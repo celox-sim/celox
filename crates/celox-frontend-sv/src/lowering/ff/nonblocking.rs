@@ -126,7 +126,7 @@ impl Ff<'_, '_> {
             // A unit stages the update in the objects of one of the
             // module's function NBA sites, which the runtime reads as the
             // unit suspends, as the kernel's own sites without a pending
-            // flag are read (see `ProcModule::function_nba_sites`).
+            // flag are read (see `FunctionSites::nba`).
             if self.kernel.is_none() {
                 self.unit_nonblocking(delay, id, lsb, width, staged, position)?;
                 continue;

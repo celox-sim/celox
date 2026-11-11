@@ -44,8 +44,8 @@ pub(super) fn lower_comb_processes(
         warnings,
     );
     pm.calls = calls;
-    pm.runtime_errors = std::mem::take(runtime_errors);
-    pm.extern_functions = std::mem::take(extern_functions);
+    pm.runtime.errors = std::mem::take(runtime_errors);
+    pm.externs.functions = std::mem::take(extern_functions);
     let random_seeds = process_random_seeds(module);
     let redundant = redundant_net_drivers(module);
     let watchable =
@@ -119,7 +119,7 @@ pub(super) fn lower_comb_processes(
             || (process.kind() != sv::ir::CombProcessKind::ContinuousAssign
                 && pm.calls_task(process.body()))
         {
-            pm.runtime_event_sites = std::mem::take(&mut sites);
+            pm.runtime.event_sites = std::mem::take(&mut sites);
             comb_blocks.extend(
                 ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
                     process.body(),
@@ -131,13 +131,13 @@ pub(super) fn lower_comb_processes(
                     &mut arena,
                 )?,
             );
-            sites = std::mem::take(&mut pm.runtime_event_sites);
+            sites = std::mem::take(&mut pm.runtime.event_sites);
             continue;
         }
         // A process that latches falls back to Ff below.
         pm.attempt_calls();
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
-        comb.site_base = sites.len() as u32;
+        comb.events.site_base = sites.len() as u32;
         comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
         let lowered = comb.lower_process(process.body());
         // The guarded unit accepts whatever the symbolic form refuses of an
@@ -163,8 +163,8 @@ pub(super) fn lower_comb_processes(
             Ok(paths)
                 if waits
                     && (process.kind() == sv::ir::CombProcessKind::AlwaysComb || symbolic_star)
-                    && comb.observers.is_empty()
-                    && comb.sites.is_empty() =>
+                    && comb.events.observers.is_empty()
+                    && comb.events.sites.is_empty() =>
             {
                 drop(comb);
                 let mut targets: Vec<_> = paths
@@ -205,7 +205,7 @@ pub(super) fn lower_comb_processes(
                 // executes once per implicit-sensitivity change, without
                 // interpreting held values as a combinational feedback loop.
                 drop(comb);
-                pm.runtime_event_sites = std::mem::take(&mut sites);
+                pm.runtime.event_sites = std::mem::take(&mut sites);
                 comb_blocks.extend(
                     ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
                         process.body(),
@@ -217,12 +217,12 @@ pub(super) fn lower_comb_processes(
                         &mut arena,
                     )?,
                 );
-                sites = std::mem::take(&mut pm.runtime_event_sites);
+                sites = std::mem::take(&mut pm.runtime.event_sites);
                 continue;
             }
             Err(error) => return Err(error),
         }
-        if comb.observers.iter().any(|observer| {
+        if comb.events.observers.iter().any(|observer| {
             observer
                 .sensitivity
                 .iter()
@@ -236,7 +236,7 @@ pub(super) fn lower_comb_processes(
                 comb.m
                     .implicit_reads(process.sensitivity_body(), include_functions),
             );
-            for observer in &mut comb.observers {
+            for observer in &mut comb.events.observers {
                 observer.sensitivity = observer
                     .sensitivity
                     .iter()
@@ -270,7 +270,7 @@ pub(super) fn lower_comb_processes(
         // counts its occurrences.
         let base = sites.len() as u32;
         let mut counters: Vec<(VarAtomBase<SourceVarId>, SourceVarId)> = Vec::new();
-        for mut observer in std::mem::take(&mut comb.observers) {
+        for mut observer in std::mem::take(&mut comb.events.observers) {
             observer.activation_group = base;
             for atom in &observer.sensitivity {
                 if !counters.iter().any(|(counted, _)| counted == atom) {
@@ -295,17 +295,17 @@ pub(super) fn lower_comb_processes(
                 .collect();
             // A deferred action waits in the queue of its process.
             if let Some(celox_design::DeferredSite::Action { queue, .. }) =
-                &mut comb.sites[(observer.site_id - base) as usize].deferred
+                &mut comb.events.sites[(observer.site_id - base) as usize].deferred
             {
                 *queue = base;
             }
             observers.push(observer);
         }
-        sites.append(&mut comb.sites);
+        sites.append(&mut comb.events.sites);
     }
     for (target, body) in port_assignments {
         pm.call_unit();
-        pm.runtime_event_sites = std::mem::take(&mut sites);
+        pm.runtime.event_sites = std::mem::take(&mut sites);
         comb_blocks.extend(ff::Ff::new(&mut pm, 0).lower_comb_process(
             body,
             &[],
@@ -315,10 +315,10 @@ pub(super) fn lower_comb_processes(
             &[*target],
             &mut arena,
         )?);
-        sites = std::mem::take(&mut pm.runtime_event_sites);
+        sites = std::mem::take(&mut pm.runtime.event_sites);
     }
-    *runtime_errors = std::mem::take(&mut pm.runtime_errors);
-    *extern_functions = std::mem::take(&mut pm.extern_functions);
+    *runtime_errors = std::mem::take(&mut pm.runtime.errors);
+    *extern_functions = std::mem::take(&mut pm.externs.functions);
     let created = std::mem::take(&mut pm.created);
     Ok((comb_blocks, arena, created, observers, sites, alternatives))
 }
@@ -398,7 +398,7 @@ fn lower_comb_alternative(
             &mut scratch,
         );
     let alternative = match lowered {
-        Ok(paths) if pm.runtime_event_sites.len() == checkpoint.runtime_event_sites() => paths
+        Ok(paths) if pm.runtime.event_sites.len() == checkpoint.runtime_event_sites() => paths
             .first()
             .and_then(|path| match &path.target {
                 LogicPathTarget::Process { process, unit, .. } => Some((*process, unit)),
