@@ -743,6 +743,52 @@ fn instance_elements(
     })
 }
 
+/// The interface instance, or selection of instances, of connection actual
+/// `actual` when it ends in the name of a modport: `bus` of `bus.mp`. A name
+/// whose last component is part of the path of an instance is unchanged.
+fn without_modport(
+    actual: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+    scope: &scope::ScopeSymbols,
+) -> celox_sv_syntax::ExprId {
+    use celox_sv_syntax::ExprKind;
+    let native = tree.declarations();
+    let ExprKind::Member {
+        expression,
+        separator,
+        ..
+    } = &native
+        .expression(expression_binding::ungroup(actual, native))
+        .kind
+    else {
+        return actual;
+    };
+    if separator != "." {
+        return actual;
+    }
+    let mut known = |id| {
+        actual_handle_key(id, tree, session, env, &scope.type_aliases).is_ok_and(|handle| {
+            scope.interface_types.contains_key(&handle)
+                || scope.interface_arrays.contains_key(&handle)
+        })
+    };
+    if known(actual) {
+        return actual;
+    }
+    // The instance may be an element or a slice of an array of instances.
+    let mut array = expression_binding::ungroup(*expression, native);
+    while let ExprKind::Select { expression, .. } = &native.expression(array).kind {
+        array = expression_binding::ungroup(*expression, native);
+    }
+    if known(*expression) || known(array) {
+        *expression
+    } else {
+        actual
+    }
+}
+
 /// Bind an interface actual as a selection of elaborated instances. Selections
 /// consume authored dimensions; a slice retains its dimension while an index
 /// removes it. Elements stay in declaration order for left-to-left port mapping.
@@ -756,6 +802,10 @@ fn connection_array(
 ) -> Converted<ArrayBinding> {
     use celox_sv_syntax::ExprKind;
     let native = tree.declarations();
+    // A connection may name a modport of the interface instance,
+    // `.p(bus.mp)` (IEEE 1800-2023 25.5), which the interface plan has
+    // checked against that of the port. The instance is what is connected.
+    let actual = actual.map(|actual| without_modport(actual, tree, session, env, scope));
     let mut selections = Vec::new();
     let mut root = actual;
     while let Some(id) = root {
