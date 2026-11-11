@@ -320,3 +320,60 @@ sv_backends! {
         }
     }
 }
+
+// The second and third operands of a conditional are in the assignment-like
+// context of the conditional itself (IEEE 1800-2023 10.8), so an assignment
+// pattern there takes the type of the target, also of a selected element.
+sv_backends! {
+    fn conditional_patterns_take_the_type_of_a_selected_target(sim) {
+        @setup {
+            let source = r#"
+    package pad_pkg;
+      typedef struct packed { logic [1:0] drive; logic schmitt; logic pull; } attr_t;
+    endpackage
+    module Top(
+      input  logic sel,
+      input  pad_pkg::attr_t [3:0] core,
+      output pad_pkg::attr_t [3:0] pad,
+      output pad_pkg::attr_t [1:0] staged,
+      output pad_pkg::attr_t nested
+    );
+      for (genvar k = 0; k < 4; k++) begin : gen
+        if (k == 1) begin : schmitt
+          assign pad[k] = (sel) ? '{schmitt: 1'b1, default: '0} : core[k];
+        end else begin : plain
+          assign pad[k] = sel ? '0 : core[k];
+        end
+      end
+      always_comb begin
+        staged[0] = sel ? core[0] : '{drive: 2'b10, default: '1};
+        staged[1] = '{default: '0};
+        if (!sel) staged[1] = (sel ? '{default: '1} : ('{pull: 1'b1, default: '0}));
+      end
+      assign nested = sel ? (core[3].pull ? '{default: '1} : '{drive: 2'b01, default: '0}) : core[2];
+    endmodule
+  "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("conditional_patterns.sv"))], "Top");
+        let sel = sim.signal("sel");
+        let core = sim.signal("core");
+        sim.modify(|io| {
+            io.set(core, 0xfa51u16);
+            io.set(sel, 1u8);
+        })
+        .unwrap();
+        assert_eq!(u64::try_from(sim.get(sim.signal("pad"))).unwrap(), 0x0020);
+        assert_eq!(u64::try_from(sim.get(sim.signal("staged"))).unwrap(), 0x01);
+        assert_eq!(u64::try_from(sim.get(sim.signal("nested"))).unwrap(), 0xf);
+        sim.modify(|io| io.set(sel, 0u8)).unwrap();
+        assert_eq!(u64::try_from(sim.get(sim.signal("pad"))).unwrap(), 0xfa51);
+        assert_eq!(u64::try_from(sim.get(sim.signal("staged"))).unwrap(), 0x1b);
+        assert_eq!(u64::try_from(sim.get(sim.signal("nested"))).unwrap(), 0xa);
+        sim.modify(|io| {
+            io.set(core, 0x0a51u16);
+            io.set(sel, 1u8);
+        })
+        .unwrap();
+        assert_eq!(u64::try_from(sim.get(sim.signal("nested"))).unwrap(), 0x4);
+    }
+}

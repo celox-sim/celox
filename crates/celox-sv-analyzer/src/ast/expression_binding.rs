@@ -69,9 +69,9 @@ pub(super) fn bind(
     bind_value(root, tree.declarations(), tree, session, dimensions, None)
 }
 /// The value of an assignment pattern without a type assigned to a
-/// selection, such as `m[i] = '{x: 1, y: 5}`: the pattern takes the type of
-/// the selected element (IEEE 1800-2023 10.9). `None` for any other
-/// assignment.
+/// selection, such as `m[i] = '{x: 1, y: 5}` or `m[i] = c ? '{x: 1, y: 5} :
+/// v`: the pattern takes the type of the selected element (IEEE 1800-2023
+/// 10.8, 10.9). `None` for any other assignment.
 pub(super) fn selected_pattern(
     left: ExprId,
     right: ExprId,
@@ -101,12 +101,7 @@ pub(super) fn selected_pattern(
         LValue::Object { select, .. } => matches!(**select, LValue::Select { .. }),
         LValue::Ident(_) => false,
     };
-    if !selected
-        || !matches!(
-            native.expression(ungroup(right, native)).kind,
-            ExprKind::Pattern { target: None, .. }
-        )
-    {
+    if !selected || !direct::reaches_untyped_pattern(right, native) {
         return Ok(None);
     }
     // A selected target's type is the select typing's (`target_type`).
