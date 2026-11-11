@@ -1,0 +1,6 @@
+Revision history for #3573:
+
+rev 2 (content) 2026-11-12 04:48 UTC — Rebased onto master after #3541 merged; review: an always_ff run as a process stays an always_ff writer of the variables it writes through hierarchical names
+rev 1 (initial) 2026-11-12 04:48 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3573,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"362e49220bae41024812a4dcc9f4094f03f7a134","timestamp_iso":"2026-11-12T04:48:49Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"362e49220bae41024812a4dcc9f4094f03f7a134","new_sha":"c9696dd1b7bcd36da1b2ea54cf1bf7f13aff5b74","timestamp_iso":"2026-11-12T04:48:49Z","reason":"Rebased onto master after #3541 merged; review: an always_ff run as a process stays an always_ff writer of the variables it writes through hierarchical names","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/362e49220bae41024812a4dcc9f4094f03f7a134...c9696dd1b7bcd36da1b2ea54cf1bf7f13aff5b74"}]} -->
