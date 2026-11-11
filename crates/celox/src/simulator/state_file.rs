@@ -444,8 +444,8 @@ impl<B: SimBackend> Simulator<B> {
             restored?;
             return Err(StateError::Runtime(error));
         }
-        self.comb_observer_snapshots = self.snapshot_all_comb_observers();
-        self.comb_observer_initial_eval = false;
+        self.comb_observers.snapshots = self.snapshot_all_comb_observers();
+        self.comb_observers.initial_eval = false;
         if let Some(writer) = &mut self.vcd_writer {
             writer.rescan();
         }

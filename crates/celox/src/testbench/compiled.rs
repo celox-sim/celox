@@ -154,7 +154,7 @@ pub(super) fn run<B: SimBackend>(
             ("watches", !schema.watches.is_empty()),
         ];
         let edge_blockers = [
-            ("host_slot_work", sim.host_slot_work),
+            ("host_slot_work", sim.slot_end.work),
             ("time_slots", !schema.time_slots.is_empty()),
             ("sample_shadows", !schema.sample_shadows.is_empty()),
         ];
