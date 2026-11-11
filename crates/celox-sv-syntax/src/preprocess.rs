@@ -633,8 +633,18 @@ impl Preprocessor {
                             replaced.push(body_token);
                         }
                     }
-                    let replaced = self.paste(replaced)?;
+                    let (replaced, open_comment) = self.paste(replaced, include_depth)?;
                     let quoted = self.stringify(replaced, include_depth)?;
+                    // A one-line comment the replacement ends in runs to the
+                    // end of the line the usage is on.
+                    if open_comment {
+                        while tokens
+                            .front()
+                            .is_some_and(|token| token.kind != TokenKind::Newline)
+                        {
+                            tokens.pop_front();
+                        }
+                    }
                     for token in quoted.into_iter().rev() {
                         tokens.push_front(token);
                     }
@@ -871,10 +881,18 @@ impl Preprocessor {
         Ok(self.defines.contains_key(name))
     }
 
-    fn paste(&mut self, tokens: Vec<Token>) -> Result<Vec<Token>, Error> {
+    /// Join the tokens around each `` of a macro replacement. The flag tells
+    /// that the replacement ends inside a one-line comment the operator
+    /// built, which the text after the macro usage continues.
+    fn paste(
+        &mut self,
+        tokens: Vec<Token>,
+        include_depth: usize,
+    ) -> Result<(Vec<Token>, bool), Error> {
         let mut result: Vec<Token> = Vec::new();
         let mut at = 0;
         let mut quoted = false;
+        let mut open_comment = false;
         while at < tokens.len() {
             if tokens[at].text != "``" {
                 if matches!(tokens[at].text.as_str(), "`\"" | "`\"\"\"") {
@@ -890,9 +908,58 @@ impl Preprocessor {
                     .get(at + 1)
                     .is_some_and(|token| !token.is_trivia() && token.text != "``")
             {
+                // `` delimits lexical tokens (22.5.1), so a usage of a
+                // defined macro that ends at the operator is a token of its
+                // own: its replacement, not its name, is what gets joined
+                // (`` `PREFIX``_name ``). A name no macro has stays part of
+                // the name being built (`` `NAME_``suffix ``).
+                if !quoted && self.ends_with_macro_usage(&result) {
+                    let name = result.pop().unwrap();
+                    let tick = result.pop().unwrap();
+                    result.extend(self.process(&[tick, name], include_depth)?.tokens);
+                    continue;
+                }
                 let left = result.pop().unwrap();
                 let right = &tokens[at + 1];
-                let text = format!("{}{}", left.text, right.text);
+                let mut text = format!("{}{}", left.text, right.text);
+                let mut next = at + 2;
+                if !quoted && left.text == "/" && right.text.starts_with('/') {
+                    // The operator may also build the delimiter of a
+                    // one-line comment (`` /``/ text ``), which runs to the
+                    // end of its line as in source text (5.4): the newline
+                    // of a continued definition, or else past the
+                    // replacement.
+                    loop {
+                        match tokens.get(next) {
+                            Some(token) if token.kind == TokenKind::Newline => break,
+                            Some(token) => {
+                                if token.text != "``" {
+                                    text.push_str(&token.text);
+                                }
+                                next += 1;
+                            }
+                            None => {
+                                open_comment = true;
+                                break;
+                            }
+                        }
+                    }
+                } else if !quoted && left.text == "/" && right.text.starts_with('*') {
+                    // Or the delimiters of a block comment
+                    // (`` /``* text *``/ ``), which runs to its end.
+                    while !text[2..].contains("*/") {
+                        let Some(token) = tokens.get(next) else {
+                            return Err(self.error(
+                                tokens[at].origin,
+                                "invalid token paste: unterminated block comment",
+                            ));
+                        };
+                        if token.text != "``" {
+                            text.push_str(&token.text);
+                        }
+                        next += 1;
+                    }
+                }
                 let mut temporary = SourceMap::default();
                 let file = temporary.add("<token paste>", text.as_str());
                 let pasted = if quoted {
@@ -926,12 +993,31 @@ impl Preprocessor {
                         .extend(right.disabled_macros.iter().cloned());
                     result.push(pasted);
                 }
-                at += 2;
+                at = next;
             } else {
                 at += 1;
             }
         }
-        Ok(result)
+        Ok((result, open_comment))
+    }
+
+    /// Whether the tokens end with the usage of a defined macro without
+    /// arguments that may still be expanded.
+    fn ends_with_macro_usage(&self, tokens: &[Token]) -> bool {
+        let [.., tick, name] = tokens else {
+            return false;
+        };
+        tick.text == "`"
+            && name.identifier().is_some_and(|identifier| {
+                !name
+                    .disabled_macros
+                    .iter()
+                    .any(|disabled| disabled == identifier)
+                    && self
+                        .defines
+                        .get(identifier)
+                        .is_some_and(|definition| definition.formals.is_none())
+            })
     }
 
     fn stringify(&mut self, tokens: Vec<Token>, include_depth: usize) -> Result<Vec<Token>, Error> {
