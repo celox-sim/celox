@@ -10,7 +10,8 @@
 //! `slice`; operand lowering is grouped into `memory`, `concat`, `wide`,
 //! `wide_binary`, `wide_binary_mask`, `wide_unary`, `bit_count`, and
 //! `four_state`.
-//! Runtime event writes and capture notifications live in `runtime_events`.
+//! Runtime event writes and capture notifications live in `runtime_events`;
+//! block parameters and their phi nodes live in `phi`.
 
 mod binary;
 mod bit_count;
@@ -25,6 +26,7 @@ mod load;
 mod memory;
 mod mux;
 mod packed_compare;
+mod phi;
 mod runtime_events;
 mod slice;
 mod sparse;
@@ -51,11 +53,12 @@ use memory::{
     lower_static_wide_load_chunks, memory_offset_low_zero_bits, memory_offset_vreg,
     prepare_sparse_store, recomposed_element_byte_offset, try_emit_single_chunk_sparse_store,
 };
+use phi::{build_phi_nodes, collect_mask_phi_sources, preseed_wide_block_params};
 use runtime_events::{
     collect_static_comb_store_byte_probes, emit_enable_comb_capture_sites,
     emit_enable_comb_capture_sites_if_byte_probes_changed,
     emit_enable_comb_capture_sites_if_regs_changed, load_runtime_event_ptr,
-    load_runtime_event_ptr_and_comb_capture_enabled, lower_runtime_event_write,
+    lower_comb_capture_event, lower_runtime_event_write,
 };
 use wide::{ShiftDir, lower_wide_runtime_shift_chunks, wide_reduce_or};
 use wide_binary::lower_wide_binary;
@@ -82,8 +85,8 @@ use celox_sir::analysis::{
 };
 use dynamic_load_cache::{block_dynamic_load_cache_plans, native_plane_access_size};
 use packed_compare::{
-    PackedByteAffineComparePlans, PackedLaneComparePlanRhs, PackedLaneComparePlans,
-    find_packed_byte_affine_compare_plans, find_packed_lane_compare_plans,
+    PackedByteAffineComparePlans, PackedLaneComparePlan, PackedLaneComparePlanRhs,
+    PackedLaneComparePlans, find_packed_byte_affine_compare_plans, find_packed_lane_compare_plans,
 };
 use sparse::{find_sparse_worklist_run, sparse_descriptor_table};
 
@@ -275,39 +278,7 @@ pub(crate) fn lower_execution_unit_with_functions(
     };
     // Pre-seed wide block params so instructions in those blocks can read the
     // full chunked value before phi nodes are materialized in a later pass.
-    for &sir_block_id in &block_ids {
-        let sir_block = &eu.blocks[&sir_block_id];
-        for &param_reg in &sir_block.params {
-            let width = eu.register_map[&param_reg].width();
-            let num_chunks = width.div_ceil(64).max(1);
-            if num_chunks <= 1 {
-                continue;
-            }
-            if !ctx.wide_regs.contains_key(&param_reg) {
-                let mut chunks = Vec::with_capacity(num_chunks);
-                chunks.push((ctx.reg_map.get(param_reg), width.min(64)));
-                for chunk_idx in 1..num_chunks {
-                    let chunk_width = (width - chunk_idx * 64).min(64);
-                    let vreg = ctx.alloc_vreg(SpillDesc::transient());
-                    chunks.push((vreg, chunk_width));
-                }
-                ctx.set_wide_chunks(param_reg, chunks);
-            }
-            if four_state {
-                if !ctx.wide_masks.contains_key(&param_reg) {
-                    let mut chunks = Vec::with_capacity(num_chunks);
-                    let mask0 = ctx.mask_map.get(param_reg);
-                    chunks.push((mask0, width.min(64)));
-                    for chunk_idx in 1..num_chunks {
-                        let chunk_width = (width - chunk_idx * 64).min(64);
-                        let vreg = ctx.alloc_vreg(SpillDesc::transient());
-                        chunks.push((vreg, chunk_width));
-                    }
-                    ctx.wide_masks.insert(param_reg, chunks);
-                }
-            }
-        }
-    }
+    preseed_wide_block_params(&mut ctx, eu, &block_ids, four_state);
 
     // Collect mask phi sources per-block (captures mask state at each terminator)
     let mut mask_phi_sources: HashMap<BlockId, Vec<(BlockId, usize, usize, VReg)>> =
@@ -442,33 +413,7 @@ pub(crate) fn lower_execution_unit_with_functions(
             }
             if packed_lane_compare_plans.skip_indices.contains(&inst_idx) {
                 if let Some(plan) = packed_lane_compare_plans.roots.get(&inst_idx) {
-                    let offset = ctx.byte_offset(&plan.address, 0);
-                    let byte_len = plan.lane_count * plan.element_stride;
-                    let rhs = match plan.rhs {
-                        PackedLaneComparePlanRhs::Scalar(value) => {
-                            PackedLaneCompareRhs::Scalar(ctx.reg_map.get(value))
-                        }
-                        PackedLaneComparePlanRhs::Memory(address) => {
-                            let rhs_offset = ctx.byte_offset(&address, 0);
-                            PackedLaneCompareRhs::Memory {
-                                offset: rhs_offset,
-                                alias_range: MemoryAliasRange::new(rhs_offset, byte_len),
-                            }
-                        }
-                    };
-                    mblock.push(MInst::PackedLaneCompare {
-                        dst: ctx.reg_map.get(plan.dst),
-                        rhs,
-                        kind: plan.kind,
-                        offset,
-                        lane_count: plan.lane_count as u8,
-                        element_stride: plan.element_stride as u8,
-                        bit_offset: plan.bit_offset as u8,
-                        field_width: plan.field_width as u8,
-                        alias_range: MemoryAliasRange::new(offset, byte_len),
-                    });
-                    ctx.known_bits
-                        .insert(ctx.reg_map.get(plan.dst), plan.lane_count);
+                    emit_packed_lane_compare(&mut ctx, &mut mblock, plan);
                 }
                 continue;
             }
@@ -535,56 +480,16 @@ pub(crate) fn lower_execution_unit_with_functions(
                 consume_enabled,
             } = inst
             {
-                let (event_ptr, enabled) = load_runtime_event_ptr_and_comb_capture_enabled(
+                mblock = lower_comb_capture_event(
                     &mut ctx,
-                    &mut mblock,
-                    *site_id,
+                    &mut func.blocks,
+                    mblock,
+                    &mut next_extra_block_id,
+                    site_id,
+                    args,
+                    fatal_error_code,
+                    consume_enabled,
                 );
-                let write_block_id = BlockId(next_extra_block_id as u32);
-                next_extra_block_id += 1;
-                let cont_block_id = BlockId(next_extra_block_id as u32);
-                next_extra_block_id += 1;
-
-                mblock.push(MInst::Branch {
-                    cond: enabled,
-                    true_bb: write_block_id,
-                    false_bb: cont_block_id,
-                });
-                func.blocks.push(mblock);
-
-                let mut write_block = MBlock::new(write_block_id);
-                lower_runtime_event_write(&mut ctx, &mut write_block, event_ptr, *site_id, args);
-                if *consume_enabled {
-                    let enabled_ptr = ctx.alloc_vreg(SpillDesc::transient());
-                    write_block.push(MInst::Load {
-                        dst: enabled_ptr,
-                        base: BaseReg::SimState,
-                        offset: celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
-                            as i32,
-                        size: OpSize::S64,
-                    });
-                    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-                    write_block.push(MInst::LoadImm {
-                        dst: zero,
-                        value: 0,
-                    });
-                    write_block.push(MInst::StorePtr {
-                        ptr: enabled_ptr,
-                        offset: *site_id as i32,
-                        src: zero,
-                        size: OpSize::S8,
-                    });
-                }
-                if let Some(code) = fatal_error_code {
-                    write_block.push(MInst::ReturnError { code: *code });
-                } else {
-                    write_block.push(MInst::Jump {
-                        target: cont_block_id,
-                    });
-                }
-                func.blocks.push(write_block);
-
-                mblock = MBlock::new(cont_block_id);
             } else if let SIRInstruction::Load(destination, address, offset, width) = inst
                 && dynamic_load_cache_plans.addresses.contains(address)
                 && matches!(offset, SIROffset::Dynamic(_) | SIROffset::Element { .. })
@@ -647,46 +552,7 @@ pub(crate) fn lower_execution_unit_with_functions(
 
         // Capture mask phi sources from this block's terminator (before mask_map changes)
         if four_state {
-            let edges: Vec<(crate::BlockId, &[RegisterId])> = match &sir_block.terminator {
-                SIRTerminator::Jump(target, args) => vec![(*target, args.as_slice())],
-                SIRTerminator::Branch {
-                    true_block,
-                    false_block,
-                    ..
-                } => vec![
-                    (true_block.0, true_block.1.as_slice()),
-                    (false_block.0, false_block.1.as_slice()),
-                ],
-                SIRTerminator::Switch { .. } => Vec::new(),
-                _ => vec![],
-            };
-            for (target_sir_id, args) in edges {
-                if args.is_empty() {
-                    continue;
-                }
-                let target_mir_id = BlockId(target_sir_id.0 as u32);
-                for (i, arg_reg) in args.iter().enumerate() {
-                    if let Some(mask_chunks) = ctx.wide_masks.get(arg_reg) {
-                        for (chunk_idx, (mask_vreg, _)) in mask_chunks.iter().enumerate() {
-                            mask_phi_sources.entry(target_mir_id).or_default().push((
-                                pred_mir_id,
-                                i,
-                                chunk_idx,
-                                *mask_vreg,
-                            ));
-                        }
-                    } else if let Some(mask_vreg) =
-                        ctx.mask_map.map.get(arg_reg.0).copied().flatten()
-                    {
-                        mask_phi_sources.entry(target_mir_id).or_default().push((
-                            pred_mir_id,
-                            i,
-                            0,
-                            mask_vreg,
-                        ));
-                    }
-                }
-            }
+            collect_mask_phi_sources(&ctx, sir_block, pred_mir_id, &mut mask_phi_sources);
         }
 
         func.blocks.push(mblock);
@@ -700,138 +566,18 @@ pub(crate) fn lower_execution_unit_with_functions(
 
     // Build phi nodes from SIR block params and predecessor terminators.
     // For each SIR block with params, find all predecessors that pass args.
-    {
-        use crate::HashMap;
-        // Collect phi sources: target_block → [(pred_block, param_idx, chunk_idx, arg_vreg)]
-        let mut phi_sources: HashMap<BlockId, Vec<(BlockId, usize, usize, VReg)>> =
-            HashMap::default();
-        for &sir_block_id in &block_ids {
-            let sir_block = &eu.blocks[&sir_block_id];
-            let pred_mir_id = sir_exit_mir_blocks
-                .get(&sir_block_id)
-                .copied()
-                .unwrap_or(BlockId(sir_block_id.0 as u32));
-            let edges: Vec<(crate::BlockId, &[RegisterId])> = match &sir_block.terminator {
-                SIRTerminator::Jump(target, args) => vec![(*target, args.as_slice())],
-                SIRTerminator::Branch {
-                    true_block,
-                    false_block,
-                    ..
-                } => vec![
-                    (true_block.0, true_block.1.as_slice()),
-                    (false_block.0, false_block.1.as_slice()),
-                ],
-                SIRTerminator::Switch { .. } => Vec::new(),
-                _ => vec![],
-            };
-            for (target_sir_id, args) in edges {
-                if args.is_empty() {
-                    continue;
-                }
-                let target_mir_id = BlockId(target_sir_id.0 as u32);
-                for (i, arg_reg) in args.iter().enumerate() {
-                    if let Some(chunks) = saved_wide_regs.get(arg_reg) {
-                        for (chunk_idx, (arg_vreg, _)) in chunks.iter().enumerate() {
-                            phi_sources.entry(target_mir_id).or_default().push((
-                                pred_mir_id,
-                                i,
-                                chunk_idx,
-                                *arg_vreg,
-                            ));
-                        }
-                    } else {
-                        let arg_vreg = reg_map.get(*arg_reg);
-                        phi_sources.entry(target_mir_id).or_default().push((
-                            pred_mir_id,
-                            i,
-                            0,
-                            arg_vreg,
-                        ));
-                    }
-                }
-            }
-        }
-        // Build phi nodes on target blocks
-        for mblock in &mut func.blocks {
-            if let Some(sources) = phi_sources.remove(&mblock.id) {
-                let sir_block_id = crate::BlockId(mblock.id.0 as usize);
-                let sir_block = &eu.blocks[&sir_block_id];
-                for (param_idx, param_reg) in sir_block.params.iter().enumerate() {
-                    if let Some(dst_chunks) = saved_wide_regs.get(param_reg) {
-                        for (chunk_idx, (dst, _)) in dst_chunks.iter().enumerate() {
-                            let phi_srcs: Vec<(BlockId, VReg)> = sources
-                                .iter()
-                                .filter(|(_, idx, src_chunk_idx, _)| {
-                                    *idx == param_idx && *src_chunk_idx == chunk_idx
-                                })
-                                .map(|(pred, _, _, vreg)| (*pred, *vreg))
-                                .collect();
-                            if !phi_srcs.is_empty() {
-                                mblock.phis.push(PhiNode {
-                                    dst: *dst,
-                                    sources: phi_srcs,
-                                });
-                            }
-                        }
-                    } else {
-                        let dst = reg_map.get(*param_reg);
-                        let phi_srcs: Vec<(BlockId, VReg)> = sources
-                            .iter()
-                            .filter(|(_, idx, src_chunk_idx, _)| {
-                                *idx == param_idx && *src_chunk_idx == 0
-                            })
-                            .map(|(pred, _, _, vreg)| (*pred, *vreg))
-                            .collect();
-                        if !phi_srcs.is_empty() {
-                            mblock.phis.push(PhiNode {
-                                dst,
-                                sources: phi_srcs,
-                            });
-                        }
-                    }
-
-                    // 4-state: add mask phi node
-                    if four_state {
-                        if let Some(m_sources) = mask_phi_sources.get(&mblock.id) {
-                            if let Some(mask_chunks) = saved_wide_masks.get(param_reg) {
-                                for (chunk_idx, (mask_dst, _)) in mask_chunks.iter().enumerate() {
-                                    let mask_phi_srcs: Vec<(BlockId, VReg)> = m_sources
-                                        .iter()
-                                        .filter(|(_, idx, src_chunk_idx, _)| {
-                                            *idx == param_idx && *src_chunk_idx == chunk_idx
-                                        })
-                                        .map(|(pred, _, _, vreg)| (*pred, *vreg))
-                                        .collect();
-                                    if !mask_phi_srcs.is_empty() {
-                                        mblock.phis.push(PhiNode {
-                                            dst: *mask_dst,
-                                            sources: mask_phi_srcs,
-                                        });
-                                    }
-                                }
-                            } else if let Some(mask_dst) =
-                                saved_mask_map.map.get(param_reg.0).copied().flatten()
-                            {
-                                let mask_phi_srcs: Vec<(BlockId, VReg)> = m_sources
-                                    .iter()
-                                    .filter(|(_, idx, src_chunk_idx, _)| {
-                                        *idx == param_idx && *src_chunk_idx == 0
-                                    })
-                                    .map(|(pred, _, _, vreg)| (*pred, *vreg))
-                                    .collect();
-                                if !mask_phi_srcs.is_empty() {
-                                    mblock.phis.push(PhiNode {
-                                        dst: mask_dst,
-                                        sources: mask_phi_srcs,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    build_phi_nodes(
+        &mut func,
+        eu,
+        &block_ids,
+        &sir_exit_mir_blocks,
+        &reg_map,
+        &saved_wide_regs,
+        &saved_mask_map,
+        &saved_wide_masks,
+        &mask_phi_sources,
+        four_state,
+    );
 
     // Update spill_descs to match final vreg count
     while func.spill_descs.len() < func.vregs.count() as usize {
@@ -2761,3 +2507,38 @@ fn lower_branch_condition(ctx: &mut ISelContext, block: &mut MBlock, cond: Regis
 
 #[cfg(test)]
 mod tests;
+
+/// Emit the planned comparison of packed lanes with a scalar or with memory.
+fn emit_packed_lane_compare(
+    ctx: &mut ISelContext,
+    mblock: &mut MBlock,
+    plan: &PackedLaneComparePlan,
+) {
+    let offset = ctx.byte_offset(&plan.address, 0);
+    let byte_len = plan.lane_count * plan.element_stride;
+    let rhs = match plan.rhs {
+        PackedLaneComparePlanRhs::Scalar(value) => {
+            PackedLaneCompareRhs::Scalar(ctx.reg_map.get(value))
+        }
+        PackedLaneComparePlanRhs::Memory(address) => {
+            let rhs_offset = ctx.byte_offset(&address, 0);
+            PackedLaneCompareRhs::Memory {
+                offset: rhs_offset,
+                alias_range: MemoryAliasRange::new(rhs_offset, byte_len),
+            }
+        }
+    };
+    mblock.push(MInst::PackedLaneCompare {
+        dst: ctx.reg_map.get(plan.dst),
+        rhs,
+        kind: plan.kind,
+        offset,
+        lane_count: plan.lane_count as u8,
+        element_stride: plan.element_stride as u8,
+        bit_offset: plan.bit_offset as u8,
+        field_width: plan.field_width as u8,
+        alias_range: MemoryAliasRange::new(offset, byte_len),
+    });
+    ctx.known_bits
+        .insert(ctx.reg_map.get(plan.dst), plan.lane_count);
+}
