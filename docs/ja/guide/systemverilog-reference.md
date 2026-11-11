@@ -55,7 +55,6 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 - package: package ネット（[#1146](https://github.com/celox-sim/celox/issues/1146)）。
   package 変数はクロックやリセットにできません。
 - コンパイル単位: `$unit` 変数を宣言できるソースファイルは1つだけです。
-  コンパイル単位スコープの DPI-C import は未対応です。
 
 ### interface の制約 {#interface-restrictions}
 
@@ -499,7 +498,8 @@ let mut sim = unsafe {
 
 対応部分集合（他は全て拒否）:
 
-- モジュールまたは package で宣言した `function` import（task でも `context` でもない）。
+- モジュール、package、またはコンパイル単位スコープで宣言した `function` import
+  （task でも `context` でもない）。
   `always_ff` プロセスとそれが呼ぶ関数からの呼び出し。組み合わせ論理からの
   呼び出しは拒否します。
 - `input` 引数は最大16個。`output`・`inout` 引数はありません。

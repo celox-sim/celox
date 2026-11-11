@@ -97,7 +97,7 @@ fn dpi_queries_keep_root_and_generated_lexical_scopes_separate() {
 }
 
 #[test]
-fn dpi_packages_generate_loops_and_compilation_unit_diagnostics_are_preserved() {
+fn dpi_packages_generate_loops_and_compilation_unit_imports_are_preserved() {
     let code = r#"package p;import "DPI-C" function byte f();endpackage
         module M;import p::*;
         for(genvar i=0;i<2;i++) begin:g
@@ -113,16 +113,20 @@ fn dpi_packages_generate_loops_and_compilation_unit_diagnostics_are_preserved() 
             .collect::<Vec<_>>(),
         ["local_f", "local_f", "p::f"]
     );
-    let error = crate::analyze_source(
-        "`define DPI import \"DPI-C\" function int f();\n`DPI\nmodule M;endmodule",
+    // An import at compilation-unit scope is visible in the modules of the
+    // unit (IEEE 1800-2023 35.2.1).
+    let ir = crate::analyze_source(
+        "`define DPI import \"DPI-C\" c_f = function int f();\n`DPI\nmodule M(output int y);initial y=f();endmodule",
         Path::new("native-dpi-unit.sv"),
     )
-    .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("DPI-C import or export at compilation-unit scope"),
-        "{error}"
+    .unwrap();
+    assert_eq!(
+        ir.modules()[0]
+            .dpi_imports()
+            .iter()
+            .map(|import| import.c_name())
+            .collect::<Vec<_>>(),
+        ["c_f"]
     );
 }
 
