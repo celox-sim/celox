@@ -1,0 +1,1 @@
+One declaration-record constructor for every scope kind: generate blocks and block bodies, classes including property types, type parameters at their own declaration; a class keeps its own declarations when a base is foreign
