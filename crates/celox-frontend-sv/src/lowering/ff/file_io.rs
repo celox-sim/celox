@@ -81,11 +81,12 @@ impl Ff<'_, '_> {
             return Err(unsupported("file I/O outside a scheduled process"));
         }
         let site = self
-            .host_request_sites
+            .sites
+            .host_request
             .iter()
             .filter(|site| site.kind == HostRequestKind::FileIo)
             .count() as u32;
-        self.host_request_sites.push(HostRequestSite {
+        self.sites.host_request.push(HostRequestSite {
             process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::FileIo,
             operation,
