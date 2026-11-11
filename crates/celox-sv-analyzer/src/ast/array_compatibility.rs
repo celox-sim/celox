@@ -272,6 +272,21 @@ fn dotted_path(
             dotted_path(*expression, native)?,
             instances::normalize_identifier(&name.spelling)
         )),
+        // An item of a package is known by its qualified name (26.3).
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "::" => {
+            let ExprKind::Name(package) = &native.expression(*expression).kind else {
+                return None;
+            };
+            Some(format!(
+                "{}::{}",
+                instances::normalize_identifier(&package.spelling),
+                instances::normalize_identifier(&name.spelling)
+            ))
+        }
         _ => None,
     }
 }
