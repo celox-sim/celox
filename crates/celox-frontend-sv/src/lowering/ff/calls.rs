@@ -96,7 +96,11 @@ impl Ff<'_, '_> {
         // Code that must not call, such as the probe of an event expression,
         // and a call that inlining folds, unless it is recursive and so
         // cannot be inlined.
-        let recursive = self.active_calls.iter().any(|active| active == name);
+        let recursive = self
+            .call_stack
+            .active_calls
+            .iter()
+            .any(|active| active == name);
         if self.inline_calls {
             self.record_outcome(
                 name,
@@ -163,7 +167,7 @@ impl Ff<'_, '_> {
             let consistent = functions.transitive(index).is_some_and(|(reads, writes)| {
                 writes.is_empty()
                     && reads.iter().all(|id| {
-                        !self.working.contains(id)
+                        !self.writes.working.contains(id)
                             && !self.m.variables.get(id).is_some_and(SvVariable::is_scratch)
                     })
             });
@@ -391,7 +395,7 @@ impl Ff<'_, '_> {
             .and_then(|graph| graph.out_of_line.as_ref())
             .is_some_and(|functions| functions.functions[frame.function].slot(id).is_some());
         own || id.0 >= frame.start.0
-            || self.active_calls.iter().any(|active| {
+            || self.call_stack.active_calls.iter().any(|active| {
                 self.m.subroutine(active).is_some_and(|subroutine| {
                     automatic_names(subroutine).any(|local| local == name)
                         && !subroutine
@@ -727,15 +731,15 @@ impl Ff<'_, '_> {
         // The body draws on the RNG states in the frame, which the caller
         // passes.
         let (random, dist_seed) = (frame.random.is_some(), frame.dist_seed.is_some());
-        self.random = frame.random.as_ref().map(|(state, _)| state.clone());
-        self.dist_seed = frame.dist_seed.clone();
+        self.rng.random = frame.random.as_ref().map(|(state, _)| state.clone());
+        self.rng.dist_seed = frame.dist_seed.clone();
         self.frame = Some(frame);
         let start = self.b.current_block();
         if let Some(resume) = self.resume_frame() {
             resume.blocks.push(start);
         }
         let return_block = self.b.new_block();
-        self.functions.push(FunctionBlocks {
+        self.scope.functions.push(FunctionBlocks {
             return_block,
             return_var: subroutine.return_var.clone(),
             loop_depth: 0,
@@ -805,9 +809,11 @@ impl Ff<'_, '_> {
                 )
             })
             .collect();
-        self.active_calls.push(subroutine.name.clone());
+        self.call_stack.active_calls.push(subroutine.name.clone());
         let falls = self.exec_block(&body);
-        self.shared_boxes.truncate(self.shared_boxes.len() - shared);
+        self.call_stack
+            .shared_boxes
+            .truncate(self.call_stack.shared_boxes.len() - shared);
         for (formal, original) in originals {
             match original {
                 Some(id) => self.m.name_to_id.insert(formal, id),
@@ -856,12 +862,12 @@ impl Ff<'_, '_> {
         }
         // The eligibility check keeps out what needs the state of a process;
         // this is the net under it.
-        if !self.host_request_sites.is_empty()
-            || !self.wait_sites.is_empty()
-            || !self.nba_sites.is_empty()
-            || !self.event_probes.is_empty()
-            || (self.random.is_some() && !random)
-            || (self.dist_seed.is_some() && !dist_seed)
+        if !self.sites.host_request.is_empty()
+            || !self.sites.wait.is_empty()
+            || !self.sites.nba.is_empty()
+            || !self.sites.event_probes.is_empty()
+            || (self.rng.random.is_some() && !random)
+            || (self.rng.dist_seed.is_some() && !dist_seed)
         {
             return Err(unsupported("process state in a function unit"));
         }
@@ -880,7 +886,7 @@ impl Ff<'_, '_> {
     /// number of the kernel's own wait sites, and a nonblocking assignment
     /// at function NBA site `k` one at its NBA site `own + k`, `own` the
     /// number of its own NBA sites; each number is patched in when the
-    /// kernel is finished (see `Ff::wait_offset_patches`). `waits` and
+    /// kernel is finished (see `Sites::wait_offset_patches`). `waits` and
     /// `nbas` say which the callee can suspend for.
     fn function_site_word(
         &mut self,
@@ -921,9 +927,9 @@ impl Ff<'_, '_> {
             let own = this.b.alloc_bit(width, false);
             this.b.emit(SIRInstruction::Imm(own, SIRValue::new(0u8)));
             if nba {
-                this.nba_offset_patches.push(own);
+                this.sites.nba_offset_patches.push(own);
             } else {
-                this.wait_offset_patches.push(own);
+                this.sites.wait_offset_patches.push(own);
             }
             let offset = this.b.alloc_bit(width, false);
             this.b
@@ -1574,7 +1580,8 @@ impl Ff<'_, '_> {
         // its values pass through staging variables (see
         // [`ResumeFrame::staging`]).
         let mut request = self
-            .host_request_sites
+            .sites
+            .host_request
             .pop()
             .filter(|request| request.kind == kind)
             .ok_or_else(|| unsupported("a host request without its site"))?;
@@ -1727,11 +1734,11 @@ impl Ff<'_, '_> {
         let continuation = self.b.seal_block(SIRTerminator::Return);
         // A branch runs in a process of its own: no loop or subroutine of
         // the parent encloses it.
-        let loops = std::mem::take(&mut self.loops);
-        let functions = std::mem::take(&mut self.functions);
-        let overlay = std::mem::take(&mut self.overlay);
-        let timing_boundary = self.timing_call_boundary;
-        self.timing_call_boundary = self.active_calls.len();
+        let loops = std::mem::take(&mut self.scope.loops);
+        let functions = std::mem::take(&mut self.scope.functions);
+        let overlay = std::mem::take(&mut self.scope.overlay);
+        let timing_boundary = self.call_stack.timing_call_boundary;
+        self.call_stack.timing_call_boundary = self.call_stack.active_calls.len();
         let mut result = Ok(());
         for (entry, branch) in entries.into_iter().zip(branches) {
             self.b.switch_to_block(entry);
@@ -1756,10 +1763,10 @@ impl Ff<'_, '_> {
                 }
             }
         }
-        self.timing_call_boundary = timing_boundary;
-        self.loops = loops;
-        self.functions = functions;
-        self.overlay = overlay;
+        self.call_stack.timing_call_boundary = timing_boundary;
+        self.scope.loops = loops;
+        self.scope.functions = functions;
+        self.scope.overlay = overlay;
         // A branch that failed leaves its block open; the unit is dropped.
         if result.is_ok() {
             self.b.switch_to_block(continuation);
@@ -1769,7 +1776,7 @@ impl Ff<'_, '_> {
 
     /// `body` of `subroutine`, being lowered into a unit, with the variables
     /// a fork in it shares in boxes (see [`SharedBox`]), which it pushes to
-    /// [`Ff::shared_boxes`]; the boxes of the formals are made here. A
+    /// [`CallStack::shared_boxes`]; the boxes of the formals are made here. A
     /// variable is shared when a branch names it, other than one the branch
     /// declares, and the body writes it besides its declaration: one that no
     /// one writes after the fork reads the same in every copy. Returns the
@@ -1949,7 +1956,7 @@ impl Ff<'_, '_> {
             if formal || !declared.contains(&shared.var) {
                 self.open_box(&shared)?;
             }
-            self.shared_boxes.push(shared);
+            self.call_stack.shared_boxes.push(shared);
         }
         Ok((body, count))
     }
@@ -2445,7 +2452,7 @@ impl Ff<'_, '_> {
                 let point = self
                     .with_kernel(|kernel| kernel.suspend_in_call(code, word, end, call_top))
                     .map_err(kernel_error)?;
-                self.call_resumes.push(celox_design::CallResume {
+                self.sites.call_resumes.push(celox_design::CallResume {
                     point,
                     function: index as u32,
                 });
