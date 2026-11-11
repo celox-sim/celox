@@ -1,1 +1,7 @@
-Use grouped externs.calls after ProcModule state grouping on master
+Revision history for #3538:
+
+rev 3 (rebase) 2026-11-11 18:11 UTC — Use grouped externs.calls after ProcModule state grouping on master
+rev 2 (rebase) 2026-11-11 06:15 UTC
+rev 1 (initial) 2026-11-11 06:15 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3538,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"ccdf405bed4ca29f16953872761df0acc110bbd2","timestamp_iso":"2026-11-11T06:15:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"ccdf405bed4ca29f16953872761df0acc110bbd2","new_sha":"623ad9c7a552e1755c9c46351c8e8efb754af7c2","timestamp_iso":"2026-11-11T06:15:30Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/ccdf405bed4ca29f16953872761df0acc110bbd2...623ad9c7a552e1755c9c46351c8e8efb754af7c2"},{"number":3,"change_type":"rebase","old_sha":"623ad9c7a552e1755c9c46351c8e8efb754af7c2","new_sha":"d9d228b058982447538a01d13b763c457d3de1a0","timestamp_iso":"2026-11-11T18:11:10Z","reason":"Use grouped externs.calls after ProcModule state grouping on master","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/623ad9c7a552e1755c9c46351c8e8efb754af7c2...d9d228b058982447538a01d13b763c457d3de1a0"}]} -->
