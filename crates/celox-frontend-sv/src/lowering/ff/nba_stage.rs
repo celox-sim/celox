@@ -131,6 +131,7 @@ pub(super) fn stage_nonblocking(
             lsb,
             array_slice_width,
             array_slice_reversed,
+            window,
             ..
         } => sv::ir::LValue::Select {
             name: name.to_string(),
@@ -138,6 +139,7 @@ pub(super) fn stage_nonblocking(
             lsb: lsb.clone(),
             array_slice_width: array_slice_width.clone(),
             array_slice_reversed: *array_slice_reversed,
+            window: *window,
         },
     };
     let mark = |lvalue: &sv::ir::LValue, stage: &NbaStage| sv::ir::Stmt::Assign {

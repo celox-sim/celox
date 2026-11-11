@@ -265,6 +265,7 @@ pub(in crate::lowering) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<s
                 lsb: lsb.clone(),
                 array_slice_width: None,
                 array_slice_reversed: false,
+                window: None,
             }]),
             _ => None,
         },

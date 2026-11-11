@@ -135,6 +135,7 @@ fn finish_lvalue(
     offset: usize,
     r#type: &Type,
     relative: LValue,
+    dynamic: bool,
     dimensions: &PackedDimensions,
 ) -> Option<LValue> {
     let functions = &tree.functions;
@@ -145,11 +146,22 @@ fn finish_lvalue(
         LValue::Ident(_) => (width.checked_sub(1)? as i128, 0, r#type.is_signed),
         LValue::Select {
             msb, lsb, signed, ..
-        } => (
-            eval_ast_const_expr(functions, &msb, &dimensions.const_env)?,
-            eval_ast_const_expr(functions, &lsb, &dimensions.const_env)?,
-            signed,
-        ),
+        } => match (
+            eval_ast_const_expr(functions, &msb, &dimensions.const_env),
+            eval_ast_const_expr(functions, &lsb, &dimensions.const_env),
+        ) {
+            (Some(msb), Some(lsb)) => (msb, lsb, signed),
+            // A run-time select of a vector member. One that leaves the
+            // member is moved above the whole structure, where a read gives
+            // X and a write is ignored (IEEE 1800-2023 11.5.1), so that it
+            // never reaches a neighboring member.
+            _ if dynamic && !r#type.packed_ranges.is_empty() => {
+                return dynamic_member_select(
+                    tree, path, offset, r#type, width, msb, lsb, signed, dimensions,
+                );
+            }
+            _ => return None,
+        },
     };
     // Constant member selects must stay within the member, never hit a neighbor.
     if lsb < 0 || msb < lsb || usize::try_from(msb).ok()? >= width {
@@ -162,8 +174,123 @@ fn finish_lvalue(
         signed,
         array_slice_width: None,
         array_slice_reversed: false,
+        window: None,
         is_2state: matches!(r#type.kind, TypeKind::Bit | TypeKind::Chandle),
     })
+}
+
+/// The select of structure variable `path[0]` that a run-time select with
+/// bounds `msb` and `lsb` makes of its member of `width` bits at `offset`.
+///
+/// A bit-select arrives as a position in the member, which is the member's
+/// width when the index is outside its range; such a select is moved above
+/// the whole structure, where a read gives X and a write is ignored.
+///
+/// An indexed part-select arrives in the index coordinates of the member's
+/// declared range, its width a constant. It becomes a select at the
+/// positions of those indices in the structure, confined to the member's
+/// bits by a [`crate::ir::SelectWindow`]: the bits it selects outside the
+/// member read X and are not written, as those outside a vector are (IEEE
+/// 1800-2023 11.5.1), and never those of a neighboring member.
+#[allow(clippy::too_many_arguments)]
+fn dynamic_member_select(
+    tree: &AnalysisContext<'_>,
+    path: &[String],
+    offset: usize,
+    r#type: &Type,
+    width: usize,
+    msb: ConstExpr,
+    lsb: ConstExpr,
+    signed: bool,
+    dimensions: &PackedDimensions,
+) -> Option<LValue> {
+    let functions = &tree.functions;
+    let literal = |value: usize| ConstExpr::Literal(value.to_string());
+    let select = |msb, lsb, window| LValue::Select {
+        name: path[0].clone(),
+        msb,
+        lsb,
+        signed,
+        array_slice_width: None,
+        array_slice_reversed: false,
+        window,
+        is_2state: matches!(r#type.kind, TypeKind::Bit | TypeKind::Chandle),
+    };
+    if msb == lsb {
+        let structure =
+            lvalue_expr_type(functions, &LValue::Ident(path[0].clone()), dimensions)?.width;
+        let position = ConstExpr::Mux {
+            condition: Box::new(ConstExpr::Binary {
+                left: Box::new(lsb.clone()),
+                op: BinaryOp::Lt,
+                right: Box::new(literal(width)),
+            }),
+            then_expr: Box::new(add_expr(literal(offset), lsb)),
+            else_expr: Box::new(literal(structure)),
+        };
+        return Some(select(position.clone(), position, None));
+    }
+    let [range] = r#type.packed_ranges.as_slice() else {
+        return None;
+    };
+    let left = eval_ast_const_expr(functions, &range.left, &dimensions.const_env)?;
+    let right = eval_ast_const_expr(functions, &range.right, &dimensions.const_env)?;
+    // The bounds are `start` and `start` plus or minus a constant, the
+    // more significant end first: `(start + n, start)` or `(start, start -
+    // n)` in a descending range, `(start, start + n)` or `(start - n,
+    // start)` in an ascending one.
+    let constant = |expr: &ConstExpr| eval_ast_const_expr(functions, expr, &dimensions.const_env);
+    let offset_from = |bound: &ConstExpr, start: &ConstExpr| match bound {
+        ConstExpr::Binary {
+            left,
+            op: BinaryOp::Add,
+            right,
+        } if **left == *start => constant(right),
+        ConstExpr::Binary {
+            left,
+            op: BinaryOp::Sub,
+            right,
+        } if **left == *start => constant(right).and_then(i128::checked_neg),
+        _ => None,
+    };
+    let (start, msb_index, lsb_index) = match (offset_from(&msb, &lsb), offset_from(&lsb, &msb)) {
+        (Some(from_lsb), _) => (&lsb, from_lsb, 0),
+        (None, Some(from_msb)) => (&msb, 0, from_msb),
+        (None, None) => return None,
+    };
+    // Index `i` is at position `i - right` of a descending member and at
+    // `right - i` of an ascending one, above the member's offset.
+    let offset = i128::try_from(offset).ok()?;
+    let (base, msb, lsb) = if left >= right {
+        (
+            start.clone(),
+            offset.checked_add(msb_index)?.checked_sub(right)?,
+            offset.checked_add(lsb_index)?.checked_sub(right)?,
+        )
+    } else {
+        (
+            ConstExpr::Unary {
+                op: UnaryOp::Minus,
+                expr: Box::new(start.clone()),
+            },
+            offset.checked_add(right)?.checked_sub(msb_index)?,
+            offset.checked_add(right)?.checked_sub(lsb_index)?,
+        )
+    };
+    let at = |constant: i128| ConstExpr::Binary {
+        left: Box::new(base.clone()),
+        op: BinaryOp::Add,
+        right: Box::new(const_expr_from_i128(constant)),
+    };
+    let offset = u32::try_from(offset).ok()?;
+    Some(select(
+        at(msb),
+        at(lsb),
+        Some(crate::ir::SelectWindow {
+            lsb: offset,
+            msb: offset.checked_add(u32::try_from(width.checked_sub(1)?).ok()?)?,
+        }),
+    ))
 }
 
 /// A whole native member path uses the same interface shadowing, type/offset
@@ -192,6 +319,7 @@ pub(in crate::ast) fn whole_member(
         offset,
         ty,
         LValue::Ident(path[0].clone()),
+        false,
         dimensions,
     )
     .ok_or_else(|| {
@@ -228,7 +356,7 @@ pub(in crate::ast) fn select_member(
         &member_dimensions(&path[0], ty, dimensions),
         true,
     )?;
-    finish_lvalue(tree, &path, offset, ty, relative, dimensions).ok_or_else(|| {
+    finish_lvalue(tree, &path, offset, ty, relative, true, dimensions).ok_or_else(|| {
         unsupported(format!(
             "select of structure member `{}` outside the member",
             path.join(".")
@@ -267,7 +395,7 @@ pub(in crate::ast) fn select_element_member(
         signed,
         is_2state,
         ..
-    }) = finish_lvalue(tree, &path, offset, ty, relative, dimensions)
+    }) = finish_lvalue(tree, &path, offset, ty, relative, false, dimensions)
     else {
         return Err(unsupported(format!(
             "select of structure member `{}` outside the member",
@@ -381,6 +509,7 @@ fn array_member_selection(
         signed,
         array_slice_width: slice_width,
         array_slice_reversed: reversed,
+        window: None,
         is_2state: matches!(ty.kind, TypeKind::Bit | TypeKind::Chandle),
     })
 }

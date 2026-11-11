@@ -179,6 +179,7 @@ pub(super) fn whole_packed_lvalue(
         signed: dimensions.signed,
         array_slice_width: None,
         array_slice_reversed: false,
+        window: None,
         is_2state: false,
     })
 }

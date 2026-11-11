@@ -281,13 +281,39 @@ pub(in crate::ast) fn expr_from_selection(
             signed,
             array_slice_width,
             array_slice_reversed,
+            window,
             ..
         } => (
-            Expr::Select {
-                expr: Box::new(variable),
-                msb: msb.clone(),
-                lsb: lsb.clone(),
-                signed: *signed,
+            match window {
+                // A run-time select of a structure member is a select of the
+                // member's value, at positions counted from its lowest bit:
+                // the bits it selects outside the member read X, as those
+                // outside any vector do (IEEE 1800-2023 11.5.1).
+                Some(window) => {
+                    let literal = |value: u32| ConstExpr::Literal(value.to_string());
+                    let within = |position: &ConstExpr| ConstExpr::Binary {
+                        left: Box::new(position.clone()),
+                        op: BinaryOp::Sub,
+                        right: Box::new(literal(window.lsb)),
+                    };
+                    Expr::Select {
+                        expr: Box::new(Expr::Select {
+                            expr: Box::new(variable),
+                            msb: literal(window.msb),
+                            lsb: literal(window.lsb),
+                            signed: false,
+                        }),
+                        msb: within(msb),
+                        lsb: within(lsb),
+                        signed: *signed,
+                    }
+                }
+                None => Expr::Select {
+                    expr: Box::new(variable),
+                    msb: msb.clone(),
+                    lsb: lsb.clone(),
+                    signed: *signed,
+                },
             },
             array_slice_width,
             *array_slice_reversed,

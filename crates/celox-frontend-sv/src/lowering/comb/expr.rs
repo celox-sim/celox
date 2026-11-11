@@ -65,6 +65,7 @@ impl Comb<'_, '_> {
                 lsb,
                 array_slice_width,
                 array_slice_reversed,
+                window,
             } => {
                 let probe = sv::ir::Expr::Select {
                     expr: Box::new(sv::ir::Expr::Literal("0".to_string())),
@@ -85,6 +86,7 @@ impl Comb<'_, '_> {
                         lsb,
                         array_slice_width: array_slice_width.clone(),
                         array_slice_reversed: *array_slice_reversed,
+                        window: *window,
                     },
                     self.m.variables,
                     self.m.name_to_id,

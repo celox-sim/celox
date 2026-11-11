@@ -235,6 +235,7 @@ impl Ff<'_, '_> {
                     lsb: lsb.clone(),
                     array_slice_width: None,
                     array_slice_reversed: false,
+                    window: None,
                 };
                 let part = self.hoist_lvalue(&part)?;
                 self.freeze_lvalue(part)?

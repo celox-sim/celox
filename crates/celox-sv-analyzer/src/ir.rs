@@ -1378,6 +1378,17 @@ impl Assignment {
     }
 }
 
+/// The bits `lsb..=msb` of a variable that a run-time select stays within:
+/// those of the packed structure member the select is written on. The
+/// select's positions count from bit 0 of the variable, as those of a
+/// constant select of the member do; what it selects outside the window
+/// reads X and is not written (IEEE 1800-2023 11.5.1), as outside a vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SelectWindow {
+    pub lsb: u32,
+    pub msb: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LValue {
     Ident(String),
@@ -1385,8 +1396,11 @@ pub enum LValue {
         name: String,
         msb: ConstExpr,
         lsb: ConstExpr,
-        array_slice_width: Option<ConstExpr>,
+        array_slice_width: Option<Box<ConstExpr>>,
         array_slice_reversed: bool,
+        /// The bits of the variable a run-time select stays within: those of
+        /// the structure member it is written on (see [`SelectWindow`]).
+        window: Option<SelectWindow>,
     },
 }
 
@@ -2340,13 +2354,15 @@ impl From<ast::LValue> for LValue {
                 lsb,
                 array_slice_width,
                 array_slice_reversed,
+                window,
                 ..
             } => LValue::Select {
                 name,
                 msb: msb.into(),
                 lsb: lsb.into(),
-                array_slice_width: array_slice_width.map(Into::into),
+                array_slice_width: array_slice_width.map(|width| Box::new(width.into())),
                 array_slice_reversed,
+                window,
             },
         }
     }

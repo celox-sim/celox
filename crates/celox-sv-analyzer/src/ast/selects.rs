@@ -18,8 +18,9 @@ pub(super) fn constant_packed_indices_in_range(
         return false;
     }
     indices.iter().enumerate().all(|(position, index)| {
+        // A run-time index is bounded where the select is flattened.
         let Some(index) = eval_ast_const_expr(functions, index, &dimensions.const_env) else {
-            return false;
+            return true;
         };
         let Some(dimension) = variable.packed.get(position) else {
             // A scalar integral member can only select bit zero.
@@ -105,6 +106,7 @@ pub(super) fn lvalue_from_indices(
                     signed,
                     array_slice_width: None,
                     array_slice_reversed: false,
+                    window: None,
                     is_2state: false,
                 });
             }
@@ -133,6 +135,7 @@ pub(super) fn lvalue_from_indices(
                 signed: dimensions.signed,
                 array_slice_width: None,
                 array_slice_reversed: false,
+                window: None,
                 is_2state: false,
             });
         } else if let Some(dimensions) = packed_dimensions.get(&name)
@@ -155,6 +158,7 @@ pub(super) fn lvalue_from_indices(
                 signed: dimensions.signed,
                 array_slice_width: None,
                 array_slice_reversed: false,
+                window: None,
                 is_2state: false,
             });
         }
@@ -182,6 +186,7 @@ pub(super) fn lvalue_from_indices(
             signed,
             array_slice_width: None,
             array_slice_reversed: false,
+            window: None,
             is_2state: false,
         });
     }
@@ -253,6 +258,7 @@ pub(super) fn lvalue_from_range(
             signed: false,
             array_slice_width: None,
             array_slice_reversed: false,
+            window: None,
             is_2state: false,
         });
     }
@@ -283,6 +289,7 @@ pub(super) fn lvalue_from_range(
         signed: false,
         array_slice_width,
         array_slice_reversed,
+        window: None,
         is_2state: false,
     })
 }
