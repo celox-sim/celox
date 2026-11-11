@@ -2762,11 +2762,14 @@ endprogram"#;
                 .iter()
                 .position(|slot| *slot == slots.delay)
                 .unwrap();
-            activation.private[status] = (
-                celox_design::ProcessStatus::InactiveDelay.code().into(),
-                0u8.into(),
+            activation.private.set(
+                status,
+                &(
+                    celox_design::ProcessStatus::InactiveDelay.code().into(),
+                    0u8.into(),
+                ),
             );
-            activation.private[delay] = (0u8.into(), 0u8.into());
+            activation.private.set(delay, &(0u8.into(), 0u8.into()));
         }
     }
     assert_eq!((module, program), (2, 2));

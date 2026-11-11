@@ -347,14 +347,21 @@ pub trait SimBackend {
             || celox_state_layout::get_byte_size(signal.width),
             |array| array.element_count * array.element_stride,
         );
+        self.mark_vcd_range(signal.offset, len);
+    }
+
+    /// Mark the bytes `offset..offset + len` of the state image as written,
+    /// for the next VCD dump and the settle partitions reading them, as
+    /// writing the signals they hold does.
+    fn mark_vcd_range(&mut self, offset: usize, len: usize) {
         if let Some(trace) = self.layout().trace.as_ref() {
             let (ptr, _) = self.memory_as_ptr();
             // SAFETY: layout homes and metadata fit in the writable state image.
             unsafe {
-                trace.mark_range(ptr.cast_mut(), signal.offset, len);
+                trace.mark_range(ptr.cast_mut(), offset, len);
             }
         }
-        self.mark_settle_range(signal.offset, len);
+        self.mark_settle_range(offset, len);
     }
 }
 

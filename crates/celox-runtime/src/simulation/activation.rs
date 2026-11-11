@@ -7,6 +7,10 @@ use crate::{
     timing::{Halt, Value, read},
 };
 use celox_design::ForkJoin;
+use frame_image::{FrameImage, ImageLayout};
+use std::sync::Arc;
+
+pub mod frame_image;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProcessControl {
@@ -44,7 +48,9 @@ pub struct Activation {
     pub control: ProcessControl,
     pub kernel: usize,
     pub parent: Option<usize>,
-    pub private: Vec<Value>,
+    /// The private slots of its frame, as the bytes of their planes (see
+    /// [`FrameImage`]).
+    pub private: FrameImage,
     pub locals: Vec<Option<usize>>,
     pub live: bool,
     pub pending: Vec<usize>,
@@ -56,7 +62,7 @@ impl Activation {
             control: ProcessControl::default(),
             kernel,
             parent: None,
-            private: Vec::new(),
+            private: FrameImage::default(),
             locals: Vec::new(),
             live: true,
             pending: Vec::new(),
@@ -121,17 +127,16 @@ impl<B: SimBackend> SimulationState<B> {
         let activation = &mut self.process_state.activations[process];
         if let Some(frame) = &self.model.processes[process].frame {
             if activation.private.is_empty() {
-                activation.private = frame
-                    .private
-                    .iter()
-                    .map(|&slot| read(backend, slot))
-                    .collect();
+                let layout = Arc::new(ImageLayout::new(
+                    &frame.private,
+                    backend.layout().four_state,
+                ));
+                activation.private = FrameImage::capture(&layout, backend);
                 activation.locals.resize(frame.locals.len(), None);
             } else {
-                for (&slot, value) in frame.private.iter().zip(&activation.private) {
-                    write(backend, slot, value);
-                }
+                activation.private.restore(backend);
             }
+            debug_assert_frame(backend, &frame.private, &activation.private);
             for (&slot, cell) in frame.locals.iter().zip(&activation.locals) {
                 if let Some(cell) = cell {
                     write(backend, slot, &self.process_state.cells[*cell]);
@@ -146,9 +151,8 @@ impl<B: SimBackend> SimulationState<B> {
             return;
         };
         let activation = &mut self.process_state.activations[process];
-        for (&slot, value) in frame.private.iter().zip(&mut activation.private) {
-            *value = read(backend, slot);
-        }
+        activation.private.save(backend);
+        debug_assert_frame(backend, &frame.private, &activation.private);
         for (&slot, cell) in frame.locals.iter().zip(&activation.locals) {
             if let Some(cell) = cell {
                 self.process_state.cells[*cell] = read(backend, slot);
@@ -213,21 +217,19 @@ impl<B: SimBackend> SimulationState<B> {
             .frame
             .as_ref()
             .ok_or(SimulatorErrorCode::InternalError)?;
-        let resume = frame
+        let layout = self.process_state.activations[process]
             .private
-            .iter()
-            .position(|slot| *slot == self.model.processes[process].resume)
+            .layout()
             .ok_or(SimulatorErrorCode::InternalError)?;
-        let status = frame
-            .private
-            .iter()
-            .position(|slot| *slot == self.model.processes[process].status)
+        let resume = layout
+            .index_of(self.model.processes[process].resume)
+            .ok_or(SimulatorErrorCode::InternalError)?;
+        let status = layout
+            .index_of(self.model.processes[process].status)
             .ok_or(SimulatorErrorCode::InternalError)?;
         let random_slot = frame.random;
-        let random = frame
-            .private
-            .iter()
-            .position(|slot| *slot == random_slot)
+        let random = layout
+            .index_of(random_slot)
             .ok_or(SimulatorErrorCode::InternalError)?;
         let raw = backend.get_as::<u64>(random_slot);
         let mut seed = if raw == 0 { frame.seed } else { raw as u32 };
@@ -235,16 +237,20 @@ impl<B: SimBackend> SimulationState<B> {
         for entry in first..first + count {
             let mut child = self.process_state.activations[process].clone();
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            child.private[random] = ((u64::from(seed) | (1 << 32)).into(), 0u8.into());
+            child
+                .private
+                .set(random, &((u64::from(seed) | (1 << 32)).into(), 0u8.into()));
             child.control = ProcessControl::default();
             child.live = true;
             child.parent = Some(process);
             child.pending.clear();
             child.join = None;
             if frames.is_none() {
-                child.private[resume] = ((entry as u64).into(), 0u8.into());
+                child
+                    .private
+                    .set(resume, &((entry as u64).into(), 0u8.into()));
             }
-            child.private[status] = (0u8.into(), 0u8.into());
+            child.private.set(status, &(0u8.into(), 0u8.into()));
             let reusable = (self.kernel_count..self.process_state.activations.len()).find(|&id| {
                 !self.process_state.activations[id].live
                     && !self.process_state.activations[id].control.exposed
@@ -441,18 +447,11 @@ impl<B: SimBackend> SimulationState<B> {
                 break;
             }
             if activation.control.exposed
-                && !activation.private.is_empty()
                 && let Some(frame) = &self.model.processes[id].frame
-                && let Some(index) = frame.private.iter().position(|s| *s == frame.random)
+                && let Some(value) = activation.private.value_of(frame.random)
             {
-                activation.control.random = Some(
-                    activation.private[index]
-                        .0
-                        .to_u64_digits()
-                        .first()
-                        .copied()
-                        .unwrap_or(0),
-                );
+                activation.control.random =
+                    Some(value.0.to_u64_digits().first().copied().unwrap_or(0));
             }
             activation.private.clear();
             activation.locals.clear();
@@ -495,7 +494,7 @@ impl<B: SimBackend> SimulationState<B> {
                         .private
                         .iter()
                         .copied()
-                        .zip(activation.private.iter().cloned()),
+                        .zip(activation.private.values()),
                 );
                 values.extend(frame.locals.iter().zip(&activation.locals).filter_map(
                     |(&slot, cell)| cell.map(|cell| (slot, self.process_state.cells[cell].clone())),
@@ -534,23 +533,42 @@ impl<B: SimBackend> SimulationState<B> {
     }
 }
 
+/// Check, in a debug build, that `image` holds the values that reading
+/// each of `slots` from the state memory of `backend` gives. An activation
+/// that has not run keeps no image.
+fn debug_assert_frame<B: SimBackend>(backend: &B, slots: &[SignalRef], image: &FrameImage) {
+    if cfg!(debug_assertions) && !image.is_empty() {
+        for (index, &slot) in slots.iter().enumerate() {
+            assert_eq!(
+                image.get(index),
+                Some(read(backend, slot)),
+                "private slot {index} of a frame image"
+            );
+        }
+    }
+}
+
+/// The value of `signal` in the frame of activation `process`: a cell of
+/// one of its locals, or one of its private slots, decoded.
 pub(super) fn activation_value<'a>(
     activations: &'a [Activation],
     cells: &'a [Value],
     refs: &crate::timing::ProcessRefs,
     process: usize,
     signal: SignalRef,
-) -> Option<&'a Value> {
+) -> Option<std::borrow::Cow<'a, Value>> {
     let frame = refs.frame.as_ref()?;
     let activation = activations.get(process)?;
     if let Some(index) = frame.locals.iter().position(|&slot| slot == signal) {
-        return activation.locals.get(index)?.map(|cell| &cells[cell]);
+        return activation
+            .locals
+            .get(index)?
+            .map(|cell| std::borrow::Cow::Borrowed(&cells[cell]));
     }
-    frame
+    activation
         .private
-        .iter()
-        .position(|&slot| slot == signal)
-        .and_then(|index| activation.private.get(index))
+        .value_of(signal)
+        .map(std::borrow::Cow::Owned)
 }
 
 /// Evaluate one pure dispatch entry without exposing another activation's
@@ -566,23 +584,28 @@ pub(super) fn event_probe<B: SimBackend>(
         .frame
         .as_ref()
         .ok_or(SimulatorErrorCode::InternalError)?;
-    let mut slots: Vec<_> = frame
-        .private
-        .iter()
-        .chain(&frame.locals)
-        .chain(&probe.scratch)
-        .copied()
-        .collect();
-    slots.extend([refs.resume, refs.status, refs.delay, probe.result]);
+    // What the probe may overwrite: the private slots of the frame, as one
+    // image, and its other slots.
+    let layout = activation.private.layout().cloned().unwrap_or_else(|| {
+        Arc::new(ImageLayout::new(
+            &frame.private,
+            backend.layout().four_state,
+        ))
+    });
+    let saved_private = FrameImage::capture(&layout, backend);
+    let mut seen = fxhash::FxHashSet::default();
     let mut saved = Vec::new();
-    for slot in slots {
-        if !saved.iter().any(|(old, _)| *old == slot) {
+    for &slot in frame.locals.iter().chain(&probe.scratch).chain(&[
+        refs.resume,
+        refs.status,
+        refs.delay,
+        probe.result,
+    ]) {
+        if layout.index_of(slot).is_none() && seen.insert(slot) {
             saved.push((slot, read(backend, slot)));
         }
     }
-    for (&slot, value) in frame.private.iter().zip(&activation.private) {
-        write(backend, slot, value);
-    }
+    activation.private.restore(backend);
     for (&slot, cell) in frame.locals.iter().zip(&activation.locals) {
         if let Some(cell) = cell {
             write(backend, slot, &cells[*cell]);
@@ -603,6 +626,7 @@ pub(super) fn event_probe<B: SimBackend>(
             }
             Ok(read(backend, probe.result))
         });
+    saved_private.restore(backend);
     for (slot, value) in saved {
         write(backend, slot, &value);
     }
