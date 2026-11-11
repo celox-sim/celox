@@ -211,6 +211,7 @@ pub(super) fn substitute_lvalue_constants(
             signed,
             array_slice_width,
             array_slice_reversed,
+            window,
             is_2state,
         } => LValue::Select {
             name,
@@ -221,6 +222,7 @@ pub(super) fn substitute_lvalue_constants(
                 substitute_const_expr_constants_with_literals(width, const_env, parameter_literals)
             }),
             array_slice_reversed,
+            window,
             is_2state,
         },
     }
