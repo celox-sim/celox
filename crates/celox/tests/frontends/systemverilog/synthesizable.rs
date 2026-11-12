@@ -181,3 +181,35 @@ fn constant_functions_select_declared_indices() {
         .collect();
     assert_eq!(displayed, ["12 3 1 3 2 9 9 64"; 2]);
 }
+
+// A cast of a division by a parameter is a constant (IEEE 1800-2023 6.24.1,
+// 11.2.1) where a constant is required: a parameter, as fpnew's
+// `SIMD_WIDTH = unsigned'(Width/NUM_LANES)`, or the width of an indexed
+// part-select.
+#[test]
+fn constant_casts_of_divisions_by_parameters() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top #(parameter int unsigned Width = 64, parameter int unsigned NUM_LANES = 4) ();
+            localparam int unsigned SIMD_WIDTH = unsigned'(Width/NUM_LANES);
+            localparam int HALF = signed'(Width / (NUM_LANES / 2));
+            logic [Width-1:0] d = 64'h0123_4567_89ab_cdef;
+            logic [SIMD_WIDTH-1:0] lane;
+            assign lane = d[16 +: unsigned'(Width / NUM_LANES)];
+            initial #1 $display("%0d %0d %0d %h", SIMD_WIDTH, HALF, $bits(lane), lane);
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("casts.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    sim.run_until(2).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["16 32 16 89ab"]);
+}

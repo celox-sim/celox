@@ -138,11 +138,12 @@ pub(super) fn finish_value(
         }
         Finish::MethodCall(call) => finish_method_call(call, operands)?,
         Finish::Cast(target) => {
-            let operand = remove_real_division_guards(
-                guard_zero_divisions(tree, session, operands.pop().ok_or_else(disagreement)?),
-                dimensions,
-            );
+            let operand = operands.pop().ok_or_else(disagreement)?;
             if dimensions.constant_indexed_base {
+                // A constant operand is evaluated as it is: the guard of a
+                // division by an operand that may be zero belongs to its
+                // evaluation at run time (see `guard_zero_divisions`).
+                let operand = remove_real_division_guards(operand, dimensions);
                 let operand = selects::indexed_expression_value(tree, session, operand, dimensions)
                     .ok_or_else(|| unsupported("constant cast operand"))?;
                 const_expr_to_expr(
@@ -156,6 +157,10 @@ pub(super) fn finish_value(
                     .ok_or_else(|| unsupported("constant cast operand"))?,
                 )
             } else {
+                let operand = remove_real_division_guards(
+                    guard_zero_divisions(tree, session, operand),
+                    dimensions,
+                );
                 casts::runtime_cast_target_expr(tree, target, operand, dimensions)?
             }
         }
