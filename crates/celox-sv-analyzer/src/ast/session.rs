@@ -55,6 +55,9 @@ pub(crate) struct Session {
     /// The semantic types of the design.
     pub(super) types: semantic_types::TyTable,
     pub(super) expression_types: expression_types::Memo,
+    /// The types found during the outermost type query that runs, see
+    /// [`expression_types::Query`].
+    pub(super) type_query: Option<expression_types::Query>,
 }
 
 impl Session {
