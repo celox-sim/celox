@@ -186,6 +186,23 @@ pub(super) struct ProcessState {
     pub observes_events: bool,
 }
 
+impl ProcessState {
+    /// The state that a body using `self` or `other` uses.
+    pub(super) fn union(self, other: Self) -> Self {
+        Self {
+            random: self.random || other.random,
+            dist_seed: self.dist_seed || other.dist_seed,
+            time: self.time || other.time,
+            suspends: self.suspends || other.suspends,
+            yields: self.yields || other.yields,
+            forks: self.forks || other.forks,
+            nbas: self.nbas || other.nbas,
+            waits: self.waits || other.waits,
+            observes_events: self.observes_events || other.observes_events,
+        }
+    }
+}
+
 /// What became of the calls of one subroutine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Outcome {
@@ -344,6 +361,9 @@ pub(crate) struct OutOfLine {
     intrinsic: HashMap<String, Option<Reason>>,
     /// The process state each subroutine asked about uses.
     process_state: HashMap<String, ProcessState>,
+    /// The least reason and the process state of the bodies each subroutine
+    /// asked about reaches (see `policy::reached_bodies`).
+    reached: HashMap<String, (Option<Reason>, ProcessState)>,
     /// The outcome of the calls of each called subroutine, for the report.
     outcomes: BTreeMap<String, Outcome>,
     /// How many function bodies are being lowered, nested.
