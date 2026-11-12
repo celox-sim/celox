@@ -279,3 +279,36 @@ fn conditional_array_parameter_value_checks_the_operand_it_does_not_select() {
         );
     }
 }
+
+/// An array parameter takes its value from an array parameter of a package
+/// by its qualified name, as a default and forwarded to a child (26.3).
+/// Verilator 5.054 prints the same line.
+#[test]
+fn array_parameter_value_from_a_package_array_parameter() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+  typedef struct packed { logic lock; logic [1:0] mode; } c_t;
+  localparam c_t R[4] = '{'{1'b0, 2'd0}, '{1'b1, 2'd1}, '{1'b0, 2'd2}, '{1'b1, 2'd3}};
+endpackage
+module leaf #(parameter p::c_t C[4] = p::R, parameter int tag_p = 0)(output logic [11:0] y);
+  assign y = {C[3], C[2], C[1], C[0]};
+  initial #1 $display("%0d y=%h", tag_p, y);
+endmodule
+module mid #(parameter p::c_t T[4] = p::R)();
+  logic [11:0] forwarded, defaulted, direct;
+  leaf #(.C(T), .tag_p(0)) a (.y(forwarded));
+  leaf #(.tag_p(1)) b (.y(defaulted));
+  leaf #(.C(p::R), .tag_p(2)) c (.y(direct));
+endmodule
+module top;
+  mid u ();
+  initial #2 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            ["0 y=ea8", "1 y=ea8", "2 y=ea8"],
+            "four_state={four_state}"
+        );
+    }
+}
