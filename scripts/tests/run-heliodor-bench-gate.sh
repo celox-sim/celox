@@ -753,5 +753,15 @@ if validate_gate_tiered_stats "$hotspot_log" hot 2>/dev/null; then
     fail "gate accepted a missing tiered record"
 fi
 
+# Hotspot statistics snapshot the interpreting phase and survive whole-image
+# promotion, so both records together are valid generated-code evidence.
+promoted_stats='CELOX_TIERED_STATS test=hot tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=200 promoted_after_interpreted_evaluations=10 promotion_elapsed_ns=12 safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0'
+printf '%s\n' "$promoted_stats" "$hotspot_stats" >"$hotspot_log"
+validate_gate_tiered_stats "$hotspot_log" hot || fail "gate rejected promoted execution with hotspot evidence"
+printf '%s\n' "$promoted_stats" "${hotspot_stats/compiled_calls=20/compiled_calls=0}" >"$hotspot_log"
+if validate_gate_tiered_stats "$hotspot_log" hot 2>/dev/null; then
+    fail "gate accepted a promoted record with hotspot evidence of no generated-code execution"
+fi
+
 CELOX_ROOT="$REAL_CELOX_ROOT"
 echo "run-heliodor-bench gate fixture tests: PASS"
