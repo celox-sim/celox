@@ -572,6 +572,22 @@ pub(in crate::ast) fn finish(
         known
             .class_member_types
             .extend(caller.class_member_types.clone());
+        // The static properties of its classes, and the static variables
+        // of their methods, are variables of the scope, which a package
+        // lowering those methods for a specialization shares (IEEE
+        // 1800-2023 6.21, 8.9).
+        let method_statics = caller
+            .subroutines
+            .iter()
+            .filter(|subroutine| {
+                caller.classes.iter().any(|class| {
+                    subroutine
+                        .name
+                        .strip_prefix(class.name.as_str())
+                        .is_some_and(|method| method.starts_with("::"))
+                })
+            })
+            .flat_map(|subroutine| subroutine.persistent_locals.iter().map(String::as_str));
         let variables = caller
             .classes
             .iter()
@@ -581,6 +597,7 @@ pub(in crate::ast) fn finish(
                     .iter()
                     .map(|property| property.variable.as_str())
             })
+            .chain(method_statics)
             .collect::<HashSet<_>>();
         for signal in caller
             .signals
