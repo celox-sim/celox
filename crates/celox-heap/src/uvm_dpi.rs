@@ -163,6 +163,17 @@ fn bracket(units: &[Unit], start: usize) -> Result<(String, usize), &'static str
             class.push(']');
             return Ok((class, index + 1));
         }
+        // A `-` that starts an element is a character only as the first
+        // or the last one of the list: after a range or a class it would
+        // start a range from neither.
+        if unit == Unit::Char('-')
+            && !first
+            && units
+                .get(index + 1)
+                .is_some_and(|next| *next != Unit::Char(']'))
+        {
+            return Err(INVALID_RANGE_END);
+        }
         first = false;
         if unit == Unit::Char('[') && char_at(index + 1) == Some(':') {
             let name_start = index + 2;
@@ -180,10 +191,6 @@ fn bracket(units: &[Unit], start: usize) -> Result<(String, usize), &'static str
                 .ok_or("Invalid character class name")?;
             class.push_str(&format!("[:{name}:]"));
             index = name_end + 2;
-            // A class is no end of a range.
-            if char_at(index) == Some('-') && char_at(index + 1).is_some_and(|next| next != ']') {
-                return Err(INVALID_RANGE_END);
-            }
             continue;
         }
         let (low, after) = element(index)?;
@@ -486,6 +493,13 @@ mod tests {
         assert_eq!(pattern_text(b"[[:alpha:]-z]"), Err("Invalid range end"));
         assert_eq!(pattern_text(b"[a-[:alpha:]]"), Err("Invalid range end"));
         assert!(matches(b"^[[:digit:]-]$", b"-"));
+        // Nor does a range start one; a `-` after it that ends the list is
+        // a character too.
+        assert_eq!(pattern_text(b"[a-b-c]"), Err("Invalid range end"));
+        assert_eq!(pattern_text(b"[a-b-\xff]"), Err("Invalid range end"));
+        assert!(matches(b"^[a-b-]$", b"-"));
+        assert!(matches(b"^[-a]$", b"-"));
+        assert!(matches(b"^[^-a]$", b"b"));
         let mut heap = Heap::new();
         let bad = heap.intern(b"[[:word:]]") as u64;
         assert_eq!(heap.call(ops::UVM_RE_COMP, bad, 0, 0), 0);
