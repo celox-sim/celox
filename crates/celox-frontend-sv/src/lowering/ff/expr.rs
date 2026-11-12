@@ -126,7 +126,7 @@ impl Ff<'_, '_> {
             Some(rewritten) => std::borrow::Cow::Owned(rewritten),
             None => expr,
         };
-        let expr = if self.m.forceable.is_empty() {
+        let expr = if !self.m.forces_reads() {
             expr
         } else {
             std::borrow::Cow::Owned(force_reads(&expr, self.m))

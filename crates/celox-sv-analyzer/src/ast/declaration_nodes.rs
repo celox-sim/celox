@@ -202,6 +202,7 @@ impl Signal {
             is_const: false,
             package_variable: None,
             hierarchical: None,
+            force_control: None,
         }
     }
 
@@ -216,7 +217,24 @@ impl Signal {
             is_const: false,
             package_variable: None,
             hierarchical: None,
+            force_control: None,
         }
+    }
+
+    /// A hidden force control of a variable or net of the module.
+    pub(super) fn force_control(
+        name: String,
+        r#type: Type,
+        control: crate::ir::ForceControl,
+    ) -> Self {
+        let mut signal = Self::new(name, r#type);
+        signal.force_control = Some(control);
+        signal
+    }
+
+    /// The force control the signal is, if any.
+    pub fn force_role(&self) -> Option<&crate::ir::ForceControl> {
+        self.force_control.as_ref()
     }
 
     /// The hierarchical name of the signal of another instance the signal

@@ -456,6 +456,32 @@ fn lower_module_with_overrides(
         );
     }
 
+    // The hidden variables a procedural force of a variable or net of the
+    // module declares (IEEE 1800-2023 10.6.2).
+    for signal in module.signals() {
+        let Some(control) = signal.force_control() else {
+            continue;
+        };
+        let (Some(&id), Some(&target)) = (
+            name_to_id.get(signal.name()),
+            name_to_id.get(&control.target),
+        ) else {
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "force of `{}`, which has no storage of its own",
+                control.target
+            )));
+        };
+        // Not hidden: a change of a control wakes what depends on it, such
+        // as the drivers of the target when it is released.
+        let variable = variables.get_mut(&id).expect("a signal has a variable");
+        variable.force_control = Some(ForceSlot {
+            target,
+            enable: control.role == sv::ir::ForceRole::Enable,
+            procedural: true,
+            stored: control.stored,
+        });
+    }
+
     let forceable = variables
         .iter()
         .filter_map(|(&id, var)| {
@@ -468,6 +494,16 @@ fn lower_module_with_overrides(
         .collect::<Vec<_>>();
     for id in forceable {
         let target = variables[&id].clone();
+        if variables.values().any(|variable| {
+            variable
+                .force_control
+                .is_some_and(|slot| slot.procedural && slot.target == id)
+        }) {
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "host force of `{}`, which a procedural force also forces",
+                target.path[0]
+            )));
+        }
         // Whole packed variables only. Array elements require a separately
         // specified addressing contract rather than a guessed flat offset.
         if !target.array_dims.is_empty() {
@@ -484,7 +520,12 @@ fn lower_module_with_overrides(
                 )));
             }
             let mut control = target.clone();
-            control.force_control = Some((id, prefix == FORCE_ENABLE));
+            control.force_control = Some(ForceSlot {
+                target: id,
+                enable: prefix == FORCE_ENABLE,
+                procedural: false,
+                stored: false,
+            });
             control.path = vec![control_name.clone()];
             control.width = width;
             control.signed = false;
