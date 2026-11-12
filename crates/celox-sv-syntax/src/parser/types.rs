@@ -556,7 +556,7 @@ impl Parser<'_> {
                 jobs.push(Job::Type(TypeJob::EnumNext { state, item }));
             }
             TypeJob::EnumNext { mut state, item } => {
-                state.items.push(item);
+                self.enum_members(item, &mut state.items);
                 if self.eat("}") {
                     jobs.push(Job::Type(TypeJob::Finish {
                         start: state.start,
@@ -630,6 +630,53 @@ impl Parser<'_> {
                     TokenKind::Identifier | TokenKind::EscapedIdentifier
                 ) || matches!(self.tokens[*index].text.as_str(), "::" | "." | "#")
             }))
+    }
+}
+
+impl Parser<'_> {
+    /// Add the members `item` declares to `items`: itself, or for a range
+    /// the named constants of the sequence (IEEE 1800-2023 6.19.2):
+    /// `name[N]` declares `name0` to `nameN-1` and `name[N:M]` `nameN` to
+    /// `nameM`, counting up or down. A value initializes the first of
+    /// them and the others follow it. A range that is not written in
+    /// integral numbers, or that has a negative or unknown one, stays
+    /// as it is and is rejected where the member is used.
+    fn enum_members(&self, item: EnumItem, items: &mut Vec<EnumItem>) {
+        // More constants than any enumeration base type is used for.
+        const LIMIT: u64 = 1 << 16;
+        let Some(dimension) = item.dimensions.first() else {
+            items.push(item);
+            return;
+        };
+        let numbers: Vec<Option<u64>> = self.tokens[dimension.tokens.start..dimension.tokens.end]
+            .iter()
+            .filter(|token| token.kind == TokenKind::Number)
+            .map(|token| super::numbers::integral_value(&token.text))
+            .collect();
+        let (first, last) = match numbers.as_slice() {
+            [Some(count)] if (1..=LIMIT).contains(count) => (0, count - 1),
+            [Some(first), Some(last)] if first.abs_diff(*last) < LIMIT => (*first, *last),
+            _ => {
+                items.push(item);
+                return;
+            }
+        };
+        let mut value = item.value;
+        let mut index = first;
+        loop {
+            items.push(EnumItem {
+                name: Name {
+                    spelling: format!("{}{index}", item.name.spelling),
+                    origin: item.name.origin,
+                },
+                dimensions: Vec::new(),
+                value: value.take(),
+            });
+            if index == last {
+                break;
+            }
+            index = if first < last { index + 1 } else { index - 1 };
+        }
     }
 }
 

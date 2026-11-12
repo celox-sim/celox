@@ -4276,12 +4276,46 @@ fn substitutes_enum_members_after_expanding_instance_connection_functions() {
     assert_eq!(sim.get(sim.signal("y")), 2u8.into());
 }
 
+// `name[N]` declares `name0` to `nameN-1` and `name[N:M]` `nameN` to `nameM`
+// (IEEE 1800-2023 6.19.2); a value initializes the first of them.
 #[test]
-fn rejects_ranged_enum_members_instead_of_registering_the_base_name() {
+fn ranged_enum_members_declare_their_sequence() {
+    let source = r#"
+        module Top(output logic [31:0] first, second, after, up, down, last, more);
+            typedef enum logic [63:0] {
+                S[2] = 4, Next, Up[3:5] = 10, Down[3'd5:'h3], Last,
+                // Sized numbers are truncated to their size; a wide signed
+                // unsized one keeps a sign bit above its value (5.7.1).
+                B[8'h1_0000_0000_0000_0001], C['sh1_0000_0000:'sh1_0000_0000]
+            } E;
+            assign more = {B0[15:0], C4294967296[15:0]};
+            assign first = S0;
+            assign second = S1;
+            assign after = Next;
+            assign up = {Up3[7:0], Up4[7:0], Up5[7:0], 8'h0};
+            assign down = {Down5[7:0], Down4[7:0], Down3[7:0], 8'h0};
+            assign last = Last;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("ranged_enum.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    for (name, value) in [
+        ("first", 4u32),
+        ("second", 5),
+        ("after", 6),
+        ("up", 0x0a0b_0c00),
+        ("down", 0x0d0e_0f00),
+        ("last", 16),
+        ("more", 0x0011_0012),
+    ] {
+        assert_eq!(sim.get(sim.signal(name)), value.into(), "{name}");
+    }
+    // A range that is not a number of members is not expanded.
     let error = cranelift_build_error(
         r#"
         module Top(output logic [31:0] y);
-            typedef enum int { S[2] = 4 } E;
+            typedef enum int { S[2'bx1] = 4 } E;
             assign y = S0;
         endmodule
         "#,

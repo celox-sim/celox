@@ -2871,6 +2871,28 @@ sv_backends! {
         assert!(value > 30 && value.is_multiple_of(3), "{value}");
     }
 
+    // The members a ranged enumerator declares (6.19.2) are the domain of a
+    // random enumeration like any others.
+    fn class_randomizes_ranged_enumerators(sim) {
+        @setup {
+            let source = r#"module Top(output int ok, output int value);
+                typedef enum bit [3:0] { A[3] = 4, B[7:6], C } e_t;
+                class K; rand e_t e; constraint c { e != A0; e != C; } endclass
+                K k;
+                initial begin
+                    k = new;
+                    ok = k.randomize();
+                    value = k.e;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("ranged_enum_rand.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("ok")), 1u32.into());
+        let value: u32 = sim.get(sim.signal("value")).try_into().unwrap();
+        assert!((5..=8).contains(&value), "{value}");
+    }
+
     // A class parameter hides the module's constant of its name also in a
     // static call that passes it on by name (8.25).
     fn class_parameter_literals_hide_module_constants_in_static_calls(sim) {
