@@ -536,7 +536,6 @@ impl ProcModule<'_> {
     }
 
     pub(super) fn find_out_of_line_reason(&mut self, name: &str) -> (Option<Reason>, ProcessState) {
-        let mut state = ProcessState::default();
         let mut found: Option<Reason> = None;
         let mut note = |reason: Reason| {
             if found.as_ref().is_none_or(|known| reason < *known) {
@@ -561,15 +560,39 @@ impl ProcModule<'_> {
         // What the body does, and the bodies of the subroutines it calls,
         // which are inlined into the unit unless they go out of line
         // themselves, and can only if they qualify themselves.
-        let mut pending = vec![name.to_string()];
-        let mut visited = HashSet::default();
-        while let Some(name) = pending.pop() {
-            if !visited.insert(name.clone()) {
-                continue;
+        let mut reached = self
+            .out_of_line()
+            .map(|functions| std::mem::take(&mut functions.reached))
+            .unwrap_or_default();
+        let (reason, state) = reached_bodies(name, &mut reached, |name| self.own_body(name));
+        if let Some(functions) = self.out_of_line() {
+            functions.reached = reached;
+        }
+        debug_assert_eq!(
+            (reason.clone(), state),
+            self.walked_bodies(name),
+            "the summary of the bodies `{name}` reaches"
+        );
+        (least(found, reason), state)
+    }
+
+    /// What the body of subroutine `name` does itself, as a unit of it or of
+    /// a subroutine that calls it would: the first reason it gives to stay
+    /// inlined, the process state it uses, and the subroutines it calls,
+    /// whose bodies are part of that unit.
+    fn own_body(&self, name: &str) -> OwnBody {
+        let mut state = ProcessState::default();
+        let mut found: Option<Reason> = None;
+        let mut note = |reason: Reason| {
+            if found.as_ref().is_none_or(|known| reason < *known) {
+                found = Some(reason);
             }
-            let Some(subroutine) = self.subroutine(&name) else {
+        };
+        let mut callees = Vec::new();
+        'body: {
+            let Some(subroutine) = self.subroutine(name) else {
                 note(Reason::Other(format!("no subroutine `{name}`")));
-                continue;
+                break 'body;
             };
             let mut calls = Vec::new();
             for stmt in &subroutine.body {
@@ -778,7 +801,7 @@ impl ProcModule<'_> {
                             note(Reason::HostRequest);
                         } else if let Some(subroutine) = self.subroutine(&callee) {
                             default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
-                            pending.push(callee);
+                            callees.push(callee);
                         } else {
                             note(Reason::Other(format!("no subroutine `{callee}`")));
                         }
@@ -786,7 +809,28 @@ impl ProcModule<'_> {
                 }
             }
         }
-        (found, state)
+        OwnBody {
+            reason: found,
+            state,
+            callees,
+        }
+    }
+
+    /// [`reached_bodies`] by walking every body `name` reaches, for checking
+    /// it.
+    fn walked_bodies(&self, name: &str) -> (Option<Reason>, ProcessState) {
+        let mut pending = vec![name.to_string()];
+        let mut visited = HashSet::default();
+        let mut summary = (None, ProcessState::default());
+        while let Some(name) = pending.pop() {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let body = self.own_body(&name);
+            summary = (least(summary.0, body.reason), summary.1.union(body.state));
+            pending.extend(body.callees);
+        }
+        summary
     }
 
     /// Whether a call of `subroutine` with `args` has only constant
@@ -864,5 +908,221 @@ impl ProcModule<'_> {
             }
         }
         false
+    }
+}
+
+/// What the body of a subroutine does itself (see `ProcModule::own_body`).
+pub(super) struct OwnBody {
+    reason: Option<Reason>,
+    state: ProcessState,
+    callees: Vec<String>,
+}
+
+/// The lesser of two reasons to stay inlined, the one the report counts.
+fn least(a: Option<Reason>, b: Option<Reason>) -> Option<Reason> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The least reason and the process state of the bodies subroutine `root`
+/// reaches through calls, itself included, each body as `own` gives it.
+/// `done` holds those already known, by subroutine, and receives those of
+/// every subroutine this visits. The subroutines of one strongly connected
+/// component of the call graph reach the same bodies, so each component is
+/// summarized once, from its members' own bodies and the summaries of the
+/// components it calls, which are complete by then (Tarjan's algorithm, on
+/// a stack of its own: a chain of calls may be deeper than the host stack).
+fn reached_bodies(
+    root: &str,
+    done: &mut HashMap<String, (Option<Reason>, ProcessState)>,
+    own: impl Fn(&str) -> OwnBody,
+) -> (Option<Reason>, ProcessState) {
+    struct Node {
+        name: String,
+        body: OwnBody,
+        low: usize,
+        on_stack: bool,
+    }
+    if let Some(summary) = done.get(root) {
+        return summary.clone();
+    }
+    // A node's index is its position: nodes are opened in the order the
+    // search reaches them.
+    let mut nodes: Vec<Node> = Vec::new();
+    let mut ids: HashMap<String, usize> = HashMap::default();
+    let mut stack: Vec<usize> = Vec::new();
+    let open = |name: &str,
+                nodes: &mut Vec<Node>,
+                ids: &mut HashMap<String, usize>,
+                stack: &mut Vec<usize>| {
+        let id = nodes.len();
+        nodes.push(Node {
+            name: name.to_string(),
+            body: own(name),
+            low: id,
+            on_stack: true,
+        });
+        ids.insert(name.to_string(), id);
+        stack.push(id);
+        id
+    };
+    let root_id = open(root, &mut nodes, &mut ids, &mut stack);
+    // Each frame is a node and the position of its next callee.
+    let mut frames = vec![(root_id, 0)];
+    while let Some(&(node, position)) = frames.last() {
+        if let Some(callee) = nodes[node].body.callees.get(position).cloned() {
+            frames.last_mut().expect("a frame is on top").1 += 1;
+            if done.contains_key(&callee) {
+                continue;
+            }
+            match ids.get(&callee).copied() {
+                None => {
+                    let id = open(&callee, &mut nodes, &mut ids, &mut stack);
+                    frames.push((id, 0));
+                }
+                Some(id) if nodes[id].on_stack => {
+                    nodes[node].low = nodes[node].low.min(id);
+                }
+                Some(_) => {}
+            }
+            continue;
+        }
+        frames.pop();
+        if let Some(&(caller, _)) = frames.last() {
+            nodes[caller].low = nodes[caller].low.min(nodes[node].low);
+        }
+        if nodes[node].low != node {
+            continue;
+        }
+        let mut members = Vec::new();
+        while let Some(member) = stack.pop() {
+            nodes[member].on_stack = false;
+            members.push(member);
+            if member == node {
+                break;
+            }
+        }
+        let mut summary = (None, ProcessState::default());
+        for &member in &members {
+            let body = &nodes[member].body;
+            summary = (
+                least(summary.0, body.reason.clone()),
+                summary.1.union(body.state),
+            );
+            // The component's own members are not done yet.
+            for callee in &body.callees {
+                if let Some((reason, state)) = done.get(callee) {
+                    summary = (least(summary.0, reason.clone()), summary.1.union(*state));
+                }
+            }
+        }
+        for &member in &members {
+            done.insert(nodes[member].name.clone(), summary.clone());
+        }
+    }
+    done[root].clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A body of subroutine `index` of a generated program.
+    fn body(index: usize, callees: Vec<usize>, random: &mut impl FnMut(usize) -> usize) -> OwnBody {
+        OwnBody {
+            reason: match random(6) {
+                0 => Some(Reason::HostRequest),
+                1 => Some(Reason::MaySuspend),
+                2 => Some(Reason::Other(format!("body {index}"))),
+                _ => None,
+            },
+            state: ProcessState {
+                random: random(5) == 0,
+                time: random(7) == 0,
+                suspends: random(3) == 0,
+                ..ProcessState::default()
+            },
+            callees: callees
+                .into_iter()
+                .map(|callee| format!("f{callee}"))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn reached_bodies_are_those_a_walk_reaches() {
+        // Call graphs with cycles, self calls, shared callees, chains and
+        // calls of subroutines the module has not, asked about in any order
+        // and sharing what earlier questions found.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut random = move |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        for count in [1, 2, 3, 5, 8, 13, 40, 120] {
+            for _ in 0..20 {
+                let bodies: HashMap<String, (Option<Reason>, ProcessState, Vec<String>)> = (0
+                    ..count)
+                    .map(|index| {
+                        let callees = (0..random(4)).map(|_| random(count + 1)).collect();
+                        let body = body(index, callees, &mut random);
+                        (format!("f{index}"), (body.reason, body.state, body.callees))
+                    })
+                    .collect();
+                let own = |name: &str| {
+                    let (reason, state, callees) = bodies.get(name).cloned().unwrap_or((
+                        Some(Reason::Other(format!("no subroutine `{name}`"))),
+                        ProcessState::default(),
+                        Vec::new(),
+                    ));
+                    OwnBody {
+                        reason,
+                        state,
+                        callees,
+                    }
+                };
+                let walked = |root: &str| {
+                    let mut pending = vec![root.to_string()];
+                    let mut visited = HashSet::default();
+                    let mut summary = (None, ProcessState::default());
+                    while let Some(name) = pending.pop() {
+                        if visited.insert(name.clone()) {
+                            let body = own(&name);
+                            summary = (least(summary.0, body.reason), summary.1.union(body.state));
+                            pending.extend(body.callees);
+                        }
+                    }
+                    summary
+                };
+                let mut done = HashMap::default();
+                for _ in 0..count {
+                    let root = format!("f{}", random(count + 1));
+                    assert_eq!(reached_bodies(&root, &mut done, own), walked(&root));
+                }
+            }
+        }
+        // A chain deeper than the host stack would allow a recursive walk.
+        let depth = 200_000;
+        let own = |name: &str| {
+            let index: usize = name[1..].parse().unwrap();
+            OwnBody {
+                reason: (index == depth - 1).then_some(Reason::HostRequest),
+                state: ProcessState::default(),
+                callees: (index + 1 < depth)
+                    .then(|| format!("f{}", index + 1))
+                    .into_iter()
+                    .collect(),
+            }
+        };
+        let mut done = HashMap::default();
+        assert_eq!(
+            reached_bodies("f0", &mut done, own).0,
+            Some(Reason::HostRequest)
+        );
+        assert_eq!(done.len(), depth);
     }
 }
