@@ -63,16 +63,23 @@ pub(super) fn ports_from_scope(
         }
         inherited_direction = direction;
         inherited_type = base.clone();
-        let ty = type_with_unpacked_ranges(
-            base,
-            constant_binding::unpacked_ranges(
-                &native.dimensions,
-                syntax_tree,
-                session,
-                const_env,
-                type_aliases,
+        // A range of the port may name a constant that is no parameter of
+        // the module, such as a member of an enumeration of a package the
+        // header imports (IEEE 1800-2023 26.4): take its value here, as for
+        // a variable of the module.
+        let ty = procedural::scoped_type(
+            type_with_unpacked_ranges(
+                base,
+                constant_binding::unpacked_ranges(
+                    &native.dimensions,
+                    syntax_tree,
+                    session,
+                    const_env,
+                    type_aliases,
+                )?,
             )?,
-        )?;
+            const_env,
+        );
         if ty.container.is_some() {
             return Err(unsupported("dynamic container port"));
         }
