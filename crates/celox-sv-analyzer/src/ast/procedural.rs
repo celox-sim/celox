@@ -767,7 +767,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     /// Declare a local in the innermost scope and return its unique name.
     pub(super) fn declare(&mut self, source: &str, r#type: Type) -> String {
         let unique = format!("{source}@{}", *self.state.counter);
-        self.declare_as(source, r#type, unique)
+        self.declare_as(source, r#type, unique, false)
     }
 
     /// Declare a local with a static lifetime, declared at token
@@ -808,7 +808,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             ),
             None => format!("{source}@{}", *self.state.counter),
         };
-        self.declare_as(source, r#type, unique)
+        let owned = self.owner.is_some();
+        self.declare_as(source, r#type, unique, owned)
     }
 
     /// The identifier of the named block declared at token `declaration`
@@ -829,7 +830,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         id
     }
 
-    fn declare_as(&mut self, source: &str, r#type: Type, unique: String) -> String {
+    fn declare_as(&mut self, source: &str, r#type: Type, unique: String, owned: bool) -> String {
         *self.state.counter += 1;
         let shape = bound_dimensions_from_type(
             &r#type,
@@ -851,6 +852,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 scoped_type(r#type, &self.dims.const_env),
                 &self.dims.const_env,
             ),
+            owned,
         });
         self.names
             .scopes

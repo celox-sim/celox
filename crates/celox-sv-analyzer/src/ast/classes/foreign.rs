@@ -703,35 +703,39 @@ fn declared_names(subroutine: &Subroutine) -> HashSet<&str> {
 
 /// A subroutine of a scope as another scope lowers it, such as a method
 /// of a class a package specialization takes, with the variables it
-/// declares. A variable named by its subroutine and declaration (see
-/// `BodyBuilder::declare_owned`) keeps its name. One the counter of the
-/// scope's analysis named would read as a variable of the other scope
-/// that its own count gave the same name: it is named after the scope and
-/// the subroutine instead.
+/// declares. A variable its subroutine and declaration name (see
+/// `BodyBuilder::declare_owned`, `LocalVariable::owned`) keeps its name.
+/// One the counter of the scope's analysis named would read as a variable
+/// of the other scope that its own count gave the same name: it is named
+/// after the scope and the subroutine instead.
 fn handed_over(
     subroutine: &Subroutine,
     locals: &[LocalVariable],
     scope: Option<&str>,
 ) -> (Subroutine, Vec<LocalVariable>) {
     let declared = declared_names(subroutine);
-    let mut names = HashMap::default();
-    for name in &declared {
-        let Some((source, number)) = name.rsplit_once('@') else {
-            continue;
-        };
-        if source.contains('%') {
-            continue;
-        }
-        let key = fxhash::hash64(&(scope, subroutine.name.as_str(), *name));
-        names.insert(name.to_string(), format!("{source}%{key:016x}@{number}"));
-    }
-    let rename = scope::Renamer { names: &names };
-    let locals = locals
+    let declarations = locals
         .iter()
         .filter(|local| declared.contains(local.name.as_str()))
+        .map(|local| (local.name.as_str(), local))
+        .collect::<HashMap<_, _>>();
+    let mut names = HashMap::default();
+    for name in &declared {
+        let local = declarations.get(name);
+        if local.is_some_and(|local| local.owned) {
+            continue;
+        }
+        let source = local.map_or(*name, |local| local.source_name.as_str());
+        let key = fxhash::hash64(&(scope, subroutine.name.as_str(), *name));
+        names.insert(name.to_string(), format!("{source}%{key:016x}@0"));
+    }
+    let rename = scope::Renamer { names: &names };
+    let locals = declarations
+        .values()
         .map(|local| LocalVariable {
             name: rename.name(&local.name),
-            ..local.clone()
+            owned: true,
+            ..(*local).clone()
         })
         .collect();
     (rename.subroutine(subroutine.clone()), locals)
@@ -768,16 +772,27 @@ mod tests {
 
     #[test]
     fn handed_over_variables_never_take_a_counted_name_of_the_receiver() {
-        // `$unit`'s count named the method's local `v@8`; the package that
-        // takes the method may have named a local of its own `v@8` too. The
-        // method's must not become that one.
+        // `$unit`'s count named the method's locals `v@8` and, escaped,
+        // `\v%foo@8`; the package that takes the method may have named
+        // locals of its own so too. The method's must not become those,
+        // whatever their spelling holds.
         let logic = crate::ir::Type::from_ast(Type::new(TypeKind::Logic), &HashMap::default());
-        let local = |name: &str, source: &str| LocalVariable {
+        let local = |name: &str, source: &str, owned: bool| LocalVariable {
             name: name.into(),
             source_name: source.into(),
             r#type: logic.clone(),
+            owned,
         };
         let this = "this%0123456789abcdef@5";
+        let assign = |lhs: &str, rhs: &str| StmtBase::Assign {
+            lhs: LValue::Ident(lhs.into()),
+            rhs: Expr::Ident(rhs.into()),
+            nonblocking: false,
+        };
+        let declare = |name: &str| StmtBase::Local {
+            name: name.into(),
+            init: None,
+        };
         let subroutine = Subroutine {
             name: "$unit::Item::code".into(),
             is_task: false,
@@ -795,47 +810,44 @@ mod tests {
             }],
             return_var: None,
             body: vec![
-                StmtBase::Local {
-                    name: "v@8".into(),
-                    init: None,
-                },
-                StmtBase::Assign {
-                    lhs: LValue::Ident("v@8".into()),
-                    rhs: Expr::Ident("w@9".into()),
-                    nonblocking: false,
-                },
+                declare("v@8"),
+                declare("\\v%foo@8"),
+                assign("v@8", "w@9"),
+                assign("\\v%foo@8", "v@8"),
             ],
             sensitivity_body: Vec::new(),
         };
-        let locals = [local("v@8", "v"), local(this, "this"), local("w@9", "w")];
+        let locals = [
+            local("v@8", "v", false),
+            local("\\v%foo@8", "\\v%foo", false),
+            local(this, "this", true),
+            local("w@9", "w", false),
+        ];
         let (handed, locals) = handed_over(&subroutine, &locals, Some("$unit"));
-        let renamed = match &handed.body[0] {
+        let declared = |index: usize| match &handed.body[index] {
             StmtBase::Local { name, .. } => name.clone(),
             other => panic!("{other:?}"),
         };
-        assert_ne!(renamed, "v@8");
+        let (v, escaped) = (declared(0), declared(1));
+        assert!(v.starts_with("v%") && v != "v@8", "{v}");
         assert!(
-            renamed.starts_with("v%") && renamed.ends_with("@8"),
-            "{renamed}"
+            escaped.starts_with("\\v%foo%") && escaped != "\\v%foo@8",
+            "{escaped}"
         );
-        assert_eq!(
-            handed.body[1],
-            StmtBase::Assign {
-                lhs: LValue::Ident(renamed.clone()),
-                // Not a variable of the method: the name it reads stays.
-                rhs: Expr::Ident("w@9".into()),
-                nonblocking: false,
-            }
-        );
+        // Not a variable of the method: the name it reads stays.
+        assert_eq!(handed.body[2], assign(&v, "w@9"));
+        assert_eq!(handed.body[3], assign(&escaped, &v));
         // The formal named by its method keeps its name.
         assert_eq!(handed.params[0].name, this);
-        // The declarations go with it, `w@9`, which it does not declare,
-        // does not.
+        // The declarations go with it, named by it now; `w@9`, which it
+        // does not declare, does not.
         let mut names = locals
             .iter()
-            .map(|local| local.name.clone())
+            .map(|local| (local.name.clone(), local.owned))
             .collect::<Vec<_>>();
         names.sort();
-        assert_eq!(names, [this.to_string(), renamed]);
+        let mut expected = vec![(this.to_string(), true), (v, true), (escaped, true)];
+        expected.sort();
+        assert_eq!(names, expected);
     }
 }
