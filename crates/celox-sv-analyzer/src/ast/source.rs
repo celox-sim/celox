@@ -141,6 +141,10 @@ impl Source {
         design: &mut packages::Design,
     ) -> Result<Self, AnalyzerError> {
         let mut session = Session::with_packages(packages, design);
+        // A type argument of the module may be a chandle no source names.
+        if bindings.types.iter().any(|(_, ty)| ty.holds_chandle()) {
+            session.types.declare_chandle();
+        }
         let source = Self::from_indexed_syntax_module_in(
             syntax_tree,
             path,
