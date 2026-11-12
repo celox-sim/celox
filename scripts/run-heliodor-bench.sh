@@ -1259,7 +1259,7 @@ build_celox_runner() {
         fi
     fi
     if ! env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET \
-        cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox-vpi \
+        cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox \
         --bin celox --profile "$HELIODOR_CELOX_CARGO_PROFILE" --locked \
         "${feature_args[@]}" "${target_args[@]}" "${target_dir_args[@]}" >"$log" 2>&1; then
         tail -n 80 "$log" >&2 || true
@@ -1291,7 +1291,7 @@ build_celox_codegen_runner() {
         feature_args=(--features "$HELIODOR_CELOX_CODEGEN_CARGO_FEATURES")
     fi
     if ! env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET \
-        cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox-vpi \
+        cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox \
         --bin celox --profile "$HELIODOR_CELOX_CARGO_PROFILE" --locked \
         "${feature_args[@]}" "${target_dir_args[@]}" >"$log" 2>&1; then
         tail -n 80 "$log" >&2 || true

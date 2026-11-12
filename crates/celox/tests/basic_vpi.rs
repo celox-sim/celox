@@ -4,8 +4,8 @@ use std::{
     sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
 };
 
+use celox::vpi::*;
 use celox::{NativeProgramInstance, SimBackend, Simulator};
-use celox_vpi::*;
 
 static VPI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static LONG_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);

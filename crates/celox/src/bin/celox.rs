@@ -1,5 +1,8 @@
 #![allow(clippy::disallowed_methods)] // This binary is the process environment boundary.
 
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("the celox command currently supports only x86-64 and AArch64");
+
 // Frontend trees and background JIT passes allocate many short-lived objects.
 // Keep this choice at the CLI boundary so library/VPI hosts own their allocator.
 #[global_allocator]
@@ -34,7 +37,7 @@ use project::{Design, DesignArgs};
 #[derive(Parser)]
 #[command(
     name = "celox",
-    version = env!("CELOX_VERSION"),
+    version = env!("CARGO_PKG_VERSION"),
     about = "Compile and run Veryl and SystemVerilog designs with Celox"
 )]
 struct Cli {
@@ -1087,7 +1090,7 @@ fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> 
     {
         return Err("pass .sv/.v sources, or one .veryl project entry file".to_string());
     }
-    let (image, warnings) = celox_vpi::driver::compile_native_image_with_state(
+    let (image, warnings) = celox::vpi::driver::compile_native_image_with_state(
         &design.sources[0],
         &design.top,
         design.diagnostics.clone(),
@@ -1167,7 +1170,7 @@ fn discover_python_configuration(
         python,
         &[
             OsStr::new("-c"),
-            OsStr::new(include_str!("../cocotb_config.py")),
+            OsStr::new(include_str!("../vpi/cocotb_config.py")),
             flag(request.vpi),
             flag(request.libpython),
             flag(request.pygpi_entry_point),
@@ -1349,7 +1352,7 @@ fn run_simulation(image: NativeProgramImage, arguments: SimulationArgs) -> Resul
     }
     set_environment("COCOTB_RESULTS_FILE", &results_file);
 
-    celox_vpi::driver::run_cocotb_image(image, &vpi)?;
+    celox::vpi::driver::run_cocotb_image(image, &vpi)?;
     check_results(&python, &results_file)
 }
 

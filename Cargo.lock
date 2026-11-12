@@ -420,6 +420,7 @@ name = "celox"
 version = "0.13.0"
 dependencies = [
  "bit-set",
+ "blake3",
  "celox-analysis",
  "celox-backend-arm64",
  "celox-backend-common",
@@ -453,6 +454,7 @@ dependencies = [
  "mimalloc",
  "num-bigint",
  "num-traits",
+ "pathdiff",
  "postcard",
  "proptest",
  "rand",
@@ -464,6 +466,7 @@ dependencies = [
  "thiserror",
  "toml",
  "tracing",
+ "tracing-subscriber",
  "vcd",
  "veryl-analyzer",
  "veryl-component-sys",
@@ -875,32 +878,6 @@ dependencies = [
  "veryl-analyzer",
  "veryl-metadata",
  "veryl-parser",
-]
-
-[[package]]
-name = "celox-vpi"
-version = "0.13.0"
-dependencies = [
- "blake3",
- "celox",
- "celox-design",
- "celox-frontend-veryl",
- "celox-runtime",
- "celox-sv-analyzer",
- "clap",
- "fxhash",
- "libc",
- "libloading",
- "mimalloc",
- "pathdiff",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "toml",
- "tracing-subscriber",
- "veryl-metadata",
- "wellen",
 ]
 
 [[package]]

@@ -42,8 +42,8 @@ RUNTIME_CASES = "celox-test-suite/runtime-cases"
 # "Run workspace tests with CI features" step. The executor builds with the
 # same scope there, so the workspace crates compile once for both.
 WORKSPACE_FEATURES = (
-    "celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,"
-    "celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,"
+    "celox/cranelift,celox/wasm-runtime,celox/wasm-component,"
+    "celox-bench/cranelift,celox-test-suite/verilator,"
     "celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases"
 )
 # The features of the optional backends, which CI's scoped builds enable.

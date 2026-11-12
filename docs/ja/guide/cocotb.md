@@ -5,13 +5,16 @@ CeloxはVerylまたはSystemVerilogの設計を、VPI経由で通常の
 コンパイルできます。生成物にはコンパイル済み設計とCeloxランタイムが含まれるため、
 実行時にHDLソースは不要です。
 
-## CLIをビルドする
+## CLIをインストールする
 
-現在、CLIはCeloxのソースツリーからビルドします。
+crates.ioから`celox`コマンドをインストールします。
 
 ```sh
-cargo build --release -p celox-vpi --bin celox
+cargo install celox
 ```
+
+対応するホストはx86-64とAArch64です。Celoxのソースツリーにあるコマンドを使う場合は、
+`cargo build --release -p celox --bin celox`でビルドすると`target/release/celox`ができます。
 
 後述の`run`コマンドにはPythonは不要です。VPIテストを使う場合は、利用するPython環境へcocotbをインストールします。
 
@@ -26,8 +29,8 @@ python3 -m pip install cocotb
 SystemVerilogのテストベンチとVerylのnative `#[test]`モジュールを、同じコマンドで実行できます。
 
 ```sh
-target/release/celox run src/types.sv src/Dut.sv test/Top.sv --top Top
-target/release/celox run test/Top.veryl --top Top
+celox run src/types.sv src/Dut.sv test/Top.sv --top Top
+celox run test/Top.veryl --top Top
 ```
 
 SVは`.sv`または`.v`をコンパイル順に指定します。既定では2値シミュレーションを使い、
@@ -203,7 +206,7 @@ include・マクロ指定にはSV入力が必要です。
 Verylプロジェクト内のソースを1つ指定し、トップレベルモジュール名を渡します。
 
 ```sh
-target/release/celox vpi build src/Top.veryl --top Top -o build/top-sim
+celox vpi build src/Top.veryl --top Top -o build/top-sim
 ```
 
 Celoxはソースの位置から`Veryl.toml`を探し、プロジェクトのソースと依存関係を
@@ -213,14 +216,13 @@ Celoxはソースの位置から`Veryl.toml`を探し、プロジェクトのソ
 SystemVerilogでは1つ以上の`.sv`ファイルをコンパイル順に指定します。
 
 ```sh
-target/release/celox vpi build src/types.sv src/Child.sv src/Top.sv --top Top -o build/top-sim
+celox vpi build src/types.sv src/Child.sv src/Top.sv --top Top -o build/top-sim
 ```
 
 Celoxが対応するSystemVerilogの範囲で、指定したファイルをコンパイルします。
 package定義は利用側より先に指定してください。`Veryl.toml`や追加のSystemVerilog
 ソースは自動探索しません。複数指定時はすべて`.sv`ファイルにする必要があります。
 Verylではプロジェクトの入口となるファイルを1つ指定します。
-`celox-vpi-compile`も同じソース一覧を受け付けます。
 
 ### プロセスを含む設計
 
@@ -256,10 +258,6 @@ cocotbからの書き込みは現在時刻のブロッキング代入です。�
 たとえば`Timer`コールバックの中での読み出しは格納された値を返します。同じコール
 バックでの書き込みから組み合わせ回路が導く値は、タイムステップが落ち着くまで
 以前の値のままです。
-
-プロセスを含む設計に対応しているのは`celox vpi build`だけです。`celox-vpi-compile`
-とその`celox-vpi-runtime`は引き続きこれらを拒否します
-([#1983](https://github.com/celox-sim/celox/issues/1983))。
 
 実行ファイルには対話モードがないため、`$stop`は`vpiStop`と同様に実行を終了します。
 一時停止への対応は[#1886](https://github.com/celox-sim/celox/issues/1886)で

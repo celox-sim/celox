@@ -56,7 +56,7 @@ jobs:
       - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - name: Build native cocotb CLI
-        run: cargo build --locked --release -p celox-vpi --bin celox
+        run: cargo build --locked --release -p celox --bin celox
       - uses: actions/upload-artifact@v7
         with:
           name: taxi-celox

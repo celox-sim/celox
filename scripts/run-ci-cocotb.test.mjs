@@ -10,7 +10,7 @@ import { cargoCommands } from "./run-ci-rust-scope.mjs";
 test("cocotb preserves build resolution and selects only its ignored tests", () => {
   const builds = [
     { packages: ["celox-heap"], targets: [], features: [] },
-    { packages: ["celox", "celox-vpi"], targets: [], features: ["celox/cranelift"] },
+    { packages: ["celox"], targets: [], features: ["celox/cranelift"] },
   ];
   const original = structuredClone(builds);
   const expected = cargoCommands("test", builds, cocotbFilter)[1]
@@ -27,10 +27,10 @@ test("cocotb preserves build resolution and selects only its ignored tests", () 
 });
 
 test("missing or wrong VPI targets fail closed", () => {
-  for (const builds of [[], [{ packages: ["celox"], targets: [], features: [] }],
-    [{ packages: ["celox-vpi"], targets: ["other_test"], features: [] }]])
+  for (const builds of [[], [{ packages: ["celox-heap"], targets: [], features: [] }],
+    [{ packages: ["celox"], targets: ["other_test"], features: [] }]])
     assert.throws(() => cocotbCommands("false", builds));
-  const [args] = cocotbCommands("false", [{ packages: ["celox-vpi"], targets: ["cocotb_e2e"], features: [] }]);
+  const [args] = cocotbCommands("false", [{ packages: ["celox"], targets: ["cocotb_e2e"], features: [] }]);
   assert.equal(args[args.indexOf("--test") + 1], "cocotb_e2e");
 });
 
@@ -41,7 +41,7 @@ test("cocotb requires Python and propagates Cargo failures without running later
     const log = join(directory, "calls");
     writeFileSync(executable, '#!/bin/sh\necho called >> "$COCOTB_CALL_LOG"\nexit 17\n');
     chmodSync(executable, 0o755);
-    const build = { packages: ["celox-vpi"], targets: [], features: [] };
+    const build = { packages: ["celox"], targets: [], features: [] };
     const env = { ...process.env, RUST_FULL: "false", BUILDS: JSON.stringify([build, build]),
       PATH: `${directory}:${process.env.PATH}`, COCOTB_CALL_LOG: log,
       CELOX_CI_REPORT_DIR: "", CELOX_COCOTB_PYTHON: "" };

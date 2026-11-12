@@ -54,7 +54,8 @@ test("Rust test infrastructure skips bindings while retaining Rust checks", () =
     "crates/celox/examples/sv_tests.rs",
     "crates/celox-bench/src/bin/veryl-heliodor.rs",
     "crates/celox-bench-sv/src/main.rs",
-    "crates/celox-vpi/src/lib.rs",
+    "crates/celox/src/vpi/mod.rs",
+    "crates/celox/src/bin/celox.rs",
     "crates/celox-wasm/src/lib.rs",
     "crates/lydite/src/lib.rs",
     "crates/lydite-ir/src/lib.rs",
@@ -323,13 +324,21 @@ test("Rust-only exclusions do not contain NAPI runtime or build dependencies", (
         )
       )
         continue;
+      // The `celox` command, which the `cli` feature checked below builds.
+      if (name === "celox" && target["required-features"]?.includes("cli")) continue;
       const targetPath = relative(root, target.src_path).replaceAll("\\", "/");
       assert.equal(classifyFiles([targetPath]).napi, true, targetPath);
     }
     // Include optional and target-specific edges; only dev dependencies are
     // excluded. New runtime edges must invalidate the skip rule.
     for (const dep of pkg.dependencies) {
-      if (dep.kind !== "dev" && packages.has(dep.name)) visit(dep.name);
+      if (dep.kind === "dev" || !packages.has(dep.name)) continue;
+      // The `celox` command and its VPI host are excluded as Rust-only.
+      if (dep.name === "celox") {
+        assert.equal(dep.uses_default_features, false, `${name} enables celox's default features`);
+        assert.ok(!dep.features.includes("cli"), `${name} enables celox's cli feature`);
+      }
+      visit(dep.name);
     }
   }
   visit("celox-napi");
@@ -441,7 +450,7 @@ test("ARM64 Heliodor changes include backend and harness integration", () => {
     "crates/celox-backend-common/src/lib.rs",
     "crates/celox/src/backend/native/backend.rs",
     "crates/celox/src/backend.rs",
-    "crates/celox-vpi/src/bin/celox/runner.rs",
+    "crates/celox/src/bin/celox/runner.rs",
     "scripts/run-heliodor-bench.sh",
     "scripts/heliodor-revision",
     ".github/actions/setup-rust/action.yml",
@@ -531,7 +540,8 @@ test("test and consumer PRs skip sv-tests; implementation and full runs retain i
     "crates/celox/tests/test_utils/mod.rs",
     "crates/celox/tests/snapshots/flip_flop__optimized.snap",
     "crates/celox-test-suite/src/lib.rs",
-    "crates/celox-vpi/src/lib.rs",
+    "crates/celox/src/vpi/mod.rs",
+    "crates/celox/src/bin/celox.rs",
     "crates/celox-napi/src/lib.rs",
     "crates/lydite/src/lib.rs",
   ]) {
@@ -570,9 +580,9 @@ test("Lydite lint and API documentation remain selected in CI", () => {
 });
 
 test("VPI test-only edits do not select the unrelated ignored cocotb end-to-end test", () => {
-  const tests = rustScopeOutputs(["crates/celox-vpi/tests/basic_vpi.rs"]);
+  const tests = rustScopeOutputs(["crates/celox/tests/basic_vpi.rs"]);
   assert.equal(tests.rust_vpi_e2e, false);
-  for (const path of ["crates/celox-vpi/src/lib.rs", "crates/celox-vpi/tests/cocotb_e2e.rs"])
+  for (const path of ["crates/celox/src/vpi/mod.rs", "crates/celox/src/bin/celox.rs", "crates/celox/tests/cocotb_e2e.rs"])
     assert.equal(rustScopeOutputs([path]).rust_vpi_e2e, true);
   assert.equal(rustScopeOutputs(null).rust_vpi_e2e, true);
 });

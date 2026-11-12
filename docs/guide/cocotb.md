@@ -5,13 +5,18 @@ Celox can compile a Veryl or SystemVerilog design into a native executable that 
 contains the compiled design and the Celox runtime; it does not need the HDL
 sources when it runs.
 
-## Build the CLI
+## Install the CLI
 
-The CLI is currently built from the Celox source tree:
+Install the `celox` command from crates.io:
 
 ```sh
-cargo build --release -p celox-vpi --bin celox
+cargo install celox
 ```
+
+The command supports x86-64 and AArch64 hosts. To use the CLI of a Celox
+source tree instead, build it with
+`cargo build --release -p celox --bin celox`, which creates
+`target/release/celox`.
 
 The `run` command below needs no Python installation. For VPI tests, install
 cocotb into the Python environment you want to use:
@@ -28,8 +33,8 @@ Use the same command for a SystemVerilog testbench and a Veryl native
 `#[test]` module:
 
 ```sh
-target/release/celox run src/types.sv src/Dut.sv test/Top.sv --top Top
-target/release/celox run test/Top.veryl --top Top
+celox run src/types.sv src/Dut.sv test/Top.sv --top Top
+celox run test/Top.veryl --top Top
 ```
 
 For SystemVerilog, pass `.sv` or `.v` sources in compilation order.
@@ -341,7 +346,7 @@ Include directories and macros require SystemVerilog inputs.
 Pass one source in the Veryl project and name the top-level module:
 
 ```sh
-target/release/celox vpi build src/Top.veryl --top Top -o build/top-sim
+celox vpi build src/Top.veryl --top Top -o build/top-sim
 ```
 
 Celox finds `Veryl.toml` from the source path and includes the project's source
@@ -352,14 +357,13 @@ omitted.
 For SystemVerilog, pass one or more `.sv` files in compilation order:
 
 ```sh
-target/release/celox vpi build src/types.sv src/Child.sv src/Top.sv --top Top -o build/top-sim
+celox vpi build src/types.sv src/Child.sv src/Top.sv --top Top -o build/top-sim
 ```
 
 This compiles the specified files using Celox's supported SystemVerilog subset.
 List package definitions before their consumers. It does not discover a
 `Veryl.toml` project or additional SystemVerilog source files. Multiple inputs
-must all be `.sv` files; for Veryl, pass one project entry file. The
-`celox-vpi-compile` binary accepts the same source list.
+must all be `.sv` files; for Veryl, pass one project entry file.
 
 ### Designs with processes
 
@@ -397,10 +401,6 @@ A write from cocotb is a blocking assignment at the current time. Outside the
 regions of a time step, in a `Timer` callback for example, a read returns the
 stored value: what combinational logic derives from a write in the same
 callback reads as before until the time step settles.
-
-Only `celox vpi build` supports designs with processes; `celox-vpi-compile`
-and its `celox-vpi-runtime` still reject them
-([#1983](https://github.com/celox-sim/celox/issues/1983)).
 
 `$stop` ends the run, as `vpiStop` does, because the executable has no
 interactive mode. Pausing instead is tracked in

@@ -4,8 +4,20 @@
 crates use its low-level `Simulator::from_frontend` hook after lowering their
 own artifact through `celox-frontend-sdk`.
 
+The package also provides the `celox` command, which runs Veryl and
+SystemVerilog testbenches and builds executables for cocotb:
+
+```sh
+cargo install celox
+```
+
+See the [CLI and cocotb guide](https://celox-sim.github.io/celox/guide/cocotb).
+
 The default `host-runtime` feature provides native, interpreter and tiered
-execution. Optional execution engines are enabled explicitly:
+execution, and the default `cli` feature builds the command. A library that
+does not need the command can depend on
+`celox = { version = "...", default-features = false, features = ["host-runtime"] }`.
+Optional execution engines are enabled explicitly:
 
 | Feature | Enables |
 | --- | --- |

@@ -30,7 +30,7 @@ revision="$(cat conformance/common-cells/revision)"
 git init work/common-cells
 git -C work/common-cells fetch --depth 1 https://github.com/pulp-platform/common_cells.git "$revision"
 git -C work/common-cells checkout FETCH_HEAD
-cargo build --locked -p celox-vpi --bin celox
+cargo build --locked -p celox --bin celox
 node scripts/run-common-cells.mjs work/common-cells target/debug/celox work/common-cells-results
 ```
 
