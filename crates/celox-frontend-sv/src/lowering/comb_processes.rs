@@ -4,6 +4,7 @@ use super::*;
 
 pub(super) fn lower_comb_processes(
     module: &sv::ir::Module,
+    tables: &procedural::ModuleTables,
     port_assignments: &[(SourceVarId, Vec<sv::ir::Stmt>)],
     variables: &mut HashMap<SourceVarId, SvVariable>,
     name_to_id: &mut HashMap<String, SourceVarId>,
@@ -36,6 +37,7 @@ pub(super) fn lower_comb_processes(
     let mut sites = Vec::new();
     let mut pm = procedural::ProcModule::new(
         module,
+        tables,
         variables,
         name_to_id,
         constants,
