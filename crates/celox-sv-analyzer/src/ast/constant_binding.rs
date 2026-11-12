@@ -142,7 +142,9 @@ fn bind_in_context(
                     expression,
                     postfix: false,
                 } => {
-                    if constants::unary_op_from_text(operator).is_none() {
+                    if constants::unary_op_from_text(operator).is_none()
+                        && constants::negated_reduction_from_text(operator).is_none()
+                    {
                         return Ok(None);
                     }
                     jobs.push(Job::Unary(operator.clone()));
@@ -502,10 +504,9 @@ fn bind_in_context(
             }
             Job::Unary(op) => {
                 let expr = values.pop().ok_or_else(disagreement)?;
-                values.push(ConstExpr::Unary {
-                    op: constants::unary_op_from_text(&op).ok_or_else(disagreement)?,
-                    expr: Box::new(expr),
-                });
+                values.push(
+                    constants::unary_const_expr_from_text(&op, expr).ok_or_else(disagreement)?,
+                );
             }
             Job::Binary(op) => {
                 let right = values.pop().ok_or_else(disagreement)?;
