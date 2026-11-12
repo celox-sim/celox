@@ -401,6 +401,7 @@ impl Names {
                 msb,
                 lsb,
                 array_slice_width,
+                window,
                 ..
             } => {
                 self.rename_name(name);
@@ -408,6 +409,10 @@ impl Names {
                 self.rename_const(lsb);
                 if let Some(width) = array_slice_width {
                     self.rename_const(width);
+                }
+                // The position of a run-time element names the index.
+                if let Some(at) = window.as_mut().and_then(|window| window.at.as_mut()) {
+                    self.rename_const(at);
                 }
             }
         }

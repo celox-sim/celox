@@ -215,7 +215,13 @@ fn rename_lvalue(lvalue: sv::ir::LValue, renames: &HashMap<String, String>) -> s
             array_slice_width: array_slice_width
                 .map(|width| Box::new(ff::rename_const_idents(&width, renames))),
             array_slice_reversed,
-            window,
+            // The position of a run-time element names the index.
+            window: window.map(|window| sv::ir::SelectWindow {
+                at: window
+                    .at
+                    .map(|at| Box::new(ff::rename_const_idents(&at, renames))),
+                ..window
+            }),
         },
     }
 }

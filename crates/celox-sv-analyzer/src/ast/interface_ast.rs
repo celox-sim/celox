@@ -215,7 +215,7 @@ pub(super) fn signature(
                         lsb: lsb.into(),
                         array_slice_width: array_slice_width.map(|width| (*width).into()),
                         array_slice_reversed,
-                        window,
+                        window: window.map(Into::into),
                         signed: false,
                         is_2state: false,
                     },

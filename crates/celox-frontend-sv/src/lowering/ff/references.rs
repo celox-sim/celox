@@ -414,7 +414,7 @@ impl Alias {
                         .as_deref()
                         .map(|width| Box::new(self.const_expr(width.clone()))),
                     array_slice_reversed: *array_slice_reversed,
-                    window: *window,
+                    window: window.clone(),
                 }
             }
         })
@@ -469,7 +469,11 @@ impl Alias {
                 lsb: self.const_expr(lsb),
                 array_slice_width: array_slice_width.map(|width| Box::new(self.const_expr(*width))),
                 array_slice_reversed,
-                window,
+                // The position of a run-time element names the index.
+                window: window.map(|window| sv::ir::SelectWindow {
+                    at: window.at.map(|at| Box::new(self.const_expr(*at))),
+                    ..window
+                }),
             },
             lvalue => lvalue,
         }

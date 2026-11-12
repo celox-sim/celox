@@ -88,7 +88,13 @@ impl Ff<'_, '_> {
                     lsb: substitute_overlay_const(lsb, &self.scope.overlay),
                     array_slice_width: array_slice_width.clone(),
                     array_slice_reversed: *array_slice_reversed,
-                    window: *window,
+                    // The position of a run-time element names the index.
+                    window: window.clone().map(|window| sv::ir::SelectWindow {
+                        at: window
+                            .at
+                            .map(|at| Box::new(substitute_overlay_const(&at, &self.scope.overlay))),
+                        ..window
+                    }),
                 },
                 self.m.variables,
                 self.m.name_to_id,

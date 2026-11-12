@@ -1393,14 +1393,26 @@ impl Assignment {
 }
 
 /// The bits `lsb..=msb` of a variable that a run-time select stays within:
-/// those of the packed structure member the select is written on. The
-/// select's positions count from bit 0 of the variable, as those of a
-/// constant select of the member do; what it selects outside the window
-/// reads X and is not written (IEEE 1800-2023 11.5.1), as outside a vector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// those of the packed structure member or the array element the select is
+/// written on. The select's positions count from bit 0 of the variable, as
+/// those of a constant select of the member do; what it selects outside the
+/// window reads X and is not written (IEEE 1800-2023 11.5.1), as outside a
+/// vector.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SelectWindow {
     pub lsb: u32,
     pub msb: u32,
+    /// For the member or bits of an array element at a run-time index: the
+    /// position of the element's bit 0, which `lsb` and `msb` then count
+    /// from; past the variable for an index outside the array.
+    pub at: Option<Box<ConstExpr>>,
+}
+
+impl SelectWindow {
+    /// The constant window of bits `lsb..=msb` of the variable.
+    pub fn bits(lsb: u32, msb: u32) -> Self {
+        Self { lsb, msb, at: None }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2357,6 +2369,26 @@ impl From<ast::Assignment> for Assignment {
     }
 }
 
+impl From<ast::SelectWindow> for SelectWindow {
+    fn from(window: ast::SelectWindow) -> Self {
+        SelectWindow {
+            lsb: window.lsb,
+            msb: window.msb,
+            at: window.at.map(|at| Box::new((*at).into())),
+        }
+    }
+}
+
+impl From<SelectWindow> for ast::SelectWindow {
+    fn from(window: SelectWindow) -> Self {
+        ast::SelectWindow {
+            lsb: window.lsb,
+            msb: window.msb,
+            at: window.at.map(|at| Box::new((*at).into())),
+        }
+    }
+}
+
 impl From<ast::LValue> for LValue {
     fn from(value: ast::LValue) -> Self {
         match value {
@@ -2376,7 +2408,7 @@ impl From<ast::LValue> for LValue {
                 lsb: lsb.into(),
                 array_slice_width: array_slice_width.map(|width| Box::new(width.into())),
                 array_slice_reversed,
-                window,
+                window: window.map(Into::into),
             },
         }
     }

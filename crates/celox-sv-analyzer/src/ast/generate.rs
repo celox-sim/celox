@@ -537,6 +537,7 @@ impl Item {
                 msb,
                 lsb,
                 array_slice_width,
+                window,
                 ..
             } => {
                 *name = self.name(name);
@@ -544,6 +545,10 @@ impl Item {
                 self.constant(lsb);
                 if let Some(width) = array_slice_width {
                     self.constant(width);
+                }
+                // The position of a run-time element names the index.
+                if let Some(at) = window.as_mut().and_then(|window| window.at.as_mut()) {
+                    self.constant(at);
                 }
             }
         }
