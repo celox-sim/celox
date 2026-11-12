@@ -3648,3 +3648,39 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("e")), 8u32.into());
     }
 }
+
+#[test]
+fn abstract_classes_of_the_compilation_unit_construct_their_subclasses() {
+    // The constructor of an abstract class (IEEE 1800-2023 8.21) runs for
+    // each object of a class derived from it, `super.new` implicit or not,
+    // and its pure constraint is the subclass's (18.5.2). Declared in the
+    // compilation unit, the class was not lowered: "call of `a::new`".
+    let source = "virtual class a;
+        int x = 3;
+        int made;
+        function new(); made = x + 1; endfunction
+        pure constraint c;
+    endclass
+    virtual class b extends a;
+        int y = 4;
+    endclass
+    class c extends b;
+        rand int z;
+        constraint c { z == 5; }
+    endclass
+    module Top(output int x, output int made, output int y, output int z);
+        c obj = new;
+        initial begin
+            void'(obj.randomize());
+            x = obj.x; made = obj.made; y = obj.y; z = obj.z;
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("x")), 3u32.into());
+    assert_eq!(sim.get(sim.signal("made")), 4u32.into());
+    assert_eq!(sim.get(sim.signal("y")), 4u32.into());
+    assert_eq!(sim.get(sim.signal("z")), 5u32.into());
+}
