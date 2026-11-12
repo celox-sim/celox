@@ -582,89 +582,20 @@ pub(in crate::ast) fn finish(
         Err(_) => Some(packages::UNIT.to_owned()),
         _ => None,
     };
+    #[cfg(debug_assertions)]
+    let mut by_scans = session.foreign.argument_symbols.clone();
+    hand_over(
+        &mut session.foreign.argument_symbols,
+        caller,
+        package_owner.as_deref(),
+    );
+    #[cfg(debug_assertions)]
     {
-        let known = &mut session.foreign.argument_symbols;
-        known
-            .class_member_types
-            .extend(caller.class_member_types.clone());
-        // The static properties of its classes, and the static variables
-        // of their methods, are variables of the scope, which a package
-        // lowering those methods for a specialization shares (IEEE
-        // 1800-2023 6.21, 8.9).
-        let method_statics = caller
-            .subroutines
-            .iter()
-            .filter(|subroutine| {
-                caller.classes.iter().any(|class| {
-                    subroutine
-                        .name
-                        .strip_prefix(class.name.as_str())
-                        .is_some_and(|method| method.starts_with("::"))
-                })
-            })
-            .flat_map(|subroutine| subroutine.persistent_locals.iter().map(String::as_str));
-        let variables = caller
-            .classes
-            .iter()
-            .flat_map(|class| {
-                class
-                    .statics
-                    .iter()
-                    .map(|property| property.variable.as_str())
-            })
-            .chain(method_statics)
-            .collect::<HashSet<_>>();
-        for signal in caller
-            .signals
-            .iter()
-            .chain(&caller.state_signals)
-            .filter(|signal| variables.contains(signal.name()))
-        {
-            if !known
-                .state_signals
-                .iter()
-                .any(|old| old.name == signal.name)
-            {
-                let mut signal = signal.clone();
-                if signal.package_variable.is_none()
-                    && let Some(owner) = &package_owner
-                {
-                    signal.package_variable = Some((owner.clone(), signal.name().into()));
-                }
-                known.state_signals.push(signal);
-            }
-        }
-
-        for class in &caller.classes {
-            if !known.classes.iter().any(|old| old.name == class.name) {
-                known.classes.push(class.clone());
-            }
-        }
-        known
-            .subroutine_params
-            .extend(caller.subroutine_params.clone());
-        known
-            .subroutine_shapes
-            .extend(caller.subroutine_shapes.clone());
-        for subroutine in &caller.subroutines {
-            if !known
-                .subroutines
-                .iter()
-                .any(|old| old.name == subroutine.name)
-            {
-                let (subroutine, locals) =
-                    handed_over(subroutine, &caller.locals, package_owner.as_deref());
-                known.subroutines.push(subroutine);
-                for local in locals {
-                    if !known.locals.iter().any(|old| old.name == local.name) {
-                        known.locals.push(local);
-                    }
-                }
-            }
-        }
-        known
-            .function_return_types
-            .extend(caller.function_return_types.clone());
+        hand_over_by_scans(&mut by_scans, caller, package_owner.as_deref());
+        debug_assert!(
+            by_scans == session.foreign.argument_symbols,
+            "the symbols handed over by name sets differ from those of the scans"
+        );
     }
     let registry = &session.foreign;
     let caller = registry.argument_symbols.clone();
@@ -678,6 +609,240 @@ pub(in crate::ast) fn finish(
         build(session, &name, Some(&caller))?;
     }
     Ok(())
+}
+
+/// Add to `known`, the symbols a foreign specialization's lowering sees, those
+/// of `caller` it does not have yet: the static variables of `caller`'s
+/// classes and their methods, its classes, and its subroutines as a scope
+/// that is not `package_owner` lowers them, with their variables. Each is
+/// told apart by its name.
+fn hand_over(known: &mut ScopeSymbols, caller: &ScopeSymbols, package_owner: Option<&str>) {
+    known
+        .class_member_types
+        .extend(caller.class_member_types.clone());
+    // The static properties of its classes, and the static variables of
+    // their methods, are variables of the scope, which a package lowering
+    // those methods for a specialization shares (IEEE 1800-2023 6.21, 8.9).
+    let class_names = caller
+        .classes
+        .iter()
+        .map(|class| class.name.as_str())
+        .collect::<HashSet<_>>();
+    // A method of a class is named by the class and `::`, and a class name
+    // may hold `::` itself.
+    let is_method = |name: &str| {
+        (0..name.len()).any(|end| {
+            name.is_char_boundary(end)
+                && name[end..].starts_with("::")
+                && class_names.contains(&name[..end])
+        })
+    };
+    let method_statics = caller
+        .subroutines
+        .iter()
+        .filter(|subroutine| is_method(&subroutine.name))
+        .flat_map(|subroutine| subroutine.persistent_locals.iter().map(String::as_str));
+    let variables = caller
+        .classes
+        .iter()
+        .flat_map(|class| {
+            class
+                .statics
+                .iter()
+                .map(|property| property.variable.as_str())
+        })
+        .chain(method_statics)
+        .collect::<HashSet<_>>();
+    let mut known_signals = known
+        .state_signals
+        .iter()
+        .map(|signal| signal.name.clone())
+        .collect::<HashSet<_>>();
+    for signal in caller
+        .signals
+        .iter()
+        .chain(&caller.state_signals)
+        .filter(|signal| variables.contains(signal.name()))
+    {
+        if known_signals.insert(signal.name.clone()) {
+            let mut signal = signal.clone();
+            if signal.package_variable.is_none()
+                && let Some(owner) = package_owner
+            {
+                signal.package_variable = Some((owner.to_owned(), signal.name().into()));
+            }
+            known.state_signals.push(signal);
+        }
+    }
+
+    let mut known_classes = known
+        .classes
+        .iter()
+        .map(|class| class.name.clone())
+        .collect::<HashSet<_>>();
+    for class in &caller.classes {
+        if known_classes.insert(class.name.clone()) {
+            known.classes.push(class.clone());
+        }
+    }
+    known
+        .subroutine_params
+        .extend(caller.subroutine_params.clone());
+    known
+        .subroutine_shapes
+        .extend(caller.subroutine_shapes.clone());
+    let mut known_subroutines = known
+        .subroutines
+        .iter()
+        .map(|subroutine| subroutine.name.clone())
+        .collect::<HashSet<_>>();
+    let mut known_locals = known
+        .locals
+        .iter()
+        .map(|local| local.name.clone())
+        .collect::<HashSet<_>>();
+    let caller_locals = LocalIndex::new(&caller.locals);
+    for subroutine in &caller.subroutines {
+        if known_subroutines.insert(subroutine.name.clone()) {
+            let (subroutine, locals) = handed_over(subroutine, &caller_locals, package_owner);
+            known.subroutines.push(subroutine);
+            for local in locals {
+                if known_locals.insert(local.name.clone()) {
+                    known.locals.push(local);
+                }
+            }
+        }
+    }
+    known
+        .function_return_types
+        .extend(caller.function_return_types.clone());
+}
+
+/// The positions of the variables of a scope, by name.
+struct LocalIndex<'a> {
+    locals: &'a [LocalVariable],
+    positions: HashMap<&'a str, Vec<usize>>,
+}
+
+impl<'a> LocalIndex<'a> {
+    fn new(locals: &'a [LocalVariable]) -> Self {
+        let mut positions: HashMap<&str, Vec<usize>> = HashMap::default();
+        for (position, local) in locals.iter().enumerate() {
+            positions
+                .entry(local.name.as_str())
+                .or_default()
+                .push(position);
+        }
+        Self { locals, positions }
+    }
+
+    /// The variables named in `names`, in the order of the scope.
+    fn named(&self, names: &HashSet<&str>) -> Vec<&'a LocalVariable> {
+        let mut positions = names
+            .iter()
+            .filter_map(|name| self.positions.get(name))
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        positions.sort_unstable();
+        positions
+            .into_iter()
+            .map(|position| &self.locals[position])
+            .collect()
+    }
+}
+
+/// [`hand_over`] as it was written before it told the symbols apart by
+/// name sets: a debug build checks that both agree.
+#[cfg(debug_assertions)]
+fn hand_over_by_scans(
+    known: &mut ScopeSymbols,
+    caller: &ScopeSymbols,
+    package_owner: Option<&str>,
+) {
+    known
+        .class_member_types
+        .extend(caller.class_member_types.clone());
+    let method_statics = caller
+        .subroutines
+        .iter()
+        .filter(|subroutine| {
+            caller.classes.iter().any(|class| {
+                subroutine
+                    .name
+                    .strip_prefix(class.name.as_str())
+                    .is_some_and(|method| method.starts_with("::"))
+            })
+        })
+        .flat_map(|subroutine| subroutine.persistent_locals.iter().map(String::as_str));
+    let variables = caller
+        .classes
+        .iter()
+        .flat_map(|class| {
+            class
+                .statics
+                .iter()
+                .map(|property| property.variable.as_str())
+        })
+        .chain(method_statics)
+        .collect::<HashSet<_>>();
+    for signal in caller
+        .signals
+        .iter()
+        .chain(&caller.state_signals)
+        .filter(|signal| variables.contains(signal.name()))
+    {
+        if !known
+            .state_signals
+            .iter()
+            .any(|old| old.name == signal.name)
+        {
+            let mut signal = signal.clone();
+            if signal.package_variable.is_none()
+                && let Some(owner) = package_owner
+            {
+                signal.package_variable = Some((owner.to_owned(), signal.name().into()));
+            }
+            known.state_signals.push(signal);
+        }
+    }
+    for class in &caller.classes {
+        if !known.classes.iter().any(|old| old.name == class.name) {
+            known.classes.push(class.clone());
+        }
+    }
+    known
+        .subroutine_params
+        .extend(caller.subroutine_params.clone());
+    known
+        .subroutine_shapes
+        .extend(caller.subroutine_shapes.clone());
+    for subroutine in &caller.subroutines {
+        if !known
+            .subroutines
+            .iter()
+            .any(|old| old.name == subroutine.name)
+        {
+            let declared = declared_names(subroutine);
+            let declarations = caller
+                .locals
+                .iter()
+                .filter(|local| declared.contains(local.name.as_str()))
+                .map(|local| (local.name.as_str(), local))
+                .collect::<HashMap<_, _>>();
+            let (subroutine, locals) =
+                rename_handed_over(subroutine, &declared, &declarations, package_owner);
+            known.subroutines.push(subroutine);
+            for local in locals {
+                if !known.locals.iter().any(|old| old.name == local.name) {
+                    known.locals.push(local);
+                }
+            }
+        }
+    }
+    known
+        .function_return_types
+        .extend(caller.function_return_types.clone());
 }
 
 /// The variables `subroutine` declares: its formals, result and locals.
@@ -710,17 +875,27 @@ fn declared_names(subroutine: &Subroutine) -> HashSet<&str> {
 /// after the scope and the subroutine instead.
 fn handed_over(
     subroutine: &Subroutine,
-    locals: &[LocalVariable],
+    locals: &LocalIndex<'_>,
     scope: Option<&str>,
 ) -> (Subroutine, Vec<LocalVariable>) {
     let declared = declared_names(subroutine);
-    let declarations = locals
-        .iter()
-        .filter(|local| declared.contains(local.name.as_str()))
-        .map(|local| (local.name.as_str(), local))
-        .collect::<HashMap<_, _>>();
+    let mut declarations = HashMap::default();
+    for local in locals.named(&declared) {
+        declarations.insert(local.name.as_str(), local);
+    }
+    rename_handed_over(subroutine, &declared, &declarations, scope)
+}
+
+/// [`handed_over`] with the variables it declares, `declared`, and the
+/// variables of the scope among them, `declarations`.
+fn rename_handed_over(
+    subroutine: &Subroutine,
+    declared: &HashSet<&str>,
+    declarations: &HashMap<&str, &LocalVariable>,
+    scope: Option<&str>,
+) -> (Subroutine, Vec<LocalVariable>) {
     let mut names = HashMap::default();
-    for name in &declared {
+    for name in declared {
         let local = declarations.get(name);
         // A static variable is one object of the scope, which the scope
         // hands over as one of its variables, by its name (IEEE 1800-2023
@@ -901,7 +1076,7 @@ mod tests {
             local(this, "this", true),
             local("w@9", "w", false),
         ];
-        let (handed, locals) = handed_over(&subroutine, &locals, Some("$unit"));
+        let (handed, locals) = handed_over(&subroutine, &LocalIndex::new(&locals), Some("$unit"));
         let declared = |index: usize| match &handed.body[index] {
             StmtBase::Local { name, .. } => name.clone(),
             other => panic!("{other:?}"),
