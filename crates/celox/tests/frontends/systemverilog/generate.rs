@@ -319,3 +319,69 @@ sv_backends! {
         }
     }
 }
+
+// A variable of a generate block is named from outside the block by the
+// block's name (IEEE 1800-2023 27.6, 23.6): `gen.var`, also of a nested
+// block or of a loop iteration, read and written, as Ibex's functional
+// coverage reads `gen_regfile_ecc.rf_ecc_err_a_id` from a generate block
+// of its own.
+#[test]
+fn variables_of_generate_blocks_by_their_scope_names() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Core #(parameter bit Ecc = 1'b1) (input logic [3:0] a, output logic [5:0] y);
+            if (1) begin : outer
+                if (1) begin : inner
+                    logic deep;
+                    assign deep = a[3];
+                end
+                logic mid;
+                assign mid = a[1];
+            end
+            for (genvar i = 0; i < 2; i++) begin : lane
+                logic bit_i;
+                assign bit_i = a[i];
+            end
+            if (1) begin : sink
+                logic w;
+            end
+            assign sink.w = ~a[2];
+            if (Ecc) begin : gen_ecc
+                logic err;
+                assign err = ^a;
+            end
+            logic fcov;
+            if (Ecc) begin : g_fcov
+                assign fcov = gen_ecc.err;
+            end else begin : g_no_fcov
+                assign fcov = 1'b0;
+            end
+            assign y = {fcov, sink.w, outer.inner.deep, outer.mid, lane[1].bit_i, lane[0].bit_i};
+        endmodule
+        module Top;
+            logic [5:0] y1, y0;
+            Core u1(.a(4'b1011), .y(y1));
+            Core #(.Ecc(1'b0)) u0(.a(4'b1011), .y(y0));
+            initial #1 $display("%b %b", y1, y0);
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("scope_names.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["111111 011111"], "four-state {four_state}");
+    }
+}

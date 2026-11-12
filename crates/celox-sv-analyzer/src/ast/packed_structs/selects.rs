@@ -29,6 +29,22 @@ pub(in crate::ast) fn bind_interface_path(
 
 /// A path that starts at no variable or interface of the scope is a
 /// hierarchical name of another scope (IEEE 1800-2023 23.6).
+/// The variable of a generate block of the scope that dotted name `path`
+/// names, such as `gen_ecc.err_a` for `logic err_a` of `begin : gen_ecc`
+/// (IEEE 1800-2023 27.6, 23.6): its first component names no variable, and
+/// the scope declares the block's variable by the whole path.
+fn generate_scope_signal(
+    path: &[String],
+    bound_interface: bool,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    if bound_interface || path.len() < 2 || dimensions.get(&path[0]).is_some() {
+        return None;
+    }
+    let name = path.join(".");
+    dimensions.get(&name).is_some().then_some(name)
+}
+
 fn unknown_member(
     path: &[String],
     bound_interface: bool,
@@ -165,6 +181,9 @@ pub(in crate::ast) fn whole_member(
     if bound_interface && path.len() == 1 {
         return Ok(LValue::Ident(path[0].clone()));
     }
+    if let Some(name) = generate_scope_signal(&path, bound_interface, dimensions) {
+        return Ok(LValue::Ident(name));
+    }
     let (offset, ty) = selected_member(&path, dimensions)
         .ok_or_else(|| unknown_member(&path, bound_interface, dimensions))?;
     finish_lvalue(
@@ -198,6 +217,9 @@ pub(in crate::ast) fn select_member(
     }
     if bound_interface && path.len() == 1 {
         return select(path[0].clone(), dimensions, false);
+    }
+    if let Some(name) = generate_scope_signal(&path, bound_interface, dimensions) {
+        return select(name, dimensions, false);
     }
     let (offset, ty) = selected_member(&path, dimensions)
         .ok_or_else(|| unknown_member(&path, bound_interface, dimensions))?;
