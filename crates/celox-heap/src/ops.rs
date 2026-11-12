@@ -215,8 +215,9 @@ const _: () = assert!(
         && UVM_TOOL_VERSION <= 0xff
 );
 
-/// `range(start, finish)`: the addresses the next [`MEMORY_FILE_LOAD`] loads
-/// from and toward, as signed integers (IEEE 1800-2023 21.4).
+/// `range(start, finish, unknown)`: the addresses the next
+/// [`MEMORY_FILE_LOAD`] loads from and toward, as signed integers, and
+/// whether either has an unknown bit (IEEE 1800-2023 21.4).
 pub const MEMORY_FILE_RANGE: u64 = 150;
 /// `load(descriptor, file)`: read memory file string `file` as string
 /// `descriptor` describes, through the reader of the heap (see
@@ -257,7 +258,7 @@ impl Heap {
             op @ UVM_RE_COMP..=UVM_TOOL_VERSION => self.uvm_call(op, a, b, c),
             op @ DPI_AREA..=DPI_FROM_C_STRING => self.dpi_call(op, a, b),
             op @ MEMORY_FILE_RANGE..=MEMORY_FILE_MESSAGE => {
-                self.memory_file_call(op, parameter, a, b)
+                self.memory_file_call(op, parameter, a, b, c)
             }
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {

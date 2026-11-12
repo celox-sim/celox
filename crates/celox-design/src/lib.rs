@@ -424,6 +424,11 @@ pub struct MemoryFileLoad {
     /// The directory a relative `file` is looked up in before the working
     /// directory, such as that of the source file of the call.
     pub base: Option<String>,
+    /// The key of that directory among the design's
+    /// [`ElaboratedDesign::memory_file_bases`], for a load the generated
+    /// code makes, which names no path of its own.
+    #[serde(default)]
+    pub base_key: Option<u64>,
     /// The width of a word of the memory.
     pub element_width: usize,
     pub addressing: MemoryFileAddressing,
@@ -464,6 +469,26 @@ impl MemoryFileLoad {
         } else {
             "$readmemh"
         }
+    }
+}
+
+/// A directory relative memory file names are looked up in (see
+/// [`MemoryFileLoad::base_key`]). The design keeps the path, so that its
+/// paths can be remapped, such as when a project moves; the code names it by
+/// `key`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MemoryFileBase {
+    pub key: u64,
+    pub path: String,
+}
+
+impl MemoryFileBase {
+    /// The base directory `path`, by its key: the FNV-1a hash of the path.
+    pub fn new(path: String) -> Self {
+        let key = path.bytes().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+        Self { key, path }
     }
 }
 
@@ -2280,6 +2305,10 @@ pub struct ElaboratedDesign<A> {
     pub state_objects: HashMap<A, VariableMetadata>,
     pub events: EventTopology<A>,
     pub initial_state: Vec<InitialStateValue<A>>,
+    /// The directories the memory file loads of the generated code look
+    /// relative names up in, by key.
+    #[serde(default)]
+    pub memory_file_bases: Vec<MemoryFileBase>,
 }
 
 impl<A> Default for ElaboratedDesign<A> {
@@ -2290,6 +2319,7 @@ impl<A> Default for ElaboratedDesign<A> {
             state_objects: HashMap::default(),
             events: EventTopology::default(),
             initial_state: Vec::new(),
+            memory_file_bases: Vec::new(),
         }
     }
 }

@@ -651,6 +651,7 @@ fn lower_module_with_overrides(
             comb_observers: Vec::<CombObserver<SourceVarId>>::new(),
             runtime_errors,
             runtime_event_sites,
+            memory_file_bases: Vec::new(),
             extern_functions,
             initial_memory_values,
             declaration_initial_memory_values,

@@ -23,7 +23,6 @@ mod system;
 mod tick;
 mod waveform;
 use super::*;
-pub(crate) use memory_files::HeapMemoryFileReader;
 pub(crate) use monitor::MonitorState;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

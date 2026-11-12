@@ -3,7 +3,11 @@ use super::*;
 use celox_design::{InitialStateData, InitialStateValue, VarAtomBase};
 
 impl<B: SimBackend> Simulator<B> {
-    fn apply_declaration_records(&mut self, records: &[InitialStateValue<crate::AbsoluteAddr>]) {
+    fn apply_declaration_records(
+        &mut self,
+        records: &[InitialStateValue<crate::AbsoluteAddr>],
+        occurrences: &mut super::memory_files::LoadOccurrences,
+    ) {
         for record in records {
             let signal = self.backend.resolve_signal(&record.address);
             match &record.data {
@@ -42,7 +46,7 @@ impl<B: SimBackend> Simulator<B> {
                 }
                 InitialStateData::Writes(runs) => self.apply_initial_memory_writes(signal, runs),
                 InitialStateData::MemoryFile(load) => {
-                    let runs = self.initial_memory_file(record.address, load);
+                    let runs = self.initial_memory_file(record.address, load, occurrences);
                     self.apply_initial_memory_writes(signal, &runs);
                 }
             }
@@ -64,7 +68,7 @@ impl<B: SimBackend> Simulator<B> {
     pub(crate) fn reset_declaration_state(&mut self) {
         self.declaration_phase = true;
         if let Some(startup) = self.program.runtime_schema.declaration_startup.clone() {
-            self.apply_declaration_records(&startup.reset);
+            self.apply_declaration_records(&startup.reset, &mut Default::default());
         }
     }
 
@@ -98,6 +102,7 @@ impl<B: SimBackend> Simulator<B> {
             return;
         };
         let watches = self.program.runtime_schema.watches.clone();
+        let mut occurrences = super::memory_files::LoadOccurrences::default();
         for record in startup.ordinary {
             let before: Vec<_> = startup
                 .probes
@@ -111,7 +116,7 @@ impl<B: SimBackend> Simulator<B> {
                         .get_four_state(self.backend.resolve_signal(&watch.signal))
                 })
                 .collect();
-            self.apply_declaration_records(std::slice::from_ref(&record));
+            self.apply_declaration_records(std::slice::from_ref(&record), &mut occurrences);
             // One counter can observe several transparent aliases. Count a
             // write once when any of its observed projections changed.
             let mut changed = crate::HashSet::default();

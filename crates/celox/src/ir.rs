@@ -484,6 +484,18 @@ impl RuntimeDesign {
         Ok(())
     }
 
+    /// The directories the memory file loads of the code look relative
+    /// names up in.
+    #[cfg(feature = "host-runtime")]
+    pub(crate) fn memory_file_bases(&self) -> &[celox_design::MemoryFileBase] {
+        &self.semantic.memory_file_bases
+    }
+
+    #[cfg(feature = "host-runtime")]
+    pub(crate) fn memory_file_bases_mut(&mut self) -> &mut [celox_design::MemoryFileBase] {
+        &mut self.semantic.memory_file_bases
+    }
+
     #[cfg(feature = "host-runtime")]
     pub(crate) fn take_initial_state(
         &mut self,

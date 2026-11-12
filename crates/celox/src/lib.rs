@@ -31,6 +31,7 @@ mod diagnostics;
 mod dpi;
 mod interpreter;
 mod ir;
+mod memory_file_reader;
 mod optimizer;
 mod parser;
 pub(crate) mod portable;
@@ -92,6 +93,7 @@ pub use ir::{
     RuntimeVariable, SignalRef, SirProgram, SourceAddr, SourceVarId, UnoptimizedSir, VariableInfo,
     VariableKind,
 };
+pub use memory_file_reader::HostMemoryFileReader;
 pub use num_bigint::BigUint;
 pub use optimizer::OptLevel;
 pub use optimizer::OptimizeOptions;

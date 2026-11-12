@@ -1641,11 +1641,7 @@ endinterface
 /// under an SV top and under a Veryl top alike.
 #[test]
 fn locates_sv_interface_warnings_at_their_call() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("short.hex");
-    std::fs::write(&file, "aa").unwrap();
-    let bus = format!(
-        r#"interface Bus;
+    let bus = r#"interface Bus;
     function automatic int width();
         $exit;
         return 8;
@@ -1654,14 +1650,12 @@ fn locates_sv_interface_warnings_at_their_call() {
     logic [W-1:0] mem [0:1];
     logic [W-1:0] req;
     initial begin
-        $readmemh("{}", mem);
+        mem[0] = 8'h00;
         $exit();
     end
     assign req = mem[0];
 endinterface
-"#,
-        file.display()
-    );
+"#;
     let located = |warnings: &[celox::CompilationWarning]| {
         warnings
             .iter()
@@ -1684,13 +1678,12 @@ endinterface
     };
     let expected = vec![
         (true, "bus.sv".to_string(), 3, 9),
-        (false, "bus.sv".to_string(), 10, 9),
         (true, "bus.sv".to_string(), 11, 9),
     ];
     let veryl = "module Top(y: output logic<8>) { inst bus: $sv::Bus; assign y = bus.req; }";
     let sim = Simulator::from_mixed_sources(
         vec![(veryl, Path::new("top.veryl"))],
-        vec![(&bus, Path::new("bus.sv"))],
+        vec![(bus, Path::new("bus.sv"))],
         "Top",
     )
     .build_cranelift()
@@ -1699,7 +1692,7 @@ endinterface
     let top =
         "module Top(output logic [7:0] y); Bus bus(); assign y = bus.req; initial $exit; endmodule";
     let sim = Simulator::from_sv_sources(
-        vec![(&bus, Path::new("bus.sv")), (top, Path::new("top.sv"))],
+        vec![(bus, Path::new("bus.sv")), (top, Path::new("top.sv"))],
         "Top",
     )
     .build_cranelift()
@@ -1814,30 +1807,44 @@ fn review_warnings_follow_instantiated_interface_parameters() {
         let veryl = format!(
             "module Top(y: output logic<8>) {{ inst bus: $sv::Bus #(N: {n}); inst passive: $sv::Passive; assign y = bus.req ^ passive.req; }}"
         );
-        let sim = Simulator::from_mixed_sources(
+        let mut sim = Simulator::from_mixed_sources(
             vec![(&veryl, Path::new("top.veryl"))],
             vec![(&sv, Path::new("bus.sv"))],
             "Top",
         )
         .build_cranelift()
         .unwrap();
-        let warnings: Vec<_> = sim
+        let lines: Vec<_> = sim
             .warnings()
             .iter()
             .filter_map(|warning| match warning {
-                celox::CompilationWarning::SystemVerilog(warning) => Some(warning),
+                celox::CompilationWarning::SystemVerilog(warning) => {
+                    Some(warning.location.as_ref().unwrap().line)
+                }
                 _ => None,
             })
             .collect();
-        let lines: Vec<_> = warnings
-            .iter()
-            .map(|warning| warning.location.as_ref().unwrap().line)
+        assert_eq!(lines, vec![8], "N={n}: {:?}", sim.warnings());
+        // The load of the memory, which has one word per address only for
+        // N=1, reports as the instance starts (IEEE 1800-2023 21.4).
+        let reports: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Report(report) => {
+                    Some((report.severity, report.location.unwrap().line))
+                }
+                _ => None,
+            })
             .collect();
         assert_eq!(
-            lines,
-            if n == 1 { vec![8] } else { vec![4, 8] },
-            "N={n}: {:?}",
-            sim.warnings()
+            reports,
+            if n == 1 {
+                vec![]
+            } else {
+                vec![(celox::Severity::Warning, 4)]
+            },
+            "N={n}"
         );
     }
 }

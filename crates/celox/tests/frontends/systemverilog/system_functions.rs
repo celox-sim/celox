@@ -3645,3 +3645,79 @@ fn readmem_reads_the_file_a_writemem_wrote() {
     assert_eq!(lines, ["123 456 789", "123 abc 789"]);
     assert!(reports.is_empty(), "{reports:?}");
 }
+
+/// An address with an unknown bit names no word: the load reports an
+/// error and loads nothing (IEEE 1800-2023 21.4).
+#[test]
+fn readmem_reports_an_unknown_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("words.hex");
+    std::fs::write(&file, "12 34").unwrap();
+    let source = format!(
+        r#"`timescale 1ns/1ns
+        module top;
+            logic [7:0] mem [0:1];
+            logic [3:0] start;
+            initial begin
+                mem[0] = 8'h55; mem[1] = 8'h66;
+                start = 4'bx;
+                #1 $readmemh("{}", mem, start);
+                $display("%h %h", mem[0], mem[1]);
+                $finish;
+            end
+        endmodule"#,
+        file.display()
+    );
+    let mut sim = celox::Simulation::from_sv_sources(vec![(&source, Path::new("x.sv"))], "top")
+        .four_state(true)
+        .build()
+        .unwrap();
+    sim.run_until(10).unwrap();
+    let mut lines = Vec::new();
+    let mut errors = Vec::new();
+    for event in sim.drain_runtime_events() {
+        match event {
+            celox::RuntimeEvent::Display { message } => {
+                lines.push(String::from_utf8_lossy(&message).into_owned())
+            }
+            celox::RuntimeEvent::Report(report) if report.severity == celox::Severity::Error => {
+                errors.push(String::from_utf8_lossy(&report.message).into_owned())
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(lines, ["55 66"]);
+    assert!(
+        matches!(&errors[..], [error] if error.contains("$readmemh: address contains X or Z")),
+        "{errors:?}"
+    );
+}
+
+/// Each call of a load reports, also equal calls of an unrolled loop in
+/// an `initial` block that the instance runs as it starts.
+#[test]
+fn readmem_reports_each_call_of_an_unrolled_loop() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("short.hex");
+    std::fs::write(&file, "aa").unwrap();
+    let source = format!(
+        r#"module Top(output logic [7:0] y);
+            logic [7:0] mem [0:1];
+            initial for (int i = 0; i < 2; i++) $readmemh("{}", mem);
+            assign y = mem[0];
+        endmodule"#,
+        file.display()
+    );
+    let mut sim = Simulator::from_sv_sources(vec![(&source, Path::new("loop.sv"))], "Top")
+        .build()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xaau8.into());
+    let reports = readmem_reports(sim.drain_runtime_events());
+    assert_eq!(reports.len(), 2, "{reports:?}");
+    assert!(
+        reports
+            .iter()
+            .all(|(severity, _, _, _)| *severity == celox::Severity::Warning),
+        "{reports:?}"
+    );
+}

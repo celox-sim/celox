@@ -719,6 +719,7 @@ version = "0.13.0"
 dependencies = [
  "celox",
  "celox-design",
+ "celox-heap",
  "celox-ts-gen",
  "fxhash",
  "globset",

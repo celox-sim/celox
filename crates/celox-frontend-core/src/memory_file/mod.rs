@@ -232,8 +232,14 @@ fn scan_memory_write_runs(
 
 /// The constant parameters of `load` as compiled code passes them to the
 /// heap's memory-file reader (see [`lowering`]).
+///
+/// The call's location stays out of the code, whose report sites carry it.
 pub fn encode_descriptor(load: &MemoryFileLoad) -> Vec<u8> {
-    serde_json::to_vec(load).expect("a memory file load serializes")
+    let load = MemoryFileLoad {
+        location: None,
+        ..load.clone()
+    };
+    serde_json::to_vec(&load).expect("a memory file load serializes")
 }
 
 /// The load [`encode_descriptor`] encoded, reading `file` instead of the
@@ -506,6 +512,7 @@ mod tests {
             radix: 16,
             file: "test/boot.hex".to_string(),
             base: base.map(str::to_string),
+            base_key: None,
             element_width: 8,
             addressing: MemoryFileAddressing::Offset { start: 0, depth: 2 },
             location: None,
@@ -546,6 +553,7 @@ mod tests {
             radix: 16,
             file: "m.hex".to_string(),
             base: None,
+            base_key: None,
             element_width: 8,
             addressing: MemoryFileAddressing::Range {
                 left: 0,

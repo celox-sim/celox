@@ -104,6 +104,20 @@ function wasmImports(raw: RawWasmSimulatorHandle, memory: WebAssembly.Memory) {
 				}
 				return raw.evaluateFloat(lhs, rhs, code);
 			},
+			// The heap helper, which loads the memory files of `$readmemh`.
+			celox_extern_4294967294(
+				code: bigint,
+				a: bigint,
+				b: bigint,
+				c: bigint,
+			): bigint {
+				if (!raw.heapCall) {
+					throw new Error(
+						"This design loads memory files and requires an addon with heapCall support",
+					);
+				}
+				return raw.heapCall(code, a, b, c);
+			},
 		},
 	};
 }

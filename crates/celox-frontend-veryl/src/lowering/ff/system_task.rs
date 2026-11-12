@@ -7,6 +7,9 @@ use super::*;
 pub(super) struct RuntimeSites {
     pub(super) runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     pub(super) runtime_event_sites: Vec<RuntimeEventSite>,
+    /// The directories the block's memory file loads look relative names up
+    /// in, by key.
+    pub(super) memory_file_bases: Vec<celox_design::MemoryFileBase>,
     pub(super) next_runtime_error_code: i64,
     pub(super) runtime_error_code_map: Option<HashMap<i64, i64>>,
     pub(super) runtime_event_site_base: u32,
@@ -386,6 +389,16 @@ impl<'a> FfParser<'a> {
                     .map(|index| eval_constexpr(index)?.to_usize())
                     .collect()
             })?;
+        // The code names the directory a relative file is looked up in by
+        // its key in the design, whose paths are remapped with the rest.
+        let mut load = load;
+        if let Some(base) = load.base.take() {
+            let base = celox_design::MemoryFileBase::new(base);
+            load.base_key = Some(base.key);
+            if !self.runtime.memory_file_bases.contains(&base) {
+                self.runtime.memory_file_bases.push(base);
+            }
+        }
         let variable = &self.module.variables[&var_id];
         let four_state = !variable.r#type.is_2state();
         let element_width = load.element_width;
@@ -449,7 +462,7 @@ impl<'a> FfParser<'a> {
             (celox_design::Severity::Warning, messages.warning),
             (celox_design::Severity::Error, messages.error),
         ] {
-            self.report_memory_file_message(severity, message, &load, ir_builder);
+            self.report_memory_file_message(severity, message, ir_builder);
         }
         Ok(())
     }
@@ -460,7 +473,6 @@ impl<'a> FfParser<'a> {
         &mut self,
         severity: celox_design::Severity,
         message: RegisterId,
-        load: &celox_design::MemoryFileLoad,
         ir_builder: &mut SIRBuilder<A>,
     ) {
         let present =
@@ -490,10 +502,12 @@ impl<'a> FfParser<'a> {
             template: Some("%s".to_string()),
             sizing: DisplaySizing::Veryl,
             scope: None,
-            location: load.location.clone(),
+            // As the other sites of the code, which name no source file.
+            location: None,
             assertion: None,
             deferred: None,
             timestamp_arg: false,
+            time_format_arg: false,
             arg_widths: vec![celox_design::HANDLE_WIDTH],
             arg_signed: vec![false],
             arg_float_precision: vec![None],

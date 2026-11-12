@@ -863,9 +863,11 @@ impl NativeBackend {
     /// warnings and errors of the initial loads.
     pub fn load_initial_memory_files(&mut self) -> Vec<InitialMemoryFileReport> {
         // So do the loads its code makes when they execute.
-        self.heap
-            .set_memory_file_reader(Arc::new(crate::simulator::HeapMemoryFileReader::new(None)));
         let compiled = Arc::clone(&self.compiled);
+        self.heap.set_memory_file_reader(
+            crate::HostMemoryFileReader::new(compiled.program_image.design.memory_file_bases())
+                .into_heap_reader(),
+        );
         let initial_state = &compiled.program_image.design.initial_state;
         if !initial_state
             .iter()

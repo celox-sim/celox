@@ -13,7 +13,21 @@ pub trait MemoryFileReader: Send + Sync {
     /// constant parameters that the compiler chose, reading file `file`;
     /// `range` holds the addresses the call loads from and toward when it
     /// gives them.
-    fn load(&self, descriptor: &[u8], file: &[u8], range: Option<(i64, i64)>) -> MemoryFileWords;
+    fn load(
+        &self,
+        descriptor: &[u8],
+        file: &[u8],
+        range: Option<MemoryFileRange>,
+    ) -> MemoryFileWords;
+}
+
+/// The addresses a memory file load is given at run time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemoryFileRange {
+    pub start: i64,
+    pub finish: i64,
+    /// Whether either address has an unknown bit, which loads nothing.
+    pub unknown: bool,
 }
 
 /// The words a memory file load gives, and its messages.
@@ -39,7 +53,7 @@ pub struct MemoryFileWords {
 #[derive(Clone, Default)]
 pub(crate) struct MemoryFiles {
     reader: Option<Arc<dyn MemoryFileReader>>,
-    range: Option<(i64, i64)>,
+    range: Option<MemoryFileRange>,
     loaded: MemoryFileWords,
 }
 
@@ -64,11 +78,22 @@ impl Heap {
         self.memory_files.reader.clone()
     }
 
-    pub(crate) fn memory_file_call(&mut self, op: u64, parameter: u64, a: u64, b: u64) -> u64 {
+    pub(crate) fn memory_file_call(
+        &mut self,
+        op: u64,
+        parameter: u64,
+        a: u64,
+        b: u64,
+        c: u64,
+    ) -> u64 {
         let files = &mut self.memory_files;
         match op {
             crate::ops::MEMORY_FILE_RANGE => {
-                files.range = Some((a as i64, b as i64));
+                files.range = Some(MemoryFileRange {
+                    start: a as i64,
+                    finish: b as i64,
+                    unknown: c != 0,
+                });
                 0
             }
             crate::ops::MEMORY_FILE_LOAD => {

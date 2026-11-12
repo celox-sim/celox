@@ -224,6 +224,11 @@ impl NativeProgramImage {
         if let Some(startup) = &mut self.runtime_schema.declaration_startup {
             map_memory_file_bases(&mut startup.ordinary, &mut map)?;
         }
+        for base in self.design.memory_file_bases_mut() {
+            base.path = map(std::path::Path::new(&base.path))?
+                .to_string_lossy()
+                .into_owned();
+        }
         Ok(())
     }
 

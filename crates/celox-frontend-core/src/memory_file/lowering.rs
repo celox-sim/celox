@@ -74,7 +74,8 @@ pub fn frozen_bytes<A>(b: &mut SIRBuilder<A>, bytes: &[u8]) -> RegisterId {
 
 /// Run `load` when the code executes, reading the file string `file` (its
 /// handle, or `load.file` when `None`), from address `range.0` toward
-/// `range.1` when given as signed 64-bit registers. `cx` is the lowering
+/// `range.1` when given as signed 64-bit registers; a nonzero `range.2`
+/// says an address has an unknown bit, which loads nothing. `cx` is the lowering
 /// that `builder` gives the builder of, and `store(cx, position, word)`
 /// stores each word the file gives at its position in the storage order of
 /// the array; a word keeps its unknown bits when `four_state` is set and has
@@ -85,7 +86,7 @@ pub fn lower_memory_file_load<C, A>(
     builder: impl Fn(&mut C) -> &mut SIRBuilder<A>,
     load: &MemoryFileLoad,
     file: Option<RegisterId>,
-    range: Option<(RegisterId, RegisterId)>,
+    range: Option<(RegisterId, RegisterId, RegisterId)>,
     four_state: bool,
     mut store: impl FnMut(&mut C, RegisterId, RegisterId),
 ) -> MemoryFileMessages {
@@ -95,8 +96,8 @@ pub fn lower_memory_file_load<C, A>(
         Some(file) => file,
         None => frozen_bytes(b, load.file.as_bytes()),
     };
-    if let Some((start, finish)) = range {
-        heap_call(b, ops::MEMORY_FILE_RANGE, &[start, finish]);
+    if let Some((start, finish, unknown)) = range {
+        heap_call(b, ops::MEMORY_FILE_RANGE, &[start, finish, unknown]);
     }
     let count = heap_call(b, ops::MEMORY_FILE_LOAD, &[descriptor, file]);
     let zero = constant64(b, 0);

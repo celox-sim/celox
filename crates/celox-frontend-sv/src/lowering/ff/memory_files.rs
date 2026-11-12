@@ -31,16 +31,29 @@ impl Ff<'_, '_> {
         let (id, load) = self.m.readmem_load(format, args, None, None, site)?;
         let (_, _, default_start, default_finish) = range_addresses(&load);
         let mut addresses = [None, None];
+        let mut unknown = None;
         for (slot, arg) in addresses.iter_mut().zip(args.iter().skip(2)) {
             let sv::ir::SystemTaskArg::Expr(expr) = arg else {
                 continue;
             };
-            let signed = self.expr_signed(expr);
-            *slot = Some(self.integer_of_width(expr, 64, signed)?);
+            let (value, value_unknown) = self.address_operand(expr)?;
+            *slot = Some(value);
+            unknown = Some(match unknown {
+                None => value_unknown,
+                Some(previous) => {
+                    let either = self.b.alloc_bit(64, false);
+                    self.b.emit(SIRInstruction::Binary(
+                        either,
+                        previous,
+                        BinaryOp::Or,
+                        value_unknown,
+                    ));
+                    either
+                }
+            });
         }
-        let range = match addresses {
-            [None, None] => None,
-            [start, finish] => {
+        let range = match (addresses, unknown) {
+            ([start, finish], Some(unknown)) => {
                 let mut address = |given: Option<RegisterId>, default: i128| match given {
                     Some(register) => register,
                     None => self.constant64(default as i64 as u64),
@@ -48,8 +61,10 @@ impl Ff<'_, '_> {
                 Some((
                     address(start, default_start),
                     address(finish, default_finish),
+                    unknown,
                 ))
             }
+            _ => None,
         };
         let element_width = load.element_width;
         if let Some((lsb, msb)) = load.written_bits() {
@@ -82,6 +97,53 @@ impl Ff<'_, '_> {
             self.report_message(severity, message, site)?;
         }
         Ok(())
+    }
+
+    /// Address `expr` as a signed 64-bit integer, with 1 in a 64-bit
+    /// register when it has an unknown bit.
+    fn address_operand(
+        &mut self,
+        expr: &sv::ir::Expr,
+    ) -> Result<(RegisterId, RegisterId), sv::AnalyzerError> {
+        let signed = self.expr_signed(expr);
+        let expr = self.hoist(expr)?;
+        let value = self.eval(&expr, Some((64, signed)))?;
+        let unknown = self.b.alloc_bit(64, false);
+        if let RegisterType::Logic { width } = self.b.register(&value).clone() {
+            // The planes of whole 64-bit words.
+            let (value, width) = if width.is_multiple_of(64) {
+                (value, width)
+            } else {
+                let words = width.next_multiple_of(64);
+                let widened = self.b.alloc_logic(words);
+                self.b
+                    .emit(SIRInstruction::Unary(widened, UnaryOp::Ident, value));
+                (widened, words)
+            };
+            let planes = self.b.alloc_bit(2 * width, false);
+            self.b
+                .emit(SIRInstruction::Unary(planes, UnaryOp::ToPlanes, value));
+            let mask = self.b.alloc_bit(width, false);
+            self.b
+                .emit(SIRInstruction::Slice(mask, planes, width, width));
+            let zero = self.b.alloc_bit(width, false);
+            self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
+            let any = self.b.alloc_bit(1, false);
+            self.b
+                .emit(SIRInstruction::Binary(any, mask, BinaryOp::Ne, zero));
+            self.b
+                .emit(SIRInstruction::Unary(unknown, UnaryOp::Ident, any));
+        } else {
+            self.b
+                .emit(SIRInstruction::Imm(unknown, SIRValue::new(0u64)));
+        }
+        let known = self.b.alloc_bit(64, signed);
+        self.b
+            .emit(SIRInstruction::Unary(known, UnaryOp::ToTwoState, value));
+        let operand = self.b.alloc_bit(64, false);
+        self.b
+            .emit(SIRInstruction::Unary(operand, UnaryOp::Ident, known));
+        Ok((operand, unknown))
     }
 
     /// Report string `message`, a 64-bit handle, at `severity` unless it is
@@ -121,6 +183,7 @@ impl Ff<'_, '_> {
             assertion: None,
             deferred: None,
             timestamp_arg: true,
+            time_format_arg: false,
             arg_widths: vec![celox_design::HANDLE_WIDTH, time_width],
             arg_signed: vec![false, false],
             arg_is_string: vec![false, false],
