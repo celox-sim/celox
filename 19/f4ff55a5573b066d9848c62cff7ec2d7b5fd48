@@ -1,0 +1,6 @@
+Revision history for #3606:
+
+rev 2 (content) 2026-11-11 23:11 UTC — Review r4544242332: validate promoted compiled_evaluations as a safe integer instead of any nonzero digit string
+rev 1 (initial) 2026-11-11 23:11 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3606,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"a0be17e35590fcfc5585063a71a7c9bbdf8c8d28","timestamp_iso":"2026-11-11T23:11:17Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"a0be17e35590fcfc5585063a71a7c9bbdf8c8d28","new_sha":"11569ad24028b654f11bbad8ccdc129198528c28","timestamp_iso":"2026-11-11T23:11:17Z","reason":"Review r4544242332: validate promoted compiled_evaluations as a safe integer instead of any nonzero digit string","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/a0be17e35590fcfc5585063a71a7c9bbdf8c8d28...11569ad24028b654f11bbad8ccdc129198528c28"}]} -->
