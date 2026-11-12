@@ -1043,7 +1043,7 @@ fn subroutine_signatures(
                 let _ = signature(id, tree, session, context, key);
                 publish(&mut session.dimensions, key, context);
             } else if let BodyItemKind::Dpi(id) = native.body_item(*id).kind
-                && let Ok(import) = dpi::import(id, native)
+                && let Ok(import) = dpi::import(id, tree, session, context)
                 && let Some(metadata) =
                     FunctionReturnMetadata::from_dpi(&import, &mut session.types)
             {

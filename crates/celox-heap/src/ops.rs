@@ -192,6 +192,23 @@ pub const UVM_TOOL_NAME: u64 = 137;
 pub const UVM_TOOL_VERSION: u64 = 138;
 // `call` dispatches the low opcode byte by range, so the UVM range shares no
 // operation with the container and stream ranges.
+/// `dpi_area(words)`: start the call area of a DPI-C call with `words`
+/// zeroed 64-bit words and no C strings (see the `dpi` module).
+pub const DPI_AREA: u64 = 144;
+/// `dpi_store(index, value)`: set word `index` of the call area.
+pub const DPI_STORE: u64 = 145;
+/// `dpi_pointer()`: the address of the words of the call area, which the
+/// C function reads and writes until the area is started again.
+pub const DPI_POINTER: u64 = 146;
+/// `dpi_load(index)`: word `index` of the call area.
+pub const DPI_LOAD: u64 = 147;
+/// `dpi_c_string(a)`: the address of a NUL-terminated copy of string `a`,
+/// valid until the call area is started again.
+pub const DPI_C_STRING: u64 = 148;
+/// `dpi_from_c_string(pointer)`: the string holding the NUL-terminated C
+/// string at `pointer`, or `""` for a null pointer.
+pub const DPI_FROM_C_STRING: u64 = 149;
+
 const _: () = assert!(
     crate::containers::RSORT < UVM_RE_COMP
         && crate::streams::TRUNCATE < UVM_RE_COMP
@@ -221,6 +238,7 @@ impl Heap {
                 self.new_buffer(crate::containers::handle_pattern(a as u32 as u64))
             }
             op @ UVM_RE_COMP..=UVM_TOOL_VERSION => self.uvm_call(op, a, b, c),
+            op @ DPI_AREA..=DPI_FROM_C_STRING => self.dpi_call(op, a, b),
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {
                 let lower = |handle| {

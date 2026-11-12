@@ -1,8 +1,8 @@
 //! DPI-C imports and exports (IEEE 1800-2023 clause 35).
 //!
-//! An imported function is called through the C ABI. Arguments and results
-//! are passed by value as the C types of IEEE 1800-2023 35.5.6; other
-//! argument kinds, tasks and `context` imports are rejected.
+//! An imported function is called through the C ABI, its arguments and
+//! result as the C types of IEEE 1800-2023 35.5.6 and H.7.4; other argument
+//! types, tasks and `context` imports are rejected.
 //!
 //! An export only lets foreign code in a DPI call chain call the subroutine
 //! and does not change it (35.7). Only a `context` import may call an
@@ -14,7 +14,7 @@
 //! a [`DpiBuiltin`], so UVM runs without `UVM_NO_DPI` or a C library.
 
 use super::*;
-use crate::ir::{DpiArgument, DpiBuiltin, DpiImport, DpiType};
+use crate::ir::{DpiArgument, DpiBuiltin, DpiDirection, DpiImport, DpiType};
 
 /// The largest number of arguments an imported function may take; the
 /// limit of `celox_sir::MAX_EXTERN_CALL_ARGUMENTS`.
@@ -36,7 +36,10 @@ pub(super) fn imports(
         if let celox_sv_syntax::BodyItemKind::Dpi(id) = syntax.body_item(item.id).kind {
             let declaration = syntax.dpi_declaration(id);
             if declaration.import {
-                imports.push(import(id, syntax)?);
+                // Types are bound in the scope of the declaration.
+                let aliases = item.type_aliases(type_aliases);
+                let context = PackedDimensions::new(HashMap::default(), &item.env, &*aliases);
+                imports.push(import(id, tree, session, &context)?);
             } else {
                 export(
                     declaration,
@@ -147,11 +150,19 @@ fn export(
     Ok(())
 }
 
+/// The import that declaration `id` of `tree` makes, with the packed
+/// dimensions of its argument types evaluated in `context`.
 pub(super) fn import(
     id: celox_sv_syntax::DpiId,
-    syntax: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
 ) -> Result<DpiImport, AnalyzerError> {
-    lower_native_dpi(syntax.dpi_declaration(id), syntax)
+    let syntax = tree.declarations();
+    lower_native_dpi(syntax.dpi_declaration(id), syntax, &mut |id| {
+        let bound = type_binding::bind(id, tree, session, context).ok()??;
+        Some(expr_type_from_type(&tree.functions, &bound, &context.const_env)?.width)
+    })
 }
 
 /// A type in the prototype of a UVM DPI-C function.
@@ -376,11 +387,12 @@ fn builtin(
     )
 }
 
-/// Bind an owned native body declaration to the existing C ABI/IR contract.
-/// No legacy declaration, prototype or type nodes participate in this conversion.
+/// Bind an owned native body declaration to the C ABI/IR contract. `width`
+/// gives the number of bits of a packed type.
 fn lower_native_dpi(
     declaration: &celox_sv_syntax::DpiDeclaration,
     syntax: &celox_sv_syntax::Declarations,
+    width: &mut dyn FnMut(celox_sv_syntax::TypeId) -> Option<usize>,
 ) -> Result<DpiImport, AnalyzerError> {
     use celox_sv_syntax::{DataTypeKind, Direction, DpiKind, DpiProperty};
     {
@@ -419,19 +431,26 @@ fn lower_native_dpi(
     {
         None
     } else {
-        Some(native_dpi_type(result, syntax, "result")?)
+        let r#type = native_dpi_type(result, syntax, "result", width)?;
+        // Results are small values (IEEE 1800-2023 35.5.5).
+        if r#type.is_vector() {
+            return Err(unsupported("DPI-C packed array result"));
+        }
+        Some(r#type)
     };
-    let mut input = true;
+    let mut direction = DpiDirection::Input;
     let mut arguments = Vec::new();
     for port in &declaration.ports {
         if port.constant {
             return Err(unsupported("DPI-C const ref argument"));
         }
-        if let Some(direction) = port.direction {
-            input = direction == Direction::Input;
-        }
-        if !input {
-            return Err(unsupported("DPI-C output, inout or ref argument"));
+        match port.direction {
+            Some(Direction::Input) => direction = DpiDirection::Input,
+            Some(Direction::Output) => direction = DpiDirection::Output,
+            Some(Direction::Inout) => direction = DpiDirection::Inout,
+            // 35.5.4: an imported subroutine has no `ref` formals.
+            Some(_) => return Err(unsupported("DPI-C ref argument")),
+            None => {}
         }
         let name = port
             .name
@@ -443,9 +462,17 @@ fn lower_native_dpi(
         if port.default.is_some() {
             return Err(unsupported("DPI-C argument default value"));
         }
-        arguments.push(DpiArgument::new(
+        let r#type = native_dpi_type(port.data_type, syntax, "argument", width)?;
+        // A pure function has only input arguments (35.5.2).
+        if pure && direction != DpiDirection::Input {
+            return Err(unsupported(
+                "DPI-C pure import with an output or inout argument",
+            ));
+        }
+        arguments.push(DpiArgument::with_direction(
             name.spelling.clone(),
-            native_dpi_type(port.data_type, syntax, "argument")?,
+            r#type,
+            direction,
         ));
     }
     if arguments.len() > MAX_DPI_ARGUMENTS {
@@ -460,9 +487,23 @@ fn native_dpi_type(
     id: celox_sv_syntax::TypeId,
     syntax: &celox_sv_syntax::Declarations,
     role: &str,
+    width: &mut dyn FnMut(celox_sv_syntax::TypeId) -> Option<usize>,
 ) -> Result<DpiType, AnalyzerError> {
     use celox_sv_syntax::DataTypeKind;
     let data_type = syntax.data_type(id);
+    // A packed array is passed in its canonical representation, as one
+    // dimension of all its bits (IEEE 1800-2023 35.5.6, H.7.7).
+    let mut vector = |four_state: bool| -> Result<DpiType, AnalyzerError> {
+        let width = width(id)
+            .filter(|width| *width > 0)
+            .ok_or_else(|| unsupported(format!("DPI-C packed array {role} of unknown size")))?;
+        let signed = data_type.signed.unwrap_or(false);
+        Ok(if four_state {
+            DpiType::LogicVector { width, signed }
+        } else {
+            DpiType::BitVector { width, signed }
+        })
+    };
     match &data_type.kind {
         DataTypeKind::Builtin(name)
             if matches!(name.as_str(), "byte" | "shortint" | "int" | "longint") =>
@@ -481,18 +522,23 @@ fn native_dpi_type(
         // A C pointer (`void *`), a 64-bit integer on the supported hosts
         // (IEEE 1800-2023 6.14, H.7.4).
         DataTypeKind::Builtin(name) if name == "chandle" => Ok(DpiType::Chandle),
-        DataTypeKind::Builtin(name) if matches!(name.as_str(), "integer" | "time") => Err(
-            unsupported(format!("DPI-C {role} of four-state integer type")),
-        ),
+        DataTypeKind::Builtin(name) if name == "string" => Ok(DpiType::String),
+        // Four-state vectors of 32 and 64 bits (6.11, H.7.4).
+        DataTypeKind::Builtin(name) if matches!(name.as_str(), "integer" | "time") => {
+            Ok(DpiType::LogicVector {
+                width: if name == "integer" { 32 } else { 64 },
+                signed: data_type.signed.unwrap_or(name == "integer"),
+            })
+        }
         DataTypeKind::Implicit => {
             if !data_type.packed_dimensions.is_empty() {
-                return Err(unsupported(format!("DPI-C packed array {role}")));
+                return vector(true);
             }
             Ok(DpiType::Logic)
         }
         DataTypeKind::Builtin(name) if matches!(name.as_str(), "bit" | "logic" | "reg") => {
             if !data_type.packed_dimensions.is_empty() {
-                return Err(unsupported(format!("DPI-C packed array {role}")));
+                return vector(name != "bit");
             }
             Ok(if name == "bit" {
                 DpiType::Bit
@@ -558,6 +604,81 @@ mod tests {
     }
 
     #[test]
+    fn prototypes_bind_strings_directions_and_packed_arrays() {
+        let code = "module M #(parameter int W = 512);
+            localparam int HALF = W / 2;
+            typedef logic [3:0] nibble;
+            import \"DPI-C\" function string upper(input string s);
+            import \"DPI-C\" function void access(
+                input bit rw, input bit [W-1:0] wdata, output bit [HALF-1:0][1:0] rdata,
+                inout logic signed [70:1] state, output string text, inout int count,
+                integer i, output time t);
+        endmodule";
+        let source = crate::analyze_source(code, Path::new("dpi_types.sv")).unwrap();
+        let imports = source.modules()[0].dpi_imports();
+        assert_eq!(imports[0].return_type(), Some(DpiType::String));
+        assert_eq!(imports[0].arguments()[0].r#type(), DpiType::String);
+        let arguments = imports[1].arguments();
+        let shapes: Vec<_> = arguments
+            .iter()
+            .map(|argument| (argument.direction(), argument.r#type()))
+            .collect();
+        use DpiDirection::{Inout, Input, Output};
+        assert_eq!(
+            shapes,
+            [
+                (Input, DpiType::Bit),
+                (
+                    Input,
+                    DpiType::BitVector {
+                        width: 512,
+                        signed: false
+                    }
+                ),
+                (
+                    Output,
+                    DpiType::BitVector {
+                        width: 512,
+                        signed: false
+                    }
+                ),
+                (
+                    Inout,
+                    DpiType::LogicVector {
+                        width: 70,
+                        signed: true
+                    }
+                ),
+                (Output, DpiType::String),
+                (
+                    Inout,
+                    DpiType::Integer {
+                        width: 32,
+                        signed: true
+                    }
+                ),
+                // A formal without a direction has the previous one (13.3).
+                (
+                    Inout,
+                    DpiType::LogicVector {
+                        width: 32,
+                        signed: true
+                    }
+                ),
+                (
+                    Output,
+                    DpiType::LogicVector {
+                        width: 64,
+                        signed: false
+                    }
+                ),
+            ]
+        );
+        assert!(arguments[3].is_input() && arguments[3].is_output());
+        assert!(!arguments[2].is_input());
+    }
+
+    #[test]
     fn native_prototypes_preserve_existing_unsupported_diagnostics() {
         for (declaration, want) in [
             (
@@ -578,8 +699,16 @@ mod tests {
                 "DPI-C argument without a name",
             ),
             (
-                "import \"DPI-C\" function int f(output int x);",
-                "DPI-C output, inout or ref argument",
+                "import \"DPI-C\" function int f(ref int x);",
+                "DPI-C ref argument",
+            ),
+            (
+                "import \"DPI-C\" pure function int f(output int x);",
+                "DPI-C pure import with an output or inout argument",
+            ),
+            (
+                "import \"DPI-C\" function int f(input real x);",
+                "DPI-C argument of type `real`",
             ),
             (
                 "import \"DPI-C\" function int f(input int x[]);",
