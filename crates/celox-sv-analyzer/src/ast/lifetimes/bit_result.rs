@@ -113,7 +113,63 @@ struct Proof<'a> {
 
 impl Proof<'_> {
     fn readable(&self, expression: &Expr) -> bool {
-        pure(expression) && (self.written == self.full || !expr_reads(expression, self.name))
+        pure(expression) && self.unobserved(expression)
+    }
+
+    /// Whether `expression` reads no bit of the variable that may still hold
+    /// its value on entry. Calls in it are evaluated, as elsewhere in the
+    /// lifetime analysis, by their arguments.
+    fn unobserved(&self, expression: &Expr) -> bool {
+        self.written == self.full || !expr_reads(expression, self.name)
+    }
+
+    /// The bits that target `lvalue` writes of the variable, or of another
+    /// local, whose numeric value is then unknown. `None` when its
+    /// selection is not a constant one that reads no entry bit.
+    fn write(&mut self, lvalue: &LValue) -> Option<()> {
+        match lvalue {
+            LValue::Object { .. } => crate::ast::lowered_object(),
+            LValue::Ident(name) if name == self.name => self.written = self.full.clone(),
+            LValue::Ident(name) => {
+                self.env.remove(name);
+            }
+            LValue::Select { name, msb, lsb, .. } => {
+                if !pure_constant(msb)
+                    || !pure_constant(lsb)
+                    || const_expr_reads(msb, self.name)
+                    || const_expr_reads(lsb, self.name)
+                {
+                    return None;
+                }
+                if name == self.name {
+                    let left = eval_ast_const_expr(&self.tree.functions, msb, &self.env)?;
+                    let right = eval_ast_const_expr(&self.tree.functions, lsb, &self.env)?;
+                    let low = usize::try_from(left.min(right)).ok()?;
+                    let high = usize::try_from(left.max(right)).ok()?;
+                    if high >= self.width {
+                        return None;
+                    }
+                    for bit in low..=high {
+                        self.written.set_bit(bit as u64, true);
+                    }
+                } else {
+                    // A partial store loses our numeric value for this
+                    // other local, but does not read its previous bits.
+                    self.env.remove(name);
+                }
+            }
+        }
+        Some(())
+    }
+
+    /// Forget the numeric values of the locals after `expression` ran
+    /// calls, which may write them through output arguments.
+    fn forget_after_calls(&mut self, expression: &Expr) {
+        if !pure(expression) {
+            for name in self.types.keys() {
+                self.env.remove(name);
+            }
+        }
     }
 
     fn value(&self, session: &mut Session, expression: &Expr) -> Option<i128> {
@@ -165,45 +221,33 @@ impl Proof<'_> {
                     rhs,
                     nonblocking: false,
                 } => {
-                    if !self.readable(rhs) {
+                    if !self.unobserved(rhs) {
                         return None;
                     }
-                    if lhs.name() == self.name {
-                        match lhs {
-                            LValue::Object { .. } => crate::ast::lowered_object(),
-                            LValue::Ident(_) => self.written = self.full.clone(),
-                            LValue::Select { msb, lsb, .. } => {
-                                if !pure_constant(msb) || !pure_constant(lsb) {
-                                    return None;
-                                }
-                                let left =
-                                    eval_ast_const_expr(&self.tree.functions, msb, &self.env)?;
-                                let right =
-                                    eval_ast_const_expr(&self.tree.functions, lsb, &self.env)?;
-                                let low = usize::try_from(left.min(right)).ok()?;
-                                let high = usize::try_from(left.max(right)).ok()?;
-                                if high >= self.width {
-                                    return None;
-                                }
-                                for bit in low..=high {
-                                    self.written.set_bit(bit as u64, true);
-                                }
-                            }
-                        }
-                    } else if let LValue::Ident(name) = lhs {
-                        let value = self.value(session, rhs);
+                    let value = match lhs {
+                        LValue::Ident(name) if name != self.name => self.value(session, rhs),
+                        _ => None,
+                    };
+                    self.forget_after_calls(rhs);
+                    self.write(lhs)?;
+                    if let LValue::Ident(name) = lhs
+                        && name != self.name
+                    {
                         self.store(name, value)?;
-                    } else if let LValue::Select { name, msb, lsb, .. } = lhs {
-                        // A partial store loses our numeric value for this
-                        // other local, but does not read its previous bits.
-                        if !pure_constant(msb)
-                            || !pure_constant(lsb)
-                            || const_expr_reads(msb, self.name)
-                            || const_expr_reads(lsb, self.name)
-                        {
-                            return None;
-                        }
-                        self.env.remove(name);
+                    }
+                }
+                // Every part is selected before any is written.
+                Stmt::AssignConcat {
+                    parts,
+                    rhs,
+                    nonblocking: false,
+                } => {
+                    if !self.unobserved(rhs) {
+                        return None;
+                    }
+                    self.forget_after_calls(rhs);
+                    for part in parts {
+                        self.write(part)?;
                     }
                 }
                 Stmt::Loop {
@@ -324,6 +368,23 @@ mod tests {
             let source = format!(
                 "module Top(input logic[3:0] a, output logic[3:0] y); \
                 function [3:0] f(input logic[3:0] a); {body} endfunction \
+                assign y=f(a); endmodule"
+            );
+            assert_retained(&source, "f");
+        }
+    }
+
+    #[test]
+    fn calls_and_concatenations_still_need_unread_entry_bits() {
+        for body in [
+            "f[1:0]=g(f); f[3:2]=a[3:2];",
+            "{f[1:0], other}=g(a); f[2]=a[2];",
+            "{f[1:0], other}={f[3:2], a[1:0]}; f[3:2]=a[3:2];",
+        ] {
+            let source = format!(
+                "module Top(input logic[3:0] a, output logic[3:0] y); \
+                function [3:0] g(input logic[3:0] a); g=a; endfunction \
+                function [3:0] f(input logic[3:0] a); logic[1:0] other; {body} endfunction \
                 assign y=f(a); endmodule"
             );
             assert_retained(&source, "f");

@@ -149,6 +149,39 @@ fn static_locals_written_before_they_are_read_are_temporaries() {
     );
 }
 
+// A static function's result and locals that every call fills bit range by
+// bit range before reading them hold nothing between calls, also when the
+// values come from calls or a concatenation target splits them: the calls
+// of several continuous assignments do not share them (IEEE 1800-2023
+// 13.4.2).
+#[test]
+fn static_results_filled_by_selects_of_calls_are_temporaries() {
+    let source = "module Top(output logic [63:0] y);
+          function [7:0] sum2(input [7:0] a, b);
+            reg [7:0] t;
+            reg [3:0] hi, lo;
+            begin
+              {hi, lo} = a;
+              t[7:0] = $signed(a) + $signed(b);
+              sum2 = t ^ {hi, lo} ^ a;
+            end
+          endfunction
+          function [15:0] both(input [15:0] x, w);
+            begin
+              both[7:0] = sum2(x[7:0], w[7:0]);
+              both[15:8] = sum2(x[15:8], w[15:8]);
+            end
+          endfunction
+          logic [15:0] p = 16'h0102, q = 16'h1020;
+          wire [7:0] s0 = sum2(p[7:0], q[7:0]);
+          wire [7:0] s1 = sum2(p[15:8], q[15:8]);
+          wire [15:0] b0 = both(p, q);
+          wire [15:0] b1 = both(q, q);
+          assign y = {s0, s1, b0, b1, 16'h0};
+        endmodule";
+    assert_eq!(settled(source), 0x2211_1122_2040_0000);
+}
+
 #[test]
 fn static_task_locals_keep_their_value() {
     assert_eq!(
