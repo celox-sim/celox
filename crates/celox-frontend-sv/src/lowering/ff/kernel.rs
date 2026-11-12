@@ -41,6 +41,40 @@ pub(super) struct Sites {
 }
 
 impl Ff<'_, '_> {
+    /// The variables the sites of the process name, which the runtime reads
+    /// or writes in the frame of a suspended activation.
+    fn site_operands(&self) -> HashSet<SourceVarId> {
+        let mut operands = HashSet::default();
+        let mut add = |id: SourceVarId| {
+            operands.insert(id);
+            id
+        };
+        for site in &self.sites.wait {
+            site.map(&mut add);
+        }
+        for site in &self.sites.nba {
+            site.map(&mut add);
+        }
+        for site in &self.sites.host_request {
+            site.map(&mut add);
+        }
+        for switch in &self.sites.nba_switches {
+            add(switch.value);
+            add(switch.switch);
+            add(switch.queued);
+            if let Some(position) = &switch.queued_position {
+                position.map(&mut add);
+            }
+        }
+        for probe in &self.sites.event_probes {
+            add(probe.result);
+            for &id in probe.inputs.iter().chain(&probe.scratch) {
+                add(id);
+            }
+        }
+        operands
+    }
+
     /// Lower an `initial` body into a process kernel that runs it from time
     /// zero, reading and writing stable state directly.
     pub fn lower_initial_kernel(
@@ -311,6 +345,15 @@ impl Ff<'_, '_> {
             }
         }
         prune_unreachable_blocks(&mut unit);
+        // The runtime reads these in the frame of a suspended activation:
+        // the operands of the process's sites and its RNG state.
+        let site_operands = if self.activation.forked {
+            let mut operands = self.site_operands();
+            operands.extend(self.rng.random.as_ref().map(|random| random.0));
+            operands
+        } else {
+            HashSet::default()
+        };
         let frame = self.activation.forked.then(|| {
             // Each activation has its own scratch: the values its lowering
             // keeps across its own suspensions. Lexical locals are cells of
@@ -318,13 +361,32 @@ impl Ff<'_, '_> {
             // made, such as the time slot, the held gate, the change counts
             // of boxes, or the sampled copies and `$past` histories the
             // runtime maintains, is the module's.
-            let mut private: Vec<_> = self.m.created[first_created..]
+            let scratch: Vec<_> = self.m.created[first_created..]
                 .iter()
                 .copied()
                 .filter(|id| {
                     self.m.var(*id).activation_scratch && !self.activation.frame_locals.contains(id)
                 })
                 .collect();
+            // Of those, an activation keeps the ones a run may read before it
+            // writes them (see `frame_liveness`), and those the runtime reads
+            // in its frame.
+            let candidates: HashSet<SourceVarId> = scratch.iter().copied().collect();
+            let whole = |id: SourceVarId| {
+                let variable = self.m.var(id);
+                variable.array_dims.is_empty().then_some(variable.width)
+            };
+            let mut kept = frame_liveness::live_at_entry(&unit, &candidates, &whole);
+            kept.extend(site_operands);
+            if cfg!(debug_assertions) {
+                let excluded: HashSet<SourceVarId> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|id| !kept.contains(id))
+                    .collect();
+                frame_liveness::assert_written_before_read(&unit, &excluded, &whole);
+            }
+            let mut private: Vec<_> = scratch.into_iter().filter(|id| kept.contains(id)).collect();
             private.extend([slots.resume, slots.status, slots.delay]);
             celox_design::ProcessFrame {
                 resume_count,

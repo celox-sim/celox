@@ -24,6 +24,7 @@ mod events;
 mod expr;
 mod file_io;
 mod format;
+mod frame_liveness;
 mod fread;
 mod hoist;
 mod inline_calls;
