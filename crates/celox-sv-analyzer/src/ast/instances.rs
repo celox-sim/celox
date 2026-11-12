@@ -295,8 +295,11 @@ fn resolve_override(
             override_.name
         ))
     })?;
-    override_.value = Some(substitute_const_expr_constants_preserving_enum_types(
-        value, const_env,
+    let value = substitute_const_expr_constants_preserving_enum_types(value, const_env);
+    override_.value = Some(constant_calls_folded(
+        value,
+        &syntax_tree.functions,
+        const_env,
     ));
     Ok(())
 }
@@ -752,4 +755,79 @@ fn parameter_override(
         return Ok(ParameterOverride::type_override(name, ty));
     }
     Ok(ParameterOverride::new(name, Some(value)))
+}
+
+/// `value` with each call of a constant function (IEEE 1800-2023 13.4.3)
+/// whose arguments are constants replaced by its result, of the function's
+/// return type. The instance is specialized by the value the call returns
+/// in the scope that gives the override; a call that does not evaluate
+/// stays.
+fn constant_calls_folded(
+    value: ConstExpr,
+    functions: &const_functions::ConstantFunctions,
+    constants: &ConstEnv,
+) -> ConstExpr {
+    let fold =
+        |value: Box<ConstExpr>| Box::new(constant_calls_folded(*value, functions, constants));
+    match value {
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => value,
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: fold(expr),
+            bit: fold(bit),
+        },
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: fold(expr),
+            msb: fold(msb),
+            lsb: fold(lsb),
+            signed,
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: fold(expr),
+            width,
+            signed,
+        },
+        ConstExpr::Function { callee, args, site } => {
+            let args: Vec<_> = args
+                .into_iter()
+                .map(|arg| constant_calls_folded(arg, functions, constants))
+                .collect();
+            if let Callee::Subroutine(name) = &callee {
+                let ir_args: Vec<crate::ir::ConstExpr> =
+                    args.iter().cloned().map(Into::into).collect();
+                if let Some(literal) =
+                    const_functions::eval_call_literal(functions, name, &ir_args, constants)
+                {
+                    return ConstExpr::Literal(typecheck::format_integral_literal_binary(&literal));
+                }
+            }
+            ConstExpr::Function { callee, args, site }
+        }
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op,
+            expr: fold(expr),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: fold(left),
+            op,
+            right: fold(right),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: fold(condition),
+            then_expr: fold(then_expr),
+            else_expr: fold(else_expr),
+        },
+    }
 }
