@@ -104,7 +104,7 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
             packed: function_packed_dimension_widths(&r#type.packed_ranges),
             unpacked: dimensions::unpacked_dimension_widths(&r#type.unpacked_ranges),
             signed: r#type.is_signed,
-            is_2state: r#type.kind == TypeKind::Bit,
+            is_2state: matches!(r#type.kind, TypeKind::Bit | TypeKind::Chandle),
             members: r#type.members.clone(),
             signed_element_depth: r#type.signed_element_depth,
             unpacked_struct: None,
@@ -146,7 +146,7 @@ fn finish_lvalue(
         signed,
         array_slice_width: None,
         array_slice_reversed: false,
-        is_2state: r#type.kind == TypeKind::Bit,
+        is_2state: matches!(r#type.kind, TypeKind::Bit | TypeKind::Chandle),
     })
 }
 
@@ -359,7 +359,7 @@ fn array_member_selection(
         signed,
         array_slice_width: slice_width,
         array_slice_reversed: reversed,
-        is_2state: ty.kind == TypeKind::Bit,
+        is_2state: matches!(ty.kind, TypeKind::Bit | TypeKind::Chandle),
     })
 }
 

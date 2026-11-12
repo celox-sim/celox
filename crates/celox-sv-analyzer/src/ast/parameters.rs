@@ -1482,7 +1482,7 @@ pub(super) fn enum_members_of(
             // Substitution of a wide predecessor may reveal an X/Z value
             // that signature-time initializer validation could not resolve.
             if literal.mask != Default::default()
-                && (base.is_none() || member_base.kind == TypeKind::Bit)
+                && (base.is_none() || matches!(member_base.kind, TypeKind::Bit | TypeKind::Chandle))
             {
                 return Err(unsupported(format!(
                     "enum member `{name}` X/Z value requires an explicit four-state base type"

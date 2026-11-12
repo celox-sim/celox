@@ -412,7 +412,7 @@ impl Names {
 /// The packed and unpacked shape of a declared type, as selects see it.
 pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
     VariableDimensions::new(VariableShape {
-        chandle: r#type.chandle,
+        chandle: r#type.is_chandle(),
         container: r#type.container.clone(),
         randomizable: r#type.container.is_none()
             && !r#type.holds_chandle()
@@ -429,6 +429,7 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
         is_2state: matches!(
             r#type.kind(),
             TypeKind::Bit
+                | TypeKind::Chandle
                 | TypeKind::Real
                 | TypeKind::Shortreal
                 | TypeKind::String
@@ -581,7 +582,6 @@ pub(super) fn rename_expr_idents(
 pub(super) fn int_type() -> Type {
     Type {
         container: None,
-        chandle: false,
         is_enum: false,
         enum_domain: None,
         packed_enum: false,

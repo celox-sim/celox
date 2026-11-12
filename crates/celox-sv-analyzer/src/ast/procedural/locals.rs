@@ -168,7 +168,7 @@ impl BodyBuilder<'_, '_, '_> {
                         dimensions_from_type(signal.r#type()),
                     );
                     expression_binding::check_chandle_assignment(
-                        signal.r#type().chandle && signal.r#type().unpacked_ranges.is_empty(),
+                        signal.r#type().is_chandle() && signal.r#type().unpacked_ranges.is_empty(),
                         root,
                         self.tree,
                         self.tree.declarations(),

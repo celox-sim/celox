@@ -19,7 +19,6 @@ impl Type {
             container: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
-            chandle: false,
         }
     }
 
@@ -39,7 +38,6 @@ impl Type {
             container: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
-            chandle: false,
         }
     }
 
@@ -67,10 +65,13 @@ impl Type {
     /// chandle member, which no port may have and no randomization fill
     /// (IEEE 1800-2023 6.14).
     pub(in crate::ast) fn holds_chandle(&self) -> bool {
-        self.chandle
-            || self
-                .unpacked_struct()
-                .is_some_and(|aggregate| aggregate.leaves().iter().any(|leaf| leaf.r#type.chandle))
+        self.is_chandle()
+            || self.unpacked_struct().is_some_and(|aggregate| {
+                aggregate
+                    .leaves()
+                    .iter()
+                    .any(|leaf| leaf.r#type.is_chandle())
+            })
     }
 
     /// The members of an unpacked structure type.
@@ -156,12 +157,17 @@ impl Type {
 
     /// Whether the type is a `chandle`.
     pub(crate) fn is_chandle(&self) -> bool {
-        self.chandle
+        self.kind == TypeKind::Chandle
     }
 
-    /// The type, a `chandle` if `chandle` (see [`crate::ir::Type::is_chandle`]).
+    /// The type, a `chandle` if `chandle` (see [`crate::ir::Type::is_chandle`]):
+    /// the bits of a chandle are two-state.
     pub fn with_chandle(mut self, chandle: bool) -> Self {
-        self.chandle = chandle;
+        if chandle {
+            self.kind = TypeKind::Chandle;
+        } else if self.kind == TypeKind::Chandle {
+            self.kind = TypeKind::Bit;
+        }
         self
     }
 }

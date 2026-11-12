@@ -427,10 +427,8 @@ fn element_name(
     if let Some(class) = r#type.class().filter(|_| r#type.kind != TypeKind::Event) {
         return class_name(class, tree, session, env);
     }
-    if r#type.chandle {
-        return Ok("chandle".to_owned());
-    }
     match r#type.kind {
+        TypeKind::Chandle => return Ok("chandle".to_owned()),
         TypeKind::Event => return Ok("event".to_owned()),
         TypeKind::Real => return Ok("real".to_owned()),
         TypeKind::Shortreal => return Ok("shortreal".to_owned()),

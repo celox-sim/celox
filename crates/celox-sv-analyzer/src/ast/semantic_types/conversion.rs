@@ -34,7 +34,7 @@ pub(in crate::ast) fn of_type(
             .map(|range| (range.left(), range.right()))
             .collect(),
         keyword: ty.spelling.keyword_of(),
-        chandle: ty.chandle,
+        chandle: ty.is_chandle(),
     };
     let unpacked = ty
         .unpacked_ranges
@@ -199,6 +199,7 @@ impl Parts<'_> {
             TypeKind::Shortreal => return Some(TyData::Shortreal),
             TypeKind::String => return Some(TyData::String),
             TypeKind::Object | TypeKind::Process | TypeKind::Event => return None,
+            TypeKind::Chandle => return Some(TyData::Chandle),
             TypeKind::Bit => false,
             // `reg` is `logic` (6.11.2), as is an implicit type.
             TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => true,
