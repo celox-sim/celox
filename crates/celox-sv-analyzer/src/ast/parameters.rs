@@ -1036,11 +1036,11 @@ pub(super) fn parameters_from_native_with_environment(
 
 fn validate_parameter_materialization_width(width: Option<usize>) -> Result<(), AnalyzerError> {
     if let Some(width) = width
-        && width > constant_folding::MAX_CONSTANT_CONCAT_BITS
+        && width > constant_folding::MAX_CONSTANT_VALUE_BITS
     {
         return Err(unsupported(format!(
             "parameter width {width} exceeds the {}-bit constant materialization limit",
-            constant_folding::MAX_CONSTANT_CONCAT_BITS
+            constant_folding::MAX_CONSTANT_VALUE_BITS
         )));
     }
     Ok(())
