@@ -2,7 +2,10 @@
 //! batch step of designs without processes.
 
 mod activation;
-pub use activation::{Activation, ProcessControl, SuspendedProcess};
+pub use activation::{
+    Activation, ProcessControl, SuspendedProcess,
+    frame_image::{FrameImage, ImageLayout},
+};
 mod batch;
 mod compiled;
 mod edges;
