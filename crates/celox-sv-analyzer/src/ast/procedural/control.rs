@@ -1548,19 +1548,13 @@ impl BodyBuilder<'_, '_, '_> {
             let ty = type_binding::bind(local.data_type, self.tree, self.session, &self.dims)?
                 .filter(|ty| {
                     // An integral variable, which a register can keep.
-                    matches!(
-                        ty.kind,
-                        TypeKind::Bit
-                            | TypeKind::Chandle
-                            | TypeKind::Logic
-                            | TypeKind::Reg
-                            | TypeKind::Implicit
-                    ) && ty.container.is_none()
-                        && ty.unpacked_ranges.is_empty()
-                        && ty.unpacked_struct.is_none()
-                        && ty.class.is_none()
-                        && ty.virtual_interface.is_none()
-                        && !ty.is_chandle()
+                    semantic_types::of_type(
+                        &mut self.session.types,
+                        &self.tree.functions,
+                        ty,
+                        &self.dims.const_env,
+                    )
+                    .is_some_and(|ty| self.session.types.is_integral(ty))
                 })
                 .ok_or_else(|| unsupported("type of a local variable of a sequence"))?;
             for name in &local.names {
