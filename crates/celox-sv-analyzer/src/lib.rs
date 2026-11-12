@@ -304,6 +304,10 @@ pub enum AnalyzerError {
     /// between types of different sizes.
     #[error("cast: {0} (IEEE 1800-2023 6.24)")]
     InvalidCast(String),
+    /// A `defparam` assignment that IEEE 1800-2023 23.10.1 or 6.20.3
+    /// forbids, such as one out of the generate block it is in.
+    #[error("defparam: {0}")]
+    InvalidDefparam(String),
 }
 
 impl miette::Diagnostic for AnalyzerError {}

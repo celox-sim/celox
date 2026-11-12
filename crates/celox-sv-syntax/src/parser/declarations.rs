@@ -807,6 +807,16 @@ impl Parser<'_> {
                 frames.push(frame);
                 continue;
             }
+            if frame.delimiters.is_empty() && self.peek() == "defparam" {
+                let start = self.at;
+                let assignments = self.defparam()?;
+                frame.record(self, start, BodyItemKind::Defparam(assignments))?;
+                frame.conditional = frame.builder.active();
+                frame.prototype = false;
+                frame.item_start = true;
+                frames.push(frame);
+                continue;
+            }
             if frame.delimiters.is_empty() && self.peek() == "assign" {
                 let start = self.at;
                 let id = self.assign_statement()?;
