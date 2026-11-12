@@ -68,6 +68,7 @@ impl LocalSink {
                 procedural::scoped_type(r#type, &dims.const_env),
                 &dims.const_env,
             ),
+            owned: false,
         });
         name
     }

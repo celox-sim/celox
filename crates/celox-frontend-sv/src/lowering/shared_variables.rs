@@ -155,6 +155,7 @@ pub(super) fn share_always_variables(
                 name: local.clone(),
                 source_name: signal.name().into(),
                 r#type: signal.r#type().clone(),
+                owned: false,
             });
             renames
                 .entry(driver)
