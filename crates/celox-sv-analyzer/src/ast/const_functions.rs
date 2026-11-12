@@ -375,11 +375,15 @@ fn scope_flags(tree: &AnalysisContext<'_>) -> (bool, bool) {
     (functions, controls)
 }
 
+/// The constant functions of the scope of `tree`. `constant_types` holds the
+/// declaration types of the scope's parameters and enum constants, which the
+/// bodies' expressions have (IEEE 1800-2023 6.19.3, 13.4.3).
 pub(super) fn module_constant_functions(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
     type_aliases: &TypeAliases,
+    constant_types: &Arc<HashMap<String, semantic_types::ConstantType>>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> ConstantFunctions {
     symbolic_module_constant_functions(
@@ -387,6 +391,7 @@ pub(super) fn module_constant_functions(
         session,
         const_env,
         type_aliases,
+        constant_types,
         parameter_literals,
         &HashSet::default(),
         procedural::ClassMethods::StaticFunctions,
@@ -398,6 +403,7 @@ pub(super) fn symbolic_module_constant_functions(
     session: &mut Session,
     const_env: &ConstEnv,
     type_aliases: &TypeAliases,
+    constant_types: &Arc<HashMap<String, semantic_types::ConstantType>>,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
     class_methods: procedural::ClassMethods,
@@ -413,6 +419,7 @@ pub(super) fn symbolic_module_constant_functions(
             session,
             const_env,
             type_aliases,
+            constant_types,
             parameter_literals,
             symbolic_parameters,
             class_methods,
@@ -429,6 +436,7 @@ pub(super) fn symbolic_module_constant_functions(
         session,
         const_env,
         type_aliases,
+        constant_types,
         parameter_literals,
         symbolic_parameters,
         class_methods,
@@ -440,6 +448,7 @@ pub(super) fn symbolic_module_constant_functions(
         session,
         const_env,
         type_aliases,
+        constant_types,
         parameter_literals,
         symbolic_parameters,
         class_methods,
@@ -451,6 +460,7 @@ fn collect_module_constant_functions(
     session: &mut Session,
     const_env: &ConstEnv,
     type_aliases: &TypeAliases,
+    constant_types: &Arc<HashMap<String, semantic_types::ConstantType>>,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
     class_methods: procedural::ClassMethods,
@@ -487,6 +497,7 @@ fn collect_module_constant_functions(
             Err(error) => return ConstantFunctions::unconverted(error),
         };
     let mut dimensions = PackedDimensions::new(HashMap::default(), const_env, type_aliases);
+    dimensions.constant_types = constant_types.clone();
     dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
     dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes);
     dimensions.subroutine_directions = Arc::new(subroutine_directions.clone());

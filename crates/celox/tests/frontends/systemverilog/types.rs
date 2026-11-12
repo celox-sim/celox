@@ -626,3 +626,89 @@ fn unused_compilation_unit_typedefs_of_undeclared_names_are_errors() {
         .build()
         .unwrap();
 }
+
+// An enum constant, or a parameter of an enumerated type, that a constant
+// function passes to a formal of its enumerated type is assignment compatible
+// with it (IEEE 1800-2023 6.19.3, 13.4.3), in a package and in a module, where
+// the result sizes a declaration and bounds a loop generate construct, as
+// fpnew's lane counts pass formats; an integral value is not, without a cast.
+#[test]
+fn constant_functions_pass_enum_constants_to_enum_formals() {
+    let source = r#"
+        `timescale 1ns/1ns
+        package fp;
+            typedef enum logic [2:0] { FP32, FP64, FP16 } fmt_e;
+            localparam fmt_e HALF = FP16;
+            function automatic int unsigned width(fmt_e fmt);
+                return fmt == FP16 ? 16 : fmt == FP64 ? 64 : 32;
+            endfunction
+            function automatic int unsigned lanes();
+                return width(FP16) + width(fp::FP64) + width(HALF);
+            endfunction
+        endpackage
+        module Top;
+            typedef enum logic [1:0] { A, B, C } kind_e;
+            localparam kind_e K = C;
+            function automatic int unsigned size(kind_e kind);
+                return kind == C ? 3 : 1;
+            endfunction
+            function automatic int unsigned sizes();
+                return size(C) + size(K) + size(A);
+            endfunction
+            localparam int unsigned N = fp::lanes();
+            localparam int unsigned M = sizes();
+            logic [N-1:0] lanes;
+            logic [M-1:0] kinds;
+            for (genvar g = 0; g < M; g++) begin : gen_kinds
+                initial #1 $display("kind %0d", g);
+            end
+            // The functions of the scope also evaluate in a generate block.
+            for (genvar g = 0; g < 2; g++) begin : gen_blocks
+                localparam int unsigned X = size(K) + g;
+                logic [X-1:0] v;
+                if (sizes() == 7) begin : sized
+                    initial #2 $display("block %0d %0d", g, $bits(v));
+                end
+            end
+            initial #3 $display("%0d %0d", $bits(lanes), $bits(kinds));
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("enums.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    let mut expected: Vec<_> = (0..7).map(|g| format!("kind {g}")).collect();
+    expected.extend(["block 0 3", "block 1 4", "96 7"].map(String::from));
+    assert_eq!(displayed, expected);
+    let source = r#"
+        module Top;
+            typedef enum logic [1:0] { A, B, C } kind_e;
+            function automatic int unsigned size(kind_e kind);
+                return kind == C ? 3 : 1;
+            endfunction
+            function automatic int unsigned sizes();
+                return size(2'd2);
+            endfunction
+            localparam int unsigned M = sizes();
+            logic [M-1:0] kinds;
+        endmodule
+    "#;
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("integral.sv"))], "Top").build()
+    else {
+        panic!("an integral argument of an enum formal is accepted");
+    };
+    let error = error.to_string();
+    assert!(
+        error.contains("argument 1 of `size`") && error.contains("Top::kind_e"),
+        "{error}"
+    );
+}

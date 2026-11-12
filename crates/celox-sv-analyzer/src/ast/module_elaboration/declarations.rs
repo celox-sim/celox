@@ -101,16 +101,7 @@ impl ScopeElaboration<'_> {
             &self.const_env,
             &self.type_aliases,
         );
-        let mut constant_types = self.imported.constant_types.clone();
-        constant_types.extend(self.enum_constants.declarations.clone());
-        self.packed_dimensions.constant_types = Arc::new(constant_types);
-        for parameter in self.imported.parameters.iter().chain(&self.parameters) {
-            let bindings = Arc::make_mut(&mut self.packed_dimensions.constant_types);
-            bindings.remove(parameter.name());
-            if let Some(ty) = &parameter.semantic_type {
-                bindings.insert(parameter.name().into(), ty.clone());
-            }
-        }
+        self.packed_dimensions.constant_types = self.constant_types();
         // Four-state parameter values cannot be represented by the numeric
         // environment. Keep their expressions for constant case analysis.
         self.packed_dimensions.parameter_values = parameter_value_env_with_imported(
@@ -129,6 +120,21 @@ impl ScopeElaboration<'_> {
                 &self.parameters,
                 self.imported,
             ));
+    }
+
+    /// The declaration types of the constants the scope sees: the enum
+    /// constants and parameters of the packages it uses and its own, as far
+    /// as they are known; a parameter has no binding until its type is.
+    pub(super) fn constant_types(&self) -> Arc<HashMap<String, semantic_types::ConstantType>> {
+        let mut bindings = self.imported.constant_types.clone();
+        bindings.extend(self.enum_constants.declarations.clone());
+        for parameter in self.imported.parameters.iter().chain(&self.parameters) {
+            bindings.remove(parameter.name());
+            if let Some(ty) = &parameter.semantic_type {
+                bindings.insert(parameter.name().into(), ty.clone());
+            }
+        }
+        Arc::new(bindings)
     }
 
     /// The argument names, shapes and directions of the subroutines the scope may
