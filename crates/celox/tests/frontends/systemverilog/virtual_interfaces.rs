@@ -265,6 +265,33 @@ fn writes_to_input_modport_members_are_rejected() {
     }
 }
 
+/// A chandle member read through a virtual interface is a chandle (IEEE
+/// 1800-2023 6.14, 25.9): it compares with null, and is no integral operand.
+#[test]
+fn chandle_members_through_virtual_interfaces_are_chandles() {
+    let source = |test: &str| {
+        format!(
+            "interface bus_if; chandle h; endinterface
+             module Top;
+                 bus_if bus();
+                 virtual bus_if v;
+                 int n;
+                 initial begin v = bus; n = {test} ? 1 : 0; end
+             endmodule"
+        )
+    };
+    let build = |test: &str| {
+        let source = source(test);
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("vif.sv"))], "Top")
+            .build_interpreter()
+            .map(drop)
+            .map_err(|error| error.to_string())
+    };
+    build("v.h == null").unwrap();
+    let error = build("v.h + 1 != 0").unwrap_err();
+    assert!(error.contains("chandle"), "{error}");
+}
+
 /// A member through a virtual interface is written only through the
 /// selection among the instances; a concatenation target or a continuous
 /// assignment through one is unsupported rather than writing nothing.

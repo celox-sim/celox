@@ -286,3 +286,25 @@ mod query_depth_tests {
         assert_eq!(value.unwrap(), Expr::Literal("32".into()));
     }
 }
+
+/// The signal of another scope, such as a variable of an interface
+/// instance, that path native expression `id` names, by its name in this
+/// scope (IEEE 1800-2023 25.5).
+pub(super) fn path_signal(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dims: &PackedDimensions,
+) -> Option<String> {
+    let (mut parts, None) = direct::path(id, native, tree, session, dims).ok()? else {
+        return None;
+    };
+    if parts.len() < 2 || !packed_structs::bind_interface_path(tree, &mut parts, dims) {
+        return None;
+    }
+    match parts.as_slice() {
+        [name] => Some(name.clone()),
+        _ => None,
+    }
+}
