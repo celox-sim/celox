@@ -1745,6 +1745,28 @@ fn unbindable_call_arguments_are_rejected() {
 }
 
 sv_backends! {
+    // set_randstate with a string that get_randstate did not return is
+    // undefined (IEEE 1800-2023 18.13.5); Celox ends the simulation with an
+    // error.
+    fn class_set_randstate_rejects_a_foreign_state(sim) {
+        @setup {
+            let source = r#"module Top(output int started);
+                class Item; rand int x; endclass
+                Item item = new;
+                initial begin
+                    started = 1;
+                    item.set_randstate("not a state");
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("set_randstate.sv"))], "Top");
+        let error = sim.run_until(0).unwrap_err().to_string();
+        assert!(error.contains("set_randstate with a state that get_randstate did not return"), "{error}");
+        assert_eq!(sim.get(sim.signal("started")), 1u8.into());
+    }
+}
+
+sv_backends! {
     fn class_randomize_null_receiver(sim) {
         @setup {
             let source = r#"module Top(output int hooks, result);

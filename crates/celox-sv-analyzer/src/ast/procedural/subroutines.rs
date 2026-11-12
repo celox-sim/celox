@@ -221,7 +221,7 @@ pub(in crate::ast) fn subroutine_argument_names(
                     params.into_iter().map(|(name, ..)| name).collect(),
                 );
             }
-            for method in ["randomize", "srandom", "rand_mode"] {
+            for method in super::randomization::RANDOMIZATION_METHODS {
                 let qualified = item.name(&classes::Class::subroutine_name(&class, method));
                 let mut param_names = vec![classes::THIS.to_owned()];
                 let mut param_shapes = vec![bound_dimensions_from_type(
@@ -230,24 +230,22 @@ pub(in crate::ast) fn subroutine_argument_names(
                     &mut session.types,
                     &env,
                 )];
-                let (argument, ty) = match method {
-                    "randomize" => (
-                        "$selection",
+                if let Some((argument, ty)) =
+                    super::randomization::randomization_method_argument(method, || {
                         layout.as_ref().map_or_else(
                             || classes::unsigned_type(1),
                             |layout| layout.selection_type(),
-                        ),
-                    ),
-                    "srandom" => ("seed", int_type()),
-                    _ => ("on_off", classes::unsigned_type(1)),
-                };
-                param_names.push(argument.into());
-                param_shapes.push(bound_dimensions_from_type(
-                    &ty,
-                    &tree.functions,
-                    &mut session.types,
-                    &env,
-                ));
+                        )
+                    })
+                {
+                    param_names.push(argument.into());
+                    param_shapes.push(bound_dimensions_from_type(
+                        &ty,
+                        &tree.functions,
+                        &mut session.types,
+                        &env,
+                    ));
+                }
                 directions.insert(
                     qualified.clone(),
                     vec![ParamDirection::Input; param_names.len()],
