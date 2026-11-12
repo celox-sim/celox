@@ -1981,9 +1981,17 @@ pub(in crate::ast) fn collect(
         }
     }
     // Outside classes, an assignment is bound in each generate scope that
-    // contains it, which may give its genvars different values.
-    let items = generate::items(tree, session, &context.const_env, &context.type_aliases)
-        .unwrap_or_default();
+    // contains it, which may give its genvars different values. Elaborating
+    // the scopes also makes the specializations their declarations name.
+    // Without a class to declare or to name, the elaboration has nothing to
+    // place or make, and the scope is not elaborated for it: the discovery
+    // of every generate block of a module would elaborate the module again.
+    let items = if native.classes.is_empty() && session.foreign.names().is_empty() {
+        Vec::new()
+    } else {
+        generate::items(tree, session, &context.const_env, &context.type_aliases)
+            .unwrap_or_default()
+    };
     // The scope that declares each class: the innermost generate scope
     // around its declaration, or the module.
     for class in &classes {
