@@ -329,15 +329,54 @@ fn compile_function_units(
     if sir.sir.functions.is_empty() {
         return Ok(Vec::new());
     }
-    // One layout serves every function in turn: each places the objects of
-    // its frame slots in it while it is compiled. A copy per function would
-    // copy the whole state's layout once per function.
-    let mut function_layout = layout.clone();
-    sir.sir
-        .functions
+    let functions = &sir.sir.functions;
+    let sizes = functions
         .iter()
-        .enumerate()
-        .map(|(index, function)| {
+        .map(|function| {
+            (
+                function.unit.blocks.len(),
+                function
+                    .unit
+                    .blocks
+                    .values()
+                    .map(|block| block.instructions.len())
+                    .sum::<usize>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let max_blocks = sizes.iter().map(|size| size.0).max().unwrap_or(0);
+    let max_instructions = sizes.iter().map(|size| size.1).max().unwrap_or(0);
+    // Each worker compiles with a copy of the layout (below).
+    let workers = super::super::compile_resources::workers_with_state(
+        max_blocks,
+        max_instructions,
+        functions.len(),
+        super::super::compile_resources::layout_bytes(layout),
+    );
+    if options.x86_options.diagnostics.phase_timing {
+        tracing::debug!(
+            "[native-timing] function_compile workers={workers} units={} max_blocks={max_blocks} max_instructions={max_instructions}",
+            functions.len()
+        );
+    }
+    // The costliest first, so that the last functions a worker takes are
+    // small, by the cost the worker count is sized by.
+    let mut order = (0..functions.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&index| {
+        let (blocks, instructions) = sizes[index];
+        std::cmp::Reverse(super::super::compile_resources::compile_cost(
+            blocks,
+            instructions,
+        ))
+    });
+    // One layout serves every function a worker compiles in turn: each places
+    // the objects of its frame slots in it while it is compiled. A copy per
+    // function would copy the whole state's layout once per function.
+    super::super::compile_resources::compile_tasks_with(
+        &order,
+        workers,
+        || layout.clone(),
+        |function_layout, index| {
             let mut function_options = options.x86_options.clone();
             function_options.function = Some(celox_sir::FunctionId(
                 u32::try_from(index).map_err(|_| codegen_message("too many function units"))?,
@@ -348,10 +387,10 @@ fn compile_function_units(
                 .ok_or_else(|| codegen_message("function units without their frames"))?
                 .frames[index];
             let placed =
-                emit::place_frame_slots(&mut function_layout, frame).map_err(codegen_message)?;
+                emit::place_frame_slots(function_layout, frame).map_err(codegen_message)?;
             let compiled = compile_unit_refs(
-                &[&function.unit],
-                &function_layout,
+                &[&functions[index].unit],
+                function_layout,
                 options.four_state,
                 &format!("function[{index}]"),
                 NativeMergeKind::Complete,
@@ -361,10 +400,11 @@ fn compile_function_units(
                 &options.optimize_options.diagnostics,
                 cancel,
             );
-            emit::remove_frame_slots(&mut function_layout, &placed);
+            emit::remove_frame_slots(function_layout, &placed);
             compiled
-        })
-        .collect::<Result<Vec<_>, _>>()
+        },
+    )
+    .map_err(|_| codegen_message("native function compile thread panicked"))?
 }
 
 /// The unit a derived edge inlines instead of combinational logic outlined
@@ -505,10 +545,9 @@ fn compile_split_comb(
             )
         }
     })
-    .map_err(|_| codegen_message("native compile worker panicked"))?;
+    .map_err(|_| codegen_message("native compile worker panicked"))??;
     let mut compiled = HashMap::default();
     for (index, code) in codes.into_iter().enumerate() {
-        let code = code?;
         if index < ff_count {
             compiled.insert(index, code);
         } else {
@@ -761,8 +800,6 @@ fn compile_remaining_processes(
         compile_process(index, &process_options)
     })
     .map_err(|_| codegen_message("native process compile thread panicked"))?
-    .into_iter()
-    .collect::<Result<Vec<_>, _>>()
 }
 
 /// Compile the clock alias kernels of a two-state program without forces.
