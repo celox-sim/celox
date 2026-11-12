@@ -377,3 +377,65 @@ sv_backends! {
         assert_eq!(u64::try_from(sim.get(sim.signal("nested"))).unwrap(), 0x4);
     }
 }
+
+/// An element of a packed parameter of more than one dimension wider than
+/// 128 bits is the element, not a bit of the parameter (IEEE 1800-2023
+/// 7.4.1), also as the default of a parameter of a module header.
+/// Verilator 5.054 prints the same lines.
+#[test]
+fn elements_of_wide_packed_parameters_are_elements() {
+    let source = r#"`timescale 1ns/1ns
+package cfg_pkg;
+  typedef struct packed { int a; int b; } cfg_s;
+  parameter cfg_s [3:0] all_cfgs_gp = {64'h0000_001f_0000_0020, 64'h0000_0015_0000_0016, 64'h0000_000b_0000_000c};
+endpackage
+module leaf import cfg_pkg::*; #(parameter int sel_p = 0, localparam cfg_s cfg_lp = all_cfgs_gp[sel_p]) ();
+  initial #1 $display("leaf sel=%0d lp=%h", sel_p, cfg_lp);
+endmodule
+module top;
+  localparam logic [1:0][64:0] t130_lp = {65'h0000_0015_0000_0016, 65'h0000_000b_0000_000c};
+  localparam logic [2:0][63:0] t192_lp = {64'h0000_0015_0000_0016, 64'h0000_000b_0000_000c};
+  localparam logic [64:0] e130_lp = t130_lp[1];
+  localparam logic [63:0] e192_lp = t192_lp[1];
+  localparam logic [63:0] o192_lp = t192_lp[2];
+  localparam logic b192_lp = t192_lp[1][4];
+  parameter int sel_p = 1;
+  localparam logic [63:0] s192_lp = t192_lp[sel_p];
+  logic [e192_lp[7:0]-1:0] sized;
+  for (genvar i = 0; i < 3; i++) begin : g
+    leaf #(.sel_p(i)) l ();
+  end
+  initial #1 $display("e130=%h e192=%h o192=%h b192=%b s192=%h bits=%0d", e130_lp, e192_lp, o192_lp, b192_lp, s192_lp, $bits(sized));
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("wide_elements.sv"))],
+            "top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let mut lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                "e130=00000001500000016 e192=0000001500000016 o192=0000000000000000 b192=1 s192=0000001500000016 bits=22",
+                "leaf sel=0 lp=0000000b0000000c",
+                "leaf sel=1 lp=0000001500000016",
+                "leaf sel=2 lp=0000001f00000020",
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
