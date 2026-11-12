@@ -45,6 +45,7 @@ export function githubClient(repository) {
     dispatchPackages: tag => {
       cli(["api", "--method", "POST", `repos/${repository}/dispatches`, "--input", "-"], JSON.stringify({ event_type: "napi-release", client_payload: { tag } }));
       cli(["workflow", "run", "publish-crates.yml", "--repo", repository, "--ref", tag]);
+      cli(["workflow", "run", "publish-cli.yml", "--repo", repository, "--ref", tag]);
     },
     markTagged: number => cli(["pr", "edit", String(number), "--repo", repository, "--remove-label", "autorelease: pending", "--add-label", "autorelease: tagged"]),
   };

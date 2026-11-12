@@ -178,6 +178,27 @@ Adding another public crate later requires the same bounded bootstrap only for
 that new name. The local script skips existing `0.0.0` placeholders and Trusted
 Publisher configurations; existing crates continue to publish through OIDC.
 
+## CLI binaries
+
+The `celox` crate also provides the `celox` command and its `veryl-celox`
+entry for Veryl's external subcommands. Promotion also dispatches
+**Publish CLI Binaries** (`publish-cli.yml`) at the stable tag. Like the crate
+publisher, it checks the tag, the published GitHub Release and the candidate's
+qualification. It then builds both binaries in release mode for each target in
+its matrix and smoke-tests them by running a SystemVerilog testbench through
+`veryl-celox`. Finally it attaches `celox-<target>.tar.gz` (`.zip` on Windows)
+and `celox-sha256sums.txt` to the GitHub Release. `cargo binstall celox`
+downloads these archives through `package.metadata.binstall` in
+`crates/celox/Cargo.toml`, so the archive names and that metadata must change
+together (`scripts/publish-cli-workflow.test.mjs`).
+
+The upload replaces assets of the same name, so a retry from the stable tag
+resumes a partial upload. A workflow fix uses the same numbered recovery tag
+and `source_tag` input as the crate publisher. Uploading after publication
+requires immutable releases to stay disabled in the repository settings.
+A pull request that edits the workflow builds and smoke-tests every target
+without uploading.
+
 ## Veryl dependency lanes
 
 `master` is both the normal Celox development trunk and the stable release lane.
