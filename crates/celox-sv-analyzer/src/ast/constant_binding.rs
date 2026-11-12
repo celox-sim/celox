@@ -409,11 +409,29 @@ fn bind_in_context(
                     // dimension or a generate condition has no layout to
                     // select from, and an override is evaluated before the
                     // instance that receives it exists.
-                    if let Some(literal) =
-                        parameter_member(id, native, tree, &query_dimensions.const_env)
-                    {
-                        values.push(ConstExpr::Literal(literal));
-                        continue;
+                    if let Some((root, index, path)) = parameter_member(id, native, tree) {
+                        let literal = match index {
+                            None => parameters::member_literal(
+                                &root,
+                                &path,
+                                &query_dimensions.const_env,
+                            ),
+                            // A member of an element of an array parameter,
+                            // whose index is a constant (11.2.1).
+                            Some(index) => element_member_literal(
+                                &root,
+                                index,
+                                &path,
+                                native,
+                                tree,
+                                session,
+                                query_dimensions,
+                            ),
+                        };
+                        if let Some(literal) = literal {
+                            values.push(ConstExpr::Literal(literal));
+                            continue;
+                        }
                     }
                     let is_query = matches!(&native.expression(id).kind,ExprKind::Call{expression,..} if matches!(&native.expression(*expression).kind,ExprKind::Name(name) if SystemFunction::from_name(&name.spelling).is_some_and(|f|f.is_data_query()||matches!(f,SystemFunction::Isunbounded|SystemFunction::Typename))));
                     let mut context = if is_query {
@@ -655,24 +673,77 @@ pub(super) fn bind_unpacked_dimension(
     range.ok_or_else(|| unsupported("unresolved unpacked array dimension"))
 }
 
-/// The typed literal of native expression `id` if it selects a member, or a
-/// member of a member, of a packed structure parameter whose member
-/// constants `env` holds: `p.m`, `p.m.n` or `pkg::p.m`.
+/// The typed literal of member `path` of the element that native index
+/// expression `index` selects in the array parameter `root`, when the index
+/// is a constant in `dimensions` (IEEE 1800-2023 11.2.1).
+fn element_member_literal(
+    root: &str,
+    index: ExprId,
+    path: &str,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    let env = &dimensions.const_env;
+    let index = bind_in(index, native, tree, session, dimensions)
+        .ok()
+        .flatten()
+        .and_then(|index| eval_ast_const_expr(&tree.functions, &index, env))?;
+    parameters::array_element_member_literal(root, index, path, env)
+}
+
+/// The typed literal of native expression `id` if it selects, with a
+/// constant index, a member of an element of an array parameter that is no
+/// variable in `dimensions`, as in the initializer of another parameter.
+pub(super) fn array_parameter_member(
+    id: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    if !matches!(native.expression(id).kind, ExprKind::Member { .. }) {
+        return None;
+    }
+    let (root, Some(index), path) = parameter_member(id, native, tree)? else {
+        return None;
+    };
+    if dimensions.get(&root).is_some() {
+        return None;
+    }
+    element_member_literal(&root, index, &path, native, tree, session, dimensions)
+}
+
+/// The parameter, the index of its element and the member path that native
+/// expression `id` selects, if it selects a member, or a member of a member,
+/// of a packed structure parameter or of an element of an unpacked array
+/// parameter: `p.m`, `p.m.n`, `pkg::p.m` or `p[k].m`.
 fn parameter_member(
     mut id: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
-    env: &ConstEnv,
-) -> Option<String> {
+) -> Option<(String, Option<ExprId>, String)> {
     let mut path = Vec::new();
+    let mut index = None;
     let root = loop {
         match &native.expression(id).kind {
             ExprKind::Member {
                 expression,
                 separator,
                 name,
-            } if separator == "." => {
+            } if separator == "." && index.is_none() => {
                 path.push(instances::normalize_identifier(&name.spelling));
+                id = *expression;
+            }
+            ExprKind::Select {
+                expression,
+                dimension,
+            } if index.is_none() && !path.is_empty() => {
+                let DimensionKind::Index(selected) = dimension.kind else {
+                    return None;
+                };
+                index = Some(selected);
                 id = *expression;
             }
             ExprKind::Member {
@@ -697,7 +768,7 @@ fn parameter_member(
         return None;
     }
     path.reverse();
-    parameters::member_literal(&root, &path.join("."), env)
+    Some((root, index, path.join(".")))
 }
 
 /// The operand of native expression `id` if it is a `$typename` call.

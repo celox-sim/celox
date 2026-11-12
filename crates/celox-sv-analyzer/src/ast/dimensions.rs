@@ -351,6 +351,20 @@ pub(super) fn parameter_element_marker(name: &str, fact: impl std::fmt::Display)
     format!("__parameter::element::{fact}::{name}")
 }
 
+/// Present for an unpacked array parameter of packed structures whose
+/// element constants are published with the layout of their members; the
+/// payload is the number of members.
+pub(super) fn parameter_element_members_marker(name: &str) -> String {
+    format!("__parameter::element_members::{name}")
+}
+
+/// The `offset` of member `path` (`a.b` for a member of a member) in an
+/// element of the unpacked array parameter `name`, or its `type`: its width
+/// shifted left by one, and its sign.
+pub(super) fn parameter_element_member_marker(name: &str, fact: &str, path: &str) -> String {
+    format!("__parameter::element_member::{fact}::{path}::{name}")
+}
+
 /// Present for a parameter of packed structure type whose member constants
 /// are published; the payload is their count.
 pub(super) fn parameter_members_marker(name: &str) -> String {

@@ -78,6 +78,19 @@ pub(super) fn element_keys(name: &str, env: &ConstEnv) -> Vec<String> {
         }
         keys.push(packed);
     }
+    let members = parameter_element_members_marker(name);
+    if env.contains_key(&members) {
+        keys.push(members);
+        keys.extend(
+            env.keys()
+                .filter(|key| {
+                    key.starts_with("__parameter::element_member::")
+                        && key.ends_with(name)
+                        && scope::split_marker(key).is_some_and(|(_, marked)| marked == name)
+                })
+                .cloned(),
+        );
+    }
     keys
 }
 
@@ -85,6 +98,84 @@ pub(super) fn element_keys(name: &str, env: &ConstEnv) -> Vec<String> {
 /// outermost first, of the elements of the unpacked array parameter `name`.
 fn element_packed_marker(name: &str, dimension: i128, bound: &str) -> String {
     dimensions::parameter_element_marker(name, format!("packed_{dimension}_{bound}"))
+}
+
+/// The constants that publish the layout of the members of an element of
+/// the unpacked array parameter `name` of packed structures `members`, with
+/// the members of their members: a member select of an element of a
+/// parameter is a constant expression (IEEE 1800-2023 11.2.1, A.8.4
+/// `constant_select`) of the member's declared width and sign (7.2.1).
+pub(super) fn element_member_markers(
+    functions: &const_functions::ConstantFunctions,
+    env: &ConstEnv,
+    name: &str,
+    members: &[packed_structs::PackedMember],
+) -> Vec<(String, i128)> {
+    let mut markers = Vec::new();
+    for (path, offset, r#type) in packed_structs::constant_members(functions, members, env) {
+        let Ok(offset) = i128::try_from(offset) else {
+            continue;
+        };
+        markers.push((
+            parameter_element_member_marker(name, "offset", &path),
+            offset,
+        ));
+        markers.push((
+            parameter_element_member_marker(name, "type", &path),
+            ((r#type.width as i128) << 1) | i128::from(r#type.signed),
+        ));
+    }
+    if !markers.is_empty() {
+        markers.push((
+            parameter_element_members_marker(name),
+            (markers.len() / 2) as i128,
+        ));
+    }
+    markers
+}
+
+/// The typed literal of member `path` of the element that `index` selects
+/// in the unpacked array parameter `name`, when its elements and their
+/// layout are published. An index out of range reads the member of a
+/// nonexistent entry: zero for a two-state element type and X otherwise
+/// (IEEE 1800-2023 Table 7-1).
+pub(super) fn array_element_member_literal(
+    name: &str,
+    index: i128,
+    path: &str,
+    env: &ConstEnv,
+) -> Option<String> {
+    let offset =
+        usize::try_from(*env.get(&parameter_element_member_marker(name, "offset", path))?).ok()?;
+    let r#type = *env.get(&parameter_element_member_marker(name, "type", path))?;
+    let width = usize::try_from(r#type >> 1).ok()?;
+    let signed = r#type & 1 != 0;
+    let count = usize::try_from(*env.get(&dimensions::parameter_elements_marker(name))?).ok()?;
+    let left = *env.get(&dimensions::parameter_element_marker(name, "left"))?;
+    let right = *env.get(&dimensions::parameter_element_marker(name, "right"))?;
+    let element = *env.get(&dimensions::parameter_element_marker(name, "type"))?;
+    if index < left.min(right) || index > left.max(right) {
+        if element & 2 != 0 {
+            return Some(format_typed_parameter_literal(0, width, signed));
+        }
+        let signing = if signed { "s" } else { "" };
+        return Some(format!("{width}'{signing}b{}", "x".repeat(width)));
+    }
+    let position = usize::try_from(index.abs_diff(left))
+        .ok()
+        .filter(|position| *position < count)?;
+    let value = *env.get(&dimensions::parameter_element_marker(name, position))? as u128;
+    let member = value.checked_shr(u32::try_from(offset).ok()?).unwrap_or(0)
+        & if width >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << width) - 1
+        };
+    Some(format_typed_parameter_literal(
+        member as i128,
+        width,
+        signed,
+    ))
 }
 
 /// The constants that publish the elements of an unpacked array parameter:
@@ -724,7 +815,15 @@ pub(super) fn parameters_from_native_with_environment(
                 ) {
                     environment.array_shapes.insert(name.clone(), shape);
                     if let Some(elements) = elements {
-                        for (key, value) in element_markers(&name, &elements) {
+                        let members = element_member_markers(
+                            &syntax_tree.functions,
+                            &environment.constants,
+                            &name,
+                            &parameter_members,
+                        );
+                        for (key, value) in
+                            element_markers(&name, &elements).into_iter().chain(members)
+                        {
                             environment.values.insert(key.clone(), value);
                             environment.constants.insert(key, value);
                         }

@@ -266,8 +266,16 @@ impl ScopeElaboration<'_> {
                 // type (IEEE 1800-2023 6.19.3).
                 dims.constant_types = constant_types.clone();
                 if let Some(elements) = parameter.constant_elements(syntax_tree, session, &dims) {
+                    let members = parameters::element_member_markers(
+                        &syntax_tree.functions,
+                        &self.const_env,
+                        parameter.signal.name(),
+                        &parameter.signal.r#type().members,
+                    );
                     for (key, value) in
                         parameters::element_markers(parameter.signal.name(), &elements)
+                            .into_iter()
+                            .chain(members)
                     {
                         self.const_env.insert(key, value);
                     }
