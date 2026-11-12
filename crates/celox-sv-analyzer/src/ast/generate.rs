@@ -29,6 +29,37 @@ fn scope_component(name: &str) -> String {
     }
 }
 
+/// The name of the instance that `path` names from generate scope `scope`
+/// (the module for an empty one), as [`Item::instance_name`] spells it.
+/// Each component keeps its parsed generate index separate from its name:
+/// an escaped name may itself contain `[` (IEEE 1800-2023 5.6.1), which is
+/// not an index.
+pub(super) fn scoped_instance_name(scope: &str, path: &[(String, Option<i128>)]) -> String {
+    match path {
+        [(name, None)] if scope.is_empty() => name.clone(),
+        [(name, Some(index))] if scope.is_empty() => format!("{name}[{index}]"),
+        _ => {
+            let mut name = scope.to_string();
+            for (component, index) in path {
+                if !name.is_empty() {
+                    name.push('.');
+                }
+                // The index of a block follows its name.
+                name.push_str(&scope_component(component));
+                if let Some(index) = index {
+                    name.push_str(&format!("[{index}]"));
+                }
+            }
+            name
+        }
+    }
+}
+
+/// The generate scope that encloses `scope`.
+pub(super) fn parent_scope(scope: &str) -> &str {
+    scope.rsplit_once('.').map_or("", |(parent, _)| parent)
+}
+
 #[derive(Clone)]
 pub(super) struct Item {
     /// The symbols the scope that elaborated the item imports.

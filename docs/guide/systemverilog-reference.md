@@ -38,7 +38,11 @@ constructs without a dedicated issue point to the frontend roadmap,
 
 - `bind`, `checker`, `config`, `covergroup`, clocking blocks and clocking
   drives, user-defined primitives (UDP), and `specify` blocks.
-- `defparam` assignments; use parameter overrides at instantiation.
+- `defparam` assignments other than to a parameter of a module instance of
+  the module that has the statement, which may be in a generate block:
+  names through a child instance, names that start at `$root`, elements of
+  instance arrays, interface instances, and parameters of the statement's
+  own scope.
 - Ports and instances: non-ANSI port expressions such as
   `module m({a, b}, c[3:0], .p(d))`
   ([#1953](https://github.com/celox-sim/celox/issues/1953)) (plain non-ANSI
