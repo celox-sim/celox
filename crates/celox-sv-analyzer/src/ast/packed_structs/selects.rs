@@ -70,14 +70,96 @@ fn unknown_member(
 }
 
 fn selected_member<'a>(
+    tree: &AnalysisContext<'_>,
     path: &[String],
     dimensions: &'a PackedDimensions,
-) -> Option<(usize, &'a Type)> {
+) -> Option<(usize, Cow<'a, Type>)> {
     let root = dimensions.get(path.first()?)?;
     if !root.unpacked.is_empty() || root.packed.len() != 1 {
         return None;
     }
-    member_in(root, &path[1..])
+    if let Some((offset, r#type)) = member_in(root, &path[1..]) {
+        return Some((offset, Cow::Borrowed(r#type)));
+    }
+    indexed_member_in(tree, root, &path[1..], dimensions)
+        .map(|(offset, r#type)| (offset, Cow::Owned(r#type)))
+}
+
+/// The offset and type of member path `path` in a packed structure of
+/// `root`'s element type, whose components may select elements of packed
+/// array members, such as `arr[0]` of `s.arr[0].f` (IEEE 1800-2023 7.2.1,
+/// 7.4.1). An index outside a member's range selects no member.
+fn indexed_member_in(
+    tree: &AnalysisContext<'_>,
+    root: &VariableDimensions,
+    path: &[String],
+    dimensions: &PackedDimensions,
+) -> Option<(usize, Type)> {
+    let constant =
+        |expr: &ConstExpr| eval_ast_const_expr(&tree.functions, expr, &dimensions.const_env);
+    let mut members = root.members.as_slice();
+    let mut offset = 0usize;
+    let mut selected = None;
+    for component in path {
+        let (name, indices) = indexed_component(component)?;
+        let member = members.iter().find(|member| member.name == name)?;
+        if member.is_void || member.is_tagged() {
+            return None;
+        }
+        offset = offset.checked_add(member.offset)?;
+        let mut r#type = member.r#type.clone();
+        for index in indices {
+            // An element of the outermost packed dimension; an index of the
+            // last one would select a bit, which has no members.
+            if r#type.packed_ranges.len() < 2 {
+                return None;
+            }
+            let range = r#type.packed_ranges.remove(0);
+            let (left, right) = (constant(&range.left)?, constant(&range.right)?);
+            let position = if left >= right {
+                index.checked_sub(right)?
+            } else {
+                right.checked_sub(index)?
+            };
+            if position < 0 || position > left.abs_diff(right) as i128 {
+                return None;
+            }
+            // An element of a named type keeps its signedness; one of a
+            // packed array otherwise is unsigned (7.4.1).
+            r#type.is_signed = r#type.signed_element_depth == Some(1);
+            r#type.signed_element_depth = r#type
+                .signed_element_depth
+                .and_then(|depth| depth.checked_sub(1))
+                .filter(|depth| *depth > 0);
+            let width = expr_type_from_type(&tree.functions, &r#type, &dimensions.const_env)?.width;
+            offset = offset.checked_add(usize::try_from(position).ok()?.checked_mul(width)?)?;
+        }
+        members = if r#type.packed_ranges.len() == 1 {
+            &member.r#type.members
+        } else {
+            &[]
+        };
+        selected = Some(r#type);
+    }
+    selected.map(|r#type| (offset, r#type))
+}
+
+/// The member name and constant indices of a member path component, such
+/// as `arr` and `[0, 1]` of `arr[0][1]`, or `f` and none of `f`.
+fn indexed_component(component: &str) -> Option<(&str, Vec<i128>)> {
+    let Some((name, mut rest)) = component.split_once('[') else {
+        return Some((component, Vec::new()));
+    };
+    let mut indices = Vec::new();
+    loop {
+        let (index, after) = rest.split_once(']')?;
+        indices.push(index.parse().ok()?);
+        match after.strip_prefix('[') {
+            Some(next) => rest = next,
+            None if after.is_empty() => return Some((name, indices)),
+            None => return None,
+        }
+    }
 }
 
 /// The offset and type of member path `path` in a packed structure of
@@ -184,13 +266,13 @@ pub(in crate::ast) fn whole_member(
     if let Some(name) = generate_scope_signal(&path, bound_interface, dimensions) {
         return Ok(LValue::Ident(name));
     }
-    let (offset, ty) = selected_member(&path, dimensions)
+    let (offset, ty) = selected_member(tree, &path, dimensions)
         .ok_or_else(|| unknown_member(&path, bound_interface, dimensions))?;
     finish_lvalue(
         tree,
         &path,
         offset,
-        ty,
+        &ty,
         LValue::Ident(path[0].clone()),
         dimensions,
     )
@@ -221,14 +303,14 @@ pub(in crate::ast) fn select_member(
     if let Some(name) = generate_scope_signal(&path, bound_interface, dimensions) {
         return select(name, dimensions, false);
     }
-    let (offset, ty) = selected_member(&path, dimensions)
+    let (offset, ty) = selected_member(tree, &path, dimensions)
         .ok_or_else(|| unknown_member(&path, bound_interface, dimensions))?;
     let relative = select(
         path[0].clone(),
-        &member_dimensions(&path[0], ty, dimensions),
+        &member_dimensions(&path[0], &ty, dimensions),
         true,
     )?;
-    finish_lvalue(tree, &path, offset, ty, relative, dimensions).ok_or_else(|| {
+    finish_lvalue(tree, &path, offset, &ty, relative, dimensions).ok_or_else(|| {
         unsupported(format!(
             "select of structure member `{}` outside the member",
             path.join(".")

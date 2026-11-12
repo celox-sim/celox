@@ -223,6 +223,72 @@ sv_backends! {
     }
 }
 
+/// Members of the elements of packed array members of a packed structure,
+/// such as `s.arr[0].f` (IEEE 1800-2023 7.2.1, 7.4.1), read and written,
+/// of descending, ascending and multidimensional arrays.
+const ARRAY_MEMBER_ELEMENTS: &str = r#"
+    module Top(input logic clk, input logic [7:0] d,
+               output logic [3:0] f0, g1, h, a3, output logic [31:0] tw, uw);
+        typedef struct packed { logic [3:0] f; logic [3:0] g; } in_t;
+        typedef struct packed { in_t [1:0] arr; in_t [0:1] asc; } s_t;
+        typedef struct packed { in_t [1:0][1:0] grid; } m_t;
+        s_t s;
+        m_t m;
+        assign s = 32'h1234_5678;
+        assign m = 32'h89ab_cdef;
+        assign f0 = s.arr[0].f;
+        assign g1 = s.arr[1].g;
+        assign h = s.asc[0].g;
+        assign a3 = m.grid[1][0].f;
+        s_t t, u;
+        always_comb begin
+            t = '0;
+            t.arr[1].f = d[3:0];
+            t.asc[1].g = d[7:4];
+        end
+        always_ff @(posedge clk) begin
+            u.arr[0].g <= d[3:0];
+            u.asc[0].f <= d[7:4];
+        end
+        initial u = '0;
+        assign tw = t;
+        assign uw = u;
+    endmodule
+"#;
+
+fn array_member_elements<B: celox::SimBackend>(sim: &mut celox::Simulator<B>) {
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let f0 = sim.signal("f0");
+    let g1 = sim.signal("g1");
+    let h = sim.signal("h");
+    let a3 = sim.signal("a3");
+    let tw = sim.signal("tw");
+    let uw = sim.signal("uw");
+    assert_eq!(sim.get(f0), 0x3u8.into(), "s.arr[0].f");
+    assert_eq!(sim.get(g1), 0x2u8.into(), "s.arr[1].g");
+    assert_eq!(sim.get(h), 0x6u8.into(), "s.asc[0].g");
+    assert_eq!(sim.get(a3), 0xau8.into(), "m.grid[1][0].f");
+    sim.set(d, 0xc5u8);
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(tw), 0x5000_000cu32.into(), "t.arr[1].f, t.asc[1].g");
+    assert_eq!(sim.get(uw), 0x0005_c000u32.into(), "u.arr[0].g, u.asc[0].f");
+}
+
+sv_backends! {
+    fn packed_struct_members_of_packed_array_member_elements(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(vec![(ARRAY_MEMBER_ELEMENTS, Path::new("array_member_elements.sv"))], "Top");
+        array_member_elements(&mut sim);
+    }
+
+    fn packed_struct_members_of_packed_array_member_elements_four_state(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(vec![(ARRAY_MEMBER_ELEMENTS, Path::new("array_member_elements.sv"))], "Top").four_state(true);
+        array_member_elements(&mut sim);
+    }
+}
+
 /// The known bits and the mask of signal `name`.
 fn known_and_mask<B: celox::SimBackend>(sim: &mut celox::Simulator<B>, name: &str) -> (u64, u64) {
     let signal = sim.signal(name);

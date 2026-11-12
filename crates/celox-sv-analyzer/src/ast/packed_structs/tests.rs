@@ -181,9 +181,7 @@ fn checks_member_access_on_packed_struct_array_aliases() {
         ("value.a", false),
         ("value[0].a", true),
         ("outer.pairs.a", false),
-        // Selecting an array held inside another packed member remains
-        // outside the current element-member lowering path.
-        ("outer.pairs[0].a", false),
+        ("outer.pairs[0].a", true),
     ] {
         let source = format!(
             "module Top(output logic [3:0] y); typedef struct packed {{ logic [3:0] a, b; }} t; typedef t [1:0] pair_t; pair_t value; struct packed {{ pair_t pairs; logic flag; }} outer; assign y = {access}; endmodule"
