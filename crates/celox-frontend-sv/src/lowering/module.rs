@@ -131,12 +131,15 @@ fn lower_module_with_overrides(
     };
     let shared_process_variables = shared_process_variables.as_ref();
     // The rewrite visits the edge processes in order, once each.
+    let sharing = edge_processes_sharing_variables(&module, &constants, &parameter_types);
     let fallbacks = module
         .ff_processes()
         .iter()
-        .map(|process| {
+        .enumerate()
+        .map(|(index, process)| {
             runs_as_process(&module, process, &constants, &parameter_types)
                 || shares_foreign_variable(&module, process, foreign_writes)
+                || sharing.contains(&index)
         })
         .collect::<Vec<_>>();
     if fallbacks.contains(&true) {

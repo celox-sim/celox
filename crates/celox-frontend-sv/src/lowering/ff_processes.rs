@@ -505,6 +505,76 @@ pub(super) fn shares_foreign_variable(
     })
 }
 
+/// The edge processes, by index, that are an edge-sensitive `always`
+/// writing bits of a variable another ordinary `always` of the module
+/// writes too, where the flip-flop form cannot share it. Several such
+/// procedures may write one variable, the last write determining its value
+/// (IEEE 1800-2023 6.5); only an `always_ff`, an `always_comb` or an
+/// `always_latch` must be the only writer (9.2.2). The flip-flop form shares
+/// a variable that edge procedures write only by blocking assignments (see
+/// `shared_edge_variables`) and a memory that only edge procedures write
+/// (see `shared_edge_memories`); for any other, such as one a procedure
+/// writes by nonblocking assignments and another by blocking ones, each
+/// write must store into the variable as it executes, so the procedure runs
+/// as a process waiting on its events, as one writing a variable of another
+/// instance does (see `shares_foreign_variable`).
+pub(super) fn edge_processes_sharing_variables(
+    module: &sv::ir::Module,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> HashSet<usize> {
+    let ff = module.ff_processes();
+    let mut sharing = HashSet::default();
+    if ff.iter().all(sv::ir::FfProcess::is_always_ff) {
+        return sharing;
+    }
+    let edge = module.comb_processes().len()..module.comb_processes().len() + ff.len();
+    // An edge-sensitive `always`, or an ordinary `always` run as a process.
+    let ordinary = |driver: usize| {
+        if edge.contains(&driver) {
+            !ff[driver - edge.start].is_always_ff()
+        } else {
+            drivers::shares_variables(module, driver)
+        }
+    };
+    let drivers = ModuleDrivers::new(module, constants, parameter_types);
+    let flip_flop_shared = shared_edge_variables(module, &drivers);
+    let memories = module
+        .signals()
+        .iter()
+        .filter(|signal| !signal.r#type().unpacked_ranges().is_empty())
+        .map(sv::ir::Signal::name)
+        .collect::<HashSet<_>>();
+    for (name, writes) in &drivers.writes {
+        let mut writers = writes
+            .iter()
+            .filter_map(|write| Some((write.local?, write.range.or(write.element))))
+            .filter(|(driver, _)| ordinary(*driver))
+            .collect::<Vec<_>>();
+        writers.sort_unstable();
+        writers.dedup();
+        let only_edges = writers.iter().all(|(driver, _)| edge.contains(driver));
+        if writers.iter().all(|(driver, _)| *driver == writers[0].0)
+            || (only_edges && (flip_flop_shared.contains(name) || memories.contains(name.as_str())))
+        {
+            continue;
+        }
+        for (index, &(left, left_range)) in writers.iter().enumerate() {
+            for &(right, right_range) in &writers[index + 1..] {
+                if left != right && net_driver_ranges_overlap(left_range, right_range) {
+                    sharing.extend(
+                        [left, right]
+                            .into_iter()
+                            .filter(|driver| edge.contains(driver))
+                            .map(|driver| driver - edge.start),
+                    );
+                }
+            }
+        }
+    }
+    sharing
+}
+
 /// Whether a flip-flop's delayed nonblocking assignments cannot take the
 /// fused staging path: an event control or nonconstant delay, a partial or
 /// array target, a target one run of the body may assign more than once,
