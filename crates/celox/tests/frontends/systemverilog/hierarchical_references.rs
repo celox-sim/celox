@@ -162,14 +162,37 @@ fn rejects_hierarchical_writes_next_to_exclusive_drivers() {
          module Top; logic clk = 0; C c(.clk(clk)); always_ff @(posedge clk) c.v <= 8'd9; endmodule",
     );
     assert!(error.contains("an always_ff process writes it"), "{error}");
-    // Two repeating writers of one packed variable would lose bits.
-    let error = build_error(
-        "module C(input logic clk, input logic [2:0] idx); logic [7:0] q = 0; \
-         always @(posedge clk) q[idx] <= 1'b1; endmodule \
-         module Top; logic clk = 0; logic [2:0] idx = 7; C c(.clk(clk), .idx(idx)); \
-         always @(posedge clk) c.q[0] = 1'b1; endmodule",
-    );
-    assert!(error.contains("another process writes it too"), "{error}");
+}
+
+// Ordinary `always` processes may write one variable, also through a
+// hierarchical name (IEEE 1800-2023 6.5): each write stores the bits it
+// assigns, so neither loses the bits of the other.
+#[test]
+fn ordinary_always_processes_share_a_variable_through_hierarchical_names() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module C(input logic clk, input logic [2:0] idx);
+            logic [7:0] q = 0;
+            always @(posedge clk) q[idx] <= 1'b1;
+        endmodule
+        module Top(output logic [7:0] seen);
+            logic clk = 0;
+            logic [2:0] idx = 7;
+            C c(.clk(clk), .idx(idx));
+            always @(posedge clk) c.q[0] = 1'b1;
+            initial begin
+                #1 clk = 1;
+                #1 clk = 0; idx = 3;
+                #1 clk = 1;
+                #1 seen = c.q;
+            end
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("hier.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    sim.run_until(10).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 0b1000_1001u8.into());
 }
 
 // Names in a module with an interface port resolve in the module as

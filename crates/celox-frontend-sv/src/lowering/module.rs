@@ -134,7 +134,10 @@ fn lower_module_with_overrides(
     let fallbacks = module
         .ff_processes()
         .iter()
-        .map(|process| runs_as_process(&module, process, &constants, &parameter_types))
+        .map(|process| {
+            runs_as_process(&module, process, &constants, &parameter_types)
+                || shares_foreign_variable(&module, process, foreign_writes)
+        })
         .collect::<Vec<_>>();
     if fallbacks.contains(&true) {
         let mut fallbacks = fallbacks.into_iter();
