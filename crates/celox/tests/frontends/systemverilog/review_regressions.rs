@@ -699,7 +699,7 @@ fn rejects_generate_local_typedefs_instead_of_leaking_them() {
         "#,
     );
     assert!(
-        error.contains("combinational expression assigned to `y`"),
+        error.contains("`T` is not declared"),
         "unexpected error: {error}"
     );
 }

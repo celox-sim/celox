@@ -364,6 +364,28 @@ pub(super) fn item_names(id: celox_sv_syntax::BodyItemId, tree: &SyntaxTree) -> 
                 }
             }
         }
+        // The type a covergroup or a user-defined nettype declares (IEEE
+        // 1800-2023 19.3, 6.6.7), which Celox keeps unconverted.
+        BodyItemKind::Unconverted { category, .. }
+            if matches!(category.as_str(), "covergroup" | "nettype") =>
+        {
+            let tokens = native.body_item(id).tokens.range();
+            for name in native
+                .covergroups
+                .iter()
+                .map(|covergroup| (&covergroup.name, covergroup.tokens))
+                .chain(
+                    native
+                        .nettypes
+                        .iter()
+                        .map(|nettype| (&nettype.name, nettype.tokens)),
+                )
+                .filter(|(_, declared)| tokens.contains(&declared.start))
+                .map(|(name, _)| name)
+            {
+                add(name);
+            }
+        }
         _ => {}
     }
     for id in types {

@@ -35,6 +35,11 @@ impl ScopeElaboration<'_> {
                 .map(|(name, ty)| (name.clone(), ty.clone()))
                 .chain(classes::scope_class_types(syntax_tree))
                 .collect(),
+            // The types the scope declares, also those that have no
+            // binding, for its importers (IEEE 1800-2023 26.3). Those it
+            // imports are the exporting packages' own, which an import
+            // or export makes visible by name.
+            type_declarations: types::declared_type_names(syntax_tree).unwrap_or_default(),
             enum_constants: self.enum_constants.clone(),
             constant_types: (*self.packed_dimensions.constant_types).clone(),
             functions: self.functions.clone(),

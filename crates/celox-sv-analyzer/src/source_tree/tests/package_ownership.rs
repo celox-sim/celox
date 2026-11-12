@@ -116,9 +116,10 @@ fn native_binding_item_membership_and_export_role_are_authoritative() {
     ));
     Source::from_syntax(&tree).unwrap();
     tree.declarations.package_bindings[0].items.pop();
+    // Without the binding's item `T`, the port type names nothing visible.
     let error = Source::from_syntax(&tree).unwrap_err();
     assert!(
-        matches!(&error, AnalyzerError::Unsupported(detail) if detail == "unsupported port data type"),
+        matches!(&error, AnalyzerError::UndeclaredIdentifier { name, .. } if name == "T"),
         "{error}"
     );
     let mut tree = parsed(&format!(

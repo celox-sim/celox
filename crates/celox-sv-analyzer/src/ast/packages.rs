@@ -181,6 +181,23 @@ impl Packages {
             .find_map(|path| self.units[path].scope.as_ref().err())
     }
 
+    /// The first error analyzing a compilation unit found that makes the
+    /// design illegal, not a construct Celox does not support: an illegal
+    /// declaration is an error even where no module uses it (IEEE 1800-2023
+    /// 3.12.1), while an unsupported one waits for a use, as
+    /// [`Self::compilation_unit_error`] says.
+    pub fn compilation_unit_illegality(&self) -> Option<&AnalyzerError> {
+        let mut paths = self.units.keys().collect::<Vec<_>>();
+        paths.sort();
+        paths.into_iter().find_map(|path| {
+            self.units[path]
+                .scope
+                .as_ref()
+                .err()
+                .filter(|error| !error.is_unsupported())
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.packages.is_empty()
     }

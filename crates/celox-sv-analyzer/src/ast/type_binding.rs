@@ -78,8 +78,10 @@ pub(super) fn port_type(
     session: &mut Session,
     env: &ConstEnv,
     aliases: &TypeAliases,
+    declarations: &Arc<types::TypeDeclarations>,
 ) -> Converted<Option<Type>> {
-    let context = PackedDimensions::new(HashMap::default(), env, aliases);
+    let mut context = PackedDimensions::new(HashMap::default(), env, aliases);
+    context.type_declarations = Some(declarations.clone());
     let Some(id) = port.data_type else {
         return Ok(None);
     };
@@ -144,6 +146,7 @@ pub(super) fn local_signals(
     session: &mut Session,
     env: &ConstEnv,
     aliases: &TypeAliases,
+    declarations: Option<&Arc<types::TypeDeclarations>>,
     selected_name: Option<&str>,
     scope: Option<&PackedDimensions>,
 ) -> Converted<Vec<Signal>> {
@@ -166,7 +169,11 @@ pub(super) fn local_signals(
         {
             scope.clone()
         }
-        _ => PackedDimensions::new(HashMap::default(), env, aliases),
+        _ => {
+            let mut context = PackedDimensions::new(HashMap::default(), env, aliases);
+            context.type_declarations = declarations.cloned();
+            context
+        }
     };
     let Some(base) = bind(declaration.data_type, tree, session, &context)? else {
         // Ports, and variables of a generate block, are not in the scope of
@@ -215,6 +222,7 @@ pub(super) fn net_signals(
     session: &mut Session,
     env: &ConstEnv,
     aliases: &TypeAliases,
+    declarations: Option<&Arc<types::TypeDeclarations>>,
     selected_name: Option<&str>,
 ) -> Converted<Vec<Signal>> {
     if declaration.net_type == "interconnect" {
@@ -226,7 +234,8 @@ pub(super) fn net_signals(
     ) {
         return Err(unsupported("unsupported net data type"));
     }
-    let context = PackedDimensions::new(HashMap::default(), env, aliases);
+    let mut context = PackedDimensions::new(HashMap::default(), env, aliases);
+    context.type_declarations = declarations.cloned();
     let Some(base) = bind(declaration.data_type, tree, session, &context)? else {
         return Err(unsupported("unsupported net data type"));
     };
@@ -362,13 +371,16 @@ pub(super) fn alias_base_type(
     session: &mut Session,
     env: impl ToShared<i128, ConstEnv>,
     aliases: impl ToShared<Type, TypeAliases>,
+    declarations: Option<&Arc<types::TypeDeclarations>>,
     defer_class_defaults: bool,
 ) -> Converted<Option<Type>> {
-    // Typedef type-reference inference is outside the supported alias path.
+    // A typedef of a type reference (IEEE 1800-2023 6.23) is not bound,
+    // rather than skipped as if it named nothing.
     if matches!(native.data_type(id).kind, DataTypeKind::TypeOf(_)) {
-        return Ok(None);
+        return Err(unsupported("typedef of a type reference"));
     }
-    let context = PackedDimensions::new(HashMap::default(), env, aliases);
+    let mut context = PackedDimensions::new(HashMap::default(), env, aliases);
+    context.type_declarations = declarations.cloned();
     binding::bind_alias_in(id, native, tree, session, &context, defer_class_defaults)
 }
 
@@ -425,9 +437,11 @@ pub(super) fn alias_signals(
     session: &mut Session,
     env: &ConstEnv,
     aliases: &TypeAliases,
+    declarations: Option<&Arc<types::TypeDeclarations>>,
     selected_name: Option<&str>,
 ) -> Converted<Vec<Signal>> {
-    let context = PackedDimensions::new(HashMap::default(), env, aliases);
+    let mut context = PackedDimensions::new(HashMap::default(), env, aliases);
+    context.type_declarations = declarations.cloned();
     let Some(base) = bind(declaration.data_type, tree, session, &context)? else {
         return Ok(Vec::new());
     };

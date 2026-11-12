@@ -286,7 +286,12 @@ fn unit_import_collisions_and_commented_unit_scopes() {
          module Top(output logic [7:0] y); assign y = 0; endmodule",
         "unit.sv",
     )]);
-    assert!(detail.contains("the compilation unit declares"), "{detail}");
+    // The unit's own analysis reports the conflict even before a module
+    // uses the unit (IEEE 1800-2023 26.3).
+    assert!(
+        detail.contains("`import p::X;` names an item the"),
+        "{detail}"
+    );
     let mut simulator = build(&[
         (
             "localparam int W = 2;

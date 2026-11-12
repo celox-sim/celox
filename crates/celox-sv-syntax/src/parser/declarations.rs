@@ -1226,6 +1226,9 @@ impl Parser<'_> {
                 }
                 if let Some(category) = frame.typed_category.take() {
                     let start = frame.builder.pending.unwrap_or(self.at - 1);
+                    if category == "nettype" {
+                        self.record_nettype(start);
+                    }
                     frame.builder.complete(
                         self,
                         start,

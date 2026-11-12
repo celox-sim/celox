@@ -4,8 +4,12 @@ use super::*;
 
 impl Parser<'_> {
     pub(super) fn coverage_header(&mut self) -> Result<()> {
+        let start = self.at;
         self.expect("covergroup")?;
-        self.name()?;
+        let name = self.name()?;
+        let tokens = self.range(start);
+        self.covergroups
+            .push(CovergroupDeclaration { name, tokens });
         if self.peek() == "(" {
             self.subroutine_ports(true)?;
         }
@@ -108,5 +112,42 @@ impl Parser<'_> {
                 _ => return Err(self.error("expected a coverage event identifier")),
             }
         }
+    }
+
+    /// Record the nettype declaration from `start` through the `;` just
+    /// read (IEEE 1800-2023 6.6.7): its name is the identifier before
+    /// `with`, or before the `;`.
+    pub(super) fn record_nettype(&mut self, start: usize) {
+        let words = (start..self.at)
+            .map(|at| &self.tokens[self.indices[at]])
+            .collect::<Vec<_>>();
+        let mut depth = 0usize;
+        let mut end = words.len().saturating_sub(1);
+        for (index, word) in words.iter().enumerate() {
+            match word.text.as_str() {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => depth = depth.saturating_sub(1),
+                "with" if depth == 0 => {
+                    end = index;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let Some(name) = end.checked_sub(1).and_then(|at| words.get(at)) else {
+            return;
+        };
+        if !matches!(
+            name.kind,
+            crate::TokenKind::Identifier | crate::TokenKind::EscapedIdentifier
+        ) {
+            return;
+        }
+        let name = Name {
+            spelling: name.text.clone(),
+            origin: name.origin,
+        };
+        let tokens = self.range(start);
+        self.nettypes.push(NettypeDeclaration { name, tokens });
     }
 }

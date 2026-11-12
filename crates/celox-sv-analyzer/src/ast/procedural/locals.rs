@@ -22,6 +22,7 @@ impl BodyBuilder<'_, '_, '_> {
             alias,
             &self.dims.const_env,
             &aliases,
+            self.dims.type_declarations.as_ref(),
             &mut members,
         )?
         .ok_or_else(|| unsupported("local type declaration of this type"))?;
@@ -107,6 +108,7 @@ impl BodyBuilder<'_, '_, '_> {
             self.session,
             &self.dims.const_env,
             &self.type_aliases,
+            self.dims.type_declarations.as_ref(),
             None,
             Some(&self.dims),
         )?;

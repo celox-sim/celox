@@ -1246,6 +1246,24 @@ pub enum AssertionDeclarationKind {
     Property,
 }
 
+/// The header of a covergroup declaration (IEEE 1800-2023 19.3), which
+/// declares a covergroup type of its name; its body stays unconverted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CovergroupDeclaration {
+    pub name: Name,
+    /// From `covergroup` through the name.
+    pub tokens: TokenRange,
+}
+
+/// A user-defined nettype declaration (IEEE 1800-2023 6.6.7), `nettype
+/// data_type name [with ...];` or `nettype other name;`, which declares a
+/// net type of its name; the declaration stays unconverted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NettypeDeclaration {
+    pub name: Name,
+    pub tokens: TokenRange,
+}
+
 /// A named sequence (IEEE 1800-2023 16.8) or property (16.12) without formal
 /// arguments or assertion variables. A sequence body has no `disable iff` or
 /// implication.
