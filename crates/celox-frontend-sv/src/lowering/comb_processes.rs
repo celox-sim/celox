@@ -171,8 +171,16 @@ pub(super) fn lower_comb_processes(
         comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
         let lowered = comb.lower_process(process.body());
         // The guarded unit accepts whatever the symbolic form refuses of an
-        // `always @*`, as it did before the symbolic attempt.
+        // `always @*`, as it did before the symbolic attempt, and runs a
+        // loop whose condition the symbolic form cannot bound, as in
+        // `for (i = W - 2; done == 0; i = i - 1)`: the process executes its
+        // statements, so the loop ends as the values make it end.
         let fallback = (symbolic_star && lowered.is_err())
+            || matches!(
+                &lowered,
+                Err(sv::AnalyzerError::Unsupported(reason))
+                    if reason == comb::RUNTIME_LOOP_CONDITION
+            )
             || matches!(
                 &lowered,
                 Err(sv::AnalyzerError::Unsupported(reason))

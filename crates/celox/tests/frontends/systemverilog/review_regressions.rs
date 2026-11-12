@@ -8328,11 +8328,12 @@ fn out_of_range_bits_of_a_two_state_packed_select_read_zero() {
 }
 
 #[test]
-fn run_time_bound_loop_return_reports_unsupported_on_a_small_stack() {
+fn run_time_bound_loop_return_runs_on_a_small_stack() {
     // Each symbolically unrolled iteration deepens the loop's `break` and
     // `return` conditions. Constant evaluation of those conditions must not
-    // recurse once per level: the diagnostic is reported on a 2 MiB thread,
-    // libtest's default, in a debug build.
+    // recurse once per level: the symbolic form gives the loop up, and the
+    // process runs as a guarded unit, on a 2 MiB thread, libtest's
+    // default, in a debug build.
     let source = r#"
         module Top (
             input  logic [7:0] a,
@@ -8364,16 +8365,27 @@ fn run_time_bound_loop_return_reports_unsupported_on_a_small_stack() {
             end
         endmodule
     "#;
-    let error = std::thread::Builder::new()
+    let outs = std::thread::Builder::new()
         .stack_size(2 * 1024 * 1024)
-        .spawn(move || cranelift_build_error(source))
+        .spawn(move || {
+            let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("review.sv"))], "Top")
+                .build_cranelift()
+                .unwrap();
+            let (a, stop, count) = (sim.signal("a"), sim.signal("stop"), sim.signal("count"));
+            [(1u8, 3u8), (0, 3), (0, 0)].map(|(early, iterations)| {
+                sim.modify(|io| {
+                    io.set(a, 5u8);
+                    io.set(stop, early);
+                    io.set(count, iterations);
+                })
+                .unwrap();
+                u8::try_from(sim.get(sim.signal("out"))).unwrap()
+            })
+        })
         .unwrap()
         .join()
         .unwrap();
-    assert!(
-        error.contains("loop condition that depends on run-time values"),
-        "{error}"
-    );
+    assert_eq!(outs, [6, 5, 5]);
 }
 
 #[test]

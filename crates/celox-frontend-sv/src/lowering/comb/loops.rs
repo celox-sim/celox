@@ -171,9 +171,7 @@ impl Comb<'_, '_> {
             if guard.is_some() {
                 symbolic_iterations += 1;
                 if symbolic_iterations > MAX_SYMBOLIC_ITERATIONS {
-                    return Err(unsupported(
-                        "loop condition that depends on run-time values",
-                    ));
+                    return Err(unsupported(RUNTIME_LOOP_CONDITION));
                 }
             }
             let mut iteration = store.fork();
@@ -613,3 +611,8 @@ impl Comb<'_, '_> {
 /// Iterations unrolled under a run-time loop condition before the loop is
 /// considered unbounded.
 pub(super) const MAX_SYMBOLIC_ITERATIONS: usize = 1024;
+
+/// Why the symbolic form refuses a loop it cannot bound; the process then
+/// runs as a guarded unit (see `lower_comb_processes`).
+pub(in crate::lowering) const RUNTIME_LOOP_CONDITION: &str =
+    "loop condition that depends on run-time values";
