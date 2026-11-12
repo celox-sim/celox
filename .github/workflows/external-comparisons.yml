@@ -13,7 +13,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  yield:
+    # Scheduled runs start hours after their cron time and then hold runners
+    # for hours while pull request CI waits. Skip a scheduled run while CI is
+    # backed up; the next night measures master again.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      run: ${{ steps.queue.outputs.run }}
+    steps:
+      - id: queue
+        env:
+          EVENT: ${{ github.event_name }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run=true
+          if [ "$EVENT" = schedule ]; then
+            queued=$(gh run list --workflow ci.yml --status queued --limit 100 --json databaseId --jq length)
+            if [ "$queued" -gt 2 ]; then
+              run=false
+              echo "::notice::Skipped: $queued CI runs are waiting for runners."
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
   external-suites:
+    needs: yield
+    if: needs.yield.outputs.run == 'true'
     name: External suite (${{ matrix.suite }}, ${{ matrix.tool }})
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -113,7 +143,7 @@ jobs:
   report:
     name: Report external comparisons
     needs: external-suites
-    if: ${{ !cancelled() && (github.ref_name == 'master' || github.ref_name == 'develop') }}
+    if: ${{ !cancelled() && needs.external-suites.result != 'skipped' && (github.ref_name == 'master' || github.ref_name == 'develop') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
