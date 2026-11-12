@@ -25,14 +25,23 @@ pub(super) fn build_comb_observer_capture_paths(
     let mut emitted_group_triggers = HashSet::default();
     let mut previous_primary_capture_path: Option<LogicPathId> = None;
     let mut previous_trigger_capture_path: Option<LogicPathId> = None;
+    // The capture paths added below write no variable, so what the logic
+    // paths read stays the same for every observer.
+    let readers = Readers::new(comb_blocks);
     for observer_idx in 0..observers.len() {
         let observer = &observers[observer_idx];
+        let affected = observer_affected_by_preceding_writes(&readers, observer);
         let has_statement_position_dependency =
-            observer_has_statement_position_dependency(comb_blocks, observer);
-        let order_before = observer_order_before(comb_blocks, observer);
-        let order_after = observer_order_after(comb_blocks, observer);
+            observer_has_statement_position_dependency(&affected, observer);
+        let order_before = observer_order_before(
+            comb_blocks,
+            observer,
+            has_statement_position_dependency.then_some(&affected),
+        );
+        let order_after =
+            observer_order_after(comb_blocks, observer, has_statement_position_dependency);
         let trigger_paths = if has_statement_position_dependency {
-            observer_trigger_paths(comb_blocks, observer)
+            observer_trigger_paths(comb_blocks, observer, &affected)
         } else {
             Vec::new()
         };
@@ -45,7 +54,7 @@ pub(super) fn build_comb_observer_capture_paths(
                 .iter()
                 .copied()
                 .filter(|atom| !observer_written_input_overlaps(observer, atom))
-                .filter(|atom| !observer_statement_position_overlaps(comb_blocks, observer, atom))
+                .filter(|atom| !affected.overlaps(atom))
                 .collect();
             let path_id = LogicPathId(comb_blocks.len());
             if let Some(prev) = previous_primary_capture_path {
@@ -123,7 +132,7 @@ pub(super) fn build_comb_observer_capture_paths(
             .copied()
             .filter(|atom| !observer_written_input_overlaps(observer, atom))
             .filter(|atom| !local_input_ids.contains(&atom.id))
-            .filter(|atom| !observer_statement_position_overlaps(comb_blocks, observer, atom))
+            .filter(|atom| !affected.overlaps(atom))
             .collect();
         for (_, node) in &observer.local_inputs {
             let mut local_sources = HashSet::default();
@@ -133,9 +142,7 @@ pub(super) fn build_comb_observer_capture_paths(
                     .into_iter()
                     .filter(|atom| !observer_written_input_overlaps(observer, atom))
                     .filter(|atom| !local_input_ids.contains(&atom.id))
-                    .filter(|atom| {
-                        !observer_statement_position_overlaps(comb_blocks, observer, atom)
-                    }),
+                    .filter(|atom| !affected.overlaps(atom)),
             );
         }
         let expr = match observer.guard.or_else(|| observer.args.first().copied()) {
@@ -313,35 +320,26 @@ pub(super) fn observer_written_input_overlaps(
         .any(|written| written.id == atom.id && written.access.overlaps(&atom.access))
 }
 
-pub(super) fn observer_statement_position_overlaps(
-    paths: &[LogicPath<AbsoluteAddr>],
-    observer: &CombObserver<AbsoluteAddr>,
-    atom: &VarAtomBase<AbsoluteAddr>,
-) -> bool {
-    atom_overlaps_any(atom, observer_affected_by_preceding_writes(paths, observer))
-}
-
 pub(super) fn observer_has_statement_position_dependency(
-    paths: &[LogicPath<AbsoluteAddr>],
+    affected: &Affected,
     observer: &CombObserver<AbsoluteAddr>,
 ) -> bool {
     if observer.preceding_writes.is_empty() {
         return false;
     }
-    let affected = observer_affected_by_preceding_writes(paths, observer);
     observer
         .position_inputs
         .iter()
         .chain(observer.observed_inputs.iter())
-        .any(|input| atom_overlaps_any(input, &affected))
+        .any(|input| affected.overlaps(input))
 }
 
 pub(super) fn observer_trigger_paths(
     paths: &[LogicPath<AbsoluteAddr>],
     observer: &CombObserver<AbsoluteAddr>,
+    affected: &Affected,
 ) -> Vec<LogicPathId> {
     let mut seen_targets = HashSet::default();
-    let affected = observer_affected_by_preceding_writes(paths, observer);
     paths
         .iter()
         .enumerate()
@@ -356,7 +354,7 @@ pub(super) fn observer_trigger_paths(
                 .chain(observer.observed_inputs.iter())
                 .any(|atom| target.id == atom.id && target.access.overlaps(&atom.access));
             if !matches_observer_operand
-                || !atom_overlaps_any(target, &affected)
+                || !affected.overlaps(target)
                 || !seen_targets.insert((target.id, target.access.lsb, target.access.msb))
             {
                 return None;
@@ -623,9 +621,10 @@ pub(super) fn annotate_comb_capture_enable_sites(
 pub(super) fn observer_order_after(
     paths: &[LogicPath<AbsoluteAddr>],
     observer: &CombObserver<AbsoluteAddr>,
+    has_statement_position_dependency: bool,
 ) -> HashSet<LogicPathId> {
     let mut result = HashSet::default();
-    if !observer_has_statement_position_dependency(paths, observer) {
+    if !has_statement_position_dependency {
         return result;
     }
     for written in &observer.preceding_writes {
@@ -644,10 +643,9 @@ pub(super) fn observer_order_after(
 pub(super) fn observer_order_before(
     paths: &[LogicPath<AbsoluteAddr>],
     observer: &CombObserver<AbsoluteAddr>,
+    affected_by_preceding_writes: Option<&Affected>,
 ) -> HashSet<LogicPathId> {
     let preceding_writes = observer.preceding_writes.iter().collect::<Vec<_>>();
-    let affected_by_preceding_writes = observer_has_statement_position_dependency(paths, observer)
-        .then(|| observer_affected_by_preceding_writes(paths, observer));
     let mut result = HashSet::default();
     for (idx, path) in paths.iter().enumerate() {
         let Some(target) = path.target.var() else {
@@ -657,9 +655,8 @@ pub(super) fn observer_order_before(
             .iter()
             .any(|written| target.id == written.id && target.access.overlaps(&written.access));
         let is_later_observed_write = observer_written_input_overlaps(observer, target);
-        let is_later_affected_write = affected_by_preceding_writes
-            .as_ref()
-            .is_some_and(|affected| atom_overlaps_any(target, affected));
+        let is_later_affected_write =
+            affected_by_preceding_writes.is_some_and(|affected| affected.overlaps(target));
         if !already_written && (is_later_observed_write || is_later_affected_write) {
             result.insert(LogicPathId(idx));
         }
@@ -691,40 +688,77 @@ pub(super) fn direct_consumers_of_path_target(
         .collect()
 }
 
-pub(super) fn observer_affected_by_preceding_writes(
-    paths: &[LogicPath<AbsoluteAddr>],
-    observer: &CombObserver<AbsoluteAddr>,
-) -> HashSet<VarAtomBase<AbsoluteAddr>> {
-    let mut affected: HashSet<VarAtomBase<AbsoluteAddr>> =
-        observer.preceding_writes.iter().copied().collect();
-    let mut changed = true;
-    while changed {
-        changed = false;
+/// What each variable that a logic path reads reaches: the part the path
+/// reads and the variable part it writes.
+pub(super) struct Readers {
+    by_id: HashMap<AbsoluteAddr, Vec<(BitAccess, VarAtomBase<AbsoluteAddr>)>>,
+}
+
+impl Readers {
+    pub(super) fn new(paths: &[LogicPath<AbsoluteAddr>]) -> Self {
+        let mut by_id: HashMap<_, Vec<_>> = HashMap::default();
         for path in paths {
             let Some(target) = path.target.var() else {
                 continue;
             };
-            if !path
-                .sources
-                .iter()
-                .any(|source| atom_overlaps_any(source, &affected))
-            {
-                continue;
+            for source in &path.sources {
+                by_id
+                    .entry(source.id)
+                    .or_default()
+                    .push((source.access, *target));
             }
-            if affected.insert(*target) {
-                changed = true;
+        }
+        Self { by_id }
+    }
+}
+
+/// The variable parts that the writes before an observer reach through the
+/// combinational dataflow, by variable.
+#[derive(Default)]
+pub(super) struct Affected {
+    by_id: HashMap<AbsoluteAddr, Vec<BitAccess>>,
+}
+
+impl Affected {
+    /// Whether `atom` overlaps an affected part of its variable.
+    pub(super) fn overlaps(&self, atom: &VarAtomBase<AbsoluteAddr>) -> bool {
+        self.by_id
+            .get(&atom.id)
+            .is_some_and(|parts| parts.iter().any(|part| part.overlaps(&atom.access)))
+    }
+}
+
+/// The parts that the writes before `observer` reach (see
+/// [`affected_by_writes`]).
+pub(super) fn observer_affected_by_preceding_writes(
+    readers: &Readers,
+    observer: &CombObserver<AbsoluteAddr>,
+) -> Affected {
+    affected_by_writes(readers, &observer.preceding_writes)
+}
+
+/// The parts that `writes` reach: those writes, and the targets of the
+/// paths that read a part already reached, to a fixpoint. Each reached part
+/// is followed to the paths that read its variable once.
+pub(super) fn affected_by_writes<'a>(
+    readers: &Readers,
+    writes: impl IntoIterator<Item = &'a VarAtomBase<AbsoluteAddr>>,
+) -> Affected {
+    let mut reached: HashSet<VarAtomBase<AbsoluteAddr>> = HashSet::default();
+    let mut affected = Affected::default();
+    let mut pending: Vec<VarAtomBase<AbsoluteAddr>> = Vec::new();
+    for write in writes {
+        if reached.insert(*write) {
+            pending.push(*write);
+        }
+    }
+    while let Some(atom) = pending.pop() {
+        affected.by_id.entry(atom.id).or_default().push(atom.access);
+        for (read, target) in readers.by_id.get(&atom.id).into_iter().flatten() {
+            if read.overlaps(&atom.access) && reached.insert(*target) {
+                pending.push(*target);
             }
         }
     }
     affected
-}
-
-pub(super) fn atom_overlaps_any<A: Eq + std::hash::Hash + Copy>(
-    atom: &VarAtomBase<A>,
-    atoms: impl IntoIterator<Item = impl std::borrow::Borrow<VarAtomBase<A>>>,
-) -> bool {
-    atoms.into_iter().any(|other| {
-        let other = other.borrow();
-        atom.id == other.id && atom.access.overlaps(&other.access)
-    })
 }
