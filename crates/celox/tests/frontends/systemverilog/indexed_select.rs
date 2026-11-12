@@ -156,3 +156,62 @@ sv_backends! {
         }
     }
 }
+
+// An element of an unpacked array whose element width calls `$clog2` is read
+// and written at a run-time index (IEEE 1800-2023 20.8.1), as Vortex's MSHR
+// table `reg [32 - $clog2(64) - $clog2(4) - 1:0] addr_table [16]` is, with a
+// constant argument or a parameter.
+#[test]
+fn unpacked_elements_whose_width_calls_clog2_take_run_time_indices() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top #(parameter int M = 32) ();
+            logic [32 - $clog2(64) - $clog2(4) - 1:0] table_a [16];
+            logic [$clog2(M)-1:0] table_b [4];
+            logic clk = 0;
+            logic [3:0] id = 3;
+            logic [1:0] k = 2;
+            logic [23:0] read_a;
+            logic [4:0] read_b;
+            always_comb read_a = table_a[id];
+            always @(posedge clk) begin
+                table_a[id] <= 24'habcdef;
+                table_b[k] <= 5'd21;
+            end
+            initial begin
+                foreach (table_a[i]) table_a[i] = '0;
+                foreach (table_b[i]) table_b[i] = '0;
+                table_b[k + 1] = 5'd9;
+                #1 clk = 1;
+                #1 read_b = table_b[k];
+                $display("%h %h %0d %0d %0d", read_a, table_a[id - 1], read_b, table_b[3],
+                    $bits(table_b[k]));
+            end
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("clog2_elements.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build_cranelift()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let displayed: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8(message).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            displayed,
+            ["abcdef 000000 21 9 5"],
+            "four_state={four_state}"
+        );
+    }
+}
