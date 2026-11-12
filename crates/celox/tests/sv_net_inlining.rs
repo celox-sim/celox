@@ -262,3 +262,75 @@ endmodule"#;
         assert_eq!(sim.get(mismatches), 0u32.into(), "{level:?}");
     }
 }
+
+/// A net that takes part of a wider one, such as the element `req_t[0]` that
+/// an instance port gives to a narrower net, is substituted into its readers
+/// as a copy of the wider value into a narrower register, which keeps only
+/// the low bits: the reduction `|conc_req` and the concatenation that reads
+/// the narrow net see five bits, not the whole 25-bit vector. Found with the
+/// RTLMeter design HammerBlade (bsg_mesh_router and bsg_arb_round_robin).
+#[test]
+fn a_substituted_part_of_a_wider_net_keeps_its_width() {
+    const SOURCE: &str = r#"
+module conc #(parameter bit [4:0] pattern = 5'b11111, parameter int w = 5) (input [4:0] i, output [w-1:0] o);
+  if (pattern[0]) begin : first
+    assign o[0] = i[0];
+  end
+  for (genvar j = 1; j < 5; j++) begin : rof
+    if (pattern[j]) begin : on
+      assign o[$countones(pattern[j-1:0])] = i[j];
+    end
+  end
+endmodule
+module arb #(parameter width_p = 2) (input clk_i, input [width_p-1:0] reqs_i);
+  logic [width_p-2:0] thermocode_r, thermocode_n;
+  always_ff @(posedge clk_i) thermocode_r <= thermocode_n;
+  wire [width_p*2-1:0] scan_li = {1'b0, thermocode_r & reqs_i[width_p-2:0], reqs_i};
+  wire [width_p*2-1:0] scan_lo;
+  assign scan_lo = scan_li;
+  assign thermocode_n = (|scan_li[width_p*2-1-:width_p]) ? scan_lo[width_p*2-1-:width_p-1]
+                                                         : scan_lo[width_p-1:1];
+endmodule
+module r (input clk_i, input [4:0][4:0] req, output logic [1:0] v_o);
+  localparam bit [1:0][4:0] pattern = {5'b00101, 5'b11111};
+  logic [4:0][4:0] req_t;
+  assign req_t = req;
+  for (genvar i = 0; i < 2; i++) begin : xbar
+    localparam int w = $countones(pattern[i]);
+    logic [w-1:0] conc_req;
+    conc #(.pattern(pattern[i]), .w(w)) c (.i(req_t[i]), .o(conc_req));
+    if (i == 0) begin : vv
+      assign v_o[0] = |conc_req;
+    end
+    arb #(.width_p(w)) rr (.clk_i(clk_i), .reqs_i(conc_req));
+  end
+endmodule
+module Top (input clk_i, input [4:0][4:0] req, output logic v);
+  logic [1:0] v_o;
+  r dut (.clk_i(clk_i), .req(req), .v_o(v_o));
+  assign v = v_o[0];
+endmodule
+"#;
+    let builder = || {
+        Simulator::from_sv_sources(vec![(SOURCE, Path::new("narrow-net.sv"))], "Top")
+            .opt_level(OptLevel::O2)
+    };
+    macro_rules! check {
+        ($sim:expr, $backend:literal) => {{
+            let mut sim = $sim;
+            let clk = sim.event("clk_i");
+            let (req, v) = (sim.signal("req"), sim.signal("v"));
+            sim.tick(clk).unwrap();
+            // req[1] = 5'b11001: element 0, the one `v` reduces, stays zero.
+            sim.modify(|io| io.set(req, 0x19u32 << 5)).unwrap();
+            assert_eq!(sim.get(v), 0u8.into(), $backend);
+            sim.modify(|io| io.set(req, 0x19u32 << 5 | 0x4)).unwrap();
+            assert_eq!(sim.get(v), 1u8.into(), $backend);
+        }};
+    }
+    check!(builder().build_interpreter().unwrap(), "interpreter");
+    check!(builder().build().unwrap(), "default backend");
+    check!(builder().build_cranelift().unwrap(), "cranelift");
+    #[cfg(target_arch = "x86_64")]
+    check!(builder().build_native().unwrap(), "native");
+}
