@@ -205,6 +205,53 @@ pub(in crate::ast) fn classify<'a>(
         });
     }
     *comb = retained;
+    // An `always_ff` whose event control names no edge runs as a process
+    // already. Like every `always_ff` it has that one event control and no
+    // blocking timing control (IEEE 1800-2023 9.2.2.4), also none of a
+    // task it calls.
+    for process in processes.iter().filter(|process| {
+        process.repeats
+            && process
+                .site
+                .as_ref()
+                .is_some_and(|site| site.construct == "always_ff")
+    }) {
+        for statement in &process.body {
+            let Stmt::Loop { body, .. } = statement else {
+                continue;
+            };
+            // The event control is a leading wait, the event block a
+            // virtual-interface event control lowers to (25.9), or the
+            // process wait on a named event (15.5); none is a blocking
+            // timing control of the body.
+            let controlled = match body.split_first() {
+                Some((Stmt::WaitEvent(_), controlled)) => controlled,
+                Some((
+                    Stmt::Loop {
+                        kind: LoopKind::EventBlock,
+                        ..
+                    },
+                    controlled,
+                )) => controlled,
+                Some((
+                    Stmt::Eval(Expr::Call {
+                        callee:
+                            Callee::System(SystemFunction::Process(celox_design::ProcessOp::WaitEvent)),
+                        ..
+                    }),
+                    controlled,
+                )) => controlled,
+                _ => body.as_slice(),
+            };
+            // An intra-assignment delay of a nonblocking assignment
+            // schedules its update without suspending the procedure
+            // (9.4.5, 10.4.2), as in the `always_ff` processes below.
+            let effects = body_effects(controlled, &known, &definitions);
+            if effects.suspends && !delayed_nonblocking_only(controlled, &timed, &definitions) {
+                return Err(unsupported("timed task call in always_ff"));
+            }
+        }
+    }
     let mut retained = Vec::new();
     for process in std::mem::take(ff) {
         let effects = body_effects(&process.body, &known, &definitions);
