@@ -19,17 +19,14 @@ impl<B: SimBackend> SimulationState<B> {
             return backend.get_as(slot);
         }
         let activation = &self.process_state.activations[target];
-        let frame = self.model.processes[target].frame.as_ref().unwrap();
         if activation.private.is_empty() {
             return activation.control.random.unwrap_or(0);
         }
-        let index = frame.private.iter().position(|s| *s == slot).unwrap();
-        activation.private[index]
-            .0
-            .to_u64_digits()
-            .first()
-            .copied()
-            .unwrap_or(0)
+        let value = activation
+            .private
+            .value_of(slot)
+            .expect("a private slot of the frame");
+        value.0.to_u64_digits().first().copied().unwrap_or(0)
     }
     fn set_process_slot(
         &mut self,
@@ -43,13 +40,14 @@ impl<B: SimBackend> SimulationState<B> {
             backend.set(slot, value);
             return;
         }
-        let frame = self.model.processes[target].frame.as_ref().unwrap();
         if self.process_state.activations[target].private.is_empty() {
             self.process_state.activations[target].control.random = Some(value);
             return;
         }
-        let index = frame.private.iter().position(|s| *s == slot).unwrap();
-        self.process_state.activations[target].private[index] = (value.into(), 0u8.into());
+        let set = self.process_state.activations[target]
+            .private
+            .set_value_of(slot, &(value.into(), 0u8.into()));
+        assert!(set, "a private slot of the frame");
     }
     fn wake_controlled(&mut self, process: usize) {
         if !self.process_state.activations[process].live

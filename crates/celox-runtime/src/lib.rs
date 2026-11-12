@@ -39,7 +39,7 @@ pub use reflection::{
 };
 pub use schedule::{ResolvedSchedule, host_watch};
 pub use simulation::{
-    Activation, CompiledSlots, EventInfo, HostBoundary, KernelSchedule,
+    Activation, CompiledSlots, EventInfo, FrameImage, HostBoundary, ImageLayout, KernelSchedule,
     PersistedSimulationSnapshot, ProcessControl, SavedCalls, ScheduleKey, ScheduleParts,
     SchedulerMode, SchedulerStats, SimulationExecutor, SimulationSnapshot, SimulationState,
     StepObserver, SuspendedProcess, UnitExecutor,
