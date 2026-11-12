@@ -1,0 +1,7 @@
+Revision history for #3744:
+
+rev 3 (rebase) 2026-11-12 21:13 UTC
+rev 2 (rebase) 2026-11-12 20:37 UTC — Review 5881464167: Type::holds_chandle now recurses into container elements (and struct leaves), so a chandle nested in a type-override container declares the chandle type
+rev 1 (initial) 2026-11-12 20:37 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3744,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"12dc66ac7da827cd6a3f13f39875678f128d850e","timestamp_iso":"2026-11-12T20:37:18Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"12dc66ac7da827cd6a3f13f39875678f128d850e","new_sha":"bfb8f976ef9445a81b37f356035b7b47363d0908","timestamp_iso":"2026-11-12T20:37:18Z","reason":"Review 5881464167: Type::holds_chandle now recurses into container elements (and struct leaves), so a chandle nested in a type-override container declares the chandle type","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/12dc66ac7da827cd6a3f13f39875678f128d850e...bfb8f976ef9445a81b37f356035b7b47363d0908"},{"number":3,"change_type":"rebase","old_sha":"bfb8f976ef9445a81b37f356035b7b47363d0908","new_sha":"da8ca6eab79d2a8bda50dafa4dd7538ad1eb0724","timestamp_iso":"2026-11-12T21:13:43Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/bfb8f976ef9445a81b37f356035b7b47363d0908...da8ca6eab79d2a8bda50dafa4dd7538ad1eb0724"}]} -->
