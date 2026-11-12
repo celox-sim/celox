@@ -292,6 +292,38 @@ fn chandle_members_through_virtual_interfaces_are_chandles() {
     assert!(error.contains("chandle"), "{error}");
 }
 
+/// An element of a queue of virtual interfaces, indexed or popped, is a
+/// virtual interface of the queue's element type (IEEE 1800-2023 7.10,
+/// 25.9): it is assigned to a virtual interface of that type, and only of
+/// that type.
+#[test]
+fn queue_elements_of_virtual_interfaces_are_virtual_interfaces() {
+    let build = |target: &str, value: &str| {
+        let source = format!(
+            "interface bus_if(input logic clk); logic [7:0] data; endinterface
+             interface other_if(input logic clk); logic [7:0] data; endinterface
+             module Top;
+                 logic clk = 0;
+                 bus_if bus(clk);
+                 virtual bus_if q[$];
+                 virtual {target} v;
+                 initial begin q.push_back(bus); v = {value}; end
+             endmodule"
+        );
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("vif.sv"))], "Top")
+            .build_interpreter()
+            .map(drop)
+            .map_err(|error| error.to_string())
+    };
+    for value in ["q[0]", "q.pop_front()", "q.pop_back()"] {
+        build("bus_if", value).unwrap_or_else(|error| panic!("{value}: {error}"));
+        assert!(
+            build("other_if", value).is_err(),
+            "{value} assigned to other_if"
+        );
+    }
+}
+
 /// A member through a virtual interface is written only through the
 /// selection among the instances; a concatenation target or a continuous
 /// assignment through one is unsupported rather than writing nothing.
