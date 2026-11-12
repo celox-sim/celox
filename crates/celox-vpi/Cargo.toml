@@ -15,7 +15,8 @@ wasm-component = ["celox/wasm-component"]
 default = ["systemverilog"]
 arm64-codegen = ["celox/arm64-codegen"]
 x86_64-codegen = ["celox/x86_64-codegen"]
-systemverilog = ["celox/systemverilog", "dep:celox-sv-analyzer"]
+# The `celox` command links DPI-C libraries (`--dpi-lib`).
+systemverilog = ["celox/sv-dpi", "dep:celox-sv-analyzer"]
 
 [lib]
 crate-type = ["rlib", "cdylib"]
