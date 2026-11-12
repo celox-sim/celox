@@ -17,14 +17,16 @@ impl ScopeElaboration<'_> {
         };
         // The scope's tables are shared with the contexts that bind in it.
         self.type_aliases = type_aliases_from_scope(syntax_tree, session)?.into();
-        // Constant functions see the module constants known so far; they are
-        // collected again once the parameters are known.
+        // Constant functions see the module constants known so far, by
+        // their values and declaration types; they are collected again once
+        // the parameters are known.
         let preliminary =
             syntax_tree.with_functions(with_imported(const_functions::module_constant_functions(
                 syntax_tree,
                 session,
                 &self.imported.const_env,
                 &self.type_aliases,
+                &self.constant_types(),
                 &self.imported.parameter_values,
             )));
         let syntax_tree = &preliminary;
@@ -130,6 +132,7 @@ impl ScopeElaboration<'_> {
                 session,
                 &self.const_env,
                 &self.type_aliases,
+                &self.constant_types(),
                 &self.imported.parameter_values,
                 &symbolic_parameters,
                 // The declarations describe the functions that the
@@ -155,6 +158,7 @@ impl ScopeElaboration<'_> {
                 session,
                 &self.const_env,
                 &self.type_aliases,
+                &self.constant_types(),
                 &parameter_values,
             )));
         let syntax_tree = &parameterized;

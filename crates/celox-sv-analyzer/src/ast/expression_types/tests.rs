@@ -37,6 +37,7 @@ fn query_in(declarations: &str, expression: &str, constant_functions: bool) -> (
             &mut session,
             &dims.const_env,
             &dims.type_aliases,
+            &dims.constant_types,
             &dims.parameter_values,
         );
         tree.with_functions(functions)
