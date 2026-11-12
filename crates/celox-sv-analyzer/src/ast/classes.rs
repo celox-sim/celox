@@ -879,7 +879,7 @@ fn imported(tree: &AnalysisContext<'_>, name: &str) -> Option<Rc<Class>> {
         .classes
         .iter()
         .find(|class| class.name == name)
-        .map(|class| Rc::new(class.clone()))
+        .map(|class| Rc::new((**class).clone()))
 }
 
 /// The classes whose objects the current scope may see: those it declares
