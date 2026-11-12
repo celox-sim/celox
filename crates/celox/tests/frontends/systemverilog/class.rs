@@ -2169,6 +2169,51 @@ fn a_specialization_asked_of_a_package_keeps_its_static_formals() {
 }
 
 #[test]
+fn methods_a_package_specialization_lowers_share_their_static_variables() {
+    // `Seq#(Item)` makes the package lower `Item::op` for its dispatcher.
+    // The static variable of that method is one variable of the
+    // compilation unit, which `Item` declares, whichever scope calls it
+    // (IEEE 1800-2023 6.21, 8.25).
+    let source = "`timescale 1ns/1ns
+    package p;
+        class Base; virtual function void op(); endfunction endclass
+        class Seq #(type T = Base);
+            T item;
+            function void run(); item.op(); endfunction
+        endclass
+    endpackage
+    import p::*;
+    class Item extends Base;
+        int count, calls;
+        virtual function void op();
+            calls++;
+            begin
+                static bit warned;
+                if (!warned) begin count++; warned = 1; end
+            end
+        endfunction
+    endclass
+    module Top(output int count, output int calls, output int other_count, output int other_calls);
+        Seq #(Item) s;
+        Item other;
+        initial begin
+            s = new; s.item = new; other = new;
+            s.run(); s.run(); other.op();
+            count = s.item.count; calls = s.item.calls;
+            other_count = other.count; other_calls = other.calls;
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("count")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("calls")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("other_count")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("other_calls")), 1u32.into());
+}
+
+#[test]
 fn a_class_of_another_module_does_not_hide_a_package() {
     let source = "package P; typedef bit [2:0] T; endpackage
         module Other; class P; typedef int T; endclass endmodule
