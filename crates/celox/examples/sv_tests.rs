@@ -10,6 +10,10 @@
 
 #![allow(clippy::disallowed_methods)] // This binary is the process environment boundary.
 
+// The allocator of the `celox` CLI, which this driver stands in for.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::{collections::BTreeSet, env, path::PathBuf, process::ExitCode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

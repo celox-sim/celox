@@ -90,6 +90,7 @@ celox-backend-arm64   = { workspace = true }
 libc.workspace = true
 
 [dev-dependencies]
+mimalloc = "0.1.52"
 celox-test-suite = { workspace = true, features = ["emit"] }
 celox-sv-analyzer = { workspace = true }
 insta      = "1.46"
