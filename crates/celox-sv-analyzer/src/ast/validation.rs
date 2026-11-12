@@ -1169,6 +1169,11 @@ fn reject_constant_calls(
             }
             _ => continue,
         };
+        // A constant system function (IEEE 1800-2023 11.2.1) that the
+        // binders make a string operation of, not a cataloged function.
+        if name == "$sformatf" {
+            continue;
+        }
         if name.starts_with('$') {
             let presence = arguments
                 .iter()

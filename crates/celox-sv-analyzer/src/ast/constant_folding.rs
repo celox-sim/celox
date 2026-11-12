@@ -350,6 +350,43 @@ fn eval_const_integral_expr_preserving_mask(
                 })
                 .collect::<Option<Vec<_>>>()?,
         ),
+        // A constant string value, as `$typename` makes of its type name,
+        // is the packed value of its bytes (6.16).
+        Expr::Call {
+            callee: Callee::String(StringOp::FromBits),
+            args,
+            ..
+        } => {
+            let [arg] = args.as_slice() else { return None };
+            let operand = eval_const_integral_expr_preserving_mask(
+                tree,
+                session,
+                arg.as_ref()?,
+                const_env,
+                parameter_types,
+            )?;
+            typecheck::packed_string_literal(&operand)
+        }
+        // `$sformatf` of constants is a constant system function call (IEEE
+        // 1800-2023 11.2.1): the packed value of the string it makes.
+        Expr::Call {
+            callee: Callee::String(StringOp::Format { .. }),
+            args,
+            ..
+        } => typecheck::constant_format(
+            &args
+                .iter()
+                .map(|arg| {
+                    eval_const_integral_expr_preserving_mask(
+                        tree,
+                        session,
+                        arg.as_ref()?,
+                        const_env,
+                        parameter_types,
+                    )
+                })
+                .collect::<Option<Vec<_>>>()?,
+        ),
         Expr::RepeatConcat { count, parts } => {
             let count = usize::try_from(eval_ast_const_expr(functions, count, const_env)?).ok()?;
             let part = concat_integral_literals(

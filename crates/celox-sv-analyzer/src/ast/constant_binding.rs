@@ -442,6 +442,25 @@ fn bind_in_context(
                         }
                         value => value,
                     };
+                    // `$sformatf` of constants is a constant (11.2.1): the
+                    // string it makes, once the values of its operands are
+                    // known. Parameters whose values are literals, as those
+                    // of strings are, are known here.
+                    if matches!(
+                        &value,
+                        Expr::Call {
+                            callee: Callee::String(StringOp::Format { .. }),
+                            ..
+                        }
+                    ) {
+                        let Some(value) =
+                            selects::indexed_expression_value(tree, session, value, dimensions)
+                        else {
+                            return Ok(None);
+                        };
+                        values.push(value);
+                        continue;
+                    }
                     let countbits = matches!(
                         &value,
                         Expr::Call {
