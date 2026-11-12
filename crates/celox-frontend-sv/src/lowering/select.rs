@@ -1221,3 +1221,488 @@ pub(super) fn guard_dynamic_array_read_slt<A: std::hash::Hash + Eq + Clone>(
         })
         .ok()
 }
+
+/// `expr` with each constant select of a packed vector variable that lies
+/// partly or wholly outside the vector replaced by the bits it reads: those
+/// outside read as X, or 0 for a two-state value (IEEE 1800-2023 11.5.1).
+/// Such a select can arise where a loop is unrolled, as in the branch of
+/// `(i != N - 1) ? v[i + 1] : 1'b1` that the last iteration does not take.
+/// `None` when `expr` has none.
+pub(super) fn out_of_range_constant_selects(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+    four_state: bool,
+) -> Option<sv::ir::Expr> {
+    use sv::ir::Expr;
+    let rewrite = |expr: &Expr| {
+        out_of_range_constant_selects(
+            expr,
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+            four_state,
+        )
+    };
+    // The operands, rewritten where any of them is.
+    let rewrite_all = |exprs: &[&Expr]| -> Option<Vec<Expr>> {
+        let rewritten: Vec<_> = exprs.iter().map(|expr| rewrite(expr)).collect();
+        rewritten.iter().any(Option::is_some).then(|| {
+            rewritten
+                .into_iter()
+                .zip(exprs)
+                .map(|(rewritten, expr)| rewritten.unwrap_or_else(|| (*expr).clone()))
+                .collect()
+        })
+    };
+    match expr {
+        Expr::Ident(_) | Expr::Literal(_) => None,
+        // The calls left in an expression when it is lowered are pure, such
+        // as `$countones`; their arguments are read as any operand.
+        Expr::Call {
+            callee,
+            args,
+            arg_order,
+        } => {
+            let present: Vec<&Expr> = args.iter().flatten().collect();
+            rewrite_all(&present).map(|rewritten| {
+                let mut rewritten = rewritten.into_iter();
+                Expr::Call {
+                    callee: callee.clone(),
+                    args: args
+                        .iter()
+                        .map(|arg| arg.as_ref().map(|_| rewritten.next().expect("an argument")))
+                        .collect(),
+                    arg_order: arg_order.clone(),
+                }
+            })
+        }
+        Expr::Inside { expr, items } => {
+            let mut operands = vec![&**expr];
+            for item in items {
+                operands.extend(item.exprs());
+            }
+            rewrite_all(&operands).map(|operands| {
+                let mut operands = operands.into_iter();
+                let expr = operands.next().expect("the operand");
+                let items = items
+                    .iter()
+                    .map(|item| item.map(&mut |_| operands.next().expect("an item operand")))
+                    .collect();
+                Expr::Inside {
+                    expr: Box::new(expr),
+                    items,
+                }
+            })
+        }
+        Expr::Select {
+            expr: expr_of_select,
+            msb,
+            lsb,
+            signed,
+        } => {
+            let inner = expr_of_select;
+            if let Expr::Ident(name) = &**inner
+                && let Some(variable) = name_to_id.get(name).and_then(|id| variables.get(id))
+                && variable.array_dims.is_empty()
+                && let Some(msb) =
+                    sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)
+                && let Some(lsb) =
+                    sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)
+                && let (Some(left), Some(right)) = (
+                    packed_index_position(variable, msb),
+                    packed_index_position(variable, lsb),
+                )
+            {
+                let (low, high) = (left.min(right), left.max(right));
+                let width = i128::try_from(variable.width).ok()?;
+                if low >= 0 && high < width {
+                    return None;
+                }
+                let fill = if four_state && variable.is_4state {
+                    'x'
+                } else {
+                    '0'
+                };
+                let fill = |bits: i128| Expr::Literal(format!("{bits}'b{fill}"));
+                // The declared index of bit position `position`.
+                let index = |position: i128| match variable.packed_ranges.as_slice() {
+                    [(left, right)] if left >= right => position + right,
+                    [(_, right)] => right - position,
+                    _ => position,
+                };
+                let literal = |value: i128| sv::ir::ConstExpr::Literal(value.to_string());
+                // Most significant part first.
+                let mut parts = Vec::new();
+                if high >= width {
+                    parts.push(fill(high - width.max(low) + 1));
+                }
+                if high >= 0 && low < width {
+                    parts.push(Expr::Select {
+                        expr: inner.clone(),
+                        msb: literal(index(high.min(width - 1))),
+                        lsb: literal(index(low.max(0))),
+                        signed: *signed,
+                    });
+                }
+                if low < 0 {
+                    parts.push(fill(high.min(-1) - low + 1));
+                }
+                return Some(assembled(parts, high - low + 1, *signed));
+            }
+            let inner = rewrite(expr_of_select);
+            let base = inner.as_ref().unwrap_or(&**expr_of_select);
+            // A select of a subexpression, such as `a[1][i + 4]` once `a[1]`
+            // is a part of `a`, counts from bit 0 of the subexpression.
+            if !matches!(base, Expr::Ident(_))
+                && let Some(msb) =
+                    sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)
+                && let Some(lsb) =
+                    sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)
+                && let Some(width) =
+                    sv_expr_natural_width(base, variables, name_to_id, constants, parameter_types)
+                && let Ok(width) = i128::try_from(width)
+                && (msb.min(lsb) < 0 || msb.max(lsb) >= width)
+            {
+                let (low, high) = (msb.min(lsb), msb.max(lsb));
+                let unknown = four_state && base_is_four_state(base, variables, name_to_id);
+                let fill = if unknown { 'x' } else { '0' };
+                let fill = |bits: i128| Expr::Literal(format!("{bits}'b{fill}"));
+                let literal = |value: i128| sv::ir::ConstExpr::Literal(value.to_string());
+                let mut parts = Vec::new();
+                if high >= width {
+                    parts.push(fill(high - width.max(low) + 1));
+                }
+                if high >= 0 && low < width {
+                    parts.push(Expr::Select {
+                        expr: Box::new(base.clone()),
+                        msb: literal(high.min(width - 1)),
+                        lsb: literal(low.max(0)),
+                        signed: *signed,
+                    });
+                }
+                if low < 0 {
+                    parts.push(fill(high.min(-1) - low + 1));
+                }
+                return Some(assembled(parts, high - low + 1, *signed));
+            }
+            // A run-time index may read past a vector too, as in
+            // `data[addr[i + 1]]`.
+            let bound = |bound: &sv::ir::ConstExpr| {
+                out_of_range_index_selects(
+                    bound,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    four_state,
+                )
+            };
+            let (new_msb, new_lsb) = (bound(msb), bound(lsb));
+            if inner.is_none() && new_msb.is_none() && new_lsb.is_none() {
+                return None;
+            }
+            Some(Expr::Select {
+                expr: Box::new(inner.unwrap_or_else(|| (**expr_of_select).clone())),
+                msb: new_msb.unwrap_or_else(|| msb.clone()),
+                lsb: new_lsb.unwrap_or_else(|| lsb.clone()),
+                signed: *signed,
+            })
+        }
+        Expr::Concat(parts) => rewrite_all(&parts.iter().collect::<Vec<_>>()).map(Expr::Concat),
+        Expr::RepeatConcat { count, parts } => {
+            rewrite_all(&parts.iter().collect::<Vec<_>>()).map(|parts| Expr::RepeatConcat {
+                count: count.clone(),
+                parts,
+            })
+        }
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => rewrite(expr).map(|expr| Expr::Resize {
+            expr: Box::new(expr),
+            width: *width,
+            signed: *signed,
+        }),
+        Expr::Unary { op, expr } => rewrite(expr).map(|expr| Expr::Unary {
+            op: *op,
+            expr: Box::new(expr),
+        }),
+        Expr::Binary { left, op, right } => rewrite_all(&[left, right]).map(|mut operands| {
+            let right = operands.pop().expect("two operands");
+            let left = operands.pop().expect("two operands");
+            Expr::Binary {
+                left: Box::new(left),
+                op: *op,
+                right: Box::new(right),
+            }
+        }),
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => rewrite_all(&[condition, then_expr, else_expr]).map(|mut operands| {
+            let else_expr = operands.pop().expect("three operands");
+            let then_expr = operands.pop().expect("three operands");
+            let condition = operands.pop().expect("three operands");
+            Expr::Mux {
+                condition: Box::new(condition),
+                then_expr: Box::new(then_expr),
+                else_expr: Box::new(else_expr),
+            }
+        }),
+    }
+}
+
+/// The concatenation of `parts`, `width` bits, with the signedness of the
+/// select they replace (IEEE 1800-2023 11.8.1).
+fn assembled(parts: Vec<sv::ir::Expr>, width: i128, signed: bool) -> sv::ir::Expr {
+    let concat = sv::ir::Expr::Concat(parts);
+    if !signed {
+        return concat;
+    }
+    sv::ir::Expr::Select {
+        expr: Box::new(concat),
+        msb: sv::ir::ConstExpr::Literal((width - 1).to_string()),
+        lsb: sv::ir::ConstExpr::Literal("0".into()),
+        signed: true,
+    }
+}
+
+/// Index expression `expr` with each constant select of a packed vector
+/// variable that lies partly or wholly outside the vector replaced by the
+/// bits it reads: those outside read X, or 0 for a two-state value (IEEE
+/// 1800-2023 11.5.1). `None` when it has none.
+fn out_of_range_index_selects(
+    expr: &sv::ir::ConstExpr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+    four_state: bool,
+) -> Option<sv::ir::ConstExpr> {
+    use sv::ir::ConstExpr;
+    let rewrite = |expr: &ConstExpr| {
+        out_of_range_index_selects(
+            expr,
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+            four_state,
+        )
+    };
+    let rewrite_all = |exprs: &[&ConstExpr]| -> Option<Vec<ConstExpr>> {
+        let rewritten: Vec<_> = exprs.iter().map(|expr| rewrite(expr)).collect();
+        rewritten.iter().any(Option::is_some).then(|| {
+            rewritten
+                .into_iter()
+                .zip(exprs)
+                .map(|(rewritten, expr)| rewritten.unwrap_or_else(|| (*expr).clone()))
+                .collect()
+        })
+    };
+    // The bits that a select of `[msb:lsb]` of variable `base` reads when
+    // they lie wholly outside it.
+    let outside = |base: &ConstExpr, msb: &ConstExpr, lsb: &ConstExpr, signed: bool| {
+        let ConstExpr::Ident(name) = base else {
+            return None;
+        };
+        let variable = name_to_id.get(name).and_then(|id| variables.get(id))?;
+        if !variable.array_dims.is_empty() {
+            return None;
+        }
+        let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
+        let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
+        let left = packed_index_position(variable, msb)?;
+        let right = packed_index_position(variable, lsb)?;
+        let width = i128::try_from(variable.width).ok()?;
+        let (low, high) = (left.min(right), left.max(right));
+        if low >= 0 && high < width {
+            return None;
+        }
+        let fill = if four_state && variable.is_4state {
+            'x'
+        } else {
+            '0'
+        };
+        let bits = usize::try_from(high - low + 1).ok()?;
+        // Bit `k` of the select is the vector's bit at position `low + k`;
+        // those inside the vector keep their value, the others read `fill`.
+        let (inside_low, inside_high) = (low.max(0), high.min(width - 1));
+        let fill_bits = (low..=high)
+            .rev()
+            .map(|position| {
+                if (inside_low..=inside_high).contains(&position) {
+                    '0'
+                } else {
+                    fill
+                }
+            })
+            .collect::<String>();
+        let fill_bits = ConstExpr::Literal(format!("{bits}'b{fill_bits}"));
+        let value = if inside_low > inside_high {
+            fill_bits
+        } else {
+            // The declared index of bit position `position`.
+            let index = |position: i128| match variable.packed_ranges.as_slice() {
+                [(left, right)] if left >= right => position + right,
+                [(_, right)] => right - position,
+                _ => position,
+            };
+            let literal = |value: i128| Box::new(ConstExpr::Literal(value.to_string()));
+            let inside = ConstExpr::Binary {
+                left: Box::new(ConstExpr::Resize {
+                    expr: Box::new(ConstExpr::SelectRange {
+                        expr: Box::new(base.clone()),
+                        msb: literal(index(inside_high)),
+                        lsb: literal(index(inside_low)),
+                        signed: false,
+                    }),
+                    width: bits,
+                    signed: false,
+                }),
+                op: sv::ir::BinaryOp::Shl,
+                right: literal(inside_low - low),
+            };
+            // An unknown bit ORed with 0 stays unknown (11.4.8).
+            if fill == '0' {
+                inside
+            } else {
+                ConstExpr::Binary {
+                    left: Box::new(inside),
+                    op: sv::ir::BinaryOp::BitOr,
+                    right: Box::new(fill_bits),
+                }
+            }
+        };
+        Some(if signed {
+            ConstExpr::Resize {
+                expr: Box::new(value),
+                width: bits,
+                signed: true,
+            }
+        } else {
+            value
+        })
+    };
+    match expr {
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => None,
+        ConstExpr::Select { expr, bit } => outside(expr, bit, bit, false).or_else(|| {
+            rewrite_all(&[expr, bit]).map(|mut operands| {
+                let bit = operands.pop().expect("two operands");
+                let expr = operands.pop().expect("two operands");
+                ConstExpr::Select {
+                    expr: Box::new(expr),
+                    bit: Box::new(bit),
+                }
+            })
+        }),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => outside(expr, msb, lsb, *signed).or_else(|| {
+            rewrite_all(&[expr, msb, lsb]).map(|mut operands| {
+                let lsb = operands.pop().expect("three operands");
+                let msb = operands.pop().expect("three operands");
+                let expr = operands.pop().expect("three operands");
+                ConstExpr::SelectRange {
+                    expr: Box::new(expr),
+                    msb: Box::new(msb),
+                    lsb: Box::new(lsb),
+                    signed: *signed,
+                }
+            })
+        }),
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => rewrite(expr).map(|expr| ConstExpr::Resize {
+            expr: Box::new(expr),
+            width: *width,
+            signed: *signed,
+        }),
+        ConstExpr::Function { callee, args, site } => rewrite_all(&args.iter().collect::<Vec<_>>())
+            .map(|args| ConstExpr::Function {
+                callee: callee.clone(),
+                args,
+                site: *site,
+            }),
+        ConstExpr::Unary { op, expr } => rewrite(expr).map(|expr| ConstExpr::Unary {
+            op: *op,
+            expr: Box::new(expr),
+        }),
+        ConstExpr::Binary { left, op, right } => rewrite_all(&[left, right]).map(|mut operands| {
+            let right = operands.pop().expect("two operands");
+            let left = operands.pop().expect("two operands");
+            ConstExpr::Binary {
+                left: Box::new(left),
+                op: *op,
+                right: Box::new(right),
+            }
+        }),
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => rewrite_all(&[condition, then_expr, else_expr]).map(|mut operands| {
+            let else_expr = operands.pop().expect("three operands");
+            let then_expr = operands.pop().expect("three operands");
+            let condition = operands.pop().expect("three operands");
+            ConstExpr::Mux {
+                condition: Box::new(condition),
+                then_expr: Box::new(then_expr),
+                else_expr: Box::new(else_expr),
+            }
+        }),
+    }
+}
+
+/// Whether the vectors `expr` reads are four-state: an unknown bit past a
+/// subexpression reads as X only where its bits can be X.
+fn base_is_four_state(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+) -> bool {
+    use sv::ir::Expr;
+    let any = |exprs: &[&Expr]| {
+        exprs
+            .iter()
+            .any(|expr| base_is_four_state(expr, variables, name_to_id))
+    };
+    match expr {
+        Expr::Ident(name) => name_to_id
+            .get(name)
+            .and_then(|id| variables.get(id))
+            .is_some_and(|variable| variable.is_4state),
+        // A conversion to two states, such as a cast to `bit`, reads no X.
+        Expr::Unary {
+            op: sv::ir::UnaryOp::ToTwoState,
+            ..
+        } => false,
+        Expr::Literal(text) => text
+            .chars()
+            .any(|digit| matches!(digit, 'x' | 'X' | 'z' | 'Z' | '?')),
+        Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+            base_is_four_state(expr, variables, name_to_id)
+        }
+        Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => {
+            any(&parts.iter().collect::<Vec<_>>())
+        }
+        Expr::Binary { left, right, .. } => any(&[left, right]),
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => any(&[condition, then_expr, else_expr]),
+        Expr::Inside { .. } | Expr::Call { .. } => true,
+    }
+}

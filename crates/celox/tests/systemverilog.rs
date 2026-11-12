@@ -65,6 +65,8 @@ macro_rules! sv_backends {
     };
 }
 
+#[path = "frontends/systemverilog/always_comb.rs"]
+mod always_comb;
 #[path = "frontends/systemverilog/array_locators.rs"]
 mod array_locators;
 #[path = "frontends/systemverilog/array_parameters.rs"]

@@ -12,6 +12,20 @@ impl Comb<'_, '_> {
         store: &Store,
         expr: &'e sv::ir::Expr,
     ) -> Cow<'e, sv::ir::Expr> {
+        let literals = self.known_literals(store, expr);
+        if literals.is_empty() {
+            return Cow::Borrowed(expr);
+        }
+        Cow::Owned(substitute_literals(expr, &literals))
+    }
+
+    /// The constant values the store holds for the variables `expr` names,
+    /// as typed literals and numbers.
+    fn known_literals(
+        &mut self,
+        store: &Store,
+        expr: &sv::ir::Expr,
+    ) -> HashMap<String, (String, i128)> {
         let mut names = HashSet::default();
         expr_idents(expr, &mut names);
         let mut literals: HashMap<String, (String, i128)> = HashMap::default();
@@ -46,10 +60,7 @@ impl Comb<'_, '_> {
             let Some(numeric) = numeric else { continue };
             literals.insert(name, (typed_literal(&value, width, signed), numeric));
         }
-        if literals.is_empty() {
-            return Cow::Borrowed(expr);
-        }
-        Cow::Owned(substitute_literals(expr, &literals))
+        literals
     }
 
     pub(super) fn propagate_lvalue(
@@ -120,7 +131,32 @@ impl Comb<'_, '_> {
         } else {
             expr
         };
-        let expr = self.propagate(store, &expr);
+        // A select an unrolled loop takes past a vector (see the guarded
+        // unit's lowering). Its positions take the store's known values,
+        // such as the loop's index, but its base stays the variable it
+        // names: the bits outside a four-state variable read X whatever
+        // the store knows of the variable (IEEE 1800-2023 11.5.1).
+        let literals = self.known_literals(store, &expr);
+        let bounded = if literals.is_empty() {
+            Cow::Borrowed(expr.as_ref())
+        } else {
+            Cow::Owned(substitute_select_bounds(&expr, &literals))
+        };
+        let expr = match out_of_range_constant_selects(
+            &bounded,
+            self.m.variables,
+            self.m.name_to_id,
+            self.m.constants,
+            self.m.parameter_types,
+            self.m.four_state,
+        ) {
+            Some(rewritten) => Cow::Owned(rewritten),
+            None => expr,
+        };
+        let expr = match expr {
+            Cow::Borrowed(expr) => self.propagate(store, expr),
+            Cow::Owned(expr) => Cow::Owned(self.propagate(store, &expr).into_owned()),
+        };
         let (node, _) = if let (sv::ir::Expr::Literal(literal), Some((width, _))) =
             (expr.as_ref(), context)
             && let Some(fill) = unbased_fill_literal(literal)
