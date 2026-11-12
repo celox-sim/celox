@@ -319,6 +319,27 @@ pub struct LogicGateInstance {
     pub tokens: TokenRange,
 }
 
+/// One assignment of a `defparam` statement (IEEE 1800-2023 23.10.1): the
+/// hierarchical name of a parameter and its new value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DefparamAssignment {
+    /// Whether the name starts at `$root`.
+    pub rooted: bool,
+    /// The scopes of the name, then the parameter.
+    pub path: Vec<DefparamSegment>,
+    pub value: ExprId,
+    pub tokens: TokenRange,
+}
+
+/// A component of the hierarchical name of a `defparam` target: the name of
+/// a scope with the index of a generate block or instance array element,
+/// or the parameter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DefparamSegment {
+    pub name: Name,
+    pub index: Option<ExprId>,
+}
+
 /// Stable handle for an authored parameter/localparam statement in any scope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct ParameterDeclarationId(pub(crate) usize);
@@ -689,6 +710,8 @@ pub enum BodyItemKind {
     Parameter(ParameterDeclarationId),
     Assign(AssignId),
     LogicGate(Box<LogicGate>),
+    /// `defparam` assignments (IEEE 1800-2023 23.10.1).
+    Defparam(Vec<DefparamAssignment>),
     Procedure(ProcedureId),
     Subroutine(SubroutineId),
     TypeAlias(TypeAliasId),

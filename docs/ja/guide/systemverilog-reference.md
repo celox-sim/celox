@@ -33,7 +33,10 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 
 - `bind`、`checker`、`config`、`covergroup`、clocking ブロックと clocking drive、
   ユーザー定義プリミティブ（UDP）、`specify` ブロック。
-- `defparam` 代入。インスタンス化時のパラメータ上書きを使ってください。
+- 文を持つモジュール自身のモジュールインスタンス（generate ブロック内でも可）の
+  パラメータ以外への `defparam` 代入: 子インスタンスを経由する名前、`$root` から
+  始まる名前、インスタンス配列の要素、インタフェースインスタンス、文自身の
+  スコープのパラメータ。
 - ポートとインスタンス: `module m({a, b}, c[3:0], .p(d))` のような non-ANSI ポート式
   （[#1953](https://github.com/celox-sim/celox/issues/1953)。ポート名のヘッダと
   本体の宣言による素の non-ANSI ポートは対応）、`ref` ポート
