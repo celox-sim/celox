@@ -3684,3 +3684,95 @@ fn abstract_classes_of_the_compilation_unit_construct_their_subclasses() {
     assert_eq!(sim.get(sim.signal("y")), 4u32.into());
     assert_eq!(sim.get(sim.signal("z")), 5u32.into());
 }
+
+#[test]
+fn modules_create_classes_they_only_reach_through_a_package_factory() {
+    // `simple_test` asks for `Reg#(simple_test)`, whose static initializer
+    // registers a `Holder#(simple_test)` with the package; the module names
+    // neither class and creates the object through the package, as UVM's
+    // `run_test("simple_test")` does. The specializations run the class's
+    // constructor, its static initializers and its overrides (IEEE
+    // 1800-2023 3.12.1, 8.25).
+    let source = "package p;
+        class Base;
+            string name;
+            function new(string name); this.name = name; endfunction
+            virtual function string get_type_name(); return \"Base\"; endfunction
+            virtual function int run(); return 0; endfunction
+        endclass
+        virtual class Wrapper;
+            pure virtual function Base create(string name);
+        endclass
+        Wrapper table_[$];
+        class Holder #(type T = Base) extends Wrapper;
+            virtual function Base create(string name); T obj; obj = new(name); return obj; endfunction
+        endclass
+        class Reg #(type T = Base);
+            static bit registered = add();
+            static function bit add(); Holder #(T) me = new; table_.push_back(me); return 1; endfunction
+        endclass
+        function automatic Base make(int kind, string name); return table_[kind].create(name); endfunction
+    endpackage
+    import p::*;
+    class simple_test extends Base;
+        typedef Reg#(simple_test) type_id;
+        const static string type_name = \"simple_test\";
+        function new(string name); super.new({name, \"!\"}); endfunction
+        virtual function string get_type_name(); return type_name; endfunction
+        virtual function int run(); return 7; endfunction
+    endclass
+    module Top(output bit named, output bit typed, output int ran);
+        initial begin
+            Base b;
+            b = make(0, \"t\");
+            named = b.name == \"t!\";
+            typed = b.get_type_name() == \"simple_test\";
+            ran = b.run();
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("named")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("typed")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("ran")), 7u32.into());
+
+    // A class of the unit declared after the module is no item the module
+    // sees (IEEE 1800-2023 3.12.1): the module does not take the unit for
+    // it, and so cannot create it.
+    let (head, module) = source.split_once("    module Top").unwrap();
+    let (package, class) = head.split_once("    class simple_test").unwrap();
+    let later = format!("{package}    module Top{module}\n    class simple_test{class}");
+    assert!(
+        celox::Simulation::from_sv_sources(vec![(later.as_str(), Path::new("class.sv"))], "Top")
+            .build()
+            .is_err(),
+        "{later}"
+    );
+
+    // A module takes only the unit of its own source: the module of b.sv
+    // sees `Reg#($unit::simple_test)`, a specialization for a class of the
+    // unit of a.sv, and leaves its own unit, which it does not use, aside
+    // (IEEE 1800-2023 3.12.1).
+    let (package, rest) = source.split_once("endpackage").unwrap();
+    let (classes, _) = rest.split_once("    module Top").unwrap();
+    let package = format!("{package}endpackage");
+    let other = "import p::*;
+    localparam int W = 3;
+    module Top(output int y);
+        initial y = 3;
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![
+            (package.as_str(), Path::new("p.sv")),
+            (classes, Path::new("a.sv")),
+            (other, Path::new("b.sv")),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 3u32.into());
+}

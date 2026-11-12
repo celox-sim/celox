@@ -83,6 +83,15 @@ impl Unit {
 /// The name of the compilation-unit scope.
 pub(super) const UNIT: &str = "$unit";
 
+/// The identity of item `name` of the compilation unit of source `path`:
+/// each source file's unit is a scope of its own (IEEE 1800-2023 3.12.1).
+pub(super) fn unit_item_identity(path: &std::path::Path, name: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = fxhash::FxHasher::default();
+    path.hash(&mut hasher);
+    format!("{UNIT}::{name}@{:016x}", hasher.finish())
+}
+
 /// What a module of a compilation unit sees of it (IEEE 1800-2023 3.12.1).
 #[derive(Debug, Default)]
 pub(super) struct UnitVisibility {

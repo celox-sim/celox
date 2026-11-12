@@ -18,6 +18,7 @@ impl ScopeElaboration<'_> {
         }
         // A package keeps its symbols for the scopes that use it.
         (self.is_package || self.export_symbols).then(|| scope::ScopeSymbols {
+            unit: None,
             package_scopes: self.imported.package_scopes.clone(),
             classes: classes::scope_classes(syntax_tree, session, &self.const_env),
             class_member_types: classes::specializations::export_member_types(syntax_tree, session),

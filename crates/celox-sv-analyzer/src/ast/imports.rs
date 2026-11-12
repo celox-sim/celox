@@ -1681,10 +1681,29 @@ fn resolve_scope_imports(
             symbols.alias(&format!("{own}::{name}"), target);
         }
     }
-    if let Some(unit) = unit
-        && uses_unit
-    {
-        symbols.extend(&unit.scope.as_ref().map_err(Clone::clone)?.symbols);
+    if let Some(unit) = unit {
+        if uses_unit {
+            symbols.extend(&unit.scope.as_ref().map_err(Clone::clone)?.symbols);
+        } else {
+            // A specialization the scope takes may still name a class of the
+            // unit, such as a class a package's factory creates: one the
+            // scope sees, declared before it (3.12.1). A unit that cannot be
+            // analyzed is reported when one does.
+            symbols.unit = Some(Arc::new(crate::ast::scope::DeferredUnit {
+                items: unit
+                    .visibility
+                    .declared_at
+                    .keys()
+                    .filter(|name| unit.declares_before(name, start))
+                    .map(|name| packages::unit_item_identity(tree.compilation_path(), name))
+                    .collect(),
+                symbols: unit
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.symbols.clone())
+                    .map_err(Clone::clone),
+            }));
+        }
     }
     for binding in &bindings {
         symbols.alias(&binding.name, &binding.target);
