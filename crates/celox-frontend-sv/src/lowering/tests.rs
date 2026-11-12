@@ -351,6 +351,32 @@ fn parameter_override_validation_rejects_unresolved_values() {
     );
 }
 
+#[test]
+fn derived_long_string_parameters_give_format_overrides_their_value() {
+    let source = "\
+        module Leaf #(parameter string ID = \"\") (); endmodule \
+        module Mid #(parameter string ID = \"a-very-long-instance-name\", \
+                     parameter string TAG = ID) (); \
+            Leaf #(.ID($sformatf(\"%s-alu\", TAG))) alu(); \
+        endmodule";
+    let ir = sv::analyze_source(source, Path::new("derived.sv")).unwrap();
+    let module = ir
+        .modules()
+        .iter()
+        .find(|module| module.name() == "Mid")
+        .unwrap();
+    let instances = lower_instances(
+        module,
+        &module_constants_with_overrides(module, &[]),
+        &module_parameter_types(module),
+    )
+    .unwrap();
+    assert_eq!(instances.len(), 1);
+    let evaluated = evaluated_parameter_overrides(&instances[0].parameter_overrides)
+        .expect("the derived string parameter is a constant override value");
+    assert!(matches!(evaluated["ID"], sv::ir::ConstExpr::Literal(_)));
+}
+
 /// The process kernels of `source`, other than declaration initializers.
 fn procedure_kernels(source: &str) -> usize {
     let scheduled = schedule_sources(
