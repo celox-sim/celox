@@ -8327,6 +8327,35 @@ fn out_of_range_bits_of_a_two_state_packed_select_read_zero() {
     );
 }
 
+// A continuous assignment is evaluated again when its own target changes
+// (IEEE 1800-2023 10.3.2). One that reads its target through a loop whose
+// condition depends on values is refused, as the symbolic form refuses
+// one without such a loop, rather than run once per change of its other
+// operands.
+#[test]
+fn self_dependent_assignments_with_value_dependent_loops_are_refused() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input bit [7:0] a, output bit [7:0] y);
+          function automatic bit [7:0] step(input bit [7:0] v, input bit [7:0] limit);
+            bit [7:0] r;
+            r = v;
+            if (r < limit) r = r + 1;
+            while (r < limit && r[1:0] != 0) r = r + 1;
+            return r;
+          endfunction
+          bit [7:0] state;
+          assign state = step(state, a);
+          assign y = state;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("continuous assignment that reads its own target `state`"),
+        "{error}"
+    );
+}
+
 #[test]
 fn run_time_bound_loop_return_runs_on_a_small_stack() {
     // Each symbolically unrolled iteration deepens the loop's `break` and

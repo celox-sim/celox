@@ -92,6 +92,22 @@ impl Ff<'_, '_> {
         }
         let dependencies =
             super::super::comb::subtract_written_sensitivity(reads.clone(), &targets);
+        // A continuous assignment is evaluated again when its own target
+        // changes (IEEE 1800-2023 10.3.2), which a guarded unit, scheduled
+        // after what it reads other than its targets, does not do. As in
+        // the symbolic form, one that reads its own target is refused.
+        if kind == sv::ir::CombProcessKind::ContinuousAssign
+            && let Some(target) = targets.iter().find(|target| {
+                reads
+                    .iter()
+                    .any(|read| read.id == target.id && read.access.overlaps(&target.access))
+            })
+        {
+            return Err(unsupported(format!(
+                "continuous assignment that reads its own target `{}`",
+                self.m.var(target.id).path.join(".")
+            )));
+        }
         let mut sources: Vec<_> = if always_comb {
             dependencies.clone()
         } else {
