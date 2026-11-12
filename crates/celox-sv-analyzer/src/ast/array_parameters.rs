@@ -11,7 +11,93 @@ use super::*;
 pub(super) struct ArrayParameter {
     pub signal: Signal,
     native_pattern: Option<celox_sv_syntax::ExprId>,
+    /// A default that is not an assignment pattern: an expression of the
+    /// array type, such as another array parameter or a conditional of
+    /// array parameters and patterns.
+    native_value: Option<celox_sv_syntax::ExprId>,
     bound: Option<BoundPattern>,
+}
+
+/// The value of the expression `root` as the value of the array parameter
+/// `name` of shape `shape`: a pattern, an expression that names an unpacked
+/// array, or a conditional of these whose condition is a constant. Every
+/// operand of a conditional is a value of the parameter, also the one that
+/// is not selected (IEEE 1800-2023 11.4.11).
+fn array_value(
+    root: celox_sv_syntax::ExprId,
+    shape: &VariableDimensions,
+    name: &str,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Expr> {
+    let native = tree.declarations();
+    let id = expression_binding::ungroup(root, native);
+    match native.expression(id).kind {
+        celox_sv_syntax::ExprKind::Conditional {
+            condition,
+            then_expression,
+            else_expression,
+        } => {
+            let condition = constant_binding::bind(condition, tree, session, dims)?
+                .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dims.const_env))
+                .ok_or_else(|| {
+                    unsupported("nonconstant or ambiguous condition in array parameter argument")
+                })?;
+            let then_value = array_value(then_expression, shape, name, tree, session, dims)?;
+            let else_value = array_value(else_expression, shape, name, tree, session, dims)?;
+            Ok(if condition != 0 {
+                then_value
+            } else {
+                else_value
+            })
+        }
+        celox_sv_syntax::ExprKind::Pattern { .. } => {
+            patterns::native_expression(id, shape, tree, session, dims)?
+                .ok_or_else(|| unsupported("array parameter pattern target"))
+        }
+        _ => {
+            let actual = instances::array_argument_shape(id, tree, session, dims)
+                .ok_or_else(|| unsupported(format!("value of array parameter `{name}`")))?;
+            bound_patterns::from_array_parameter(id, tree, session, dims, &actual)?
+                .lower(tree, session, shape, dims)
+        }
+    }
+}
+
+/// The operand a conditional expression of an unpacked array type selects.
+/// Aggregate conditional expressions require equivalent branch types (IEEE
+/// 1800-2023 11.4.11). A known condition selects a whole array before element
+/// binding; treating it as a packed mux would use the wrong X merge rule.
+pub(super) fn selected_branch(
+    root: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<celox_sv_syntax::ExprId> {
+    let native = tree.declarations();
+    let mut selected = expression_binding::ungroup(root, native);
+    while let celox_sv_syntax::ExprKind::Conditional {
+        condition,
+        then_expression,
+        else_expression,
+    } = native.expression(selected).kind
+    {
+        let condition = constant_binding::bind(condition, tree, session, dims)?
+            .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dims.const_env))
+            .ok_or_else(|| {
+                unsupported("nonconstant or ambiguous condition in array parameter argument")
+            })?;
+        selected = expression_binding::ungroup(
+            if condition != 0 {
+                then_expression
+            } else {
+                else_expression
+            },
+            native,
+        );
+    }
+    Ok(selected)
 }
 
 /// An authored unpacked parameter or an assignment-pattern value.
@@ -263,7 +349,8 @@ fn array_parameters_from_declaration(
                 )
             })
             .collect::<Converted<Vec<_>>>()?;
-        let pattern = parameters::ownership::default(native).filter(|id| {
+        let default = parameters::ownership::default(native);
+        let pattern = default.filter(|id| {
             matches!(
                 tree.declarations()
                     .expression(expression_binding::ungroup(*id, tree.declarations()))
@@ -271,7 +358,7 @@ fn array_parameters_from_declaration(
                 celox_sv_syntax::ExprKind::Pattern { .. }
             )
         });
-        if pattern.is_none() && bound.is_none() {
+        if default.is_none() && bound.is_none() {
             return Err(AnalyzerError::Unsupported(format!(
                 "value of array parameter `{name}`"
             )));
@@ -279,9 +366,15 @@ fn array_parameters_from_declaration(
         // A supplied caller-bound pattern takes precedence over the authored
         // default. Only defaults actually consumed here require their native ID.
         let native_pattern = if bound.is_none() { pattern } else { None };
+        let native_value = if bound.is_none() && pattern.is_none() {
+            default
+        } else {
+            None
+        };
         let parameter = ArrayParameter {
             signal: Signal::new(name, type_with_unpacked_ranges(element, ranges)?),
             native_pattern,
+            native_value,
             bound,
         };
         // Publish before the next declarator can query this array's shape.
@@ -311,9 +404,10 @@ impl ArrayParameter {
                     None => return Err(unsupported("array parameter pattern target")),
                 },
                 None => {
-                    return Err(AnalyzerError::Parse(
-                        "native array parameter default is missing".into(),
-                    ));
+                    let root = self.native_value.ok_or_else(|| {
+                        AnalyzerError::Parse("native array parameter default is missing".into())
+                    })?;
+                    array_value(root, &shape, &name, tree, session, dims)?
                 }
             }
         };
