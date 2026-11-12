@@ -807,7 +807,6 @@ fn comb_processes_pulse_only_when_an_input_changes() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 mod systemverilog {
     use super::*;
 
@@ -1167,7 +1166,6 @@ fn loading_a_finished_state_freezes_the_simulation() {
     });
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn finish_during_a_direct_settle_ends_the_simulation() {
     const SOURCE: &str = r#"
@@ -1401,7 +1399,6 @@ fn state_files_reject_baselines_of_the_wrong_kind() {
     ));
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn saving_state_after_a_finishing_write_records_the_finish() {
     const SOURCE: &str = r#"
@@ -2398,7 +2395,6 @@ fn executor_call_traces_of_veryl_clock_domains_are_unchanged() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 mod sv_traces {
     use super::*;
 
@@ -2621,7 +2617,6 @@ fn four_state_reads_preserve_wide_unknown_masks_and_simulation_time() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn public_time_setter_publishes_time_before_design_evaluation() {
     let source = r#"
@@ -2651,7 +2646,6 @@ fn public_time_setter_publishes_time_before_design_evaluation() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn portable_fork_strings_include_roots_absent_from_backend_memory() {
     // Explicitly erase stale backend scratch references: the portable table
@@ -2705,7 +2699,6 @@ endmodule"#;
     assert_eq!(target.get(target.signal("q")), 12345u32.into());
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn portable_fork_state_roundtrips_each_region_queue() {
     let source = r#"`timescale 1ns/1ns
@@ -2796,7 +2789,6 @@ endprogram"#;
 
 /// An Active occurrence consumed before NBA must not be replayed when a
 /// different domain observes one of the deferred publications (LRM 4.5).
-#[cfg(feature = "systemverilog")]
 #[test]
 fn consumed_active_occurrences_are_not_replayed_after_nba() {
     let source = r#"`timescale 1ns/1ns

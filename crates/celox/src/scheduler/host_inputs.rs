@@ -156,12 +156,7 @@ pub(super) fn replay(program: &LaidOutProgram, g: &mut Generator<'_>, checks: &[
     g.arena_header_store(offset_of!(ArenaHeader, host_words), zero);
 }
 
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
 mod tests {
     use crate::{SchedulerMode, Simulation};
 

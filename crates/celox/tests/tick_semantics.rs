@@ -11,8 +11,6 @@
 //! where `s` is the event's signal, `A` its active level and `I` its inactive
 //! one.
 
-#![cfg(feature = "systemverilog")]
-
 use std::path::Path;
 
 use celox::{Edge, Simulation, Simulator};

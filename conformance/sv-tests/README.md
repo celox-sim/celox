@@ -418,7 +418,7 @@ git -C ../sv-tests submodule update --init --depth 1 \
     third_party/tests/uvm third_party/tests/uvm-1.2 \
     third_party/tests/easyUVM third_party/tests/uvm-examples
 work/sv-tests-venv/bin/python conformance/sv-tests/prepare.py ../sv-tests
-CARGO_PROFILE_RELEASE_LTO=off cargo build --locked --release -p celox --features systemverilog --example sv_tests
+CARGO_PROFILE_RELEASE_LTO=off cargo build --locked --release -p celox --example sv_tests
 PYTHONDONTWRITEBYTECODE=1 work/sv-tests-venv/bin/python conformance/sv-tests/run.py ../sv-tests \
     --driver target/release/examples/sv_tests --out-dir work/sv-tests --jobs 4 \
     --expected conformance/sv-tests/expected.tsv --report work/sv-tests-report.tsv

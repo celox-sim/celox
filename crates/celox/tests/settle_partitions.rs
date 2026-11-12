@@ -320,7 +320,6 @@ fn loaded_state_reaches_partitions() {
     assert_eq!(trace!(target), trace!(plain));
 }
 
-#[cfg(feature = "systemverilog")]
 mod systemverilog {
     use std::path::Path;
 
@@ -616,14 +615,12 @@ endmodule
 /// A shared producer marks readers across flag words, with unrelated readers
 /// between them. Mask-only changes must propagate without clearing flags that
 /// another producer already set.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn four_state_fanout_preserves_other_pending_readers() {
     check_four_state_fanout(false);
     check_four_state_fanout(true);
 }
 
-#[cfg(feature = "systemverilog")]
 fn check_four_state_fanout(registered: bool) {
     use std::path::Path;
     let ports = (0..20)

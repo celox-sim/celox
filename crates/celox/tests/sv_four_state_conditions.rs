@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! A four-state build decides which branch conditions are complements by
 //! whether their operands can hold unknown bits. Operands are shared: a
 //! counter that thirty-two conditional statements increment is thirty-two

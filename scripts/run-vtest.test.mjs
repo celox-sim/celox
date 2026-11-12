@@ -80,7 +80,7 @@ test("local tests leave heavy backends off unless explicitly requested", () => {
     }, { CELOX_TEST_FEATURES: extra });
     const features = calls.map(([, args]) => args[args.indexOf("--features") + 1]);
     assert.equal(features[0], features[1]);
-    assert.equal(features[0], "celox/systemverilog,celox-test-suite/runtime-cases"
+    assert.equal(features[0], "celox-test-suite/runtime-cases"
       + (extra ? `,${extra}` : ""));
   }
 });
@@ -91,11 +91,11 @@ test("the CI executor is built in the scope of the test build it serves", () => 
     ["--workspace", "--exclude", "lydite*", "--features", workspaceFeatures, "--tests"]);
   const builds = [
     { packages: ["celox-heap"], targets: [], features: [] },
-    { packages: ["celox", "celox-test-suite"], targets: ["systemverilog"], features: ["celox/systemverilog", "celox/cranelift"] },
+    { packages: ["celox", "celox-test-suite"], targets: ["systemverilog"], features: ["celox/cranelift"] },
   ];
   assert.deepEqual(executorScope({ CELOX_RUST_FULL: "false", BUILDS: JSON.stringify(builds) }), [
     "-p", "celox", "-p", "celox-test-suite",
-    "--features", "celox/systemverilog,celox/cranelift,celox-test-suite/runtime-cases",
+    "--features", "celox/cranelift,celox-test-suite/runtime-cases",
     "--test", "systemverilog",
   ]);
   assert.deepEqual(executorScope({ CELOX_RUST_FULL: "false",
@@ -106,5 +106,5 @@ test("the CI executor is built in the scope of the test build it serves", () => 
   assert.throws(() => executorScope({ CELOX_RUST_FULL: "false",
     BUILDS: JSON.stringify([{ packages: ["celox"], targets: [], features: ["x;y"] }]) }),
   /Invalid Cargo scope/);
-  assert.deepEqual(executorScope({}), ["-p", "celox", "--features", "celox/systemverilog,celox-test-suite/runtime-cases"]);
+  assert.deepEqual(executorScope({}), ["-p", "celox", "--features", "celox-test-suite/runtime-cases"]);
 });

@@ -1,4 +1,4 @@
-#![cfg(all(feature = "systemverilog", unix))]
+#![cfg(unix)]
 
 use std::path::Path;
 

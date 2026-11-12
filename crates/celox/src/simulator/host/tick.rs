@@ -748,7 +748,7 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     /// The edge facts of `event`.
-    #[cfg(all(test, feature = "systemverilog", feature = "cranelift"))]
+    #[cfg(all(test, feature = "cranelift"))]
     pub(crate) fn event_edge(&self, event: B::Event) -> celox_runtime::EventEdge {
         self.event_edges[event.id()]
     }

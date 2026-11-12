@@ -276,12 +276,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
         )
     }
 
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn build_scheduler_test(
         mut self,
     ) -> Result<crate::Simulation<crate::backend::TieredBackend>, SimulatorError> {

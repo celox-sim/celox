@@ -18,17 +18,14 @@ use celox::{
 };
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
-#[cfg(feature = "systemverilog")]
 #[path = "celox/checkpoint_fs.rs"]
 mod checkpoint_fs;
 #[path = "celox/project.rs"]
 mod project;
 #[path = "celox/runner.rs"]
 mod runner;
-#[cfg(feature = "systemverilog")]
 #[path = "celox/state_signal.rs"]
 mod state_signal;
-#[cfg(feature = "systemverilog")]
 #[path = "celox/system_checkpoint.rs"]
 mod system_checkpoint;
 
@@ -204,13 +201,7 @@ fn run_testbench(arguments: RunArgs) -> Result<(), String> {
     let mut arguments = resolve_run_config(arguments);
     arguments.design.opt_level = Some(arguments.opt_level);
     if arguments.design.is_sv() {
-        #[cfg(feature = "systemverilog")]
         return run_sv(arguments);
-        #[cfg(not(feature = "systemverilog"))]
-        return Err(
-            "SystemVerilog support requires building celox-vpi with --features systemverilog"
-                .to_string(),
-        );
     }
     if arguments.execution.native_image_input.is_none()
         && !arguments.design.sources.iter().all(|path| {
@@ -237,7 +228,6 @@ fn run_testbench(arguments: RunArgs) -> Result<(), String> {
     })
 }
 
-#[cfg(feature = "systemverilog")]
 fn run_sv(arguments: RunConfig) -> Result<(), String> {
     arguments.execution.validate_sv().unwrap_or_else(|message| {
         clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, message).exit()
@@ -384,7 +374,6 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 fn simulate_sv<B: celox::SimBackend>(
     simulation: &mut celox::Simulation<B>,
     max_steps: u64,
@@ -399,7 +388,6 @@ fn simulate_sv<B: celox::SimBackend>(
     result
 }
 
-#[cfg(feature = "systemverilog")]
 fn simulate_sv_inner<B: celox::SimBackend>(
     simulation: &mut celox::Simulation<B>,
     max_steps: u64,
@@ -453,7 +441,6 @@ fn simulate_sv_inner<B: celox::SimBackend>(
 }
 
 /// Report actual compiled-slot execution as well as static eligibility.
-#[cfg(feature = "systemverilog")]
 fn report_sv_scheduler<B: celox::SimBackend>(
     simulation: &celox::Simulation<B>,
     phase: &str,
@@ -488,7 +475,6 @@ fn report_sv_scheduler<B: celox::SimBackend>(
 /// settle). Its file is saved right after that time step, with every region
 /// of the time done. A file for time `T` holds the state after everything
 /// due at times up to `T`, saved before the run advances past `T`.
-#[cfg(feature = "systemverilog")]
 #[derive(Default)]
 struct StateSaves {
     counted: Option<(String, celox::SignalRef)>,
@@ -506,7 +492,6 @@ struct StateSaves {
 }
 
 /// Persistent CLI bookkeeping; signal registration and output directory are local.
-#[cfg(feature = "systemverilog")]
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct SavedStateSaves {
     counted: Option<String>,
@@ -519,7 +504,6 @@ struct SavedStateSaves {
     started: bool,
 }
 
-#[cfg(feature = "systemverilog")]
 impl StateSaves {
     fn progress(&self) -> SavedStateSaves {
         SavedStateSaves {
@@ -754,7 +738,6 @@ impl StateSaves {
 
 /// Resolve `path`, a hierarchical signal name such as `tb.cpu.clk` or
 /// `cpu[1].clk`, which may start with the top module's name.
-#[cfg(feature = "systemverilog")]
 fn resolve_signal_path<B: celox::SimBackend>(
     simulation: &celox::Simulation<B>,
     top: &str,
@@ -782,7 +765,6 @@ fn resolve_signal_path<B: celox::SimBackend>(
         .map_err(|error| format!("--save-state-on {path}: {error}"))
 }
 
-#[cfg(feature = "systemverilog")]
 fn drain_sv_output<B: celox::SimBackend>(
     simulation: &mut celox::Simulation<B>,
     output: &mut impl Write,
@@ -795,7 +777,6 @@ fn drain_sv_output<B: celox::SimBackend>(
 }
 
 /// What the runtime events written so far reported.
-#[cfg(feature = "systemverilog")]
 #[derive(Default)]
 struct SvOutput {
     failed: bool,
@@ -804,7 +785,6 @@ struct SvOutput {
     missed: u64,
 }
 
-#[cfg(feature = "systemverilog")]
 impl SvOutput {
     /// Write the messages of `events` to `output`.
     fn write(
@@ -874,7 +854,6 @@ impl SvOutput {
 /// finishes, nothing is due or a SIGUSR1 request needs a step boundary.
 /// Returns the steps run, or `None` when the backend has no ring buffer to
 /// drain concurrently.
-#[cfg(feature = "systemverilog")]
 fn run_sv_slots<B: celox::SimBackend>(
     simulation: &mut celox::Simulation<B>,
     max_steps: u64,
@@ -1067,7 +1046,6 @@ fn build(arguments: BuildArgs) -> Result<(), String> {
 }
 
 /// The SystemVerilog compilation options of `design`.
-#[cfg(feature = "systemverilog")]
 fn configure_sv<'a, T>(
     design: &'a Design,
     builder: celox::SimulatorBuilder<'a, T>,
@@ -1083,32 +1061,24 @@ fn configure_sv<'a, T>(
 
 fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> {
     if design.is_sv() {
-        #[cfg(feature = "systemverilog")]
-        {
-            let sources = design.sv_sources()?;
-            let refs: Vec<_> = sources
-                .iter()
-                .map(|(text, path)| (text.as_str(), path.as_path()))
-                .collect();
-            // VPI advances time and dispatches callbacks even for a process-free
-            // DUT. Compile its process-capable image directly, rather than first
-            // compiling an untimed image and repeating analysis and optimization
-            // when that builder discovers a process.
-            let simulation = configure_sv(
-                design,
-                celox::Simulation::from_sv_sources(refs, &design.top),
-            )
-            .compile_native()
-            .map_err(|error| format!("compilation failed:\n{error}"))?;
-            report_warnings(simulation.warnings())?;
-            let image = simulation.into_program_image();
-            return Ok(image);
-        }
-        #[cfg(not(feature = "systemverilog"))]
-        return Err(
-            "SystemVerilog support requires building celox-vpi with --features systemverilog"
-                .to_string(),
-        );
+        let sources = design.sv_sources()?;
+        let refs: Vec<_> = sources
+            .iter()
+            .map(|(text, path)| (text.as_str(), path.as_path()))
+            .collect();
+        // VPI advances time and dispatches callbacks even for a process-free
+        // DUT. Compile its process-capable image directly, rather than first
+        // compiling an untimed image and repeating analysis and optimization
+        // when that builder discovers a process.
+        let simulation = configure_sv(
+            design,
+            celox::Simulation::from_sv_sources(refs, &design.top),
+        )
+        .compile_native()
+        .map_err(|error| format!("compilation failed:\n{error}"))?;
+        report_warnings(simulation.warnings())?;
+        let image = simulation.into_program_image();
+        return Ok(image);
     }
     if design.sources.len() != 1
         || !design.sources[0]
@@ -1521,7 +1491,6 @@ fn main() -> ExitCode {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 fn report_sv_hotspots(_simulation: &celox::Simulation<celox::TieredBackend>, _test: &str) {
     #[cfg(any(
         all(target_arch = "x86_64", not(feature = "arm64-codegen")),
@@ -1608,7 +1577,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn sv_scheduler_limit_fails_and_preserves_scheduled_output() {
         let source = "module Top(input bit clk); always @(posedge clk) $display(\"tick\"); final $display(\"finalized\"); endmodule";
@@ -1632,7 +1600,6 @@ mod tests {
         assert!(!output.contains("finalized"));
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn sv_batch_runs_final_output_on_quiescence_and_finish() {
         for ending in ["", "$finish;"] {
@@ -1659,7 +1626,6 @@ mod tests {
     }
 
     /// Output that fails to write ends a run that would go on forever.
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn sv_runs_end_when_output_fails() {
         struct Closed;
@@ -1692,7 +1658,6 @@ mod tests {
 
     /// Only `$error` and `$fatal` fail a run; every report is printed with
     /// its severity and location (IEEE 1800-2023 20.10).
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn sv_reports_fail_the_run_only_from_errors() {
         let run = |task: &str| {

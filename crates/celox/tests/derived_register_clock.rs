@@ -570,7 +570,6 @@ module t {
     );
 }
 
-#[cfg(feature = "systemverilog")]
 fn check_sv(source: &str, edges: u64, expected: &[(u64, u64)]) {
     let path = std::path::Path::new("derived_register_clock.sv");
     check_with(
@@ -581,7 +580,6 @@ fn check_sv(source: &str, edges: u64, expected: &[(u64, u64)]) {
     );
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_systemverilog_register_bit_clock_divides_by_two() {
     check_sv(
@@ -600,7 +598,6 @@ fn a_systemverilog_register_bit_clock_divides_by_two() {
 }
 
 /// A register bit connected directly to a child's clock port.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_systemverilog_register_bit_on_a_child_clock_port() {
     check_sv(
@@ -619,7 +616,6 @@ fn a_systemverilog_register_bit_on_a_child_clock_port() {
 }
 
 /// `clk & en` on a child's clock port: the child counts the gated edges.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_systemverilog_gated_child_clock_port() {
     let source = "module Counter(input logic clk, input logic rst, output logic [7:0] q);
@@ -657,7 +653,6 @@ fn a_systemverilog_gated_child_clock_port() {
 /// A child's clock output drives one bit of a parent vector. The vector is
 /// not that clock: a clock taken from its other, constant bit never rises,
 /// while one taken from the driven bit follows the child's clock.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_systemverilog_child_clock_into_a_vector_bit() {
     for (bit, step) in [(0u64, 0u64), (1, 1)] {
@@ -771,7 +766,6 @@ module Top (
     );
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_systemverilog_clock_copy_sensed_at_the_falling_edge() {
     let source = "module Top(input logic clk, input logic rst, output logic [7:0] cnt);
@@ -789,7 +783,6 @@ fn a_systemverilog_clock_copy_sensed_at_the_falling_edge() {
     );
 }
 
-#[cfg(feature = "systemverilog")]
 fn check_sv_falling_edges(source: &str) {
     let path = std::path::Path::new("derived_register_clock.sv");
     check_falling_edges(
@@ -800,7 +793,6 @@ fn check_sv_falling_edges(source: &str) {
 }
 
 /// A copy of a copy takes its edge from the end of the chain that is sensed.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_systemverilog_chain_of_clock_copies_sensed_at_the_falling_edge() {
     check_sv_falling_edges(
@@ -815,7 +807,6 @@ fn a_systemverilog_chain_of_clock_copies_sensed_at_the_falling_edge() {
     );
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_systemverilog_chain_of_clock_copies_through_a_child_port() {
     check_sv_falling_edges(
@@ -835,7 +826,6 @@ fn a_systemverilog_chain_of_clock_copies_through_a_child_port() {
 }
 
 /// Copies of a clock that is itself sensed at no edge, one at each edge.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_systemverilog_unsensed_clock_copied_to_both_edges() {
     for (first, second) in [("posedge c", "negedge d"), ("negedge d", "posedge c")] {

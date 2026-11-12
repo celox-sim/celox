@@ -1,10 +1,5 @@
 //! Canonical event bindings and shared clock storage stay in generated code.
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
 mod tests {
     use crate::{SchedulerMode, Simulation};
 
@@ -91,12 +86,7 @@ endmodule"#
     }
 }
 
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
 mod batches {
     use crate::{SchedulerMode, Simulation};
 
@@ -175,12 +165,7 @@ endmodule"#
     }
 }
 
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
 mod unknown_kinds {
     use crate::{
         NativeBackend, SchedulerMode, SignalRef, SimBackend, Simulation, Simulator,
@@ -356,12 +341,7 @@ mod unknown_kinds {
         }
     }
 }
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
 mod shared_storage {
     use crate::{
         NativeBackend, SchedulerMode, SimBackend, Simulation, Simulator, SimulatorOptions,

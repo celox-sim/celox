@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 use std::path::Path;
 
 macro_rules! math_backend {

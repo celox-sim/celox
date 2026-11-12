@@ -333,5 +333,5 @@ fn first_difference<B: SimBackend>(
         .min()
 }
 
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 mod tests;

@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! Variable lifetimes (IEEE 1800-2023 6.21): static locals keep their value.
 
 use celox::{Simulation, Simulator};

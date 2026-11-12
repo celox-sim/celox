@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! The functions of UVM's C library that Celox provides itself.
 use std::path::Path;
 

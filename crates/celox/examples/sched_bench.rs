@@ -25,7 +25,7 @@
 //! instruction counts of two runs, which cancels compilation:
 //!
 //! ```sh
-//! cargo build --release -p celox --features systemverilog --example sched_bench
+//! cargo build --release -p celox --example sched_bench
 //! valgrind --tool=callgrind target/release/examples/sched_bench b1 200000
 //! valgrind --tool=callgrind target/release/examples/sched_bench b1 20000
 //! ```

@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! Celox's default timing configuration must preserve authored scope rounding.
 use std::path::Path;
 

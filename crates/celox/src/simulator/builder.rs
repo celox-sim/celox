@@ -18,7 +18,6 @@ mod compile;
 pub(in crate::simulator) use analyze::*;
 pub use compile::*;
 
-#[cfg(feature = "systemverilog")]
 fn sv_compilation_warnings(
     warnings: Vec<celox_frontend_sv::FrontendWarning>,
 ) -> Vec<CompilationWarning> {

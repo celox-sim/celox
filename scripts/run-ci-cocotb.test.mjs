@@ -10,7 +10,7 @@ import { cargoCommands } from "./run-ci-rust-scope.mjs";
 test("cocotb preserves build resolution and selects only its ignored tests", () => {
   const builds = [
     { packages: ["celox-heap"], targets: [], features: [] },
-    { packages: ["celox", "celox-vpi"], targets: [], features: ["celox/systemverilog"] },
+    { packages: ["celox", "celox-vpi"], targets: [], features: ["celox/cranelift"] },
   ];
   const original = structuredClone(builds);
   const expected = cargoCommands("test", builds, cocotbFilter)[1]

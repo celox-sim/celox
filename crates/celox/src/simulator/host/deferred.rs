@@ -365,7 +365,7 @@ impl<B: SimBackend> Simulator<B> {
         }
     }
 
-    #[cfg(all(test, feature = "systemverilog"))]
+    #[cfg(test)]
     pub(crate) fn sampled_copy_count(&self) -> usize {
         self.slot_end.sample_shadows.len()
     }

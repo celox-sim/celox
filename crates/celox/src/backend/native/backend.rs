@@ -613,12 +613,7 @@ impl NativeBackend {
         }
     }
 
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn compile_outlined_image_for_test(
         program: &LaidOutProgram,
         options: &SimulatorOptions,
@@ -627,12 +622,7 @@ impl NativeBackend {
             .map(|(image, _)| image)
     }
 
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn split_comb_units_for_test(program: &mut LaidOutProgram) {
         program.sir.eval_comb = program
             .sir

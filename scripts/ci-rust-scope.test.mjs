@@ -93,10 +93,10 @@ test("a test file change runs only that binary and nothing downstream", () => {
   assert.deepEqual(rustTestScope(["crates/celox/tests/flip_flop.rs"], workspace), {
     full: false,
     packages: ["celox"],
-    features: ["celox/systemverilog", "celox/cranelift", "celox/wasm-runtime", "celox/wasm-component"],
+    features: ["celox/cranelift", "celox/wasm-runtime", "celox/wasm-component"],
     filter: "binary_id(celox::flip_flop)",
     targets: ["flip_flop"],
-    builds: [{ packages: ["celox"], targets: ["flip_flop"], features: ["celox/systemverilog", "celox/cranelift", "celox/wasm-runtime", "celox/wasm-component"] }],
+    builds: [{ packages: ["celox"], targets: ["flip_flop"], features: ["celox/cranelift", "celox/wasm-runtime", "celox/wasm-component"] }],
     libraries: [],
     libraryFeatures: [],
   });
@@ -283,7 +283,7 @@ test("multiple packages keep their own Cargo test targets and omit unused adapte
     [["celox"], ["flip_flop"]], [["consumer"], ["e2e"]],
   ]);
   const real = rustTestScope(["crates/celox/tests/param_override.rs"], readWorkspace(root));
-  assert.deepEqual(real.features, ["celox/systemverilog", "celox/cranelift", "celox/wasm-runtime", "celox/wasm-component"]);
+  assert.deepEqual(real.features, ["celox/cranelift", "celox/wasm-runtime", "celox/wasm-component"]);
 });
 
 test("a shared case does not turn a simultaneous SV fix into every backend", () => {

@@ -125,7 +125,6 @@ fn signal_copy_marks_the_destination_for_vcd_tracking() {
 /// Batched testbench ticks end each tick's slot in a design with
 /// sampled values: a register capturing `$sampled(count)` follows
 /// the preceding tick.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn batched_testbench_ticks_end_each_slot() {
     let source = "module Top(input bit clk, output bit [7:0] count, output bit [7:0] seen);\n  \
@@ -146,7 +145,6 @@ fn batched_testbench_ticks_end_each_slot() {
     assert_eq!(sim.get(seen), BigUint::from(2u8));
 }
 
-#[cfg(feature = "systemverilog")]
 #[test_case::test_case(false; "two_state")]
 #[test_case::test_case(true; "four_state")]
 fn cached_coincident_edges_match_fresh_plans_after_level_and_gate_changes(four_state: bool) {

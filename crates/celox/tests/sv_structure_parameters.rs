@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! A member of a parameter of packed structure type is a constant (IEEE
 //! 1800-2023 11.2.1, A.8.4 `constant_select`) of the member's declared
 //! width and sign (7.2.1): it sizes ports and variables, bounds and selects

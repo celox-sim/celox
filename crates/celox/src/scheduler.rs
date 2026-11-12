@@ -704,29 +704,17 @@ mod test_support;
 #[cfg(test)]
 pub(crate) use test_support::*;
 
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod active_commit_compiled_tests;
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 mod finish_phase_tests;
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 mod orphan_clock_tests;
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod reference_reset_compiled_tests;
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod repeated_active_edge_tests;
 #[cfg(test)]
 mod tests;
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 mod wide_event_tests;

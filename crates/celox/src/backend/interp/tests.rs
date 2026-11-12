@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(all(feature = "systemverilog", hotspot_jit))]
+#[cfg(hotspot_jit)]
 #[test]
 fn hotspot_block_frames_preserve_values_across_native_and_interpreted_branches() {
     let mut source = String::from(
@@ -93,7 +93,7 @@ fn hotspot_block_frames_preserve_values_across_native_and_interpreted_branches()
     }
 }
 
-#[cfg(all(feature = "systemverilog", hotspot_jit))]
+#[cfg(hotspot_jit)]
 #[test]
 fn hotspot_split_groups_share_pending_writes_and_trigger_snapshots() {
     const SOURCE: &str = r#"`timescale 1ns/1ns
@@ -420,7 +420,6 @@ module Top (
 /// groups. Those groups snapshot only the trigger addresses their own
 /// units store, not the combinational ones, and trigger the same
 /// edges as the default compiled backend.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn split_groups_snapshot_only_their_own_trigger_addresses() {
     const SOURCE: &str = "`timescale 1ns/1ns

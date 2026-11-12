@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! The actions of deferred immediate assertions wait in the deferred
 //! assertion report queue of their process: `#0` ones mature in the
 //! Observed region, `final` ones in the Postponed region, and a flush point

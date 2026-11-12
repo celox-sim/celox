@@ -1,5 +1,4 @@
 //! Explicit signal access is a native-image API/optimization contract.
-#![cfg(feature = "systemverilog")]
 use celox::BigUint;
 use celox::{NativeProgramInstance, OptLevel, SignalAccessOptions, SimBackend, Simulator};
 

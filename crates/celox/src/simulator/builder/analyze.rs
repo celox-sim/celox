@@ -194,8 +194,6 @@ pub(super) fn analyze(
     Vec<FrontendDiagnostic>,
     Vec<CompilationWarning>,
 ) {
-    #[cfg(not(feature = "systemverilog"))]
-    let _ = (diagnostic_policy, sv_timescale, legacy_empty_reductions);
     symbol_table::clear();
     attribute_table::clear();
 
@@ -268,13 +266,10 @@ pub(super) fn analyze(
             }
         }
     }
-    #[cfg(feature = "systemverilog")]
     let mut sv_interface_signatures = Vec::new();
     // Behaviorless interfaces may never be lowered again. Retain their probe
     // warnings too, deduplicating calls also encountered during design lowering.
-    #[cfg(feature = "systemverilog")]
     let mut sv_probe_warnings = Vec::new();
-    #[cfg(feature = "systemverilog")]
     if let Some(sv_sources) = sv_sources {
         let references = super::super::mixed::referenced_sv_components(
             authored_parsers.iter().map(|parser| &parser.veryl),
@@ -351,10 +346,7 @@ pub(super) fn analyze(
         && let Err(error) = elaborate_parameterized_top(&mut ir, &mut context, top, param_overrides)
     {
         errors.append(&mut context.drain_errors());
-        #[cfg(feature = "systemverilog")]
         let warnings = sv_compilation_warnings(sv_probe_warnings);
-        #[cfg(not(feature = "systemverilog"))]
-        let warnings = Vec::new();
         return (Err(error.into()), errors, Vec::new(), warnings);
     }
     errors.append(&mut context.drain_errors());
@@ -417,7 +409,6 @@ pub(super) fn analyze(
         build_config.reset_type = rt;
     }
     build_config.parallel_lanes = optimize_options.parallel_lanes();
-    #[cfg(feature = "systemverilog")]
     let mut sv_warnings = Vec::new();
     let sir = if let Some(external) = external_frontend {
         parser::parse_with_external_hierarchy(
@@ -439,99 +430,51 @@ pub(super) fn analyze(
             component_libraries,
             component_file_base,
         )
-    } else {
-        #[cfg(feature = "systemverilog")]
-        {
-            if let Some(sv_sources) = sv_sources {
-                (|| {
-                    let names = super::super::mixed::EmittedNames::new(&metadata);
-                    let mut used_names = super::super::mixed::component_names(sv_sources, names)?;
-                    let behavior_sources = super::super::mixed::attach_sv_interface_behavior(
-                        &mut ir,
-                        &sv_interface_signatures,
-                        &mut context,
-                        &mut used_names,
-                    )?;
-                    let mut joint_sources = sv_sources.to_vec();
-                    joint_sources.extend(
-                        behavior_sources
-                            .iter()
-                            .map(|source| (source.as_str(), Path::new("<sv-interface-behavior>"))),
-                    );
-                    let requests = super::super::mixed::specialize_sv_instances(
-                        &mut ir,
-                        &joint_sources,
-                        &mut context,
-                        &mut used_names,
-                        names,
-                    )?;
-                    let declarations = super::super::mixed::sv_declaration_contracts(
-                        &ir,
-                        &mut context,
-                        &joint_sources,
-                        &requests,
-                        names,
-                    )?;
-                    parser::parse_mixed(
-                        &top,
-                        &mut ir,
-                        &mut context,
-                        &loop_provenance,
-                        &joint_sources,
-                        &[(
-                            declarations.as_str(),
-                            Path::new("<veryl-declaration-contracts>"),
-                        )],
-                        param_overrides,
-                        &requests,
-                        &sv_interface_signatures,
-                        &mut used_names,
-                        names,
-                        &build_config,
-                        ignored_loops,
-                        true_loops,
-                        four_state,
-                        trace_opts,
-                        trace_out,
-                        optimize_options,
-                        diagnostics,
-                        diagnostic_policy,
-                        sv_timescale,
-                        legacy_empty_reductions,
-                        preserve_element_storage_layout,
-                        testbench_random_seed,
-                        component_libraries,
-                        component_file_base,
-                        &mut sv_warnings,
-                    )
-                })()
-            } else {
-                parser::parse(
-                    &top,
-                    &ir,
-                    &loop_provenance,
-                    &build_config,
-                    ignored_loops,
-                    true_loops,
-                    four_state,
-                    trace_opts,
-                    trace_out,
-                    optimize_options,
-                    diagnostics,
-                    preserve_element_storage_layout,
-                    testbench_random_seed,
-                    component_libraries,
-                    component_file_base,
-                )
-            }
-        }
-        #[cfg(not(feature = "systemverilog"))]
-        {
-            debug_assert!(sv_sources.is_none());
-            parser::parse(
-                &top,
+    } else if let Some(sv_sources) = sv_sources {
+        (|| {
+            let names = super::super::mixed::EmittedNames::new(&metadata);
+            let mut used_names = super::super::mixed::component_names(sv_sources, names)?;
+            let behavior_sources = super::super::mixed::attach_sv_interface_behavior(
+                &mut ir,
+                &sv_interface_signatures,
+                &mut context,
+                &mut used_names,
+            )?;
+            let mut joint_sources = sv_sources.to_vec();
+            joint_sources.extend(
+                behavior_sources
+                    .iter()
+                    .map(|source| (source.as_str(), Path::new("<sv-interface-behavior>"))),
+            );
+            let requests = super::super::mixed::specialize_sv_instances(
+                &mut ir,
+                &joint_sources,
+                &mut context,
+                &mut used_names,
+                names,
+            )?;
+            let declarations = super::super::mixed::sv_declaration_contracts(
                 &ir,
+                &mut context,
+                &joint_sources,
+                &requests,
+                names,
+            )?;
+            parser::parse_mixed(
+                &top,
+                &mut ir,
+                &mut context,
                 &loop_provenance,
+                &joint_sources,
+                &[(
+                    declarations.as_str(),
+                    Path::new("<veryl-declaration-contracts>"),
+                )],
+                param_overrides,
+                &requests,
+                &sv_interface_signatures,
+                &mut used_names,
+                names,
                 &build_config,
                 ignored_loops,
                 true_loops,
@@ -540,12 +483,34 @@ pub(super) fn analyze(
                 trace_out,
                 optimize_options,
                 diagnostics,
+                diagnostic_policy,
+                sv_timescale,
+                legacy_empty_reductions,
                 preserve_element_storage_layout,
                 testbench_random_seed,
                 component_libraries,
                 component_file_base,
+                &mut sv_warnings,
             )
-        }
+        })()
+    } else {
+        parser::parse(
+            &top,
+            &ir,
+            &loop_provenance,
+            &build_config,
+            ignored_loops,
+            true_loops,
+            four_state,
+            trace_opts,
+            trace_out,
+            optimize_options,
+            diagnostics,
+            preserve_element_storage_layout,
+            testbench_random_seed,
+            component_libraries,
+            component_file_base,
+        )
     };
     let sir = sir
         .map(|(sir, mut elaborated_diagnostics)| {
@@ -553,7 +518,6 @@ pub(super) fn analyze(
             sir
         })
         .map_err(SimulatorError::from);
-    #[cfg(feature = "systemverilog")]
     let elaboration_warnings = {
         for warning in sv_probe_warnings {
             if !sv_warnings.contains(&warning) {
@@ -574,8 +538,6 @@ pub(super) fn analyze(
         });
         sv_compilation_warnings(sv_warnings)
     };
-    #[cfg(not(feature = "systemverilog"))]
-    let elaboration_warnings = Vec::new();
     errors.retain(|error| {
         !frontend_diagnostics
             .iter()

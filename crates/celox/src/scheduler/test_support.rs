@@ -64,7 +64,7 @@ pub(crate) fn count_test_settles(
 /// What [`Plan::new`] decides for `program` that tests of call effects
 /// check: the storage the settle reads, why each kernel falls back, and the
 /// events RTL logic drives (`Plan::derived`).
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 pub(crate) struct PlanSummary {
     pub(crate) settle_reads: Option<HashSet<AbsoluteAddr>>,
     pub(crate) fallback: Vec<Option<String>>,
@@ -75,7 +75,7 @@ pub(crate) struct PlanSummary {
     pub(crate) incremental: bool,
 }
 
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 pub(crate) fn plan_for_test(program: &LaidOutProgram) -> Result<PlanSummary, String> {
     let schema = program.runtime.runtime_schema.scheduler.clone().unwrap();
     let plan = Plan::new(program, &schema.slots, true)?;
@@ -116,7 +116,6 @@ pub(crate) fn defers_settles_for_test(program: &LaidOutProgram) -> (bool, bool) 
 
 #[cfg(all(
     test,
-    feature = "systemverilog",
     feature = "host-runtime",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -133,7 +132,6 @@ pub(crate) fn incremental_inputs_for_test(program: &LaidOutProgram) -> Option<us
 /// conservative statefulness check.
 #[cfg(all(
     test,
-    feature = "systemverilog",
     feature = "host-runtime",
     any(
         all(target_arch = "x86_64", not(feature = "arm64-codegen")),

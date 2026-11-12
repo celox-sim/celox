@@ -69,7 +69,7 @@ test("queue integration tests run before reports are collected and keep normal f
   const rust = job(workflow, "rust-tests");
   const smoke = rust.split("      - name: Run merge queue integration tests")[1].split("      - name:")[0];
   assert.match(smoke, /if: needs.changes.outputs.fast_queue == 'true'/);
-  assert.match(smoke, /cargo nextest run --locked -p celox --features systemverilog --profile ci/);
+  assert.match(smoke, /cargo nextest run --locked -p celox --profile ci/);
   assert.doesNotMatch(smoke, /no-tests=pass|continue-on-error/);
   assert.ok(rust.indexOf("Run merge queue integration tests") < rust.indexOf("Collect Rust test reports"));
   assert.match(rust, /test_step_outcome: .*steps.queue-tests.outcome/);

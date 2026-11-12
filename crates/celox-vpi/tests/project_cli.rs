@@ -208,7 +208,6 @@ fn filelist_errors_do_not_silently_skip_inputs_or_options() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 fn sv_project(root: &Path) {
     for dir in ["rtl/space dir", "lists/nested", "include", "work"] {
         fs::create_dir_all(root.join(dir)).unwrap();
@@ -262,7 +261,6 @@ fn sv_project(root: &Path) {
     .unwrap();
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn sv_projects_resolve_ordered_lists_includes_defines_and_targets() {
     let root = tempfile::tempdir().unwrap();
@@ -298,7 +296,6 @@ fn sv_projects_resolve_ordered_lists_includes_defines_and_targets() {
 
 // A file list names library sources by whatever extension the design uses;
 // only a Veryl source makes the design a Veryl one.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn filelist_sources_of_any_extension_are_systemverilog() {
     let root = tempfile::tempdir().unwrap();
@@ -321,7 +318,6 @@ fn filelist_sources_of_any_extension_are_systemverilog() {
     assert_eq!(output.stdout, b"q=42\n");
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn standalone_filelists_and_cli_preprocessing_options_work_for_both_commands() {
     let root = tempfile::tempdir().unwrap();
@@ -365,23 +361,6 @@ fn standalone_filelists_and_cli_preprocessing_options_work_for_both_commands() {
     assert_eq!(output.stdout, b"q=42\n");
 }
 
-#[cfg(not(feature = "systemverilog"))]
-#[test]
-fn sv_project_without_feature_reports_the_required_build_option() {
-    let root = tempfile::tempdir().unwrap();
-    fs::write(
-        root.path().join("celox.toml"),
-        "sources = ['top.sv']\ntop = 'Top'\n",
-    )
-    .unwrap();
-    for args in [&["run"][..], &["vpi", "build"]] {
-        let output = invoke(root.path(), args);
-        assert_eq!(output.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("--features systemverilog"));
-    }
-}
-
-#[cfg(feature = "systemverilog")]
 #[test]
 fn native_build_applies_target_and_cli_signal_access_contracts() {
     use celox::{BigUint, NativeProgramInstance, SimBackend};
@@ -480,7 +459,6 @@ fn native_build_applies_target_and_cli_signal_access_contracts() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("Top.typo"));
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn top_parameters_merge_common_target_and_cli_without_editing_sv() {
     let root = tempfile::tempdir().unwrap();
@@ -613,7 +591,6 @@ fn invalid_parameter_assignments_are_rejected() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn sv_parameter_literals_preserve_types_across_project_target_and_cli() {
     let root = tempfile::tempdir().unwrap();
@@ -681,7 +658,6 @@ fn sv_parameter_literals_preserve_types_across_project_target_and_cli() {
     );
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn state_mode_merges_project_target_and_cli_for_run_and_native_build() {
     let root = tempfile::tempdir().unwrap();
@@ -788,7 +764,6 @@ fn veryl_native_images_preserve_the_selected_state_mode() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn sv_cli_defaults_to_two_state_for_run_and_native_images() {
     let root = tempfile::tempdir().unwrap();
@@ -824,7 +799,6 @@ fn sv_cli_defaults_to_two_state_for_run_and_native_images() {
     assert!(!instance.four_state());
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn timescale_reaches_run_and_native_images_with_target_and_cli_precedence() {
     let root = tempfile::tempdir().unwrap();
@@ -895,7 +869,6 @@ timescale = "1ns/1fs"
 
 /// The timed simulation of the design an executable built by `vpi build`
 /// carries, for a design with processes.
-#[cfg(feature = "systemverilog")]
 fn attached_simulation(executable: &Path) -> celox::Simulation<celox::NativeBackend> {
     let bytes = fs::read(executable).unwrap();
     let image = celox::NativeProgramImage::discover_appended(&bytes)
@@ -908,7 +881,6 @@ fn attached_simulation(executable: &Path) -> celox::Simulation<celox::NativeBack
         .unwrap()
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn single_unit_shares_header_macros_and_unit_declarations_in_filelist_order() {
     let root = tempfile::tempdir().unwrap();
@@ -987,7 +959,6 @@ fn single_unit_shares_header_macros_and_unit_declarations_in_filelist_order() {
     ));
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn separate_units_resolve_relative_headers_without_command_macros_or_include_paths() {
     let root = tempfile::tempdir().unwrap();
@@ -1014,7 +985,6 @@ fn separate_units_resolve_relative_headers_without_command_macros_or_include_pat
     assert_eq!(output.stdout, b"y=42\n");
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn non_utf8_source_and_header_comments_are_allowed_by_default() {
     let root = tempfile::tempdir().unwrap();
@@ -1051,7 +1021,6 @@ fn non_utf8_source_and_header_comments_are_allowed_by_default() {
     success(&invoke(root.path(), &["run", "--target", "compat"]));
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn macro_expansion_preserves_operator_boundaries_in_both_compilation_modes() {
     let root = tempfile::tempdir().unwrap();
@@ -1063,7 +1032,6 @@ fn macro_expansion_preserves_operator_boundaries_in_both_compilation_modes() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn expanded_escaped_identifiers_are_terminated_before_block_and_line_comments() {
     let root = tempfile::tempdir().unwrap();
@@ -1077,7 +1045,6 @@ fn expanded_escaped_identifiers_are_terminated_before_block_and_line_comments() 
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn line_comments_at_included_file_eof_do_not_swallow_the_caller() {
     let root = tempfile::tempdir().unwrap();
@@ -1096,7 +1063,7 @@ fn line_comments_at_included_file_eof_do_not_swallow_the_caller() {
 
 /// Build `source` into the shared library `name` under `root` with the
 /// host's C compiler.
-#[cfg(all(feature = "systemverilog", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 fn c_library(root: &Path, name: &str, source: &str) {
     let path = root.join(name);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1115,7 +1082,7 @@ fn c_library(root: &Path, name: &str, source: &str) {
     );
 }
 
-#[cfg(all(feature = "systemverilog", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 #[test]
 fn dpi_libraries_link_from_the_project_the_target_and_the_command_line() {
     let root = tempfile::tempdir().unwrap();

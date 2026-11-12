@@ -206,12 +206,10 @@ impl ExecutionArgs {
     }
 
     /// The `--sir-pass` overrides, each enabling or disabling one pass.
-    #[cfg(feature = "systemverilog")]
     pub(super) fn pass_overrides(&self) -> &[(bool, SirPass)] {
         &self.pass_overrides
     }
 
-    #[cfg(feature = "systemverilog")]
     pub(super) fn validate_sv(&self) -> Result<(), String> {
         if self.compile_only
             || self.native_image_input.is_some()
