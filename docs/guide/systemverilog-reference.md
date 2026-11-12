@@ -83,7 +83,7 @@ constructs without a dedicated issue point to the frontend roadmap,
 
 ### Interfaces {#interface-restrictions}
 
-- **Declarations:** tasks, implicit nets, enums, module instances, macros,
+- **Declarations:** implicit nets, enums, module instances, macros,
   and compiler directives inside an interface. Recursive interface
   specializations and nesting beyond 64 levels are rejected.
 - **Modports and connections:** `inout`, `ref`, expression ports, `export`,
@@ -95,6 +95,12 @@ constructs without a dedicated issue point to the frontend roadmap,
   to a function that accesses members; calls through a port to an imported
   function that writes members inside generate constructs, functions, and
   tasks.
+- **Static storage of subroutines:** a static function or task called
+  through interface ports of several modules keeps its static variables, and
+  the static formals of a task that suspends, once per calling module
+  instead of once per interface instance (13.3.2, 13.4.2;
+  [#3739](https://github.com/celox-sim/celox/issues/3739)). Calls through
+  the instance itself and through the port of a single module share one.
 - **Declaration dependencies:** member references in parameter, constant,
   type, or member declarations of an interface used through a port;
   compilation-unit items used by an interface when a module in another file,
