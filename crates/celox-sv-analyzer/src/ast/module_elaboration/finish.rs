@@ -74,19 +74,31 @@ impl ScopeElaboration<'_> {
     /// Adds the subroutines, locals and DPI imports of the packages the scope
     /// uses. Returns the package parameters it sees.
     pub(super) fn lower_imported(&mut self) -> Vec<Parameter> {
-        // The subroutines, locals and DPI imports of the packages the module
-        // uses are lowered with it.
+        // The subroutines of the packages the module uses that it can call,
+        // and their locals and DPI imports, are lowered with it.
         {
             let mut known: HashSet<&str> = self
                 .subroutines
                 .iter()
                 .map(|subroutine| subroutine.name.as_str())
                 .collect();
+            let mut imported: HashMap<&str, &Subroutine> = HashMap::default();
+            for subroutine in &self.imported.subroutines {
+                if !known.contains(subroutine.name.as_str()) {
+                    imported
+                        .entry(subroutine.name.as_str())
+                        .or_insert(subroutine);
+                }
+            }
+            let reachable = self.reachable_imports(&imported);
             let missing = self
                 .imported
                 .subroutines
                 .iter()
-                .filter(|subroutine| known.insert(subroutine.name.as_str()))
+                .filter(|subroutine| {
+                    reachable.contains(subroutine.name.as_str())
+                        && known.insert(subroutine.name.as_str())
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             self.subroutines.extend(missing);

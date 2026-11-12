@@ -37,6 +37,17 @@ impl ValueType {
         }
     }
 
+    fn expressions<'a>(&'a self, visit: &mut impl FnMut(&'a Expr)) {
+        match self {
+            Self::Known(_) => {}
+            Self::Call(expr) => visit(expr),
+            Self::Conditional(left, right) => {
+                left.expressions(visit);
+                right.expressions(visit);
+            }
+        }
+    }
+
     fn map_expressions(&mut self, map: &mut impl FnMut(Expr) -> Expr) {
         match self {
             Self::Known(_) => {}
@@ -98,6 +109,35 @@ impl BoundPattern {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Visit the expressions of the pattern, as [`Self::map_expressions`]
+    /// maps them.
+    pub(in crate::ast) fn expressions<'a>(&'a self, visit: &mut impl FnMut(&'a Expr)) {
+        fn value<'a>(value: &'a Value, visit: &mut impl FnMut(&'a Expr)) {
+            match value {
+                Value::Pattern(pattern) => pattern.expressions(visit),
+                Value::Expression {
+                    expr, value_type, ..
+                } => {
+                    visit(expr);
+                    value_type.expressions(visit);
+                }
+            }
+        }
+        match &self.items {
+            Items::Value(expr) | Items::ArrayValue { value: expr, .. } => visit(expr),
+            Items::List(items) | Items::Repeat(_, items) => {
+                for item in items {
+                    value(item, visit);
+                }
+            }
+            Items::Keyed(items) => {
+                for (_, item) in items {
+                    value(item, visit);
+                }
+            }
+        }
     }
 
     pub(in crate::ast) fn map_expressions(&mut self, map: &mut impl FnMut(Expr) -> Expr) {

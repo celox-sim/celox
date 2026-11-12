@@ -465,6 +465,140 @@ impl<E, L> StmtBase<E, L> {
         }
     }
 
+    /// Visit every expression and lvalue of this statement tree, the reads
+    /// of an `@*` included. The names of the subroutines a call statement
+    /// calls are passed to `fcall`.
+    pub fn visit<'a>(
+        &'a self,
+        fe: &mut impl FnMut(&'a E),
+        fl: &mut impl FnMut(&'a L),
+        fcall: &mut impl FnMut(&'a str),
+    ) {
+        fn body<'a, E, L>(
+            stmts: &'a [StmtBase<E, L>],
+            fe: &mut impl FnMut(&'a E),
+            fl: &mut impl FnMut(&'a L),
+            fcall: &mut impl FnMut(&'a str),
+        ) {
+            for stmt in stmts {
+                stmt.visit(fe, fl, fcall);
+            }
+        }
+        match self {
+            StmtBase::DelayedNonblocking {
+                control,
+                assignment,
+            } => {
+                control.visit(fe, fl, fcall);
+                assignment.visit(fe, fl, fcall);
+            }
+            StmtBase::Assign { lhs, rhs, .. } => {
+                fl(lhs);
+                fe(rhs);
+            }
+            StmtBase::AssignConcat { parts, rhs, .. } => {
+                parts.iter().for_each(&mut *fl);
+                fe(rhs);
+            }
+            StmtBase::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                fe(condition);
+                body(then_body, fe, fl, fcall);
+                body(else_body, fe, fl, fcall);
+            }
+            StmtBase::Case {
+                selector,
+                items,
+                default,
+                ..
+            } => {
+                fe(selector);
+                for item in items {
+                    for label in &item.labels {
+                        match label {
+                            CaseLabel::Value(value) => fe(value),
+                            CaseLabel::Range { low, high } => {
+                                fe(low);
+                                fe(high);
+                            }
+                        }
+                    }
+                    body(&item.body, fe, fl, fcall);
+                }
+                if let Some(default) = default {
+                    body(default, fe, fl, fcall);
+                }
+            }
+            StmtBase::Loop {
+                kind,
+                init,
+                condition,
+                step,
+                body: loop_body,
+            } => {
+                if let LoopKind::Repeat(count) = kind {
+                    fe(count);
+                }
+                body(init, fe, fl, fcall);
+                if let Some(condition) = condition {
+                    fe(condition);
+                }
+                body(step, fe, fl, fcall);
+                body(loop_body, fe, fl, fcall);
+            }
+            StmtBase::Fork { branches, .. } => {
+                for branch in branches {
+                    body(branch, fe, fl, fcall);
+                }
+            }
+            StmtBase::Break | StmtBase::Continue => {}
+            StmtBase::Return(value) => {
+                if let Some(value) = value {
+                    fe(value);
+                }
+            }
+            StmtBase::Call { name, args, .. } => {
+                fcall(name);
+                for arg in args.iter().flatten() {
+                    fe(arg);
+                }
+            }
+            StmtBase::Eval(expr) => fe(expr),
+            StmtBase::SystemTask { args, .. } => {
+                for arg in args {
+                    if let SystemTaskArg::Expr(expr) = arg {
+                        fe(expr);
+                    }
+                }
+            }
+            StmtBase::Local { init, .. } => {
+                if let Some(init) = init {
+                    fe(init);
+                }
+            }
+            StmtBase::Delay { amount, .. } => fe(amount),
+            StmtBase::WaitEvent(items) => {
+                for item in items {
+                    fe(&item.expr);
+                    if let Some(iff) = &item.iff {
+                        fe(iff);
+                    }
+                }
+            }
+            StmtBase::Block { body: stmts, .. } => body(stmts, fe, fl, fcall),
+            StmtBase::DeferActive
+            | StmtBase::WaitFork
+            | StmtBase::DisableFork
+            | StmtBase::DisableBlock(_)
+            | StmtBase::AssertionRegion { .. } => {}
+            StmtBase::Wait(condition) => fe(condition),
+            StmtBase::WaitImplicit { reads, .. } => body(reads, fe, fl, fcall),
+        }
+    }
+
     /// Visit every expression and lvalue of this statement tree in place.
     /// Local declaration and call names are passed to `fname`.
     pub fn visit_mut(

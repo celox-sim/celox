@@ -6,6 +6,7 @@ mod bodies;
 mod constants;
 mod declarations;
 mod finish;
+mod reachable_imports;
 
 /// The state [`Module::from_selected_scope_once`] elaborates a scope in: what
 /// the scope is elaborated for, and what the phases found of it so far. The
