@@ -184,6 +184,11 @@ pub(super) struct ProcessState {
     /// observation of the event or process, so that a predicate's call of
     /// it stays inlined.
     pub observes_events: bool,
+    /// Whether it issues the action of a deferred assertion, which waits in
+    /// the queue of the process the unit runs in (IEEE 1800-2023 16.4.1):
+    /// only a process of its own, a kernel's, runs such a unit (see
+    /// `celox_design::DeferredSite::ProcessAction`).
+    pub deferred: bool,
 }
 
 impl ProcessState {
@@ -199,6 +204,7 @@ impl ProcessState {
             nbas: self.nbas || other.nbas,
             waits: self.waits || other.waits,
             observes_events: self.observes_events || other.observes_events,
+            deferred: self.deferred || other.deferred,
         }
     }
 }

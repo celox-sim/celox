@@ -75,11 +75,17 @@ pub(super) struct PendingRuntimeEvents {
 
 #[derive(Clone)]
 pub(super) struct DeferredReport {
+    /// The flush-point site whose queue holds it, or [`PROCESS_QUEUE`].
     pub(super) queue: u32,
     pub(super) owner: u64,
     pub(super) region: celox_design::AssertionDeferral,
     pub(super) event: RawRuntimeEvent,
 }
+
+/// The queue of the action of a function unit: that of the process the
+/// unit runs in, whichever its flush-point site (see
+/// [`celox_design::DeferredSite::ProcessAction`]).
+pub(super) const PROCESS_QUEUE: u32 = u32::MAX;
 
 #[derive(Clone)]
 pub(super) struct DeferredLoss {
@@ -175,6 +181,14 @@ impl PendingRuntimeEvents {
                         event,
                     });
                 }
+                celox_design::DeferredSite::ProcessAction { region } => {
+                    self.deferred.waiting.push(DeferredReport {
+                        queue: PROCESS_QUEUE,
+                        owner: self.deferred_owners.owner(),
+                        region,
+                        event,
+                    });
+                }
             }
             return;
         }
@@ -195,6 +209,8 @@ impl PendingRuntimeEvents {
                         celox_design::DeferredSite::Action {
                             region: celox_design::AssertionDeferral::Observed,
                             ..
+                        } | celox_design::DeferredSite::ProcessAction {
+                            region: celox_design::AssertionDeferral::Observed,
                         }
                     )
             }) {
@@ -214,9 +230,10 @@ impl PendingRuntimeEvents {
     /// Discard the actions waiting in queue `queue`.
     pub(super) fn flush(&mut self, queue: u32) {
         let owner = self.deferred_owners.owner();
-        self.deferred
-            .waiting
-            .retain(|report| report.queue != queue || report.owner != owner);
+        // The actions of the units the process ran wait in its queue too.
+        self.deferred.waiting.retain(|report| {
+            report.owner != owner || (report.queue != queue && report.queue != PROCESS_QUEUE)
+        });
         // A dynamic execution has exactly its process's queue. The
         // ordinary context may mix unrelated comb/FF queues, so losses
         // there must remain conservatively fatal until maturity.

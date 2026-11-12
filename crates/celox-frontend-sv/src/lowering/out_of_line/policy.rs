@@ -654,7 +654,13 @@ impl ProcModule<'_> {
                                 assertion.deferral != celox_design::AssertionDeferral::None
                             }) =>
                             {
-                                note(Reason::HostRequest);
+                                state.deferred = true;
+                                if matches!(
+                                    system_task_kind(*task),
+                                    Some(SystemTaskKind::Message(_) | SystemTaskKind::Fatal)
+                                ) {
+                                    state.time = true;
+                                }
                             }
                             Some(SystemTaskKind::Print(..) | SystemTaskKind::Assertion(_)) => {}
                             Some(SystemTaskKind::Message(_) | SystemTaskKind::Fatal) => {
