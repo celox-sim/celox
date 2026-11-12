@@ -21,7 +21,10 @@ pub(super) struct LocalSink(Arc<Mutex<Sink>>);
 
 #[derive(Debug, Default)]
 struct Sink {
-    prefix: usize,
+    /// What joins the source name and the site in a local's name.
+    prefix: String,
+    /// Whether that names the body's subroutine (see `LocalVariable::owned`).
+    owned: bool,
     locals: Vec<LocalVariable>,
 }
 
@@ -37,14 +40,24 @@ impl Eq for LocalSink {}
 impl LocalSink {
     pub(super) fn new(prefix: usize) -> Self {
         Self(Arc::new(Mutex::new(Sink {
-            prefix,
+            prefix: format!("@{prefix}."),
+            ..Sink::default()
+        })))
+    }
+    /// The sink of the body of subroutine `owner`, whose locals its name
+    /// tells apart from those of every other body, in every analysis that
+    /// lowers it (see `BodyBuilder::declare`).
+    pub(super) fn owned(owner: &str) -> Self {
+        Self(Arc::new(Mutex::new(Sink {
+            prefix: format!("%{:016x}@", fxhash::hash64(&(owner, "locator"))),
+            owned: true,
             ..Sink::default()
         })))
     }
 
     /// Declare local `source` of the locator call at `site`. The name joins
-    /// the local counter of the body when it started, which tells the bodies
-    /// of a scope apart, and the site.
+    /// what tells the body apart from the others of the scope, its
+    /// subroutine or the local counter when it started, and the site.
     pub(super) fn declare(
         &self,
         site: &str,
@@ -55,10 +68,11 @@ impl LocalSink {
         dims: &PackedDimensions,
     ) -> String {
         let mut sink = self.0.lock().expect("locator locals");
-        let name = format!("{source}@{}.{site}", sink.prefix);
+        let name = format!("{source}{}{site}", sink.prefix);
         if sink.locals.iter().any(|local| local.name == name) {
             return name;
         }
+        let owned = sink.owned;
         sink.locals.push(LocalVariable {
             name: name.clone(),
             source_name: source.to_string(),
@@ -68,7 +82,7 @@ impl LocalSink {
                 procedural::scoped_type(r#type, &dims.const_env),
                 &dims.const_env,
             ),
-            owned: false,
+            owned,
         });
         name
     }

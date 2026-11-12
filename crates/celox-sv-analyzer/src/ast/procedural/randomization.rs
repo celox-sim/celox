@@ -72,6 +72,7 @@ fn lower_methods(
             system_functions::Body::Subroutine,
         );
         builder.automatic = true;
+        builder.set_owner(method_name(&class.name, method));
         let first_local = builder.state.locals.len();
         let this = builder.declare(classes::THIS, handle.clone());
         let (argument, argument_type) = match method {
