@@ -1,5 +1,8 @@
 (group logical_shift_count (category operators))
 
+; Dynamic logical shift counts of at least the operand width must yield zero
+; rather than wrapping modulo the machine word on any backend.
+
 ; IEEE 1800-2023 11.4.10: logical shifts fill vacated bits with zero, so a
 ; known dynamic count of at least the operand width yields zero.
 

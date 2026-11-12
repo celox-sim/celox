@@ -285,10 +285,6 @@ fn test_large_scc_dynamic_loop_convergence(sim) {
     assert_eq!(sim.get(o_port), 0u32.into());
 }
 
-fn test_read_then_overwrite_convergence(sim) {
-    @case "false_loop::test_read_then_overwrite_convergence";
-}
-
 }
 #[test]
 fn test_range_limited_dependency_success() {

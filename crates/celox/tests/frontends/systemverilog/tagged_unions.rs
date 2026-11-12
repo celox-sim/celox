@@ -1,29 +1,5 @@
 use super::*;
 
-sv_backends! {
-    fn default_arguments(sim) {
-        @case "tagged_unions::default_arguments";
-    }
-    fn factory_and_union_arguments(sim) {
-        @case "tagged_unions::factory_and_union_arguments";
-    }
-    fn writable_task_arguments(sim) {
-        @case "tagged_unions::writable_task_arguments";
-    }
-    fn writable_system_arguments(sim) {
-        @case "tagged_unions::writable_system_arguments";
-    }
-    fn conditional_struct_payload(sim) {
-        @case "tagged_unions::conditional_struct_payload";
-    }
-    fn constructors_and_checked_members(sim) {
-        @case "tagged_unions::constructors_and_checked_members";
-    }
-    fn nested_and_void_constructors(sim) {
-        @case "tagged_unions::nested_and_void_constructors";
-    }
-}
-
 #[test]
 fn inactive_member_read_and_write_report_runtime_errors() {
     for statement in ["y = item.Full;", "item.Full = 8'hff;"] {
@@ -78,12 +54,6 @@ fn rejects_invalid_tagged_constructors() {
 }
 
 sv_backends! {
-    fn casts_ports_and_registers(sim) {
-        @case "tagged_unions::casts_ports_and_registers";
-    }
-    fn wide_four_state_payload(sim) {
-        @case "tagged_unions::wide_four_state_payload";
-    }
     fn inactive_read_fails_on_clock(sim) {
         @setup {
             let source = r#"

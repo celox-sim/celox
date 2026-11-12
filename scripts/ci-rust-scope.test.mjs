@@ -9,6 +9,7 @@ import {
   rustTestScope,
   VARIANT_CRATES,
   VARIANTS,
+  VTEST_UNNARROWED,
 } from "./ci-rust-scope.mjs";
 
 // A small workspace in the shape of the real one: celox over a backend, a
@@ -95,6 +96,7 @@ test("a test file change runs only that binary and nothing downstream", () => {
     packages: ["celox"],
     features: ["celox/cranelift", "celox/wasm-runtime", "celox/wasm-component"],
     filter: "binary_id(celox::flip_flop)",
+    vtest: null,
     targets: ["flip_flop"],
     builds: [{ packages: ["celox"], targets: ["flip_flop"], features: ["celox/cranelift", "celox/wasm-runtime", "celox/wasm-component"] }],
     libraries: [],
@@ -223,16 +225,17 @@ test("a dev dependency affects consumer tests but not consumer documentation", (
   assert.deepEqual(scope.libraries, ["lib"]);
 });
 
-test("shared case data selects its real harness instead of every library consumer", () => {
+test("shared case data selects its group's cases instead of every library consumer", () => {
   const packages = readWorkspace(root);
   const scope = rustTestScope([
     "crates/celox-test-suite/src/veryl/cases/param_override.vtest",
   ], packages);
   assert.equal(scope.full, false);
   assert.deepEqual(scope.libraries, []);
-  assert.equal(scope.filter, "package(celox-test-suite) | package(lydite-celox) | binary_id(celox::param_override)");
-  const celox = scope.builds.find((build) => build.packages.includes("celox"));
-  assert.deepEqual(celox.targets, ["param_override"]);
+  // No Celox test reads the group by name; the runner runs its cases.
+  assert.equal(scope.filter, "package(celox-test-suite) | package(lydite-celox)");
+  assert.deepEqual(scope.vtest, { select: [{ groups: ["veryl/param_override"] }] });
+  assert.ok(!scope.builds.some((build) => build.packages.includes("celox")));
   assert.ok(scope.builds.some((build) => build.packages.includes("celox-test-suite")));
   for (const unrelated of ["celox-vpi", "celox-napi", "celox-bench"])
     assert.ok(!scope.packages.includes(unrelated), unrelated);
@@ -245,34 +248,54 @@ test("shared case data selects its real harness instead of every library consume
   assert.ok(mixed.filter.includes("package(celox)"));
   assert.ok(mixed.packages.includes("celox-vpi"));
   assert.deepEqual(mixed.builds.find((build) => build.packages.includes("celox")).targets, []);
+  assert.deepEqual(mixed.vtest, {});
+  // A new group's cases run without a Celox test registering them.
   const unknown = rustTestScope([
     "crates/celox-test-suite/src/veryl/cases/new_unknown.vtest",
   ], packages);
-  assert.ok(unknown.filter.includes("package(celox)"));
+  assert.deepEqual(unknown.vtest, { select: [{ groups: ["veryl/new_unknown"] }] });
+  assert.ok(!unknown.filter.includes("package(celox)"));
+});
+
+test("Celox changes run the suite cases; Rust test edits do not", () => {
+  const packages = readWorkspace(root);
+  const vtest = (...files) => rustTestScope(files, packages).vtest;
+  assert.deepEqual(vtest("crates/celox/src/lib.rs"), {});
+  assert.deepEqual(vtest("crates/celox/examples/vtest-exec.rs"), {});
+  assert.deepEqual(vtest("crates/celox/tests/test_utils/suite.rs"), {});
+  assert.equal(vtest("crates/celox/tests/hierarchy.rs"), null);
+  assert.equal(vtest("crates/celox/tests/frontends/systemverilog/operators.rs"), null);
+  // The manifest and the executor's SV adapter are in no Rust test binary.
+  const manifest = rustTestScope(["crates/celox/vtest.toml"], packages);
+  assert.deepEqual([manifest.vtest, manifest.packages], [{}, []]);
+  const adapter = rustTestScope(["crates/celox/tests/frontends/systemverilog/suite.rs"], packages);
+  assert.deepEqual([adapter.vtest, adapter.packages], [{ select: [{ groups: ["sv"] }] }, []]);
+  // A backend crate narrows the cases to its backends and the unnarrowed ones.
+  assert.deepEqual(vtest("crates/celox-backend-x86/src/lib.rs"), {
+    select: [{ backends: ["native", "native-parallel", ...VTEST_UNNARROWED] }],
+  });
 });
 
 test("SV module and case edits select the referenced module; adapters retain the binary", () => {
   const packages = readWorkspace(root);
-  for (const file of [
-    "crates/celox/tests/frontends/systemverilog/operators.rs",
-    "crates/celox-test-suite/src/sv/cases/operators.vtest",
-  ]) {
-    const scope = rustTestScope([file], packages);
-    assert.match(scope.filter, /binary_id\(celox::systemverilog\) & test\(\/\^\(operators\)::\/\)/);
-    assert.deepEqual(scope.builds.find((b) => b.packages.includes("celox")).targets, ["systemverilog"]);
-  }
-  for (const shared of ["frontends/systemverilog/suite.rs", "systemverilog.rs"]) {
-    const scope = rustTestScope([
-      "crates/celox/tests/frontends/systemverilog/operators.rs",
-      `crates/celox/tests/${shared}`,
-    ], packages);
-    assert.equal(scope.filter, "binary_id(celox::systemverilog)");
-  }
+  const module = rustTestScope(["crates/celox/tests/frontends/systemverilog/operators.rs"], packages);
+  assert.match(module.filter, /binary_id\(celox::systemverilog\) & test\(\/\^\(operators\)::\/\)/);
+  assert.deepEqual(module.builds.find((b) => b.packages.includes("celox")).targets, ["systemverilog"]);
+  // A case edit runs its group, the modules that read its cases by name and
+  // the checks that compile every SystemVerilog case.
+  const latch = rustTestScope(["crates/celox-test-suite/src/sv/cases/latch.vtest"], packages);
+  assert.match(latch.filter, /binary_id\(celox::systemverilog\) & test\(\/\^\(corpus\|latch\)::\/\)/);
+  assert.deepEqual(latch.vtest, { select: [{ groups: ["sv/latch"] }] });
   const scope = rustTestScope([
+    "crates/celox/tests/frontends/systemverilog/operators.rs",
+    "crates/celox/tests/systemverilog.rs",
+  ], packages);
+  assert.equal(scope.filter, "binary_id(celox::systemverilog)");
+  const both = rustTestScope([
     "crates/celox/tests/frontends/systemverilog/operators.rs",
     "crates/celox/tests/frontends/systemverilog/literals.rs",
   ], packages);
-  assert.match(scope.filter, /\(literals\|operators\)/);
+  assert.match(both.filter, /\(literals\|operators\)/);
 });
 
 test("multiple packages keep their own Cargo test targets and omit unused adapters", () => {
@@ -294,8 +317,12 @@ test("a shared case does not turn a simultaneous SV fix into every backend", () 
   ], readWorkspace(root));
   assert.ok(!scope.filter.startsWith("package(celox) |"), scope.filter);
   assert.ok(scope.filter.includes("test(/::(sv)$/)"), scope.filter);
-  assert.ok(scope.filter.includes("binary_id(celox::param_override)"), scope.filter);
   assert.ok(scope.filter.includes("binary_id(celox::systemverilog)"), scope.filter);
+  assert.deepEqual(scope.vtest, { select: [
+    { groups: ["veryl/param_override"] },
+    { backends: ["sv", ...VTEST_UNNARROWED] },
+    { groups: ["sv"] },
+  ] });
 });
 
 test("default application builds and tests do not pull optional compilers", () => {

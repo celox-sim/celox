@@ -59,7 +59,7 @@ For example, to check a changed shared counter case locally:
 
 ```sh
 cargo fmt --all -- --check
-cargo test --locked -p celox --test counter
+python3 scripts/run-vtest.py veryl/counter::
 cargo run --locked -p celox-test-suite --features verilator --bin verify-verilator -- --filter counter::
 cargo run --locked -p celox-test-suite --features icarus --bin verify-icarus -- --filter counter::
 ```
@@ -68,39 +68,49 @@ Use the actual affected case or group as the filter. For SystemVerilog cases,
 use the `verify-sv-verilator` and `verify-sv-icarus` binaries. Missing tools,
 empty selections, compilation failures, and simulator errors are not passes.
 
-For repeated local vtest runs, use the optimized shared executor:
+`scripts/run-vtest.py` runs the shared cases on Celox's backends; no Rust test
+registers them. It builds the `vtest-exec` example with the `vtest` Cargo
+profile (`opt-level = 1`, development assertions and overflow checks enabled),
+expands `crates/celox/vtest.toml` into case and backend pairs, and runs the
+executor once per pair, in parallel, each in its own process with a timeout
+(600 s unless `--timeout` says otherwise):
 
 ```sh
-node scripts/run-vtest.mjs --test counter
-CELOX_TEST_FEATURES=cranelift,wasm-runtime node scripts/run-vtest.mjs --test systemverilog -E 'test(operators::)'
+python3 scripts/run-vtest.py counter::
+python3 scripts/run-vtest.py 'sv/timing::*' --backend native
+python3 scripts/run-vtest.py --features cranelift,wasm-runtime --language sv
+python3 scripts/run-vtest.py --list 'veryl/operators::*'
 ```
 
-This builds `vtest-exec` with the `vtest` Cargo profile (`opt-level = 1`,
-development assertions and overflow checks enabled), then runs the existing
-Celox test registrations with nextest. Both builds enable `systemverilog` and
-`celox-test-suite/runtime-cases`. Cases execute in the shared binary, while
-Rust API tests execute normally. Existing test names, filters, backend omissions,
-ignored cases and nextest's parallel scheduling/timeouts are preserved. Additional
-arguments are passed to `cargo nextest run`; use `--run-ignored all` to include
-ignored registrations deliberately.
+A pattern selects `language/group::case`, optionally with `@backend`; one
+without `*`, `?` or `[` matches as a substring. `vtest.toml` gives each language
+its backends and each group or case its exceptions: `add` (such as
+`native-image`, `native-baseline` or `interpreter`), `omit` for backends a case
+does not apply to, and `ignore` with an optional `reason` for backends that
+cannot run it yet. Ignored pairs run only with `--ignored include` or
+`--ignored only`. A case without an entry runs on its group's backends, so a
+new case needs no registration; the runner rejects an entry for a case, group
+or backend that does not exist. Optional backends run only when the executor
+includes them: `--features cranelift,wasm-runtime` (or `CELOX_TEST_FEATURES`)
+adds Cranelift and WebAssembly, and the summary counts the pairs of backends
+the build leaves out.
 
-With `runtime-cases`, `.vtest` bodies are read from disk instead of embedded in
-Rust binaries, so edits to an existing case do not require recompilation. Adding
-a test registration or changing Rust still requires a build. CI builds the test
-binaries with the executor's `vtest` profile and builds the executor with the
-same packages and features as the test build it serves (the whole workspace,
-or the scoped build that tests Celox), so the workspace crates are compiled
-once for both; the profile alone would not share them when the two builds
-resolve different features. Local commands keep the ordinary test profile. Ordinary Cargo test commands retain the embedded,
-in-process path. CI's Rust Tests job prepares the executor once and uses it for
-full workspace runs and scoped PR runs that include Celox. The merge queue
-runs a small integration set directly, without building the all-backend executor. Scopes without Celox
-skip that build. The default-branch cache warmer builds both executor and test
-dependencies under the same cache key; preparation failures fail the test job.
-Cocotb runs through nextest with the exact packages, features and targets of its
-original build, selecting
-only the ignored `cocotb_` cases; an empty selection fails. Its reports are kept
-separately and uploaded with the regular test results.
+With `celox-test-suite/runtime-cases`, which the executor always enables, case
+scripts are read from disk instead of being embedded in the binary, so editing
+or adding a case does not rebuild anything. `--executor` reuses a built
+executor without running Cargo. CI builds the executor with the same packages,
+features and profile as the Rust test build it runs next to (the whole
+workspace, or the scoped build that tests Celox), so the workspace crates are
+compiled once for both. A pull request runs the cases its changes can affect
+(`scripts/ci-rust-scope.mjs`): a changed case script runs its group, a backend
+crate the backends it implements, and any other Celox change every case. The
+merge queue runs the `counter` and `hierarchy` cases. The runner writes a JUnit
+report beside nextest's under `work/ci-reports/rust/`.
+
+Cocotb runs through nextest with the exact packages, features and targets of
+its original build, selecting only the ignored `cocotb_` cases; an empty
+selection fails. Its reports are kept separately and uploaded with the regular
+test results.
 
 Default-feature library and documentation tests run in a separate parallel job
 with no extra features. The required Rust gate still requires this job whenever
@@ -118,17 +128,17 @@ for the repository. Tests keep their normal failure status; reporting does not
 enable retries or quarantine. Forks without the secret still run tests and retain
 the artifact. `cargo test`/doctest invocations are not part of this nextest report.
 
-For debugging a single case after building, the executor also accepts
-`<veryl|sv> <group::case> <backend>` directly, for example:
+To debug one pair, run the executor directly; `--build-only` prints its path:
 
 ```sh
-target/vtest/examples/vtest-exec veryl counter::test_counter_n4_basic native
+"$(python3 scripts/run-vtest.py --build-only)" run veryl counter::test_counter_n4_basic native
 ```
 
-Direct invocations do not apply registration-level ignores. `CELOX_VTEST_ROOT`
-can point to an alternative corpus root containing `veryl/cases` and `sv/cases`;
-otherwise the executor uses the suite's source directory from its build checkout.
-The script sets that root and `CELOX_VTEST_RUNNER` for its test invocation only.
+Its `cases` and `backends` subcommands list a language's cases and the backends
+the build includes. A direct run does not apply `vtest.toml`.
+`CELOX_VTEST_ROOT` can point to an alternative corpus root containing
+`veryl/cases` and `sv/cases`; otherwise the executor uses the suite's source
+directory from its build checkout.
 
 External results are reused locally by default, including between worktrees,
 when the case, verifier and tool fingerprints match. New/changed cases and

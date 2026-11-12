@@ -26,25 +26,3 @@ fn simulates_systemverilog_literals_with_widths_and_masks() {
     assert_eq!(z_value, BigUint::from(0b1010u32));
     assert_eq!(z_mask, BigUint::from(0b0011u32));
 }
-
-sv_backends! {
-    fn string_literals_are_unsigned_packed_bytes(sim) {
-        @case "literals::string_literals_are_unsigned_packed_bytes";
-    }
-
-    fn simulates_systemverilog_unbased_unsized_literals(sim) {
-        @case "literals::simulates_systemverilog_unbased_unsized_literals";
-    }
-
-    fn simulates_systemverilog_four_state_input_operator_masks(sim) {
-        @case "literals::simulates_systemverilog_four_state_input_operator_masks";
-    }
-
-    fn simulates_systemverilog_four_state_literal_operator_masks(sim) {
-        @case "literals::simulates_systemverilog_four_state_literal_operator_masks";
-    }
-
-    fn time_literals_scale_to_the_time_unit(sim) {
-        @case "literals::time_literals_scale_to_the_time_unit";
-    }
-}

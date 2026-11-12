@@ -71,7 +71,7 @@
  },
  "floating_point::integral_constants_from_float": {
   "kind": "known_celox_failure",
-  "reason": "Upstream Veryl 0.22 misfolds negative f32 constants (#1657), producing integer SIR values -1 and 4 instead of -2 and 3. Celox ignores this exact shared case on every backend in crates/celox/tests/floating_point.rs; the proof executor correctly exposes the incorrect frontend constant.",
+  "reason": "Upstream Veryl 0.22 misfolds negative f32 constants (#1657), producing integer SIR values -1 and 4 instead of -2 and 3. Celox ignores this exact shared case on every backend in crates/celox/vtest.toml; the proof executor correctly exposes the incorrect frontend constant.",
   "panic": "floating_point::integral_constants_from_float at 132:3: assert_eq direct: expected 0xfffffffe, got 0xffffffff"
  },
  "floating_point::scalar_port_and_function_conversions": {
@@ -101,7 +101,7 @@
  },
  "hierarchy::test_instance_array_broadcast_and_unpacked_array_connection": {
   "kind": "known_celox_failure",
-  "reason": "Instance arrays are unsupported by the Celox Veryl frontend; Celox ignores this case on every backend (crates/celox/tests/hierarchy.rs).",
+  "reason": "Instance arrays are unsupported by the Celox Veryl frontend; Celox ignores this case on every backend (crates/celox/vtest.toml).",
   "panic": "compile hierarchy::test_instance_array_broadcast_and_unpacked_array_connection: lower: IllegalContext { feature: \"output port destination\", detail: \"destination slice 0..8 does not fit output width 4\", source_location: Some(SourceLocation { source: MultiSources { sources: [Source { path: \"test.veryl\", text: \"\\nmodule Child (\\na: input  logic<4>,\\nen: input  logic,\\ny: output logic<4>\\n) {\\nassign y = if en ? ~a : a;\\n}\\nmodule Top (\\na: input  logic<4>,\\nen: input  logic,\\ny: output logic<4>[2]\\n) {\\ninst u: Child [2] (\\na,\\nen,\\ny,\\n);\\n}\\n\", line_offset: 0 }] }, span: SourceSpan { offset: SourceOffset(210), length: 1 } }) }"
  },
  "interface::test_generic_interface_port": {
@@ -111,32 +111,32 @@
  },
  "interface::test_interface_always_comb_packed_array_member": {
   "kind": "known_celox_failure",
-  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
+  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/vtest.toml).",
   "panic": "interface::test_interface_always_comb_packed_array_member at 142:3: assert_eq q: expected 0x11, got 0x0"
  },
  "interface::test_interface_always_ff_on_member_clock": {
   "kind": "known_celox_failure",
-  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
+  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/vtest.toml).",
   "panic": "interface::test_interface_always_ff_on_member_clock at 200:3: assert_eq count: expected 0x3, got 0x0"
  },
  "interface::test_interface_array_direct_function_calls": {
   "kind": "known_celox_failure",
-  "reason": "Veryl 0.22 native IR loses the selected interface array element in function calls. Celox ignores this case on its native backends (crates/celox/tests/interface.rs); emitted SystemVerilog preserves the selection.",
+  "reason": "Veryl 0.22 native IR loses the selected interface array element in function calls. Celox ignores this case on its native backends (crates/celox/vtest.toml); emitted SystemVerilog preserves the selection.",
   "panic": "interface::test_interface_array_direct_function_calls at 1453:5: assert_eq y1: expected 0x8c, got 0x3c"
  },
  "interface::test_interface_continuous_assign_logic": {
   "kind": "known_celox_failure",
-  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
+  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/vtest.toml).",
   "panic": "interface::test_interface_continuous_assign_logic at 92:3: assert_eq total: expected 0x12c, got 0x0"
  },
  "interface::test_interface_param_and_const": {
   "kind": "known_celox_failure",
-  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
+  "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/vtest.toml).",
   "panic": "interface::test_interface_param_and_const at 1124:3: assert_eq f12: expected 0x1, got 0x0"
  },
  "interface::test_nested_interface_instance": {
   "kind": "known_celox_failure",
-  "reason": "Veryl 0.22 native IR drops interface body assignments and nested instances. Celox ignores this case on its native backends (crates/celox/tests/interface.rs); emitted SystemVerilog retains them.",
+  "reason": "Veryl 0.22 native IR drops interface body assignments and nested instances. Celox ignores this case on its native backends (crates/celox/vtest.toml); emitted SystemVerilog retains them.",
   "panic": "interface::test_nested_interface_instance at 1506:5: assert_eq y8: expected 0xcd, got 0x0"
  },
  "synth_dynamic_loop::test_constant_signed_bounds_in_unrolled_synth_loops": {

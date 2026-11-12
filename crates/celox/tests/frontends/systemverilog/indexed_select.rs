@@ -3,124 +3,6 @@ use super::*;
 // IEEE 1800-2023 11.5.1: the index operator and declaration direction
 // independently determine the endpoints of the selected range.
 sv_backends! {
-    fn wide_parameter_index_bounds(sim) {
-        @case "indexed_select::wide_parameter_index_bounds";
-    }
-
-    fn wide_parameter_unknown_index_bounds(sim) {
-        @case "indexed_select::wide_parameter_unknown_index_bounds";
-    }
-
-    fn procedural_loop_selects_constant_packed_bytes(sim) {
-        @case "indexed_select::procedural_loop_selects_constant_packed_bytes";
-    }
-
-    fn procedural_loop_selects_packed_words(sim) {
-        @case "indexed_select::procedural_loop_selects_packed_words";
-    }
-    fn procedural_loop_reads_packed_words_into_memory(sim) {
-        @case "indexed_select::procedural_loop_reads_packed_words_into_memory";
-    }
-
-    fn procedural_loop_writes_memory_word_part_selects(sim) {
-        @case "indexed_select::procedural_loop_writes_memory_word_part_selects";
-    }
-
-    fn constant_parameter_initializers_preserve_inferred_dimensions(sim) {
-        @case "indexed_select::constant_parameter_initializers_preserve_inferred_dimensions";
-    }
-    fn constant_parameter_initializers_short_circuit_wide_operands(sim) {
-        @case "indexed_select::constant_parameter_initializers_short_circuit_wide_operands";
-    }
-    fn constant_parameter_initializers_short_circuit_repetitions_and_selections(sim) {
-        @case "indexed_select::constant_parameter_initializers_short_circuit_repetitions_and_selections";
-    }
-    fn constant_parameter_initializers_short_circuit_four_state_bindings(sim) {
-        @case "indexed_select::constant_parameter_initializers_short_circuit_four_state_bindings";
-    }
-    fn nested_array_indices_preserve_cast_widths(sim) {
-        @case "indexed_select::nested_array_indices_preserve_cast_widths";
-    }
-
-    fn nested_array_indices_freeze_concat_targets(sim) {
-        @case "indexed_select::nested_array_indices_freeze_concat_targets";
-    }
-
-    fn nested_array_indices_preserve_elements_and_ranges(sim) {
-        @case "indexed_select::nested_array_indices_preserve_elements_and_ranges";
-    }
-
-    fn nested_array_indices_preserve_invalid_reads_and_writes(sim) {
-        @case "indexed_select::nested_array_indices_preserve_invalid_reads_and_writes";
-    }
-
-    fn signed_indices_access_clocked_negative_range_arrays(sim) {
-        @case "indexed_select::signed_indices_access_clocked_negative_range_arrays";
-    }
-
-    fn constant_part_select_indices_of_concatenations(sim) {
-        @case "indexed_select::constant_part_select_indices_of_concatenations";
-    }
-
-    fn constant_part_select_indices_of_signed_slices(sim) {
-        @case "indexed_select::constant_part_select_indices_of_signed_slices";
-    }
-
-    fn constant_part_select_indices_in_continuous_targets(sim) {
-        @case "indexed_select::constant_part_select_indices_in_continuous_targets";
-    }
-
-    fn constant_part_select_indices_read_and_write_unpacked_arrays(sim) {
-        @case "indexed_select::constant_part_select_indices_read_and_write_unpacked_arrays";
-    }
-
-    fn constant_part_select_indices_preserve_selected_unknowns(sim) {
-        @case "indexed_select::constant_part_select_indices_preserve_selected_unknowns";
-    }
-
-    fn indexed_select_reads_and_writes_both_declaration_directions(sim) {
-        @case "indexed_select::indexed_select_reads_and_writes_both_declaration_directions";
-    }
-
-    fn runtime_indices_select_multidimensional_packed_elements(sim) {
-        @case "indexed_select::runtime_indices_select_multidimensional_packed_elements";
-    }
-
-    fn runtime_indices_select_within_multidimensional_packed_elements(sim) {
-        @case "indexed_select::runtime_indices_select_within_multidimensional_packed_elements";
-    }
-
-    fn signed_index_expressions_wrap_at_their_own_width(sim) {
-        @case "indexed_select::signed_index_expressions_wrap_at_their_own_width";
-    }
-
-    fn runtime_index_expressions_wrap_at_their_own_width(sim) {
-        @case "indexed_select::runtime_index_expressions_wrap_at_their_own_width";
-    }
-
-    fn out_of_range_inner_indices_stay_in_their_element(sim) {
-        @case "indexed_select::out_of_range_inner_indices_stay_in_their_element";
-    }
-
-    fn out_of_range_inner_indices_stay_in_their_unpacked_element(sim) {
-        @case "indexed_select::out_of_range_inner_indices_stay_in_their_unpacked_element";
-    }
-
-    fn runtime_inner_bits_of_unpacked_elements_feed_child_ports(sim) {
-        @case "indexed_select::runtime_inner_bits_of_unpacked_elements_feed_child_ports";
-    }
-
-    fn out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element(sim) {
-        @case "indexed_select::out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element";
-    }
-
-    fn runtime_index_reads_single_bit_unpacked_elements(sim) {
-        @case "indexed_select::runtime_index_reads_single_bit_unpacked_elements";
-    }
-
-    fn indexed_select_parameterized_generate_and_ff(sim) {
-        @case "indexed_select::indexed_select_parameterized_generate_and_ff";
-    }
 
     fn veryl_emitted_parameterized_step_generate(sim) {
         @setup {
@@ -147,130 +29,6 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("narrow")), 0x1bu8.into());
     }
 
-    fn runtime_indexed_bases_preserve_numeric_and_type_casts(sim) {
-        @case "indexed_select::runtime_indexed_bases_preserve_numeric_and_type_casts";
-    }
-
-    fn indexed_select_preserves_selected_and_cast_bases(sim) {
-        @case "indexed_select::indexed_select_preserves_selected_and_cast_bases";
-    }
-
-    fn indexed_widths_preserve_parameter_selections(sim) {
-        @case "indexed_select::indexed_widths_preserve_parameter_selections";
-    }
-
-    fn indexed_compound_bases_fold_selected_operands(sim) {
-        @case "indexed_select::indexed_compound_bases_fold_selected_operands";
-    }
-
-    fn indexed_constants_respect_declared_parameter_indices(sim) {
-        @case "indexed_select::indexed_constants_respect_declared_parameter_indices";
-    }
-
-    fn indexed_functions_preserve_selected_arguments(sim) {
-        @case "indexed_select::indexed_functions_preserve_selected_arguments";
-    }
-
-    // IEEE 1800-2023 11.6.1: both ternary arms determine the result width.
-    fn indexed_ternaries_preserve_both_arm_types(sim) {
-        @case "indexed_select::indexed_ternaries_preserve_both_arm_types";
-    }
-
-    fn constant_parameter_initializers_preserve_selections(sim) {
-        @case "indexed_select::constant_parameter_initializers_preserve_selections";
-    }
-
-    fn constant_parameter_initializers_preserve_imported_shapes(sim) {
-        @case "indexed_select::constant_parameter_initializers_preserve_imported_shapes";
-    }
-
-    fn constant_parameter_initializers_preserve_overhanging_parts(sim) {
-        @case "indexed_select::constant_parameter_initializers_preserve_overhanging_parts";
-    }
-
-    fn constant_parameter_initializers_preserve_unknown_indices(sim) {
-        @case "indexed_select::constant_parameter_initializers_preserve_unknown_indices";
-    }
-
-    fn constant_parameter_initializers_shape_ports_and_generate(sim) {
-        @case "indexed_select::constant_parameter_initializers_shape_ports_and_generate";
-    }
-
-    fn indexed_parameter_initializers_preserve_selections(sim) {
-        @case "indexed_select::indexed_parameter_initializers_preserve_selections";
-    }
-
-    fn indexed_parameter_initializers_use_assignment_width(sim) {
-        @case "indexed_select::indexed_parameter_initializers_use_assignment_width";
-    }
-
-    fn indexed_parameter_initializers_resolve_enum_constants(sim) {
-        @case "indexed_select::indexed_parameter_initializers_resolve_enum_constants";
-    }
-
-    fn indexed_parameter_ports_preserve_declared_ranges(sim) {
-        @case "indexed_select::indexed_parameter_ports_preserve_declared_ranges";
-    }
-
-    fn indexed_bases_resolve_size_queries(sim) {
-        @case "indexed_select::indexed_bases_resolve_size_queries";
-    }
-
-    fn indexed_initializers_preserve_four_state_parameters(sim) {
-        @case "indexed_select::indexed_initializers_preserve_four_state_parameters";
-    }
-
-    fn indexed_initializers_accept_casts_around_selections(sim) {
-        @case "indexed_select::indexed_initializers_accept_casts_around_selections";
-    }
-
-    fn indexed_size_queries_preserve_parameter_dimensions(sim) {
-        @case "indexed_select::indexed_size_queries_preserve_parameter_dimensions";
-    }
-
-    fn indexed_widths_accept_replication_concatenations(sim) {
-        @case "indexed_select::indexed_widths_accept_replication_concatenations";
-    }
-
-    fn indexed_constants_work_in_ordinary_selection_indices(sim) {
-        @case "indexed_select::indexed_constants_work_in_ordinary_selection_indices";
-    }
-
-    fn indexed_runtime_replications_preserve_attached_selections(sim) {
-        @case "indexed_select::indexed_runtime_replications_preserve_attached_selections";
-    }
-
-    fn indexed_generate_parameters_retain_local_metadata(sim) {
-        @case "indexed_select::indexed_generate_parameters_retain_local_metadata";
-    }
-
-    fn indexed_constants_lower_selected_concatenations(sim) {
-        @case "indexed_select::indexed_constants_lower_selected_concatenations";
-    }
-
-    fn indexed_unsigned_bases_cross_zero(sim) {
-        @case "indexed_select::indexed_unsigned_bases_cross_zero";
-    }
-
-    fn runtime_indexed_reads_follow_the_declared_direction(sim) {
-        @case "indexed_select::runtime_indexed_reads_follow_the_declared_direction";
-    }
-
-    fn runtime_indexed_base_may_select_a_parameter_bit(sim) {
-        @case "indexed_select::runtime_indexed_base_may_select_a_parameter_bit";
-    }
-
-    fn runtime_indexed_writes_keep_unselected_bits_and_clip_overhang(sim) {
-        @case "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang";
-    }
-
-    fn runtime_indexed_ff_write_updates_only_the_selected_slice(sim) {
-        @case "indexed_select::runtime_indexed_ff_write_updates_only_the_selected_slice";
-    }
-
-    fn indexed_select_multidimensional_packed_reads(sim) {
-        @case "indexed_select::indexed_select_multidimensional_packed_reads";
-    }
 }
 
 #[test]
@@ -305,12 +63,6 @@ fn rejects_selected_widths_that_are_nonpositive() {
     }
 }
 
-sv_backends! {
-    fn indexed_selections_in_constant_declaration_contexts(sim) {
-        @case "indexed_select::indexed_selections_in_constant_declaration_contexts";
-    }
-}
-
 #[test]
 fn rejects_unresolved_indexed_parameter_initializers_after_collection() {
     let source = "module Top; localparam logic [7:0] P = 8'hab; localparam logic [3:0] Q = P[MISSING +: 4]; endmodule";
@@ -340,18 +92,6 @@ fn rejects_unresolved_logical_parameter_type_queries() {
     }
 }
 
-sv_backends! {
-    fn constant_part_selects_partly_outside_write_the_bits_inside(sim) {
-        @case "indexed_select::constant_part_selects_partly_outside_write_the_bits_inside";
-    }
-    fn ascending_part_selects_partly_outside_write_the_bits_inside(sim) {
-        @case "indexed_select::ascending_part_selects_partly_outside_write_the_bits_inside";
-    }
-    fn known_run_time_selects_stay_within_their_element(sim) {
-        @case "indexed_select::known_run_time_selects_stay_within_their_element";
-    }
-}
-
 /// A continuous assignment to a part-select partly outside its vector drives
 /// the bits inside, and one wholly outside drives nothing (IEEE 1800-2023
 /// 11.5.1). Icarus 13.0 aborts on the partial assignment, so this is no
@@ -378,21 +118,6 @@ fn continuous_part_selects_partly_outside_drive_the_bits_inside() {
     assert_eq!(sim.get(r), 0x5au8.into());
 }
 
-sv_backends! {
-    fn generated_pipeline_with_unselected_invalid_array_element(sim) {
-        @case "indexed_select::generated_pipeline_with_unselected_invalid_array_element";
-    }
-    fn generated_pipeline_with_unselected_invalid_array_element_four_state(sim) {
-        @case "indexed_select::generated_pipeline_with_unselected_invalid_array_element_four_state";
-    }
-    fn invalid_unpacked_elements_preserve_type_in_conditionals(sim) {
-        @case "indexed_select::invalid_unpacked_elements_preserve_type_in_conditionals";
-    }
-    fn constant_invalid_unpacked_indices_read_defaults_and_ignore_writes(sim) {
-        @case "indexed_select::constant_invalid_unpacked_indices_read_defaults_and_ignore_writes";
-    }
-}
-
 // Icarus 13.0 returns X here, contrary to IEEE 1800-2023 7.4.5 Table 7-1.
 // Keep this regression local, like the partial continuous-select check above.
 sv_backends! {
@@ -403,18 +128,6 @@ sv_backends! {
         @build Simulator::from_sv_sources(vec![(source, Path::new("invalid_bit_element.sv"))], "Top").four_state(true);
         let q=sim.signal("q");
         assert_eq!(sim.get_four_state(q), (BigUint::default(), BigUint::default()));
-    }
-}
-
-sv_backends! {
-    fn generated_pipeline_with_explicit_generate_branches(sim) {
-        @case "indexed_select::generated_pipeline_with_explicit_generate_branches";
-    }
-}
-
-sv_backends! {
-    fn disjoint_single_bit_array_drivers(sim) {
-        @case "indexed_select::disjoint_single_bit_array_drivers";
     }
 }
 
@@ -441,14 +154,5 @@ sv_backends! {
             sim.modify(|io| {io.set(index,position);io.set(value,bits);}).unwrap();
             assert_eq!(sim.get(q),BigUint::from(expected));
         }
-    }
-}
-
-sv_backends! {
-    fn disjoint_shifted_single_bit_array_drivers(sim) {
-        @case "indexed_select::disjoint_shifted_single_bit_array_drivers";
-    }
-    fn disjoint_negative_single_bit_array_drivers(sim) {
-        @case "indexed_select::disjoint_negative_single_bit_array_drivers";
     }
 }

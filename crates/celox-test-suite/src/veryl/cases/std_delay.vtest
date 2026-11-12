@@ -1,5 +1,6 @@
 (group std_delay (category standard_library))
 
+; DELAY=0: passthrough (no delay)
 (case test_delay_zero
   (source "test.veryl"
     (std "delay/delay.veryl")
@@ -25,6 +26,7 @@ o_d,
   (modify (set i_d 0xCD))
   (assert_eq (trunc 8 (get o_d)) 0xCD))
 
+; DELAY=1: one cycle delay
 (case test_delay_one
   (source "test.veryl"
     (std "delay/delay.veryl")
@@ -61,6 +63,7 @@ o_d,
   (tick clk)
   (assert_eq (trunc 8 (get o_d)) 0xBB "should appear after 1 tick"))
 
+; DELAY=3: three cycle pipeline
 (case test_delay_three
   (source "test.veryl"
     (std "delay/delay.veryl")

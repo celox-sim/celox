@@ -1,0 +1,940 @@
+# The Celox backends each celox-test-suite case runs on. scripts/run-vtest.py
+# reads this file and runs the `vtest-exec` example once per case and backend;
+# no Rust test registers the cases.
+#
+# A case runs on the `backends` of its language, changed first by its group's
+# entry and then by its own:
+#
+# - `add`: backends beyond those, such as `native-image`, `native-baseline`
+#   or `interpreter`;
+# - `omit`: backends the case does not apply to, which never run it;
+# - `ignore`: backends that cannot run the case yet. The runner reports them
+#   as ignored and runs them only with `--ignored include` or `--ignored only`;
+# - `reason`: why the case is ignored.
+#
+# Entries must name existing groups, cases and backends: the runner rejects
+# a stale one. A case without an entry runs on its group's backends.
+
+[veryl]
+backends = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "sv", "veryl"]
+
+[veryl.groups.case_switch]
+add = ["native-baseline"]
+
+[veryl.groups.compare_matrix]
+add = ["native-baseline"]
+
+[veryl.groups.four_state]
+add = ["native-baseline"]
+
+[veryl.groups.linear_sorter_pull]
+add = ["native-baseline"]
+
+[veryl.groups.multi_clock]
+add = ["native-baseline"]
+
+[veryl.groups.nba_dynamic_array]
+add = ["native-baseline"]
+
+[veryl.groups.operators]
+add = ["native-baseline"]
+
+[veryl.groups.signed_divrem]
+add = ["native-baseline"]
+
+[veryl.groups.std_fifo]
+add = ["native-baseline"]
+
+[veryl.groups.std_ram]
+add = ["native-baseline"]
+
+[veryl.groups.synth_dynamic_loop]
+add = ["native-baseline"]
+
+[veryl.groups.wide_operators]
+add = ["native-baseline"]
+
+[veryl.groups.wide_shift_mem]
+add = ["native-baseline"]
+
+# Veryl emits `'{8'h12, default: 8'hAA}`, mixing positional items with `default:`,
+# which is not legal SV; the SV parser rejects it.
+[veryl.cases."array_literal::test_array_literal_default_comb_assignment"]
+ignore = ["sv"]
+
+# Veryl emits `'{8'h11, default: 8'h22}`, mixing positional items with `default:`,
+# which is not legal SV; the SV parser rejects it.
+[veryl.cases."array_literal::test_array_literal_nested_default_multidim_assignment"]
+ignore = ["sv"]
+
+# repeat + default: '{val repeat 2, default: 0} in a size-4 array.
+# Veryl emits `'{2{a}, default: b}`, mixing positional items with `default:`, which is
+# not legal SV; the SV parser rejects it.
+[veryl.cases."array_literal::test_array_literal_repeat_plus_default"]
+ignore = ["sv"]
+
+# Two explicit elements + default: remaining slots filled correctly.
+# Veryl emits `'{a, b, default: c}`, mixing positional items with `default:`, which is
+# not legal SV; the SV parser rejects it.
+[veryl.cases."array_literal::test_array_literal_two_explicit_plus_default"]
+ignore = ["sv"]
+
+[veryl.cases."basic::test_comb_case_target_output_call_is_evaluated_once"]
+ignore = ["veryl"]
+
+[veryl.cases."basic::test_comb_effectful_case_after_dynamic_break_stays_inactive"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0's simulator runs the call in the untaken `?:` arm and writes its output
+# back.
+[veryl.cases."basic::test_comb_function_call_expression_output_is_guarded_by_ternary"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0's simulator runs the short-circuited operand of `&&` / `||` and writes
+# its output back.
+[veryl.cases."basic::test_comb_function_call_expression_output_respects_short_circuit"]
+ignore = ["veryl"]
+
+[veryl.cases."basic::test_comb_function_condition_output_is_guarded_after_early_return"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0's simulator drops the output writeback of a call whose return value is
+# used inside a function body (0 instead of 0xb).
+[veryl.cases."basic::test_comb_nested_function_output_call_in_function_condition"]
+ignore = ["veryl"]
+
+[veryl.cases."basic::test_comb_value_system_function_after_dynamic_break_stays_inactive"]
+ignore = ["veryl"]
+
+[veryl.cases."basic::test_comb_value_system_function_statement_applies_argument_outputs"]
+ignore = ["veryl"]
+
+[veryl.cases."comb_observer::test_comb_function_array_literal_accepts_array_returning_items"]
+ignore = ["veryl"]
+
+# sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+# formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+# ("assignment pattern item: an unpacked array of type `logic signed [3:0] [2]` is not
+# assignment compatible with `logic signed [7:0] [2]`") instead of reinterpreting its bits.
+[veryl.cases."comb_observer::test_comb_function_array_literal_array_item_preserves_element_type"]
+ignore = ["sv", "veryl"]
+
+# sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+# formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+# ("argument 1 of `pick`: an unpacked array of type `logic signed [3:0] [2]` is not
+# assignment compatible with `logic signed [7:0] [2]`") instead of reinterpreting its bits.
+[veryl.cases."comb_observer::test_comb_function_direct_array_argument_converts_each_element"]
+ignore = ["sv", "veryl"]
+
+[veryl.cases."comb_observer::test_comb_function_direct_array_return_preserves_all_elements"]
+ignore = ["veryl"]
+
+[veryl.cases."comb_observer::test_comb_function_loop_bounds_apply_output_effects_left_to_right"]
+ignore = ["veryl"]
+
+[veryl.cases."comb_observer::test_comb_function_loop_skips_conditions_after_break"]
+ignore = ["veryl"]
+
+[veryl.cases."comb_observer::test_comb_function_nested_array_scalar_default_converts_each_element"]
+ignore = ["veryl"]
+
+# SV arm: Veryl emits `'{default: a, b}`, mixing positional items with `default:`, which is
+# not legal SV; the SV parser rejects it.
+[veryl.cases."comb_observer::test_comb_function_packed_array_literal_preserves_source_order"]
+ignore = ["sv", "veryl"]
+
+# sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+# formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+# ("argument 1 of `capture`: an unpacked array of type `logic signed [3:0] [2]` is not
+# assignment compatible with `logic signed [7:0] [2]`") instead of reinterpreting its bits.
+[veryl.cases."comb_observer::test_comb_statement_function_direct_array_argument_converts_each_element"]
+ignore = ["sv", "veryl"]
+
+# Tests the compare matrix merger.
+# Two sorted ascending arrays in, one merged sorted ascending array out.
+[veryl.cases."compare_matrix::test_compare_matrix_merger"]
+ignore = ["veryl"]
+
+# Tests the compare matrix selector module (through wrapper, verifying parameter forwarding).
+[veryl.cases."compare_matrix::test_compare_matrix_selector"]
+ignore = ["veryl"]
+
+# Tests full sorting via CompareMatrixStage1 (scoring + selection through wrapper chain).
+# Input unsorted values, output sorted ascending.
+[veryl.cases."compare_matrix::test_compare_matrix_stage1_sort"]
+ignore = ["veryl"]
+
+# Tests the compare matrix scoring module (CompareMatrixStage1CM).
+# Input 4 values, verify scores reflect sorted order.
+[veryl.cases."compare_matrix::test_compare_matrix_stage1cm"]
+ignore = ["veryl"]
+
+# Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
+[veryl.cases."concurrent_initial::clock_periods"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+# Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
+[veryl.cases."concurrent_initial::control_flow"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+# Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
+[veryl.cases."concurrent_initial::gated_drive"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+# Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
+[veryl.cases."concurrent_initial::hierarchy"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+# Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
+[veryl.cases."concurrent_initial::mixed_edges"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+# Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
+[veryl.cases."concurrent_initial::reset"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+# Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
+[veryl.cases."concurrent_initial::reset_between_edges"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+# Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
+[veryl.cases."concurrent_initial::reset_only_clock"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+# Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
+[veryl.cases."concurrent_initial::shared_clock"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+# Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
+[veryl.cases."concurrent_initial::simultaneous_edges"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+[veryl.cases."counter::test_phase_state_ssa_preserves_eval_before_apply_and_four_state"]
+ignore = ["veryl"]
+
+[veryl.cases."data_access::test_genvar_const_in_generate"]
+ignore = ["veryl"]
+
+[veryl.cases."data_access::test_genvar_dynamic_index_issue21"]
+ignore = ["veryl"]
+
+# Enum-typed variables can be assigned from logic inputs
+# and compared against enum members. Veryl emits the assignment of
+# the logic input to the enum without a cast, which SystemVerilog
+# requires (IEEE 1800-2023 6.19.3; the `sv_enum_conversion`
+# limitation), so the emitted design is not run.
+[veryl.cases."enum_type::test_enum_assign_and_compare"]
+omit = ["sv"]
+
+[veryl.cases."expression_semantics::short_circuit_operators_skip_effectful_operands"]
+omit = ["veryl"]
+
+[veryl.cases."flip_flop::test_ff_array_literal_default_expression"]
+ignore = ["veryl"]
+
+[veryl.cases."flip_flop::test_ff_assert_message_output_argument_is_eager"]
+omit = ["sv", "veryl"]
+
+# Celox opt-in FF function effects are rejected by the Veryl analyzer.
+[veryl.cases."flip_flop::test_ff_bits_and_size_array_dependencies_do_not_alias_later_write"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_constant_signed_bounds_in_unrolled_loops"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_dynamic_nonlocal_store_follows_pending_whole_write"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_effectful_array_item_output_is_not_a_read_alias"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_array_literal_branch_view_is_reused_after_merge"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_array_literal_effect_is_eager_in_short_circuit_rhs"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_array_literal_effect_is_eager_in_ternary_arm"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_array_literal_element_uses_formal_context_width"]
+ignore = ["veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_array_literal_snapshots_scalar_before_callee_write"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_array_literal_snapshots_scalar_before_later_write"]
+omit = ["sv", "veryl"]
+
+# Veryl emits `'{1{'{...}}, default: '{...}}`, mixing positional items with `default:`,
+# which is not legal SV; the SV parser rejects it.
+[veryl.cases."flip_flop::test_ff_function_call_array_literal_supports_dynamic_multidim_indexing"]
+ignore = ["sv"]
+
+[veryl.cases."flip_flop::test_ff_function_call_array_literal_view_preserves_expression_order"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_array_literal_view_preserves_source_order"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_bits_and_size_evaluate_effectful_array_argument"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_carries_branch_local_static_array_item_cache"]
+omit = ["sv", "veryl"]
+
+# sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+# formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+# ("argument 1 of `inner`: an unpacked array of type `logic [3:0] [2]` is not assignment
+# compatible with `logic [7:0] [2]`") instead of reinterpreting its bits.
+[veryl.cases."flip_flop::test_ff_function_call_converts_array_literal_view_for_wider_nested_formal"]
+ignore = ["sv"]
+
+# sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+# formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+# ("argument 1 of `inner`: an unpacked array of type `logic [3:0] [2]` is not assignment
+# compatible with `logic [7:0] [2]`") instead of reinterpreting its bits.
+[veryl.cases."flip_flop::test_ff_function_call_converts_forwarded_static_array_element"]
+ignore = ["sv"]
+
+# sv: Veryl emits a call that passes an unpacked array whose element type differs from the
+# formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
+# ("assignment pattern item: an unpacked array of type `logic [3:0] [2]` is not assignment
+# compatible with `logic [7:0] [2]`") instead of reinterpreting its bits.
+[veryl.cases."flip_flop::test_ff_function_call_dynamic_multidim_indexing_accepts_array_valued_items"]
+ignore = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_effectful_array_items_are_eager_before_conditional_access"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_expression_with_output_argument_and_return_value"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_indexed_argument_access"]
+ignore = ["veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_keeps_array_view_active_for_output_index"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_merges_directly_forwarded_array_cache"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_merges_nested_array_state_at_cache_completion"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_merges_nested_array_state_at_static_cache_completion"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_merges_outer_array_view_across_nested_short_circuit"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_multidim_array_literal_default_fill_matches_formal_shape"]
+ignore = ["veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_nested_bits_evaluates_effectful_array_argument"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_nested_output_statement_in_function_body"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_snapshots_pure_array_items_before_later_effect"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_statement_with_output_argument"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_statement_with_output_argument_and_return_value"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_tracks_array_reads_in_output_indices"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_tracks_array_view_hidden_in_bound_literal"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_tracks_nested_array_reads_in_output_indices"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_call_tracks_nested_static_array_read_through_branch"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_function_output_index_uses_final_nonlocal_state"]
+omit = ["sv", "veryl"]
+
+# Veryl 0.22.0's simulator evaluates a runtime loop bound wider than 64 bits as 0.
+[veryl.cases."flip_flop::test_ff_i32_bitwise_steps_discard_bits_above_the_counter_width"]
+ignore = ["veryl"]
+
+[veryl.cases."flip_flop::test_ff_nonlocal_source_ternary_preserves_unknown_merge"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_nonlocal_write_precedes_aliased_formal_output_copyout"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_outputless_wrapper_direct_dynamic_nonlocal_assignment_is_observable"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_outputless_wrapper_dynamic_indexed_copyout_to_nonlocal_is_observable"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_outputless_wrapper_expression_copyout_to_nonlocal_is_observable"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_outputless_wrapper_indexed_copyout_to_nonlocal_is_observable"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_outputless_wrapper_nested_copyout_to_nonlocal_is_observable"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_pure_input_is_snapshotted_before_later_effectful_input"]
+omit = ["sv", "veryl"]
+
+# Veryl 0.22.0's simulator holds a master-gated clock's enable for the
+# whole edge, as a clock-gating cell does: the enable register rising
+# with the edge does not raise `clk & en` until the next edge. Celox
+# follows the SystemVerilog Veryl emits (IEEE 1800-2023 4.4.2, 4.5), as
+# Verilator and Icarus do.
+[veryl.cases."flip_flop::test_ff_register_gated_clock_rises_after_the_commit"]
+ignore = ["veryl"]
+
+[veryl.cases."flip_flop::test_ff_runtime_function_snapshots_helper_input_before_callee_nonlocal_write"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_short_circuit_runtime_write_preserves_later_state_source"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_signed_xor_step_uses_loop_counter_width"]
+ignore = ["veryl"]
+
+[veryl.cases."flip_flop::test_ff_skipped_conditional_nonlocal_write_preserves_prior_ff_assignment"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."flip_flop::test_ff_statement_function_direct_nonlocal_assignment_is_observable"]
+omit = ["sv", "veryl"]
+
+# Veryl 0.22 simulator truncates 7.0 / 2.0 to 3 instead of rounding to 4.
+[veryl.cases."floating_point::arithmetic_and_rounding"]
+ignore = ["veryl"]
+
+# Veryl 0.22 simulator returns the f32 IEEE payload instead of a numeric integer conversion.
+[veryl.cases."floating_point::f32_precision_and_conversion"]
+ignore = ["veryl"]
+
+# Veryl 0.22 prints the %0.2f format text literally; its adapter also
+# has no byte-output capture API. External simulators check this case.
+[veryl.cases."floating_point::formatted_display_and_write"]
+ignore = ["veryl"]
+
+# Upstream Veryl 0.22 folds negative f32 constants incorrectly (#1657).
+# https://github.com/celox-sim/celox/issues/1657
+[veryl.cases."floating_point::integral_constants_from_float"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
+
+# Veryl 0.22 simulator truncates the implicit 3.5 port conversion to 3 instead of 4.
+[veryl.cases."floating_point::scalar_port_and_function_conversions"]
+ignore = ["veryl"]
+
+# Veryl 0.22 simulator returns zero for the clocked floating-point conversion.
+[veryl.cases."floating_point::sequential_float"]
+ignore = ["veryl"]
+
+# Veryl 0.22 simulator retains X/Z bits when converting an integer through a float.
+[veryl.cases."floating_point::unknown_integer_conversion"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0's simulator keeps X/Z when storing into a 2-state type.
+[veryl.cases."four_state::test_ff_struct_logic_to_bit_coercion_clears_mask"]
+ignore = ["veryl"]
+
+# Cascaded Mux with X
+[veryl.cases."four_state::test_four_state_cascaded_mux_with_x"]
+ignore = ["veryl"]
+
+[veryl.cases."four_state::test_four_state_case_x_in_selector"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0's simulator misses edges through x and z, such as x -> 0.
+[veryl.cases."four_state::test_four_state_comb_clock_edges_follow_table_9_2"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0's simulator gives an uninitialized 2-state variable X instead of 0.
+[veryl.cases."four_state::test_four_state_initial_and_set"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0's simulator misses edges through x and z, such as x -> 0.
+[veryl.cases."four_state::test_four_state_internal_async_reset_edges_follow_table_9_2"]
+ignore = ["veryl"]
+
+# IEEE 1800 LogicAnd (&&) dominant-value: 0 && x = 0
+[veryl.cases."four_state::test_four_state_logic_and_dominant_zero"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0's simulator keeps X/Z when storing into a 2-state type.
+[veryl.cases."four_state::test_four_state_mixing"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0's simulator keeps X/Z when storing into a 2-state type.
+[veryl.cases."four_state::test_four_state_mixing_propagation"]
+ignore = ["veryl"]
+
+# Ternary / Mux with X condition
+[veryl.cases."four_state::test_four_state_mux_x_condition"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0's simulator misses edges through x and z, such as x -> 0.
+[veryl.cases."four_state::test_four_state_register_clock_edges_follow_table_9_2"]
+ignore = ["veryl"]
+
+# P1: Wide comparison + X
+[veryl.cases."four_state::test_four_state_wide_comparison_with_x"]
+ignore = ["veryl"]
+
+# Wide NE + X (128-bit)
+[veryl.cases."four_state::test_four_state_wide_ne_with_x"]
+ignore = ["veryl"]
+
+[veryl.cases."four_state_expression_semantics::effectful_ternary_takes_known_true_branch_despite_unknown_bits"]
+omit = ["sv"]
+ignore = ["veryl"]
+
+[veryl.cases."four_state_expression_semantics::ff_procedural_control_uses_known_nonzero_truth"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."four_state_expression_semantics::ff_unknown_reset_is_not_active"]
+omit = ["veryl"]
+
+[veryl.cases."four_state_expression_semantics::indeterminate_ternary_executes_effectful_arms_in_order"]
+ignore = ["veryl"]
+
+[veryl.cases."four_state_expression_semantics::ternary_unknown_condition_merges_branch_bits"]
+omit = ["veryl"]
+
+# Veryl 0.22.0's simulator picks the false arm for an X/Z condition instead of merging
+# the arms (IEEE 1800-2023 11.4.11).
+[veryl.cases."four_state_expression_semantics::wide_ternary_unknown_condition_merges_every_arm_chunk"]
+ignore = ["veryl"]
+
+[veryl.cases."function_arguments::test_comb_nested_output_copyout_stops_at_early_return"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0's simulator copies the whole formal into each concatenated actual instead of
+# splitting it.
+[veryl.cases."function_arguments::test_comb_output_copyout_to_concat_preserves_unselected_bits_and_elements"]
+ignore = ["veryl"]
+
+[veryl.cases."function_arguments::test_ff_expression_output_copyout_extends_before_splitting_concat"]
+omit = ["sv"]
+ignore = ["veryl"]
+
+[veryl.cases."function_arguments::test_ff_function_local_snapshot_ignores_later_assignment"]
+ignore = ["veryl"]
+
+[veryl.cases."function_arguments::test_ff_nested_output_copyout_is_visible_before_outer_copyout"]
+omit = ["sv", "veryl"]
+
+# Veryl rejects function outputs in always_ff (function_output_in_always_ff); this is a
+# Celox extension.
+[veryl.cases."function_arguments::test_ff_output_copyout_to_dynamic_slice_preserves_other_bits"]
+omit = ["sv"]
+ignore = ["veryl"]
+
+[veryl.cases."function_arguments::test_ff_statement_output_copyout_freezes_all_inputs"]
+omit = ["sv", "veryl"]
+
+# Veryl 0.22.0 rejects the always_ff half (function_output_in_always_ff), and its simulator
+# ignores the formal's sign in the comb copy-out.
+[veryl.cases."function_arguments::test_output_copyout_converts_formal_width_and_signedness_in_comb_and_ff"]
+omit = ["sv"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0's simulator ignores concatenation offsets and dynamic selects when copying
+# an output out.
+[veryl.cases."function_bodies::test_nested_output_to_concat_and_dynamic_local"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0's simulator keeps the previous call's return value on a path without
+# `return` instead of X.
+[veryl.cases."function_bodies::test_path_without_return_yields_unknown"]
+ignore = ["veryl"]
+
+# Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
+[veryl.cases."hierarchical_assignment::disjoint_loop"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+# Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
+[veryl.cases."hierarchical_assignment::selections"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+# Upstream veryl-simulator still accepts this invalid destination.
+[veryl.cases."hierarchy::test_dynamic_minus_colon_output_port_rmw"]
+ignore = ["veryl"]
+
+# Upstream veryl-simulator still accepts this invalid destination.
+[veryl.cases."hierarchy::test_dynamic_output_port_converts_four_state_child_to_two_state_parent"]
+ignore = ["veryl"]
+
+# Upstream veryl-simulator still accepts this invalid destination.
+# The SV analyzer stops at unsupported indexed part-select, before checking
+# the output destination. That limitation is not a successful rejection.
+[veryl.cases."hierarchy::test_dynamic_output_port_rmw_preserves_unselected_bits"]
+ignore = ["veryl"]
+
+[veryl.cases."hierarchy::test_dynamic_prefix_colon_output_port_allows_zero_lsb"]
+omit = ["veryl"]
+
+# Upstream veryl-simulator still accepts this invalid destination.
+[veryl.cases."hierarchy::test_dynamic_step_output_port_rmw"]
+ignore = ["veryl"]
+
+# Veryl emits a call with an output argument in an input port connection, which IEEE 1800
+# 13.4 forbids outside procedural code; the SV frontend rejects it
+# ("systemverilog input port connection", #88).
+[veryl.cases."hierarchy::test_inactive_instance_input_output_call_adds_no_parent_driver"]
+ignore = ["sv"]
+
+# Neither veryl-simulator nor the Veryl frontend supports instance
+# arrays; the emitted SystemVerilog does.
+[veryl.cases."hierarchy::test_instance_array_broadcast_and_unpacked_array_connection"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
+
+# SV arm: Veryl emits a call with an output argument in an input port connection, which
+# IEEE 1800 13.4 forbids outside procedural code; the SV frontend rejects it
+# ("systemverilog input port connection", #88).
+[veryl.cases."hierarchy::test_instance_input_function_output_concat_dynamic_writeback"]
+ignore = ["sv", "veryl"]
+
+# Veryl emits a call with an output argument in an input port connection, which IEEE
+# 1800 13.4 forbids outside procedural code; the SV frontend rejects it
+# ("systemverilog input port connection", #88).
+[veryl.cases."hierarchy::test_instance_input_function_output_writeback"]
+ignore = ["sv"]
+
+# veryl-simulator 0.22.0 does not support a concatenation as an instance output
+# connection (UnsupportedDescription).
+[veryl.cases."hierarchy::test_instance_output_concat_advances_each_destination"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0 accepts this dynamic select in an output port connection; veryl-
+# lang/veryl#3476 rejects it after 0.22.0.
+[veryl.cases."hierarchy::test_instance_output_dynamic_index_composes_aliasing_writeback"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0 accepts this dynamic select in an output port connection; veryl-
+# lang/veryl#3476 rejects it after 0.22.0.
+[veryl.cases."hierarchy::test_instance_output_dynamic_index_function_output_writeback"]
+ignore = ["veryl"]
+
+# Generic `interface` and `interface::client` ports are not lowered from
+# the Veryl IR: Celox reports `Unsupported ... generic interface port
+# [tracking issue #1088]`; veryl-simulator: `build_ir failed:
+# UnsupportedDescription`. The `sv` arm binds them in the emitted SV.
+[veryl.cases."interface::test_generic_interface_port"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
+
+# Celox and veryl-simulator both build from the Veryl analyzer IR, whose
+# `ir::Interface` keeps only variables, functions and modports: logic
+# declared inside an interface is dropped without a diagnostic. The
+# emitted SystemVerilog keeps it, so the `sv` arm passes.
+# Observed on every other arm: `q` reads 0x0 instead of 0x11 (the interface `always_comb` never runs).
+[veryl.cases."interface::test_interface_always_comb_packed_array_member"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
+
+# Celox and veryl-simulator both build from the Veryl analyzer IR, whose
+# `ir::Interface` keeps only variables, functions and modports: logic
+# declared inside an interface is dropped without a diagnostic. The
+# emitted SystemVerilog keeps it, so the `sv` arm passes.
+# Observed on every other arm: `count` stays 0x0 instead of 0x3 (the interface `always_ff` never runs).
+[veryl.cases."interface::test_interface_always_ff_on_member_clock"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
+
+# Veryl 0.22 loses the selected interface element in native IR calls:
+# Celox reads lane 0 for both calls; veryl-simulator panics on lane 1.
+# The emitted SV preserves the selection and is the regression target.
+[veryl.cases."interface::test_interface_array_direct_function_calls"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
+
+# Celox and veryl-simulator both build from the Veryl analyzer IR, whose
+# `ir::Interface` keeps only variables, functions and modports: logic
+# declared inside an interface is dropped without a diagnostic. The
+# emitted SystemVerilog keeps it, so the `sv` arm passes.
+# Observed on every other arm: `total` reads 0x0 instead of 0x12c (the interface `assign` never runs).
+[veryl.cases."interface::test_interface_continuous_assign_logic"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
+
+# Celox and veryl-simulator both build from the Veryl analyzer IR, whose
+# `ir::Interface` keeps only variables, functions and modports: logic
+# declared inside an interface is dropped without a diagnostic. The
+# emitted SystemVerilog keeps it, so the `sv` arm passes.
+# Observed on every other arm: `f12` reads 0x0 instead of 0x1 (the interface `assign full = data == MAX` never runs).
+[veryl.cases."interface::test_interface_param_and_const"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
+
+# veryl-simulator panics calling a modport-imported function:
+# `Option::unwrap()` on None (veryl-simulator ir/expression.rs:2506).
+[veryl.cases."interface::test_modport_import_function"]
+ignore = ["veryl"]
+
+# veryl-simulator panics calling a modport-imported function:
+# `Option::unwrap()` on None (veryl-simulator ir/expression.rs:2506).
+[veryl.cases."interface::test_modport_import_function_forwarded_from_instance_array"]
+ignore = ["veryl"]
+
+# veryl-simulator panics calling a modport-imported function:
+# `Option::unwrap()` on None (veryl-simulator ir/expression.rs:2506).
+[veryl.cases."interface::test_modport_import_function_in_always_ff"]
+ignore = ["veryl"]
+
+# Veryl 0.22 native IR drops interface body assignments and nested
+# instances: all native arms return 0 for a driven member.
+[veryl.cases."interface::test_nested_interface_instance"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
+
+# The Veryl reference simulator reads an existing element through an
+# invalid index.
+[veryl.cases."nba_dynamic_array::test_out_of_range_dynamic_comb_access"]
+ignore = ["veryl"]
+
+# The Veryl reference simulator writes through an unknown index instead
+# of ignoring the write (IEEE 1800-2023 7.4.6).
+[veryl.cases."nba_dynamic_array::test_out_of_range_dynamic_ff_access_four_state"]
+ignore = ["veryl"]
+
+[veryl.cases."nba_dynamic_array::test_unaligned_309_bit_dynamic_ff_round_trip"]
+ignore = ["wasm"]
+
+[veryl.cases."operators::test_pow_operator_runtime_exponent_comb_and_ff"]
+omit = ["sv", "veryl"]
+
+[veryl.cases."state_cast_semantics::constant_type_cast_clears_unknown_bits"]
+omit = ["veryl"]
+
+[veryl.cases."state_cast_semantics::function_formal_type_clears_unknown_bits"]
+omit = ["veryl"]
+
+[veryl.cases."state_cast_semantics::implicit_assignment_to_bit_clears_unknowns_without_mutating_source"]
+ignore = ["veryl"]
+
+[veryl.cases."state_cast_semantics::type_cast_clears_unknown_bits_in_comb_and_ff"]
+omit = ["veryl"]
+
+# Build-only smoke test: binary demux also depends on selector_pkg compile-time
+# width resolution through `calc_select_width`.
+# Veryl connects the array variable to the packed-array port of `$std::demux` without a
+# conversion; veryl-simulator rejects it (UnsupportedDescription).
+[veryl.cases."std_mux::test_demux_build_smoke"]
+ignore = ["veryl"]
+
+# Build-only smoke test: mux with selector_pkg requires `calc_select_width`
+# evaluation while resolving module parameters and widths.
+[veryl.cases."std_mux::test_mux_build_smoke"]
+ignore = ["veryl"]
+
+[veryl.cases."struct_constructor::test_struct_constructor_member_width_adjustment"]
+omit = ["veryl"]
+
+[veryl.cases."synth_dynamic_loop::test_constant_signed_bounds_in_unrolled_synth_loops"]
+omit = ["native-baseline"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "sv", "veryl"]
+
+# Veryl 0.22.0's simulator evaluates a runtime loop bound wider than 64 bits as 0.
+[veryl.cases."synth_dynamic_loop::test_i32_bitwise_steps_discard_bits_above_the_counter_width"]
+ignore = ["veryl"]
+
+# SV frontend rejects the loop-carried `x[i + 1] = x[i]` in a run-time-bounded loop:
+# "combinational expression assigned to `x`" (#88).
+[veryl.cases."synth_dynamic_loop::test_runtime_bounds_preserve_loop_carried_state_for_indexed_reads"]
+ignore = ["sv"]
+
+[veryl.cases."synth_dynamic_loop::test_signed_xor_step_uses_loop_counter_width"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0 folds a runtime `$clog2` inside a function body from its unknown
+# argument, so its simulator gives 0.
+[veryl.cases."system_function::test_comb_function_body_clog2_system_function"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0 folds a runtime `$onehot` inside a function body from its unknown
+# argument, so its simulator gives 0.
+[veryl.cases."system_function::test_comb_function_body_onehot_system_function"]
+ignore = ["veryl"]
+
+[veryl.cases."system_function::test_direct_comb_clog2_system_function"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "sv", "veryl"]
+reason = "direct $clog2 in always_comb is folded from X payload by Veryl analyzer before Celox comb lowering"
+
+[veryl.cases."system_function::test_direct_comb_onehot_system_function"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "sv", "veryl"]
+reason = "direct $onehot in always_comb currently evaluates incorrectly before Celox system-function lowering"
+
+[veryl.cases."system_function::test_direct_ff_clog2_system_function"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "sv", "veryl"]
+reason = "direct $clog2 in always_ff is folded from X payload by Veryl analyzer before Celox FF lowering"
+
+[veryl.cases."system_function::test_direct_ff_onehot_system_function"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "sv", "veryl"]
+reason = "direct $onehot in always_ff is folded to 1'h0 by Veryl analyzer before Celox FF lowering"
+
+# Veryl 0.22.0 folds a runtime `$clog2` inside a function body from its unknown
+# argument, so its simulator gives 0.
+[veryl.cases."system_function::test_ff_function_body_clog2_system_function"]
+ignore = ["veryl"]
+
+# Veryl 0.22.0 folds a runtime `$onehot` inside a function body from its unknown
+# argument, so its simulator gives 0.
+[veryl.cases."system_function::test_ff_function_body_onehot_system_function"]
+ignore = ["veryl"]
+
+[veryl.cases."tb_string::array_elements"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+# Veryl does not emit #[test] modules into SystemVerilog.
+[veryl.cases."tb_string::assignment"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+# Veryl does not emit #[test] modules into SystemVerilog.
+[veryl.cases."tb_string::comparison"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+# Veryl does not emit #[test] modules into SystemVerilog.
+[veryl.cases."tb_string::control_flow"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+[veryl.cases."tb_string::function_argument"]
+omit = ["veryl"]
+ignore = ["sv"]
+
+[sv]
+backends = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm"]
+
+[sv.groups.events]
+add = ["native-image"]
+
+[sv.groups.fork]
+add = ["native-image"]
+
+[sv.groups.fork_control]
+add = ["native-image"]
+
+[sv.groups.fork_deferred]
+add = ["native-image", "interpreter"]
+
+[sv.groups.logic_gates]
+add = ["interpreter"]
+
+[sv.groups.mailboxes]
+add = ["native-image"]
+
+[sv.groups.program]
+add = ["native-image"]
+
+[sv.groups.semaphores]
+add = ["native-image"]
+
+[sv.groups.timing]
+add = ["native-image"]
+
+[sv.cases."aggregate_regressions::wide_unpacked_ff_array_masks"]
+add = ["interpreter"]
+
+[sv.cases."concurrent_assertions::sampled_history_gates_and_indices"]
+add = ["native-image"]
+
+[sv.cases."concurrent_assertions::sampled_history_unknown_transitions"]
+add = ["native-image"]
+
+[sv.cases."concurrent_assertions::sampled_predicate_live_action"]
+add = ["native-image"]
+
+[sv.cases."fork::compound_event_activations_outlive_parent"]
+add = ["interpreter"]
+
+[sv.cases."fork::compound_event_four_state_lsb_edges"]
+add = ["interpreter"]
+
+[sv.cases."fork::compound_event_function_scratch_isolated"]
+add = ["interpreter"]
+
+[sv.cases."fork::compound_event_tracks_result_not_operands"]
+add = ["interpreter"]
+
+[sv.cases."fork_control::function_join_none_automatic_values_outlive_returns"]
+add = ["interpreter"]
+
+[sv.cases."fork_control::function_join_none_calls_in_defaults_need_process_frames"]
+add = ["interpreter"]
+
+[sv.cases."fork_control::function_join_none_children_can_call_timed_tasks"]
+add = ["interpreter"]
+
+[sv.cases."fork_control::function_join_none_event_driven_caller"]
+add = ["interpreter"]
+
+[sv.cases."fork_control::function_join_none_preserves_expression_temporaries"]
+add = ["interpreter"]
+
+[sv.cases."fork_control::function_join_none_retains_child_only_class_handle"]
+add = ["interpreter"]
+
+[sv.cases."scan::sscanf_string_format_expression"]
+add = ["native-image"]
+
+[sv.cases."scan::sscanf_string_inputs_and_discarded_return"]
+add = ["native-image"]
+
+[sv.cases."string_format::sformatf_in_expressions"]
+add = ["native-image"]
+
+[sv.cases."string_format::sformatf_runtime_formats"]
+add = ["native-image"]
+
+[sv.cases."timing::comb_startup_ignores_final_four_state"]
+add = ["interpreter"]
+
+[sv.cases."timing::comb_startup_ignores_final_two_state"]
+add = ["interpreter"]
+
+[sv.cases."timing::edge_blocking_results_precede_later_process_writes"]
+omit = ["native-image"]
+
+[sv.cases."timing::edge_nonblocking_updates_follow_writes_their_blocking_results_wake"]
+omit = ["native-image"]
+
+[sv.cases."timing::edge_nonblocking_updates_keep_later_writes_of_other_bits"]
+omit = ["native-image"]
+
+[sv.cases."timing::process_dynamic_writes_preserve_xz"]
+omit = ["native-image"]
+
+[sv.cases."timing::process_dynamic_writes_preserve_xz_at_unknown_positions"]
+omit = ["native-image"]
+
+[sv.cases."timing::static_formals_of_package_tasks"]
+omit = ["native-image"]
+
+[sv.cases."timing::static_function_readonly_initializer_calls_execute_once"]
+omit = ["native-image"]
+
+[sv.cases."timing::static_function_storage_is_shared_between_processes"]
+omit = ["native-image"]

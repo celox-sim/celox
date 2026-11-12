@@ -167,66 +167,6 @@ sv_backends! {
         assert!(bare(sim.drain_runtime_events()).is_empty());
     }
 
-    fn casts_evaluate_destination_operands_once(sim) {
-        @case "system_functions::casts_evaluate_destination_operands_once";
-    }
-
-    fn casts_between_numeric_types(sim) {
-        @case "system_functions::casts_between_numeric_types";
-    }
-
-    fn casts_of_constants_to_enumerated_types(sim) {
-        @case "system_functions::casts_of_constants_to_enumerated_types";
-    }
-
-    fn casts_of_comparisons_and_cast_results(sim) {
-        @case "system_functions::casts_of_comparisons_and_cast_results";
-    }
-
-    fn casts_through_struct_members_and_string_keys(sim) {
-        @case "system_functions::casts_through_struct_members_and_string_keys";
-    }
-
-    fn casts_address_destinations_as_assignments(sim) {
-        @case "system_functions::casts_address_destinations_as_assignments";
-    }
-
-    fn casts_of_members_of_specialized_structures(sim) {
-        @case "system_functions::casts_of_members_of_specialized_structures";
-    }
-
-    fn wide_enumerated_types(sim) {
-        @case "system_functions::wide_enumerated_types";
-    }
-
-    fn casts_to_enumerated_types(sim) {
-        @case "system_functions::casts_to_enumerated_types";
-    }
-
-    fn casts_to_enumerated_types_reject_unknown_bits(sim) {
-        @case "system_functions::casts_to_enumerated_types_reject_unknown_bits";
-    }
-
-    fn casts_to_enumerated_types_check_whole_values(sim) {
-        @case "system_functions::casts_to_enumerated_types_check_whole_values";
-    }
-
-    fn casts_to_enumerated_types_size_sources_by_themselves(sim) {
-        @case "system_functions::casts_to_enumerated_types_size_sources_by_themselves";
-    }
-
-    fn casts_to_enumerated_types_reject_class_handles(sim) {
-        @case "system_functions::casts_to_enumerated_types_reject_class_handles";
-    }
-
-    fn scope_randomize_fills_arbitrary_packed_widths(sim) {
-        @case "system_functions::scope_randomize_fills_arbitrary_packed_widths";
-    }
-
-    fn scope_randomize_obeys_control_flow_and_statement_order(sim) {
-        @case "system_functions::scope_randomize_obeys_control_flow_and_statement_order";
-    }
-
     fn scope_randomize_preserves_four_state_storage_and_checkpoint(sim) {
         @setup { let source = r#"
             module Top(input bit clk, output logic signed [2048:0] value);
@@ -249,14 +189,6 @@ sv_backends! {
         assert_eq!(sim.get(value), first);
         sim.tick(clk).unwrap();
         assert_eq!(sim.get(value), second);
-    }
-
-    fn urandom_extends_signed_seed_values(sim) {
-        @case "system_functions::urandom_extends_signed_seed_values";
-    }
-
-    fn urandom_comb_executes_in_statement_order(sim) {
-        @case "system_functions::urandom_comb_executes_in_statement_order";
     }
 
     fn urandom_comb_uses_only_process_activations(sim) {
@@ -350,10 +282,6 @@ sv_backends! {
         assert_ne!(sim.get(b), first_b);
         assert_eq!(sim.get(sim.signal("initial_draw")), initial_draw);
         assert_eq!(sim.get(sim.signal("star_draw")), star_draw);
-    }
-
-    fn urandom_select_keeps_distinct_source_calls(sim) {
-        @case "system_functions::urandom_select_keeps_distinct_source_calls";
     }
 
     fn urandom_comb_tracks_static_bits_dead_branches_and_unknown_changes(sim) {
@@ -486,14 +414,6 @@ sv_backends! {
         assert_eq!(messages, vec![b"array=0".to_vec(), b"dynamic=0".to_vec()]);
     }
 
-    fn urandom_has_an_unsigned_self_determined_result(sim) {
-        @case "system_functions::urandom_has_an_unsigned_self_determined_result";
-    }
-
-    fn urandom_respects_short_circuits_and_evaluates_indices_once(sim) {
-        @case "system_functions::urandom_respects_short_circuits_and_evaluates_indices_once";
-    }
-
     fn urandom_checkpoint_restores_the_stream(sim) {
         @setup { let source = r#"
             module Top(input logic clk, reseed, output int unsigned value);
@@ -525,57 +445,10 @@ sv_backends! {
         }
     }
 
-    fn packed_string_literals_preserve_bytes_and_unsignedness(sim) {
-        @case "random_plusargs::packed_string_literals_preserve_bytes_and_unsignedness";
-    }
-    fn dist_uniform_converts_wide_and_signed_seeds_to_int_formals(sim) {
-        @case "random_plusargs::dist_uniform_converts_wide_and_signed_seeds_to_int_formals";
-    }
-    fn dist_uniform_bounds_seed_and_replay(sim) {
-        @case "random_plusargs::dist_uniform_bounds_seed_and_replay";
-    }
 }
 
 sv_backends! {
-    fn distribution_annex_n_reference_values(sim) {
-        @case "distributions::annex_n_reference_values";
-    }
-    fn distribution_replay_and_normal_parameters(sim) {
-        @case "distributions::replay_and_normal_parameters";
-    }
-    fn dist_uniform_reference_sequence(sim) {
-        @case "random_plusargs::dist_uniform_reference_sequence";
-    }
-    fn plusargs_absent_preserves_destination(sim) {
-        @case "random_plusargs::plusargs_absent_preserves_destination";
-    }
-    fn urandom_reseeds_and_shares_the_calling_process_stream(sim) {
-        @case "system_functions::urandom_reseeds_and_shares_the_calling_process_stream";
-    }
-    fn urandom_keeps_process_and_instance_streams_independent(sim) {
-        @case "system_functions::urandom_keeps_process_and_instance_streams_independent";
-    }
-    fn random_follows_annex_n_and_updates_its_seed(sim) {
-        @case "system_functions::random_follows_annex_n_and_updates_its_seed";
-    }
-    fn random_without_a_seed_continues_its_stream(sim) {
-        @case "system_functions::random_without_a_seed_continues_its_stream";
-    }
-    fn urandom_range_stays_within_its_bounds(sim) {
-        @case "system_functions::urandom_range_stays_within_its_bounds";
-    }
 
-    fn display_expressions_propagate_operand_widths(sim) { @case "system_functions::display_expressions_propagate_operand_widths"; }
-
-    fn character_formats_preserve_non_utf8_bytes(sim) { @case "system_functions::character_formats_preserve_non_utf8_bytes"; }
-    fn time_format_consumes_its_expression_argument(sim) { @case "system_functions::time_format_consumes_its_expression_argument"; }
-    fn time_format_defaults_to_the_smallest_precision(sim) { @case "system_functions::time_format_defaults_to_the_smallest_precision"; }
-    fn time_format_sets_the_format_of_later_conversions(sim) { @case "system_functions::time_format_sets_the_format_of_later_conversions"; }
-    fn time_format_in_an_always_ff_procedure(sim) { @case "system_functions::time_format_in_an_always_ff_procedure"; }
-    fn time_format_scales_each_scope_to_the_smallest_precision(sim) { @case "system_functions::time_format_scales_each_scope_to_the_smallest_precision"; }
-    fn time_format_scales_string_literals(sim) { @case "system_functions::time_format_scales_string_literals"; }
-    fn time_format_values_are_self_determined(sim) { @case "system_functions::time_format_values_are_self_determined"; }
-    fn string_literals_follow_numeric_format_specifiers(sim) { @case "system_functions::string_literals_follow_numeric_format_specifiers"; }
     // Veryl extension calls emitted unchanged into SV, not SV assert statements.
     fn veryl_assert_continue_ff_captures_arguments_before_reporting(sim) {
         @setup { let source = r#"
@@ -752,50 +625,6 @@ sv_backends! {
         ]);
     }
 
-    fn unpacked_dimensions_publishes_dependent_array_parameters(sim) { @case "system_functions::unpacked_dimensions_publishes_dependent_array_parameters"; }
-    fn unpacked_dimensions_accepts_function_result_arguments(sim) { @case "system_functions::unpacked_dimensions_accepts_function_result_arguments"; }
-    fn unpacked_dimensions_resolves_sibling_declarators(sim) { @case "system_functions::unpacked_dimensions_resolves_sibling_declarators"; }
-    fn unpacked_dimensions_selects_integral_atoms(sim) { @case "system_functions::unpacked_dimensions_selects_integral_atoms"; }
-    fn unpacked_dimensions_publishes_array_parameters_before_declarations(sim) { @case "system_functions::unpacked_dimensions_publishes_array_parameters_before_declarations"; }
-    fn unpacked_dimensions_resolves_preceding_module_declarations(sim) { @case "system_functions::unpacked_dimensions_resolves_preceding_module_declarations"; }
-    fn unpacked_dimensions_prefers_values_over_imported_types(sim) { @case "system_functions::unpacked_dimensions_prefers_values_over_imported_types"; }
-    fn unpacked_dimensions_checks_unevaluated_indices(sim) { @case "system_functions::unpacked_dimensions_checks_unevaluated_indices"; }
-
-    fn unpacked_dimensions_restores_shadowed_array_rank(sim) { @case "system_functions::unpacked_dimensions_restores_shadowed_array_rank"; }
-    fn unpacked_dimensions_accepts_explicit_default_omissions(sim) { @case "system_functions::unpacked_dimensions_accepts_explicit_default_omissions"; }
-    fn unpacked_dimensions_validates_writable_function_arguments(sim) { @case "system_functions::unpacked_dimensions_validates_writable_function_arguments"; }
-
-    fn unpacked_dimensions_accepts_defaulted_function_arguments(sim) { @case "system_functions::unpacked_dimensions_accepts_defaulted_function_arguments"; }
-
-    fn unpacked_dimensions_types_function_pattern_arguments(sim) { @case "system_functions::unpacked_dimensions_types_function_pattern_arguments"; }
-    fn unpacked_dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::unpacked_dimensions_resolves_preceding_block_declarations"; }
-
-    fn unpacked_dimensions_resolves_procedural_scopes(sim) {
-        @case "system_functions::unpacked_dimensions_resolves_procedural_scopes";
-    }
-    fn unpacked_dimensions_resolves_package_array_constants(sim) {
-        @case "system_functions::unpacked_dimensions_resolves_package_array_constants";
-    }
-
-    fn unpacked_dimensions_counts_declared_arrays(sim) {
-        @case "system_functions::unpacked_dimensions_counts_declared_arrays";
-    }
-
-    fn unpacked_dimensions_preserves_selection_and_return_types(sim) {
-        @case "system_functions::unpacked_dimensions_preserves_selection_and_return_types";
-    }
-
-    fn unpacked_dimensions_resolves_types_and_constant_scopes(sim) {
-        @case "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes";
-    }
-
-    fn unpacked_dimensions_is_independent_of_unknown_values(sim) {
-        @case "system_functions::unpacked_dimensions_is_independent_of_unknown_values";
-    }
-
-    fn printtimescale_displays_unit_and_global_precision(sim) { @case "system_functions::printtimescale_displays_unit_and_global_precision"; }
-    fn printtimescale_preserves_package_subroutine_scope(sim) { @case "system_functions::printtimescale_preserves_package_subroutine_scope"; }
-
     fn printtimescale_qualifies_current_and_relative_module_instances(sim) {
         @setup { let source = r#"
             module Child(input logic clk, input logic enabled);
@@ -894,16 +723,6 @@ sv_backends! {
             "Time scale of (Top.r_j.info) is 100ns / 10ps",
         ]);
     }
-    fn timescale_queries_resolve_hierarchical_interface_instances(sim) { @case "system_functions::timescale_queries_resolve_hierarchical_interface_instances"; }
-    fn timescale_queries_resolve_interface_instances_and_ports(sim) { @case "system_functions::timescale_queries_resolve_interface_instances_and_ports"; }
-    fn timescale_queries_accept_leading_zero_magnitudes(sim) { @case "system_functions::timescale_queries_accept_leading_zero_magnitudes"; }
-    fn timescale_queries_survive_type_parameter_specialization(sim) { @case "system_functions::timescale_queries_survive_type_parameter_specialization"; }
-    fn timescale_queries_resolve_packages_with_instantiated_namesakes(sim) { @case "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes"; }
-    fn timescale_queries_preserve_interface_scopes_when_flattened(sim) { @case "system_functions::timescale_queries_preserve_interface_scopes_when_flattened"; }
-    fn timescale_queries_accept_directives_before_unit_declarations(sim) { @case "system_functions::timescale_queries_accept_directives_before_unit_declarations"; }
-
-    fn timescale_queries_accept_separate_initial_declarations(sim) { @case "system_functions::timescale_queries_accept_separate_initial_declarations"; }
-    fn timescale_queries_keep_module_and_package_names_independent(sim) { @case "system_functions::timescale_queries_keep_module_and_package_names_independent"; }
 
     fn timescale_queries_keep_selected_root_despite_unreachable_instantiations(sim) {
         @setup {
@@ -960,64 +779,6 @@ sv_backends! {
         ], "Top");
         let ok = sim.signal("ok");
         assert_eq!(sim.get(ok), 1u32.into());
-    }
-
-    fn timescale_queries_resolve_declarations_and_return_types(sim) { @case "system_functions::timescale_queries_resolve_declarations_and_return_types"; }
-    fn timescale_queries_resolve_directives_and_hierarchy(sim) { @case "system_functions::timescale_queries_resolve_directives_and_hierarchy"; }
-    fn timescale_queries_distinguish_unit_and_global_precision(sim) { @case "system_functions::timescale_queries_distinguish_unit_and_global_precision"; }
-    fn timescale_queries_follow_partial_declarations_and_resetall(sim) { @case "system_functions::timescale_queries_follow_partial_declarations_and_resetall"; }
-    fn timescale_queries_preserve_procedural_and_package_scopes(sim) { @case "system_functions::timescale_queries_preserve_procedural_and_package_scopes"; }
-    fn timescale_queries_are_constant_in_unqualified_calls(sim) { @case "system_functions::timescale_queries_are_constant_in_unqualified_calls"; }
-
-    fn isunbounded_generate_guards_preserve_short_circuit_bounds(sim) { @case "system_functions::isunbounded_generate_guards_preserve_short_circuit_bounds"; }
-    fn isunbounded_restores_shadowed_function_arguments(sim) { @case "system_functions::isunbounded_restores_shadowed_function_arguments"; }
-    fn isunbounded_binds_procedural_aliases_in_declaration_order(sim) { @case "system_functions::isunbounded_binds_procedural_aliases_in_declaration_order"; }
-    fn isunbounded_restores_procedural_parameter_bindings(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_bindings"; }
-    fn isunbounded_restores_procedural_parameter_type_metadata(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_type_metadata"; }
-    fn isunbounded_preserves_lexical_scopes_and_short_circuits(sim) { @case "system_functions::isunbounded_preserves_lexical_scopes_and_short_circuits"; }
-    fn coverage_without_instrumentation(sim) { @case "system_functions::coverage_without_instrumentation"; }
-    fn coverage_selectors_and_database_names(sim) { @case "system_functions::coverage_selectors_and_database_names"; }
-    fn isunbounded_reports_bounded_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_parameters"; }
-    fn isunbounded_reports_bounded_array_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_array_parameters"; }
-    fn isunbounded_preserves_parameter_values_and_result_type(sim) { @case "system_functions::isunbounded_preserves_parameter_values_and_result_type"; }
-    fn isunbounded_handles_overrides_and_forwarding(sim) { @case "system_functions::isunbounded_handles_overrides_and_forwarding"; }
-    fn isunbounded_resolves_package_and_local_parameters(sim) { @case "system_functions::isunbounded_resolves_package_and_local_parameters"; }
-    fn dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::dimensions_resolves_preceding_block_declarations"; }
-    fn dimensions_types_function_pattern_arguments(sim) { @case "system_functions::dimensions_types_function_pattern_arguments"; }
-    fn dimensions_signing_conversions_are_vectors(sim) { @case "system_functions::dimensions_signing_conversions_are_vectors"; }
-    fn dimensions_resolves_procedural_parameters_and_indices(sim) { @case "system_functions::dimensions_resolves_procedural_parameters_and_indices"; }
-
-    fn dimensions_resolves_procedural_scopes(sim) {
-        @case "system_functions::dimensions_resolves_procedural_scopes";
-    }
-    fn dimensions_resolves_package_array_constants(sim) {
-        @case "system_functions::dimensions_resolves_package_array_constants";
-    }
-    fn dimensions_preserves_one_bit_vectors(sim) {
-        @case "system_functions::dimensions_preserves_one_bit_vectors";
-    }
-    fn dimensions_resolves_imported_function_returns(sim) {
-        @case "system_functions::dimensions_resolves_imported_function_returns";
-    }
-
-    fn dimensions_of_nonarray_handle_types(sim) {
-        @case "system_functions::dimensions_of_nonarray_handle_types";
-    }
-
-    fn dimensions_is_independent_of_unknown_values(sim) {
-        @case "system_functions::dimensions_is_independent_of_unknown_values";
-    }
-
-    fn dimensions_counts_declared_arrays(sim) {
-        @case "system_functions::dimensions_counts_declared_arrays";
-    }
-
-    fn dimensions_preserves_selected_and_expression_types(sim) {
-        @case "system_functions::dimensions_preserves_selected_and_expression_types";
-    }
-
-    fn dimensions_resolves_types_and_constant_scopes(sim) {
-        @case "system_functions::dimensions_resolves_types_and_constant_scopes";
     }
 
     fn array_query_evaluates_dimension_function_once(sim) {
@@ -1179,11 +940,6 @@ sv_backends! {
         let line = source_line(&source, "\", a);");
         assert!(rendered.contains(&format!("[calls.sv:{line}:29]")), "{rendered}");
     }
-    fn signed_casts_in_parameters(sim) { @case "system_functions::signed_casts_in_parameters"; }
-    fn array_queries_preserve_bounds_and_dimensions(sim) { @case "system_functions::array_queries_preserve_bounds_and_dimensions"; }
-    fn array_queries_handle_runtime_dimensions(sim) { @case "system_functions::array_queries_handle_runtime_dimensions"; }
-    fn immediate_cover_handles_unknown_conditions(sim) { @case "system_functions::immediate_cover_handles_unknown_conditions"; }
-    fn immediate_cover_executes_pass_statement(sim) { @case "system_functions::immediate_cover_executes_pass_statement"; }
 
     fn drain_runtime_events_returns_always_comb_fatal(sim) {
         @setup {
@@ -1210,61 +966,6 @@ sv_backends! {
         assert!(bare(sim.drain_runtime_events()).is_empty());
     }
 
-    fn display_field_flags(sim) { @case "system_functions::display_field_flags"; }
-
-    fn display_arguments_are_sized_as_ieee_specifies(sim) {
-        @case "system_functions::display_arguments_are_sized_as_ieee_specifies";
-    }
-
-    fn display_field_widths_expand_to_the_value(sim) {
-        @case "system_functions::display_field_widths_expand_to_the_value";
-    }
-
-    fn display_unknown_bits_as_ieee_specifies(sim) {
-        @case "system_functions::display_unknown_bits_as_ieee_specifies";
-    }
-
-    fn display_tasks_default_to_their_radix(sim) {
-        @case "system_functions::display_tasks_default_to_their_radix";
-    }
-
-    fn countbits_in_parameter_specializations_and_generate_scopes(sim) {
-        @case "system_functions::countbits_in_parameter_specializations_and_generate_scopes";
-    }
-
-    fn countbits_preserves_argument_and_return_types(sim) {
-        @case "system_functions::countbits_preserves_argument_and_return_types";
-    }
-    fn countbits_in_constant_expressions(sim) {
-        @case "system_functions::countbits_in_constant_expressions";
-    }
-    fn countbits_matches_four_states_and_variable_controls(sim) {
-        @case "system_functions::countbits_matches_four_states_and_variable_controls";
-    }
-
-    fn countones_preserves_argument_and_return_types(sim) {
-        @case "system_functions::countones_preserves_argument_and_return_types";
-    }
-
-    fn countones_ignores_unknown_bits_in_comb_and_ff(sim) {
-        @case "system_functions::countones_ignores_unknown_bits_in_comb_and_ff";
-    }
-
-    fn countones_in_constant_expressions(sim) {
-        @case "system_functions::countones_in_constant_expressions";
-    }
-
-    fn bit_vector_predicates_preserve_argument_and_return_types(sim) {
-        @case "system_functions::bit_vector_predicates_preserve_argument_and_return_types";
-    }
-
-    fn bit_vector_predicates_handle_unknown_bits_in_comb_ff_and_ports(sim) {
-        @case "system_functions::bit_vector_predicates_handle_unknown_bits_in_comb_ff_and_ports";
-    }
-
-    fn bit_vector_predicates_in_constant_expressions(sim) {
-        @case "system_functions::bit_vector_predicates_in_constant_expressions";
-    }
 }
 
 #[test]
@@ -3633,16 +3334,6 @@ fn time_format_rejects_string_operands() {
             "{timescale}: {error}"
         );
     }
-}
-
-sv_backends! {
-    fn scope_randomize_enum_values(sim) { @case "system_functions::scope_randomize_enum_values"; }
-    fn scope_randomize_enum_order(sim) { @case "system_functions::scope_randomize_enum_order"; }
-    fn typename_vectors_and_arrays(sim) { @case "system_functions::typename_vectors_and_arrays"; }
-    fn typename_aggregates(sim) { @case "system_functions::typename_aggregates"; }
-    fn typename_class_parameters(sim) { @case "system_functions::typename_class_parameters"; }
-    fn typename_elaboration_constant(sim) { @case "system_functions::typename_elaboration_constant"; }
-    fn typename_scopes_and_string_operands(sim) { @case "system_functions::typename_scopes_and_string_operands"; }
 }
 
 sv_backends! {
