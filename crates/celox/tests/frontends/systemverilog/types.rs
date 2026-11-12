@@ -149,6 +149,29 @@ endmodule
     }
 }
 
+/// Types whose widths name parameters are integral (IEEE 1800-2023 6.11.1):
+/// an intra-assignment delay assigns a variable of such a type, and a
+/// parameter of such a type takes an assignment pattern.
+#[test]
+fn parameter_sized_types_are_integral() {
+    let source = "`timescale 1ns/1ns
+    module Top #(parameter int W = 8);
+        localparam logic [W-1:0] P = '{default: 1'b1};
+        logic [W-1:0] a, b;
+        logic [W-1:0] pattern;
+        initial begin b = 3; pattern = P; a = #1 b; end
+    endmodule";
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("integral.sv"))], "Top")
+            .build_interpreter()
+            .unwrap();
+    sim.run_until(2).unwrap();
+    let a = sim.signal("a");
+    assert_eq!(sim.get(a), BigUint::from(3u8));
+    let pattern = sim.signal("pattern");
+    assert_eq!(sim.get(pattern), BigUint::from(0xffu8));
+}
+
 /// Methods of an element of a packed array of enums are not supported yet;
 /// they are rejected, not given the members of another type.
 #[test]
