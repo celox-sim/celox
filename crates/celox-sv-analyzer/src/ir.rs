@@ -576,6 +576,7 @@ pub struct Port {
     r#type: Type,
     is_net: bool,
     unresolved_net: bool,
+    net_resolution: crate::ast::NetResolution,
     default: Option<ConstExpr>,
     pattern_target: Option<crate::ast::Type>,
 }
@@ -586,6 +587,7 @@ pub struct Signal {
     r#type: Type,
     is_net: bool,
     unresolved_net: bool,
+    net_resolution: crate::ast::NetResolution,
     package_variable: Option<(String, String)>,
     hierarchical: Option<String>,
 }
@@ -597,6 +599,7 @@ impl Signal {
             r#type,
             is_net,
             unresolved_net: false,
+            net_resolution: crate::ast::NetResolution::Wire,
             package_variable: None,
             hierarchical: None,
         }
@@ -652,6 +655,16 @@ impl Signal {
         self.unresolved_net = unresolved;
         self
     }
+
+    /// How several drivers of the net combine (IEEE 1800-2023 6.6).
+    pub fn net_resolution(&self) -> crate::ast::NetResolution {
+        self.net_resolution
+    }
+
+    pub(crate) fn with_net_resolution(mut self, resolution: crate::ast::NetResolution) -> Self {
+        self.net_resolution = resolution;
+        self
+    }
 }
 
 impl Port {
@@ -662,6 +675,7 @@ impl Port {
             r#type,
             is_net,
             unresolved_net: false,
+            net_resolution: crate::ast::NetResolution::Wire,
             default: None,
             pattern_target: None,
         }
@@ -717,6 +731,16 @@ impl Port {
 
     pub(crate) fn with_unresolved_net(mut self, unresolved: bool) -> Self {
         self.unresolved_net = unresolved;
+        self
+    }
+
+    /// How several drivers of the net combine (IEEE 1800-2023 6.6).
+    pub fn net_resolution(&self) -> crate::ast::NetResolution {
+        self.net_resolution
+    }
+
+    pub(crate) fn with_net_resolution(mut self, resolution: crate::ast::NetResolution) -> Self {
+        self.net_resolution = resolution;
         self
     }
 
@@ -1360,11 +1384,18 @@ pub struct CombProcess {
     assignments: Vec<Assignment>,
     body: Vec<Stmt>,
     sensitivity_body: Vec<Stmt>,
+    drive_strength: bool,
 }
 
 impl CombProcess {
     pub fn site(&self) -> Option<&SourceSpan> {
         self.site.as_ref()
+    }
+
+    /// Whether the continuous assignment or gate states a drive strength
+    /// (IEEE 1800-2023 10.3.4, 28.11).
+    pub fn has_drive_strength(&self) -> bool {
+        self.drive_strength
     }
 
     /// Where an `always` procedure is written, as a process.
@@ -1393,6 +1424,7 @@ impl CombProcess {
             site: None,
             process_site: None,
             sensitivity_body: Vec::new(),
+            drive_strength: false,
             kind,
             condition,
             assignments,
@@ -2315,6 +2347,7 @@ impl From<ast::CombProcess> for CombProcess {
         result.creation_order = process.creation_order();
         result.site = process.site().cloned();
         result.process_site = process.process_site().cloned();
+        result.drive_strength = process.has_drive_strength();
         result.sensitivity_body = process
             .sensitivity_body()
             .iter()

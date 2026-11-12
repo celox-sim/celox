@@ -39,6 +39,7 @@ impl CombProcess {
         Self {
             delay: None,
             net_delay: false,
+            drive_strength: false,
             creation_order: 0,
             site: None,
             process_site: None,
@@ -58,6 +59,7 @@ impl CombProcess {
         Self {
             delay: None,
             net_delay: false,
+            drive_strength: false,
             creation_order: 0,
             site: None,
             process_site: None,
@@ -67,6 +69,11 @@ impl CombProcess {
             assignments: Vec::new(),
             body,
         }
+    }
+
+    /// Whether the driver states a drive strength.
+    pub(crate) fn has_drive_strength(&self) -> bool {
+        self.drive_strength
     }
 
     pub fn body(&self) -> &[Stmt] {

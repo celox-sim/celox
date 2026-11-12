@@ -321,6 +321,7 @@ pub struct Port {
     r#type: Type,
     is_net: bool,
     unresolved_net: bool,
+    net_resolution: NetResolution,
     default: Option<ConstExpr>,
 }
 
@@ -334,6 +335,32 @@ pub enum NetDrive {
     Supply(bool),
 }
 
+/// How the values of the drivers of a net combine (IEEE 1800-2023 6.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NetResolution {
+    /// `wire` and `tri` (Table 6-2).
+    #[default]
+    Wire,
+    /// `wand` and `triand` (Table 6-3).
+    And,
+    /// `wor` and `trior` (Table 6-4).
+    Or,
+    /// A net whose drivers Celox does not combine: `uwire`, the pull and
+    /// supply nets, `trireg`.
+    Single,
+}
+
+impl NetResolution {
+    pub(crate) fn of(net_type: &str) -> Self {
+        match net_type {
+            "wire" | "tri" => Self::Wire,
+            "wand" | "triand" => Self::And,
+            "wor" | "trior" => Self::Or,
+            _ => Self::Single,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signal {
     is_const: bool,
@@ -341,6 +368,7 @@ pub struct Signal {
     r#type: Type,
     is_net: bool,
     unresolved_net: bool,
+    net_resolution: NetResolution,
     net_drive: NetDrive,
     /// The package variable the signal denotes, as `(package, variable)`.
     package_variable: Option<(String, String)>,
@@ -573,6 +601,9 @@ pub struct CombProcess {
     delay: Option<u64>,
     /// A declaration's independent net delay, consumed before IR publication.
     net_delay: bool,
+    /// Whether the continuous assignment or gate states a drive strength
+    /// (IEEE 1800-2023 10.3.4, 28.11).
+    drive_strength: bool,
     creation_order: usize,
     site: Option<crate::procedural::SourceSpan>,
     /// Where the procedure is written, for an `always @*` that becomes a

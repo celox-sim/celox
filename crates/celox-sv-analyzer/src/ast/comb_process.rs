@@ -73,13 +73,12 @@ fn comb_processes_from_item(
 ) -> Result<(), AnalyzerError> {
     match &syntax_tree.declarations().body_item(item.id).kind {
         celox_sv_syntax::BodyItemKind::Assign(id) => {
-            for mut process in continuous_assignments(
-                syntax_tree.declarations().assign_statement(*id),
-                syntax_tree,
-                session,
-                packed_dimensions,
-            )? {
+            let assign = syntax_tree.declarations().assign_statement(*id);
+            for mut process in
+                continuous_assignments(assign, syntax_tree, session, packed_dimensions)?
+            {
                 process.condition = condition.clone();
+                process.drive_strength = assign.strength.is_some();
                 processes.push(substitute_process_constants_with_parameter_literals(
                     syntax_tree,
                     session,
@@ -93,6 +92,7 @@ fn comb_processes_from_item(
             for mut process in logic_gate_processes(gate, syntax_tree, session, packed_dimensions)?
             {
                 process.condition = condition.clone();
+                process.drive_strength = gate.strength.is_some();
                 processes.push(substitute_process_constants_with_parameter_literals(
                     syntax_tree,
                     session,
@@ -151,6 +151,7 @@ fn comb_processes_from_item(
                     vec![assignment],
                 );
                 process.delay = delay;
+                process.drive_strength = declaration.strength.is_some();
                 processes.push(process);
             }
             if delay.is_some_and(|ticks| ticks != 0) {

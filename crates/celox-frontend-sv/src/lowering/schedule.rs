@@ -630,7 +630,7 @@ fn schedule_sources_collecting(
         }
         checkpoint!("specialize_modules");
         resolve_inout_drivers(&module_ids, &mut lowered_modules);
-        validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
+        validate_specialized_instance_net_drivers(&module_ids, &lowered_modules, four_state)?;
         let root = &lowered_modules[&root_id];
         if let Some(port) = root
             .port_order
