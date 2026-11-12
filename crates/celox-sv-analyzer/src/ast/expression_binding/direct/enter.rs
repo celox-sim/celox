@@ -262,21 +262,18 @@ fn check_received(
             "unpacked structure value received by a destination that is not of its type",
         ));
     }
-    if let Some(ty) = target.as_deref().and_then(|shape| {
-        shape
-            .virtual_interface
-            .as_deref()
-            .filter(|_| shape.unpacked.is_empty() && shape.container.is_none())
-    }) {
-        virtual_interfaces::check_assignment(tree, session, id, native, dimensions, ty)?;
+    // A virtual interface, or a fixed-size array of them, takes the values
+    // of its own type (25.9).
+    let target_type = target.as_deref().and_then(|shape| {
+        shape.type_id(&mut session.types, &tree.functions, &dimensions.const_env)
+    });
+    if let Some(ty) = target_type.and_then(|ty| virtual_interfaces::of_type(&session.types, ty)) {
+        virtual_interfaces::check_assignment(tree, session, id, native, dimensions, &ty)?;
     }
-    if let Some(ty) = target.as_deref().and_then(|shape| {
-        shape
-            .virtual_interface
-            .as_deref()
-            .filter(|_| !shape.unpacked.is_empty() && shape.container.is_none())
-    }) {
-        virtual_interfaces::check_array_assignment(session, id, native, dimensions, ty)?;
+    if let Some(ty) =
+        target_type.and_then(|ty| virtual_interfaces::element_of_array(&session.types, ty))
+    {
+        virtual_interfaces::check_array_assignment(tree, session, id, native, dimensions, &ty)?;
     }
     if let Some(shape) = target.as_deref()
         && shape
