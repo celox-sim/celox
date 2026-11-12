@@ -292,7 +292,12 @@ pub(crate) fn generated_time_declarations(
     timescales::generated_source_declarations(sources, roots, crate::AnalysisOptions::default())
 }
 
-const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;
+/// The most iterations the loop generate constructs of one module expand to
+/// in all, a bound on elaboration that IEEE 1800-2023 27.4 does not set: a
+/// loop whose condition never becomes false is rejected rather than run
+/// forever. OpenTitan's one-hot multiplexer of 312 bits from 32 inputs
+/// expands to 10_296 iterations.
+const MAX_GENERATE_LOOP_EXPANSION: usize = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
