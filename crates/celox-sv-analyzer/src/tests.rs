@@ -3880,11 +3880,19 @@ fn package_functions_give_shapes_to_instance_connections() {
         .iter()
         .find(|module| module.name() == "Top")
         .unwrap();
+    // The port takes a variable that a continuous assignment of the call
+    // computes.
     let connection = &top.instances()[0].port_connections()[0];
-    assert!(
-        matches!(connection.actual_expr(), Some(ir::Expr::Call { callee: ir::Callee::Subroutine(name), .. }) if name == "p::sum"),
-        "{connection:?}"
-    );
+    let Some(ir::Expr::Ident(hidden)) = connection.actual_expr() else {
+        panic!("{connection:?}");
+    };
+    let computes_call = top.comb_processes().iter().any(|process| {
+        process.body().iter().any(|stmt| {
+            matches!(stmt, ir::Stmt::Assign { lhs: ir::LValue::Ident(name), rhs: ir::Expr::Call { callee: ir::Callee::Subroutine(callee), .. }, .. }
+                if name == hidden && callee == "p::sum")
+        })
+    });
+    assert!(computes_call, "{connection:?}");
 }
 
 #[test]
