@@ -1110,19 +1110,32 @@ fn substitute_indexed_parameter_values(
     // Known values come from the current environment, which may include a
     // generate index shadowing a parameter. Supply expressions only for values
     // absent from that numeric environment, including X/Z parameters.
-    let values = dimensions
+    let values: HashMap<String, Expr> = dimensions
         .parameter_values
         .iter()
         .filter(|(name, _)| !dimensions.const_env.contains_key(*name))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
-    substitute_expr_constants_with_parameter_literals(
-        tree,
-        session,
-        expression,
-        &dimensions.const_env,
-        &values,
-    )
+    // A value may name another parameter wider than 128 bits, such as a
+    // default `Seed = SeedDefault` of a package (6.20.2): substitute until
+    // no name is left. A chain of distinct parameters takes at most one step
+    // for each of them; one that takes more repeats a parameter, which no
+    // valid design does (6.20.2), and stops there.
+    let mut expression = expression;
+    for _ in 0..=values.len() {
+        let next = substitute_expr_constants_with_parameter_literals(
+            tree,
+            session,
+            expression.clone(),
+            &dimensions.const_env,
+            &values,
+        );
+        if next == expression {
+            break;
+        }
+        expression = next;
+    }
+    expression
 }
 
 // Parameter arithmetic receives the assignment width after self-determined
