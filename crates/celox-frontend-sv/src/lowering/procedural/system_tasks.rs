@@ -78,6 +78,7 @@ pub(in crate::lowering) fn system_task_kind(task: sv::ir::SystemTask) -> Option<
         | SystemTask::Fdisplay(_)
         | SystemTask::Fwrite(_)
         | SystemTask::Printtimescale
+        | SystemTask::Timeformat
         | SystemTask::SetCoverageDbName
         | SystemTask::LoadCoverageDb
         | SystemTask::Exit
@@ -194,7 +195,7 @@ pub(in crate::lowering) fn system_task_template(
     module: &ProcModule<'_>,
     kind: &SystemTaskKind,
     args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
-) -> (Option<String>, Vec<sv::ir::SystemTaskArg<sv::ir::Expr>>) {
+) -> Result<(Option<String>, Vec<sv::ir::SystemTaskArg<sv::ir::Expr>>), sv::AnalyzerError> {
     let args = match kind {
         SystemTaskKind::Fatal if matches!(args.first(), Some(sv::ir::SystemTaskArg::Expr(_))) => {
             &args[1..]
@@ -205,7 +206,9 @@ pub(in crate::lowering) fn system_task_template(
     };
     let (mut template, values) = match args.first() {
         Some(sv::ir::SystemTaskArg::Str(template)) => {
-            (Some(unescape(template)), args[1..].to_vec())
+            let mut values = args[1..].to_vec();
+            let template = template_text(&unescape(template)?, &mut values);
+            (Some(template), values)
         }
         _ => (None, args.to_vec()),
     };
@@ -240,29 +243,31 @@ pub(in crate::lowering) fn system_task_template(
             template = Some(text);
         }
     }
-    (template, values)
+    Ok((template, values))
 }
 
-/// The value of a string literal's escape sequences (IEEE 1800-2023 5.9.1).
-pub(in crate::lowering) fn unescape(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            result.push(ch);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => result.push('\n'),
-            Some('t') => result.push('\t'),
-            Some('\\') => result.push('\\'),
-            Some('"') => result.push('"'),
-            Some(other) => {
-                result.push('\\');
-                result.push(other);
-            }
-            None => result.push('\\'),
+/// The bytes of a string literal's text, written as in the source, after
+/// its escape sequences (IEEE 1800-2023 5.9.1).
+pub(in crate::lowering) fn unescape(text: &str) -> Result<Vec<u8>, sv::AnalyzerError> {
+    sv::typecheck::unescape_string_literal(text)
+        .ok_or_else(|| unsupported(format!("string literal \"{text}\" with a malformed escape")))
+}
+
+/// The format `bytes` of a system task as text: a byte that is not part of
+/// UTF-8 text, such as one an escape `\377` writes, becomes a `%c`
+/// conversion of an argument inserted into `values` in its place.
+fn template_text(bytes: &[u8], values: &mut Vec<sv::ir::SystemTaskArg<sv::ir::Expr>>) -> String {
+    let mut text = String::with_capacity(bytes.len());
+    for chunk in bytes.utf8_chunks() {
+        text.push_str(chunk.valid());
+        for byte in chunk.invalid() {
+            let index = template_arguments(&text).min(values.len());
+            values.insert(
+                index,
+                sv::ir::SystemTaskArg::Expr(sv::ir::Expr::Literal(format!("8'h{byte:02x}"))),
+            );
+            text.push_str("%c");
         }
     }
-    result
+    text
 }

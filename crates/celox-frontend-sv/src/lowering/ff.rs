@@ -47,6 +47,7 @@ mod strings;
 mod strobe;
 mod system;
 mod system_tasks;
+mod time_format;
 mod waits;
 
 use super::procedural::*;
@@ -68,6 +69,8 @@ use inline_calls::*;
 use monitors::*;
 use nba_stage::*;
 pub(super) use rewrite::*;
+pub(super) use time_format::{TIME_FORMAT, calls_time_format};
+pub(in crate::lowering) use time_format::{converts_time, time_format_operand};
 pub(super) use waits::*;
 
 type Addr = RegionedVarAddr;

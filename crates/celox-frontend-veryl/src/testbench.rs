@@ -124,6 +124,7 @@ fn runtime_event_site_for_assert(
         assertion: None,
         deferred: None,
         timestamp_arg: false,
+        time_format_arg: false,
         arg_widths: value_args.iter().map(assert_arg_width).collect(),
         arg_signed: value_args
             .iter()

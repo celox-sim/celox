@@ -35,7 +35,7 @@ impl Ff<'_, '_> {
                     (self.eval(expr, None)?, self.expr_signed(expr), false)
                 }
                 sv::ir::SystemTaskArg::Str(text) if operation == VcdTask::File => {
-                    let bytes = unescape(text).into_bytes();
+                    let bytes = unescape(text)?;
                     let width = (bytes.len() * 8).max(8);
                     let value = bytes.iter().fold(BigUint::zero(), |value, byte| {
                         (value << 8u32) | BigUint::from(*byte)
@@ -371,6 +371,10 @@ impl Ff<'_, '_> {
                 .warn(crate::FrontendWarningKind::ExitOutsideProgram, site);
             return Ok(true);
         }
+        if task == sv::ir::SystemTask::Timeformat {
+            self.time_format(args)?;
+            return Ok(true);
+        }
         let kind =
             system_task_kind(task).ok_or_else(|| unsupported(format!("system task `{task}`")))?;
         // A process ends the simulation itself; the rest of its body does not
@@ -413,7 +417,7 @@ impl Ff<'_, '_> {
         } else {
             None
         };
-        let (template, mut values) = system_task_template(self.m, &kind, args);
+        let (template, mut values) = system_task_template(self.m, &kind, args)?;
         prepare_time_operands(self.m, template.as_deref(), &mut values)?;
         // Arguments are evaluated left to right. A later argument's call can
         // change what an earlier one reads, or suspend the process (a host
@@ -465,7 +469,7 @@ impl Ff<'_, '_> {
                     regs.push(reg);
                 }
                 sv::ir::SystemTaskArg::Str(text) => {
-                    let bytes = unescape(text).into_bytes();
+                    let bytes = unescape(text)?;
                     let width = (bytes.len() * 8).max(8);
                     let value = bytes.iter().fold(BigUint::zero(), |value, byte| {
                         (value << 8u32) | BigUint::from(*byte)
@@ -484,6 +488,22 @@ impl Ff<'_, '_> {
                 }
             }
         }
+        // A `%t` reports in the format the design's `$timeformat` calls set
+        // when the site runs (IEEE 1800-2023 20.4.3).
+        let time_format_arg =
+            match time_format_operand(self.m, template.as_deref().is_some_and(converts_time)) {
+                Some(format) => {
+                    let reg = self.eval(&format, None)?;
+                    arg_widths.push(self.b.register(&reg).width());
+                    arg_signed.push(false);
+                    arg_is_string.push(false);
+                    arg_float_precision.push(None);
+                    arg_is_handle.push(false);
+                    regs.push(reg);
+                    true
+                }
+                None => false,
+            };
         // A report carries the time it is issued at (IEEE 1800-2023 20.10).
         let timestamp_arg = matches!(kind, SystemTaskKind::Message(_) | SystemTaskKind::Fatal);
         if timestamp_arg {
@@ -530,6 +550,7 @@ impl Ff<'_, '_> {
             assertion: assertion_site.cloned(),
             deferred,
             timestamp_arg,
+            time_format_arg,
             arg_widths,
             arg_signed,
             arg_is_string,

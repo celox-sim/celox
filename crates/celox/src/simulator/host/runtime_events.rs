@@ -311,7 +311,18 @@ pub(super) fn render_runtime_event_message(
     args: &[RuntimeEventArgValue],
     ctx: RuntimeFormatContext<'_>,
 ) -> Vec<u8> {
-    let args = formatted_args(site, args);
+    let time_format = site_time_format(site, args);
+    render_formatted_message(site, formatted_args(site, args), ctx, &time_format)
+}
+
+/// The message of `site` for `args`, the arguments it formats, with `%t`
+/// in `time_format`.
+pub(super) fn render_formatted_message(
+    site: &RuntimeEventSite,
+    args: &[RuntimeEventArgValue],
+    ctx: RuntimeFormatContext<'_>,
+    time_format: &TimeFormat,
+) -> Vec<u8> {
     let Some(template) = site.template.as_deref() else {
         let default_spec = match site.kind {
             // Veryl prints arguments without a format string in hexadecimal.
@@ -388,11 +399,7 @@ pub(super) fn render_runtime_event_message(
                     arg_idx += 1;
                     continue;
                 };
-                let field = FieldSpec {
-                    width: Some(field.width.unwrap_or(20)),
-                    ..field
-                };
-                out.extend_from_slice(&runtime_event_format_arg(arg, 'd', site.sizing, field));
+                out.extend_from_slice(&format_time(arg, time_format, field));
                 arg_idx += 1;
             }
             // The analyzer rewrites each `%p` of a literal format; one of a
@@ -480,9 +487,251 @@ pub(super) fn formatted_args<'a>(
     site: &RuntimeEventSite,
     args: &'a [RuntimeEventArgValue],
 ) -> &'a [RuntimeEventArgValue] {
-    match (site.timestamp_arg, args.split_last()) {
+    let args = match (site.timestamp_arg, args.split_last()) {
         (true, Some((_, args))) => args,
         _ => args,
+    };
+    match (site.time_format_arg, args.split_last()) {
+        (true, Some((_, args))) => args,
+        _ => args,
+    }
+}
+
+/// The format of `%t` of an event of `site` with `args`: the one its
+/// format argument captured, or the default.
+pub(super) fn site_time_format(
+    site: &RuntimeEventSite,
+    args: &[RuntimeEventArgValue],
+) -> TimeFormat {
+    let args = match (site.timestamp_arg, args.split_last()) {
+        (true, Some((_, args))) => args,
+        _ => args,
+    };
+    match (site.time_format_arg, args.last()) {
+        (true, Some(format)) => TimeFormat::of(format),
+        _ => TimeFormat::default(),
+    }
+}
+
+/// The format in which `%t` reports a time (IEEE 1800-2023 20.4.3), as a
+/// `$timeformat` call sets it in the design's state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TimeFormat {
+    /// The powers of ten from the simulation's time unit to the reported
+    /// unit.
+    pub(super) units: i32,
+    /// The digits after the decimal point.
+    pub(super) precision: u32,
+    pub(super) suffix: Vec<u8>,
+    /// The fewest characters a conversion prints.
+    pub(super) width: usize,
+}
+
+impl Default for TimeFormat {
+    /// The format before a `$timeformat` call: the simulation's time unit,
+    /// no decimal places or suffix, and 20 characters (Table 20-3).
+    fn default() -> Self {
+        Self {
+            units: 0,
+            precision: 0,
+            suffix: Vec::new(),
+            width: 20,
+        }
+    }
+}
+
+impl TimeFormat {
+    /// The format that the value `arg` of the design's format variable
+    /// holds (`celox_design::time_format`).
+    pub(super) fn of(arg: &RuntimeEventArgValue) -> Self {
+        use celox_design::time_format::{
+            FIELD_WIDTH, PRECISION, SET, SUFFIX, SUFFIX_BYTES, SUFFIX_LENGTH, UNITS,
+        };
+        let bits = runtime_event_words_to_biguint(&arg.values, arg.width);
+        let field = |offset: usize, width: usize| -> BigUint {
+            (&bits >> offset) & ((BigUint::from(1u8) << width) - 1u8)
+        };
+        if !bits.bit(SET as u64) {
+            return Self::default();
+        }
+        let word = |offset: usize| field(offset, 32).iter_u32_digits().next().unwrap_or(0) as i32;
+        // `$timeformat` stores only a units number from 2 to -15 (IEEE
+        // 1800-2023 20.4.3) counted from a time unit in the same range, and
+        // a precision and field width from 0 to their most Celox prints.
+        let count = |offset: usize| {
+            u32::try_from(word(offset)).expect("`$timeformat` stores a checked count")
+        };
+        Self {
+            units: word(UNITS),
+            precision: count(PRECISION),
+            suffix: suffix_bytes(
+                &field(SUFFIX, 8 * SUFFIX_BYTES),
+                (field(SUFFIX_LENGTH, 8)
+                    .iter_u32_digits()
+                    .next()
+                    .unwrap_or(0) as usize)
+                    .min(SUFFIX_BYTES),
+            ),
+            width: count(FIELD_WIDTH) as usize,
+        }
+    }
+}
+
+/// The last `length` bytes of `bits`, the bytes of a suffix with its last
+/// byte lowest, NUL bytes included.
+fn suffix_bytes(bits: &BigUint, length: usize) -> Vec<u8> {
+    let mut bytes = bits.to_bytes_le();
+    bytes.resize(length, 0);
+    bytes.reverse();
+    bytes
+}
+
+/// What `%t` prints for `arg`, a time in simulation time units, in
+/// `format` (IEEE 1800-2023 20.4.3): the time in its units with its decimal
+/// places, rounded half away from zero, also a real time, and its suffix,
+/// padded to its minimum field width, which the width of the conversion
+/// replaces, with spaces on the left, zeros after the sign for a leading
+/// `0`, or spaces on the right for `-`. A value with unknown bits prints as
+/// `%d` prints it.
+fn format_time(arg: &RuntimeEventArgValue, format: &TimeFormat, field: FieldSpec) -> Vec<u8> {
+    let width = field.width.unwrap_or(format.width);
+    let mut text = match arg.float_precision {
+        Some(kind) => {
+            let bits = runtime_event_words_to_biguint(&arg.values, arg.width);
+            let value = match kind {
+                celox_design::FloatPrecision::F64 => {
+                    f64::from_bits(bits.iter_u64_digits().next().unwrap_or(0))
+                }
+                celox_design::FloatPrecision::F32 => {
+                    f64::from(f32::from_bits(bits.iter_u32_digits().next().unwrap_or(0)))
+                }
+            };
+            // A finite real is an exact binary fraction, so its digits come
+            // from that rational, rounded once.
+            match real_ratio(value) {
+                Some((numerator, binary_exponent)) => {
+                    rounded_time(numerator, binary_exponent, format.units, format.precision)
+                }
+                None => value.to_string(),
+            }
+        }
+        None if arg.masks.iter().any(|&mask| mask != 0) => {
+            String::from_utf8_lossy(&runtime_event_format_arg(
+                arg,
+                'd',
+                DisplaySizing::Ieee,
+                FieldSpec {
+                    width: Some(0),
+                    ..FieldSpec::default()
+                },
+            ))
+            .into_owned()
+        }
+        None => {
+            let unsigned = runtime_event_words_to_biguint(&arg.values, arg.width);
+            let value = if arg.signed && arg.width > 0 && unsigned.bit(arg.width as u64 - 1) {
+                num_bigint::BigInt::from(unsigned) - (num_bigint::BigInt::from(1u8) << arg.width)
+            } else {
+                num_bigint::BigInt::from(unsigned)
+            };
+            decimal_time(value, format.units, format.precision)
+        }
+    }
+    .into_bytes();
+    text.extend_from_slice(&format.suffix);
+    let pad = width.saturating_sub(text.len());
+    let mut out = Vec::with_capacity(text.len() + pad);
+    if field.left_justify {
+        out.extend_from_slice(&text);
+        out.resize(text.len() + pad, b' ');
+    } else if field.zero_pad {
+        // Zeros go after the sign, as `%d` pads with them.
+        let digits = text.strip_prefix(b"-");
+        if digits.is_some() {
+            out.push(b'-');
+        }
+        out.resize(out.len() + pad, b'0');
+        out.extend_from_slice(digits.unwrap_or(&text));
+    } else {
+        out.resize(pad, b' ');
+        out.extend_from_slice(&text);
+    }
+    out
+}
+
+/// An integral time of `ticks` simulation time units in its units and
+/// decimal places, rounded half away from zero.
+fn decimal_time(ticks: num_bigint::BigInt, units: i32, precision: u32) -> String {
+    rounded_time(ticks, 0, units, precision)
+}
+
+/// The finite real `value` as `numerator * 2^exponent`, exactly.
+fn real_ratio(value: f64) -> Option<(num_bigint::BigInt, i32)> {
+    if !value.is_finite() {
+        return None;
+    }
+    let bits = value.to_bits();
+    let biased = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1 << 52) - 1);
+    let (mantissa, exponent) = if biased == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1 << 52), biased - 1075)
+    };
+    let numerator = num_bigint::BigInt::from(mantissa);
+    Some((if value < 0.0 { -numerator } else { numerator }, exponent))
+}
+
+/// A time of `numerator * 2^binary_exponent` simulation time units in its
+/// units, `10^units` time units, with `precision` decimal places, rounded
+/// half away from zero.
+fn rounded_time(
+    numerator: num_bigint::BigInt,
+    binary_exponent: i32,
+    units: i32,
+    precision: u32,
+) -> String {
+    use num_bigint::{BigInt, Sign};
+    let ten = |power: u32| BigInt::from(10u8).pow(power);
+    let two = |power: u32| BigInt::from(1u8) << power;
+    // fixed = numerator * 2^binary_exponent * 10^(precision - units)
+    let mut scaled = numerator * ten(precision);
+    let mut divisor = BigInt::from(1u8);
+    if binary_exponent >= 0 {
+        scaled *= two(binary_exponent.unsigned_abs());
+    } else {
+        divisor *= two(binary_exponent.unsigned_abs());
+    }
+    if units >= 0 {
+        divisor *= ten(units.unsigned_abs());
+    } else {
+        scaled *= ten(units.unsigned_abs());
+    }
+    let (quotient, remainder) = (&scaled / &divisor, &scaled % &divisor);
+    let fixed = if remainder.magnitude() * 2u8 >= *divisor.magnitude() {
+        match scaled.sign() {
+            Sign::Minus => quotient - 1,
+            _ => quotient + 1,
+        }
+    } else {
+        quotient
+    };
+    fixed_point(fixed, precision)
+}
+
+/// `fixed`, an integer of the smallest of `precision` decimal places, with
+/// its decimal point: `fixed / 10^precision`.
+fn fixed_point(fixed: num_bigint::BigInt, precision: u32) -> String {
+    let negative = fixed.sign() == num_bigint::Sign::Minus;
+    let digits = fixed.magnitude().to_string();
+    let precision = precision as usize;
+    let digits = format!("{digits:0>width$}", width = precision + 1);
+    let (whole, fraction) = digits.split_at(digits.len() - precision);
+    let sign = if negative { "-" } else { "" };
+    if precision == 0 {
+        format!("{sign}{whole}")
+    } else {
+        format!("{sign}{whole}.{fraction}")
     }
 }
 
@@ -694,4 +943,68 @@ pub(crate) fn collect_runtime_events_for_backend<B: SimBackend>(
             render_raw_runtime_event(event, sites, context)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod time_format_tests {
+    use super::*;
+
+    /// A time in larger units rounds half away from zero to its decimal
+    /// places; in smaller units it gains zeros (IEEE 1800-2023 20.4.3).
+    #[test]
+    fn decimal_times_round_half_away_from_zero() {
+        let time = |ticks: i64, units, precision| {
+            decimal_time(num_bigint::BigInt::from(ticks), units, precision)
+        };
+        assert_eq!(time(1500, 3, 0), "2");
+        assert_eq!(time(1499, 3, 0), "1");
+        assert_eq!(time(-1500, 3, 0), "-2");
+        assert_eq!(time(1500, 3, 3), "1.500");
+        assert_eq!(time(12346, 6, 4), "0.0123");
+        assert_eq!(time(-5, 3, 2), "-0.01");
+        assert_eq!(time(7, -3, 1), "7000.0");
+        assert_eq!(time(0, 6, 5), "0.00000");
+    }
+
+    /// A real time is scaled to its units and decimal places once, and
+    /// rounded half away from zero (IEEE 1800-2023 20.4.3).
+    #[test]
+    fn real_times_scale_once_to_their_decimal_places() {
+        let real = |ticks: f64, units, precision| {
+            let arg = RuntimeEventArgValue {
+                values: vec![ticks.to_bits()],
+                masks: vec![0],
+                width: 64,
+                signed: false,
+                is_string: false,
+                float_precision: Some(celox_design::FloatPrecision::F64),
+                handle: false,
+            };
+            let format = TimeFormat {
+                units,
+                precision,
+                suffix: b" ns".to_vec(),
+                width: 0,
+            };
+            String::from_utf8(format_time(&arg, &format, FieldSpec::default())).unwrap()
+        };
+        assert_eq!(real(1500.0, 3, 1), "1.5 ns");
+        assert_eq!(real(1500.0, 3, 2), "1.50 ns");
+        assert_eq!(real(1500.0, 3, 3), "1.500 ns");
+        assert_eq!(real(1234.5, 3, 3), "1.235 ns");
+        assert_eq!(real(2500.0, 3, 0), "3 ns");
+        assert_eq!(real(-2500.0, 3, 0), "-3 ns");
+        // The digits of the binary fraction nearest 0.1, also beyond the
+        // digits of an f64, and more decimal places than 64.
+        assert_eq!(real(0.1, 0, 20), "0.10000000000000000555 ns");
+        assert_eq!(real(1.5, 0, 70), format!("1.5{} ns", "0".repeat(69)));
+        assert_eq!(real(f64::INFINITY, 0, 3), "inf ns");
+    }
+
+    /// An integral time keeps any number of decimal places.
+    #[test]
+    fn decimal_times_keep_every_decimal_place() {
+        let time = decimal_time(num_bigint::BigInt::from(7), 0, 100);
+        assert_eq!(time, format!("7.{}", "0".repeat(100)));
+    }
 }

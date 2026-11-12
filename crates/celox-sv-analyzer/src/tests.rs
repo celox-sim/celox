@@ -8472,3 +8472,30 @@ fn only_disabled_named_blocks_stay_blocks() {
         }]
     ));
 }
+
+/// A constant `$timeformat` units number is a time unit from 2 to -15, and
+/// its precision and minimum field width are not negative (IEEE 1800-2023
+/// 20.4.3).
+#[test]
+fn rejects_constant_time_format_arguments_outside_their_ranges() {
+    for (arguments, name) in [
+        ("5, 0, \"\", 0", "units number"),
+        ("-16, 0, \"\", 0", "units number"),
+        ("-9, -1, \"\", 0", "precision number"),
+        ("-9, 0, \"\", -2", "minimum field width"),
+    ] {
+        let source = format!("module Top; initial $timeformat({arguments}); endmodule");
+        let error = analyze_source(&source, Path::new("time_format.sv"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(name) && error.contains("20.4.3"),
+            "{arguments}: {error}"
+        );
+    }
+    analyze_source(
+        "module Top; int u = -9; initial $timeformat(u, 2, \" ns\", 10); endmodule",
+        Path::new("time_format.sv"),
+    )
+    .unwrap();
+}
