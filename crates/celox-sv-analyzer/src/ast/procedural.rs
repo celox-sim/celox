@@ -786,6 +786,21 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         r#type: Type,
         declaration: usize,
     ) -> String {
+        self.declare_owned(source, r#type, declaration)
+    }
+
+    /// Declare a variable of the subroutine being lowered, declared at
+    /// token `declaration`, and return its unique name: keyed by the
+    /// subroutine's qualified name and the declaration, as a static
+    /// variable is (see [`Self::declare_static`]), so that every analysis
+    /// lowering the subroutine names it the same, whatever it counted
+    /// before. Outside a subroutine, the counter names it.
+    pub(super) fn declare_owned(
+        &mut self,
+        source: &str,
+        r#type: Type,
+        declaration: usize,
+    ) -> String {
         let unique = match &self.owner {
             Some(owner) => format!(
                 "{source}%{:016x}@{declaration}",

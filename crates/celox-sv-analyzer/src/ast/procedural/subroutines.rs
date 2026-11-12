@@ -81,8 +81,8 @@ pub(in crate::ast) fn subroutine_param_declarations(
     )
 }
 
-/// The token that declares formal `source` of `native`, which keys it as a
-/// static variable (see `BodyBuilder::declare_static`); a formal a
+/// The token that declares formal `source` of `native`, which keys its
+/// name (see `BodyBuilder::declare_owned`); a formal a
 /// prototype names without declaring is keyed by the subroutine.
 fn formal_declaration(native: &celox_sv_syntax::Subroutine, source: &str) -> usize {
     native
@@ -762,9 +762,9 @@ pub(in crate::ast) fn lower_subroutine(
             None,
         )
     });
-    let mut this_name = this
-        .as_ref()
-        .map(|(source, _, r#type, _)| builder.declare(source, r#type.clone()));
+    let mut this_name = this.as_ref().map(|(source, _, r#type, _)| {
+        builder.declare_owned(source, r#type.clone(), native.tokens.start)
+    });
     // Defaults bind in the enclosing declaration scope, before
     // any formal can shadow those names (IEEE 1800-2023 13.5.3).
     let defaults = params
@@ -837,13 +837,14 @@ pub(in crate::ast) fn lower_subroutine(
     for ((source, direction, r#type, _), default) in this.into_iter().chain(params).zip(defaults) {
         let name = match this_name.take() {
             Some(name) => name,
-            None if builder.automatic => builder.declare(&source, r#type.clone()),
-            // The formals of a static subroutine are static variables
-            // (IEEE 1800-2023 13.3.1), named as its static locals are, so
-            // that every analysis lowering it names the same ones.
+            // Named by the subroutine and their declarations, so that every
+            // analysis lowering the subroutine names the same ones: those of
+            // a static subroutine are static variables (IEEE 1800-2023
+            // 13.3.1), and a scope may lower the methods of another's
+            // classes, with their formals.
             None => {
                 let declaration = formal_declaration(native, &source);
-                builder.declare_static(&source, r#type.clone(), declaration)
+                builder.declare_owned(&source, r#type.clone(), declaration)
             }
         };
         if r#type.unpacked_struct().is_some() {
@@ -867,14 +868,11 @@ pub(in crate::ast) fn lower_subroutine(
             leaves: Vec::new(),
         });
     }
-    // So is the result of a static function, declared with the function.
-    let return_var = return_type.as_ref().map(|r#type| {
-        if builder.automatic {
-            builder.declare(&name, r#type.clone())
-        } else {
-            builder.declare_static(&name, r#type.clone(), native.tokens.start)
-        }
-    });
+    // So is the result of a function, and `this`, declared with the
+    // function.
+    let return_var = return_type
+        .as_ref()
+        .map(|r#type| builder.declare_owned(&name, r#type.clone(), native.tokens.start));
     if let (Some(name), Some(ty)) = (&return_var, &return_type) {
         formal_types.insert(name.clone(), scoped_type(ty.clone(), declaration_env));
     }
