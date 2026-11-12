@@ -274,8 +274,7 @@ blocks in programs. Two region deviations are listed under
 - Inline `with` constraints: four-state and aggregate caller-scope inputs,
   typed parameter inputs, qualified `this` / `super` references, restricted
   `with (names)` lookup, and scope `std::randomize(…) with`.
-- Enums with unresolved or X/Z values and ranged enumerator declarations
-  for randomization.
+- Enums with unresolved or X/Z values for randomization.
 
 ### Dynamic containers, strings, and reference arguments
 

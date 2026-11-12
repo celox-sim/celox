@@ -216,7 +216,7 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
 - インライン `with` 制約: 4値・集約の呼び出し側入力、型パラメータ入力、
   修飾付き `this` / `super` 参照、制限付き `with (names)` 検索、
   スコープ `std::randomize(…) with` は未対応です。
-- 未解決・X/Z 値を持つ enum と、範囲付き列挙子宣言のランダム化。
+- 未解決・X/Z 値を持つ enum のランダム化。
 
 ### 動的コンテナ・文字列・参照引数
 
