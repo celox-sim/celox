@@ -721,6 +721,11 @@ pub struct LocalVariableBase<T> {
     pub name: String,
     pub source_name: String,
     pub r#type: T,
+    /// Whether its subroutine and declaration name it, so that every
+    /// analysis lowering the subroutine names it the same; otherwise the
+    /// count of one analysis named it. Escaped identifiers may hold any
+    /// character, so the name itself cannot tell.
+    pub owned: bool,
 }
 
 /// A function or task; tasks may suspend their calling process.
