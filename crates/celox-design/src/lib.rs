@@ -255,6 +255,21 @@ pub struct ExternSignature {
     /// The result, or `None` for a `void` function.
     pub result: Option<ExternType>,
     pub arguments: Vec<ExternType>,
+    /// The direction of each argument; an argument without one is an
+    /// `input`.
+    #[serde(default)]
+    pub directions: Vec<ExternDirection>,
+}
+
+/// The direction of an argument of an [`ExternFunction`]. An `input` of a
+/// small type is passed by value and any other argument by pointer (IEEE
+/// 1800-2023 35.5.6, H.8.8).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExternDirection {
+    #[default]
+    Input,
+    Output,
+    Inout,
 }
 
 /// A type an [`ExternFunction`] passes or returns.
@@ -267,6 +282,12 @@ pub enum ExternType {
     /// `byte`, `shortint`, `int` or `longint`, passed as the C integer of
     /// that width.
     Integer { width: usize, signed: bool },
+    /// `string`, passed as `const char *`.
+    String,
+    /// A packed array of `bit`, passed as `svBitVecVal *`.
+    BitVector { width: usize },
+    /// A packed array of `logic`, passed as `svLogicVecVal *`.
+    LogicVector { width: usize },
 }
 
 impl fmt::Display for ExternType {
@@ -274,6 +295,9 @@ impl fmt::Display for ExternType {
         let (name, signed) = match *self {
             ExternType::Bit => return f.write_str("bit"),
             ExternType::Logic => return f.write_str("logic"),
+            ExternType::String => return f.write_str("string"),
+            ExternType::BitVector { width } => return write!(f, "bit [{}:0]", width - 1),
+            ExternType::LogicVector { width } => return write!(f, "logic [{}:0]", width - 1),
             ExternType::Integer { width: 8, signed } => ("byte", signed),
             ExternType::Integer { width: 16, signed } => ("shortint", signed),
             ExternType::Integer { width: 32, signed } => ("int", signed),
@@ -306,7 +330,12 @@ impl fmt::Display for ExternFunction {
             if index > 0 {
                 f.write_str(", ")?;
             }
-            write!(f, "input {argument}")?;
+            let direction = match signature.directions.get(index) {
+                None | Some(ExternDirection::Input) => "input",
+                Some(ExternDirection::Output) => "output",
+                Some(ExternDirection::Inout) => "inout",
+            };
+            write!(f, "{direction} {argument}")?;
         }
         f.write_str(")")
     }

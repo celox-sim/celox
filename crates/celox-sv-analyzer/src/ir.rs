@@ -2644,8 +2644,8 @@ impl From<BinaryOp> for ast::BinaryOp {
     }
 }
 
-/// The C type a DPI-C import passes or returns by value (IEEE 1800-2023
-/// 35.5.6).
+/// The type of an argument or result of a DPI-C import, which decides the
+/// C type it is passed as (IEEE 1800-2023 35.5.6, H.7.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DpiType {
     /// `bit`, passed as `svBit`.
@@ -2655,28 +2655,50 @@ pub enum DpiType {
     /// `byte`, `shortint`, `int` or `longint`, passed as the C integer of
     /// that width.
     Integer { width: usize, signed: bool },
-    /// `string`, only for a [`DpiBuiltin`]: a heap handle.
+    /// `string`, passed as `const char *`: a heap handle in the design.
     String,
     /// `chandle`, passed as a C pointer (IEEE 1800-2023 6.14).
     Chandle,
+    /// A packed array of `bit`, passed as a pointer to `svBitVecVal`
+    /// words.
+    BitVector { width: usize, signed: bool },
+    /// A packed array of `logic` or `reg`, `integer` or `time`, passed as a
+    /// pointer to `svLogicVecVal` words.
+    LogicVector { width: usize, signed: bool },
 }
 
 impl DpiType {
     pub fn width(&self) -> usize {
         match self {
             DpiType::Bit | DpiType::Logic => 1,
-            DpiType::Integer { width, .. } => *width,
+            DpiType::Integer { width, .. }
+            | DpiType::BitVector { width, .. }
+            | DpiType::LogicVector { width, .. } => *width,
             DpiType::String => celox_design::HANDLE_WIDTH,
             DpiType::Chandle => 64,
         }
     }
 
     pub fn is_signed(&self) -> bool {
-        matches!(self, DpiType::Integer { signed: true, .. })
+        matches!(
+            self,
+            DpiType::Integer { signed: true, .. }
+                | DpiType::BitVector { signed: true, .. }
+                | DpiType::LogicVector { signed: true, .. }
+        )
     }
 
     pub fn is_4state(&self) -> bool {
-        matches!(self, DpiType::Logic)
+        matches!(self, DpiType::Logic | DpiType::LogicVector { .. })
+    }
+
+    /// Whether the type is a packed array, which C takes by pointer even as
+    /// an `input`.
+    pub fn is_vector(&self) -> bool {
+        matches!(
+            self,
+            DpiType::BitVector { .. } | DpiType::LogicVector { .. }
+        )
     }
 }
 
@@ -2700,35 +2722,52 @@ pub enum DpiBuiltin {
     Unavailable,
 }
 
-/// An argument of a DPI-C import. Only `input` arguments are supported,
-/// except by a [`DpiBuiltin`].
+/// The direction of an argument of a DPI-C import (IEEE 1800-2023
+/// 35.5.1.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DpiDirection {
+    Input,
+    Output,
+    Inout,
+}
+
+/// An argument of a DPI-C import.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DpiArgument {
     name: String,
     r#type: DpiType,
-    output: bool,
+    direction: DpiDirection,
 }
 
 impl DpiArgument {
     pub(crate) fn new(name: String, r#type: DpiType) -> Self {
-        Self {
-            name,
-            r#type,
-            output: false,
-        }
+        Self::with_direction(name, r#type, DpiDirection::Input)
     }
 
     pub(crate) fn output(name: String, r#type: DpiType) -> Self {
+        Self::with_direction(name, r#type, DpiDirection::Output)
+    }
+
+    pub(crate) fn with_direction(name: String, r#type: DpiType, direction: DpiDirection) -> Self {
         Self {
             name,
             r#type,
-            output: true,
+            direction,
         }
     }
 
-    /// Whether the argument is an `output` (or `inout`), of a builtin.
+    /// Whether the call writes the actual: an `output` or `inout`.
     pub fn is_output(&self) -> bool {
-        self.output
+        self.direction != DpiDirection::Input
+    }
+
+    /// Whether the call reads the actual: an `input` or `inout`.
+    pub fn is_input(&self) -> bool {
+        self.direction != DpiDirection::Output
+    }
+
+    pub fn direction(&self) -> DpiDirection {
+        self.direction
     }
 
     pub fn name(&self) -> &str {
@@ -2810,6 +2849,17 @@ impl DpiImport {
 
     pub fn arguments(&self) -> &[DpiArgument] {
         &self.arguments
+    }
+
+    /// Whether a call passes a pointer: an `output` or `inout` argument, a
+    /// packed array, or a string argument or result.
+    pub fn uses_call_area(&self) -> bool {
+        self.return_type == Some(DpiType::String)
+            || self.arguments.iter().any(|argument| {
+                argument.is_output()
+                    || argument.r#type().is_vector()
+                    || argument.r#type() == DpiType::String
+            })
     }
 }
 

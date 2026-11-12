@@ -735,10 +735,17 @@ fn rejects_unsupported_imports_and_calls() {
         ),
         (
             r#"module Top(input logic clk, input int a, output int y);
-                import "DPI-C" function void f(input int x, output int r);
+                import "DPI-C" function void f(input int x, ref int r);
                 always_ff @(posedge clk) f(a, y);
             endmodule"#,
-            "DPI-C output, inout or ref argument",
+            "DPI-C ref argument",
+        ),
+        (
+            r#"module Top(input logic clk, input int a, output int y);
+                import "DPI-C" pure function int f(input int x, output int r);
+                always_ff @(posedge clk) y <= f(a, y);
+            endmodule"#,
+            "DPI-C pure import with an output or inout argument",
         ),
         (
             r#"module Top(input logic clk, input int a, output int y);
@@ -755,25 +762,18 @@ fn rejects_unsupported_imports_and_calls() {
             "DPI-C task import",
         ),
         (
-            r#"module Top(input logic clk, input logic [7:0] a, output int y);
-                import "DPI-C" function int f(input bit [7:0] x);
+            r#"module Top(input logic clk, input logic [7:0] a, output logic [7:0] y);
+                import "DPI-C" function bit [7:0] f(input bit [7:0] x);
                 always_ff @(posedge clk) y <= f(a);
             endmodule"#,
-            "DPI-C packed array argument",
+            "DPI-C packed array result",
         ),
         (
             r#"module Top(input logic clk, input int a, output int y);
-                import "DPI-C" function int f(input integer x);
+                import "DPI-C" function int f(input real x);
                 always_ff @(posedge clk) y <= f(a);
             endmodule"#,
-            "DPI-C argument of four-state integer type",
-        ),
-        (
-            r#"module Top(input logic clk, input int a, output int y);
-                import "DPI-C" function int f(input string x);
-                always_ff @(posedge clk) y <= f(a);
-            endmodule"#,
-            "DPI-C argument of type `string`",
+            "DPI-C argument of type `real`",
         ),
     ];
     for (source, expected) in cases {
@@ -867,6 +867,381 @@ dpi_backends! {
         assert_eq!(sim.get(value), BigUint::from(0xffff_ffffu32));
         assert_eq!(sim.get(is_null), BigUint::from(1u32));
     }
+}
+
+/// `flash_read` of a memory model: the data comes back through a pointer
+/// (IEEE 1800-2023 35.5.1.2, H.8.8).
+extern "C" fn dpi_read(addr: i32, data: *mut i64) {
+    // SAFETY: an `output longint` is a pointer to a `long long`.
+    unsafe { *data = 0x1122_3344_5566_7700 + i64::from(addr) }
+}
+
+extern "C" fn dpi_bump(count: *mut i32) -> i32 {
+    // SAFETY: an `inout int` is a pointer to an `int` holding the actual.
+    unsafe {
+        *count += 3;
+        *count * 2
+    }
+}
+
+extern "C" fn dpi_scalars(b: *mut u8, l: *mut u8, by: *mut i8, sh: *mut i16, handle: *mut usize) {
+    // SAFETY: each output is a pointer to the C type of its formal.
+    unsafe {
+        *b = 1;
+        // `sv_x`.
+        *l = 3;
+        *by = -3;
+        *sh = -300;
+        *handle = 0x1234_5678_9abc;
+    }
+}
+
+dpi_backends! {
+    fn output_and_inout_arguments_are_copied_out(sim) {
+        @build unsafe {
+            builder(r#"
+                import "DPI-C" function void read(input int addr, output longint data);
+                module Top(
+                    input logic clk, input int a,
+                    output logic [63:0] data, output int count, doubled,
+                    output bit b, output logic l, output byte by, output shortint sh,
+                    output bit handle_set, output logic [15:0] low, output int element
+                );
+                    import "DPI-C" function int bump(inout int count);
+                    import "DPI-C" function void scalars(
+                        output bit b, output logic l, output byte by, output shortint sh,
+                        output chandle handle);
+                    chandle handle;
+                    int elements [3];
+                    logic [47:0] high;
+                    always @(posedge clk) begin
+                        read(a, data);
+                        doubled = bump(count);
+                        scalars(b, l, by, sh, handle);
+                        handle_set = handle != null;
+                        // A concatenation and an element are assigned as by
+                        // an assignment from the formal.
+                        read(a + 1, {high, low});
+                        read(a, elements[a[0]]);
+                        element = elements[1];
+                    end
+                endmodule
+            "#)
+            .dpi_function("read", dpi_read as *const ())
+            .dpi_function("bump", dpi_bump as *const ())
+            .dpi_function("scalars", dpi_scalars as *const ())
+        };
+        let clk = sim.event("clk");
+        let a = sim.signal("a");
+        macro_rules! get {
+            ($name:literal) => {
+                sim.get(sim.signal($name))
+            };
+        }
+        sim.modify(|io| io.set(a, 5u32)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(get!("data"), BigUint::from(0x1122_3344_5566_7705u64));
+        assert_eq!(get!("count"), BigUint::from(3u32));
+        assert_eq!(get!("doubled"), BigUint::from(6u32));
+        assert_eq!(get!("b"), BigUint::from(1u32));
+        assert_eq!(get!("by"), BigUint::from(0xfdu32));
+        assert_eq!(get!("sh"), BigUint::from(0xfed4u32));
+        assert_eq!(get!("handle_set"), BigUint::from(1u32));
+        assert_eq!(get!("low"), BigUint::from(0x7706u32));
+        assert_eq!(get!("element"), BigUint::from(0x5566_7705u32));
+        sim.tick(clk).unwrap();
+        assert_eq!(get!("count"), BigUint::from(6u32));
+        assert_eq!(get!("doubled"), BigUint::from(12u32));
+    }
+}
+
+/// A packed array of `bit` is an array of `svBitVecVal` (`uint32_t`) words,
+/// the least significant first (IEEE 1800-2023 H.7.7).
+extern "C" fn dpi_reverse_words(write: u8, input: *const u32, output: *mut u32) {
+    // SAFETY: both formals are `bit [159:0]`, five words each.
+    unsafe {
+        for index in 0..5 {
+            let word = *input.add(4 - index);
+            *output.add(index) = if write != 0 { !word } else { word };
+        }
+    }
+}
+
+/// A packed array of `logic` is an array of `svLogicVecVal`: `aval` then
+/// `bval` for each 32 bits.
+extern "C" fn dpi_swap_planes(input: *const [u32; 2], output: *mut [u32; 2]) {
+    // SAFETY: both formals are `logic [70:0]`, three words each.
+    unsafe {
+        for index in 0..3 {
+            let [aval, bval] = *input.add(index);
+            *output.add(index) = [bval, aval];
+        }
+    }
+}
+
+/// `integer` is one `svLogicVecVal`.
+extern "C" fn dpi_swap_integer(input: *const [u32; 2], output: *mut [u32; 2]) {
+    // SAFETY: both formals are `integer`, one word each.
+    unsafe {
+        let [aval, bval] = *input;
+        *output = [bval, aval];
+    }
+}
+
+const PACKED_ARRAYS: &str = r#"
+    module Top #(parameter int W = 160) (
+        input logic clk, input bit write, input bit [W-1:0] wdata, input logic [70:0] planes,
+        output bit [W-1:0] rdata, output logic [70:0] swapped, output integer narrow
+    );
+        import "DPI-C" function void reverse_words(
+            input bit write, input bit [W-1:0] wdata, output bit [W-1:0] rdata);
+        import "DPI-C" function void swap_planes(input logic [70:0] in, output logic [70:0] out);
+        import "DPI-C" function void swap_integer(input integer in, output integer out);
+        always @(posedge clk) begin
+            reverse_words(write, wdata, rdata);
+            swap_planes(planes, swapped);
+            swap_integer(planes[31:0], narrow);
+        end
+    endmodule
+"#;
+
+fn packed_arrays() -> SimulatorBuilder<'static> {
+    // SAFETY: the functions have the prototypes of their imports.
+    unsafe {
+        builder(PACKED_ARRAYS)
+            .dpi_function("reverse_words", dpi_reverse_words as *const ())
+            .dpi_function("swap_planes", dpi_swap_planes as *const ())
+            .dpi_function("swap_integer", dpi_swap_integer as *const ())
+    }
+}
+
+/// `words`, least significant first, as one value.
+fn from_words(words: &[u32]) -> BigUint {
+    words.iter().rev().fold(BigUint::from(0u8), |value, word| {
+        (value << 32) | BigUint::from(*word)
+    })
+}
+
+dpi_backends! {
+    fn packed_arrays_are_passed_as_canonical_words(sim) {
+        @build packed_arrays();
+        let clk = sim.event("clk");
+        let (write, wdata, planes) = (sim.signal("write"), sim.signal("wdata"), sim.signal("planes"));
+        let words = [0x1000_0001u32, 0x2000_0002, 0x3000_0003, 0x4000_0004, 0x5000_0005];
+        sim.modify(|io| {
+            io.set_wide(wdata, from_words(&words));
+            io.set_wide(planes, BigUint::from(0x12_3456_789a_bcdeu64));
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        let mut reversed = words;
+        reversed.reverse();
+        assert_eq!(sim.get(sim.signal("rdata")), from_words(&reversed));
+        // Two-state simulation: the unknown bits the function gives read as
+        // zero, and it was given none.
+        assert_eq!(sim.get(sim.signal("swapped")), BigUint::from(0u8));
+        assert_eq!(sim.get(sim.signal("narrow")), BigUint::from(0u8));
+        sim.modify(|io| io.set(write, 1u8)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("rdata")),
+            from_words(&reversed.map(|word| !word))
+        );
+    }
+}
+
+#[test]
+fn logic_packed_arrays_keep_both_planes_in_four_state_simulation() {
+    macro_rules! check {
+        ($build:ident) => {{
+            let mut sim = packed_arrays().four_state(true).$build().unwrap();
+            let clk = sim.event("clk");
+            let planes = sim.signal("planes");
+            // 71 bits: the top word holds 7 of them.
+            let value: BigUint =
+                (BigUint::from(0x55u8) << 64u32) | BigUint::from(0x0123_4567_89ab_cdefu64);
+            let mask: BigUint =
+                (BigUint::from(0x41u8) << 64u32) | BigUint::from(0xf000_0000_0000_00f0u64);
+            sim.modify(|io| io.set_four_state(planes, value.clone(), mask.clone()))
+                .unwrap();
+            sim.tick(clk).unwrap();
+            assert_eq!(
+                sim.get_four_state(sim.signal("swapped")),
+                (mask.clone(), value.clone()),
+                stringify!($build)
+            );
+            let low = BigUint::from(0xffff_ffffu32);
+            assert_eq!(
+                sim.get_four_state(sim.signal("narrow")),
+                (&mask & &low, &value & &low),
+                stringify!($build)
+            );
+        }};
+    }
+    check!(build_cranelift);
+    check!(build_interpreter);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check!(build_native);
+}
+
+extern "C" fn dpi_put(target: *mut i32, value: i32) {
+    // SAFETY: an `output int` is a pointer to an `int`.
+    unsafe { *target = value }
+}
+
+// An output or inout actual is the place it names when the call starts
+// (IEEE 1800-2023 13.5): its selectors are evaluated once, before the
+// actuals after it, and an inout is read from and written to that place.
+#[test]
+fn output_actuals_are_captured_before_later_actuals() {
+    let source = r#"
+        module Top(output int first, second, third, calls);
+            import "DPI-C" function int bump(inout int count);
+            import "DPI-C" function void put(output int target, input int value);
+            int elements [3] = '{10, 20, 30};
+            int index = 0;
+            int selected = 0;
+            int ignored;
+            function automatic int next();
+                selected++;
+                return selected;
+            endfunction
+            function automatic int advance();
+                index++;
+                return 100 + index;
+            endfunction
+            initial begin
+                ignored = bump(elements[next()]);
+                put(elements[index], advance());
+                first = elements[0];
+                second = elements[1];
+                third = elements[2];
+                calls = selected;
+            end
+        endmodule
+    "#;
+    let builder = || unsafe {
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("dpi.sv"))], "Top")
+            .dpi_function("bump", dpi_bump as *const ())
+            .dpi_function("put", dpi_put as *const ())
+    };
+    macro_rules! check {
+        ($build:ident) => {{
+            let mut sim = builder().$build().unwrap();
+            sim.run_until(0).unwrap();
+            let values: Vec<_> = ["first", "second", "third", "calls"]
+                .map(|name| sim.get(sim.signal(name)))
+                .to_vec();
+            let expected: Vec<BigUint> = [101u32, 23, 30, 1].map(BigUint::from).to_vec();
+            assert_eq!(values, expected, stringify!($build));
+        }};
+    }
+    check!(build_cranelift);
+    check!(build_interpreter);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check!(build_native);
+}
+
+/// The strings `dpi_upper` and `dpi_append` gave back. A C function keeps
+/// its result valid after it returns, in a static buffer for instance; these
+/// stay for the rest of the test run.
+static RETURNED: Mutex<Vec<std::ffi::CString>> = Mutex::new(Vec::new());
+
+fn returned(bytes: Vec<u8>) -> *const std::ffi::c_char {
+    let string = std::ffi::CString::new(bytes).unwrap();
+    // The characters are on the heap and do not move with the string.
+    let pointer = string.as_ptr();
+    RETURNED.lock().unwrap().push(string);
+    pointer
+}
+
+extern "C" fn dpi_upper(text: *const std::ffi::c_char) -> *const std::ffi::c_char {
+    // SAFETY: an `input string` is a NUL-terminated C string.
+    returned(
+        unsafe { std::ffi::CStr::from_ptr(text) }
+            .to_bytes()
+            .to_ascii_uppercase(),
+    )
+}
+
+extern "C" fn dpi_length(text: *const std::ffi::c_char) -> i32 {
+    // SAFETY: an `input string` is a NUL-terminated C string.
+    unsafe { std::ffi::CStr::from_ptr(text) }.to_bytes().len() as i32
+}
+
+extern "C" fn dpi_describe(value: i32, text: *mut *const std::ffi::c_char) {
+    let described = if value < 0 { c"negative" } else { c"" };
+    // SAFETY: an `output string` is a pointer to a `const char *`.
+    unsafe {
+        *text = if value == 0 {
+            std::ptr::null()
+        } else {
+            described.as_ptr()
+        }
+    }
+}
+
+extern "C" fn dpi_append(text: *mut *const std::ffi::c_char) {
+    // SAFETY: an `inout string` points at the C string of the actual.
+    let bytes = unsafe { std::ffi::CStr::from_ptr(*text) }.to_bytes();
+    let appended = returned([bytes, b"!"].concat());
+    // SAFETY: as above.
+    unsafe { *text = appended }
+}
+
+// Strings are `const char *` (IEEE 1800-2023 35.5.6, H.7.4): the function
+// reads a copy of the actual, and what it gives back is copied at once.
+#[test]
+fn strings_are_passed_as_c_strings() {
+    let source = r#"
+        import "DPI-C" function string upper(input string s);
+        module Top(output int lengths, output bit [4:0] checks);
+            import "DPI-C" function int length(input string s);
+            import "DPI-C" function void describe(input int value, output string s);
+            import "DPI-C" function void append(inout string s);
+            string greeting = "Hello World";
+            string described, both;
+            initial begin
+                greeting = upper(greeting);
+                checks[0] = greeting == "HELLO WORLD";
+                // Two strings live in one call, and a literal actual.
+                lengths = length({greeting, upper("abc")}) * 100 + length("") * 10 + length("xy");
+                both = {upper("a"), upper("b")};
+                checks[1] = both == "AB";
+                describe(-1, described);
+                checks[2] = described == "negative";
+                // A null pointer is the empty string.
+                describe(0, described);
+                checks[3] = described.len() == 0;
+                append(greeting);
+                checks[4] = greeting == "HELLO WORLD!";
+            end
+        endmodule
+    "#;
+    let builder = |four_state| unsafe {
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("dpi.sv"))], "Top")
+            .dpi_function("upper", dpi_upper as *const ())
+            .dpi_function("length", dpi_length as *const ())
+            .dpi_function("describe", dpi_describe as *const ())
+            .dpi_function("append", dpi_append as *const ())
+            .four_state(four_state)
+    };
+    macro_rules! check {
+        ($build:ident) => {{
+            for four_state in [false, true] {
+                let mut sim = builder(four_state).$build().unwrap();
+                sim.run_until(0).unwrap();
+                let (lengths, checks) = (sim.signal("lengths"), sim.signal("checks"));
+                assert_eq!(sim.get(lengths), BigUint::from(1402u32), stringify!($build));
+                assert_eq!(sim.get(checks), BigUint::from(0x1fu32), stringify!($build));
+            }
+        }};
+    }
+    check!(build_cranelift);
+    check!(build_interpreter);
+    check!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check!(build_native);
 }
 
 // An import declared at compilation-unit scope is visible in every module of

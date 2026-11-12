@@ -502,7 +502,11 @@ impl Ff<'_, '_> {
 
     /// The value and mask planes of `value` as two-state registers of `width`
     /// bits, moved in whole words rather than bit by bit.
-    fn split_wide_planes(&mut self, value: RegisterId, width: usize) -> (RegisterId, RegisterId) {
+    pub(super) fn split_wide_planes(
+        &mut self,
+        value: RegisterId,
+        width: usize,
+    ) -> (RegisterId, RegisterId) {
         let words = width.next_multiple_of(64);
         let padded = self.b.alloc_logic(words);
         if words > width {
@@ -529,7 +533,7 @@ impl Ff<'_, '_> {
 
     /// The four-state register of `width` bits whose value and mask planes
     /// are two-state registers `value` and `mask`.
-    fn join_wide_planes(
+    pub(super) fn join_wide_planes(
         &mut self,
         value: RegisterId,
         mask: RegisterId,
