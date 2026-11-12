@@ -127,6 +127,10 @@ pub(super) struct Ff<'p, 'a> {
     /// What the process declares to the runtime while it is lowered.
     sites: kernel::Sites,
     direct: bool,
+    /// Whether this lowers an `always_comb`, `always_latch` or `always @*`
+    /// procedure, whose writes of a released target keep the forced value
+    /// while the target is held (IEEE 1800-2023 10.6.2).
+    holds_targets: bool,
     /// Whether a combinational process also reruns for occurrences of its
     /// inputs that left their value unchanged.
     input_occurrences: bool,
@@ -204,6 +208,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             observation: assign::Observation::default(),
             sites: kernel::Sites::default(),
             direct: false,
+            holds_targets: false,
             input_occurrences: true,
             assertions: sampled::Assertions::default(),
             frame: None,

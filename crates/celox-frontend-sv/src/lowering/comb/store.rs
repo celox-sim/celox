@@ -106,12 +106,24 @@ impl Comb<'_, '_> {
         if !self.initial
             && let Some((enabled, forced)) = self.m.force_controls(id)
         {
-            let condition = self.alloc(SLTNode::Input {
+            let mut condition = self.alloc(SLTNode::Input {
                 variable: enabled,
                 signed: false,
                 index: vec![],
                 access: full(1),
             })?;
+            // A released target holds the forced value until the procedure
+            // writing it executes again (IEEE 1800-2023 10.6.2).
+            if let Some(&hold) = self.m.force_holds.get(&id) {
+                let held = self.alloc(SLTNode::Input {
+                    variable: hold,
+                    signed: false,
+                    index: vec![],
+                    access: full(1),
+                })?;
+                condition = self.alloc(SLTNode::Binary(condition, BinaryOp::Or, held))?;
+                value.1.insert(VarAtomBase::new(hold, 0, 0));
+            }
             let replacement = self.alloc(SLTNode::Input {
                 variable: forced,
                 signed: false,
