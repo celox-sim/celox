@@ -66,6 +66,26 @@ fn resolve(
             .intern(TyData::Class(Decl::Class(name.into())))
     };
     let id = ungroup(id, native);
+    // An iterator over a container whose elements are kept as records has
+    // the container's element type (7.12.1); its members are typed from it.
+    if !dims.locator_iterators.is_empty()
+        && let Some((container, _)) = locators::record_iterator(id, native, dims)
+    {
+        return of_type(session, &container.element);
+    }
+    // The index query of an array locator method's iterator, `item.index`
+    // or `item.index(1)`, which `locators::index` resolves in either form,
+    // has the index type of its array (7.12.4).
+    if !dims.locator_iterators.is_empty()
+        && matches!(
+            native.expression(id).kind,
+            ExprKind::Member { .. } | ExprKind::Call { .. }
+        )
+        && let Ok(Some(Expr::Ident(index))) = locators::index(id, native, tree, session, dims)
+        && let Some(shape) = dims.get(&index)
+    {
+        return of_shape(session, shape);
+    }
     if matches!(
         native.expression(id).kind,
         ExprKind::Literal(_)
@@ -238,9 +258,13 @@ fn resolve(
         // A min:typ:max expression has the type of the value it selects
         // (11.11).
         ExprKind::MinTypMax { typical, .. } => type_of(tree, session, *typical, native, dims).ok(),
-        // A member of a property of unpacked structure type, or of another
-        // scope.
-        ExprKind::Member { .. } => property_type(tree, session, id, native, dims),
+        // A member of a property of unpacked structure type, or a signal of
+        // another scope, such as an interface instance, named by its path
+        // (25.5).
+        ExprKind::Member { .. } => property_type(tree, session, id, native, dims).or_else(|| {
+            let signal = expression_binding::path_signal(tree, session, id, native, dims)?;
+            of_shape(session, dims.get(&signal)?)
+        }),
         // `randomize() with {...}` returns int (18.7).
         ExprKind::RandomizeWith { .. } => values::integral(&mut session.types, 32, true, false),
         // A typed assignment pattern has its type (10.9).

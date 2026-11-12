@@ -3,8 +3,9 @@
 //! chandle or `null`.
 use super::*;
 
-/// Whether native expression `id` is a chandle: a chandle variable, a
-/// chandle property, or an element of a container of chandles.
+/// Whether native expression `id` is a chandle: whatever it is, a
+/// variable, an element, a member, a property, a call or a conditional,
+/// its type is `chandle` (6.14).
 pub(in crate::ast) fn native_chandle(
     tree: &AnalysisContext<'_>,
     id: ExprId,
@@ -12,218 +13,8 @@ pub(in crate::ast) fn native_chandle(
     dimensions: &PackedDimensions,
     session: &mut Session,
 ) -> bool {
-    let id = ungroup(id, native);
-    if let Some(chandle) = locator_index(tree, id, native, dimensions, session) {
-        return chandle;
-    }
-    match &native.expression(id).kind {
-        ExprKind::Name(name) => {
-            if let Some(shape) = dimensions.get(&instances::normalize_identifier(&name.spelling)) {
-                return shape.chandle && shape.unpacked.is_empty();
-            }
-        }
-        ExprKind::Select {
-            expression,
-            dimension,
-        } => {
-            // A slice of an unpacked array is an array (7.4.6); `q[$]` is
-            // the last element of a queue (7.10.1).
-            if !element_select(&dimension.kind) {
-                return false;
-            }
-            if let Ok(Some(container)) =
-                containers::native_type(*expression, native, tree, session, dimensions)
-            {
-                return container.element.chandle;
-            }
-            let mut base = ungroup(*expression, native);
-            let mut indices = 1;
-            while let ExprKind::Select {
-                expression,
-                dimension,
-            } = &native.expression(base).kind
-            {
-                if !element_select(&dimension.kind) {
-                    return false;
-                }
-                base = ungroup(*expression, native);
-                indices += 1;
-            }
-            return array_of_chandles(tree, base, native, dimensions, session)
-                .is_some_and(|rank| rank == indices);
-        }
-        ExprKind::Call { .. } => {
-            return call_result(tree, id, native, dimensions, session) == Some(true);
-        }
-        ExprKind::Member {
-            expression: receiver,
-            separator,
-            name,
-        } => {
-            // A pop of a queue may omit its parentheses.
-            if separator == "."
-                && let Some(chandle) =
-                    container_method(tree, *receiver, &name.spelling, native, dimensions, session)
-            {
-                return chandle;
-            }
-            // So may a class method (13.5.5).
-            if let Ok(Some((method, ..))) = objects::method(tree, session, id, native, dimensions) {
-                return dimensions
-                    .function_return_types
-                    .get(&method)
-                    .is_some_and(|metadata| metadata.chandle);
-            }
-        }
-        // A conditional choosing between chandles, or a chandle and `null`.
-        ExprKind::Conditional {
-            then_expression,
-            else_expression,
-            ..
-        } => {
-            // Each branch is classified once, or nested conditionals would
-            // be classified exponentially often.
-            let branches = [*then_expression, *else_expression]
-                .map(|branch| native_chandle(tree, branch, native, dimensions, session));
-            return branches.contains(&true)
-                && [*then_expression, *else_expression]
-                    .iter()
-                    .zip(branches)
-                    .all(|(&branch, chandle)| chandle || null(branch, native));
-        }
-        _ => {}
-    }
-    // A member of a variable of unpacked structure type is a variable.
-    if let Some(variable) = unpacked_structs::native_member(id, native, dimensions) {
-        return dimensions
-            .get(&variable)
-            .is_some_and(|shape| shape.chandle && shape.unpacked.is_empty());
-    }
-    // A member selected through a virtual interface has its declared type.
-    if virtual_member(tree, id, native, dimensions, session) {
-        return true;
-    }
-    // A signal of another instance or interface named by a path.
-    if let ExprKind::Member { .. } = &native.expression(id).kind
-        && let Ok((mut parts, None)) = direct::path(id, native, tree, session, dimensions)
-        && parts.len() > 1
-        && packed_structs::bind_interface_path(tree, &mut parts, dimensions)
-        && let [variable] = parts.as_slice()
-    {
-        return dimensions
-            .get(variable)
-            .is_some_and(|shape| shape.chandle && shape.unpacked.is_empty());
-    }
-    // A member of an unpacked structure element of a container.
-    if let Ok(Some((member, _))) = containers::element_member(id, native, tree, session, dimensions)
-    {
-        return member.chandle && member.unpacked_ranges.is_empty();
-    }
-    if let Ok(Some(variable)) = objects::static_property(tree, session, id, native, dimensions) {
-        return dimensions
-            .get(&variable)
-            .is_some_and(|shape| shape.chandle && shape.unpacked.is_empty());
-    }
-    objects::property(tree, session, id, native, dimensions)
-        .ok()
-        .flatten()
-        .is_some_and(|(property, _)| {
-            property.r#type.chandle && property.r#type.unpacked_ranges.is_empty()
-        })
-}
-
-/// Whether `id`, an iterator index query `item.index` of a locator method
-/// (7.12.4), has the chandle index type of its array; `None` if `id` is no
-/// such query.
-#[inline(never)]
-fn locator_index(
-    tree: &AnalysisContext<'_>,
-    id: ExprId,
-    native: &Declarations,
-    dimensions: &PackedDimensions,
-    session: &mut Session,
-) -> Option<bool> {
-    let Ok(Some(Expr::Ident(index))) = locators::index(id, native, tree, session, dimensions)
-    else {
-        return None;
-    };
-    Some(
-        dimensions
-            .get(&index)
-            .is_some_and(|shape| shape.chandle && shape.unpacked.is_empty()),
-    )
-}
-
-/// Whether call native expression `id` of a function, method or DPI-C
-/// import returns a chandle, `None` if the callee has no known result.
-fn call_result(
-    tree: &AnalysisContext<'_>,
-    id: ExprId,
-    native: &Declarations,
-    dimensions: &PackedDimensions,
-    session: &mut Session,
-) -> Option<bool> {
-    let ExprKind::Call { expression, .. } = &native.expression(ungroup(id, native)).kind else {
-        return None;
-    };
-    match &native.expression(ungroup(*expression, native)).kind {
-        // No system function returns a chandle.
-        ExprKind::Name(name) if name.spelling.starts_with('$') => return Some(false),
-        // Of the built-in container methods, only the pops return an element.
-        ExprKind::Member {
-            expression: receiver,
-            separator,
-            name,
-        } if separator == "." => {
-            if let Some(chandle) =
-                container_method(tree, *receiver, &name.spelling, native, dimensions, session)
-            {
-                return Some(chandle);
-            }
-        }
-        _ => {}
-    }
-    dimensions
-        .function_return_types
-        .get(&callee_name(tree, id, native, dimensions, session)?)
-        .map(|metadata| metadata.chandle)
-}
-
-/// The subroutine, a function, a method or a DPI-C import, that call `call`
-/// calls.
-fn callee_name(
-    tree: &AnalysisContext<'_>,
-    call: ExprId,
-    native: &Declarations,
-    dimensions: &PackedDimensions,
-    session: &mut Session,
-) -> Option<String> {
-    objects::call_method(tree, session, call, native, dimensions)
-        .ok()
-        .flatten()
-        .map(|(name, ..)| name)
-        .or_else(|| {
-            let callee = objects::callee(call, native);
-            direct::bound_callable_name(tree, session, callee, native, dimensions)
-                .ok()
-                .flatten()
-        })
-}
-
-/// The number of unpacked dimensions of array `id` of chandles: a variable
-/// or a signal of another scope named by a path. `None` if `id` is no such
-/// array.
-#[inline(never)]
-fn array_of_chandles(
-    tree: &AnalysisContext<'_>,
-    id: ExprId,
-    native: &Declarations,
-    dimensions: &PackedDimensions,
-    session: &mut Session,
-) -> Option<usize> {
-    variable(tree, id, native, dimensions, session)
-        .filter(|shape| shape.chandle && shape.container.is_none())
-        .map(|shape| shape.unpacked.len())
+    expression_types::type_of(tree, session, id, native, dimensions)
+        .is_ok_and(|ty| matches!(session.types.data(ty), semantic_types::TyData::Chandle))
 }
 
 /// The shape of variable `id`: a name, or a signal of another scope named
@@ -253,48 +44,6 @@ fn variable<'a>(
         [name] => dimensions.get(name),
         _ => None,
     }
-}
-
-/// Whether `id` is a chandle member selected through a virtual interface
-/// (25.9), whose members are scalar.
-#[inline(never)]
-fn virtual_member(
-    tree: &AnalysisContext<'_>,
-    id: ExprId,
-    native: &Declarations,
-    dimensions: &PackedDimensions,
-    session: &mut Session,
-) -> bool {
-    virtual_interfaces::native_member(tree, session, id, native, dimensions).is_some_and(
-        |(_, ty, member)| {
-            virtual_interfaces::member(session, &ty, &member)
-                .is_ok_and(|(member, _)| member.r#type.chandle)
-        },
-    )
-}
-
-/// Whether a select of `kind` selects one element.
-fn element_select(kind: &DimensionKind) -> bool {
-    matches!(kind, DimensionKind::Index(_) | DimensionKind::Queue(None))
-}
-
-/// Whether built-in method `name` of container `receiver` returns a
-/// chandle, `None` if `receiver` is no container. Of these methods, only the
-/// pops return an element.
-fn container_method(
-    tree: &AnalysisContext<'_>,
-    receiver: ExprId,
-    name: &str,
-    native: &Declarations,
-    dimensions: &PackedDimensions,
-    session: &mut Session,
-) -> Option<bool> {
-    let container = containers::native_type(receiver, native, tree, session, dimensions).ok()??;
-    Some(
-        matches!(name, "pop_front" | "pop_back")
-            && container.element.chandle
-            && container.element.unpacked_ranges.is_empty(),
-    )
 }
 
 /// Whether native expression `id` is a hierarchical name not yet bound to a
@@ -613,8 +362,7 @@ fn chandle_valued(
 }
 
 /// Whether native expression `id` may be assigned to a chandle: a chandle,
-/// `null`, a call without a known result (such as a container method), or a
-/// conditional choosing between such values.
+/// `null`, or a conditional choosing between such values.
 fn assignable(
     id: ExprId,
     tree: &AnalysisContext<'_>,
@@ -624,7 +372,7 @@ fn assignable(
 ) -> bool {
     let id = ungroup(id, native);
     match &native.expression(id).kind {
-        ExprKind::Call { .. } => call_result(tree, id, native, dimensions, session) == Some(true),
+        ExprKind::Call { .. } => native_chandle(tree, id, native, dimensions, session),
         ExprKind::Conditional {
             then_expression,
             else_expression,
@@ -821,6 +569,68 @@ mod tests {
                 && body.contains(r#"lhs: Ident("t"), rhs: Literal("32'bx")"#),
             "{body}"
         );
+    }
+
+    /// The index of a locator's iterator over an array with chandle keys is
+    /// a chandle, whether the query is written with parentheses or without
+    /// (7.12.4): it compares with another chandle, and is no integral
+    /// operand.
+    #[test]
+    fn locator_index_queries_of_chandle_keys_are_chandles() {
+        for query in ["item.index", "item.index()", "item.index(1)"] {
+            analyze(&format!(
+                "chandle a; int keyed[chandle]; chandle q[$];
+                 initial q = keyed.find_index() with ({query} == a);"
+            ))
+            .unwrap_or_else(|error| panic!("{query}: {error}"));
+            let error = analyze(&format!(
+                "chandle a; int keyed[chandle]; chandle q[$];
+                 initial q = keyed.find_index() with ({query} + 1 != 0);"
+            ))
+            .unwrap_err();
+            assert!(
+                matches!(error, AnalyzerError::IllegalChandleUse { .. }),
+                "{query}: {error:?}"
+            );
+        }
+    }
+
+    /// A chandle member of a structure element a locator's iterator names,
+    /// a chandle of an interface instance named by its path, and the result
+    /// of a method called without parentheses are chandles (6.14, 7.12.1,
+    /// 25.5, 13.5.5): they compare with null, and are no integral operands.
+    /// A chandle through a virtual interface is checked where virtual
+    /// interfaces bind (`virtual_interfaces.rs` of the simulator's tests).
+    #[test]
+    fn members_paths_and_parenless_calls_are_chandles() {
+        let structs = "typedef struct { chandle h; int x; } S; S q[$], r[$];";
+        let source = "class Source; function chandle get(); return null; endfunction endclass
+                      Source s; int n;";
+        for (accepted, rejected) in [
+            (
+                format!("{structs} initial r = q.find with (item.h == null);"),
+                format!("{structs} initial r = q.find with (item.h + 1 != 0);"),
+            ),
+            (
+                "Bus bus(); int n; initial n = bus.h == null ? 1 : 0;".to_owned(),
+                "Bus bus(); int n; initial n = bus.h + 1 != 0 ? 1 : 0;".to_owned(),
+            ),
+            (
+                format!("{source} initial n = s.get == null ? 1 : 0;"),
+                format!("{source} initial n = s.get + 1 != 0 ? 1 : 0;"),
+            ),
+        ] {
+            let module = |body: &str| {
+                format!("interface Bus; chandle h; endinterface module Top; {body} endmodule")
+            };
+            analyze_source(&module(&accepted), Path::new("chandle.sv"))
+                .unwrap_or_else(|error| panic!("{accepted}: {error}"));
+            let error = analyze_source(&module(&rejected), Path::new("chandle.sv")).unwrap_err();
+            assert!(
+                matches!(error, AnalyzerError::IllegalChandleUse { .. }),
+                "{rejected}: {error:?}"
+            );
+        }
     }
 
     /// Nested conditionals are classified in time linear in their depth.
