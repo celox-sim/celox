@@ -152,7 +152,7 @@ pub(super) fn analyze_module(
     let overrides = bindings.values;
     let interface_ports = plan.map(|plan| plan.ports.as_slice()).unwrap_or_default();
     let mut view_ports = port_owners::Selection::authored(tree)?;
-    remove_interface_ports(&mut view_ports, interface_ports, tree)?;
+    remove_interface_ports(&mut view_ports, interface_ports)?;
     let supplied = overrides;
     let overrides = overrides
         .iter()
@@ -299,12 +299,7 @@ fn binding_declaration_view<'a>(
                 Ok(true)
             }
         })?;
-        let unit = tree.root_unit()?;
-        let native_ports = port_owners::scope(Some(&selected), tree)?
-            .into_iter()
-            .filter(|port| {
-                port.tokens.start >= unit.header.start && port.tokens.end <= unit.header.end
-            });
+        let native_ports = selected.header_ports()?;
         let mut inherited_deferred = false;
         let mut membership = Vec::new();
         for native in native_ports {
@@ -622,12 +617,10 @@ fn binding_names_with_prefix(
 fn remove_interface_ports(
     selected: &mut port_owners::Selection<'_>,
     ports: &[interfaces::NativePortPlan],
-    tree: &SyntaxTree,
 ) -> Converted<()> {
-    let unit = tree.root_unit()?;
-    let membership = port_owners::scope(Some(selected), tree)?
+    let membership = selected
+        .header_ports()?
         .into_iter()
-        .filter(|port| port.tokens.start >= unit.header.start && port.tokens.end <= unit.header.end)
         .map(|native| {
             let name = match &native.kind {
                 celox_sv_syntax::PortKind::Named(name)
