@@ -449,6 +449,15 @@ Where IEEE 1800-2023 leaves a choice to the implementation, or declares an
 order unspecified or nondeterministic, Celox chooses as follows.
 Portable code must not depend on these choices.
 
+### Constant widths {#constant-widths}
+
+IEEE 1800-2023 lets an implementation limit the width of a vector to no
+less than 65536 bits (6.9.1, 7.4.1). A constant value, such as a parameter,
+the concatenation that gives it or a part-select of it, may have up to
+1048576 bits. A replication, a constant built bit by bit, and a value inside
+a constant function call may have up to 65536 bits. A wider constant is
+rejected before it is built.
+
 ### Event scheduling {#timing-semantics}
 
 Clause 4.7 permits either order in the cases below; Celox is deterministic:

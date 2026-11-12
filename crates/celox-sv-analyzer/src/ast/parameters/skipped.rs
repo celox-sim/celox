@@ -676,7 +676,7 @@ pub(in crate::ast) fn literal_widths(
                         .replace('_', "")
                         .parse::<usize>()
                         .map_err(|_| unsupported("parameter literal width"))?;
-                    if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+                    if width > constant_folding::MAX_CONSTANT_VALUE_BITS {
                         if shape {
                             validate_parameter_materialization_width(Some(width))?;
                         }
@@ -818,7 +818,7 @@ pub(in crate::ast) fn literal_widths(
             &|name| dimensions::parameter_type_from_const_env(&dims.const_env, name),
             true,
         )
-        && ty.width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
+        && ty.width <= constant_folding::MAX_CONSTANT_VALUE_BITS
         && let Some(value) = eval_ast_const_expr(&tree.functions, &proof, &dims.const_env)
     {
         for id in visited {
@@ -891,7 +891,7 @@ fn proof(
             Job::Enter(id) => match &native.expression(id).kind {
                 ExprKind::Literal(text) => values.push(
                     if typecheck::integral_literal_type_metadata(text).is_some_and(|(width, _)| {
-                        width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
+                        width <= constant_folding::MAX_CONSTANT_VALUE_BITS
                     }) {
                         Expr::Literal(text.clone())
                     } else {
@@ -908,7 +908,7 @@ fn proof(
                             .get(&name)
                             .filter(|value| {
                                 expr_static_width(tree, value, dims).is_some_and(|width| {
-                                    width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
+                                    width <= constant_folding::MAX_CONSTANT_VALUE_BITS
                                 })
                             })
                             .cloned()
@@ -943,7 +943,7 @@ fn proof(
                                 .get(&name)
                                 .and_then(|value| expr_static_width(tree, value, dims))
                                 .is_some_and(|width| {
-                                    width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
+                                    width <= constant_folding::MAX_CONSTANT_VALUE_BITS
                                 })
                         });
                     values.push(if safe {

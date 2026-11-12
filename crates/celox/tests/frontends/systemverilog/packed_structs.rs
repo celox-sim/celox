@@ -439,3 +439,53 @@ endmodule"#;
         );
     }
 }
+
+/// A packed parameter may be wider than 65536 bits, such as BlackParrot's
+/// 344064-bit configuration table, given by a concatenation of fewer bits
+/// (IEEE 1800-2023 6.9.1, 10.7); its elements and part-selects are
+/// constants.
+#[test]
+fn packed_parameters_wider_than_65536_bits_are_constants() {
+    let source = r#"`timescale 1ns/1ns
+package cfg_pkg;
+  localparam max_cfgs = 5376;
+  typedef struct packed { int a; int b; } cfg_s;
+  parameter cfg_s [max_cfgs-1:0] all_cfgs_gp =
+    {64'h0000_001f_0000_0020, 64'h0000_0015_0000_0016, 64'h0000_000b_0000_000c};
+endpackage
+module top;
+  import cfg_pkg::*;
+  localparam logic [63:0] part_lp = all_cfgs_gp[1:1];
+  localparam logic [63:0] idx_lp  = all_cfgs_gp[2 +: 1];
+  localparam logic [63:0] qual_lp = cfg_pkg::all_cfgs_gp[1];
+  localparam logic [63:0] top_lp  = cfg_pkg::all_cfgs_gp[max_cfgs-1];
+  initial #1 $display("bits=%0d e0=%h e3=%h part=%h idx=%h qual=%h top=%h", $bits(all_cfgs_gp),
+                      all_cfgs_gp[0], all_cfgs_gp[3], part_lp, idx_lp, qual_lp, top_lp);
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("wide_table.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "bits=344064 e0=0000000b0000000c e3=0000000000000000 part=0000001500000016 \
+              idx=0000001f00000020 qual=0000001500000016 top=0000000000000000"
+            ],
+            "four_state={four_state}"
+        );
+    }
+}

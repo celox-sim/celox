@@ -5,7 +5,16 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
+/// The widest constant that a construct builds bit by bit or element by
+/// element, such as a replication or a select node per bit.
 pub(super) const MAX_CONSTANT_CONCAT_BITS: usize = 65_536;
+
+/// The widest constant value, such as a parameter or the concatenation that
+/// gives one. IEEE 1800-2023 lets an implementation limit the width of a
+/// vector to no less than 65536 bits (6.9.1, 7.4.1); a value is held as one
+/// integer, so this limit is higher, but still rejects a runaway width
+/// before it is materialized.
+pub(crate) const MAX_CONSTANT_VALUE_BITS: usize = 1 << 20;
 
 pub(super) fn simplify_constant_mux_conditions(
     tree: &AnalysisContext<'_>,
@@ -286,7 +295,7 @@ fn eval_const_integral_expr_preserving_mask(
             let msb = eval_ast_const_expr(functions, msb, const_env)?;
             let lsb = eval_ast_const_expr(functions, lsb, const_env)?;
             let width = usize::try_from(msb.checked_sub(lsb)?.checked_add(1)?).ok()?;
-            if width > MAX_CONSTANT_CONCAT_BITS {
+            if width > MAX_CONSTANT_VALUE_BITS {
                 return None;
             }
             let operand = eval_const_integral_expr_preserving_mask(
@@ -477,7 +486,7 @@ fn concat_integral_literals(
     let mut mask = num_bigint::BigUint::default();
     for part in parts {
         width = width.checked_add(part.width)?;
-        if width > MAX_CONSTANT_CONCAT_BITS {
+        if width > MAX_CONSTANT_VALUE_BITS {
             return None;
         }
         value = (value << part.width) | part.value;

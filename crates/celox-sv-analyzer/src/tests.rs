@@ -1523,10 +1523,10 @@ fn preserves_overhanging_constant_parameter_part_selects() {
 #[test]
 fn bounds_constant_parameter_part_select_folding() {
     for selection in [
-        "W[65536:0]",
+        "W[1048576:0]",
         "W[1000000000:0]",
         "W[0 +: 1000000000]",
-        "W[1'bx +: 65537]",
+        "W[1'bx +: 1048577]",
         "W[1'bz -: 1000000000]",
         "W[1'bx +: 0]",
         "W[1'bx +: -1]",
@@ -1539,22 +1539,22 @@ fn bounds_constant_parameter_part_select_folding() {
             .expect_err("oversized selections must be rejected before allocating their bits");
         assert!(matches!(error, AnalyzerError::Unsupported(_)), "{error}");
     }
-    for selection in ["W[65535:0]", "W[1'bx +: 65536]"] {
+    for selection in ["W[1048575:0]", "W[1'bx +: 1048576]"] {
         let source = format!(
             "module Top; parameter logic [7:0] W = 0; \
             localparam N = {selection}; localparam BITS = $bits(N); endmodule"
         );
         let ir = analyze_source(&source, Path::new("maximum_parameter_select.sv")).unwrap();
         let parameters = ir.modules()[0].parameters();
-        assert_eq!(parameters[1].resolved_width(), Some(65_536));
-        assert_eq!(parameters[2].resolved_value(), Some(65_536));
+        assert_eq!(parameters[1].resolved_width(), Some(1_048_576));
+        assert_eq!(parameters[2].resolved_value(), Some(1_048_576));
     }
 }
 
 #[test]
 fn rejects_oversized_constant_parameter_operands_before_materialization() {
     for source in [
-        "module Top; parameter logic [65536:0] W = 0; localparam N = W[0:0]; endmodule",
+        "module Top; parameter logic [1048576:0] W = 0; localparam N = W[0:0]; endmodule",
         "module Top; parameter logic [1000000000:0] W = 0; localparam N = W[0:0]; endmodule",
         "module Top; parameter logic [1000000000:0] W = '1; localparam N = W[0:0]; endmodule",
         "module Top #(parameter logic [1000000000:0] W = 0, N = W[0:0]); endmodule",
@@ -1562,7 +1562,7 @@ fn rejects_oversized_constant_parameter_operands_before_materialization() {
          module Top; localparam N = p::W[0:0]; endmodule",
         "module Top; typedef logic [1000000000:0] wide_t; parameter wide_t W = 0; \
          localparam N = W[0:0]; endmodule",
-        "module Top; localparam W = 65537'd0; localparam N = W[0:0]; endmodule",
+        "module Top; localparam W = 1048577'd0; localparam N = W[0:0]; endmodule",
         "module Top; localparam W = 1000000000'd0; localparam N = W[0:0]; endmodule",
         "module Top; localparam W = 1000000000'bx; localparam N = W[0:0]; endmodule",
     ] {
@@ -1604,7 +1604,7 @@ fn permits_wide_unevaluated_constant_parameter_query_operands() {
         );
     }
     let error = analyze_source(
-        "module Top(input logic [3:0] data); localparam N = $size(data, 65537'd1); endmodule",
+        "module Top(input logic [3:0] data); localparam N = $size(data, 1048577'd1); endmodule",
         Path::new("wide_query_dimension.sv"),
     )
     .expect_err("the evaluated dimension argument must still have a bounded value");
@@ -1655,7 +1655,7 @@ fn preserves_unknown_constant_parameter_indexed_part_select_bases() {
 
 #[test]
 fn bounds_evaluated_constant_parameter_query_subexpressions() {
-    for literal_width in [65_537, 1_000_000_000] {
+    for literal_width in [1_048_577, 1_000_000_000] {
         for query in [
             format!("$bits(W[0 +: {literal_width}'d1])"),
             format!("$bits(W[{literal_width}'d0:0])"),

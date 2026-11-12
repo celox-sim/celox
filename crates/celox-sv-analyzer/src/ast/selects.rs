@@ -1204,7 +1204,7 @@ fn unknown_indexed_range_literal(
     let width = eval_ast_const_expr(functions, stride, &dimensions.const_env)
         .and_then(|stride| width.checked_mul(stride))
         .and_then(|width| usize::try_from(width).ok())
-        .filter(|width| *width > 0 && *width <= constant_folding::MAX_CONSTANT_CONCAT_BITS)
+        .filter(|width| *width > 0 && *width <= constant_folding::MAX_CONSTANT_VALUE_BITS)
         .ok_or_else(|| unsupported("constant indexed part-select materialization width"))?;
     // IEEE 1800-2023 11.5.1: an X/Z part-select base reads as X,
     // including for two-state sources. Part-select results are unsigned.
