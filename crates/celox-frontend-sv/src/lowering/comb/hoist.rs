@@ -159,10 +159,18 @@ impl Comb<'_, '_> {
             return Ok(lvalue.clone());
         }
         let mut lvalue = lvalue.clone();
-        if let sv::ir::LValue::Select { msb, lsb, .. } = &mut lvalue {
+        if let sv::ir::LValue::Select {
+            msb, lsb, window, ..
+        } = &mut lvalue
+        {
             let mut calls = Vec::new();
             *lsb = self.hoist_const(store, frames, lsb, &mut calls)?;
             *msb = self.hoist_const(store, frames, msb, &mut calls)?;
+            // The window's position names the same element, from the same
+            // call results.
+            if let Some(at) = window.as_mut().and_then(|window| window.at.as_mut()) {
+                **at = self.hoist_const(store, frames, at, &mut calls)?;
+            }
         }
         Ok(lvalue)
     }
@@ -176,12 +184,18 @@ impl Comb<'_, '_> {
         frames: &[Frame],
         mut lvalue: sv::ir::LValue,
     ) -> Result<sv::ir::LValue, sv::AnalyzerError> {
-        let sv::ir::LValue::Select { msb, lsb, .. } = &mut lvalue else {
+        let sv::ir::LValue::Select {
+            msb, lsb, window, ..
+        } = &mut lvalue
+        else {
             return Ok(lvalue);
         };
         let mut copies = HashMap::default();
         *lsb = self.freeze_const(store, frames, lsb, &mut copies)?;
         *msb = self.freeze_const(store, frames, msb, &mut copies)?;
+        if let Some(at) = window.as_mut().and_then(|window| window.at.as_mut()) {
+            **at = self.freeze_const(store, frames, at, &mut copies)?;
+        }
         Ok(lvalue)
     }
 
@@ -314,6 +328,38 @@ impl Comb<'_, '_> {
         Ok(frozen)
     }
 
+    /// Hoist the calls of a select and of the selects it applies to, the
+    /// inner ones first, with one call cache: a read within an element at a
+    /// run-time index (`mem[f()][j +: 4]`) repeats the element's position in
+    /// the bounds of both selects, and its calls run once.
+    fn hoist_select(
+        &mut self,
+        store: &mut Store,
+        frames: &[Frame],
+        select: &sv::ir::Expr,
+        calls: &mut Vec<(sv::ir::ConstExpr, sv::ir::ConstExpr)>,
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::Expr;
+        let Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } = select
+        else {
+            return self.hoist(store, frames, select);
+        };
+        let expr = self.hoist_select(store, frames, expr, calls)?;
+        let lsb = self.hoist_const(store, frames, lsb, calls)?;
+        let msb = self.hoist_const(store, frames, msb, calls)?;
+        Ok(Expr::Select {
+            expr: Box::new(expr),
+            msb,
+            lsb,
+            signed: *signed,
+        })
+    }
+
     /// Execute the user subroutine calls of an expression, left to right, and
     /// replace each by a hidden variable holding its result. Calls in an
     /// operand that short-circuit evaluation may skip run only when it is
@@ -429,23 +475,7 @@ impl Comb<'_, '_> {
                     else_expr: Box::new(else_expr),
                 }
             }
-            Expr::Select {
-                expr,
-                msb,
-                lsb,
-                signed,
-            } => {
-                let expr = self.hoist(store, frames, expr)?;
-                let mut calls = Vec::new();
-                let lsb = self.hoist_const(store, frames, lsb, &mut calls)?;
-                let msb = self.hoist_const(store, frames, msb, &mut calls)?;
-                Expr::Select {
-                    expr: Box::new(expr),
-                    msb,
-                    lsb,
-                    signed: *signed,
-                }
-            }
+            Expr::Select { .. } => self.hoist_select(store, frames, expr, &mut Vec::new())?,
             Expr::Concat(parts) => Expr::Concat(
                 parts
                     .iter()

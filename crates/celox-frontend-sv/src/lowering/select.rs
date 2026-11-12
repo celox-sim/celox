@@ -12,6 +12,21 @@ pub(super) struct DynamicPackedWrite {
     /// For a run-time select inside a constant element of an array, the
     /// bits of that element: only they are written.
     pub(super) window: Option<BitAccess>,
+    /// For a select inside an array element at a run-time index, the bits
+    /// it stays within: only they are written.
+    pub(super) moving: Option<MovingWindow>,
+}
+
+/// The bits `lsb..lsb + width` above run-time position `at` of a variable: a
+/// member or the bits of an array element at a run-time index (see
+/// [`sv::ir::SelectWindow`]). Past the variable for an element outside the
+/// array, so that no bit of it is written.
+pub(super) struct MovingWindow {
+    pub(super) at: sv::ir::Expr,
+    /// `at` as the bit offset of an element of an unpacked array.
+    pub(super) element: sv::ir::ConstExpr,
+    pub(super) lsb: usize,
+    pub(super) width: usize,
 }
 
 /// Recover a constant outer element for a checked dynamic bit select of a
@@ -153,6 +168,19 @@ pub(super) fn dynamic_packed_write(
     };
     let id = *name_to_id.get(name)?;
     let variable = variables.get(&id)?;
+    let moving = match member {
+        Some(sv::ir::SelectWindow {
+            lsb,
+            msb,
+            at: Some(at),
+        }) => Some(MovingWindow {
+            at: expr_from_const_expr(at)?,
+            element: (**at).clone(),
+            lsb: *lsb as usize,
+            width: (msb.checked_sub(*lsb)? as usize).checked_add(1)?,
+        }),
+        _ => None,
+    };
     // Callers try the element lowering of an array first.
     let position = runtime_select_position(
         name,
@@ -164,9 +192,20 @@ pub(super) fn dynamic_packed_write(
         parameter_types,
         true,
         false,
+        moving.is_some(),
     )?;
+    if moving.is_some() {
+        return (position.width <= variable.width).then_some(DynamicPackedWrite {
+            select_width: position.width,
+            up: position.up,
+            down: position.down,
+            window: None,
+            moving,
+        });
+    }
     // A select of a structure member stays in the member's bits.
     let window = member
+        .as_ref()
         .map(|member| BitAccess::new(member.lsb as usize, member.msb as usize))
         .or_else(|| {
             (!variable.is_unpacked_struct)
@@ -187,6 +226,7 @@ pub(super) fn dynamic_packed_write(
         up: position.up,
         down: position.down,
         window,
+        moving: None,
     })
 }
 
@@ -380,7 +420,7 @@ pub(super) fn lower_dynamic_array_selection_slt<A: std::hash::Hash + Eq + Clone>
 /// footprint from its access range: a run-time index may reach any element.
 /// Lowering composes the outer slice into the indexed load, so the selected
 /// element is still loaded directly.
-fn dynamic_array_input_slt<A: std::hash::Hash + Eq + Clone>(
+pub(super) fn dynamic_array_input_slt<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
     variable: A,
     signed: bool,
@@ -481,6 +521,42 @@ pub(super) fn keep_element_window(
     };
     if constant(original_msb).is_some() && constant(original_lsb).is_some() {
         return folded;
+    }
+    // A window at a run-time position: the folded select is kept when its
+    // positions are the window's position plus constants within it, the
+    // select of an element at a run-time index that the element lowering
+    // keeps within the element; otherwise the run-time form, which stays
+    // within the window.
+    if let sv::ir::LValue::Select {
+        window:
+            Some(sv::ir::SelectWindow {
+                lsb: window_lsb,
+                msb: window_msb,
+                at: Some(at),
+            }),
+        ..
+    } = original
+    {
+        let sv::ir::LValue::Select { msb, lsb, .. } = &folded else {
+            return original.clone();
+        };
+        let split = |expr: &sv::ir::ConstExpr| {
+            split_dynamic_array_offset(expr, constants, parameter_types)
+                .map(|(base, offset)| (base.clone(), offset))
+        };
+        let (at_base, at_offset) = split(at).unwrap_or_else(|| ((**at).clone(), 0));
+        let within = |position: &sv::ir::ConstExpr| {
+            split(position).is_some_and(|(base, offset)| {
+                base == at_base
+                    && (i128::from(*window_lsb)..=i128::from(*window_msb))
+                        .contains(&(offset - at_offset))
+            })
+        };
+        return if within(msb) && within(lsb) {
+            folded
+        } else {
+            original.clone()
+        };
     }
     let (Some(msb), Some(lsb)) = (constant(msb), constant(lsb)) else {
         return folded;
@@ -675,6 +751,7 @@ fn runtime_select_position(
     parameter_types: &HashMap<String, (usize, bool)>,
     flat_arrays: bool,
     element_window: bool,
+    confined: bool,
 ) -> Option<RuntimePosition> {
     let mut window = None;
     let mut whole_array = false;
@@ -710,9 +787,11 @@ fn runtime_select_position(
                     parameter_types,
                 )
             });
-            // A single element spans the whole array.
-            whole_array =
-                element.is_none() && unpacked_element_width(variable) != Some(variable.width);
+            // A single element spans the whole array. A select confined to
+            // a window at a run-time position reaches no other element.
+            whole_array = !confined
+                && element.is_none()
+                && unpacked_element_width(variable) != Some(variable.width);
             window = element.filter(|_| element_window);
             match window {
                 Some(window) => (
@@ -847,6 +926,7 @@ pub(super) fn runtime_select_as_shift(
             parameter_types,
             flat_arrays,
             flat_arrays,
+            false,
         )?
     } else {
         let width = sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)?;
