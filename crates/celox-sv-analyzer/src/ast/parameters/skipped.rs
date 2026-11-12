@@ -1132,7 +1132,16 @@ pub(in crate::ast) fn validate_scope(
         validate_operators(tree, root, native)?;
         if literal_widths(root, scope, session, dimensions)?.is_some() {
             validate(root, scope, session, dimensions, &unavailable, true)?;
-        } else if needs_selected(tree, root, native) {
+        } else if !matches!(
+            native
+                .expression(expression_binding::ungroup(root, native))
+                .kind,
+            ExprKind::Pattern { .. }
+        ) && needs_selected(tree, root, native)
+        {
+            // An assignment pattern takes its shape from the declared type
+            // (IEEE 1800-2023 10.9): it is checked where it is bound to it,
+            // casts of its items included.
             let context = dimensions::query_context_for_operand(root, scope, session, dimensions)?;
             selects::selected_parameter_initializer(root, scope, session, &context, None)?;
         }
