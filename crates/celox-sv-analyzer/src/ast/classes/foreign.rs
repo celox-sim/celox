@@ -722,7 +722,12 @@ fn handed_over(
     let mut names = HashMap::default();
     for name in &declared {
         let local = declarations.get(name);
-        if local.is_some_and(|local| local.owned) {
+        // A static variable is one object of the scope, which the scope
+        // hands over as one of its variables, by its name (IEEE 1800-2023
+        // 6.21).
+        if local.is_some_and(|local| local.owned)
+            || subroutine.persistent_locals.contains(&name.to_string())
+        {
             continue;
         }
         let source = local.map_or(*name, |local| local.source_name.as_str());
@@ -798,7 +803,8 @@ mod tests {
             is_task: false,
             automatic: true,
             automatic_locals: Vec::new(),
-            persistent_locals: Vec::new(),
+            // A static local, a variable of the scope now, not a local.
+            persistent_locals: vec!["s%fedcba9876543210@3".into()],
             return_type: None,
             params: vec![SubroutineParamBase {
                 name: this.into(),
@@ -814,6 +820,7 @@ mod tests {
                 declare("\\v%foo@8"),
                 assign("v@8", "w@9"),
                 assign("\\v%foo@8", "v@8"),
+                assign("s%fedcba9876543210@3", "v@8"),
             ],
             sensitivity_body: Vec::new(),
         };
@@ -837,6 +844,9 @@ mod tests {
         // Not a variable of the method: the name it reads stays.
         assert_eq!(handed.body[2], assign(&v, "w@9"));
         assert_eq!(handed.body[3], assign(&escaped, &v));
+        // The static keeps its name, which the scope hands over.
+        assert_eq!(handed.body[4], assign("s%fedcba9876543210@3", &v));
+        assert_eq!(handed.persistent_locals, ["s%fedcba9876543210@3"]);
         // The formal named by its method keeps its name.
         assert_eq!(handed.params[0].name, this);
         // The declarations go with it, named by it now; `w@9`, which it
