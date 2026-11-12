@@ -20,7 +20,12 @@
 //! frontend gives a net that nothing else drives the driver `E ? V : 'z`
 //! (see [`crate::ir::ForceControl::stored`]). A released variable keeps its
 //! value until its next assignment; a released net, and a continuously
-//! assigned variable, take the value of their drivers again. A target that a force
+//! assigned variable, take the value of their drivers again. A target that
+//! an `always_comb`, `always_latch` or `always @*` procedure assigns keeps
+//! the forced value until the procedure executes again (9.2.2.2): the
+//! release sets its hold `H |= E`, the writes of the target store `V` while
+//! `E | H` is set, and one process for each such procedure waits on what
+//! the procedure waits on and clears the holds of its targets. A target that a force
 //! with a varying expression has, has a select variable (zero, or the
 //! number of the active statement) and one process that keeps `V` and `t`
 //! on the expression of the active statement (4.9.2):
@@ -44,6 +49,9 @@ struct Controls {
     select: Option<(String, usize)>,
     /// Whether a force stores its value into the target.
     stored: bool,
+    /// The hold of a target that procedures of the settle assign (see
+    /// [`ForceRole::Hold`]).
+    hold: Option<String>,
 }
 
 /// A force of a varying expression.
@@ -146,6 +154,18 @@ impl Lowering<'_> {
                     // A released net, and a continuously assigned variable,
                     // take the value of their drivers at once (10.6.2):
                     // the writes of the drivers depend on the enable.
+                    // A target a procedure of the settle assigns keeps the
+                    // forced value until the procedure executes again.
+                    if let Some(hold) = &controls.hold {
+                        lowered.push(assign(
+                            hold,
+                            Expr::Binary {
+                                left: Box::new(Expr::Ident(hold.clone())),
+                                op: BinaryOp::BitOr,
+                                right: Box::new(Expr::Ident(controls.enable.clone())),
+                            },
+                        ));
+                    }
                     lowered.push(assign(&controls.enable, literal("1'b0")));
                 }
                 _ => {
@@ -240,9 +260,18 @@ fn writes(stmts: &[Stmt], name: &str) -> bool {
     found
 }
 
+/// What the lowering does for a target.
+struct Target {
+    /// Whether a force stores its value into the target (see
+    /// [`crate::ir::ForceControl::stored`]).
+    stored: bool,
+    /// The `always_comb`, `always_latch` and `always @*` procedures that
+    /// assign the target, by position.
+    holders: Vec<usize>,
+}
+
 /// Reject target `name` of a `force` or `release` that this lowering does
-/// not support, and tell whether a force stores its value into it (see
-/// [`crate::ir::ForceControl::stored`]).
+/// not support, and tell what the lowering does for it.
 fn check_target(
     name: &str,
     dimensions: &PackedDimensions,
@@ -251,7 +280,7 @@ fn check_target(
     comb: &[CombProcess],
     ff: &[FfProcess],
     initial: &[InitialProcess],
-) -> Converted<bool> {
+) -> Converted<Target> {
     let port = ports.iter().find(|port| port.name() == name);
     let net = if let Some(signal) = signals.iter().find(|signal| signal.name() == name) {
         if signal.hierarchical().is_some() {
@@ -288,35 +317,20 @@ fn check_target(
         )));
     }
     // A target such a procedure writes keeps its forced value after the
-    // release until the procedure executes again (9.2.2.2), which is not
-    // supported yet.
-    if let Some(process) = comb.iter().find(|process| {
-        process.kind != CombProcessKind::ContinuousAssign
-            && (process
-                .assignments
-                .iter()
-                .any(|assignment| assignment.lhs.name() == name)
-                || writes(&process.body, name))
-    }) {
-        let procedure = match process.kind {
-            CombProcessKind::AlwaysLatch => "`always_latch`",
-            CombProcessKind::AlwaysStar => "`always @*`",
-            _ => "`always_comb`",
-        };
-        return Err(unsupported(format!(
-            "force or release of `{name}`, which an {procedure} procedure assigns"
-        )));
-    }
-    // A delayed continuous assignment drives its target from a process,
-    // whose writes do not depend on the force.
-    if initial
+    // release until the procedure executes again (9.2.2.2).
+    let holders: Vec<usize> = comb
         .iter()
-        .any(|process| process.synthetic && writes(&process.body, name))
-    {
-        return Err(unsupported(format!(
-            "force or release of `{name}`, which a delayed continuous assignment or a net delay drives"
-        )));
-    }
+        .enumerate()
+        .filter(|(_, process)| {
+            process.kind != CombProcessKind::ContinuousAssign
+                && (process
+                    .assignments
+                    .iter()
+                    .any(|assignment| assignment.lhs.name() == name)
+                    || writes(&process.body, name))
+        })
+        .map(|(index, _)| index)
+        .collect();
     // A delayed nonblocking assignment lands when its delay ends, which
     // the force does not control.
     let delayed = |stmts: &[Stmt]| {
@@ -339,15 +353,44 @@ fn check_target(
     }
     let input = port
         .is_some_and(|port| matches!(port.direction, PortDirection::Input | PortDirection::Inout));
-    let assigned = comb.iter().any(|process| {
-        process.kind == CombProcessKind::ContinuousAssign
-            && (process
-                .assignments
-                .iter()
-                .any(|assignment| assignment.lhs.name() == name)
-                || writes(&process.body, name))
-    });
-    Ok(input || (!net && !assigned))
+    // A procedure of the settle need not write the target when it runs,
+    // as a latch that is closed: a force stores into its targets, unless an
+    // `always_comb` assigns the whole target each time it runs, as a
+    // continuous assignment does (a store into storage the settle defines
+    // loses its edges on the native backend, #3755).
+    let assigned =
+        comb.iter().any(|process| {
+            let whole = |stmts: &[Stmt]| {
+                fn whole(stmts: &[Stmt], name: &str) -> bool {
+                    stmts.iter().any(|stmt| match stmt {
+                        Stmt::Assign {
+                            lhs: LValue::Ident(target),
+                            ..
+                        } => target == name,
+                        Stmt::Block { body, .. } => whole(body, name),
+                        _ => false,
+                    })
+                }
+                whole(stmts, name)
+            };
+            match process.kind {
+                CombProcessKind::ContinuousAssign => {
+                    process
+                        .assignments
+                        .iter()
+                        .any(|assignment| assignment.lhs.name() == name)
+                        || writes(&process.body, name)
+                }
+                CombProcessKind::AlwaysComb => process.assignments.iter().any(
+                    |assignment| matches!(&assignment.lhs, LValue::Ident(target) if target == name),
+                ) || whole(&process.body),
+                _ => false,
+            }
+        });
+    Ok(Target {
+        stored: input || (!net && !assigned),
+        holders,
+    })
 }
 
 /// A name for a hidden variable that no declaration of the module has.
@@ -409,8 +452,12 @@ pub(super) fn lower(
         return Ok(HashMap::default());
     }
     let mut controls: HashMap<String, Controls> = HashMap::default();
+    // The procedures of the settle that assign a target, with the holds of
+    // their targets.
+    let mut held: Vec<(usize, Vec<String>)> = Vec::new();
     for (serial, name) in names.into_iter().enumerate() {
-        let stored = check_target(&name, dimensions, ports, signals, comb, ff, initial)?;
+        let Target { stored, holders } =
+            check_target(&name, dimensions, ports, signals, comb, ff, initial)?;
         let target_type = signals
             .iter()
             .find(|signal| signal.name() == name)
@@ -447,6 +494,25 @@ pub(super) fn lower(
             signals.push(Signal::new(select.clone(), bit_type(32)));
             (select, 0)
         });
+        let hold = (!holders.is_empty()).then(|| {
+            let hold = fresh("%force_hold", serial, dimensions, signals);
+            signals.push(Signal::force_control(
+                hold.clone(),
+                bit_type(1),
+                ForceControl {
+                    target: name.clone(),
+                    role: ForceRole::Hold,
+                    stored,
+                },
+            ));
+            for holder in holders {
+                match held.iter_mut().find(|(process, _)| *process == holder) {
+                    Some((_, holds)) => holds.push(hold.clone()),
+                    None => held.push((holder, vec![hold.clone()])),
+                }
+            }
+            hold
+        });
         controls.insert(
             name,
             Controls {
@@ -454,6 +520,7 @@ pub(super) fn lower(
                 value,
                 select,
                 stored,
+                hold,
             },
         );
     }
@@ -517,6 +584,40 @@ pub(super) fn lower(
             creation_order,
             site,
             condition,
+            body: vec![Stmt::Loop {
+                kind: LoopKind::Forever,
+                init: Vec::new(),
+                condition: None,
+                step: Vec::new(),
+                body,
+            }],
+            kind: celox_design::ProcessKind::Regular,
+            validation_body: Vec::new(),
+            synthetic: true,
+            repeats: false,
+        });
+    }
+    // One process for each such procedure: it waits on what the procedure
+    // waits on, so it ends the holds when the procedure executes again.
+    for (holder, holds) in held {
+        let process = &comb[holder];
+        let mut body = vec![Stmt::WaitImplicit {
+            reads: process
+                .body
+                .iter()
+                .chain(&process.sensitivity_body)
+                .cloned()
+                .collect(),
+            always_comb: process.kind != CombProcessKind::AlwaysStar,
+        }];
+        body.extend(holds.iter().map(|hold| assign(hold, literal("1'b0"))));
+        initial.push(InitialProcess {
+            creation_order: process.creation_order,
+            site: process.process_site.clone().map(|mut site| {
+                site.construct = "release";
+                site
+            }),
+            condition: process.condition.clone(),
             body: vec![Stmt::Loop {
                 kind: LoopKind::Forever,
                 init: Vec::new(),

@@ -1052,7 +1052,7 @@ fn add_forced_net_drivers(
     let mut targets: Vec<_> = variables
         .values()
         .filter_map(|variable| variable.force_control)
-        .filter(|slot| slot.procedural && slot.enable && !slot.stored)
+        .filter(|slot| slot.procedural && slot.role == ForceSlotRole::Enable && !slot.stored)
         .map(|slot| slot.target)
         .collect();
     targets.sort_by_key(|target| target.0);
@@ -1129,17 +1129,18 @@ fn procedural_force_controls(
     variables: &HashMap<SourceVarId, SvVariable>,
     target: SourceVarId,
 ) -> Option<(SourceVarId, SourceVarId)> {
-    let control = |enable: bool| {
+    let control = |role: ForceSlotRole| {
         variables.iter().find_map(|(&id, variable)| {
             variable
                 .force_control
-                .is_some_and(|slot| {
-                    slot.procedural && slot.target == target && slot.enable == enable
-                })
+                .is_some_and(|slot| slot.procedural && slot.target == target && slot.role == role)
                 .then_some(id)
         })
     };
-    Some((control(true)?, control(false)?))
+    Some((
+        control(ForceSlotRole::Enable)?,
+        control(ForceSlotRole::Value)?,
+    ))
 }
 
 /// `value`, written to bits `access` of a variable, or the forced value of

@@ -90,7 +90,7 @@ impl Ff<'_, '_> {
             }
             self.m.warn(crate::FrontendWarningKind::InferredLatch, site);
         }
-        let dependencies =
+        let mut dependencies =
             super::super::comb::subtract_written_sensitivity(reads.clone(), &targets);
         let mut sources: Vec<_> = if always_comb {
             dependencies.clone()
@@ -99,6 +99,23 @@ impl Ff<'_, '_> {
         }
         .into_iter()
         .collect();
+        // A force or a release of a target writes it again (IEEE 1800-2023
+        // 10.6.2): the unit runs when the force controls change.
+        for target in &targets {
+            if !self.m.procedurally_forced.contains(&target.id) {
+                continue;
+            }
+            let Some((enabled, _)) = self.m.force_controls(target.id) else {
+                continue;
+            };
+            let controls = [Some(enabled), self.m.force_holds.get(&target.id).copied()];
+            for control in controls.into_iter().flatten() {
+                let atom = VarAtomBase::new(control, 0, 0);
+                if dependencies.insert(atom) {
+                    sources.push(atom);
+                }
+            }
+        }
         sources.sort_by_key(|atom| (atom.id.0, atom.access.lsb, atom.access.msb));
         let (initialized, _) = self.m.temp("comb_initialized", 1, false, false);
         let init = self.b.alloc_bit(1, false);

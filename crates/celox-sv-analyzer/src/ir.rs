@@ -602,6 +602,11 @@ pub enum ForceRole {
     Enable,
     /// The forced value.
     Value,
+    /// Whether a released target that an `always_comb`, `always_latch` or
+    /// `always @*` procedure assigns still holds the forced value: until
+    /// the procedure executes again (IEEE 1800-2023 10.6.2, 9.2.2.2), its
+    /// writes store the forced value as while forced.
+    Hold,
 }
 
 /// The force control a hidden variable is (see [`ForceRole`]).
