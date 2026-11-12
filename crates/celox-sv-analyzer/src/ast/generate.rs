@@ -1328,15 +1328,38 @@ impl<'a> Elaborator<'a, '_> {
                 }
             })
             .collect::<Vec<_>>();
-        if !type_names.is_empty() {
+        // Enumeration types this block declares, by typedef or inline in a
+        // data declaration: their members are constants of this block
+        // (IEEE 1800-2023 6.19, 27.5) even when it declares no typedef.
+        let enum_types = children
+            .iter()
+            .filter_map(|id| {
+                use celox_sv_syntax::{BodyItemKind, DataDeclaration, TypeAliasTarget};
+                let native = self.tree.declarations();
+                let ty = match native.body_item(*id).kind {
+                    BodyItemKind::TypeAlias(alias) => match native.type_alias(alias).target {
+                        TypeAliasTarget::DataType(ty) => ty,
+                        _ => return None,
+                    },
+                    BodyItemKind::Data(data) => match native.data_declaration(data) {
+                        DataDeclaration::Variables(declaration)
+                        | DataDeclaration::Constructed(declaration) => declaration.data_type,
+                        DataDeclaration::Unconverted(_) => return None,
+                    },
+                    _ => return None,
+                };
+                matches!(
+                    native.data_type(ty).kind,
+                    celox_sv_syntax::DataTypeKind::Enum { .. }
+                )
+                .then_some(ty)
+            })
+            .collect::<Vec<_>>();
+        if !type_names.is_empty() || !enum_types.is_empty() {
             let mut enum_names = HashSet::default();
-            for id in children {
-                if let celox_sv_syntax::BodyItemKind::TypeAlias(alias) =
-                    self.tree.declarations().body_item(*id).kind
-                    && let celox_sv_syntax::TypeAliasTarget::DataType(ty) =
-                        self.tree.declarations().type_alias(alias).target
-                    && let celox_sv_syntax::DataTypeKind::Enum { items, .. } =
-                        &self.tree.declarations().data_type(ty).kind
+            for ty in &enum_types {
+                if let celox_sv_syntax::DataTypeKind::Enum { items, .. } =
+                    &self.tree.declarations().data_type(*ty).kind
                 {
                     for item in items {
                         let name = instances::normalize_identifier(&item.name.spelling);
