@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { backendTestFilter } from "./ci-backend-tests.mjs";
+import { backendTestFilter, backendVtestExclusions } from "./ci-backend-tests.mjs";
 
 import { readWorkspace, rustTestScope } from "./ci-rust-scope.mjs";
 
@@ -283,20 +283,32 @@ if (
           ...classifyFiles(files, { releasePlease: !queue && process.env.RELEASE_PLEASE_PR === "true" }),
           heliodor_arm64: affectsHeliodorArm64(files),
         };
+  const scope = rustScopeOutputs(
+    process.env.GITHUB_EVENT_NAME === "pull_request" &&
+      !scheduledFull &&
+      affected.rust
+      ? files
+      : null,
+  );
   writeOutputs({
     queue,
     full_validation: scheduledFull,
     fast_queue: queue && !scheduledFull,
     rust_backend_filter: backendTestFilter(files, { full: scheduledFull }),
     ...affected,
-    ...rustScopeOutputs(
-      process.env.GITHUB_EVENT_NAME === "pull_request" &&
-        !scheduledFull &&
-        affected.rust
-        ? files
-        : null,
-    ),
+    ...scope,
+    rust_vtest: vtestScope(scope.rust_vtest, backendVtestExclusions(files, { full: scheduledFull })),
   });
+}
+
+/**
+ * The `--scope` of scripts/run-vtest.py: the suite cases of a Rust scope
+ * (`rust_vtest`, empty for none) without the backends the change leaves out.
+ */
+export function vtestScope(selection, excluded) {
+  if (!selection) return "";
+  const scope = JSON.parse(selection);
+  return JSON.stringify(excluded.length ? { ...scope, exclude_backends: excluded } : scope);
 }
 
 // Lydite core tests run independently; bridge CI is disabled.
@@ -341,6 +353,7 @@ export function rustScopeOutputs(files) {
       rust_vpi_e2e: true,
       rust_features: "",
       rust_filter: "",
+      rust_vtest: "{}",
       rust_libraries: "",
       rust_library_features: "",
     };
@@ -362,6 +375,7 @@ export function rustScopeOutputs(files) {
       /^(?:\.\/)?(?:conformance\/sv-tests\/|crates\/celox\/examples\/sv_tests\.rs$)/.test(path)),
     rust_features: scope.features.join(","),
     rust_filter: scope.filter,
+    rust_vtest: scope.vtest ? JSON.stringify(scope.vtest) : "",
     rust_libraries: scope.libraries.join(" "),
     rust_library_features: scope.libraryFeatures.join(","),
   };

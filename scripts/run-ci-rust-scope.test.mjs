@@ -46,15 +46,6 @@ test("runtime loading is enabled only for Celox test builds, without changing sc
   assert.deepEqual(builds, original);
 });
 
-test("Celox CI tests reject missing executor setup before launching Cargo", () => {
-  const result = spawnSync(process.execPath, ["scripts/run-ci-rust-scope.mjs", "test"], {
-    env: { ...process.env, BUILDS: JSON.stringify([builds[1]]), FILTER: filter,
-      CELOX_VTEST_RUNNER: "" }, encoding: "utf8",
-  });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /require the prepared vtest executor/);
-});
-
 test("the runner stops and propagates a failed scoped Cargo invocation", () => {
   const directory = mkdtempSync(join(tmpdir(), "celox-cargo-failure-"));
   try {

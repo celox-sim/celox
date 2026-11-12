@@ -1,7 +1,6 @@
 use crate::*;
 
 sv_backends! {
-    fn ferror_success_clears_description(sim) { @case "file_io::ferror_success_clears_description"; }
 
     fn ferror_tracks_status_and_clears_outputs_on_success(sim) {
         @setup {

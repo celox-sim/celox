@@ -1,7 +1,6 @@
 use super::*;
 
 sv_backends! {
-    fn zero_count_preserves_memory(sim) { @case "binary_file_io::zero_count_preserves_memory"; }
 
     fn packed_partial_reads_and_integer_descriptor_conversion(sim) {
         @setup {

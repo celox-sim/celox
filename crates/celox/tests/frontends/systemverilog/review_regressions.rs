@@ -93,12 +93,6 @@ fn rejects_self_reads_hidden_in_comb_function_calls() {
     );
 }
 
-sv_backends! {
-    fn nested_block_local_declarations_shadow_ports(sim) {
-        @case "synthesizable::nested_block_locals_shadow_ports";
-    }
-}
-
 #[test]
 fn substitutes_prior_comb_values_into_function_bodies() {
     let source = r#"
@@ -7700,92 +7694,6 @@ fn coerces_function_returns_in_procedural_lvalue_indices() {
     assert_eq!(sim.get(x), 2u8.into());
 }
 
-sv_backends! {
-    fn preserves_use_site_dimensions_in_parameter_alias_types(sim) {
-        @case "review_regressions::preserves_use_site_dimensions_in_parameter_alias_types";
-    }
-
-    fn body_parameters_are_local_with_a_parameter_port_list(sim) {
-        @case "review_regressions::body_parameters_are_local_with_a_parameter_port_list";
-    }
-
-    fn preserves_four_state_arithmetic_case_constants(sim) {
-        @case "review_regressions::preserves_four_state_arithmetic_case_constants";
-    }
-
-    fn preserves_four_state_shift_and_bit_select_constants(sim) {
-        @case "review_regressions::preserves_four_state_shift_and_bit_select_constants";
-    }
-
-    fn preserves_unsigned_128_bit_enum_arithmetic(sim) {
-        @case "review_regressions::preserves_unsigned_128_bit_enum_arithmetic";
-    }
-
-    fn preserves_four_state_reduction_case_constants(sim) {
-        @case "review_regressions::preserves_four_state_reduction_case_constants";
-    }
-
-    fn preserves_use_site_dimensions_in_function_alias_types(sim) {
-        @case "review_regressions::preserves_use_site_dimensions_in_function_alias_types";
-    }
-
-    fn preserves_four_state_relational_case_selectors(sim) {
-        @case "review_regressions::preserves_four_state_relational_case_selectors";
-    }
-
-    fn folds_compound_four_state_case_labels(sim) {
-        @case "review_regressions::folds_compound_four_state_case_labels";
-    }
-
-    fn preserves_four_state_equality_case_selectors(sim) {
-        @case "review_regressions::preserves_four_state_equality_case_selectors";
-    }
-
-    fn preserves_constant_case_selector_context(sim) {
-        @case "review_regressions::preserves_constant_case_selector_context";
-    }
-
-    fn preserves_size_cast_dimensions_in_declarations_and_selections(sim) {
-        @case "review_regressions::preserves_size_cast_dimensions_in_declarations_and_selections";
-    }
-
-    fn resolves_generate_local_alias_casts_for_all_processes(sim) {
-        @case "review_regressions::resolves_generate_local_alias_casts_for_all_processes";
-    }
-
-    fn covers_single_bit_bitwise_complementary_guards(sim) {
-        @case "review_regressions::covers_single_bit_bitwise_complementary_guards";
-    }
-
-    fn normalizes_function_parameter_cast_dimensions(sim) {
-        @case "review_regressions::normalizes_function_parameter_cast_dimensions";
-    }
-
-    fn lowers_parameter_casts_in_conditional_generate(sim) {
-        @case "review_regressions::lowers_parameter_casts_in_conditional_generate";
-    }
-
-    fn lowers_parameter_casts_in_loop_generate(sim) {
-        @case "review_regressions::lowers_parameter_casts_in_loop_generate";
-    }
-
-    fn default_pattern_fills_each_element_of_unpacked_subarrays(sim) {
-        @case "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays";
-    }
-
-    fn int_parameters_are_signed_in_comparisons_and_loop_bounds(sim) {
-        @case "review_regressions::int_parameters_are_signed_in_comparisons_and_loop_bounds";
-    }
-
-    fn run_time_for_condition_uses_the_relational_operand_context(sim) {
-        @case "review_regressions::run_time_for_condition_uses_the_relational_operand_context";
-    }
-
-    fn size_of_a_type_uses_the_dimension_argument(sim) {
-        @case "review_regressions::size_of_a_type_uses_the_dimension_argument";
-    }
-}
-
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn collapses_unknown_initializers_in_two_state_native_images() {
@@ -8909,35 +8817,6 @@ fn timed_task_edge_processes_of_several_instances_may_write_a_package_variable()
     .unwrap_or_else(|error| panic!("{error}"));
 }
 
-mod aggregate_regressions {
-    #[test]
-    fn wide_unpacked_ff_array_masks_interpreter() {
-        crate::suite::run_case(
-            "aggregate_regressions::wide_unpacked_ff_array_masks",
-            "interpreter",
-        );
-    }
-
-    sv_backends! {
-        fn wide_unpacked_ff_array_masks(sim) { @case "aggregate_regressions::wide_unpacked_ff_array_masks"; }
-    }
-    sv_backends! {
-        fn continuous_function_dynamic_scratch_write(sim) { @case "aggregate_regressions::continuous_function_dynamic_scratch_write"; }
-        fn masked_feed_forward_dependencies(sim) { @case "aggregate_regressions::masked_feed_forward_dependencies"; }
-        fn shared_memory_reads_pre_edge_values(sim) { @case "aggregate_regressions::shared_memory_reads_pre_edge_values"; }
-        fn coincident_disjoint_byte_writers(sim) { @case "aggregate_regressions::coincident_disjoint_byte_writers"; }
-        fn independent_clock_byte_writers(sim) { @case "aggregate_regressions::independent_clock_byte_writers"; }
-
-        fn continuous_nested_concatenated_targets(sim) { @case "aggregate_regressions::continuous_nested_concatenated_targets"; }
-        fn concatenated_runtime_index(sim) { @case "aggregate_regressions::concatenated_runtime_index"; }
-        fn concatenated_static_loop_initializer(sim) { @case "aggregate_regressions::concatenated_static_loop_initializer"; }
-        fn parameter_element_forwarding(sim) { @case "aggregate_regressions::parameter_element_forwarding"; }
-        fn parameter_runtime_element_bit(sim) { @case "aggregate_regressions::parameter_runtime_element_bit"; }
-        fn independent_clock_memory_writers(sim) { @case "aggregate_regressions::independent_clock_memory_writers"; }
-        fn wide_concatenated_procedural_targets(sim) { @case "aggregate_regressions::wide_concatenated_procedural_targets"; }
-    }
-}
-
 #[test]
 fn shared_ff_memories_keep_native_sparse_next_state() {
     use celox_design::{SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION};
@@ -9227,11 +9106,6 @@ fn exhaustive_case_preserves_fixed_unknown_selector_bits() {
     }
 }
 
-sv_backends! {
-    fn exhaustive_case_preserves_fixed_selector_bits(sim) { @case "review_regressions::exhaustive_case_preserves_fixed_selector_bits"; }
-    fn fixed_case_bits_preserve_unknown_input_fallback(sim) { @case "review_regressions::fixed_case_bits_preserve_unknown_input_fallback"; }
-}
-
 #[test]
 fn fixed_selector_bits_do_not_hide_incomplete_cases() {
     for source in [
@@ -9252,15 +9126,6 @@ fn rejects_hierarchical_unpacked_arrays_of_nonequivalent_elements() {
         "module Sub; byte b[2]; endmodule module Top; Sub u(); int a[2]; initial a = u.b; endmodule",
     );
     assert!(error.contains("is not assignment compatible"), "{error}");
-}
-
-sv_backends! {
-    fn blocking_write_preserves_extracted_snapshot(sim) {
-        @case "review_regressions::blocking_write_preserves_extracted_snapshot";
-    }
-    fn blocking_write_preserves_extracted_snapshot_four_state(sim) {
-        @case "review_regressions::blocking_write_preserves_extracted_snapshot_four_state";
-    }
 }
 
 // The complement of a parameter has the width of the parameter (IEEE

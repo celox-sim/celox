@@ -19,18 +19,6 @@ fn setup_and_trace(code: &str, top: &str) -> celox::CompilationTrace {
 
 all_backends! {
 
-fn test_ff_nonblocking(sim) {
-    @case "flip_flop::test_ff_nonblocking";
-}
-
-fn test_ff_statement_after_if_reset_keeps_source_order(sim) {
-    @case "flip_flop::test_ff_statement_after_if_reset_keeps_source_order";
-}
-
-fn test_ff_static_and_dynamic_writes_share_sparse_state(sim) {
-    @case "flip_flop::test_ff_static_and_dynamic_writes_share_sparse_state";
-}
-
 fn test_ff_runtime_display_and_assert_continue(sim) {
     @omit_veryl;
     @setup { let code = r#"
@@ -58,12 +46,6 @@ fn test_ff_runtime_display_and_assert_continue(sim) {
             celox::RuntimeEvent::Report(celox::Report::new(celox::Severity::Error, b"bad a=3".to_vec())),
         ],
     );
-}
-
-fn test_ff_assert_message_output_argument_is_eager(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_assert_message_output_argument_is_eager";
 }
 
 fn test_ff_assert_message_runtime_effect_is_eager(sim) {
@@ -1203,18 +1185,6 @@ fn test_ff_runtime_function_snapshots_nonlocal_read_before_later_write(sim) {
     assert_eq!(sim.get(q), 7u8.into());
 }
 
-fn test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write";
-}
-
-fn test_ff_runtime_function_snapshots_helper_input_before_callee_nonlocal_write(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_runtime_function_snapshots_helper_input_before_callee_nonlocal_write";
-}
-
 fn test_ff_outputless_nested_nonlocal_write_updates_later_event_argument(sim) {
     @omit_veryl;
     @omit_sv;
@@ -1254,54 +1224,6 @@ fn test_ff_outputless_nested_nonlocal_write_updates_later_event_argument(sim) {
             message: b"values=1,9".to_vec(),
         }],
     );
-}
-
-fn test_ff_statement_function_direct_nonlocal_assignment_is_observable(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_statement_function_direct_nonlocal_assignment_is_observable";
-}
-
-fn test_ff_skipped_conditional_nonlocal_write_preserves_prior_ff_assignment(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_skipped_conditional_nonlocal_write_preserves_prior_ff_assignment";
-}
-
-fn test_ff_nonlocal_write_precedes_aliased_formal_output_copyout(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_nonlocal_write_precedes_aliased_formal_output_copyout";
-}
-
-fn test_ff_outputless_wrapper_nested_copyout_to_nonlocal_is_observable(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_outputless_wrapper_nested_copyout_to_nonlocal_is_observable";
-}
-
-fn test_ff_outputless_wrapper_expression_copyout_to_nonlocal_is_observable(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_outputless_wrapper_expression_copyout_to_nonlocal_is_observable";
-}
-
-fn test_ff_outputless_wrapper_indexed_copyout_to_nonlocal_is_observable(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_outputless_wrapper_indexed_copyout_to_nonlocal_is_observable";
-}
-
-fn test_ff_outputless_wrapper_dynamic_indexed_copyout_to_nonlocal_is_observable(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_outputless_wrapper_dynamic_indexed_copyout_to_nonlocal_is_observable";
-}
-
-fn test_ff_outputless_wrapper_direct_dynamic_nonlocal_assignment_is_observable(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_outputless_wrapper_direct_dynamic_nonlocal_assignment_is_observable";
 }
 
 fn test_ff_pure_helper_nonlocal_read_is_snapshotted_before_runtime_write(sim) {
@@ -1346,12 +1268,6 @@ fn test_ff_pure_helper_nonlocal_read_is_snapshotted_before_runtime_write(sim) {
             message: b"captured=0".to_vec(),
         }],
     );
-}
-
-fn test_ff_dynamic_nonlocal_store_follows_pending_whole_write(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_dynamic_nonlocal_store_follows_pending_whole_write";
 }
 
 fn test_ff_guarded_system_task_merges_definition_state(sim) {
@@ -1415,12 +1331,6 @@ fn test_ff_guarded_system_task_merges_definition_state(sim) {
             message: b"global=2".to_vec(),
         }],
     );
-}
-
-fn test_ff_nonlocal_source_ternary_preserves_unknown_merge(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_nonlocal_source_ternary_preserves_unknown_merge";
 }
 
 fn test_ff_statement_helper_dynamic_nonlocal_copyout_is_observable(sim) {
@@ -1540,12 +1450,6 @@ fn test_ff_retained_dynamic_copyout_does_not_repeat_nonlocal_body_write(sim) {
             message: b"result=1 global=1".to_vec(),
         }],
     );
-}
-
-fn test_ff_function_output_index_uses_final_nonlocal_state(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_output_index_uses_final_nonlocal_state";
 }
 
 fn test_ff_guarded_runtime_expression_merges_definition_state(sim) {
@@ -1718,12 +1622,6 @@ fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
             },
         ],
     );
-}
-
-fn test_ff_short_circuit_runtime_write_preserves_later_state_source(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_short_circuit_runtime_write_preserves_later_state_source";
 }
 
 fn test_ff_pure_predicate_output_updates_outer_function_state(sim) {
@@ -1947,19 +1845,6 @@ fn test_ff_bits_and_size_do_not_evaluate_output_writing_operand(sim) {
             message: b"bits=8 size=8".to_vec(),
         }],
     );
-}
-
-fn test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument";
-}
-
-fn test_ff_bits_and_size_array_dependencies_do_not_alias_later_write(sim) {
-    // Celox opt-in FF function effects are rejected by the Veryl analyzer.
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_bits_and_size_array_dependencies_do_not_alias_later_write";
 }
 
 fn test_ff_statement_call_materializes_output_only_input_effect(sim) {
@@ -2945,12 +2830,6 @@ fn test_ff_effectful_function_inputs_follow_declaration_order(sim) {
     );
 }
 
-fn test_ff_pure_input_is_snapshotted_before_later_effectful_input(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_pure_input_is_snapshotted_before_later_effectful_input";
-}
-
 fn test_ff_runtime_event_arguments_use_per_argument_state(sim) {
     @omit_veryl;
     @omit_sv;
@@ -3077,12 +2956,6 @@ fn test_ff_unpacked_input_before_runtime_effect_stays_symbolically_bound(sim) {
             message: b"observed=17".to_vec(),
         }],
     );
-}
-
-fn test_ff_effectful_array_item_output_is_not_a_read_alias(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_effectful_array_item_output_is_not_a_read_alias";
 }
 
 fn test_ff_symbolic_runtime_input_uses_declared_formal_type(sim) {
@@ -3643,25 +3516,6 @@ fn test_ff_message_less_runtime_fatal_assert_uses_default_message(sim) {
     );
 }
 
-fn test_ff_runtime_for_bounds(sim) {
-    @case "flip_flop::test_ff_runtime_for_bounds";
-}
-
-fn test_ff_runtime_for_bitwise_steps(sim) {
-    @case "flip_flop::test_ff_runtime_for_bitwise_steps";
-}
-
-fn test_ff_signed_xor_step_uses_loop_counter_width(sim) {
-    @ignore_on(veryl);
-    @case "flip_flop::test_ff_signed_xor_step_uses_loop_counter_width";
-}
-
-fn test_ff_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
-    // Veryl 0.22.0's simulator evaluates a runtime loop bound wider than 64 bits as 0.
-    @ignore_on(veryl);
-    @case "flip_flop::test_ff_i32_bitwise_steps_discard_bits_above_the_counter_width";
-}
-
 fn test_ff_i32_xor_step_with_only_high_bits_reports_true_loop(sim) {
     // The Veryl reference reports its own loop diagnostic ("Detected True Loop"), not the
     // message this test checks.
@@ -3800,15 +3654,6 @@ fn test_ff_i32_shl_step_overflow_reports_true_loop(sim) {
     );
 }
 
-fn test_ff_runtime_for_break(sim) {
-    @case "flip_flop::test_ff_runtime_for_break";
-}
-
-#[ignore]
-fn test_ff_constant_signed_bounds_in_unrolled_loops(sim) {
-    @case "flip_flop::test_ff_constant_signed_bounds_in_unrolled_loops";
-}
-
 fn test_ff_runtime_for_dynamic_zero_start_mul_reports_true_loop(sim) {
     @setup { let code = r#"
         module Top (
@@ -3849,10 +3694,6 @@ fn test_ff_runtime_for_dynamic_zero_start_mul_reports_true_loop(sim) {
     assert_eq!(error, expected);
 }
 
-fn test_ff_runtime_for_zero_iteration_mul_loop_is_allowed(sim) {
-    @case "flip_flop::test_ff_runtime_for_zero_iteration_mul_loop_is_allowed";
-}
-
 fn test_ff_runtime_for_terminal_inclusive_mul_loop_reports_true_loop(sim) {
     @setup { let code = r#"
         module Top (
@@ -3885,18 +3726,6 @@ fn test_ff_runtime_for_terminal_inclusive_mul_loop_reports_true_loop(sim) {
         }
     };
     assert_eq!(error, expected);
-}
-
-fn test_ff_runtime_reverse_step_matches_emitted_sv_order(sim) {
-    @case "flip_flop::test_ff_runtime_reverse_step_matches_emitted_sv_order";
-}
-
-fn test_ff_runtime_reverse_exclusive_i32_upper_sentinel(sim) {
-    @case "flip_flop::test_ff_runtime_reverse_exclusive_i32_upper_sentinel";
-}
-
-fn test_ff_runtime_reverse_min_i32_end_wraps_before_range_check(sim) {
-    @case "flip_flop::test_ff_runtime_reverse_min_i32_end_wraps_before_range_check";
 }
 
 fn test_ff_runtime_reverse_i32_step_truncation_reports_true_loop(sim) {
@@ -3932,210 +3761,6 @@ fn test_ff_runtime_reverse_i32_step_truncation_reports_true_loop(sim) {
         sim.tick(clk).unwrap_err().to_string(),
         "Non-progressing for loop in always_ff (loop variable `i`): i"
     );
-}
-
-fn test_ff_runtime_for_reverse_singleton_exits_cleanly(sim) {
-    @case "flip_flop::test_ff_runtime_for_reverse_singleton_exits_cleanly";
-}
-
-fn test_ff_runtime_for_signed_inclusive_range_preserves_negative_bounds(sim) {
-    @case "flip_flop::test_ff_runtime_for_signed_inclusive_range_preserves_negative_bounds";
-}
-
-fn test_ff_runtime_for_forward_overshoot_exits_without_wraparound(sim) {
-    @case "flip_flop::test_ff_runtime_for_forward_overshoot_exits_without_wraparound";
-}
-
-fn test_ff_runtime_for_unsigned_slice_bound_zero_extends_signed_source(sim) {
-    @case "flip_flop::test_ff_runtime_for_unsigned_slice_bound_zero_extends_signed_source";
-}
-
-fn test_ff_if_reset_basic(sim) {
-    @case "flip_flop::test_ff_if_reset_basic";
-}
-
-fn test_async_reset(sim) {
-    @case "flip_flop::test_async_reset";
-}
-
-fn test_ff_swap_correctness(sim) {
-    @case "flip_flop::test_ff_swap_correctness";
-}
-
-fn test_multiple_clocks(sim) {
-    @case "flip_flop::test_multiple_clocks";
-}
-
-fn test_hierarchical_clocks(sim) {
-    @case "flip_flop::test_hierarchical_clocks";
-}
-
-fn test_multiple_async_resets(sim) {
-    @case "flip_flop::test_multiple_async_resets";
-}
-
-fn test_ff_if_reset_multi_cycle(sim) {
-    @case "flip_flop::test_ff_if_reset_multi_cycle";
-}
-
-fn test_ff_if_reset_with_nested_if(sim) {
-    @case "flip_flop::test_ff_if_reset_with_nested_if";
-}
-
-fn test_ff_struct_constructor_expression(sim) {
-    @case "flip_flop::test_ff_struct_constructor_expression";
-}
-
-fn test_ff_struct_constructor_expression_literal_order(sim) {
-    @case "flip_flop::test_ff_struct_constructor_expression_literal_order";
-}
-
-fn test_ff_struct_constructor_signed_member_extension(sim) {
-    @case "flip_flop::test_ff_struct_constructor_signed_member_extension";
-}
-
-fn test_ff_array_literal_expression_order(sim) {
-    @case "flip_flop::test_ff_array_literal_expression_order";
-}
-
-fn test_ff_array_literal_default_expression(sim) {
-    @ignore_on(veryl);
-    @case "flip_flop::test_ff_array_literal_default_expression";
-}
-
-fn test_ff_array_literal_nested_default_multidim_expression(sim) {
-    @case "flip_flop::test_ff_array_literal_nested_default_multidim_expression";
-}
-
-fn test_ff_function_call_expression(sim) {
-    @case "flip_flop::test_ff_function_call_expression";
-}
-
-fn test_ff_function_call_statement_with_output_argument(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_statement_with_output_argument";
-}
-
-fn test_ff_function_call_statement_with_output_argument_and_return_value(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_statement_with_output_argument_and_return_value";
-}
-
-fn test_ff_function_call_expression_with_output_argument_and_return_value(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_expression_with_output_argument_and_return_value";
-}
-
-fn test_ff_function_call_expression_with_if(sim) {
-    @case "flip_flop::test_ff_function_call_expression_with_if";
-}
-
-fn test_ff_nested_function_call_expression(sim) {
-    @case "flip_flop::test_ff_nested_function_call_expression";
-}
-
-fn test_ff_function_call_multistatement_body(sim) {
-    @case "flip_flop::test_ff_function_call_multistatement_body";
-}
-
-fn test_ff_function_call_indexed_argument_access(sim) {
-    @ignore_on(veryl);
-    @case "flip_flop::test_ff_function_call_indexed_argument_access";
-}
-
-fn test_ff_function_call_nested_output_statement_in_function_body(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_nested_output_statement_in_function_body";
-}
-
-fn test_ff_function_call_indexed_nonvariable_argument_expression(sim) {
-    @case "flip_flop::test_ff_function_call_indexed_nonvariable_argument_expression";
-}
-
-fn test_ff_function_call_chained_range_access_on_argument(sim) {
-    @case "flip_flop::test_ff_function_call_chained_range_access_on_argument";
-}
-
-fn test_ff_function_call_step_access_on_nonvariable_argument(sim) {
-    @case "flip_flop::test_ff_function_call_step_access_on_nonvariable_argument";
-}
-
-fn test_ff_function_call_nonvariable_argument_uses_formal_width_before_slice(sim) {
-    @case "flip_flop::test_ff_function_call_nonvariable_argument_uses_formal_width_before_slice";
-}
-
-fn test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion(sim) {
-    @case "flip_flop::test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion";
-}
-
-fn test_ff_function_call_part_select_of_signed_formal_is_unsigned(sim) {
-    @case "flip_flop::test_ff_function_call_part_select_of_signed_formal_is_unsigned";
-}
-
-fn test_ff_function_call_sign_extends_narrow_signed_actual_before_slice(sim) {
-    @case "flip_flop::test_ff_function_call_sign_extends_narrow_signed_actual_before_slice";
-}
-
-fn test_ff_function_call_preserves_unsigned_actual_when_widening_to_signed_formal(sim) {
-    @case "flip_flop::test_ff_function_call_preserves_unsigned_actual_when_widening_to_signed_formal";
-}
-
-fn test_ff_function_call_preserves_unsigned_formal_signedness_for_nonvariable_actual(sim) {
-    @case "flip_flop::test_ff_function_call_preserves_unsigned_formal_signedness_for_nonvariable_actual";
-}
-
-fn test_ff_function_call_nonvariable_argument_uses_formal_shape_for_indexing(sim) {
-    @case "flip_flop::test_ff_function_call_nonvariable_argument_uses_formal_shape_for_indexing";
-}
-
-fn test_ff_function_call_array_literal_element_uses_formal_context_width(sim) {
-    @ignore_on(veryl);
-    @case "flip_flop::test_ff_function_call_array_literal_element_uses_formal_context_width";
-}
-
-fn test_ff_function_call_array_literal_supports_dynamic_multidim_indexing(sim) {
-    // Veryl emits `'{1{'{...}}, default: '{...}}`, mixing positional items with `default:`,
-    // which is not legal SV; the SV parser rejects it.
-    @ignore_on(sv);
-    @case "flip_flop::test_ff_function_call_array_literal_supports_dynamic_multidim_indexing";
-}
-
-fn test_ff_function_call_array_literal_view_dominates_conditional_access(sim) {
-    @case "flip_flop::test_ff_function_call_array_literal_view_dominates_conditional_access";
-}
-
-fn test_ff_function_call_array_literal_effect_is_eager_in_ternary_arm(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_array_literal_effect_is_eager_in_ternary_arm";
-}
-
-fn test_ff_function_call_array_literal_effect_is_eager_in_short_circuit_rhs(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_array_literal_effect_is_eager_in_short_circuit_rhs";
-}
-
-fn test_ff_function_call_array_literal_view_preserves_expression_order(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_array_literal_view_preserves_expression_order";
-}
-
-fn test_ff_function_call_array_literal_snapshots_scalar_before_later_write(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_array_literal_snapshots_scalar_before_later_write";
-}
-
-fn test_ff_function_call_array_literal_snapshots_scalar_before_callee_write(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_array_literal_snapshots_scalar_before_callee_write";
 }
 
 fn test_ff_case_range_skips_effectful_upper_bound_when_lower_is_false(sim) {
@@ -4185,166 +3810,6 @@ fn test_ff_case_range_skips_effectful_upper_bound_when_lower_is_false(sim) {
             message: b"upper".to_vec(),
         }],
     );
-}
-
-fn test_ff_function_call_array_literal_branch_view_is_reused_after_merge(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_array_literal_branch_view_is_reused_after_merge";
-}
-
-fn test_ff_function_call_effectful_array_items_are_eager_before_conditional_access(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_effectful_array_items_are_eager_before_conditional_access";
-}
-
-fn test_ff_function_call_carries_branch_local_static_array_item_cache(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_carries_branch_local_static_array_item_cache";
-}
-
-fn test_ff_function_call_tracks_nested_static_array_read_through_branch(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_tracks_nested_static_array_read_through_branch";
-}
-
-fn test_ff_function_call_tracks_array_view_hidden_in_bound_literal(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_tracks_array_view_hidden_in_bound_literal";
-}
-
-fn test_ff_function_call_merges_nested_array_state_at_cache_completion(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_merges_nested_array_state_at_cache_completion";
-}
-
-fn test_ff_function_call_merges_nested_array_state_at_static_cache_completion(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_merges_nested_array_state_at_static_cache_completion";
-}
-
-fn test_ff_function_call_merges_directly_forwarded_array_cache(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_merges_directly_forwarded_array_cache";
-}
-
-fn test_ff_function_call_tracks_array_reads_in_output_indices(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_tracks_array_reads_in_output_indices";
-}
-
-fn test_ff_function_call_tracks_nested_array_reads_in_output_indices(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_tracks_nested_array_reads_in_output_indices";
-}
-
-fn test_ff_function_call_restores_initialized_forwarded_alias_view(sim) {
-    @case "flip_flop::test_ff_function_call_restores_initialized_forwarded_alias_view";
-}
-
-fn test_ff_function_call_merges_outer_array_view_across_nested_short_circuit(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_merges_outer_array_view_across_nested_short_circuit";
-}
-
-fn test_ff_function_call_forwards_array_literal_view_to_nested_call(sim) {
-    @case "flip_flop::test_ff_function_call_forwards_array_literal_view_to_nested_call";
-}
-
-fn test_ff_function_call_keeps_array_view_active_for_output_index(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_keeps_array_view_active_for_output_index";
-}
-
-fn test_ff_function_call_restores_array_literal_view_after_reentrant_call(sim) {
-    @case "flip_flop::test_ff_function_call_restores_array_literal_view_after_reentrant_call";
-}
-
-fn test_ff_function_call_restores_nearest_array_view_after_deep_reentrant_call(sim) {
-    @case "flip_flop::test_ff_function_call_restores_nearest_array_view_after_deep_reentrant_call";
-}
-
-fn test_ff_function_call_bits_and_size_evaluate_effectful_array_argument(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_bits_and_size_evaluate_effectful_array_argument";
-}
-
-fn test_ff_function_call_nested_bits_evaluates_effectful_array_argument(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_nested_bits_evaluates_effectful_array_argument";
-}
-
-fn test_ff_function_call_array_literal_view_preserves_source_order(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_array_literal_view_preserves_source_order";
-}
-
-fn test_ff_function_call_snapshots_pure_array_items_before_later_effect(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "flip_flop::test_ff_function_call_snapshots_pure_array_items_before_later_effect";
-}
-
-fn test_ff_function_call_converts_array_literal_view_for_wider_nested_formal(sim) {
-    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
-    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
-    // ("argument 1 of `inner`: an unpacked array of type `logic [3:0] [2]` is not assignment
-    // compatible with `logic [7:0] [2]`") instead of reinterpreting its bits.
-    @ignore_on(sv);
-    @case "flip_flop::test_ff_function_call_converts_array_literal_view_for_wider_nested_formal";
-}
-
-fn test_ff_function_call_converts_forwarded_static_array_element(sim) {
-    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
-    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
-    // ("argument 1 of `inner`: an unpacked array of type `logic [3:0] [2]` is not assignment
-    // compatible with `logic [7:0] [2]`") instead of reinterpreting its bits.
-    @ignore_on(sv);
-    @case "flip_flop::test_ff_function_call_converts_forwarded_static_array_element";
-}
-
-fn test_ff_function_call_array_literal_element_uses_element_width(sim) {
-    @case "flip_flop::test_ff_function_call_array_literal_element_uses_element_width";
-}
-
-fn test_ff_function_array_element_assignment_preserves_signedness(sim) {
-    @case "flip_flop::test_ff_function_array_element_assignment_preserves_signedness";
-}
-
-fn test_ff_function_call_array_literal_default_fill_matches_formal_shape(sim) {
-    @case "flip_flop::test_ff_function_call_array_literal_default_fill_matches_formal_shape";
-}
-
-fn test_ff_function_call_multidim_array_literal_default_fill_matches_formal_shape(sim) {
-    @ignore_on(veryl);
-    @case "flip_flop::test_ff_function_call_multidim_array_literal_default_fill_matches_formal_shape";
-}
-
-fn test_ff_function_call_multidim_array_literal_indexing_preserves_element_order(sim) {
-    @case "flip_flop::test_ff_function_call_multidim_array_literal_indexing_preserves_element_order";
-}
-
-fn test_ff_function_call_dynamic_multidim_indexing_accepts_array_valued_items(sim) {
-    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
-    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
-    // ("assignment pattern item: an unpacked array of type `logic [3:0] [2]` is not assignment
-    // compatible with `logic [7:0] [2]`") instead of reinterpreting its bits.
-    @ignore_on(veryl, sv);
-    @case "flip_flop::test_ff_function_call_dynamic_multidim_indexing_accepts_array_valued_items";
 }
 
 }
@@ -5329,56 +4794,6 @@ fn test_benchmark_loop_sir() {
     let trace = setup_and_trace(code, "Top");
     let output = trace.format_program().unwrap();
     assert_snapshot!("benchmark_loop_sir", output);
-}
-
-all_backends! {
-
-fn test_ff_register_bit_clock_follows_the_selected_bit(sim) {
-    @case "flip_flop::test_ff_register_bit_clock_follows_the_selected_bit";
-}
-
-fn test_ff_register_bit_clock_ignores_other_bits(sim) {
-    @case "flip_flop::test_ff_register_bit_clock_ignores_other_bits";
-}
-
-fn test_ff_divider_of_a_divider(sim) {
-    @case "flip_flop::test_ff_divider_of_a_divider";
-}
-
-fn test_ff_gated_clock_follows_its_enable(sim) {
-    @case "flip_flop::test_ff_gated_clock_follows_its_enable";
-}
-
-}
-
-all_backends! {
-
-fn test_ff_gated_clock_samples_pre_edge_state(sim) {
-    @case "flip_flop::test_ff_gated_clock_samples_pre_edge_state";
-}
-
-fn test_ff_register_gated_clock_uses_the_pre_edge_enable(sim) {
-    @case "flip_flop::test_ff_register_gated_clock_uses_the_pre_edge_enable";
-}
-
-fn test_ff_inverted_clock_samples_after_the_rising_edge(sim) {
-    @case "flip_flop::test_ff_inverted_clock_samples_after_the_rising_edge";
-}
-
-}
-
-all_backends! {
-
-fn test_ff_register_gated_clock_rises_after_the_commit(sim) {
-    // Veryl 0.22.0's simulator holds a master-gated clock's enable for the
-    // whole edge, as a clock-gating cell does: the enable register rising
-    // with the edge does not raise `clk & en` until the next edge. Celox
-    // follows the SystemVerilog Veryl emits (IEEE 1800-2023 4.4.2, 4.5), as
-    // Verilator and Icarus do.
-    @ignore_on(veryl);
-    @case "flip_flop::test_ff_register_gated_clock_rises_after_the_commit";
-}
-
 }
 
 /// The drained events without the time, scope, location and assertion of

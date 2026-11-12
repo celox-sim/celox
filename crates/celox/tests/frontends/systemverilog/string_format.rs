@@ -1,28 +1,6 @@
 use super::*;
 
 sv_backends! {
-    fn sformatf_matches_display(sim) { @case "string_format::sformatf_matches_display"; }
-    fn sformatf_four_state_values(sim) { @case "string_format::sformatf_four_state_values"; }
-    fn sformatf_in_expressions(sim) { @case "string_format::sformatf_in_expressions"; }
-    fn sformat_property_output(sim) { @case "string_format::sformat_property_output"; }
-    fn sformatf_runtime_formats(sim) { @case "string_format::sformatf_runtime_formats"; }
-    fn sformatf_packed_runtime_format(sim) { @case "string_format::sformatf_packed_runtime_format"; }
-    fn sformatf_in_conditional_expressions(sim) { @case "string_format::sformatf_in_conditional_expressions"; }
-    fn sformatf_time_values(sim) { @case "string_format::sformatf_time_values"; }
-    fn sformatf_in_omitted_default(sim) { @case "string_format::sformatf_in_omitted_default"; }
-    fn sformatf_runtime_format_bytes(sim) { @case "string_format::sformatf_runtime_format_bytes"; }
-    fn sformatf_after_wider_input(sim) { @case "string_format::sformatf_after_wider_input"; }
-    fn sformatf_in_container_operands(sim) { @case "string_format::sformatf_in_container_operands"; }
-    fn sformatf_with_associative_index(sim) { @case "string_format::sformatf_with_associative_index"; }
-    fn sformatf_with_reference_argument(sim) { @case "string_format::sformatf_with_reference_argument"; }
-    fn swrite_matches_write(sim) { @case "string_format::swrite_matches_write"; }
-    fn display_later_formats(sim) { @case "string_format::display_later_formats"; }
-    fn pattern_format(sim) { @case "string_format::pattern_format"; }
-    fn pattern_format_keys_and_handles(sim) { @case "string_format::pattern_format_keys_and_handles"; }
-    fn pattern_format_structure_containers(sim) { @case "string_format::pattern_format_structure_containers"; }
-    fn pattern_format_structure_values(sim) { @case "string_format::pattern_format_structure_values"; }
-    fn pattern_format_enums(sim) { @case "string_format::pattern_format_enums"; }
-    fn formatted_strings_into_integral_outputs(sim) { @case "string_format::formatted_strings_into_integral_outputs"; }
     // A string literal operand leaves a conditional integral (5.9): `%p`
     // prints it unformatted, not in quotes.
     fn pattern_format_conditional_string_literal(sim) {
@@ -184,17 +162,6 @@ sv_backends! {
             celox::RuntimeEvent::Display { message: b"[pkg::P#(3)::where]".to_vec() },
             celox::RuntimeEvent::Display { message: b"[$unit::U::where]".to_vec() },
         ]);
-    }
-}
-
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-#[test]
-fn sformatf_native_image() {
-    for case in [
-        "string_format::sformatf_in_expressions",
-        "string_format::sformatf_runtime_formats",
-    ] {
-        crate::suite::run_case(case, "native-image");
     }
 }
 

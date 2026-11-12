@@ -1,31 +1,5 @@
 use super::*;
 
-sv_backends! {
-    fn nonblocking_latch_declared_index_sensitivity(sim) {
-        @case "latch::nonblocking_latch_declared_index_sensitivity";
-    }
-fn nonblocking_latch_function_writes(sim) { @case "latch::nonblocking_latch_function_writes"; }
-fn nonblocking_clock_gate(sim) { @case "latch::nonblocking_clock_gate"; }
-fn nonblocking_latch_old_values(sim) { @case "latch::nonblocking_latch_old_values"; }
-fn nonblocking_latch_function_sensitivity(sim) { @case "latch::nonblocking_latch_function_sensitivity"; }
-fn nonblocking_latch_partial_sensitivity(sim) { @case "latch::nonblocking_latch_partial_sensitivity"; }
-    fn task_call_sensitivity(sim) { @case "latch::task_call_sensitivity"; }
-    fn star_complete_declaration_startup(sim) { @case "latch::star_complete_declaration_startup"; }
-    fn star_unpacked_select_sensitivity(sim) { @case "latch::star_unpacked_select_sensitivity"; }
-    fn star_select_sensitivity(sim) { @case "latch::star_select_sensitivity"; }
-    fn explicit_latch(sim) { @case "latch::explicit_latch"; }
-    fn classic_star_latch(sim) { @case "latch::classic_star_latch"; }
-    fn classic_star_declaration_startup(sim) { @case "latch::classic_star_declaration_startup"; }
-    fn classic_star_initial_startup(sim) { @case "latch::classic_star_initial_startup"; }
-    fn classic_star_continuous_startup(sim) { @case "latch::classic_star_continuous_startup"; }
-    fn classic_star_hierarchy_declaration_startup(sim) { @case "latch::classic_star_hierarchy_declaration_startup"; }
-    fn guarded_activation(sim) { @case "latch::guarded_activation"; }
-    fn four_state_latch(sim) { @case "latch::four_state_latch"; }
-    fn hierarchy_same_activation_change_return(sim) { @case "latch::hierarchy_same_activation_change_return"; }
-    fn same_activation_change_return(sim) { @case "latch::same_activation_change_return"; }
-    fn timed_initial_drives_latch(sim) { @case "latch::timed_initial_drives_latch"; }
-}
-
 #[test]
 fn canonical_nonblocking_latch_requires_the_process_runtime() {
     let source =

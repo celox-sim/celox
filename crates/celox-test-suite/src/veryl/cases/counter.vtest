@@ -1,5 +1,6 @@
 (group counter (category sequential))
 
+; Simple counter: increment on each tick, reset to 0
 (case test_counter_n4_basic
   (source "test.veryl" #"
 module Top (
@@ -39,6 +40,7 @@ else { cnt[i] += 1; }
   (assert_eq cnt0 110)
   (assert_eq cnt3 110))
 
+; Large counter array (similar to bench)
 (case test_counter_n100_wrap
   (source "test.veryl" #"
 module Top #(param N: u32 = 100) (

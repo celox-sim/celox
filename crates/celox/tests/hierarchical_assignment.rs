@@ -53,13 +53,6 @@ fn hierarchical_assignment_settles_logic_and_clocked_consumers(sim) {
     assert_eq!(sim.get(sim.signal("doubled")), 0x2eu32.into());
 }
 
-fn hierarchical_assignment_resolves_nested_instances_and_dynamic_selections(sim) {
-    @omit_veryl;
-    // Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
-    @ignore_on(sv);
-    @case "hierarchical_assignment::selections";
-}
-
 fn hierarchical_assignment_preserves_unselected_four_state_bits(sim) {
     @omit_veryl;
     // Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
@@ -125,13 +118,6 @@ fn hierarchical_assignment_uses_function_result(sim) {
 }
 
 all_backends! {
-
-fn hierarchical_assignment_to_disjoint_loop_state(sim) {
-    @omit_veryl;
-    // Veryl does not emit `#[test]` testbench modules, so the emitted SV has no `Top`.
-    @ignore_on(sv);
-    @case "hierarchical_assignment::disjoint_loop";
-}
 
 fn hierarchical_assignment_updates_register_state(sim) {
     @omit_veryl;

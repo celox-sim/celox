@@ -1,5 +1,6 @@
 (group multi_clock (category sequential))
 
+; Two independent clock domains: each FF only advances on its own clock.
 (case test_independent_clock_domains
   (source "test.veryl" #"
 module Top (
@@ -54,6 +55,8 @@ assign qb = rb;
   (assert_eq qa 0xAA)
   (assert_eq qb 0xBB))
 
+; A counter in one clock domain feeding into another (CDC pattern).
+; Tests that domains are truly independent.
 (case test_clock_domain_crossing_pattern
   (source "test.veryl" #"
 module Top (
@@ -113,6 +116,7 @@ assign sample_out = sample;
   ; sample still holds 3
   (assert_eq sample_out 3))
 
+; FF with separate clocks and separate resets.
 (case test_separate_resets_per_domain
   (source "test.veryl" #"
 module Top (

@@ -1,273 +1,9 @@
-//! Shared timing-control cases: `#delay`, `@(event)` and `wait` in
-//! processes, driven through the timed `Simulation`.
-//!
-//! Every exclusion names what Celox lacks for the case, so the change that
-//! adds it removes the exclusion. Supported cases run on every backend,
-//! and natively also from a serialized native image.
+//! Timing control: `#delay`, `@(event)` and `wait` in processes, driven
+//! through the timed `Simulation`. `scripts/run-vtest.py` runs the shared
+//! timing cases; their backends, including the serialized native image, are
+//! in `crates/celox/vtest.toml`.
 
 use num_bigint::BigUint;
-
-macro_rules! timed_cases {
-    () => {};
-    (
-        $(#[$attr:meta])*
-        fn $name:ident = $case:literal;
-        $($rest:tt)*
-    ) => {
-        mod $name {
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            #[test]
-            $(#[$attr])*
-            fn native() {
-                crate::suite::run_case($case, "native");
-            }
-
-            #[test]
-            $(#[$attr])*
-            fn cranelift() {
-                crate::suite::run_case($case, "cranelift");
-            }
-
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            #[test]
-            $(#[$attr])*
-            fn native_image() {
-                crate::suite::run_case($case, "native-image");
-            }
-
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            #[test]
-            $(#[$attr])*
-            fn native_parallel() {
-                crate::suite::run_case($case, "native-parallel");
-            }
-
-            #[test]
-            $(#[$attr])*
-            fn cranelift_parallel() {
-                crate::suite::run_case($case, "cranelift-parallel");
-            }
-
-            #[test]
-            $(#[$attr])*
-            fn wasm() {
-                crate::suite::run_case($case, "wasm");
-            }
-        }
-        timed_cases! { $($rest)* }
-    };
-}
-
-timed_cases! {
-    fn always_ff_event_order = "timing::always_ff_event_order";
-    fn always_ff_falling_clock_reset_first = "timing::always_ff_falling_clock_reset_first";
-    fn always_ff_reset_first_four_state = "timing::always_ff_reset_first_four_state";
-    fn wildcard_blocks_with_crossing_output_dependencies = "timing::wildcard_blocks_with_crossing_output_dependencies";
-    fn wildcard_blocks_in_a_converging_feedback_loop = "timing::wildcard_blocks_in_a_converging_feedback_loop";
-    fn nonblocking_intra_assignment_delays = "timing::nonblocking_intra_assignment_delays";
-    fn nonblocking_intra_assignment_positions = "timing::nonblocking_intra_assignment_positions";
-    fn nonblocking_intra_assignment_four_state = "timing::nonblocking_intra_assignment_four_state";
-    fn nonblocking_intra_assignment_flip_flop = "timing::nonblocking_intra_assignment_flip_flop";
-    fn nonblocking_intra_assignment_outlives_caller = "timing::nonblocking_intra_assignment_outlives_caller";
-    fn blocking_intra_assignment_tag_checks = "timing::blocking_intra_assignment_tag_checks";
-    fn blocking_intra_assignment_rejects_net = "timing::blocking_intra_assignment_rejects_net";
-    fn blocking_intra_assignment_rejects_net_port_select = "timing::blocking_intra_assignment_rejects_net_port_select";
-    fn blocking_intra_assignment_rejects_task_net_write = "timing::blocking_intra_assignment_rejects_task_net_write";
-    fn blocking_intra_assignment_net_shadow_is_variable = "timing::blocking_intra_assignment_net_shadow_is_variable";
-    fn blocking_intra_assignment_late_target = "timing::blocking_intra_assignment_late_target";
-    fn blocking_intra_assignment_repeat_events = "timing::blocking_intra_assignment_repeat_events";
-    fn blocking_intra_assignment_delays = "timing::blocking_intra_assignment_delays";
-    fn blocking_intra_assignment_events = "timing::blocking_intra_assignment_events";
-    fn blocking_intra_assignment_nonpositive_unknown_repeat = "timing::blocking_intra_assignment_nonpositive_unknown_repeat";
-    fn blocking_intra_assignment_four_state = "timing::blocking_intra_assignment_four_state";
-    fn blocking_intra_assignment_automatic_tasks = "timing::blocking_intra_assignment_automatic_tasks";
-}
-
-timed_cases! {
-    fn comb_startup_ignores_final_two_state = "timing::comb_startup_ignores_final_two_state";
-    fn comb_startup_ignores_final_four_state = "timing::comb_startup_ignores_final_four_state";
-}
-
-// Static locals of tasks (IEEE 1800-2023 6.21, 13.3.1).
-timed_cases! {
-    fn timed_task_static_locals_are_shared = "timing::timed_task_static_locals_are_shared";
-    fn timed_task_declared_static_locals_are_shared = "timing::timed_task_declared_static_locals_are_shared";
-    fn timed_task_static_locals_take_nonblocking_updates_and_waits = "timing::timed_task_static_locals_take_nonblocking_updates_and_waits";
-    fn timed_task_static_locals_follow_their_scope = "timing::timed_task_static_locals_follow_their_scope";
-    fn timed_task_static_locals_in_forked_children = "timing::timed_task_static_locals_in_forked_children";
-}
-
-#[test]
-fn comb_startup_ignores_final_interpreter() {
-    for case in [
-        "timing::comb_startup_ignores_final_two_state",
-        "timing::comb_startup_ignores_final_four_state",
-    ] {
-        crate::suite::run_case(case, "interpreter");
-    }
-}
-
-// Program blocks (IEEE 1800-2023 Clause 24) and the reactive region set.
-timed_cases! {
-    fn program_reads_design_after_nonblocking_updates_settle = "program::program_reads_design_after_nonblocking_updates_settle";
-    fn program_nonblocking_updates_follow_design_updates = "program::program_nonblocking_updates_follow_design_updates";
-    fn program_zero_delay_resumes_in_the_re_inactive_region = "program::program_zero_delay_resumes_in_the_re_inactive_region";
-    fn design_activity_of_a_program_waits_for_the_reactive_region_set = "program::design_activity_of_a_program_waits_for_the_reactive_region_set";
-    fn program_exit_ends_its_initial_procedures = "program::program_exit_ends_its_initial_procedures";
-    fn simulation_ends_when_program_procedures_end = "program::simulation_ends_when_program_procedures_end";
-    fn program_ports_connect_to_design_nets = "program::program_ports_connect_to_design_nets";
-    fn programs_reject_always_procedures = "program::programs_reject_always_procedures";
-    fn programs_reject_instances = "program::programs_reject_instances";
-    fn program_waits_see_host_driven_edges_after_design_updates = "program::program_waits_see_host_driven_edges_after_design_updates";
-}
-
-timed_cases! {
-    fn timed_task_automatic_scalar_calls_keep_separate_storage = "timing::timed_task_automatic_scalar_calls_keep_separate_storage";
-    fn timed_task_four_state_storage_survives_suspension = "timing::timed_task_four_state_storage_survives_suspension";
-    fn timed_task_automatic_calls_keep_separate_storage = "timing::timed_task_automatic_calls_keep_separate_storage";
-    fn timed_task_nested_copyback_wait_and_return = "timing::timed_task_nested_copyback_wait_and_return";
-    fn timed_task_static_formals_remain_shared = "timing::timed_task_static_formals_remain_shared";
-    fn timed_task_in_edge_always_rearms_after_return = "timing::timed_task_in_edge_always_rearms_after_return";
-    fn always_star_timed_task_calls_run_as_processes = "timing::always_star_timed_task_calls_run_as_processes";
-    fn always_star_timed_task_calls_assign_nonblocking = "timing::always_star_timed_task_calls_assign_nonblocking";
-    fn always_star_timed_task_calls_wait_on_nested_call_defaults = "timing::always_star_timed_task_calls_wait_on_nested_call_defaults";
-    fn always_star_timed_task_calls_wait_on_folded_branch_reads = "timing::always_star_timed_task_calls_wait_on_folded_branch_reads";
-    fn package_scoped_delay_values_wait_their_value = "timing::package_scoped_delay_values_wait_their_value";
-    fn time_calls_in_child_port_subroutines = "timing::time_calls_in_child_port_subroutines";
-    fn time_calls_in_child_port_actuals = "timing::time_calls_in_child_port_actuals";
-    fn time_literal_delays_accept_all_units = "timing::time_literal_delays_accept_all_units";
-    fn delays_resume_initial_blocks_at_later_times = "timing::delays_resume_initial_blocks_at_later_times";
-    fn zero_delay_process_ends_a_pulse_after_its_edge_triggers = "timing::zero_delay_process_ends_a_pulse_after_its_edge_triggers";
-    fn edge_waits_count_generated_clock_edges_in_any_declaration_order = "timing::edge_waits_count_generated_clock_edges_in_any_declaration_order";
-    fn delay_process_nonblocking_updates_reach_later_edges = "timing::delay_process_nonblocking_updates_reach_later_edges";
-    fn variable_delay_clock_changes_its_period = "timing::variable_delay_clock_changes_its_period";
-    fn asynchronous_reset_driven_by_a_delay_process = "timing::asynchronous_reset_driven_by_a_delay_process";
-    fn generated_clocks_with_a_common_edge_sample_each_other = "timing::generated_clocks_with_a_common_edge_sample_each_other";
-    fn script_writes_between_runs_reach_generated_clock_domains = "timing::script_writes_between_runs_reach_generated_clock_domains";
-    fn edge_waits_on_script_inputs_next_to_a_generated_clock = "timing::edge_waits_on_script_inputs_next_to_a_generated_clock";
-    fn finish_from_a_delay_process_between_clock_edges = "timing::finish_from_a_delay_process_between_clock_edges";
-    fn always_with_a_delay_generates_a_clock = "timing::always_with_a_delay_generates_a_clock";
-    fn edge_waits_resume_before_the_registers_of_that_edge_update = "timing::edge_waits_resume_before_the_registers_of_that_edge_update";
-    fn any_change_waits_wake_on_every_value_change = "timing::any_change_waits_wake_on_every_value_change";
-    fn wait_statements_block_until_their_condition_holds = "timing::wait_statements_block_until_their_condition_holds";
-    fn level_sensitive_always_runs_as_a_process = "timing::level_sensitive_always_runs_as_a_process";
-    fn explicit_list_of_every_read_waits_for_a_change = "timing::explicit_list_of_every_read_waits_for_a_change";
-    fn list_missing_a_read_does_not_wake_on_it = "timing::list_missing_a_read_does_not_wake_on_it";
-    fn list_with_an_extra_signal_wakes_on_it = "timing::list_with_an_extra_signal_wakes_on_it";
-    fn list_of_every_read_with_a_nonblocking_body_runs = "timing::list_of_every_read_with_a_nonblocking_body_runs";
-    fn processes_wake_each_other_at_the_same_time = "timing::processes_wake_each_other_at_the_same_time";
-    fn tasks_with_timing_controls_run_in_processes = "timing::tasks_with_timing_controls_run_in_processes";
-    fn edge_waits_see_the_signals_the_script_drives = "timing::edge_waits_see_the_signals_the_script_drives";
-    fn time_functions_report_the_time_in_the_caller_unit = "timing::time_functions_report_the_time_in_the_caller_unit";
-    fn finish_in_an_always_process_ends_the_simulation = "timing::finish_in_an_always_process_ends_the_simulation";
-    fn waiting_processes_do_not_keep_an_idle_simulation_running = "timing::waiting_processes_do_not_keep_an_idle_simulation_running";
-    fn four_state_edges_count_transitions_through_unknown = "timing::four_state_edges_count_transitions_through_unknown";
-    fn unknown_delays_and_conditions_count_as_zero_and_false = "timing::unknown_delays_and_conditions_count_as_zero_and_false";
-    fn direct_reads_settle_waiting_processes = "timing::direct_reads_settle_waiting_processes";
-    fn output_reads_settle_waiting_processes = "timing::output_reads_settle_waiting_processes";
-    fn run_until_drains_target_time_before_later_writes = "timing::run_until_drains_target_time_before_later_writes";
-    fn repeated_settles_do_not_advance_design_time = "timing::repeated_settles_do_not_advance_design_time";
-    fn run_to_finish_has_no_simulated_time_deadline = "timing::run_to_finish_has_no_simulated_time_deadline";
-    fn blocking_ff_stores_are_visible_before_inactive_work = "timing::blocking_ff_stores_are_visible_before_inactive_work";
-    fn blocking_ff_clock_edges_trigger_their_domains_before_inactive_work = "timing::blocking_ff_clock_edges_trigger_their_domains_before_inactive_work";
-    fn nonblocking_assignments_in_processes_update_in_the_nba_region = "timing::nonblocking_assignments_in_processes_update_in_the_nba_region";
-    fn staged_nonblocking_updates_keep_their_order = "timing::staged_nonblocking_updates_keep_their_order";
-    fn process_nonblocking_assignments_to_array_elements = "timing::process_nonblocking_assignments_to_array_elements";
-    fn process_nonblocking_assignments_at_run_time_positions = "timing::process_nonblocking_assignments_at_run_time_positions";
-    fn process_nonblocking_assignments_outside_their_target = "timing::process_nonblocking_assignments_outside_their_target";
-    fn process_nonblocking_assignments_at_unknown_positions = "timing::process_nonblocking_assignments_at_unknown_positions";
-    fn narrow_nonblocking_updates_keep_the_other_bits = "timing::narrow_nonblocking_updates_keep_the_other_bits";
-    fn four_state_nonblocking_updates_keep_unknown_bits = "timing::four_state_nonblocking_updates_keep_unknown_bits";
-    fn nonblocking_ff_stores_remain_pending_during_inactive_work = "timing::nonblocking_ff_stores_remain_pending_during_inactive_work";
-    fn mixed_ff_stores_keep_their_active_and_nba_values = "timing::mixed_ff_stores_keep_their_active_and_nba_values";
-    fn printed_finish_notice_is_design_output = "timing::printed_finish_notice_is_design_output";
-    fn combinational_finish_ends_timed_execution = "timing::combinational_finish_ends_timed_execution";
-    fn inactive_time_directives_do_not_change_scheduler_units = "timing::inactive_time_directives_do_not_change_scheduler_units";
-    fn blocking_concatenation_publishes_one_event_update = "timing::blocking_concatenation_publishes_one_event_update";
-    fn finite_active_feedback_preserves_convergence = "timing::finite_active_feedback_preserves_convergence";
-    fn list_in_a_loop_through_always_comb_converges = "timing::list_in_a_loop_through_always_comb_converges";
-    fn list_outside_a_loop_keeps_its_value = "timing::list_outside_a_loop_keeps_its_value";
-    fn pure_function_rhs_preserves_distinct_write_times = "timing::pure_function_rhs_preserves_distinct_write_times";
-    fn conditional_writes_preserve_distinct_activation_times = "timing::conditional_writes_preserve_distinct_activation_times";
-    fn case_writes_preserve_distinct_activation_times = "timing::case_writes_preserve_distinct_activation_times";
-    fn constant_repeat_writes_preserve_distinct_activation_times = "timing::constant_repeat_writes_preserve_distinct_activation_times";
-    fn separate_comb_assignments_preserve_selected_dependencies = "timing::separate_comb_assignments_preserve_selected_dependencies";
-    fn constant_for_writes_preserve_distinct_activation_times = "timing::constant_for_writes_preserve_distinct_activation_times";
-    fn untimed_tasks_preserve_distinct_activation_times = "timing::untimed_tasks_preserve_distinct_activation_times";
-    fn untimed_task_copyback_preserves_distinct_activation_times = "timing::untimed_task_copyback_preserves_distinct_activation_times";
-    fn statically_satisfied_waits_preserve_distinct_activation_times = "timing::statically_satisfied_waits_preserve_distinct_activation_times";
-    fn nba_woken_waiters_sample_before_continuations = "timing::nba_woken_waiters_sample_before_continuations";
-    fn negative_repeat_counts_do_not_run_the_body = "timing::negative_repeat_counts_do_not_run_the_body";
-    fn blocking_ff_woken_waiters_sample_before_continuations = "timing::blocking_ff_woken_waiters_sample_before_continuations";
-    fn direct_blocking_ff_woken_waiters_sample_before_continuations = "timing::direct_blocking_ff_woken_waiters_sample_before_continuations";
-    fn constant_variable_initializers_do_not_invent_clock_edges = "timing::constant_variable_initializers_do_not_invent_clock_edges";
-    fn repeated_active_edges_share_one_nba_batch = "timing::repeated_active_edges_share_one_nba_batch";
-    fn false_wait_preserves_separate_hierarchical_write_times = "timing::false_wait_preserves_separate_hierarchical_write_times";
-    fn always_timed_task_without_inline_timing_executes = "timing::always_timed_task_without_inline_timing_executes";
-    fn constant_comb_if_discards_unreachable_pulse_branch = "timing::constant_comb_if_discards_unreachable_pulse_branch";
-    fn constant_child_ff_case_discards_unreachable_pulse_arm = "timing::constant_child_ff_case_discards_unreachable_pulse_arm";
-    fn constant_child_loop_exit_keeps_one_write = "timing::constant_child_loop_exit_keeps_one_write";
-    fn constant_child_case_exit_keeps_one_write = "timing::constant_child_case_exit_keeps_one_write";
-    fn four_state_child_if_keeps_one_write = "timing::four_state_child_if_keeps_one_write";
-    fn selected_child_dependency_ignores_unreachable_reads = "timing::selected_child_dependency_ignores_unreachable_reads";
-    fn selected_child_loop_exit_ignores_unreachable_suffix = "timing::selected_child_loop_exit_ignores_unreachable_suffix";
-    fn finite_process_loop_preserves_continuation_values = "timing::finite_process_loop_preserves_continuation_values";
-    fn zero_trip_child_dependencies_ignore_body_and_step = "timing::zero_trip_child_dependencies_ignore_body_and_step";
-    fn cross_file_package_initializers_keep_static_clock_baseline = "timing::cross_file_package_initializers_keep_static_clock_baseline";
-    fn edge_waits_wake_on_rising_and_falling_edges = "timing::edge_waits_wake_on_rising_and_falling_edges";
-    fn min_typ_max_delays_wait_the_typical_value = "timing::min_typ_max_delays_wait_the_typical_value";
-    fn long_process_loops_finish_within_one_time_slot = "timing::long_process_loops_finish_within_one_time_slot";
-    fn initial_blocks_run_at_time_zero = "timing::initial_blocks_run_at_time_zero";
-    fn host_edges_after_time_zero_clock_flip_flops = "timing::host_edges_after_time_zero_clock_flip_flops";
-    fn real_delays_round_at_the_scope_precision = "timing::real_delays_round_at_the_scope_precision";
-    fn negative_real_delays_wait_their_twos_complement = "timing::negative_real_delays_wait_their_twos_complement";
-    fn expression_events_see_pulses_within_a_time_slot = "timing::expression_events_see_pulses_within_a_time_slot";
-    fn real_expression_events_see_fractional_changes = "timing::real_expression_events_see_fractional_changes";
-    fn bit_select_edges_follow_the_selected_bit = "timing::bit_select_edges_follow_the_selected_bit";
-    fn part_select_events_see_pulses_of_the_selected_bits = "timing::part_select_events_see_pulses_of_the_selected_bits";
-    fn variable_index_events_follow_the_index = "timing::variable_index_events_follow_the_index";
-    fn pure_function_events_change_with_the_result = "timing::pure_function_events_change_with_the_result";
-    fn event_expressions_read_automatic_task_locals = "timing::event_expressions_read_automatic_task_locals";
-    fn event_controls_sample_the_expression_when_they_begin = "timing::event_controls_sample_the_expression_when_they_begin";
-    fn implicit_event_controls_in_processes_wait_on_their_reads = "timing::implicit_event_controls_in_processes_wait_on_their_reads";
-    fn intermediate_combinational_writes_wake_waiters = "timing::intermediate_combinational_writes_wake_waiters";
-    fn intermediate_edge_process_writes_wake_waiters = "timing::intermediate_edge_process_writes_wake_waiters";
-    fn staged_nonblocking_writes_wake_waiters = "timing::staged_nonblocking_writes_wake_waiters";
-    fn child_port_pulses_reach_waiters_settled = "timing::child_port_pulses_reach_waiters_settled";
-    fn intermediate_combinational_writes_keep_other_drivers = "timing::intermediate_combinational_writes_keep_other_drivers";
-    fn parallel_flip_flop_parts_keep_pulses = "timing::parallel_flip_flop_parts_keep_pulses";
-    fn staged_nonblocking_writes_follow_later_blocking_writes = "timing::staged_nonblocking_writes_follow_later_blocking_writes";
-    fn intermediate_combinational_writes_replace_split_definitions = "timing::intermediate_combinational_writes_replace_split_definitions";
-    fn intermediate_combinational_writes_reach_part_select_waiters_settled = "timing::intermediate_combinational_writes_reach_part_select_waiters_settled";
-    fn intermediate_combinational_writes_reach_concatenated_ports = "timing::intermediate_combinational_writes_reach_concatenated_ports";
-    fn blocking_write_waiters_run_before_nonblocking_updates = "timing::blocking_write_waiters_run_before_nonblocking_updates";
-    fn blocking_write_waiters_rearm_before_nonblocking_updates = "timing::blocking_write_waiters_rearm_before_nonblocking_updates";
-    fn blocking_write_edges_read_values_before_nonblocking_updates = "timing::blocking_write_edges_read_values_before_nonblocking_updates";
-    fn plain_always_expression_edges_run_as_processes = "timing::plain_always_expression_edges_run_as_processes";
-    fn plain_always_multi_bit_edges_follow_the_lsb = "timing::plain_always_multi_bit_edges_follow_the_lsb";
-    fn plain_always_edges_without_a_reset_run_as_processes = "timing::plain_always_edges_without_a_reset_run_as_processes";
-    fn derived_clocks_follow_several_nonblocking_updates = "timing::derived_clocks_follow_several_nonblocking_updates";
-    fn derived_clocks_follow_active_region_commits = "timing::derived_clocks_follow_active_region_commits";
-    fn derived_clocks_follow_superseded_publications = "timing::derived_clocks_follow_superseded_publications";
-}
-
-// A second list: one invocation expands one item per recursion level.
-timed_cases! {
-    fn iff_events_occur_only_while_the_condition_holds = "timing::iff_events_occur_only_while_the_condition_holds";
-    fn iff_conditions_see_writes_before_the_event = "timing::iff_conditions_see_writes_before_the_event";
-    fn iff_conditions_apply_to_their_own_items = "timing::iff_conditions_apply_to_their_own_items";
-    fn iff_conditions_read_automatic_task_arguments = "timing::iff_conditions_read_automatic_task_arguments";
-    fn unknown_iff_conditions_are_false = "timing::unknown_iff_conditions_are_false";
-    fn plain_always_iff_events_run_as_processes = "timing::plain_always_iff_events_run_as_processes";
-    fn iff_conditions_are_judged_before_edge_processes_run = "timing::iff_conditions_are_judged_before_edge_processes_run";
-    fn iff_conditions_are_judged_at_the_write = "timing::iff_conditions_are_judged_at_the_write";
-    fn iff_conditions_follow_nonblocking_update_order = "timing::iff_conditions_follow_nonblocking_update_order";
-    fn iff_conditions_consume_occurrences_while_false = "timing::iff_conditions_consume_occurrences_while_false";
-    fn iff_conditions_preserve_cross_module_combinational_order = "timing::iff_conditions_preserve_cross_module_combinational_order";
-    fn iff_shared_automatic_gate_uses_edge_time_value = "timing::iff_shared_automatic_gate_uses_edge_time_value";
-    fn iff_forked_automatic_gates_are_separate = "timing::iff_forked_automatic_gates_are_separate";
-    fn iff_conditions_follow_combinational_process_order = "timing::iff_conditions_follow_combinational_process_order";
-}
 
 #[test]
 fn timed_task_activations_survive_each_optimization_level() {
@@ -840,44 +576,6 @@ fn narrow_nonblocking_updates_cover_staged_and_queued_sites() {
     }
     for name in ["q", "v", "y"] {
         assert!(!staged(name), "{name} queues its updates");
-    }
-}
-
-sv_backends! {
-    fn process_dynamic_writes_preserve_xz(sim) {
-        @case "timing::process_dynamic_writes_preserve_xz";
-    }
-
-    fn process_dynamic_writes_preserve_xz_at_unknown_positions(sim) {
-        @case "timing::process_dynamic_writes_preserve_xz_at_unknown_positions";
-    }
-
-    fn static_function_storage_is_shared_between_processes(sim) {
-        @case "timing::static_function_storage_is_shared_between_processes";
-    }
-}
-
-sv_backends! {
-    fn static_function_readonly_initializer_calls_execute_once(sim) {
-        @case "timing::static_function_readonly_initializer_calls_execute_once";
-    }
-}
-
-sv_backends! {
-    fn edge_nonblocking_updates_keep_later_writes_of_other_bits(sim) {
-        @case "timing::edge_nonblocking_updates_keep_later_writes_of_other_bits";
-    }
-
-    fn edge_nonblocking_updates_follow_writes_their_blocking_results_wake(sim) {
-        @case "timing::edge_nonblocking_updates_follow_writes_their_blocking_results_wake";
-    }
-
-    fn edge_blocking_results_precede_later_process_writes(sim) {
-        @case "timing::edge_blocking_results_precede_later_process_writes";
-    }
-
-    fn static_formals_of_package_tasks(sim) {
-        @case "timing::static_formals_of_package_tasks";
     }
 }
 
@@ -1670,110 +1368,6 @@ fn iff_wait_state_survives_saves_between_host_writes() {
     }
 }
 
-// Forked child activations and join boundaries.
-timed_cases! {
-    fn fork_join_any_keeps_other_children_running = "fork::join_any_keeps_other_children_running";
-    fn fork_join_none_starts_after_parent_blocks = "fork::join_none_starts_after_parent_blocks";
-    fn fork_repeated_forks_capture_each_automatic_local = "fork::repeated_forks_capture_each_automatic_local";
-    fn fork_nested_forks_wait_for_their_own_children = "fork::nested_forks_wait_for_their_own_children";
-    fn fork_automatic_task_inputs_outlive_the_call = "fork::automatic_task_inputs_outlive_the_call";
-    fn fork_fork_children_wait_for_signal_changes = "fork::fork_children_wait_for_signal_changes";
-    fn fork_repeated_forks_reuse_finished_instances = "fork::repeated_forks_reuse_finished_instances";
-    fn fork_static_locals_are_shared_between_overlapping_children = "fork::static_locals_are_shared_between_overlapping_children";
-    fn fork_fork_nonblocking_updates_keep_each_child_value = "fork::fork_nonblocking_updates_keep_each_child_value";
-    fn fork_children_share_a_live_automatic_local = "fork::children_share_a_live_automatic_local";
-    fn fork_wait_on_shared_automatic_local_wakes_after_child_write = "fork::wait_on_shared_automatic_local_wakes_after_child_write";
-    fn fork_event_on_shared_automatic_local_wakes_after_child_write = "fork::event_on_shared_automatic_local_wakes_after_child_write";
-    fn fork_suspended_child_keeps_automatic_string_alive = "fork::suspended_child_keeps_automatic_string_alive";
-    fn fork_child_delay_uses_current_simulation_time = "fork::child_delay_uses_current_simulation_time";
-    fn fork_join_any_waits_only_for_immediate_children = "fork::join_any_waits_only_for_immediate_children";
-    fn fork_branches_call_imported_package_tasks = "fork::branches_call_imported_package_tasks";
-}
-
-timed_cases! { fn fork_four_state_automatic_values_survive_fork_suspension = "fork::four_state_automatic_values_survive_fork_suspension"; }
-
-timed_cases! {
-    fn events_trigger_unblocks_processes_already_waiting = "events::trigger_unblocks_processes_already_waiting";
-    fn events_triggered_state_lasts_until_time_advances = "events::triggered_state_lasts_until_time_advances";
-    fn events_event_controls_wait_for_any_listed_event = "events::event_controls_wait_for_any_listed_event";
-    fn events_events_of_class_objects = "events::events_of_class_objects";
-}
-
-timed_cases! {
-    fn mailboxes_messages_come_out_in_put_order = "mailboxes::messages_come_out_in_put_order";
-    fn mailboxes_get_and_bounded_put_block = "mailboxes::get_and_bounded_put_block";
-    fn mailboxes_try_methods_do_not_block = "mailboxes::try_methods_do_not_block";
-    fn mailboxes_strings_and_class_handles = "mailboxes::strings_and_class_handles";
-}
-
-timed_cases! {
-    fn semaphores_one_key_admits_one_process_at_a_time = "semaphores::one_key_admits_one_process_at_a_time";
-    fn semaphores_try_get_takes_only_available_keys = "semaphores::try_get_takes_only_available_keys";
-    fn semaphores_get_waits_until_enough_keys_are_put = "semaphores::get_waits_until_enough_keys_are_put";
-}
-
-timed_cases! {
-    fn fork_control_no_children_does_not_suspend = "fork_control::no_children_does_not_suspend";
-    fn fork_control_wait_in_task_includes_earlier_forks = "fork_control::wait_in_task_includes_earlier_forks";
-    fn fork_control_wait_excludes_descendants_of_completed_children = "fork_control::wait_excludes_descendants_of_completed_children";
-    fn fork_control_disable_before_children_start = "fork_control::disable_before_children_start";
-    fn fork_control_disable_after_join_any_cancels_waiters_and_delays = "fork_control::disable_after_join_any_cancels_waiters_and_delays";
-    fn fork_control_disable_reaches_through_completed_parents = "fork_control::disable_reaches_through_completed_parents";
-    fn fork_control_disable_does_not_kill_siblings_or_caller = "fork_control::disable_does_not_kill_siblings_or_caller";
-    fn fork_control_disable_removes_nested_join_waits = "fork_control::disable_removes_nested_join_waits";
-    fn fork_control_cancelled_ids_can_be_reused_without_stale_wakeups = "fork_control::cancelled_ids_can_be_reused_without_stale_wakeups";
-    fn fork_control_program_waits_then_cancels_in_reactive_region = "fork_control::program_waits_then_cancels_in_reactive_region";
-}
-
-timed_cases! {
-    fn fork_control_function_disable_uses_calling_process = "fork_control::function_disable_uses_calling_process";
-}
-
-timed_cases! {
-    fn fork_control_four_state_values_survive_wait_and_cancellation = "fork_control::four_state_values_survive_wait_and_cancellation";
-}
-
-timed_cases! {
-    fn fork_control_review_wait_predicate_preserves_cancellation = "fork_control::wait_predicate_preserves_cancellation";
-    fn fork_control_review_wait_predicate_repeats_effects_on_each_wakeup = "fork_control::wait_predicate_repeats_effects_on_each_wakeup";
-    fn fork_control_review_event_driven_caller_propagates_wait_fork_through_tasks = "fork_control::event_driven_caller_propagates_wait_fork_through_tasks";
-    fn fork_control_review_event_driven_caller_spawns_untimed_children = "fork_control::event_driven_caller_spawns_untimed_children";
-}
-
-timed_cases! {
-    fn fork_control_function_join_none_automatic_values_outlive_returns = "fork_control::function_join_none_automatic_values_outlive_returns";
-    fn fork_control_function_join_none_children_can_call_timed_tasks = "fork_control::function_join_none_children_can_call_timed_tasks";
-    fn fork_control_function_join_none_preserves_expression_temporaries = "fork_control::function_join_none_preserves_expression_temporaries";
-    fn fork_control_function_join_none_retains_child_only_class_handle = "fork_control::function_join_none_retains_child_only_class_handle";
-    fn fork_control_function_join_none_event_driven_caller = "fork_control::function_join_none_event_driven_caller";
-    fn fork_control_function_join_none_calls_in_defaults_need_process_frames = "fork_control::function_join_none_calls_in_defaults_need_process_frames";
-}
-
-#[test]
-fn function_join_none_interpreter() {
-    for name in [
-        "automatic_values_outlive_returns",
-        "children_can_call_timed_tasks",
-        "calls_in_defaults_need_process_frames",
-        "event_driven_caller",
-        "preserves_expression_temporaries",
-        "retains_child_only_class_handle",
-    ] {
-        crate::suite::run_case(
-            &format!("fork_control::function_join_none_{name}"),
-            "interpreter",
-        );
-    }
-}
-
-// Activation-local compound event expressions (IEEE 1800-2023 9.4.2).
-timed_cases! {
-    fn fork_compound_event_tracks_result_not_operands = "fork::compound_event_tracks_result_not_operands";
-    fn fork_compound_event_activations_outlive_parent = "fork::compound_event_activations_outlive_parent";
-    fn fork_compound_event_function_scratch_isolated = "fork::compound_event_function_scratch_isolated";
-    fn fork_compound_event_four_state_lsb_edges = "fork::compound_event_four_state_lsb_edges";
-}
-
 #[test]
 fn fork_compound_event_rejects_nonautomatic_operands() {
     let source = r#"
@@ -1802,18 +1396,6 @@ fn fork_compound_event_rejects_nonautomatic_operands() {
         error.contains("activation-local event expression reading a non-automatic variable"),
         "{error}"
     );
-}
-
-#[test]
-fn fork_compound_event_interpreter() {
-    for name in [
-        "compound_event_tracks_result_not_operands",
-        "compound_event_activations_outlive_parent",
-        "compound_event_function_scratch_isolated",
-        "compound_event_four_state_lsb_edges",
-    ] {
-        crate::suite::run_case(&format!("fork::{name}"), "interpreter");
-    }
 }
 
 #[test]
@@ -1892,35 +1474,6 @@ fn fork_compound_event_rejects_implicit_expression_writes() {
     }
 }
 
-timed_cases! {
-    fn fork_deferred_four_state_arguments_are_captured_before_child_exit = "fork_deferred::four_state_arguments_are_captured_before_child_exit";
-    fn fork_deferred_reactive_wakeup_preserves_mature_observed_only = "fork_deferred::reactive_wakeup_preserves_mature_observed_only";
-    fn fork_deferred_sibling_wait_queues_are_independent = "fork_deferred::sibling_wait_queues_are_independent";
-    fn fork_deferred_sibling_event_queues_are_independent = "fork_deferred::sibling_event_queues_are_independent";
-    fn fork_deferred_child_flush_does_not_inherit_parent_reports = "fork_deferred::child_flush_does_not_inherit_parent_reports";
-    fn fork_deferred_disable_fork_flushes_live_children_only = "fork_deferred::disable_fork_flushes_live_children_only";
-    fn fork_deferred_reused_slot_cannot_flush_completed_reports = "fork_deferred::reused_slot_cannot_flush_completed_reports";
-    fn fork_deferred_zero_delay_is_not_a_flush_point = "fork_deferred::zero_delay_is_not_a_flush_point";
-    fn fork_deferred_repeated_static_site_keeps_completed_reports = "fork_deferred::repeated_static_site_keeps_completed_reports";
-}
-
-#[test]
-fn fork_deferred_interpreter() {
-    for name in [
-        "reactive_wakeup_preserves_mature_observed_only",
-        "four_state_arguments_are_captured_before_child_exit",
-        "sibling_wait_queues_are_independent",
-        "sibling_event_queues_are_independent",
-        "child_flush_does_not_inherit_parent_reports",
-        "disable_fork_flushes_live_children_only",
-        "reused_slot_cannot_flush_completed_reports",
-        "zero_delay_is_not_a_flush_point",
-        "repeated_static_site_keeps_completed_reports",
-    ] {
-        crate::suite::run_case(&format!("fork_deferred::{name}"), "interpreter");
-    }
-}
-
 #[test]
 fn iff_fork_waits_keep_gates_across_state_files() {
     let source = r#"
@@ -1963,10 +1516,6 @@ fn iff_fork_waits_keep_gates_across_state_files() {
         );
         assert_eq!(loaded.get(loaded.signal(name)), expected.into(), "{name}");
     }
-}
-
-timed_cases! {
-    fn iff_automatic_clock_preserves_enabled_pulses = "timing::iff_automatic_clock_preserves_enabled_pulses";
 }
 
 #[test]
@@ -2071,54 +1620,6 @@ fn iff_host_pulses_use_the_waiting_automatic_gate() {
     check!(build().build_wasm());
 }
 
-timed_cases! {
- fn process_identity_and_status = "fork_control::process_identity_and_status";
- fn process_finished_parent_kills_descendants = "fork_control::process_finished_parent_kills_descendants";
-}
-
-timed_cases! {
- fn process_handles_index_associative_arrays = "fork_control::process_handles_index_associative_arrays";
-}
-
-timed_cases! {
- fn process_suspend_and_resume_waits = "fork_control::process_suspend_and_resume_waits";
- fn process_self_suspend_and_await = "fork_control::process_self_suspend_and_await";
- fn process_status_wait_and_disable = "fork_control::process_status_wait_and_disable";
- fn process_random_state_and_handles = "fork_control::process_random_state_and_handles";
-}
-
-timed_cases! {
- fn process_package_constants_keep_their_scope = "fork_control::process_package_constants_keep_their_scope";
- fn process_self_kill_finishes_program = "fork_control::process_self_kill_finishes_program";
- fn process_external_kill_finishes_program = "fork_control::process_external_kill_finishes_program";
-}
-
-timed_cases! {
- fn final_procedure_output_survives_finish = "timing::final_procedure_output_survives_finish";
- fn final_procedure_output_survives_program_completion = "timing::final_procedure_output_survives_program_completion";
-}
-
-timed_cases! {
- fn process_program_exit_wakes_sibling_observers = "fork_control::process_program_exit_wakes_sibling_observers";
-}
-
-timed_cases! {
- fn process_mutual_status_waits_advance_to_cancellation = "fork_control::process_mutual_status_waits_advance_to_cancellation";
- fn process_final_kill_preserves_cleanup = "fork_control::process_final_kill_preserves_cleanup";
-}
-
-timed_cases! {
- fn process_package_qualified_types_keep_their_scope = "fork_control::process_package_qualified_types_keep_their_scope";
- fn process_final_procedures_share_identity_and_rng = "fork_control::process_final_procedures_share_identity_and_rng";
- fn process_ancestor_kill_preserves_caller_rng = "fork_control::process_ancestor_kill_preserves_caller_rng";
-}
-
-timed_cases! {
- fn process_nested_calls_preserve_level_wait_resume = "fork_control::process_nested_calls_preserve_level_wait_resume";
- fn process_resume_resamples_automatic_event_expression = "fork_control::process_resume_resamples_automatic_event_expression";
- fn process_resume_after_program_exit_is_noop = "fork_control::process_resume_after_program_exit_is_noop";
-}
-
 #[test]
 fn blocking_intra_assignment_tag_errors_observe_the_right_time() {
     for backend in [
@@ -2197,30 +1698,6 @@ fn blocking_intra_assignment_tag_errors_observe_the_right_time() {
             }
         }
     }
-}
-
-timed_cases! {
-    fn continuous_delay_net_independent = "timing::continuous_delay_net_independent";
-    fn continuous_delay_net_selected_drivers = "timing::continuous_delay_net_selected_drivers";
-    fn continuous_delay_net_per_bit = "timing::continuous_delay_net_per_bit";
-    fn continuous_delay_net_mixed_generate = "timing::continuous_delay_net_mixed_generate";
-    fn continuous_delay_net_four_state = "timing::continuous_delay_net_four_state";
-    fn continuous_delay_net_partially_undriven = "timing::continuous_delay_net_partially_undriven";
-    fn continuous_delay_net_gate_driver = "timing::continuous_delay_net_gate_driver";
-    fn continuous_delay_net_initializer = "timing::continuous_delay_net_initializer";
-    fn continuous_delay_net_initializer_generate = "timing::continuous_delay_net_initializer_generate";
-    fn continuous_delay_net_initializer_four_state = "timing::continuous_delay_net_initializer_four_state";
-    fn continuous_delay_inertial = "timing::continuous_delay_inertial";
-    fn continuous_delay_unchanged_rhs = "timing::continuous_delay_unchanged_rhs";
-    fn continuous_delay_sized_vector = "timing::continuous_delay_sized_vector";
-    fn continuous_delay_four_state = "timing::continuous_delay_four_state";
-}
-
-timed_cases! {
-    fn continuous_delay_selected_drivers = "timing::continuous_delay_selected_drivers";
-    fn continuous_delay_generate_parameters = "timing::continuous_delay_generate_parameters";
-    fn continuous_delay_zero = "timing::continuous_delay_zero";
-    fn continuous_delay_wide_context = "timing::continuous_delay_wide_context";
 }
 
 sv_backends! {

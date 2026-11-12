@@ -6,21 +6,6 @@ mod test_utils;
 
 all_backends! {
 
-    // Interface with multiple modport signals and bidirectional data flow.
-    fn test_interface_bidirectional(sim) {
-        @case "advanced_interface::test_interface_bidirectional";
-    }
-
-    // Multiple interface instances used in parallel.
-    fn test_multiple_interface_instances(sim) {
-        @case "advanced_interface::test_multiple_interface_instances";
-    }
-
-    // Interface with wide (multi-bit) signals.
-    fn test_interface_wide_signal(sim) {
-        @case "advanced_interface::test_interface_wide_signal";
-    }
-
     // Parametric interface array: verify array_dims are populated for parametric-type members.
     fn test_parametric_interface_array(sim) {
         @omit_veryl;
@@ -72,16 +57,4 @@ assign out = bus[0].data + bus[1].data;
 
     }
 
-    // Transitive generics: type parameter flows through interface → child module → top.
-    //
-    // Tests that generic type parameters are correctly propagated across multiple
-    // levels of the module hierarchy (a pattern that has been buggy in the past).
-    fn test_transitive_generics(sim) {
-        @case "advanced_interface::test_transitive_generics";
-    }
-
-    // Two-level transitive generics: Top → Mid::<T> → Leaf::<T>, all with concrete type at Top.
-    fn test_transitive_generics_two_level(sim) {
-        @case "advanced_interface::test_transitive_generics_two_level";
-    }
 }

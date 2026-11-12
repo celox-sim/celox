@@ -75,19 +75,3 @@ fn optimized_sir_recovers_expanded_bit_count_loops() {
         "missing ctz idiom:\n{sir}"
     );
 }
-
-all_backends! {
-
-fn test_guarded_scan_preserves_independent_outputs(sim) {
-    @case "loop_idiom::test_guarded_scan_preserves_independent_outputs";
-}
-
-fn test_recovered_bit_count_loop_semantics(sim) {
-    @case "loop_idiom::test_recovered_bit_count_loop_semantics";
-}
-
-fn test_guarded_packed_scan(sim) {
-    @case "loop_idiom::test_guarded_packed_scan";
-}
-
-}

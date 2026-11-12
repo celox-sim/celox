@@ -1,5 +1,6 @@
 (group std_fifo (category standard_library))
 
+; After reset, FIFO should be empty
 (case test_fifo_initial_empty
   (source "test.veryl"
     (std "ram/ram.veryl")
@@ -51,6 +52,7 @@ module Top (
   (assert_eq (trunc 8 (get o_full)) 0 "should not be full after reset")
   (assert_eq (trunc 8 (get o_word_count)) 0 "word_count should be 0"))
 
+; Push one item, verify not empty, pop it back
 (case test_fifo_push_pop_single
   (source "test.veryl"
     (std "ram/ram.veryl")
@@ -117,6 +119,7 @@ module Top (
   (assert_eq (trunc 8 (get o_empty)) 1 "should be empty after pop")
   (assert_eq (trunc 8 (get o_word_count)) 0 "word_count should be 0"))
 
+; Push until full (DEPTH=4), verify full flag
 (case test_fifo_full
   (source "test.veryl"
     (std "ram/ram.veryl")
@@ -175,6 +178,7 @@ module Top (
   (assert_eq (trunc 8 (get o_full)) 1 "should be full after 4 pushes")
   (assert_eq (trunc 8 (get o_word_count)) 4))
 
+; Push 4 items then pop all, verify FIFO ordering
 (case test_fifo_ordering
   (source "test.veryl"
     (std "ram/ram.veryl")
@@ -240,6 +244,7 @@ module Top (
   (tick clk)
   (assert_eq (trunc 8 (get o_data)) 0x40 "fourth out should be 0x40"))
 
+; Clear resets the FIFO to empty
 (case test_fifo_clear
   (source "test.veryl"
     (std "ram/ram.veryl")

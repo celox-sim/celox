@@ -3,81 +3,6 @@
 use super::*;
 
 sv_backends! {
-    fn class_external_constraints(sim) { @case "class::external_constraints"; }
-    fn class_external_constraints_in_packages(sim) {
-        @case "class::external_constraints_in_packages";
-    }
-
-    fn class_imported_member_type_dimensions(sim) { @case "class::imported_member_type_dimensions"; }
-    fn class_members_hide_module_names(sim) { @case "class::members_hide_module_names"; }
-    fn class_imported_member_type_inheritance(sim) { @case "class::imported_member_type_inheritance"; }
-    fn class_package_constant_class_defaults(sim) { @case "class::package_constant_class_defaults"; }
-    fn class_waits_on_static_properties(sim) { @case "class::waits_on_static_properties"; }
-    fn class_waits_on_instance_properties(sim) { @case "class::waits_on_instance_properties"; }
-    fn class_body_parameters_are_local(sim) { @case "class::body_parameters_are_local"; }
-    fn class_waits_on_properties_in_package_subroutines(sim) { @case "class::waits_on_properties_in_package_subroutines"; }
-    fn class_package_constant_type_arguments(sim) { @case "class::package_constant_type_arguments"; }
-    fn class_named_aggregate_type_arguments(sim) { @case "class::named_aggregate_type_arguments"; }
-    fn class_enumeration_constants_of_classes(sim) { @case "class::enumeration_constants_of_classes"; }
-    fn class_container_type_aliases_of_classes(sim) { @case "class::container_type_aliases_of_classes"; }
-    fn class_members_of_call_results(sim) { @case "class::members_of_call_results"; }
-    fn class_generate_scope_enum_type_arguments(sim) { @case "class::generate_scope_enum_type_arguments"; }
-    fn class_method_ranges_of_scope_declarations(sim) { @case "class::method_ranges_of_scope_declarations"; }
-    fn class_type_alias_members(sim) { @case "class::type_alias_members"; }
-    fn class_type_alias_lexical_scopes(sim) { @case "class::type_alias_lexical_scopes"; }
-    fn constraint_mode_ordinary_struct_members(sim) {
-        @case "class::constraint_mode_ordinary_struct_members";
-    }
-    fn class_type_parameter_imports(sim) { @case "class::type_parameter_imports"; }
-    fn class_type_parameter_shadowing(sim) { @case "class::type_parameter_shadowing"; }
-    fn class_objects_properties_and_methods(sim) { @case "class::objects_properties_and_methods"; }
-}
-
-sv_backends! {
-    fn class_implicit_constructors_and_this(sim) { @case "class::implicit_constructors_and_this"; }
-    fn class_objects_referring_to_objects(sim) { @case "class::objects_referring_to_objects"; }
-    fn class_extern_methods_and_tasks(sim) { @case "class::extern_methods_and_tasks"; }
-    fn class_objects_survive_heap_collections(sim) { @case "class::objects_survive_heap_collections"; }
-    fn class_string_methods_on_properties(sim) { @case "class::string_methods_on_properties"; }
-    fn class_derived_properties_hide_base_properties(sim) { @case "class::derived_properties_hide_base_properties"; }
-    fn class_inherited_properties_and_methods(sim) { @case "class::inherited_properties_and_methods"; }
-    fn class_static_properties_and_methods(sim) { @case "class::static_properties_and_methods"; }
-    fn class_constructors_chain_to_base(sim) { @case "class::constructors_chain_to_base"; }
-    fn class_virtual_methods_dispatch_on_object_class(sim) { @case "class::virtual_methods_dispatch_on_object_class"; }
-    fn class_abstract_classes_and_pure_virtual_methods(sim) { @case "class::abstract_classes_and_pure_virtual_methods"; }
-    fn class_methods_of_handle_array_elements(sim) { @case "class::methods_of_handle_array_elements"; }
-    fn class_classes_implementing_interface_classes(sim) { @case "class::classes_implementing_interface_classes"; }
-    fn class_methods_called_through_interface_class_handles(sim) { @case "class::methods_called_through_interface_class_handles"; }
-    fn class_inherited_methods_of_extended_interface_classes(sim) { @case "class::inherited_methods_of_extended_interface_classes"; }
-    fn class_casts_of_class_handles(sim) { @case "class::casts_of_class_handles"; }
-    fn class_casts_to_class_properties(sim) { @case "class::casts_to_class_properties"; }
-    fn class_void_casts_of_class_handles(sim) { @case "class::void_casts_of_class_handles"; }
-    fn class_failing_casts_evaluate_their_sources(sim) { @case "class::failing_casts_evaluate_their_sources"; }
-    fn class_casts_from_interface_class_handles(sim) { @case "class::casts_from_interface_class_handles"; }
-    fn class_specializations_of_parameterized_classes(sim) { @case "class::specializations_of_parameterized_classes"; }
-    fn class_specializations_are_named_by_parameter_values(sim) { @case "class::specializations_are_named_by_parameter_values"; }
-    fn class_specializations_with_their_own_handles(sim) { @case "class::specializations_with_their_own_handles"; }
-    fn class_class_scoped_parameters_and_types(sim) { @case "class::class_scoped_parameters_and_types"; }
-    fn class_specializations_of_interface_classes(sim) { @case "class::specializations_of_interface_classes"; }
-    fn class_named_constructor_arguments(sim) { @case "class::named_constructor_arguments"; }
-    fn class_named_method_arguments(sim) { @case "class::named_method_arguments"; }
-    fn class_typedefs_of_interface_classes(sim) { @case "class::typedefs_of_interface_classes"; }
-    fn class_specializations_in_generate_blocks(sim) { @case "class::specializations_in_generate_blocks"; }
-    fn class_specializations_of_procedural_constants(sim) { @case "class::specializations_of_procedural_constants"; }
-    fn class_specializations_of_procedural_aggregate_types(sim) { @case "class::specializations_of_procedural_aggregate_types"; }
-    fn class_specializations_keep_their_parameter_scopes(sim) { @case "class::specializations_keep_their_parameter_scopes"; }
-    fn class_untyped_class_parameters_take_the_type_of_their_value(sim) { @case "class::untyped_class_parameters_take_the_type_of_their_value"; }
-    fn class_class_declarations_bind_in_their_scopes(sim) { @case "class::class_declarations_bind_in_their_scopes"; }
-    fn class_parameter_defaults_bind_where_the_class_is_declared(sim) { @case "class::parameter_defaults_bind_where_the_class_is_declared"; }
-    fn class_specialization_keys_follow_the_bound_parameters(sim) { @case "class::specialization_keys_follow_the_bound_parameters"; }
-    fn class_derived_classes_keep_their_declaration_scopes(sim) { @case "class::derived_classes_keep_their_declaration_scopes"; }
-    fn class_shallow_copies(sim) { @case "class::shallow_copies"; }
-    fn class_classes_of_packages(sim) { @case "class::classes_of_packages"; }
-    fn class_package_classes_by_their_qualified_names(sim) { @case "class::package_classes_by_their_qualified_names"; }
-    fn class_classes_of_the_compilation_unit(sim) { @case "class::classes_of_the_compilation_unit"; }
-}
-
-sv_backends! {
     // Actuals are evaluated in the order they are written, as for other
     // calls with named arguments.
     fn named_constructor_arguments_are_evaluated_in_written_order(sim) {
@@ -280,7 +205,6 @@ sv_backends! {
 }
 
 sv_backends! {
-    fn class_four_state_properties(sim) { @case "class::four_state_properties"; }
 
     fn four_state_properties_are_two_state_in_two_state_mode(sim) {
         @setup {
@@ -1678,7 +1602,7 @@ fn incompatible_class_handle_assignments_are_rejected() {
 
 /// The SV frontend is recursive, and one case nests class specializations
 /// 64 deep, so the cases build on a thread with room on its stack (like
-/// suite cases in `suite::run_case`).
+/// the vtest executor runs suite cases).
 #[test]
 fn misused_parameterized_classes_are_rejected() {
     std::thread::scope(|scope| {
@@ -1821,8 +1745,6 @@ fn unbindable_call_arguments_are_rejected() {
 }
 
 sv_backends! {
-    fn class_unconstrained_randomize(sim) { @case "class::unconstrained_randomize"; }
-    fn class_randomize_without_rand_members(sim) { @case "class::randomize_without_rand_members"; }
     fn class_randomize_null_receiver(sim) {
         @setup {
             let source = r#"module Top(output int hooks, result);
@@ -1939,13 +1861,6 @@ sv_backends! {
             assert_eq!(sim.get_four_state(value), expected);
         }
     }
-}
-
-sv_backends! {
-    fn class_randomization_mode_bit_argument(sim) { @case "class::randomization_mode_bit_argument"; }
-    fn class_randomization_inheritance(sim) { @case "class::randomization_inheritance"; }
-    fn class_randomization_modes_and_selection(sim) { @case "class::randomization_modes_and_selection"; }
-    fn class_randomization_pre_hook_controls_modes(sim) { @case "class::randomization_pre_hook_controls_modes"; }
 }
 
 sv_backends! {
@@ -2518,16 +2433,6 @@ endmodule"#;
     assert_eq!(sim.get(sim.signal("bits")), 8u32.into());
 }
 
-sv_backends! {
-    fn class_randomization_enum_inheritance(sim) { @case "class::randomization_enum_inheritance"; }
-    fn class_randomization_enum_alias(sim) { @case "class::randomization_enum_alias"; }
-    fn class_randomization_enum_domain(sim) { @case "class::randomization_enum_domain"; }
-}
-
-sv_backends! {
-    fn class_randomization_enum_fill_literals(sim) { @case "class::randomization_enum_fill_literals"; }
-}
-
 // The methods and static properties a module class inherits from a class of
 // a package in another source keep what they are there: a source-local
 // method identifier does not make a method of the module static, and a
@@ -2569,9 +2474,6 @@ endmodule"#;
 }
 
 sv_backends! {
-    fn class_randomization_cyclic_enum_alias(sim) { @case "class::randomization_cyclic_enum_alias"; }
-    fn class_randomization_cyclic_domains(sim) { @case "class::randomization_cyclic_domains"; }
-    fn class_randomization_cyclic_controls(sim) { @case "class::randomization_cyclic_controls"; }
     fn class_randomization_cyclic_checkpoint(sim) {
         @setup { let source = r#"
             module Top(output bit [63:0] value);
@@ -2600,60 +2502,6 @@ sv_backends! {
         sim.run_until(15).unwrap();
         assert_eq!(sim.get_four_state(value), expected);
     }
-}
-
-sv_backends! {
-    fn constrained_randomize_scalar(sim) { @case "class::constrained_randomize_scalar"; }
-    fn constrained_randomize_width_and_inheritance(sim) { @case "class::constrained_randomize_width_and_inheritance"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_hooks(sim) { @case "class::constrained_randomize_hooks"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_inside(sim) { @case "class::constrained_randomize_inside"; }
-    fn constrained_randomize_inside_widths(sim) { @case "class::constrained_randomize_inside_widths"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_conditionals(sim) { @case "class::constrained_randomize_conditionals"; }
-    fn constrained_randomize_nested_guards(sim) { @case "class::constrained_randomize_nested_guards"; }
-    fn constrained_randomize_state_properties(sim) { @case "class::constrained_randomize_state_properties"; }
-    fn constrained_randomize_rand_objects(sim) { @case "class::constrained_randomize_rand_objects"; }
-    fn output_arguments_write_class_properties(sim) { @case "class::output_arguments_write_class_properties"; }
-    fn virtual_interface_property_waits(sim) { @case "class::virtual_interface_property_waits"; }
-    fn constrained_randomize_rand_arrays(sim) { @case "class::constrained_randomize_rand_arrays"; }
-    fn constrained_randomize_shifts(sim) { @case "class::constrained_randomize_shifts"; }
-    fn constrained_randomize_foreach(sim) { @case "class::constrained_randomize_foreach"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_inline(sim) { @case "class::constrained_randomize_inline"; }
-    fn constrained_randomize_inline_inheritance(sim) { @case "class::constrained_randomize_inline_inheritance"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_inline_basic(sim) { @case "class::constrained_randomize_inline_basic"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_inline_package_instances(sim) { @case "class::constrained_randomize_inline_package_instances"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_inline_inputs(sim) { @case "class::constrained_randomize_inline_inputs"; }
-    fn constrained_randomize_inline_input_methods(sim) { @case "class::constrained_randomize_inline_input_methods"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_inline_input_hooks(sim) { @case "class::constrained_randomize_inline_input_hooks"; }
-}
-
-sv_backends! {
-    fn constraint_mode_basic(sim) { @case "class::constraint_mode_basic"; }
-    fn constraint_mode_inheritance(sim) { @case "class::constraint_mode_inheritance"; }
-    fn constraint_mode_hooks(sim) { @case "class::constraint_mode_hooks"; }
 }
 
 sv_backends! {
@@ -2694,28 +2542,6 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("mode")), 0u8.into());
         assert_eq!(sim.get(sim.signal("value")), 7u8.into());
     }
-}
-
-sv_backends! {
-    fn constraint_mode_base_dispatch(sim) { @case "class::constraint_mode_base_dispatch"; }
-}
-
-sv_backends! {
-    fn class_foreign_generic_static_state_across_modules(sim) { @case "class::foreign_generic_static_state_across_modules"; }
-    fn class_foreign_generic_unit_type_constructor(sim) { @case "class::foreign_generic_unit_type_constructor"; }
-    fn class_foreign_generic_static_handle_identity(sim) { @case "class::foreign_generic_static_handle_identity"; }
-}
-
-sv_backends! {
-    fn class_foreign_generic_declaration_scope_and_equivalent_defaults(sim) { @case "class::foreign_generic_declaration_scope_and_equivalent_defaults"; }
-}
-
-sv_backends! {
-    fn class_foreign_generic_multiple_user_classes(sim) { @case "class::foreign_generic_multiple_user_classes"; }
-}
-
-sv_backends! {
-    fn class_foreign_generic_nominal_and_nested_types(sim) { @case "class::foreign_generic_nominal_and_nested_types"; }
 }
 
 #[test]
@@ -2829,41 +2655,6 @@ endmodule"#, Path::new("top.sv")),
             assert_eq!(sim.get(sim.signal(name)), BigUint::from(expected), "{name}");
         }
     }
-}
-
-sv_backends! {
-    fn class_foreign_generic_inherited_constants(sim) { @case "class::foreign_generic_inherited_constants"; }
-}
-
-sv_backends! {
-    fn class_foreign_generic_constructor_lexical_scope(sim) { @case "class::foreign_generic_constructor_lexical_scope"; }
-    fn class_foreign_generic_package_type_static_storage(sim) { @case "class::foreign_generic_package_type_static_storage"; }
-    fn class_foreign_generic_template_of_the_named_package(sim) { @case "class::foreign_generic_template_of_the_named_package"; }
-    fn class_foreign_generic_in_a_module_with_interface_instances(sim) { @case "class::foreign_generic_in_a_module_with_interface_instances"; }
-}
-
-sv_backends! {
-    fn class_scoped_typedef_handles(sim) { @case "class::scoped_typedef_handles"; }
-    fn class_specialized_scope_typedef_calls(sim) { @case "class::specialized_scope_typedef_calls"; }
-    fn class_specialized_scope_typedef_properties(sim) { @case "class::specialized_scope_typedef_properties"; }
-    fn class_parameter_strings_wider_than_a_constant(sim) { @case "class::parameter_strings_wider_than_a_constant"; }
-    fn class_new_initializers_of_scoped_and_alias_types(sim) { @case "class::new_initializers_of_scoped_and_alias_types"; }
-    fn class_parameter_literals_hide_module_constants(sim) { @case "class::parameter_literals_hide_module_constants"; }
-    fn class_static_initializers_run_once_before_time_zero(sim) { @case "class::static_initializers_run_once_before_time_zero"; }
-    fn class_method_defaults_use_the_object(sim) { @case "class::method_defaults_use_the_object"; }
-    fn class_nested_value_selects(sim) { @case "class::nested_value_selects"; }
-    fn class_property_assignment_sites(sim) { @case "class::property_assignment_sites"; }
-    fn class_property_place_addresses(sim) { @case "class::property_place_addresses"; }
-    fn class_property_member_place_addresses(sim) { @case "class::property_member_place_addresses"; }
-    fn class_formatting_task_place_outputs(sim) { @case "class::formatting_task_place_outputs"; }
-    fn class_property_member_assignment_sites(sim) { @case "class::property_member_assignment_sites"; }
-    fn class_packed_structure_property_members(sim) { @case "class::packed_structure_property_members"; }
-    fn class_tagged_members_of_structure_properties(sim) { @case "class::tagged_members_of_structure_properties"; }
-    fn class_methods_called_without_parentheses(sim) { @case "class::methods_called_without_parentheses"; }
-    fn class_constrained_enumerations_and_randc(sim) { @case "class::constrained_enumerations_and_randc"; }
-    fn class_prototype_formals_inherit_types(sim) { @case "class::prototype_formals_inherit_types"; }
-    fn class_real_values_round_into_integral_properties(sim) { @case "class::real_values_round_into_integral_properties"; }
-    fn class_real_properties(sim) { @case "class::real_properties"; }
 }
 
 sv_backends! {

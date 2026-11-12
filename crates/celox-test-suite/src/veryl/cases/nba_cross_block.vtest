@@ -1,5 +1,8 @@
 (group nba_cross_block (category sequential))
 
+; Test NBA semantics across separate always_ff blocks with the same clock.
+; In RTL, two always_ff blocks on the same clock should both read OLD values
+; (pre-edge) and write NEW values (post-edge), regardless of textual order.
 (case test_nba_separate_blocks_swap
   (source "test.veryl" #"
 module Top (clk: input clock, rst: input reset, a: output logic<8>, b: output logic<8>) {
@@ -41,6 +44,8 @@ assign b = r2;
   (assert_eq a 0xAA "r1 should be 0xAA after 2nd swap")
   (assert_eq b 0x55 "r2 should be 0x55 after 2nd swap"))
 
+; Test pipeline pattern across 3 separate always_ff blocks.
+; d → stage1 → stage2 → stage3 should take 3 clock cycles.
 (case test_nba_separate_blocks_pipeline
   (source "test.veryl" #"
 module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
@@ -63,6 +68,8 @@ always_ff (clk) { q = stage2; }
   (tick clk)
   (assert_eq q 0x42 "q should be 0x42 after 3rd tick"))
 
+; Test that the order of always_ff blocks in source code does not matter.
+; Reverse the pipeline order (q first, stage1 last) — same behavior expected.
 (case test_nba_separate_blocks_pipeline_reversed
   (source "test.veryl" #"
 module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
