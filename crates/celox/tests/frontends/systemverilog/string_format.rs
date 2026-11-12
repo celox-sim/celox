@@ -245,9 +245,22 @@ fn pattern_format_rejects_unsupported_types() {
             "typedef enum bit {A, B} e_t; e_t [1:0] v;",
             "%p of an enum value",
         ),
+        // A member that is a packed array of enum values, which prints as
+        // no single name.
         (
-            "typedef struct packed { bit [3:0] a; } s_t; s_t v;",
-            "%p of a structure or unpacked array",
+            "typedef enum logic [1:0] {A, B} e_t; \
+             typedef struct packed { e_t [1:0] a; } s_t; s_t v;",
+            "%p of a packed structure with an enum member",
+        ),
+        // A packed union prints none of its members by name, also with a
+        // single member, whose layout equals a one-member structure's.
+        (
+            "typedef union packed { bit [3:0] a; } u_t; u_t v;",
+            "%p of a packed union",
+        ),
+        (
+            "typedef union packed { bit [3:0] a; bit [3:0] b; } u_t; u_t v;",
+            "%p of a packed union",
         ),
         (
             "class C; endclass int v[C];",
@@ -257,11 +270,6 @@ fn pattern_format_rejects_unsupported_types() {
         check_rejected(declarations, "v", expected);
     }
     for (declarations, value) in [
-        ("typedef struct packed { bit [3:0] a; } s_t;", "s_t'(4'h3)"),
-        (
-            "typedef struct packed { bit [3:0] a; } s_t; s_t q[2];",
-            "q[0]",
-        ),
         ("int m[2][3];", "m[1]"),
         ("int a[4];", "a[1:2]"),
         ("typedef struct { int n; string s; } r_t; r_t q[$];", "q[0]"),
@@ -270,14 +278,17 @@ fn pattern_format_rejects_unsupported_types() {
              function automatic r_t make(); r_t r; r.n = 1; return r; endfunction",
             "make()",
         ),
-        (
-            "typedef struct packed { bit [3:0] a; } s_t; \
-             function automatic s_t make(); return s_t'(4'h3); endfunction",
-            "make()",
-        ),
     ] {
         check_rejected(declarations, value, "%p of a structure or unpacked array");
     }
+    // A packed structure is printed through one select of each member, so
+    // a function result, as any call that may have effects, is rejected.
+    check_rejected(
+        "typedef struct packed { bit [3:0] a; } s_t; \
+         function automatic s_t make(); return s_t'(4'h3); endfunction",
+        "make()",
+        "%p of a packed structure value of a call with effects",
+    );
     // An enum value is printed by name through more than one evaluation.
     for (declarations, value) in [
         ("typedef enum {A, B} e_t; e_t q[$];", "q.pop_front()"),
@@ -523,4 +534,57 @@ fn sformatf_of_a_huge_operand_is_not_folded() {
             .build_cranelift()
             .is_err()
     );
+}
+
+sv_backends! {
+    // A packed structure prints as an assignment pattern with named members
+    // (IEEE 1800-2023 21.2.1.6): a packed structure member as a pattern, an
+    // enum member by name, others unformatted; also an element of a packed
+    // structure array, a member that is a structure and a conditional of
+    // two structures, as BlackParrot prints its configuration. An operator
+    // makes a vector of a structure, which prints as one (7.2.1, 11.4).
+    fn pattern_format_packed_structures(sim) {
+        @setup {
+            let source = r#"
+                module Top;
+                    typedef enum logic [1:0] {OFF, ON, IDLE} mode_e;
+                    typedef struct packed { logic [3:0] c; logic signed [3:0] d; } inner_t;
+                    typedef struct packed { logic [7:0] a; inner_t b; mode_e m; } outer_t;
+                    outer_t v;
+                    outer_t arr [2];
+                    string s;
+                    logic sel;
+                    struct packed { logic [3:0] \%s ; } esc;
+                    initial begin
+                        v = '{a: 8'd200, b: '{c: 4'd5, d: -4'sd3}, m: ON};
+                        arr[1] = v;
+                        arr[1].m = IDLE;
+                        $display("%p", v);
+                        s = $sformatf("<%p>", arr[1]);
+                        $display("%s", s);
+                        $display("%p", v.b);
+                        $display("%p", inner_t'(8'h5d));
+                        sel = 1;
+                        esc = 4'd6;
+                        $display("%p", sel ? v.b : inner_t'(8'h00));
+                        $display("%p", ~v.b);
+                        $display("%p", v.b << 1);
+                        $display("%p", esc);
+                    end
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("pattern_packed.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"'{a:200, b:'{c:5, d:-3}, m:ON}".to_vec() },
+            celox::RuntimeEvent::Display { message: b"<'{a:200, b:'{c:5, d:-3}, m:IDLE}>".to_vec() },
+            celox::RuntimeEvent::Display { message: b"'{c:5, d:-3}".to_vec() },
+            celox::RuntimeEvent::Display { message: b"'{c:5, d:-3}".to_vec() },
+            celox::RuntimeEvent::Display { message: b"'{c:5, d:-3}".to_vec() },
+            celox::RuntimeEvent::Display { message: b"162".to_vec() },
+            celox::RuntimeEvent::Display { message: b"186".to_vec() },
+            celox::RuntimeEvent::Display { message: br"'{\%s:6}".to_vec() },
+        ]);
+    }
 }

@@ -307,7 +307,7 @@ sequence 内のインスタンス、複数サイクル sequence への `disable 
   動的 `string` および非 UTF-8 のファイル名・モード、動的・連想配列の
   `$writememh` / `$writememb` は未対応です。
 - 書式付き文字列出力 <a id="formatted-output-to-strings"></a>: 関数呼び出しやキュー pop から得た
-  enum 値、packed 構造体、enum の packed 配列、固定長 unpacked 配列、
+  enum 値、packed 共用体、関数呼び出しの戻り値やその他の副作用のある呼び出しで得た packed 構造体、enum の packed 配列、固定長 unpacked 配列、
   `real` メンバを持つ構造体、その他の集約関数結果、他の集約のコンテナに対する
   `%p` は未対応です。実行時書式の `%p` は string を引用符付きで、それ以外を
   `%0d` として出力します。

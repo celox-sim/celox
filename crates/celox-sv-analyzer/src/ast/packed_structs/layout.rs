@@ -63,6 +63,7 @@ pub(in crate::ast) fn native_type(
                 offset: 0,
                 tag: None,
                 is_void,
+                in_union: !matches!(kind, AggregateKind::Struct),
                 r#type: capture_member_type(functions, ty, env)?,
             })
         })
