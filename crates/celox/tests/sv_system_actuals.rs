@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 use std::path::Path;
 const SOURCE: &str = r#"
 module Top(output logic ok);

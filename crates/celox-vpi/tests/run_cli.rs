@@ -14,7 +14,6 @@ fn run(sources: &[(&str, &str)], extra: &[&str]) -> std::process::Output {
     command.args(["--top", "Top"]).args(extra).output().unwrap()
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn sv_optimization_preserves_testbench_reads_of_internal_combinational_signals() {
     let source = r#"
@@ -49,7 +48,6 @@ fn sv_optimization_preserves_testbench_reads_of_internal_combinational_signals()
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn runs_multiple_sources_and_preserves_display_and_write_output() {
     let output = run(
@@ -73,7 +71,6 @@ fn runs_multiple_sources_and_preserves_display_and_write_output() {
     assert_eq!(output.stdout, b"value=42\n");
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn no_remaining_events_is_success() {
     let output = run(
@@ -91,7 +88,6 @@ fn no_remaining_events_is_success() {
     assert_eq!(output.stdout, b"done\n");
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn fatal_and_nonfatal_failures_return_failure_with_output() {
     for action in [
@@ -241,7 +237,6 @@ fn rejects_mixed_sources_and_veryl_without_a_testbench() {
     );
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn sv_delays_complete_and_execution_limit_fails() {
     let output = run(
@@ -270,10 +265,7 @@ fn sv_delays_complete_and_execution_limit_fails() {
 
 #[test]
 fn accepts_supported_optimization_levels() {
-    for extension in ["sv", "veryl"]
-        .into_iter()
-        .filter(|extension| *extension != "sv" || cfg!(feature = "systemverilog"))
-    {
+    for extension in ["sv", "veryl"] {
         let name = format!("top.{extension}");
         let source = if extension == "sv" {
             "module Top; initial $finish; endmodule"
@@ -305,15 +297,6 @@ fn accepts_relative_standalone_veryl_source() {
     assert!(output.status.success(), "{output:?}");
 }
 
-#[cfg(not(feature = "systemverilog"))]
-#[test]
-fn sv_without_feature_explains_how_to_enable_it() {
-    let output = run(&[("top.sv", "module Top; endmodule")], &[]);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--features systemverilog"));
-}
-
-#[cfg(feature = "systemverilog")]
 #[test]
 fn sv_stop_is_not_reported_as_successful_completion() {
     let output = run(
@@ -474,7 +457,6 @@ fn backend_defaults_to_tiered_unless_native_code_is_requested() {
     assert!(report.contains("backend=native "), "{report}");
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn sv_defaults_to_two_state_and_four_state_is_explicit() {
     for (args, expected) in [(vec![], "0"), (vec!["--four-state"], "x")] {
@@ -552,7 +534,6 @@ fn execution_option_conflicts_are_rejected() {
 /// `--sir-pass` selects the passes of a SystemVerilog design as it does
 /// those of a Veryl one: with net inlining (the two-state O2 default)
 /// disabled, the run prints the same.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn sv_accepts_pass_overrides() {
     let source = r#"
@@ -590,7 +571,6 @@ fn sv_accepts_pass_overrides() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn sv_backends_preserve_timed_nba_execution_and_failures() {
     let source = r#"
@@ -702,7 +682,6 @@ fn source_file_is_relative_to_celox_manifest_from_another_directory() {
     assert!(output.status.success(), "{output:?}");
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn interface_array_query_policy_flows_through_manifest_and_cli_overrides() {
     let project = tempfile::tempdir().unwrap();
@@ -763,7 +742,6 @@ fn interface_array_query_policy_flows_through_manifest_and_cli_overrides() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn sv_saves_state_files_at_cycles_and_times() {
     let source = "`timescale 1ns/1ns
@@ -837,7 +815,6 @@ endmodule
     );
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn sv_plusargs_reach_the_testbench_in_order() {
     let source = r#"module Top;
@@ -884,7 +861,7 @@ endmodule
     );
 }
 
-#[cfg(all(unix, feature = "systemverilog"))]
+#[cfg(unix)]
 #[test]
 fn sigusr1_checkpoints_by_default_and_resumes_in_a_new_process() {
     use std::{
@@ -1079,7 +1056,6 @@ endmodule
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn sv_report_exposes_actual_compiled_scheduler_execution() {
     let source = r#"module Top;
@@ -1166,7 +1142,6 @@ fn veryl_vcd_records_clock_phases_across_backends() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn sv_vcd_preserves_compiled_slots_and_matches_interpreter() {
     let source = r#"`timescale 1ns/1ns
@@ -1325,7 +1300,6 @@ fn vcd_is_flushed_when_a_veryl_run_hits_the_tick_limit() {
     );
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn vcd_is_flushed_when_an_sv_run_fails_or_hits_the_step_limit() {
     let dir = tempfile::tempdir().unwrap();
@@ -1365,7 +1339,6 @@ fn jit_strategy_defaults_and_overrides_reach_both_frontends() {
             "top.veryl",
             "#[test(Top)] module Top { initial { $finish(); } }",
         ),
-        #[cfg(feature = "systemverilog")]
         ("top.sv", "module Top; initial $finish; endmodule"),
     ] {
         for (args, expected) in [

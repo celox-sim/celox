@@ -25,7 +25,7 @@ feature when a `.wasm` library is requested.
 
 Common test matrices use the enabled backends. Binaries that directly compare
 optional backends declare required features. To run the complete Celox suite,
-use `cargo test -p celox --features systemverilog,cranelift,wasm-runtime,wasm-component,veryl-reference`.
+use `cargo test -p celox --features cranelift,wasm-runtime,wasm-component,veryl-reference`.
 CI enables the Celox backend features, but does not enable `veryl-reference`,
 including in full, scheduled and release validation. The upstream Veryl
 reference simulator comparisons remain available through the explicit local
@@ -59,7 +59,7 @@ For example, to check a changed shared counter case locally:
 
 ```sh
 cargo fmt --all -- --check
-cargo test --locked -p celox --features systemverilog --test counter
+cargo test --locked -p celox --test counter
 cargo run --locked -p celox-test-suite --features verilator --bin verify-verilator -- --filter counter::
 cargo run --locked -p celox-test-suite --features icarus --bin verify-icarus -- --filter counter::
 ```

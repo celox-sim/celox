@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! Several continuous assignments to a net are its drivers, and the net
 //! type resolves their values bit by bit (IEEE 1800-2023 6.5, 6.6): Table
 //! 6-2 for `wire` and `tri`, Table 6-3 for `wand` and `triand`, Table 6-4

@@ -445,12 +445,7 @@ pub struct TieredBackend {
 }
 
 impl TieredBackend {
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn publish_scheduler_for_test(&mut self) {
         self.keep_incremental_for_test();
         let Phase::Interpreting(Some(interp)) = &mut self.phase else {
@@ -461,12 +456,7 @@ impl TieredBackend {
         assert!(!self.is_compiled(), "must not use whole-image promotion");
     }
 
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn interp_for_test(&mut self) -> &mut crate::backend::InterpBackend {
         self.keep_incremental_for_test();
         let Phase::Interpreting(Some(interp)) = &mut self.phase else {
@@ -480,12 +470,7 @@ impl TieredBackend {
     /// escalate to whole-image code once it is ready, which would otherwise
     /// replace the executor under test at a timing-dependent safe point.
     /// Hotspot compilation is left running.
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     fn keep_incremental_for_test(&mut self) {
         if !matches!(self.phase, Phase::Interpreting(Some(_))) {
             return;
@@ -659,12 +644,7 @@ impl TieredBackend {
 
     /// A deterministic scheduler test: either the ordinary native executor,
     /// or the real mixed executor after its scheduler has been published.
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn for_scheduler_test(
         laid_out: &LaidOutProgram,
         options: &SimulatorOptions,

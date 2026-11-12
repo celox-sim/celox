@@ -70,13 +70,11 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     }
 
     /// Returns the SystemVerilog source files passed to this builder.
-    #[cfg(feature = "systemverilog")]
     pub fn sv_sources(&self) -> &[(&'a str, &'a Path)] {
         &self.sv_sources
     }
 
     /// Replace the builder's SystemVerilog source set.
-    #[cfg(feature = "systemverilog")]
     pub fn with_sv_sources(mut self, sources: Vec<(&'a str, &'a Path)>) -> Self {
         self.sv_sources = sources;
         self
@@ -84,7 +82,6 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
 
     /// Replace the builder's Veryl sources with SystemVerilog sources,
     /// keeping its configuration.
-    #[cfg(feature = "systemverilog")]
     pub fn into_sv_sources(mut self, sources: Vec<(&'a str, &'a Path)>) -> Self {
         self.sources.clear();
         self.sv_sources = sources;
@@ -173,7 +170,7 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
 
     /// Append the generated derived-edge units of every event and record
     /// them in `sink`.
-    #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
+    #[cfg(all(test, feature = "cranelift"))]
     pub(crate) fn derived_edge_units(mut self, sink: crate::derived_edge::TestEdgeUnits) -> Self {
         self.options.derived_edge_units = Some(sink);
         self
@@ -842,5 +839,5 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
 /// units. No frontend makes calls yet, so the tests inject them into the
 /// SIR of ordinary designs: each design gives the objects it involves
 /// distinct widths, by which the injection finds them.
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 mod call_consumer_tests;

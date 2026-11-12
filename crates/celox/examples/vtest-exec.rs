@@ -12,7 +12,6 @@ mod veryl_sv;
 #[path = "../tests/test_utils/vtest_exec.rs"]
 mod vtest_exec;
 
-#[cfg(feature = "systemverilog")]
 #[allow(dead_code)]
 #[path = "../tests/frontends/systemverilog/suite.rs"]
 mod sv_suite;
@@ -20,7 +19,6 @@ mod sv_suite;
 #[derive(Clone, ValueEnum)]
 enum Language {
     Veryl,
-    #[cfg(feature = "systemverilog")]
     Sv,
 }
 
@@ -37,7 +35,6 @@ fn main() {
     let args = Args::parse();
     match args.language {
         Language::Veryl => suite::run_case(&args.case, &args.backend),
-        #[cfg(feature = "systemverilog")]
         Language::Sv => sv_suite::run_case(&args.case, &args.backend),
     }
 }

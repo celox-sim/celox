@@ -1,4 +1,3 @@
-#[cfg(feature = "systemverilog")]
 use std::fs;
 use std::process::Command;
 
@@ -20,7 +19,6 @@ fn cli_rejects_invalid_diagnostic_levels() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid diagnostic level"));
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn run_and_build_share_project_target_and_cli_diagnostic_precedence() {
     let project = tempfile::tempdir().unwrap();
@@ -92,7 +90,6 @@ fn run_and_build_share_project_target_and_cli_diagnostic_precedence() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn aggregate_input_defaults_can_be_enabled_with_diagnostic_policy() {
     let project = tempfile::tempdir().unwrap();
@@ -150,7 +147,6 @@ fn aggregate_input_defaults_can_be_enabled_with_diagnostic_policy() {
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("unpacked_port_default"));
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn inferred_latch_uses_common_diagnostics_for_run_and_build() {
     let project = tempfile::tempdir().unwrap();

@@ -1,7 +1,7 @@
 /// Sampled copies no unit reads are dropped from the runtime
 /// schema, even though the frontend lists every copy among the
 /// testbench read roots for the host refresh that writes them.
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 #[test]
 fn unread_sample_copies_are_pruned_from_the_runtime_schema() {
     // The sampled copy of `dat` is read only by the check's monitor
@@ -34,7 +34,7 @@ endmodule"#;
 
 /// The traced build lays out its program itself, so it must prune
 /// the same unread sampled copies as the laid-out path above.
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 #[test]
 fn unread_sample_copies_are_pruned_in_traced_builds() {
     // A sampled copy no unit reads is pruned; the copy an output
@@ -60,7 +60,7 @@ fn unread_sample_copies_are_pruned_in_traced_builds() {
 /// Lane units that call functions share the call stack, so the lane
 /// plan orders them, on one lane or by a wait; the call-free units of
 /// the same kernel still spread over several lanes.
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 #[test]
 fn lane_plans_order_the_units_that_call() {
     let source = r#"module Top(input logic clk, input logic [31:0] a, input logic [31:0] b,
@@ -147,11 +147,7 @@ endmodule"#;
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn hotspot_scheduler_releases_its_program_after_a_failed_stage() {
     use crate::backend::hotspot::{EntryKey, HotspotRuntime, SCRATCH_BYTES};
@@ -191,7 +187,7 @@ endmodule"#;
     }
 }
 
-#[cfg(all(test, feature = "systemverilog", hotspot_jit))]
+#[cfg(all(test, hotspot_jit))]
 #[test]
 fn hotspot_scheduler_overlaps_large_comb_and_links_after_publication() {
     use crate::backend::hotspot::{EntryKey, HotspotRuntime, SCRATCH_BYTES};
@@ -290,7 +286,6 @@ endmodule"#;
 
 #[cfg(all(
     test,
-    feature = "systemverilog",
     any(
         target_arch = "x86_64",
         target_arch = "aarch64",
@@ -429,12 +424,7 @@ fn deferred_edges_preserve_expanded_ir_and_reserve_only_small_entries() {
     }
 }
 
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn native_comb_chunks_preserve_cross_unit_state_through_image_roundtrip() {
     let source = r#"module Top(input bit [7:0] a,
@@ -489,12 +479,7 @@ fn native_comb_chunks_preserve_cross_unit_state_through_image_roundtrip() {
     }
 }
 
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn portable_fork_state_remaps_reordered_compiled_kernels() {
     let source = r#"`timescale 1ns/1ns
@@ -547,7 +532,6 @@ endmodule"#;
 
 #[cfg(all(
     test,
-    feature = "systemverilog",
     any(
         all(target_arch = "x86_64", not(feature = "arm64-codegen")),
         all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
@@ -592,7 +576,6 @@ fn extended_host_requests_survive_native_image_roundtrip() {
 
 #[cfg(all(
     test,
-    feature = "systemverilog",
     any(
         all(target_arch = "x86_64", not(feature = "arm64-codegen")),
         all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
@@ -654,7 +637,6 @@ fn typed_vcd_selections_survive_native_image_roundtrip() {
 
 #[cfg(all(
     test,
-    feature = "systemverilog",
     any(
         all(target_arch = "x86_64", not(feature = "arm64-codegen")),
         all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
@@ -756,11 +738,7 @@ fn dirty_clock_batch_evaluates_new_inputs_before_ff_update() {
     assert!(count_clean_clock_batch(false, false, true).0 > 0);
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn native_scheduler_delayed_nba_code_grows_linearly() {
     // Every process both stages a delayed NBA and waits on the clock:
@@ -804,11 +782,7 @@ fn native_scheduler_delayed_nba_code_grows_linearly() {
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn hotspot_scheduler_outlines_kernels_past_its_inline_budget() {
     // Hundreds of medium processes: inlining all of them would make the
@@ -874,7 +848,6 @@ fn hotspot_scheduler_outlines_kernels_past_its_inline_budget() {
     assert!(crate::scheduler::hotspot_scheduler(&program, None, Some(&cancel)).is_err());
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn always_comb_startup_gate_reads_process_statuses_once() {
     // Every always_comb waits for the time-zero barrier. Testing every
@@ -920,11 +893,7 @@ fn always_comb_startup_gate_reads_process_statuses_once() {
     );
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn native_scheduler_host_wait_scans_grow_linearly() {
     for four_state in [false, true] {
@@ -965,11 +934,7 @@ fn native_scheduler_host_wait_scans_grow_linearly() {
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn native_scheduler_host_wait_continuations_exceed_one_byte() {
     let mut source =
@@ -1045,7 +1010,6 @@ fn discarded_stale_bits_keep_settles_deferred() {
 
 #[cfg(all(
     test,
-    feature = "systemverilog",
     any(
         all(target_arch = "x86_64", not(feature = "arm64-codegen")),
         all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
@@ -1107,12 +1071,9 @@ endmodule"#;
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn unrelated_active_updates_allow_a_procedural_clock_cone() {
@@ -1174,12 +1135,9 @@ endmodule"#;
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn derived_clock_domains_stop_at_the_same_state_as_the_reference() {
@@ -1262,12 +1220,9 @@ endmodule"#,
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn raw_wait_multiple_terms_can_wake_one_kernel_twice_in_a_slot() {
@@ -1310,12 +1265,9 @@ endmodule"#;
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn raw_wait_snapshots_distinguish_x_from_z() {
@@ -1359,12 +1311,9 @@ endmodule"#
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn raw_wait_rearms_at_distinct_sites_and_across_run_boundaries() {
@@ -1414,12 +1363,9 @@ endmodule"#;
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn reactive_waits_run_after_nbas_without_repeating_domains() {
@@ -1494,12 +1440,9 @@ endmodule"#
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn reactive_wait_cycles_use_a_bounded_native_work_list() {
@@ -1529,12 +1472,9 @@ fn reactive_wait_cycles_use_a_bounded_native_work_list() {
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn reactive_waits_on_active_results_run_before_native_nba_publication() {
@@ -1575,12 +1515,9 @@ fn reactive_waits_on_active_results_run_before_native_nba_publication() {
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn reactive_wait_can_finish_after_a_host_clock_nba() {
@@ -1625,12 +1562,9 @@ fn reactive_wait_can_finish_after_a_host_clock_nba() {
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn reactive_wait_remembers_an_intermediate_domain_wave() {
@@ -1682,12 +1616,9 @@ fn reactive_wait_remembers_an_intermediate_domain_wave() {
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn reactive_wait_direct_self_write_is_captured_before_registration() {
@@ -1753,12 +1684,9 @@ fn reactive_wait_direct_self_write_is_captured_before_registration() {
     );
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn native_file_calls_keep_the_host_return_bound() {
@@ -1814,12 +1742,9 @@ fn native_file_calls_keep_the_host_return_bound() {
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn native_file_calls_survive_tiered_adoption() {
@@ -1883,12 +1808,9 @@ fn native_file_calls_survive_tiered_adoption() {
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn native_file_calls_reset_the_bound_after_a_wait() {
@@ -1930,12 +1852,9 @@ fn native_file_calls_reset_the_bound_after_a_wait() {
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn native_loop_checkpoints_continue_without_reference_slots() {
@@ -1999,11 +1918,7 @@ fn native_loop_checkpoints_continue_without_reference_slots() {
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn native_budget_guard_continuations_exceed_one_byte() {
     let mut source =
@@ -2042,11 +1957,7 @@ fn native_budget_guard_continuations_exceed_one_byte() {
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn native_budget_is_shared_by_checkpoints_and_file_calls() {
     for file_first in [false, true] {
@@ -2097,7 +2008,6 @@ fn native_budget_is_shared_by_checkpoints_and_file_calls() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn first_tier_scheduler_continuations_exceed_one_byte() {
     let mut source = String::from("module Top(input bit [7:0] d");
@@ -2318,10 +2228,7 @@ fn partitioned_host_clock_glue_invalidates_its_comb_readers() {
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn partitioned_compiled_run_marks_native_nbas() {
     let source = r#"`timescale 1ns/1ns
@@ -2356,10 +2263,7 @@ endmodule"#;
     }
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn incremental_clock_settle_matches_full_reference_with_mixed_writes() {
     let source = r#"`timescale 1ns/1ns
@@ -2417,10 +2321,7 @@ endmodule"#;
 /// right-hand side at the edge and publishes the update at the due time
 /// (IEEE 1800-2023 9.4.5, 10.4.2). The flip-flop still fuses into its
 /// clock domain instead of running as a process kernel per edge.
-#[cfg(all(
-    feature = "systemverilog",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn delayed_nonblocking_ff_is_fused_and_matches_reference() {
     let source = r#"`timescale 1ns/1ns
@@ -2484,10 +2385,7 @@ endmodule"#;
 /// own (IEEE 1800-2023 10.4.2), and a part-select updates its bits
 /// alone: such an edge process, `always_ff` included, keeps the queue.
 /// Assignments in alternative branches stay in the flip-flop.
-#[cfg(all(
-    feature = "systemverilog",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn delayed_nonblocking_a_stage_cannot_hold_keeps_the_queue() {
     for keyword in ["always", "always_ff"] {
@@ -2561,10 +2459,7 @@ endmodule"#
 /// timestamps refreshes the sampled copies at its own slot starts,
 /// so a reader deep inside a batched run still sees each slot's
 /// beginning-of-slot value, matching the reference loop.
-#[cfg(all(
-    feature = "systemverilog",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn sampled_shadows_refresh_inside_batched_compiled_runs() {
     let source = r#"`timescale 1ns/1ns
@@ -2594,10 +2489,7 @@ endmodule"#;
 /// (IEEE 1800-2023 4.4.2.1, 16.5.1). A compiled run that takes up work
 /// of the timestamp the last run ended at, here a host write, keeps
 /// the copies of that slot; it refreshes them only as time advances.
-#[cfg(all(
-    feature = "systemverilog",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn sampled_shadows_keep_the_slot_start_within_a_timestamp() {
     let source = r#"`timescale 1ns/1ns
@@ -2641,12 +2533,9 @@ endmodule"#;
 /// by typed commits). The interpreted tier executes the same units
 /// before adoption, so it must run those raw accesses as plain
 /// state loads and stores instead of extern calls.
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn tiered_wide_ff_commits_match_reference() {
@@ -2695,10 +2584,7 @@ endmodule"#;
 /// the kernels' clock writes dirty and those they publish to. The slot
 /// after a clock toggle runs only the cone; a kernel writing data as
 /// well runs the whole settle.
-#[cfg(all(
-    feature = "systemverilog",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn partitioned_clock_cone_matches_the_single_pass_settle() {
     let source = r#"`timescale 1ns/1ns
@@ -2790,10 +2676,7 @@ endmodule"#;
 /// first in a pass that also toggles a clock, runs the cone of both,
 /// and the data logic reading `din` is settled before anything
 /// observes it.
-#[cfg(all(
-    feature = "systemverilog",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn partitioned_clock_cone_covers_the_kernels_data_writes() {
     let source = r#"`timescale 1ns/1ns
@@ -2879,10 +2762,7 @@ endmodule"#;
     );
 }
 
-#[cfg(all(
-    feature = "systemverilog",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn combinational_rtl_wait_inputs_keep_unrelated_outputs_deferred() {
     let source = r#"`timescale 1ns/1ns

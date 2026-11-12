@@ -10,7 +10,7 @@ CeloxはVerylまたはSystemVerilogの設計を、VPI経由で通常の
 現在、CLIはCeloxのソースツリーからビルドします。
 
 ```sh
-cargo build --release -p celox-vpi --features systemverilog --bin celox
+cargo build --release -p celox-vpi --bin celox
 ```
 
 後述の`run`コマンドにはPythonは不要です。VPIテストを使う場合は、利用するPython環境へcocotbをインストールします。
@@ -196,7 +196,7 @@ celox vpi build -f rtl/design.f --top Dut -o build/dut-sim
 環境変数・ワイルドカード・シェルの展開は行いません。
 未対応オプション、未知のTOMLフィールド、一覧の循環参照はエラーにします。
 CLIからも`-I`/`--include-dir`と`-D`/`--define`を直接指定できます。
-include・マクロ指定にはSV入力と`--features systemverilog`によるビルドが必要です。
+include・マクロ指定にはSV入力が必要です。
 
 ## 設計をコンパイルする
 

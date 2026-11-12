@@ -92,7 +92,6 @@ fn abstract_reset_uses_project_default() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn generator_follows_declared_indices_of_sv_instance_arrays() {
     use std::path::Path;

@@ -12,11 +12,8 @@ edition.workspace     = true
 cranelift = ["celox/cranelift"]
 wasm-runtime = ["celox/wasm-runtime"]
 wasm-component = ["celox/wasm-component"]
-default = ["systemverilog"]
 arm64-codegen = ["celox/arm64-codegen"]
 x86_64-codegen = ["celox/x86_64-codegen"]
-# The `celox` command links DPI-C libraries (`--dpi-lib`).
-systemverilog = ["celox/sv-dpi", "dep:celox-sv-analyzer"]
 
 [lib]
 crate-type = ["rlib", "cdylib"]
@@ -36,10 +33,10 @@ name = "celox"
 path = "src/bin/celox.rs"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-celox = { path = "../celox", features = ["systemverilog"] }
+celox = { path = "../celox" }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
-celox = { path = "../celox", features = ["systemverilog"] }
+celox = { path = "../celox" }
 
 [dependencies]
 blake3 = "1.8"
@@ -52,7 +49,7 @@ tempfile.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 celox-design.workspace = true
 celox-runtime.workspace = true
-celox-sv-analyzer = { workspace = true, optional = true }
+celox-sv-analyzer.workspace = true
 clap.workspace = true
 fxhash.workspace = true
 libloading = "0.9"

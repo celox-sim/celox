@@ -52,7 +52,7 @@ jobs:
         if: matrix.suite == 'sv' && matrix.tool == 'icarus'
         run: >-
           nix develop "$VERIFY_SHELL" --no-update-lock-file --command
-          cargo test --locked -p celox-vpi --features systemverilog
+          cargo test --locked -p celox-vpi
           --test cocotb_e2e icarus_and_celox_agree_on_dut_processes -- --ignored --exact
 
       - name: Catalogue every shared case

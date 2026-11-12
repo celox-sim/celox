@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! Every change of a variable is an update event that schedules the
 //! processes sensitive to it (IEEE 1800-2023 4.3, 4.5), also a change that
 //! a later write of the same time slot undoes. Nonblocking updates are

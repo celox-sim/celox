@@ -20,7 +20,7 @@ pub enum Frontend {
 }
 
 /// Generates native, cranelift, wasm, interpreter, and Veryl reference tests,
-/// plus an SV frontend test when the `systemverilog` feature is enabled.
+/// plus an SV frontend test.
 ///
 /// Directives at the start of a test body, in any order:
 ///
@@ -111,7 +111,6 @@ macro_rules! all_backends {
         body { $($body:tt)* }
     ) => {
         all_backends!(@with_ignore sv; $ignore_list; {
-            #[cfg(feature = "systemverilog")]
             #[test]
             $(#[$meta])*
             #[allow(unused_mut, unused_variables)]
@@ -450,7 +449,6 @@ macro_rules! all_backends {
     (@case_veryl skip $ignore_list:tt $(#[$meta:meta])* $case:literal) => {};
     (@case_sv emit $ignore_list:tt $(#[$meta:meta])* $case:literal) => {
         all_backends!(@with_ignore sv; $ignore_list; {
-            #[cfg(feature = "systemverilog")]
             #[test]
             $(#[$meta])*
             fn sv() {

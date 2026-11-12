@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 use std::path::Path;
 
 const DISTRIBUTIONS: [(&str, &str, i32, i32); 6] = [

@@ -216,10 +216,10 @@ The retained report records execution before the ignores were added.
 Reproduce those observations explicitly with:
 
 ```sh
-cargo test --locked -p celox --features systemverilog \
+cargo test --locked -p celox \
   --test expression_semantics system_function_results_obey_ternary_width_contexts \
   -- --include-ignored
-cargo test --locked -p celox --features systemverilog \
+cargo test --locked -p celox \
   --test flip_flop test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion \
   -- --include-ignored
 ```

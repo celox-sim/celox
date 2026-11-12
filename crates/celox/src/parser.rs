@@ -644,7 +644,6 @@ pub fn parse(
     Ok((program, dynamic_for_diagnostics))
 }
 
-#[cfg(feature = "systemverilog")]
 pub fn parse_sv(
     sources: &[(&str, &std::path::Path)],
     top: &str,
@@ -749,7 +748,6 @@ pub fn parse_sv(
 
 /// Split only SystemVerilog hierarchy separators. Escaped identifiers retain
 /// their spelling and whitespace terminator (IEEE 1800-2023 5.6.1).
-#[cfg(feature = "systemverilog")]
 fn sv_reflection_scope_segments(segments: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     for segment in segments {
@@ -774,7 +772,6 @@ fn sv_reflection_scope_segments(segments: &[String]) -> Vec<String> {
 
 /// An analyzer error as a parser error: a construct the analyzer does not
 /// support stays unsupported, and anything else is an error in the source.
-#[cfg(feature = "systemverilog")]
 pub(crate) fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
     match error.into_error() {
         error @ celox_frontend_sv::AnalyzerError::Unsupported(_) => ParserError::unsupported(
@@ -793,7 +790,6 @@ pub(crate) fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> Pars
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(feature = "systemverilog")]
 pub fn parse_mixed(
     top: &StrId,
     ir: &mut veryl_analyzer::ir::Ir,
@@ -1128,7 +1124,6 @@ pub fn parse_with_external_hierarchy(
     Ok((program, dynamic_for_diagnostics))
 }
 
-#[cfg(feature = "systemverilog")]
 fn reachable_external_sv_roots(ir: &veryl_analyzer::ir::Ir, top: &StrId) -> HashSet<StrId> {
     use veryl_analyzer::ir::{Component, Declaration};
 
@@ -1265,7 +1260,7 @@ mod fused_hint_tests {
     }
 }
 
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 mod sv_scope_tests {
     use super::sv_reflection_scope_segments;
 

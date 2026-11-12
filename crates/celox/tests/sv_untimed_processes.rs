@@ -1,6 +1,5 @@
 //! An untimed `Simulator` runs no process kernel, so building one for a
 //! design with a kernel is an error that names the process (#1712).
-#![cfg(feature = "systemverilog")]
 
 use std::path::Path;
 

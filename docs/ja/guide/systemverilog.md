@@ -1,7 +1,7 @@
 # SystemVerilog サポート
 
 Celox は **Rust API** から SystemVerilog をシミュレートできます。
-Cargo feature の `systemverilog` を有効にし、ソースファイルとトップモジュールを指定して使います。
+ソースファイルとトップモジュールを指定して使います。
 TypeScript パッケージと Vite プラグインは、現時点では Veryl のみを読み込みます。
 
 Celox は IEEE Std 1800™-2023 に従います。
@@ -11,11 +11,11 @@ Celox は IEEE Std 1800™-2023 に従います。
 
 ## 最初のモジュールを動かす
 
-Rust プロジェクトで feature を有効にします。
+Rust プロジェクトに Celox を追加します。
 
 ```toml
 [dependencies]
-celox = { version = "*", features = ["systemverilog"] }
+celox = "*"
 ```
 
 `Simulator::from_sv_sources` にソース文字列とそのパスを渡し、トップモジュール名を指定します。
@@ -99,7 +99,7 @@ interface と `input` / `output` modport も言語間で接続できます。
 
 ## DPI-C imports
 
-`sv-dpi` を有効にすると、手続きコードから C 関数を呼び出せます。
+手続きコードから C 関数を呼び出せます。
 関数や共有ライブラリは `dpi_function` / `dpi_library` で登録します。
 C と SV の型を一致させる必要があるため、どちらも `unsafe` API です。
 `celox run` コマンドは `--dpi-lib PATH` で共有ライブラリをリンクします。

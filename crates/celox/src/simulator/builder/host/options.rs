@@ -49,7 +49,7 @@ pub struct SimulatorOptions {
     /// kernels the scheduler leaves to the host.
     pub(crate) host_edges: bool,
     /// Generated derived-edge units the tests run, recorded here.
-    #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
+    #[cfg(all(test, feature = "cranelift"))]
     pub(crate) derived_edge_units: Option<crate::derived_edge::TestEdgeUnits>,
     /// A rewrite of the optimized SIR before layout, with which tests
     /// build programs no frontend produces yet.
@@ -116,7 +116,7 @@ impl Default for SimulatorOptions {
             legacy_empty_reductions: false,
             emit_triggers: false,
             host_edges: true,
-            #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
+            #[cfg(all(test, feature = "cranelift"))]
             derived_edge_units: None,
             #[cfg(test)]
             sir_transform: None,

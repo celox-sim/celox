@@ -495,7 +495,7 @@ fn dump_target_matches(
     })
 }
 
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 mod tests {
     #[test]
     fn relaxed_limit_rescans_consumed_backend_writes() {

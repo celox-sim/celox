@@ -587,7 +587,6 @@ impl Simulation {
     }
 
     /// Build a timed simulation directly from SystemVerilog sources.
-    #[cfg(feature = "systemverilog")]
     pub fn from_sv_sources<'a>(
         sources: Vec<(&'a str, &'a std::path::Path)>,
         top: &'a str,
@@ -1712,7 +1711,7 @@ impl<B: SimBackend, F: FnMut() -> bool> celox_runtime::StepObserver<Simulator<B>
 #[cfg(all(test, feature = "host-runtime"))]
 mod process_tests;
 
-#[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+#[cfg(all(test, feature = "host-runtime"))]
 mod process_control_tests;
 #[cfg(all(test, feature = "host-runtime"))]
 mod runtime_core_tests;

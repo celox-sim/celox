@@ -50,7 +50,6 @@ fn direct_veryl_compile_returns_readmem_dependencies_to_its_caller() {
     assert_memory_is_tracked(&dependencies, &memory);
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn direct_mixed_compile_returns_veryl_child_readmem_dependencies_to_its_caller() {
     let directory = tempfile::tempdir().unwrap();

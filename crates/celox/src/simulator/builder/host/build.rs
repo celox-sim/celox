@@ -51,7 +51,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         }
     }
 
-    #[cfg(feature = "systemverilog")]
     pub fn from_sv_sources(sources: Vec<(&'a str, &'a Path)>, top: &'a str) -> Self {
         Self {
             sources: Vec::new(),
@@ -76,7 +75,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         }
     }
 
-    #[cfg(feature = "systemverilog")]
     /// Combine native Veryl and SV sources, with a top in either language.
     pub fn from_mixed_sources(
         sources: Vec<(&'a str, &'a Path)>,
@@ -540,7 +538,7 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
                 crate::derived_edge::attach(&mut laid_out, self.options.host_edges);
             }
         }
-        #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
+        #[cfg(all(test, feature = "cranelift"))]
         if let Some(sink) = &self.options.derived_edge_units {
             crate::derived_edge::attach_test_units(&mut laid_out, sink);
         }

@@ -1,12 +1,9 @@
 //! A timed `Simulation` built from a native image: the image carries the
 //! process kernels and the compiled scheduler, so a serialized image runs as
 //! the in-process build does (#1730).
-#![cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#![cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 
 use std::path::Path;

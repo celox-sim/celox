@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! The compilation-unit scope `$unit` (IEEE 1800-2023 3.12.1): each source
 //! file is a compilation unit of its own.
 

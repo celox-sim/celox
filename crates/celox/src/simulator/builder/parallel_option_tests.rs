@@ -22,10 +22,7 @@ fn optimization_setters_keep_thread_and_partition_requests() {
         assert_eq!(options.parallel_partition(), ParallelPartition::Always);
     }
 }
-#[cfg(all(
-    feature = "systemverilog",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn native_feedback_work_lists_converge_or_report_the_slot_bound() {
     for four_state in [false, true] {

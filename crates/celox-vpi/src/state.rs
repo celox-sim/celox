@@ -369,7 +369,7 @@ impl Runtime {
     }
 }
 
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

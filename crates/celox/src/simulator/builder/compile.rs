@@ -464,7 +464,6 @@ pub(super) fn compile_to_sir_with_layout_mode(
 }
 
 /// Compile SystemVerilog sources to optimized SIR.
-#[cfg(feature = "systemverilog")]
 pub fn compile_sv_to_sir(
     sources: &[(&str, &Path)],
     top: &str,
@@ -515,7 +514,6 @@ pub fn compile_sv_to_sir(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(feature = "systemverilog")]
 pub(super) fn compile_sv_to_sir_with_layout_mode(
     sources: &[(&str, &Path)],
     top: &str,
@@ -608,7 +606,6 @@ pub(super) fn compile_sv_to_sir_with_layout_mode(
 /// Either language may supply the top or instantiate the other language.
 /// Use [`compile_mixed_to_sir_with_file_dependencies`] to collect external file lookups.
 #[allow(clippy::too_many_arguments)]
-#[cfg(feature = "systemverilog")]
 pub fn compile_mixed_to_sir(
     sources: &[(&str, &Path)],
     sv_sources: &[(&str, &Path)],
@@ -654,7 +651,6 @@ pub fn compile_mixed_to_sir(
 /// Pass the collector supplied by `celox_frontend_veryl::capture_file_dependencies`
 /// to retain readmem lookup paths for cache invalidation. Source files must be
 /// tracked separately.
-#[cfg(feature = "systemverilog")]
 pub fn compile_mixed_to_sir_with_file_dependencies(
     sources: &[(&str, &Path)],
     sv_sources: &[(&str, &Path)],
@@ -710,7 +706,6 @@ pub fn compile_mixed_to_sir_with_file_dependencies(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(feature = "systemverilog")]
 pub(super) fn compile_mixed_to_sir_with_layout_mode(
     sources: &[(&str, &Path)],
     sv_sources: &[(&str, &Path)],
@@ -867,35 +862,6 @@ pub(super) fn compile_hdl_to_sir_with_layout_mode(
         )
         .into());
     }
-    #[cfg(not(feature = "systemverilog"))]
-    {
-        debug_assert!(sv_sources.is_empty());
-        compile_to_sir_with_layout_mode(
-            sources,
-            top,
-            ignored_loops,
-            true_loops,
-            four_state,
-            trace_opts,
-            trace_out,
-            metadata,
-            clock_type,
-            reset_type,
-            param_overrides,
-            optimize_options,
-            diagnostics,
-            diagnostic_policy,
-            sv_timescale,
-            legacy_empty_reductions,
-            injected_manifests,
-            layout_mode,
-            recover_comb_loops,
-            allow_always_ff_function_effects,
-            allow_inferred_latches,
-            file_dependencies,
-        )
-    }
-    #[cfg(feature = "systemverilog")]
     match (sources.is_empty(), sv_sources.is_empty()) {
         (_, true) => compile_to_sir_with_layout_mode(
             sources,

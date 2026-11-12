@@ -484,17 +484,6 @@ fn lower_module_with_overrides(
         }
     }
 
-    // The functions Celox provides need no C library.
-    if !cfg!(feature = "dpi")
-        && module
-            .dpi_imports()
-            .iter()
-            .any(|import| import.builtin().is_none())
-    {
-        return Err(sv::AnalyzerError::Unsupported(
-            "DPI-C import (enable the `sv-dpi` feature of `celox`)".to_string(),
-        ));
-    }
     procedural::register_locals(
         module,
         &mut variables,

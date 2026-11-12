@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! A combinational net the host does not observe only carries a value from
 //! its driver to its readers. With a dead-store policy that lets signals go
 //! the frontend substitutes such a net into the paths that read it, or

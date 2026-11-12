@@ -147,7 +147,6 @@ pub fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
             super::veryl_sim::build_veryl_adapter(&sources, &design.top, design.four_state),
         )));
     }
-    #[cfg(feature = "systemverilog")]
     if backend == "sv" {
         return build_sv(design, &sources);
     }
@@ -239,7 +238,6 @@ pub fn classify_build_error(error: SimulatorError) -> celox_test_suite::Error {
 }
 
 // Keep the recursive SV frontend out of the multi-backend dispatch frame.
-#[cfg(feature = "systemverilog")]
 fn build_sv(design: &Design, sources: &[(&str, &std::path::Path)]) -> Result<Box<dyn Backend>> {
     let emitted = super::veryl_sv::emit_veryl_sources(sources);
     Ok(Box::new(CeloxBackend(
