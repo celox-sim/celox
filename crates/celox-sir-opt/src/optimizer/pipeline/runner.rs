@@ -282,9 +282,7 @@ pub(super) fn optimize_with_options(
 
     let phase_start = timing.then(crate::timing::now);
     let process_passes = pipeline_builder.process();
-    for process in &mut program.sir.processes {
-        process_passes.run(process, &options);
-    }
+    process_passes.run_parallel(&mut program.sir.processes, &options);
     if let Some(s) = phase_start {
         let count = program.sir.processes.len();
         tracing::debug!("[phase] processes ({count} EUs): {:?}", s.elapsed());
@@ -295,9 +293,11 @@ pub(super) fn optimize_with_options(
     if !program.sir.functions.is_empty() {
         let phase_start = timing.then(crate::timing::now);
         let function_passes = pipeline_builder.function();
-        for function in &mut program.sir.functions {
-            function_passes.run_function(&mut function.unit, &options);
-        }
+        function_passes.run_functions_parallel(
+            &mut program.sir.functions,
+            |function| &mut function.unit,
+            &options,
+        );
         if let Some(s) = phase_start {
             let count = program.sir.functions.len();
             tracing::debug!("[phase] functions ({count} EUs): {:?}", s.elapsed());
