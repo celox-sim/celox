@@ -63,10 +63,9 @@
           }
         },
         "by_failure_category": {
-          "compile_error": 4,
           "input_issue": 1,
           "unclassified": 1,
-          "unsupported": 10
+          "unsupported": 14
         }
       },
       "4state": {
@@ -123,10 +122,9 @@
           }
         },
         "by_failure_category": {
-          "compile_error": 4,
           "input_issue": 1,
           "unclassified": 1,
-          "unsupported": 10
+          "unsupported": 14
         }
       }
     }
@@ -138,8 +136,8 @@
       "result": "fail",
       "mode": "elaboration",
       "tags": "ariane cva6",
-      "failure_category": "compile_error",
-      "diagnostic": "parse_error",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
       "input_issue": ""
     },
     {
@@ -148,8 +146,8 @@
       "result": "fail",
       "mode": "elaboration",
       "tags": "ariane cva6",
-      "failure_category": "compile_error",
-      "diagnostic": "parse_error",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
       "input_issue": ""
     },
     {
@@ -158,8 +156,8 @@
       "result": "fail",
       "mode": "elaboration",
       "tags": "ariane cva6",
-      "failure_category": "compile_error",
-      "diagnostic": "parse_error",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
       "input_issue": ""
     },
     {
@@ -168,8 +166,8 @@
       "result": "fail",
       "mode": "elaboration",
       "tags": "ariane cva6",
-      "failure_category": "compile_error",
-      "diagnostic": "parse_error",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
       "input_issue": ""
     },
     {
@@ -178,8 +176,8 @@
       "result": "fail",
       "mode": "elaboration",
       "tags": "ariane cva6",
-      "failure_category": "compile_error",
-      "diagnostic": "parse_error",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
       "input_issue": ""
     },
     {
@@ -188,8 +186,8 @@
       "result": "fail",
       "mode": "elaboration",
       "tags": "ariane cva6",
-      "failure_category": "compile_error",
-      "diagnostic": "parse_error",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
       "input_issue": ""
     },
     {
@@ -198,8 +196,8 @@
       "result": "fail",
       "mode": "elaboration",
       "tags": "ariane cva6",
-      "failure_category": "compile_error",
-      "diagnostic": "parse_error",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
       "input_issue": ""
     },
     {
@@ -208,8 +206,8 @@
       "result": "fail",
       "mode": "elaboration",
       "tags": "ariane cva6",
-      "failure_category": "compile_error",
-      "diagnostic": "parse_error",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
       "input_issue": ""
     },
     {
@@ -554,7 +552,7 @@
     }
   ],
   "driver_profile": "release",
-  "measured_at": "2026-11-11T12:50:27.994312+00:00",
-  "celox_revision": "5db2026321494ecf1cfbcb3e965fbf1c23498696",
-  "run_url": "https://github.com/celox-sim/celox/actions/runs/43016209478"
+  "measured_at": "2026-11-12T14:08:03.306871+00:00",
+  "celox_revision": "0948bf3d2bb9c70116f25f77fcceb6cb1320b867",
+  "run_url": "https://github.com/celox-sim/celox/actions/runs/43222564295"
 }
