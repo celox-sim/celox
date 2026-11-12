@@ -437,3 +437,49 @@ pattern_parameter_casts_backend!(pattern_parameter_casts_cranelift, build);
 #[cfg(target_arch = "x86_64")]
 pattern_parameter_casts_backend!(pattern_parameter_casts_native, build_native);
 pattern_parameter_casts_backend!(pattern_parameter_casts_wasm, build_wasm);
+
+// An enumeration member wider than the numeric constant environment is known
+// by its literal, also for the signedness a pattern item needs.
+sv_backends! {
+    fn wide_enumeration_members_are_pattern_items(sim) {
+        @setup {
+            let source = r#"
+    package st_pkg;
+      parameter logic [79:0] A = 80'h1234_5678_9abc_def0_1357;
+      parameter logic [79:0] B = 80'hbeef_0000_0000_0000_cafe;
+      typedef logic [159:0] state_t;
+      typedef enum state_t {
+        StRaw      = {160{1'b0}},
+        StUnlocked = {A, B}
+      } state_e;
+    endpackage
+    package data_pkg;
+      typedef struct packed {
+        logic valid;
+        st_pkg::state_t state;
+      } data_t;
+      parameter data_t DATA_DEFAULT = '{valid: 1'b1, state: st_pkg::StUnlocked};
+    endpackage
+    module Top(input logic sel, output logic valid, output logic [15:0] low, high,
+               output logic same);
+      data_pkg::data_t d;
+      assign d = sel ? data_pkg::DATA_DEFAULT : '{valid: 1'b0, state: st_pkg::StRaw};
+      assign valid = d.valid;
+      assign low = d.state[15:0];
+      assign high = d.state[159:144];
+      assign same = d.state == st_pkg::StUnlocked;
+    endmodule
+  "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("wide_enum_pattern_items.sv"))], "Top");
+        let sel = sim.signal("sel");
+        sim.modify(|io| io.set(sel, 1u8)).unwrap();
+        assert_eq!(u64::try_from(sim.get(sim.signal("valid"))).unwrap(), 1);
+        assert_eq!(u64::try_from(sim.get(sim.signal("low"))).unwrap(), 0xcafe);
+        assert_eq!(u64::try_from(sim.get(sim.signal("high"))).unwrap(), 0x1234);
+        assert_eq!(u64::try_from(sim.get(sim.signal("same"))).unwrap(), 1);
+        sim.modify(|io| io.set(sel, 0u8)).unwrap();
+        assert_eq!(u64::try_from(sim.get(sim.signal("valid"))).unwrap(), 0);
+        assert_eq!(u64::try_from(sim.get(sim.signal("same"))).unwrap(), 0);
+    }
+}
