@@ -988,3 +988,79 @@ endmodule"#;
         );
     }
 }
+
+// A run-time index of a member of several packed dimensions selects one of
+// its elements (IEEE 1800-2023 7.4.5, 11.5.1), as Ariane's configuration
+// structure does with `Cfg.NonIdempotentAddrBase[k]`: an index outside the
+// member's range reads X and writes nothing, and never reaches a
+// neighboring member.
+#[test]
+fn run_time_element_selects_of_structure_members_stay_in_the_member() {
+    let source = r#"
+        module Top(
+            input logic clk, clear, input logic [1:0] idx, input logic [14:0] value,
+            input logic [3:0] nibble, output logic [3:0] element, output logic [1:0] low,
+            output logic [14:0] written
+        );
+            typedef struct packed { logic valid; logic [2:0][3:0] base; logic [1:0] low; } cfg_t;
+            cfg_t cfg, target;
+            assign cfg = value;
+            assign element = cfg.base[idx];
+            assign low = cfg.base[idx][1:0];
+            always_ff @(posedge clk)
+                if (clear) target <= '0;
+                else target.base[idx] <= nibble;
+            assign written = target;
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            Simulator::from_sv_sources(vec![(source, Path::new("member_elements.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        let clk = sim.event("clk");
+        let (clear, idx, value, nibble) = (
+            sim.signal("clear"),
+            sim.signal("idx"),
+            sim.signal("value"),
+            sim.signal("nibble"),
+        );
+        // valid = 1, base = {4'ha, 4'h5, 4'hc}, low = 2'b11: the members
+        // next to `base` hold ones that an index past it must not read.
+        sim.modify(|io| io.set(value, 0x6973u16)).unwrap();
+        let mut read = |name: &str, i: u8| {
+            sim.modify(|io| io.set(idx, i)).unwrap();
+            let (value, unknown) = sim.get_four_state(sim.signal(name));
+            let (value, unknown) = (u8::try_from(value).unwrap(), u8::try_from(unknown).unwrap());
+            (value & !unknown, unknown)
+        };
+        let x = |bits: u8| if four_state { bits } else { 0 };
+        assert_eq!(read("element", 0), (0xc, 0));
+        assert_eq!(read("element", 1), (0x5, 0));
+        assert_eq!(read("element", 2), (0xa, 0));
+        assert_eq!(read("low", 2), (0b10, 0));
+        // Index 3 is past the member, next to `valid`.
+        assert_eq!(read("element", 3), (0, x(0xf)));
+        assert_eq!(read("low", 3), (0, x(0b11)));
+
+        let written = sim.signal("written");
+        sim.modify(|io| io.set(clear, 1u8)).unwrap();
+        sim.tick(clk).unwrap();
+        let mut write = |i: u8, value: u8| {
+            sim.modify(|io| {
+                io.set(clear, 0u8);
+                io.set(idx, i);
+                io.set(nibble, value);
+            })
+            .unwrap();
+            sim.tick(clk).unwrap();
+            sim.get_four_state(written)
+        };
+        let known = |value: u16| (BigUint::from(value), BigUint::from(0u8));
+        // Index 3 writes nothing, not `valid`.
+        assert_eq!(write(3, 0xf), known(0));
+        assert_eq!(write(0, 0xf), known(0x3c));
+        assert_eq!(write(2, 0x6), known(0x183c));
+    }
+}
