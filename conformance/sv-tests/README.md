@@ -439,7 +439,7 @@ expectations.
 
 `--case-timeout SECONDS` replaces each case's own `:timeout:` with one
 limit, through upstream `BaseRunner`'s `OVERRIDE_TEST_TIMEOUTS`; a case that
-reaches it fails with the runner's timeout diagnostic (`runner_timeout`). PR CI
+reaches it fails with the runner's timeout diagnostic (`runner_timeout`). CI
 uses 78 seconds, three times what the longest passing case of the main corpus
 took with the CI driver when the limit was set (25.8 seconds), so that a
 change which lets a UVM testbench elaborate further cannot run each one to its
@@ -453,8 +453,20 @@ workflow keeps the upstream limits.
 neighbouring tests, such as the UVM testbenches, spread over the shards; a test
 that `expected.tsv` lists but the corpus lost belongs to one shard, which
 reports it missing. With `--update`, a shard replaces only its own rows. CI
-builds the driver once and runs five shards (`sv-tests conformance (N/5)`),
-each with 4 jobs, and retains one report per shard.
+builds the driver once; full runs (daily, release qualification and `ci:full`)
+run five shards (`sv-tests conformance (N/5)`), each with 4 jobs, and retain
+one report per shard.
+
+`--exclude-library-cases` leaves out the tests that the official runner
+compiles with a `conf/runners/libs.json` library, which it attaches when the
+library's name (`uvm`, `uvm-1.2`) is one of the case's tags: the 172 UVM
+cases. Their `expected.tsv` rows are neither compared nor replaced by
+`--update`. These cases take nearly all of the corpus' CI time, most of them
+at the case timeout, while no other case takes more than a few seconds. Pull
+requests therefore run the other
+1,478 cases in a single job (`sv-tests conformance (1/1)`) and the full runs
+above check the UVM cases. A change that moves a UVM case across the timeout
+shows up in the next daily full CI, whose failures open the Full CI issue.
 
 Both state modes run by default. Use `--state-mode 2state` or
 `--state-mode 4state` to run and compare only one; `--state-mode both` explicitly
