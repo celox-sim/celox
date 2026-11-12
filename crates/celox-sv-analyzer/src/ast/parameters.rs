@@ -492,8 +492,10 @@ pub(super) fn parameters_from_native_with_environment(
             .unwrap_or_else(|| native_prefix.signed())
     });
     let parameter_signed_element_depth = native_prefix.signed_element_depth();
+    // A range may select a member of an earlier parameter (`[Info.size*8-1:0]`),
+    // a constant of the scope those parameters bind (IEEE 1800-2023 6.20.2).
     let parameter_ranges =
-        native_prefix.ranges(syntax_tree, session, base_const_env, type_aliases)?;
+        native_prefix.ranges(syntax_tree, session, &environment.constants, type_aliases)?;
     let simple_bit_vector = parameter_ranges.len() <= 1
         && declared_alias
             .as_ref()
