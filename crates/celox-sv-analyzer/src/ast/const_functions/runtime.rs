@@ -53,12 +53,39 @@ pub struct RuntimeConstantFunctions<'a> {
     two_state: bool,
 }
 
+/// The functions of a module that [`RuntimeConstantFunctions`] may evaluate,
+/// which depend on the module alone: one table serves every lowering of the
+/// module, each with constants and a cache of its own.
+#[derive(Clone)]
+pub struct RuntimeConstantTable {
+    functions: ConstantFunctions,
+}
+
 impl<'a> RuntimeConstantFunctions<'a> {
     pub fn new(
         module: &crate::ir::Module,
         constants: &'a impl typecheck::Constants,
         four_state: bool,
     ) -> Self {
+        Self::with_table(&Self::table(module), constants, four_state)
+    }
+
+    /// [`Self::new`] with the table of the module, [`Self::table`].
+    pub fn with_table(
+        table: &RuntimeConstantTable,
+        constants: &'a impl typecheck::Constants,
+        four_state: bool,
+    ) -> Self {
+        Self {
+            functions: table.functions.clone(),
+            constants,
+            cache: HashMap::default(),
+            two_state: !four_state,
+        }
+    }
+
+    /// The functions of `module` that a lowering of it may evaluate.
+    pub fn table(module: &crate::ir::Module) -> RuntimeConstantTable {
         let subroutines = module
             .subroutines()
             .iter()
@@ -189,12 +216,7 @@ impl<'a> RuntimeConstantFunctions<'a> {
             ),
             errors: Arc::default(),
         };
-        Self {
-            functions,
-            constants,
-            cache: HashMap::default(),
-            two_state: !four_state,
-        }
+        RuntimeConstantTable { functions }
     }
 
     /// A call with no actual or formal arguments, or `None` when it cannot be

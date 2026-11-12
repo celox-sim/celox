@@ -153,6 +153,7 @@ fn process_origin(process: &sv::ir::InitialProcess) -> celox_design::ProcessOrig
 #[allow(clippy::too_many_arguments)]
 pub(super) fn lower_initial_processes(
     module: &sv::ir::Module,
+    tables: &procedural::ModuleTables,
     variables: &mut HashMap<SourceVarId, SvVariable>,
     name_to_id: &mut HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
@@ -188,6 +189,7 @@ pub(super) fn lower_initial_processes(
     let mut runtime_units = Vec::new();
     let mut pm = procedural::ProcModule::new(
         module,
+        tables,
         variables,
         name_to_id,
         constants,
@@ -341,6 +343,7 @@ pub(super) fn lower_initial_processes(
     // state the kernels keep.
     let mut pm = procedural::ProcModule::new(
         module,
+        tables,
         variables,
         name_to_id,
         constants,
