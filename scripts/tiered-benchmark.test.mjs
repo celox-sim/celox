@@ -137,3 +137,20 @@ test('hotspot execution and cold completion retain evidence without whole-image 
     assert.throws(() => parseTiered(bad, 'tb', 'celox-tiered'), bad);
   }
 });
+
+test('hotspot evidence surviving whole-image promotion is valid', () => {
+  const promoted = 'CELOX_TIERED_STATS test=tb tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=200';
+  const hot = 'CELOX_HOTSPOT_STATS test=tb interpreted_calls=4 compiled_calls=0 compiled_block_calls=8 compiled_entries=2 rejected_entries=0 failed_entries=0 code_bytes=128 compile_ns=1000 frame_bytes_transferred=0';
+  const log = `${promoted}\n${hot}`;
+  const stats = parseTiered(log, 'tb', 'celox-tiered');
+  assert.equal(stats.promotion, 'promoted');
+  assert.equal(stats.hotspot_compiled_block_calls, '8');
+  const saved = `CELOX_TIERED_STATS ${Object.entries(stats).map(([k, v]) => `${k}=${v}`).join(' ')}`;
+  assert.deepEqual(parseTiered(saved, 'tb', 'celox-tiered'), stats);
+  for (const bad of [log.replace('failed_entries=0', 'failed_entries=1'),
+    log.replace('compiled_evaluations=200', 'compiled_evaluations=0'),
+    log.replace('compiled_evaluations=200', 'compiled_evaluations=9007199254740992'),
+    log.replace('promotion=promoted', 'promotion=failed')]) {
+    assert.throws(() => parseTiered(bad, 'tb', 'celox-tiered'), bad);
+  }
+});
