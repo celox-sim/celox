@@ -123,6 +123,12 @@ name = "celox"
 path = "src/bin/celox.rs"
 required-features = ["cli"]
 
+[[bin]]
+# `veryl celox ...` runs this through Veryl's external subcommands.
+name = "veryl-celox"
+path = "src/bin/veryl-celox.rs"
+required-features = ["cli"]
+
 [[bench]]
 name = "vcd"
 required-features = ["cranelift"]
