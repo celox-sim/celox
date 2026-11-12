@@ -28,7 +28,9 @@ pub(in crate::ast) struct Specialization {
     /// extending it inherits without the scope around the declaration.
     pub declared_env: HashMap<String, Option<i128>>,
     pub declared_aliases: TypeAliases,
-    pub enum_constants: HashMap<String, semantic_types::ConstantType>,
+    pub constant_types: HashMap<String, semantic_types::ConstantType>,
+    /// Properties and methods also hide inherited constants.
+    pub nonconstant_members: HashSet<String>,
     /// The literals that replace the value parameters.
     pub literals: HashMap<String, Expr>,
     /// The type parameters and typedefs, and the class name itself.
@@ -388,9 +390,23 @@ pub(in crate::ast) fn body_scope(
                 && let Some(scope) = session.foreign.declarations(base)
             {
                 scope.apply(&mut dimensions.const_env, &mut dimensions.type_aliases);
+                extend_body_constant_types(
+                    &mut dimensions,
+                    &scope.env,
+                    scope.types.keys().map(String::as_str),
+                    &scope.constant_types,
+                    &scope.nonconstant_members,
+                );
                 literals.extend(scope.literals.clone());
             }
         }
+        extend_body_constant_types(
+            &mut dimensions,
+            &specialization.declared_env,
+            specialization.declared_aliases.keys().map(String::as_str),
+            &specialization.constant_types,
+            &specialization.nonconstant_members,
+        );
         dimensions.const_env.extend(specialization.env.clone());
         // The parameters hide constants of the scope around the class, also
         // the literals of those without an integral value.
@@ -460,8 +476,28 @@ pub(in crate::ast) fn export_declarations(
                     {
                         scope.env.extend(parent.env.clone());
                         scope.literals.extend(parent.literals.clone());
+                        scope
+                            .nonconstant_members
+                            .extend(parent.nonconstant_members.iter().cloned());
+                        extend_constant_types(
+                            &mut scope.constant_types,
+                            &parent.env,
+                            parent.types.keys().map(String::as_str),
+                            &parent.constant_types,
+                            &parent.nonconstant_members,
+                        );
                     }
                 }
+                extend_constant_types(
+                    &mut scope.constant_types,
+                    &specialization.declared_env,
+                    specialization.declared_aliases.keys().map(String::as_str),
+                    &specialization.constant_types,
+                    &specialization.nonconstant_members,
+                );
+                scope
+                    .nonconstant_members
+                    .extend(specialization.nonconstant_members.iter().cloned());
                 scope.env.extend(specialization.declared_env.clone());
                 scope.literals.extend(specialization.literals.clone());
             }
@@ -844,6 +880,7 @@ fn prepare_bound(
         arguments: Vec::new(),
         own_env: HashMap::default(),
         own_aliases: TypeAliases::default(),
+        constant_types: HashMap::default(),
     };
     if let Some(id) = declaration.parameter_ports
         && let Some(name) =
@@ -987,7 +1024,6 @@ fn finish_specialization(
         }))
         .collect::<Vec<_>>();
     body.sort_by_key(|(start, _)| *start);
-    let mut own_enum_constants = HashMap::default();
     for (_, item) in body {
         match item {
             Ok(id) => {
@@ -1014,6 +1050,7 @@ fn finish_specialization(
                 // use of it reports the type unknown.
                 let mut context = PackedDimensions::new(HashMap::default(), &env, &aliases);
                 context.parameter_values = parameters.literals.clone().into();
+                context.constant_types = Arc::new(parameters.constant_types.clone());
                 let ty = type_binding::binding::bind_in(target, native, tree, session, &context)
                     .ok()
                     .flatten()
@@ -1103,13 +1140,14 @@ fn finish_specialization(
                                 }
                                 parameters.literals.remove(&member);
                             }
-                            own_enum_constants.insert(
+                            parameters.constant_types.insert(
                                 instances::normalize_identifier(&member.name.spelling),
                                 binding.clone(),
                             );
                         }
                     }
                     if let Some(alias) = alias {
+                        parameters.constant_types.remove(&alias);
                         parameters.own_aliases.insert(alias.clone(), ty.clone());
                         aliases.insert(alias, ty);
                     }
@@ -1129,7 +1167,18 @@ fn finish_specialization(
                 .collect(),
             declared_env: parameters.own_env,
             declared_aliases: parameters.own_aliases,
-            enum_constants: own_enum_constants,
+            constant_types: parameters.constant_types,
+            nonconstant_members: declaration
+                .properties
+                .iter()
+                .flat_map(|property| &property.declaration.variables)
+                .map(|variable| instances::normalize_identifier(&variable.name.spelling))
+                .chain(declaration.methods.iter().map(|method| {
+                    instances::normalize_identifier(
+                        &native.subroutine(method.subroutine).name.spelling,
+                    )
+                }))
+                .collect(),
             env,
             literals: parameters.literals,
             aliases,
@@ -1156,6 +1205,7 @@ struct Parameters {
     /// of its bases; a constant without a value hides one of a base too.
     own_env: HashMap<String, Option<i128>>,
     own_aliases: TypeAliases,
+    constant_types: HashMap<String, semantic_types::ConstantType>,
 }
 
 impl Parameters {
@@ -1261,6 +1311,7 @@ impl Parameters {
                         self.record_type(&ty);
                     }
                     aliases.insert(name.clone(), ty.clone());
+                    self.constant_types.remove(&name);
                     self.own_aliases.insert(name, ty);
                 }
                 ParameterKind::Value { .. } => {
@@ -1275,6 +1326,7 @@ impl Parameters {
                     if !local && let Some(value) = self.values.remove(&name) {
                         overrides.insert(name.clone(), value);
                     }
+                    self.constant_types.remove(&name);
                     let first = self.lowered.len();
                     parameters::parameters_from_native(
                         &[parameter],
@@ -1289,6 +1341,9 @@ impl Parameters {
                     let mut typed = true;
                     for parameter in self.lowered[first..].iter().cloned() {
                         typed &= parameter.has_declared_type;
+                        if let Some(ty) = &parameter.semantic_type {
+                            self.constant_types.insert(name.clone(), ty.clone());
+                        }
                         keys.extend(parameters::binding_keys(
                             &name,
                             env,
@@ -2063,9 +2118,59 @@ fn argument_spelling(native: &celox_sv_syntax::Declarations, arguments: &[Argume
         .join(",")
 }
 
-/// Enum constants belonging to the resolved class and its bases, never a scan
-/// of typedef contents. A derived declaration shadows the base binding.
-pub(in crate::ast) fn enum_constants(
+/// Remove enclosing layouts as well as constant types when entering a class
+/// method. A class parameter with no semantic type (such as `$`) cannot fall
+/// back to a module variable or parameter of the same name.
+fn extend_body_constant_types<'a>(
+    dimensions: &mut PackedDimensions,
+    env: &HashMap<String, Option<i128>>,
+    aliases: impl Iterator<Item = &'a str>,
+    bindings: &HashMap<String, semantic_types::ConstantType>,
+    nonconstant_members: &HashSet<String>,
+) {
+    let aliases: Vec<&str> = aliases.collect();
+    let prefix = crate::ast::parameters::unbounded_parameter_marker("");
+    for name in aliases
+        .iter()
+        .copied()
+        .chain(env.keys().filter_map(|key| key.strip_prefix(&prefix)))
+        .chain(nonconstant_members.iter().map(String::as_str))
+    {
+        dimensions.remove(name);
+    }
+    extend_constant_types(
+        Arc::make_mut(&mut dimensions.constant_types),
+        env,
+        aliases.iter().copied(),
+        bindings,
+        nonconstant_members,
+    );
+}
+
+/// Apply only the declarations of a class to a visible constant-type map.
+/// Hiding a parameter without a supported type must also hide an enclosing one.
+fn extend_constant_types<'a>(
+    target: &mut HashMap<String, semantic_types::ConstantType>,
+    env: &HashMap<String, Option<i128>>,
+    aliases: impl Iterator<Item = &'a str>,
+    bindings: &HashMap<String, semantic_types::ConstantType>,
+    nonconstant_members: &'a HashSet<String>,
+) {
+    for name in aliases.chain(nonconstant_members.iter().map(String::as_str)) {
+        target.remove(name);
+    }
+    let prefix = crate::ast::parameters::unbounded_parameter_marker("");
+    for key in env.keys() {
+        if let Some(name) = key.strip_prefix(&prefix) {
+            target.remove(name);
+        }
+    }
+    target.extend(bindings.iter().map(|(name, ty)| (name.clone(), ty.clone())));
+}
+
+/// Constant declaration types of the resolved class and its bases. A derived
+/// declaration hides the base binding, independently of its numeric value.
+pub(in crate::ast) fn constant_types(
     tree: &AnalysisContext<'_>,
     session: &Session,
     class: &str,
@@ -2073,50 +2178,57 @@ pub(in crate::ast) fn enum_constants(
     let imported = scope::imported(tree);
     let mut result = HashMap::default();
     let prefix = format!("{class}::");
-    for (name, binding) in &imported.enum_constants.declarations {
+    for (name, binding) in &imported.constant_types {
         if let Some(member) = name.strip_prefix(&prefix)
             && !member.contains("::")
         {
             result.insert(member.to_owned(), binding.clone());
         }
     }
+    if lookup(session, class).is_none()
+        && let Some(scope) = session.foreign.declarations(class)
+    {
+        extend_constant_types(
+            &mut result,
+            &scope.env,
+            scope.types.keys().map(String::as_str),
+            &scope.constant_types,
+            &scope.nonconstant_members,
+        );
+    }
     for specialization in lineage(session, class) {
         for base in &specialization.bases {
-            if lookup(session, base).is_none() {
-                let prefix = format!("{base}::");
-                for (name, binding) in &imported.enum_constants.declarations {
-                    if let Some(member) = name.strip_prefix(&prefix)
-                        && !member.contains("::")
-                    {
-                        result.insert(member.to_owned(), binding.clone());
-                    }
-                }
+            if lookup(session, base).is_none()
+                && let Some(scope) = session.foreign.declarations(base)
+            {
+                extend_constant_types(
+                    &mut result,
+                    &scope.env,
+                    scope.types.keys().map(String::as_str),
+                    &scope.constant_types,
+                    &scope.nonconstant_members,
+                );
             }
         }
-        result.retain(|member, _| {
-            !specialization.declared_aliases.contains_key(member)
-                && !specialization
-                    .declared_env
-                    .contains_key(&crate::ast::parameters::unbounded_parameter_marker(member))
-        });
-        result.extend(
-            specialization
-                .enum_constants
-                .iter()
-                .map(|(n, t)| (n.clone(), t.clone())),
+        extend_constant_types(
+            &mut result,
+            &specialization.declared_env,
+            specialization.declared_aliases.keys().map(String::as_str),
+            &specialization.constant_types,
+            &specialization.nonconstant_members,
         );
     }
     result
 }
 
-pub(in crate::ast) fn export_enum_constants(
+pub(in crate::ast) fn export_constant_types(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
 ) -> HashMap<String, semantic_types::ConstantType> {
     let mut result = HashMap::default();
     for declaration in super::scope_declarations(tree) {
         for class in super::specializations_of(tree, session, declaration) {
-            for (member, binding) in enum_constants(tree, session, &class) {
+            for (member, binding) in constant_types(tree, session, &class) {
                 result.insert(format!("{class}::{member}"), binding);
             }
         }

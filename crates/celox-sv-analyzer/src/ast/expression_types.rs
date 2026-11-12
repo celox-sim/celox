@@ -13,6 +13,8 @@ use expression_binding::{objects, ungroup};
 use semantic_types::{ArrayKind, Decl, PackedElement, Range, TyData, TyId};
 
 mod builtins;
+mod constants;
+pub(super) use constants::constant_binding;
 mod memo;
 mod values;
 pub(super) use memo::Memo;
@@ -184,6 +186,11 @@ fn resolve(
             if let Some(ty) = property_type(tree, session, id, native, dims) {
                 return Some(ty);
             }
+            if let Some(binding) =
+                classes::specializations::constant_types(tree, session, &owner).get(&member)
+            {
+                return binding.type_id(&mut session.types);
+            }
             // A method called without parentheses (13.5.5).
             let receiver = match handle {
                 Some(handle) => objects::Receiver::Handle(handle),
@@ -269,7 +276,7 @@ fn resolve(
         | ExprKind::Parameterized { .. } => None,
     };
     resolved.or_else(|| {
-        enums::constant_binding(tree, session, id, native, dims)
+        constant_binding(tree, session, id, native, dims)
             .ok()??
             .type_id(&mut session.types)
     })
@@ -550,7 +557,7 @@ fn enum_constant(
     native: &Declarations,
     dims: &PackedDimensions,
 ) -> Option<TyId> {
-    enums::constant_binding(tree, session, id, native, dims)
+    constant_binding(tree, session, id, native, dims)
         .ok()??
         .type_id(&mut session.types)
 }

@@ -238,16 +238,16 @@ fn packages_preserve_enum_bindings_across_reexports_aliases_and_filtering() {
     let syntax=crate::source_tree::parse_source("package p; typedef enum bit[4:0] {A,B} E; endpackage package q; import p::*; export p::*; endpackage module M; endmodule",path).unwrap();
     let packages = packages::Packages::analyze(&[(&syntax, path)]).unwrap();
     let mut symbols = packages.get("q").unwrap().symbols.clone();
-    assert!(symbols.enum_constants.declarations.contains_key("p::A"));
+    assert!(symbols.constant_types.contains_key("p::A"));
     symbols.alias("LocalA", "p::A");
     let mut design = packages.design();
-    let a = symbols.enum_constants.declarations["LocalA"]
+    let a = symbols.constant_types["LocalA"]
         .type_id(&mut design.types)
         .unwrap();
     enum_type(&design.types, a, 5, false, false);
     let symbols = symbols.without(&HashSet::from_iter(["LocalA".into()]));
-    assert!(!symbols.enum_constants.declarations.contains_key("LocalA"));
-    assert!(symbols.enum_constants.declarations.contains_key("p::A"));
+    assert!(!symbols.constant_types.contains_key("LocalA"));
+    assert!(symbols.constant_types.contains_key("p::A"));
 }
 
 #[test]
