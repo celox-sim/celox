@@ -424,6 +424,8 @@ Ordinary PRs also scope Rust compilation and execution:
 - sv-tests conformance runs when the Celox library or its runtime/build
   dependencies change, or its runner/expectations change. Test infrastructure
   and downstream consumers do not select this separate release-mode build.
+  Pull requests run the main corpus without its UVM cases in one job; full
+  runs check every case across five shards.
 - Python/cocotb setup runs only when VPI tests are selected.
 
 Release qualification, `ci:full` and daily/manual full runs

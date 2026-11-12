@@ -625,9 +625,20 @@ test("sv-tests shards reuse one driver and together cover every case", () => {
   assert.match(shard, /needs: \[changes, sv-tests\]/);
   assert.match(shard, /if: \$\{\{ !cancelled\(\) && needs\.sv-tests\.result == 'success' \}\}/);
   assert.doesNotMatch(shard, /cargo |rust-cache/);
-  const count = shard.match(/shard: \[([\d, ]+)\]/)[1].split(",").map(Number);
-  assert.deepEqual(count, count.map((_, index) => index + 1));
-  assert.match(shard, new RegExp(`--shard \\$\\{\\{ matrix\\.shard \\}\\}/${count.length}\n`));
+  // Pull requests run one shard without the UVM cases; full runs shard all of them.
+  const [, light, full] = shard.match(
+    /shard: \$\{\{ fromJSON\(needs\.changes\.outputs\.full_validation == 'false' && '\[([\d, ]+)\]' \|\| '\[([\d, ]+)\]'\) \}\}/,
+  );
+  for (const list of [light, full]) {
+    const count = list.split(",").map(Number);
+    assert.deepEqual(count, count.map((_, index) => index + 1));
+  }
+  assert.ok(full.split(",").length > 1);
+  assert.match(shard, /--shard \$\{\{ matrix\.shard \}\}\/\$\{\{ strategy\.job-total \}\}\n/);
+  assert.match(
+    shard,
+    /\n\s+\$\{\{ needs\.changes\.outputs\.full_validation == 'false' && '--exclude-library-cases' \|\| '' \}\}\n/,
+  );
   assert.match(shard, /fail-fast: false/);
   assert.match(shard, /name: sv-tests-report-\$\{\{ matrix\.shard \}\}/);
 });
