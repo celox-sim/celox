@@ -1227,6 +1227,23 @@ fn check_indexed_width(
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<()> {
+    // The width may be an element of an array parameter, `Cap[L128]`, a
+    // constant the constant binder folds (IEEE 1800-2023 11.2.1).
+    if let Ok(Some(width)) = constant_binding::bind_in(
+        native,
+        syntax_tree.declarations(),
+        syntax_tree,
+        session,
+        dimensions,
+    ) && let Some(width) =
+        eval_ast_const_expr(&syntax_tree.functions, &width, &dimensions.const_env)
+    {
+        return if width > 0 {
+            Ok(())
+        } else {
+            Err(unsupported(format!("indexed part-select width {width}")))
+        };
+    }
     let mut context = dimensions.clone();
     context.constant_indexed_base = true;
     let value = constant_binding::indexed_expression(

@@ -378,3 +378,44 @@ endmodule"#;
         );
     }
 }
+
+/// An element of an array parameter is a constant (IEEE 1800-2023 11.2.1):
+/// the width of an indexed part-select (11.5.1), also by an enumeration
+/// member, the operand of a cast in a parameter initializer (6.24.1), a
+/// packed bound and a generate condition, as OpenTitan's KMAC application
+/// interface clears `state[StateW-1-:KeccakBitCapacity[L128]]`.
+#[test]
+fn array_parameter_elements_size_part_selects_and_casts() {
+    let source = r#"`timescale 1ns/1ns
+package S;
+  typedef enum logic [2:0] { L128 = 3'b000, L224 = 3'b001 } strength_e;
+  parameter int StateW = 16;
+  parameter int unsigned Cap [2] = '{2 * 2, 2 * 3};
+endpackage
+module top;
+  import S::Cap;
+  import S::L128;
+  import S::L224;
+  localparam int W = int'(Cap[L224]);
+  logic [Cap[L128]-1:0] narrow;
+  logic [15:0] state, low;
+  if (Cap[L224] > 5) begin : wide
+    initial #2 $display("wide");
+  end
+  initial begin
+    state = '1;
+    low = '1;
+    state[S::StateW-1-:Cap[L224]] = '0;
+    low[0+:int'(Cap[0])] = '0;
+    #1 $display("W=%0d bits=%0d state=%h low=%h", W, $bits(narrow), state, low);
+  end
+  initial #3 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            ["W=6 bits=4 state=03ff low=fff0", "wide"],
+            "four_state={four_state}"
+        );
+    }
+}
