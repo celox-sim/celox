@@ -1550,13 +1550,17 @@ impl BodyBuilder<'_, '_, '_> {
                     // An integral variable, which a register can keep.
                     matches!(
                         ty.kind,
-                        TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+                        TypeKind::Bit
+                            | TypeKind::Chandle
+                            | TypeKind::Logic
+                            | TypeKind::Reg
+                            | TypeKind::Implicit
                     ) && ty.container.is_none()
                         && ty.unpacked_ranges.is_empty()
                         && ty.unpacked_struct.is_none()
                         && ty.class.is_none()
                         && ty.virtual_interface.is_none()
-                        && !ty.chandle
+                        && !ty.is_chandle()
                 })
                 .ok_or_else(|| unsupported("type of a local variable of a sequence"))?;
             for name in &local.names {

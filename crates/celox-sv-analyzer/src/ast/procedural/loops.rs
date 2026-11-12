@@ -91,7 +91,7 @@ impl BodyBuilder<'_, '_, '_> {
                         let mut scoped = self.dims.clone();
                         scoped.insert(source.clone(), dimensions_from_type(&ty));
                         expression_binding::check_chandle_assignment(
-                            ty.chandle && ty.unpacked_ranges.is_empty(),
+                            ty.is_chandle() && ty.unpacked_ranges.is_empty(),
                             variable.value,
                             self.tree,
                             self.tree.declarations(),

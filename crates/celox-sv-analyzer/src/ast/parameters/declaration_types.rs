@@ -31,7 +31,7 @@ pub(super) fn prefix<'a>(
             Some(
                 type_binding::builtin_type(name, data.signed)
                     // A chandle is no constant (IEEE 1800-2023 6.14).
-                    .filter(|ty| !ty.chandle)
+                    .filter(|ty| !ty.is_chandle())
                     .ok_or_else(|| unsupported("unsupported parameter data type"))?,
             ),
         ),
@@ -77,7 +77,7 @@ impl Prefix<'_> {
         self.alias
             .as_ref()
             .or(self.primitive.as_ref())
-            .is_some_and(|ty| ty.kind == TypeKind::Bit)
+            .is_some_and(|ty| matches!(ty.kind, TypeKind::Bit | TypeKind::Chandle))
     }
     pub fn scalar_width(&self, functions: &const_functions::ConstantFunctions) -> Option<usize> {
         self.primitive

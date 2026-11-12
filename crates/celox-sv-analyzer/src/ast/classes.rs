@@ -1547,7 +1547,11 @@ pub(super) fn field(
         TypeKind::String => (HANDLE_WIDTH, false, Some(HandleProperty::String)),
         TypeKind::Object => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::Process | TypeKind::Event => (HANDLE_WIDTH, false, None),
-        TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => {
+        TypeKind::Chandle
+        | TypeKind::Bit
+        | TypeKind::Logic
+        | TypeKind::Reg
+        | TypeKind::Implicit => {
             let shape = casts::expr_type_from_type(functions, ty, env)
                 .ok_or_else(|| unsupported("class property type"))?;
             (shape.width, shape.signed, None)

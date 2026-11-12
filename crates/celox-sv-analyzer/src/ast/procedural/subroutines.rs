@@ -785,7 +785,7 @@ pub(in crate::ast) fn lower_subroutine(
                         )?;
                     }
                     expression_binding::check_chandle_assignment(
-                        ty.chandle && ty.unpacked_ranges.is_empty(),
+                        ty.is_chandle() && ty.unpacked_ranges.is_empty(),
                         root,
                         tree,
                         tree.declarations(),
@@ -809,7 +809,7 @@ pub(in crate::ast) fn lower_subroutine(
                     // that of a chandle, a chandle.
                     let shape = (ty.tagged_identity().is_some()
                         || ty.unpacked_struct().is_some()
-                        || ty.chandle && ty.unpacked_ranges.is_empty()
+                        || ty.is_chandle() && ty.unpacked_ranges.is_empty()
                         || ty.container.is_some() && *direction == ParamDirection::Input)
                         .then(|| dimensions_from_type(ty));
                     let mut value = expression_binding::bind_value(
@@ -956,7 +956,7 @@ pub(in crate::ast) fn lower_subroutine(
     // lifetime, like the formals themselves.
     builder.return_chandle = return_type
         .as_ref()
-        .map(|ty| ty.chandle && ty.unpacked_ranges.is_empty());
+        .map(|ty| ty.is_chandle() && ty.unpacked_ranges.is_empty());
     let parameter_locals_end = builder.state.locals.len();
     let mut items = native.items.clone();
     let mut prologue = Vec::new();

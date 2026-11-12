@@ -303,15 +303,17 @@ pub(in crate::ast) fn read(
 /// integral or bit-stream value (IEEE 1800-2023 6.14, 6.24.3).
 pub(in crate::ast) fn holds_chandle(shape: &VariableDimensions) -> bool {
     shape.chandle
-        || shape
-            .unpacked_struct
-            .as_ref()
-            .is_some_and(|aggregate| aggregate.leaves().iter().any(|leaf| leaf.r#type.chandle))
+        || shape.unpacked_struct.as_ref().is_some_and(|aggregate| {
+            aggregate
+                .leaves()
+                .iter()
+                .any(|leaf| leaf.r#type.is_chandle())
+        })
 }
 
 /// [`holds_chandle`] for data of type `ty`, such as a container element.
 pub(in crate::ast) fn type_holds_chandle(ty: &Type) -> bool {
-    ty.chandle || holds_chandle(&procedural::dimensions_from_type(ty))
+    ty.is_chandle() || holds_chandle(&procedural::dimensions_from_type(ty))
 }
 
 /// Whether a destination of shape `shape` receives a chandle.

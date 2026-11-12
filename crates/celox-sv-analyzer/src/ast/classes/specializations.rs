@@ -1316,7 +1316,11 @@ impl Parameters {
             .is_some_and(|ty| {
                 matches!(
                     ty.kind(),
-                    TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+                    TypeKind::Bit
+                        | TypeKind::Chandle
+                        | TypeKind::Logic
+                        | TypeKind::Reg
+                        | TypeKind::Implicit
                 ) && ty.container.is_none()
                     && ty.class().is_none()
                     && ty.unpacked_ranges.is_empty()
@@ -1729,6 +1733,7 @@ pub(in crate::ast) fn spelling(ty: &Type) -> String {
             (None, TypeKind::Object) => "object".to_owned(),
             (None, TypeKind::Process) => "process".to_owned(),
             (None, TypeKind::Event) => "event".to_owned(),
+            (None, TypeKind::Chandle) => "chandle".to_owned(),
             (None, TypeKind::Bit) => "bit".to_owned(),
             // `reg` is `logic` (6.11.2).
             (None, TypeKind::Logic | TypeKind::Implicit | TypeKind::Reg) => "logic".to_owned(),

@@ -219,7 +219,9 @@ fn native_signature(
             direction,
             width: expr_type.map(|ty| ty.width),
             signed: expr_type.is_some_and(|ty| ty.signed),
-            is_2state: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::Bit),
+            is_2state: ty
+                .as_ref()
+                .is_some_and(|ty| matches!(ty.kind(), TypeKind::Bit | TypeKind::Chandle)),
             packed_dimensions: ty
                 .as_ref()
                 .map(|ty| dimensions::function_packed_dimension_widths(ty.packed_ranges()))
@@ -253,7 +255,7 @@ fn native_signature(
         return_handle: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::Object),
         return_chandle: ty
             .as_ref()
-            .is_some_and(|ty| ty.chandle && ty.unpacked_ranges.is_empty()),
+            .is_some_and(|ty| ty.is_chandle() && ty.unpacked_ranges.is_empty()),
         name: instances::normalize_identifier(&native.name.spelling),
         params,
         body: None,
@@ -263,14 +265,16 @@ fn native_signature(
         return_dimensions: ty.as_ref().map(|ty| {
             ty.unpacked_ranges().len()
                 // A chandle has no packed dimensions (IEEE 1800-2023 6.14).
-                + if ty.chandle || matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal) {
+                + if ty.is_chandle() || matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal) {
                     0
                 } else {
                     ty.packed_ranges().len()
                 }
         }),
         return_signed: result.is_some_and(|ty| ty.signed),
-        return_is_2state: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::Bit),
+        return_is_2state: ty
+            .as_ref()
+            .is_some_and(|ty| matches!(ty.kind(), TypeKind::Bit | TypeKind::Chandle)),
         return_enum_domain: ty
             .as_ref()
             .filter(|ty| ty.unpacked_ranges.is_empty())

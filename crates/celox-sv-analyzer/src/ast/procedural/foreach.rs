@@ -145,7 +145,7 @@ impl BodyBuilder<'_, '_, '_> {
             .key
             .as_ref()
             .filter(|key| key.kind() == TypeKind::Process);
-        let index_type = if object || container.key.as_ref().is_some_and(|key| key.chandle) {
+        let index_type = if object || container.key.as_ref().is_some_and(|key| key.is_chandle()) {
             container
                 .key
                 .clone()

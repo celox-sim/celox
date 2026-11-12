@@ -435,7 +435,7 @@ pub(in crate::ast) fn cast_target_native(
             casts::expr_type_from_type(&tree.functions, ty, &dimensions.const_env)
                 .ok_or_else(|| unsupported("cast target type"))?,
             false,
-            ty.kind() == TypeKind::Bit,
+            matches!(ty.kind(), TypeKind::Bit | TypeKind::Chandle),
         )
     } else if let ExprKind::Type(id) = native.expression(target).kind {
         match &native.data_type(id).kind {
@@ -461,7 +461,7 @@ pub(in crate::ast) fn cast_target_native(
             casts::expr_type_from_type(&tree.functions, &ty, &dimensions.const_env)
                 .ok_or_else(|| unsupported("cast target type"))?,
             false,
-            ty.kind() == TypeKind::Bit,
+            matches!(ty.kind(), TypeKind::Bit | TypeKind::Chandle),
         )
     } else {
         // The size is a constant expression (6.24.1), which may select a

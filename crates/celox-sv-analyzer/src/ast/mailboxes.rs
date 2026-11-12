@@ -59,7 +59,7 @@ impl Message {
             two_state: handle.is_some()
                 || matches!(
                     ty.kind(),
-                    TypeKind::Bit | TypeKind::Process | TypeKind::Event
+                    TypeKind::Bit | TypeKind::Chandle | TypeKind::Process | TypeKind::Event
                 ),
             handle,
             class: ty.class().map(str::to_owned),
