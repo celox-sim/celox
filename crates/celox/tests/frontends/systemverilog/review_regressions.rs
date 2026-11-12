@@ -5799,8 +5799,12 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         (
             "loop-generate unroll limit exceeded",
             r#"
-            module Top(input logic [10000:0] a, output logic [10000:0] y);
-                for (genvar i = 0; i < 10001; i++) assign y[i] = a[i];
+            module Top(output logic y);
+                assign y = 1'b0;
+                for (genvar i = 0; i < 1001; i++) begin : outer_loop
+                    for (genvar j = 0; j < 1000; j++) begin : inner_loop
+                    end
+                end
             endmodule
         "#,
         ),

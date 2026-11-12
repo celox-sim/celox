@@ -309,8 +309,9 @@ blocks in programs. Two region deviations are listed under
   own thread or calling `await()` from a function.
 - Loops: a procedural loop unrolls at most 10,000 iterations; a
   combinational loop with a run-time trip count must be a counted `for`
-  loop; loop-generate constructs past 10,000 iterations are rejected
-  ([#448](https://github.com/celox-sim/celox/issues/448)); genvar updates
+  loop; the loop-generate constructs of one module are rejected past
+  1,000,000 iterations in all, which stops a loop whose condition never
+  becomes false; genvar updates
   with bitwise compound operators are rejected
   ([#455](https://github.com/celox-sim/celox/issues/455)); recursive
   constant-function expansion in generate constructs is rejected.

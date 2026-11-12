@@ -241,8 +241,8 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
   `mailbox`・`semaphore`・`process`・`event` ハンドル以外の mailbox 要素型。
 - 組み込み `process` クラスの構築・継承。関数からの自スレッド停止や `await()`。
 - ループ: 手続きループの展開は最大10,000回。実行時に回数が決まる組み合わせループは
-  数え上げ `for` のみ。10,000回を超える loop-generate は拒否します
-  （[#448](https://github.com/celox-sim/celox/issues/448)）。
+  数え上げ `for` のみ。1モジュールの loop-generate は合計1,000,000回を超えると
+  拒否します（条件が偽にならないループを止めるためです）。
   genvar のビット複合代入での更新も拒否します
   （[#455](https://github.com/celox-sim/celox/issues/455)）。
   generate 中の再帰的な定数関数展開も拒否します。
