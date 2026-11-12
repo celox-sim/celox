@@ -1136,20 +1136,44 @@ pub(super) fn selected_parameter_initializer(
 ) -> Converted<ConstExpr> {
     let mut dimensions = dimensions.clone();
     dimensions.constant_indexed_base = true;
-    let expression = constant_binding::indexed_expression(
+    constant_binding::indexed_expression(
         native,
         syntax_tree.declarations(),
         syntax_tree,
         session,
         &dimensions,
-    )?;
-    fold_parameter_selection(
-        syntax_tree,
-        session,
-        expression,
-        &dimensions,
-        assignment_width,
     )
+    .and_then(|expression| {
+        fold_parameter_selection(
+            syntax_tree,
+            session,
+            expression,
+            &dimensions,
+            assignment_width,
+        )
+    })
+    .or_else(|error| {
+        // The value binder reads an element of an array parameter, `Cap[k]`,
+        // as a select of the array, which the constant binder folds to the
+        // element (11.2.1).
+        let Ok(Some(constant)) = constant_binding::bind_in(
+            native,
+            syntax_tree.declarations(),
+            syntax_tree,
+            session,
+            &dimensions,
+        ) else {
+            return Err(error);
+        };
+        fold_parameter_selection(
+            syntax_tree,
+            session,
+            const_expr_to_expr(constant),
+            &dimensions,
+            assignment_width,
+        )
+        .map_err(|_| error)
+    })
 }
 
 fn fold_parameter_selection(
