@@ -5539,3 +5539,33 @@ endmodule
         "the reset reached the flip-flop"
     );
 }
+
+#[test]
+fn defaults_no_call_uses_do_not_stop_a_unit() {
+    // A default is evaluated only by a call that uses it (IEEE 1800-2023
+    // 13.5.3). This one reads another formal, as UVM's `uvm_report` does,
+    // which the scope of the declaration does not resolve; no call omits
+    // it, so the recursive function still runs out of line.
+    let source = r#"module Top(output int f);
+    function automatic int depth(int severity, int verbosity = (severity == 1) ? 0 : 200, int n = 0);
+        if (n == 0) return verbosity + severity;
+        return depth(severity, verbosity, n - 1) + 1;
+    endfunction
+    initial f = depth(1, 5, 3);
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 1);
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, false, backend, 0, &["f"]),
+                Ok(vec![value(9)]),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+    // A call that uses it is an error.
+    let omits = source.replace("depth(1, 5, 3)", "depth(1)");
+    let built = simulate(&omits, false, false, "interpreter", 0, &["f"]);
+    assert!(built.is_err(), "{built:?}");
+}
