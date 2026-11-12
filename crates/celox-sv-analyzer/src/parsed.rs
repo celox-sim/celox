@@ -28,8 +28,8 @@ pub struct ParsedSource {
 /// What a module analysis lowers.
 #[derive(Clone, Copy)]
 enum ModuleAnalysis<'a> {
-    /// The whole module, with the signals its hierarchical names denote.
-    Full(&'a [ast::HierarchicalSignal]),
+    /// The whole module, with the objects its hierarchical names denote.
+    Full(ast::HierarchicalObjects<'a>),
     DeclarationsOnly,
 }
 
@@ -278,13 +278,13 @@ impl ParsedSource {
             pattern_overrides,
             interfaces,
             packages,
-            ModuleAnalysis::Full(&[]),
+            ModuleAnalysis::Full(ast::HierarchicalObjects::default()),
             design,
         )
     }
 
     /// [`Self::analyze_module`] for a module whose hierarchical names
-    /// denote `hierarchical`, signals of other instances.
+    /// denote `hierarchical`, signals and subroutines of other instances.
     #[allow(clippy::too_many_arguments)]
     pub fn analyze_module_with_hierarchy(
         &self,
@@ -295,7 +295,7 @@ impl ParsedSource {
         interfaces: &ModuleInterfaces,
         packages: &Packages,
         design: &mut Design,
-        hierarchical: &[ast::HierarchicalSignal],
+        hierarchical: ast::HierarchicalObjects<'_>,
     ) -> Result<Ir, AnalyzerError> {
         self.analyze_module_with_packages(
             module_name,
@@ -403,6 +403,22 @@ impl ParsedSource {
         names
     }
 
+    /// The names of the functions and tasks that module `module_name`
+    /// declares in its own scope, which hierarchical names of other modules
+    /// may call (IEEE 1800-2023 23.8).
+    pub fn subroutine_names(&self, module_name: &str, packages: &Packages) -> Vec<String> {
+        let original = packages.authored_module_name(module_name);
+        let mut names = Vec::new();
+        for scope in self.index.scopes(original) {
+            for name in ast::subroutine_owners::module_subroutine_names(scope) {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        names
+    }
+
     /// Inspect declaration shapes without lowering procedures or tasks.
     /// The returned IR is metadata for tooling, not an executable simulation.
     pub fn analyze_module_declarations(
@@ -446,7 +462,7 @@ impl ParsedSource {
                 values: &overrides,
                 types: &[],
                 patterns: &[],
-                hierarchical: &[],
+                hierarchical: ast::HierarchicalObjects::default(),
             },
             interfaces,
             packages,
@@ -471,7 +487,7 @@ impl ParsedSource {
             &[],
             interfaces,
             &packages,
-            ModuleAnalysis::Full(&[]),
+            ModuleAnalysis::Full(ast::HierarchicalObjects::default()),
             &mut packages.design(),
         )
     }
@@ -529,7 +545,7 @@ impl ParsedSource {
                     patterns: pattern_overrides,
                     hierarchical: match analysis {
                         ModuleAnalysis::Full(hierarchical) => hierarchical,
-                        ModuleAnalysis::DeclarationsOnly => &[],
+                        ModuleAnalysis::DeclarationsOnly => ast::HierarchicalObjects::default(),
                     },
                 },
                 interfaces,

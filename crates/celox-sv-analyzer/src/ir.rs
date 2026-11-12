@@ -57,6 +57,12 @@ impl Ir {
         &self.modules
     }
 
+    /// The module `name`, to supply it what its analysis left to the caller
+    /// (see [`Module::import_subroutines`]).
+    pub fn module_mut(&mut self, name: &str) -> Option<&mut Module> {
+        self.modules.iter_mut().find(|module| module.name == name)
+    }
+
     /// The modules, to lower them from their own bodies.
     /// See [`Module::expand_virtual_interface_instances`], for each module.
     pub fn expand_virtual_interface_instances(&mut self, ids: &crate::HashMap<String, Vec<u32>>) {
@@ -446,6 +452,23 @@ impl Module {
         &self.subroutines
     }
 
+    /// Supply the module the body of a subroutine of another instance that
+    /// its hierarchical names call (see [`crate::ast::HierarchicalSubroutine`]),
+    /// with the signals and locals the body names: the signals denote objects
+    /// of other instances or packages, the locals belong to the module.
+    pub fn import_subroutines(
+        &mut self,
+        subroutines: Vec<Subroutine>,
+        signals: Vec<Signal>,
+        locals: Vec<LocalVariable>,
+        dpi_imports: Vec<DpiImport>,
+    ) {
+        self.subroutines.extend(subroutines);
+        self.signals.extend(signals);
+        self.locals.extend(locals);
+        self.dpi_imports.extend(dpi_imports);
+    }
+
     pub fn id(&self) -> ModuleId {
         self.id
     }
@@ -603,6 +626,13 @@ impl Signal {
             package_variable: None,
             hierarchical: None,
         }
+    }
+
+    /// A signal `name` of type `r#type` that denotes the object of another
+    /// instance hierarchical name `name` names (see [`Self::hierarchical`]).
+    pub fn hierarchical_alias(name: String, r#type: Type, is_net: bool) -> Self {
+        let path = name.clone();
+        Self::new(name, r#type, is_net).with_hierarchical(Some(&path))
     }
 
     pub(crate) fn with_hierarchical(mut self, hierarchical: Option<&str>) -> Self {
@@ -1044,6 +1074,38 @@ impl Type {
     /// does not have.
     pub fn packed_bounds(&self) -> Option<&[(i128, i128)]> {
         self.packed_bounds.as_deref()
+    }
+
+    /// This type with its packed and unpacked bounds evaluated by `bound` in
+    /// the scope that declares it, as literals, so that another scope, whose
+    /// constants differ, can declare a variable of it (see
+    /// [`Module::import_subroutines`]). `None` if a bound does not evaluate.
+    pub fn with_literal_bounds(&self, bound: &dyn Fn(&ConstExpr) -> Option<i128>) -> Option<Self> {
+        let literal = |value: i128| ConstExpr::Literal(value.to_string());
+        let packed = match self.packed_bounds() {
+            Some(bounds) => bounds.to_vec(),
+            None => self
+                .packed_ranges
+                .iter()
+                .map(|range| Some((bound(range.left())?, bound(range.right())?)))
+                .collect::<Option<Vec<_>>>()?,
+        };
+        let mut ty = self.clone();
+        ty.packed_ranges = packed
+            .iter()
+            .map(|&(left, right)| PackedRange::new(literal(left), literal(right)))
+            .collect();
+        ty.packed_bounds = Some(packed.into_boxed_slice());
+        for range in &mut ty.unpacked_ranges {
+            let (left, right) = match range.resolved_bounds {
+                Some(bounds) => bounds,
+                None => (bound(&range.left)?, bound(&range.right)?),
+            };
+            range.left = literal(left);
+            range.right = literal(right);
+            range.resolved_bounds = Some((left, right));
+        }
+        Some(ty)
     }
 
     /// This type with resolved packed bounds `bounds` (see

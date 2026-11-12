@@ -70,12 +70,16 @@ constructs without a dedicated issue point to the frontend roadmap,
 - Instance arrays with a negative bound.
 - Hierarchical references <a id="hierarchical-references"></a> that drive a net or a
   variable through a continuous assignment, appear in port connections, or
-  name tasks, functions, named blocks, parameters, structure members of
-  another scope other than members of a packed structure variable (a member
-  of an element of a packed array of structures is rejected), or `real`,
-  `string` (except through the host API name, see below), or class-typed
-  signals; names that start inside a generate block relative to it are also
-  rejected.
+  name named blocks, parameters, structure members of another scope other
+  than members of a packed structure variable (a member of an element of a
+  packed array of structures is rejected), or `real`, `string` (except
+  through the host API name, see below), or class-typed signals; names that
+  start inside a generate block relative to it are also rejected. A task or
+  function of another instance called by a hierarchical name (23.8) must be
+  declared in the scope of a module, of one specialization for every
+  instance of the calling module, and its formals, result and the variables
+  it names must not be `real`, `shortreal`, class or event typed; two
+  modules cannot call each other's subroutines.
 - Packages: package nets
   ([#1146](https://github.com/celox-sim/celox/issues/1146)); a package
   variable cannot be a clock or reset.

@@ -80,6 +80,9 @@ pub(super) struct ScopeSymbols {
     /// it takes when a specialization of a package class it takes names an
     /// item of the unit (see `Module::from_selected_scope`).
     pub unit: Option<Arc<DeferredUnit>>,
+    /// The functions and tasks of other instances that the scope's
+    /// hierarchical names call (IEEE 1800-2023 23.8), by their signatures.
+    pub hierarchical_subroutines: Vec<HierarchicalSubroutine>,
 }
 
 /// The compilation unit a scope takes only if a specialization it takes
@@ -201,6 +204,14 @@ pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
 }
 
 impl ScopeSymbols {
+    /// The subroutine of another instance that hierarchical name `path`
+    /// calls (IEEE 1800-2023 23.8).
+    pub(super) fn hierarchical_subroutine(&self, path: &str) -> Option<&HierarchicalSubroutine> {
+        self.hierarchical_subroutines
+            .iter()
+            .find(|subroutine| subroutine.paths.iter().any(|candidate| candidate == path))
+    }
+
     /// Add the symbols of `other` that this scope does not already have.
     pub fn extend(&mut self, other: &ScopeSymbols) {
         self.package_scopes
@@ -453,6 +464,7 @@ impl ScopeSymbols {
             classes: self.classes.clone(),
             class_member_types: self.class_member_types.clone(),
             inline_randomizations: self.inline_randomizations.clone(),
+            hierarchical_subroutines: self.hierarchical_subroutines.clone(),
             declarations_only: self.declarations_only,
             interface_instances: self.interface_instances.clone(),
             interface_types: self.interface_types.clone(),

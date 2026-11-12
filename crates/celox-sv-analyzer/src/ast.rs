@@ -89,7 +89,7 @@ mod selects;
 mod semantic_types;
 mod shared_map;
 mod statements;
-mod subroutine_owners;
+pub(crate) mod subroutine_owners;
 pub(crate) mod timescales;
 mod type_names;
 pub(crate) mod type_parameters;
@@ -237,7 +237,42 @@ pub(crate) struct ModuleParameterBindings<'a> {
     pub values: &'a HashMap<String, ConstExpr>,
     pub types: &'a [(String, Type)],
     pub patterns: &'a [(String, BoundPattern)],
-    pub hierarchical: &'a [HierarchicalSignal],
+    pub hierarchical: HierarchicalObjects<'a>,
+}
+
+/// The objects of other instances that hierarchical names of the analyzed
+/// module denote, resolved by the caller against the elaborated hierarchy.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HierarchicalObjects<'a> {
+    pub signals: &'a [HierarchicalSignal],
+    pub subroutines: &'a [HierarchicalSubroutine],
+}
+
+/// A function or task of another instance that hierarchical names of the
+/// analyzed module call (IEEE 1800-2023 23.8), resolved by the caller
+/// against the elaborated hierarchy. The module calls it as its subroutine
+/// `name`, whose body the caller supplies once the module is analyzed: the
+/// analysis binds the calls by this signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchicalSubroutine {
+    /// The names that denote the subroutine, as
+    /// [`crate::ParsedSource::hierarchical_names`] spells them.
+    pub paths: Vec<String>,
+    pub name: String,
+    pub formals: Vec<HierarchicalFormal>,
+    /// The result of a function; `None` for a task or a `void` function.
+    pub result: Option<Type>,
+    pub is_task: bool,
+}
+
+/// A formal argument of a [`HierarchicalSubroutine`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchicalFormal {
+    pub name: String,
+    pub direction: crate::procedural::ParamDirection,
+    pub r#type: Type,
+    /// The formal has a default, which an omitted argument takes.
+    pub has_default: bool,
 }
 
 /// A signal of another instance that hierarchical names of the analyzed
