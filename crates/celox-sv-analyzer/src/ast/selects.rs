@@ -1160,6 +1160,7 @@ fn fold_parameter_selection(
     assignment_width: Option<usize>,
 ) -> Converted<ConstExpr> {
     let expression = substitute_indexed_parameter_values(tree, session, expression, dimensions);
+    let expression = without_division_guards(expression);
     if let Expr::Literal(text) = &expression
         && text.contains(['.', 'e', 'E'])
         && text.parse::<f64>().is_ok()
@@ -1193,6 +1194,23 @@ fn fold_parameter_selection(
     Ok(ConstExpr::Literal(
         typecheck::format_integral_literal_binary(&literal),
     ))
+}
+
+/// `expr` with the guards binding puts around a division or modulus whose
+/// divisor may be zero replaced by the operation: a constant expression is
+/// evaluated with the divisor's value, and the evaluation gives the result
+/// of a zero divisor (IEEE 1800-2023 11.4.2) itself.
+fn without_division_guards(expr: Expr) -> Expr {
+    match expr {
+        Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } if matches!(&*then_expr, Expr::Literal(text) if text == crate::DIV_ZERO_UNKNOWN_LITERAL) => {
+            without_division_guards(*else_expr)
+        }
+        expr => virtual_interfaces::map_children(expr, &mut without_division_guards),
+    }
 }
 
 fn unknown_indexed_range_literal(

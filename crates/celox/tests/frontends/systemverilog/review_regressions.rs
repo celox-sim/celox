@@ -3102,6 +3102,52 @@ fn reevaluates_constant_casts_after_parameter_overrides() {
     assert_eq!(sim.get(sim.signal("y")), 4u8.into());
 }
 
+// A cast in a parameter initializer divided by a parameter is a constant
+// (IEEE 1800-2023 11.2.1), a division by zero one whose value is X
+// (11.4.2): 0 in a two-state type.
+#[test]
+fn divides_constant_casts_by_parameters() {
+    let source = r#"
+        package sizes_pkg;
+            parameter int unsigned SIZE = 'h c00;
+        endpackage
+        module Top #(parameter int W = 256, parameter int Z = 0) (
+            output int words, rest, zero, output logic [7:0] width,
+            output logic unknown
+        );
+            localparam int Words = int'(sizes_pkg::SIZE) / (W / 8);
+            localparam int Rest = int'(3075) % W;
+            localparam int Zero = int'(sizes_pkg::SIZE) / Z;
+            localparam logic [7:0] Unknown = int'(sizes_pkg::SIZE) / Z;
+            logic [$clog2(Words)-1:0] address;
+            assign words = Words;
+            assign rest = Rest;
+            assign zero = Zero;
+            assign width = $bits(address);
+            assign unknown = $isunknown(Unknown);
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        for (w, words, rest, width) in [(256, 96u32, 3u32, 7u8), (64, 384, 3, 9)] {
+            let mut sim =
+                Simulator::from_sv_sources(vec![(source, Path::new("cast_division.sv"))], "Top")
+                    .four_state(four_state)
+                    .param("W", w)
+                    .build_cranelift()
+                    .unwrap();
+            assert_eq!(sim.get(sim.signal("words")), words.into());
+            assert_eq!(sim.get(sim.signal("rest")), rest.into());
+            assert_eq!(sim.get(sim.signal("zero")), 0u32.into());
+            assert_eq!(sim.get(sim.signal("width")), width.into());
+            assert_eq!(
+                sim.get(sim.signal("unknown")),
+                u8::from(four_state).into(),
+                "four_state={four_state}"
+            );
+        }
+    }
+}
+
 #[test]
 fn resolves_typedefs_in_size_function_cast_targets() {
     let source = r#"
