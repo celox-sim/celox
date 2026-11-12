@@ -43,7 +43,7 @@ fn local_values_hide_enum_bindings_and_scope_exit_restores_them() {
     builder.declare("A", int_type());
     assert!(!builder.dims.constant_types.contains_key("A"));
     assert!(
-        enums::constant_binding(
+        expression_types::constant_binding(
             &tree,
             builder.session,
             id,
@@ -64,7 +64,7 @@ fn local_values_hide_enum_bindings_and_scope_exit_restores_them() {
         .insert(parameters::unbounded_parameter_marker("A"), 0);
     builder.names.scopes.last_mut().unwrap().entries.push(entry);
     assert!(
-        enums::constant_binding(
+        expression_types::constant_binding(
             &tree,
             builder.session,
             id,

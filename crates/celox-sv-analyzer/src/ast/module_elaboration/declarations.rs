@@ -98,7 +98,9 @@ impl ScopeElaboration<'_> {
             &self.const_env,
             &self.type_aliases,
         );
-        self.packed_dimensions.constant_types = Arc::new(self.enum_constants.declarations.clone());
+        let mut constant_types = self.imported.constant_types.clone();
+        constant_types.extend(self.enum_constants.declarations.clone());
+        self.packed_dimensions.constant_types = Arc::new(constant_types);
         for parameter in self.imported.parameters.iter().chain(&self.parameters) {
             let bindings = Arc::make_mut(&mut self.packed_dimensions.constant_types);
             bindings.remove(parameter.name());

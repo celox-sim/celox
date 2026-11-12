@@ -350,7 +350,7 @@ fn nested_generate_imports_replace_enclosing_parameter_types() {
                 &symbols.const_env,
                 &symbols.type_aliases,
             );
-            input.constant_types = Arc::new(symbols.enum_constants.declarations.clone());
+            input.constant_types = Arc::new(symbols.constant_types.clone());
             for parameter in &symbols.parameters {
                 if let Some(ty) = &parameter.semantic_type {
                     Arc::make_mut(&mut input.constant_types)
