@@ -138,6 +138,7 @@ impl Ff<'_, '_> {
                     assertion: None,
                     deferred: Some(DeferredSite::ProcessFlushPoint),
                     timestamp_arg: false,
+                    time_format_arg: false,
                     arg_widths: Vec::new(),
                     arg_signed: Vec::new(),
                     arg_is_string: Vec::new(),

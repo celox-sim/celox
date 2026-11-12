@@ -713,8 +713,8 @@ chapter-20/20.4--printtimescale-hier.sv	2state	fail
 chapter-20/20.4--printtimescale-hier.sv	4state	fail
 chapter-20/20.4--printtimescale.sv	2state	pass
 chapter-20/20.4--printtimescale.sv	4state	pass
-chapter-20/20.4--timeformat.sv	2state	fail
-chapter-20/20.4--timeformat.sv	4state	fail
+chapter-20/20.4--timeformat.sv	2state	pass
+chapter-20/20.4--timeformat.sv	4state	pass
 chapter-20/20.5--itor.sv	2state	pass
 chapter-20/20.5--itor.sv	4state	pass
 chapter-20/20.5--real-bits-conv.sv	2state	pass

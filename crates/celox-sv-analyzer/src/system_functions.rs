@@ -639,6 +639,11 @@ pub enum SystemTask {
     /// `$printtimescale` (20.4.1); the analyzer rewrites it into a
     /// [`SystemTask::Display`] of the message.
     Printtimescale,
+    /// `$timeformat` (20.4.3), whose arguments the analyzer makes the
+    /// powers of ten from the simulation's time unit to the reported unit,
+    /// the precision, the suffix and the minimum field width that `%t`
+    /// reports with until the next call.
+    Timeformat,
     /// `$set_coverage_db_name` (40.3.2.7); with no coverage database the
     /// analyzer drops the call.
     SetCoverageDbName,
@@ -772,6 +777,7 @@ impl SystemTask {
             Self::Stop => "$stop",
             Self::Exit => "$exit",
             Self::Printtimescale => "$printtimescale",
+            Self::Timeformat => "$timeformat",
             Self::SetCoverageDbName => "$set_coverage_db_name",
             Self::LoadCoverageDb => "$load_coverage_db",
             Self::Fatal => "$fatal",
@@ -1988,7 +1994,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     function(SystemFunction::Realtime, 0, Some(0)),
     // 20.4 Timescale system tasks and system functions
     task(SystemTask::Printtimescale, ProceduralAndInitial, 0, Some(1)),
-    unsupported("$timeformat", Task),
+    task(SystemTask::Timeformat, ProceduralAndInitial, 0, Some(4)),
     function(SystemFunction::Timeunit, 0, Some(1)),
     function(SystemFunction::Timeprecision, 0, Some(1)),
     // 20.5 Conversion functions

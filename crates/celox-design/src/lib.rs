@@ -224,6 +224,11 @@ pub struct RuntimeEventSite {
     /// formatted.
     #[serde(default)]
     pub timestamp_arg: bool,
+    /// The last argument, before the time of a timestamped site, is the
+    /// format of `%t` the design's `$timeformat` calls set
+    /// ([`time_format`]). It is not formatted.
+    #[serde(default)]
+    pub time_format_arg: bool,
     pub arg_widths: Vec<usize>,
     pub arg_signed: Vec<bool>,
     pub arg_is_string: Vec<bool>,
@@ -594,6 +599,41 @@ pub enum HostRequestKind {
     Format,
     /// Host command execution (`$system`).
     System,
+}
+
+/// The text after the format of a `$sformatf` or file output request that
+/// makes its last argument the format of `%t` ([`time_format`]).
+pub const TIME_FORMAT_ARGUMENT: &str = "$timeformat";
+
+/// The format of `%t` that `$timeformat` sets (IEEE 1800-2023 20.4.3), a
+/// value of [`WIDTH`](time_format::WIDTH) bits in the design's state, which
+/// the sites that convert a time with `%t` capture with their arguments. A
+/// value without [`SET`](time_format::SET) is the default format.
+pub mod time_format {
+    /// Bits of the value.
+    pub const WIDTH: usize = SUFFIX_LENGTH + 8;
+    /// The bit set by a `$timeformat` call.
+    pub const SET: usize = 0;
+    /// The 32-bit signed powers of ten from the simulation's time unit to
+    /// the reported unit.
+    pub const UNITS: usize = 1;
+    /// The 32-bit number of decimal places.
+    pub const PRECISION: usize = 33;
+    /// The 32-bit minimum field width.
+    pub const FIELD_WIDTH: usize = 65;
+    /// The suffix, as the bytes of a string literal, its last byte lowest,
+    /// [`SUFFIX_LENGTH`] bytes of it.
+    pub const SUFFIX: usize = 97;
+    /// The most bytes of a suffix.
+    pub const SUFFIX_BYTES: usize = 32;
+    /// The 8-bit number of bytes of the suffix, which may be NUL.
+    pub const SUFFIX_LENGTH: usize = SUFFIX + 8 * SUFFIX_BYTES;
+    /// The most decimal places Celox prints; `$timeformat` with more is an
+    /// error.
+    pub const MAX_PRECISION: i32 = 4096;
+    /// The widest minimum field width Celox pads to; `$timeformat` with a
+    /// wider one is an error.
+    pub const MAX_FIELD_WIDTH: i32 = 4096;
 }
 
 impl HostRequestKind {

@@ -366,7 +366,7 @@ nonblocking action statements.
   including Annex D. One it does not support where it is called, such as
   `$get_coverage`, is reported by name wherever it is written, including in
   an unused parameter and in a function body.
-- `$timeformat`; `%t` of a `string` value; time queries
+- `%t` of a `string` value; time queries
   (`$timeunit`, `$timeprecision`, `$printtimescale`) of selected instance
   array elements and generate paths; designs mixing explicitly specified
   or inherited time scales with implementation defaults (3.14.2.3).
@@ -485,6 +485,18 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
 - The implementation default time scale is 1 ns / 1 ps. A `Simulation`
   counts time in the design's global time precision (3.14.3), 1 ps by
   default, so `%t` reports picoseconds in a design without time scales.
+- `$timeformat` (20.4.3) sets the units, decimal places, suffix and
+  minimum field width of the `%t` conversions after it, in every output and
+  in `$sformatf`; the time rounds half away from zero, and the width of a
+  conversion such as `%0t` replaces the minimum field width. The suffix is
+  a string literal, NUL characters included. An `always_comb`,
+  `always_latch` or `always @*` that calls it, also through a subroutine,
+  runs as a process: once at time zero (except `always @*`), then after
+  each change of what it reads. A units number outside 2 to -15 or a negative
+  precision or field width computed at run time ends the simulation with an
+  error, as a constant one fails the analysis; Celox prints at most 4096
+  decimal places and pads to at most 4096 characters, and a larger
+  precision or field width is an error.
 - A class or subroutine declared in the compilation unit (`$unit`) uses
   the compilation unit's time unit and precision. A `` `timescale ``
   directive does not set those (3.14.2.3), so they are the default 1 ns /

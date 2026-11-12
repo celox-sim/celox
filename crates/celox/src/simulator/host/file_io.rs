@@ -216,6 +216,12 @@ impl<B: SimBackend> Simulator<B> {
                     assertion: None,
                     deferred: None,
                     timestamp_arg: false,
+                    // The last value is the format of `%t` when the call
+                    // ran.
+                    time_format_arg: site
+                        .strings
+                        .get(1)
+                        .is_some_and(|text| text == celox_design::TIME_FORMAT_ARGUMENT),
                     arg_widths: Vec::new(),
                     arg_signed: Vec::new(),
                     arg_is_string: Vec::new(),
