@@ -2214,6 +2214,42 @@ fn methods_a_package_specialization_lowers_share_their_static_variables() {
 }
 
 #[test]
+fn a_package_specialization_runs_methods_of_the_classes_it_takes() {
+    // `Registry#(Item)` makes the package run `Item::code` through the
+    // dispatcher of `Obj::code` in the initializer of a static property.
+    // The locals of the method are its own, not the package's: `keep`
+    // holds its `v` across the call, and the method writes its `v`
+    // (IEEE 1800-2023 8.25, 13.4.2).
+    let source = "`timescale 1ns/1ns
+    package p;
+        class Obj; virtual function int code(int x); return x; endfunction endclass
+        function automatic int keep(Obj o);
+            int v;
+            v = 100;
+            v = v + o.code(1);
+            return v;
+        endfunction
+        class Registry #(type T = Obj);
+            static int registered = register();
+            static function int register(); T t = new; return keep(t); endfunction
+        endclass
+    endpackage
+    import p::*;
+    class Item extends Obj;
+        virtual function int code(int x); int v; v = x * 7; return v; endfunction
+    endclass
+    module Top(output int o);
+        typedef Registry#(Item) R;
+        initial o = R::registered;
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("o")), 107u32.into());
+}
+
+#[test]
 fn a_class_of_another_module_does_not_hide_a_package() {
     let source = "package P; typedef bit [2:0] T; endpackage
         module Other; class P; typedef int T; endclass endmodule

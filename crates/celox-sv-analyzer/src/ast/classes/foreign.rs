@@ -426,6 +426,21 @@ fn specialize(
                 .filter(|subroutine| subroutine.name.contains("::"))
                 .cloned()
                 .collect(),
+            // With the variables they declare (see `handed_over`).
+            locals: {
+                let declared = caller
+                    .subroutines
+                    .iter()
+                    .filter(|subroutine| subroutine.name.contains("::"))
+                    .flat_map(declared_names)
+                    .collect::<HashSet<_>>();
+                caller
+                    .locals
+                    .iter()
+                    .filter(|local| declared.contains(local.name.as_str()))
+                    .cloned()
+                    .collect()
+            },
             function_return_types: qualified(&caller.function_return_types),
             ..Default::default()
         });
@@ -637,7 +652,14 @@ pub(in crate::ast) fn finish(
                 .iter()
                 .any(|old| old.name == subroutine.name)
             {
-                known.subroutines.push(subroutine.clone());
+                let (subroutine, locals) =
+                    handed_over(subroutine, &caller.locals, package_owner.as_deref());
+                known.subroutines.push(subroutine);
+                for local in locals {
+                    if !known.locals.iter().any(|old| old.name == local.name) {
+                        known.locals.push(local);
+                    }
+                }
             }
         }
         known
@@ -656,6 +678,72 @@ pub(in crate::ast) fn finish(
         build(session, &name, Some(&caller))?;
     }
     Ok(())
+}
+
+/// The variables `subroutine` declares: its formals, result and locals.
+fn declared_names(subroutine: &Subroutine) -> HashSet<&str> {
+    let mut declared: HashSet<&str> = subroutine
+        .params
+        .iter()
+        .flat_map(|param| std::iter::once(&param.name).chain(&param.leaves))
+        .chain(&subroutine.return_var)
+        .chain(&subroutine.automatic_locals)
+        .chain(&subroutine.persistent_locals)
+        .map(String::as_str)
+        .collect();
+    for stmt in &subroutine.body {
+        stmt.walk(&mut |stmt| {
+            if let crate::procedural::StmtBase::Local { name, .. } = stmt {
+                declared.insert(name.as_str());
+            }
+        });
+    }
+    declared
+}
+
+/// A subroutine of a scope as another scope lowers it, such as a method
+/// of a class a package specialization takes, with the variables it
+/// declares. A variable its subroutine and declaration name (see
+/// `BodyBuilder::declare_owned`, `LocalVariable::owned`) keeps its name.
+/// One the counter of the scope's analysis named would read as a variable
+/// of the other scope that its own count gave the same name: it is named
+/// after the scope and the subroutine instead.
+fn handed_over(
+    subroutine: &Subroutine,
+    locals: &[LocalVariable],
+    scope: Option<&str>,
+) -> (Subroutine, Vec<LocalVariable>) {
+    let declared = declared_names(subroutine);
+    let declarations = locals
+        .iter()
+        .filter(|local| declared.contains(local.name.as_str()))
+        .map(|local| (local.name.as_str(), local))
+        .collect::<HashMap<_, _>>();
+    let mut names = HashMap::default();
+    for name in &declared {
+        let local = declarations.get(name);
+        // A static variable is one object of the scope, which the scope
+        // hands over as one of its variables, by its name (IEEE 1800-2023
+        // 6.21).
+        if local.is_some_and(|local| local.owned)
+            || subroutine.persistent_locals.contains(&name.to_string())
+        {
+            continue;
+        }
+        let source = local.map_or(*name, |local| local.source_name.as_str());
+        let key = fxhash::hash64(&(scope, subroutine.name.as_str(), *name));
+        names.insert(name.to_string(), format!("{source}%{key:016x}@0"));
+    }
+    let rename = scope::Renamer { names: &names };
+    let locals = declarations
+        .values()
+        .map(|local| LocalVariable {
+            name: rename.name(&local.name),
+            owned: true,
+            ..(*local).clone()
+        })
+        .collect();
+    (rename.subroutine(subroutine.clone()), locals)
 }
 
 pub(in crate::ast) fn is_foreign(
@@ -680,4 +768,96 @@ fn qualified<V: Clone>(table: &HashMap<String, V>) -> HashMap<String, V> {
         .filter(|(name, _)| name.contains("::"))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::procedural::{ParamDirection, StmtBase, SubroutineParamBase};
+
+    #[test]
+    fn handed_over_variables_never_take_a_counted_name_of_the_receiver() {
+        // `$unit`'s count named the method's locals `v@8` and, escaped,
+        // `\v%foo@8`; the package that takes the method may have named
+        // locals of its own so too. The method's must not become those,
+        // whatever their spelling holds.
+        let logic = crate::ir::Type::from_ast(Type::new(TypeKind::Logic), &HashMap::default());
+        let local = |name: &str, source: &str, owned: bool| LocalVariable {
+            name: name.into(),
+            source_name: source.into(),
+            r#type: logic.clone(),
+            owned,
+        };
+        let this = "this%0123456789abcdef@5";
+        let assign = |lhs: &str, rhs: &str| StmtBase::Assign {
+            lhs: LValue::Ident(lhs.into()),
+            rhs: Expr::Ident(rhs.into()),
+            nonblocking: false,
+        };
+        let declare = |name: &str| StmtBase::Local {
+            name: name.into(),
+            init: None,
+        };
+        let subroutine = Subroutine {
+            name: "$unit::Item::code".into(),
+            is_task: false,
+            automatic: true,
+            automatic_locals: Vec::new(),
+            // A static local, a variable of the scope now, not a local.
+            persistent_locals: vec!["s%fedcba9876543210@3".into()],
+            return_type: None,
+            params: vec![SubroutineParamBase {
+                name: this.into(),
+                source_name: "this".into(),
+                direction: ParamDirection::Input,
+                r#type: logic.clone(),
+                default: None,
+                leaves: Vec::new(),
+            }],
+            return_var: None,
+            body: vec![
+                declare("v@8"),
+                declare("\\v%foo@8"),
+                assign("v@8", "w@9"),
+                assign("\\v%foo@8", "v@8"),
+                assign("s%fedcba9876543210@3", "v@8"),
+            ],
+            sensitivity_body: Vec::new(),
+        };
+        let locals = [
+            local("v@8", "v", false),
+            local("\\v%foo@8", "\\v%foo", false),
+            local(this, "this", true),
+            local("w@9", "w", false),
+        ];
+        let (handed, locals) = handed_over(&subroutine, &locals, Some("$unit"));
+        let declared = |index: usize| match &handed.body[index] {
+            StmtBase::Local { name, .. } => name.clone(),
+            other => panic!("{other:?}"),
+        };
+        let (v, escaped) = (declared(0), declared(1));
+        assert!(v.starts_with("v%") && v != "v@8", "{v}");
+        assert!(
+            escaped.starts_with("\\v%foo%") && escaped != "\\v%foo@8",
+            "{escaped}"
+        );
+        // Not a variable of the method: the name it reads stays.
+        assert_eq!(handed.body[2], assign(&v, "w@9"));
+        assert_eq!(handed.body[3], assign(&escaped, &v));
+        // The static keeps its name, which the scope hands over.
+        assert_eq!(handed.body[4], assign("s%fedcba9876543210@3", &v));
+        assert_eq!(handed.persistent_locals, ["s%fedcba9876543210@3"]);
+        // The formal named by its method keeps its name.
+        assert_eq!(handed.params[0].name, this);
+        // The declarations go with it, named by it now; `w@9`, which it
+        // does not declare, does not.
+        let mut names = locals
+            .iter()
+            .map(|local| (local.name.clone(), local.owned))
+            .collect::<Vec<_>>();
+        names.sort();
+        let mut expected = vec![(this.to_string(), true), (v, true), (escaped, true)];
+        expected.sort();
+        assert_eq!(names, expected);
+    }
 }
