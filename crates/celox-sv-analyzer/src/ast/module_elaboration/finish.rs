@@ -47,7 +47,7 @@ impl ScopeElaboration<'_> {
             constant_functions: syntax_tree.functions.clone(),
             subroutine_params: self.subroutine_params.clone(),
             subroutine_shapes: self.subroutine_shapes.clone(),
-            subroutines: self.subroutines.clone(),
+            subroutines: self.subroutines.iter().cloned().map(Arc::new).collect(),
             locals: self.locals.clone(),
             dpi_imports: self.dpi_imports.clone(),
             // A package's signals are its array parameters and constant
@@ -99,7 +99,7 @@ impl ScopeElaboration<'_> {
                     reachable.contains(subroutine.name.as_str())
                         && known.insert(subroutine.name.as_str())
                 })
-                .cloned()
+                .map(|subroutine| (**subroutine).clone())
                 .collect::<Vec<_>>();
             self.subroutines.extend(missing);
             let mut known: HashSet<&str> = self
