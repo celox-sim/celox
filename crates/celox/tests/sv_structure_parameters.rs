@@ -316,3 +316,113 @@ fn rejects_members_that_are_no_constants() {
     );
     assert!(unknown.contains("nothing.n"), "{unknown}");
 }
+
+/// A member of an element of an unpacked array parameter of packed
+/// structures is a constant when the index is one (IEEE 1800-2023 11.2.1):
+/// in a parameter initializer, a generate condition and the bounds of a
+/// part-select, with a genvar index; with a run-time index it is a value.
+/// The array may be one of a package, named with its scope or imported, or
+/// of the module.
+#[test]
+fn members_of_array_parameter_elements() {
+    let source = r#"
+    `timescale 1ns/1ns
+    package Parts;
+      typedef struct packed { logic secret; logic [10:0] offset; logic [10:0] size; } part_t;
+      parameter int Count = 3;
+      localparam part_t Info [Count] = '{
+        '{secret: 1'b0, offset: 11'd0,  size: 11'd8},
+        '{secret: 1'b1, offset: 11'd8,  size: 11'd16},
+        '{secret: 1'b0, offset: 11'd24, size: 11'd8}
+      };
+    endpackage
+    module Top import Parts::*; ;
+      localparam part_t Local [2] = '{'{1'b1, 11'd4, 11'd2}, '{1'b0, 11'd6, 11'd3}};
+      logic [31:0] data;
+      logic [Count-1:0] sel;
+      logic [10:0] addr;
+      logic [1:0] idx;
+      logic [10:0] base;
+      logic [Parts::Info[1].size-1:0] qualified;
+      logic [Local[1].offset:Local[0].offset] local_bits;
+      for (genvar k = 0; k < Count; k++) begin : gen_part
+        localparam int unsigned PartEnd = 32'(Info[k].offset) + 32'(Info[k].size);
+        if (Info[k].offset == 0) begin : gen_zero
+          assign sel[k] = addr < PartEnd;
+        end else begin : gen_nonzero
+          assign sel[k] = (addr >= Info[k].offset) & (addr < PartEnd);
+        end
+        assign data[Info[k].offset +: Info[k].size] = {4{8'(k + 1)}};
+        initial #1 $display("k=%0d end=%0d secret=%b", k, PartEnd, Info[k].secret);
+      end
+      always_comb base = Info[idx].offset;
+      initial begin
+        addr = 11'd10;
+        idx = 2;
+        #2 $display("sel=%b base=%0d data=%h", sel, base, data);
+        $display("qualified=%0d local=%0d", $bits(qualified), $bits(local_bits));
+      end
+    endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut lines = display(source, four_state);
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                "k=0 end=8 secret=0",
+                "k=1 end=24 secret=1",
+                "k=2 end=32 secret=0",
+                "qualified=16 local=3",
+                "sel=010 base=24 data=03020201",
+            ],
+            "four-state {four_state}"
+        );
+    }
+}
+
+/// The elements may be given by enumeration members and casts, and a member
+/// of enumerated type compares with the enumeration's members.
+#[test]
+fn enumerated_members_of_array_parameter_elements() {
+    let source = r#"
+    `timescale 1ns/1ns
+    package Keys;
+      typedef enum logic [2:0] { KeyA, KeyB } key_e;
+    endpackage
+    package Parts;
+      import Keys::*;
+      typedef enum logic [1:0] { Unbuffered, Buffered, LifeCycle } variant_e;
+      typedef struct packed {
+        variant_e    variant;
+        logic [10:0] offset;
+        logic [10:0] size;
+        key_e        key;
+      } part_t;
+      parameter int Count = 2;
+      localparam part_t Info [Count] = '{
+        '{variant: Unbuffered, offset: 11'd0,  size: 64, key: key_e'('0)},
+        '{variant: Buffered,   offset: 11'd64, size: 32, key: KeyB}
+      };
+    endpackage
+    module Top import Parts::*; ;
+      for (genvar k = 0; k < Count; k++) begin : gen_part
+        localparam int End = 32'(Info[k].offset) + 32'(Info[k].size);
+        if (Info[k].variant == Buffered) begin : gen_buffered
+          initial #1 $display("k=%0d end=%0d buffered key=%0d", k, End, Info[k].key);
+        end else begin : gen_unbuffered
+          initial #1 $display("k=%0d end=%0d unbuffered key=%0d", k, End, Info[k].key);
+        end
+      end
+    endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut lines = display(source, four_state);
+        lines.sort();
+        assert_eq!(
+            lines,
+            ["k=0 end=64 unbuffered key=0", "k=1 end=96 buffered key=1"],
+            "four-state {four_state}"
+        );
+    }
+}
