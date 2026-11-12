@@ -531,5 +531,87 @@ fn parameter_override(
         .ok_or_else(|| AnalyzerError::Unsupported(format!("parameter type override `{name}`")))?;
         return Ok(ParameterOverride::type_override(name, ty));
     }
+    let value = fold_function_calls(syntax_tree, value, &packed_dimensions.const_env);
     Ok(ParameterOverride::new(name, Some(value)))
+}
+
+/// `expr` with each call of a constant function of the instantiating scope
+/// replaced by its value (IEEE 1800-2023 13.4.3): the instantiated module has
+/// no such function to call. A call whose value is not known here stays.
+fn fold_function_calls(tree: &AnalysisContext<'_>, expr: ConstExpr, env: &ConstEnv) -> ConstExpr {
+    let fold = |expr: Box<ConstExpr>| Box::new(fold_function_calls(tree, *expr, env));
+    match expr {
+        ConstExpr::Function {
+            callee: Callee::Subroutine(name),
+            args,
+            site,
+        } => {
+            let args = args
+                .into_iter()
+                .map(|arg| fold_function_calls(tree, arg, env))
+                .collect::<Vec<_>>();
+            let ir_args = args.iter().cloned().map(Into::into).collect::<Vec<_>>();
+            match const_functions::eval_call_literal(&tree.functions, &name, &ir_args, env) {
+                Some(literal) => {
+                    ConstExpr::Literal(typecheck::format_integral_literal_binary(&literal))
+                }
+                None => ConstExpr::Function {
+                    callee: Callee::Subroutine(name),
+                    args,
+                    site,
+                },
+            }
+        }
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee,
+            args: args
+                .into_iter()
+                .map(|arg| fold_function_calls(tree, arg, env))
+                .collect(),
+            site,
+        },
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: fold(expr),
+            bit: fold(bit),
+        },
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: fold(expr),
+            msb: fold(msb),
+            lsb: fold(lsb),
+            signed,
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: fold(expr),
+            width,
+            signed,
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op,
+            expr: fold(expr),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: fold(left),
+            op,
+            right: fold(right),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: fold(condition),
+            then_expr: fold(then_expr),
+            else_expr: fold(else_expr),
+        },
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => expr,
+    }
 }
