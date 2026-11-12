@@ -54,7 +54,7 @@ pub(super) use streams::{
     is_stream, pack as pack_stream, take as stream_take, unpack as stream_unpack,
 };
 pub(super) use strings::{
-    call as string_call, fixed_array_element as fixed_string_array_element,
+    alias_name, call as string_call, fixed_array_element as fixed_string_array_element,
     method as string_method, native_string, string_value, to_string as string_operand,
 };
 fn disagreement() -> AnalyzerError {
