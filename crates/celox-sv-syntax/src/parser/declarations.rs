@@ -216,7 +216,14 @@ impl Parser<'_> {
                 if self.peek().is_empty() {
                     return Err(self.error("attribute without a source declaration"));
                 }
-                pending = Some((start, self.at, self.peek().to_owned()));
+                // `virtual class` declares a class (IEEE 1800-2023 8.21), as
+                // `class` does.
+                let category = if self.peek() == "virtual" && self.nth(1) == "class" {
+                    "class"
+                } else {
+                    self.peek()
+                };
+                pending = Some((start, self.at, category.to_owned()));
             }
             if class_boundary
                 && scopes.last() == Some(&"endclass")
