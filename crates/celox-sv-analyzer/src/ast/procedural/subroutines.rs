@@ -103,6 +103,111 @@ fn formal_declaration(native: &celox_sv_syntax::Subroutine, source: &str) -> usi
         .map_or(native.tokens.start, |port| port.tokens.start)
 }
 
+/// The return metadata of every function in the active generate items and
+/// of the static functions of their classes, as its declaration gives it,
+/// keyed by its (qualified) name: what an expression of a constant
+/// function's body knows of a function it calls, such as the width a cast of
+/// the result keeps (IEEE 1800-2023 6.24.1, 13.4.3), before discovery
+/// publishes the scope's signatures. A function whose signature does not
+/// bind has none here; it is rejected where its body is.
+pub(in crate::ast) fn function_returns(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    type_aliases: &SharedAliases,
+    const_env: &ConstEnv,
+) -> Converted<HashMap<String, FunctionReturnMetadata>> {
+    let mut returns = HashMap::default();
+    for item in generate::subroutine_items(tree, session, const_env, type_aliases)? {
+        let tree = &item.scoped(tree);
+        let item_aliases = item.shared_type_aliases(type_aliases);
+        for native_id in subroutine_owners::item(item.id, tree)? {
+            let tree = &item.enter(tree);
+            if let Some(metadata) =
+                declared_return(native_id, tree, session, &item.env, &item_aliases)
+            {
+                let native = tree.declarations().subroutine(native_id);
+                returns.insert(
+                    item.name(&instances::normalize_identifier(&native.name.spelling)),
+                    metadata,
+                );
+            }
+        }
+        for class in classes::item_classes(item.id, tree, session) {
+            let tree = &item.enter(tree);
+            let aliases = item.type_aliases(type_aliases);
+            // A specialization's methods see its parameters (8.25).
+            let (env, aliases) =
+                classes::specializations::scope(session, &class, &item.env, &aliases);
+            let (env, aliases): (SharedEnv, SharedAliases) = (env.into(), aliases.into());
+            for (native_id, is_static) in classes::declared_methods(tree, session, &class)? {
+                // Only a static method is called without a handle, as a
+                // constant function may call one.
+                if !is_static {
+                    continue;
+                }
+                if let Some(metadata) = declared_return(native_id, tree, session, &env, &aliases) {
+                    let native = tree.declarations().subroutine(native_id);
+                    let name = classes::Class::subroutine_name(
+                        &class,
+                        &instances::normalize_identifier(&native.name.spelling),
+                    );
+                    returns.insert(item.name(&name), metadata);
+                }
+            }
+        }
+    }
+    Ok(returns)
+}
+
+/// The return metadata of function `native_id` as its declaration gives
+/// it, its formals and result bound with constants `env` and types
+/// `aliases` of the scope that declares it; `None` for a task, or a function
+/// whose signature does not bind.
+fn declared_return(
+    native_id: celox_sv_syntax::SubroutineId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &SharedEnv,
+    aliases: &SharedAliases,
+) -> Option<FunctionReturnMetadata> {
+    let native = tree.declarations().subroutine(native_id);
+    if native.kind != celox_sv_syntax::SubroutineKind::Function {
+        return None;
+    }
+    let context = PackedDimensions::new(HashMap::default(), env, aliases);
+    let params = type_binding::subroutine_formals(native, tree, session, &context).ok()?;
+    let return_type = match native.return_type {
+        Some(id)
+            if matches!(
+                tree.declarations().data_type(id).kind,
+                celox_sv_syntax::DataTypeKind::Implicit
+            ) =>
+        {
+            Some(type_binding::implicit_subroutine_type(id, tree, session, env, aliases).ok()?)
+        }
+        Some(id) => {
+            type_binding::procedural_type(id, tree.declarations(), tree, session, env, aliases)
+                .ok()?
+        }
+        None => None,
+    };
+    let arguments = params
+        .iter()
+        .map(|(name, direction, _, default)| FunctionArgumentMetadata {
+            name: name.clone(),
+            direction: *direction,
+            has_default: default.is_some(),
+        })
+        .collect();
+    Some(FunctionReturnMetadata::from_type(
+        tree,
+        session,
+        return_type.as_ref(),
+        arguments,
+        &context,
+    ))
+}
+
 /// The argument names of every function and task in the active generate
 /// items, in declaration order, keyed by their (qualified) names.
 pub(in crate::ast) fn subroutine_argument_names(

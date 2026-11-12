@@ -498,6 +498,12 @@ fn collect_module_constant_functions(
         };
     let mut dimensions = PackedDimensions::new(HashMap::default(), const_env, type_aliases);
     dimensions.constant_types = constant_types.clone();
+    let mut returns = scope::imported(tree).function_return_types.clone();
+    match procedural::function_returns(tree, session, &type_aliases.clone().into(), const_env) {
+        Ok(own) => returns.extend(own),
+        Err(error) => return ConstantFunctions::unconverted(error),
+    }
+    dimensions.function_return_types = returns.into();
     dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
     dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes);
     dimensions.subroutine_directions = Arc::new(subroutine_directions.clone());
