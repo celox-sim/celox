@@ -4,13 +4,15 @@
 //! `force t = e;` makes `t` take `e` until `release t;`, overriding every
 //! procedural assignment, continuous assignment and port driver of `t`.
 //! Each forced target `t` has two hidden variables that the frontend reads
-//! wherever `t` is written: the enable `E`, and the forced value `V`. While
-//! `E` is set, every write of `t` stores `V` instead of its value (see
-//! [`crate::ir::ForceControl`]). The statements become
+//! wherever `t` is written: the enable mask `E`, and the forced value `V`.
+//! Every write of `t` stores the bits of `V` where `E` is set instead of its
+//! own (see [`crate::ir::ForceControl`]). A force or a release names all
+//! bits `r` of `t`, or a constant select or member of it, and the
+//! statements become
 //!
 //! ```text
-//! force t = e;   (statement k)     select = k or 0; V = e; E = 1; force-store t = V;
-//! release t;                       select = 0; E = 0;
+//! force t[r] = e;  (statement k)   select_r = k or 0; V[r] = e; E[r] = '1; force-store t[r] = V[r];
+//! release t[r];                    select_r = 0; E[r] = '0;
 //! ```
 //!
 //! where the force-store puts the value in `t` at once and is no driver of
@@ -25,7 +27,9 @@
 //! the forced value until the procedure executes again (9.2.2.2): the
 //! release sets its hold `H |= E`, the writes of the target store `V` while
 //! `E | H` is set, and one process for each such procedure waits on what
-//! the procedure waits on and clears the holds of its targets. A target that a force
+//! the procedure waits on and clears the holds of its targets. Parts of a
+//! target that overlap are forced exactly only by constant expressions: an
+//! overlap with a force of a varying expression is rejected. A target that a force
 //! with a varying expression has, has a select variable (zero, or the
 //! number of the active statement) and one process that keeps `V` and `t`
 //! on the expression of the active statement (4.9.2):
@@ -40,23 +44,84 @@ use super::*;
 use crate::ir::{ForceControl, ForceRole};
 use crate::procedural::{EventEdge, EventItemBase, LoopKind};
 
+/// The bits of a target that a force or a release names: all of them, or
+/// the constant range `(msb, lsb)` of a select or a member.
+type Range = Option<(i128, i128)>;
+
+/// The range `lhs` names (see [`Range`]); the binder made its bounds
+/// literals (see `BodyBuilder::force_target`).
+fn range(lhs: &LValue) -> Range {
+    match lhs {
+        LValue::Select { msb, lsb, .. } => {
+            let bound = |bound: &ConstExpr| match bound {
+                ConstExpr::Literal(text) => text.parse::<i128>().ok(),
+                _ => None,
+            };
+            Some((bound(msb)?, bound(lsb)?))
+        }
+        _ => None,
+    }
+}
+
+/// `lhs`, which names bits of a target, for the same bits of `name`.
+fn renamed(lhs: &LValue, name: &str) -> LValue {
+    let mut lhs = lhs.clone();
+    match &mut lhs {
+        LValue::Ident(target) | LValue::Select { name: target, .. } => *target = name.to_string(),
+        LValue::Object { .. } => unreachable!("a force names a variable or a net"),
+    }
+    lhs
+}
+
+/// The same bits of the mask `name`, a two-state vector.
+fn mask_part(lhs: &LValue, name: &str) -> LValue {
+    match lhs {
+        LValue::Select { msb, lsb, .. } => LValue::Select {
+            name: name.to_string(),
+            msb: msb.clone(),
+            lsb: lsb.clone(),
+            signed: false,
+            array_slice_width: None,
+            array_slice_reversed: false,
+            is_2state: false,
+        },
+        _ => LValue::Ident(name.to_string()),
+    }
+}
+
+/// The value of the same bits of `name`.
+fn read_part(lhs: &LValue, name: &str) -> Expr {
+    match lhs {
+        LValue::Select { msb, lsb, .. } => Expr::Select {
+            expr: Box::new(Expr::Ident(name.to_string())),
+            msb: msb.clone(),
+            lsb: lsb.clone(),
+            signed: false,
+        },
+        _ => Expr::Ident(name.to_string()),
+    }
+}
+
 /// The force controls of one target.
 struct Controls {
+    /// The mask of the forced bits.
     enable: String,
     value: String,
-    /// The select variable, for a target with a force of a varying
-    /// expression, and the number of such forces seen so far.
-    select: Option<(String, usize)>,
+    /// For each range with a force of a varying expression, the select
+    /// variable and the number of such forces seen so far.
+    selects: Vec<(Range, String, usize)>,
     /// Whether a force stores its value into the target.
     stored: bool,
-    /// The hold of a target that procedures of the settle assign (see
-    /// [`ForceRole::Hold`]).
+    /// The mask of the held bits of a target that procedures of the
+    /// settle assign (see [`ForceRole::Hold`]).
     hold: Option<String>,
 }
 
 /// A force of a varying expression.
 struct Driver {
     target: String,
+    /// The bits it forces.
+    lhs: LValue,
     number: usize,
     rhs: Expr,
     /// The process the statement is in.
@@ -119,11 +184,17 @@ impl Lowering<'_> {
                         .controls
                         .get_mut(&target)
                         .expect("every target has controls");
-                    if let Some((select, count)) = &mut controls.select {
+                    let bits = range(&lhs);
+                    if let Some((_, select, count)) = controls
+                        .selects
+                        .iter_mut()
+                        .find(|(selected, _, _)| *selected == bits)
+                    {
                         let number = if varies(&rhs) {
                             *count += 1;
                             self.drivers.push(Driver {
                                 target: target.clone(),
+                                lhs: lhs.clone(),
                                 number: *count,
                                 rhs: rhs.clone(),
                                 process: self.process,
@@ -134,12 +205,20 @@ impl Lowering<'_> {
                         };
                         lowered.push(assign(select, select_literal(number)));
                     }
-                    lowered.push(assign(&controls.value, rhs));
-                    lowered.push(assign(&controls.enable, literal("1'b1")));
+                    lowered.push(Stmt::Assign {
+                        lhs: renamed(&lhs, &controls.value),
+                        rhs,
+                        nonblocking: false,
+                    });
+                    lowered.push(Stmt::Assign {
+                        lhs: mask_part(&lhs, &controls.enable),
+                        rhs: literal("'1"),
+                        nonblocking: false,
+                    });
                     if controls.stored {
                         lowered.push(Stmt::ForceStore {
+                            rhs: read_part(&lhs, &controls.value),
                             lhs,
-                            rhs: Expr::Ident(controls.value.clone()),
                         });
                     }
                 }
@@ -148,7 +227,12 @@ impl Lowering<'_> {
                     let Some(controls) = self.controls.get(lhs.name()) else {
                         continue;
                     };
-                    if let Some((select, _)) = &controls.select {
+                    let bits = range(&lhs);
+                    if let Some((_, select, _)) = controls
+                        .selects
+                        .iter()
+                        .find(|(selected, _, _)| *selected == bits)
+                    {
                         lowered.push(assign(select, select_literal(0)));
                     }
                     // A released net, and a continuously assigned variable,
@@ -157,16 +241,21 @@ impl Lowering<'_> {
                     // A target a procedure of the settle assigns keeps the
                     // forced value until the procedure executes again.
                     if let Some(hold) = &controls.hold {
-                        lowered.push(assign(
-                            hold,
-                            Expr::Binary {
-                                left: Box::new(Expr::Ident(hold.clone())),
+                        lowered.push(Stmt::Assign {
+                            lhs: mask_part(&lhs, hold),
+                            rhs: Expr::Binary {
+                                left: Box::new(read_part(&lhs, hold)),
                                 op: BinaryOp::BitOr,
-                                right: Box::new(Expr::Ident(controls.enable.clone())),
+                                right: Box::new(read_part(&lhs, &controls.enable)),
                             },
-                        ));
+                            nonblocking: false,
+                        });
                     }
-                    lowered.push(assign(&controls.enable, literal("1'b0")));
+                    lowered.push(Stmt::Assign {
+                        lhs: mask_part(&lhs, &controls.enable),
+                        rhs: literal("'0"),
+                        nonblocking: false,
+                    });
                 }
                 _ => {
                     self.children(&mut stmt, false);
@@ -405,6 +494,18 @@ fn fresh(prefix: &str, serial: usize, dimensions: &PackedDimensions, signals: &[
     }
 }
 
+/// The type of a mask of the bits of a target of type `target`, `width`
+/// bits wide: a select of the target selects the same bits of it, by the
+/// target's own packed ranges, or by offsets for a structure.
+fn mask_type(target: &Type, width: usize) -> Type {
+    if target.packed_ranges.is_empty() || !target.members.is_empty() {
+        return bit_type(width);
+    }
+    let mut mask = Type::new(TypeKind::Bit);
+    mask.packed_ranges = target.packed_ranges.clone();
+    mask
+}
+
 fn bit_type(width: usize) -> Type {
     let mut storage = Type::new(TypeKind::Bit);
     if width > 1 {
@@ -419,6 +520,7 @@ fn bit_type(width: usize) -> Type {
 /// Lower the `force` and `release` statements of the module's processes,
 /// and return the enable of each forced target.
 pub(super) fn lower(
+    tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
     ports: &[Port],
     signals: &mut Vec<Signal>,
@@ -429,21 +531,27 @@ pub(super) fn lower(
     // The statements are in the processes only (see
     // `BodyBuilder::force_target`).
     let mut names: Vec<String> = Vec::new();
-    let mut varying: HashSet<String> = HashSet::default();
+    // The ranges each statement names, and whether a force of them has a
+    // varying expression.
+    let mut ranges: Vec<(String, Range, bool)> = Vec::new();
+    let mut note = |lhs: &LValue, varying: bool| {
+        if !names.iter().any(|name| name == lhs.name()) {
+            names.push(lhs.name().to_string());
+        }
+        let bits = range(lhs);
+        match ranges
+            .iter_mut()
+            .find(|(name, range, _)| name == lhs.name() && *range == bits)
+        {
+            Some((_, _, varies)) => *varies |= varying,
+            None => ranges.push((lhs.name().to_string(), bits, varying)),
+        }
+    };
     for process in initial.iter() {
         for stmt in &process.body {
             stmt.walk(&mut |stmt| match stmt {
-                Stmt::Force { lhs, rhs } => {
-                    if !names.iter().any(|name| name == lhs.name()) {
-                        names.push(lhs.name().to_string());
-                    }
-                    if varies(rhs) {
-                        varying.insert(lhs.name().to_string());
-                    }
-                }
-                Stmt::Release { lhs } if !names.iter().any(|name| name == lhs.name()) => {
-                    names.push(lhs.name().to_string());
-                }
+                Stmt::Force { lhs, rhs } => note(lhs, varies(rhs)),
+                Stmt::Release { lhs } => note(lhs, false),
                 _ => {}
             });
         }
@@ -469,10 +577,37 @@ pub(super) fn lower(
                     .map(|port| port.r#type().clone())
             })
             .expect("a checked target is a signal or a port");
+        let width = dimensions
+            .get(&name)
+            .and_then(|shape| patterns::shape_width(&tree.functions, shape, dimensions))
+            .ok_or_else(|| {
+                unsupported(format!(
+                    "force or release of `{name}`, whose width is not a constant"
+                ))
+            })?;
+        // Two ranges of a target that overlap are forced by the forces of
+        // each in turn, which only a constant expression keeps exact.
+        let named: Vec<_> = ranges
+            .iter()
+            .filter(|(target, _, _)| *target == name)
+            .map(|&(_, bits, varying)| {
+                let (msb, lsb) = bits.unwrap_or((width as i128 - 1, 0));
+                (bits, msb.max(lsb), msb.min(lsb), varying)
+            })
+            .collect();
+        for (index, &(_, high, low, varying)) in named.iter().enumerate() {
+            for &(_, other_high, other_low, other_varying) in &named[index + 1..] {
+                if (varying || other_varying) && low <= other_high && other_low <= high {
+                    return Err(unsupported(format!(
+                        "force or release of overlapping parts of `{name}`, one of which is forced to a varying expression"
+                    )));
+                }
+            }
+        }
         let enable = fresh("%force_enable", serial, dimensions, signals);
         signals.push(Signal::force_control(
             enable.clone(),
-            bit_type(1),
+            mask_type(&target_type, width),
             ForceControl {
                 target: name.clone(),
                 role: ForceRole::Enable,
@@ -482,23 +617,26 @@ pub(super) fn lower(
         let value = fresh("%force_value", serial, dimensions, signals);
         signals.push(Signal::force_control(
             value.clone(),
-            target_type,
+            target_type.clone(),
             ForceControl {
                 target: name.clone(),
                 role: ForceRole::Value,
                 stored,
             },
         ));
-        let select = varying.contains(&name).then(|| {
-            let select = fresh("%force_select", serial, dimensions, signals);
-            signals.push(Signal::new(select.clone(), bit_type(32)));
-            (select, 0)
-        });
+        let mut selects = Vec::new();
+        for &(bits, _, _, varying) in &named {
+            if varying {
+                let select = fresh("%force_select", serial, dimensions, signals);
+                signals.push(Signal::new(select.clone(), bit_type(32)));
+                selects.push((bits, select, 0));
+            }
+        }
         let hold = (!holders.is_empty()).then(|| {
             let hold = fresh("%force_hold", serial, dimensions, signals);
             signals.push(Signal::force_control(
                 hold.clone(),
-                bit_type(1),
+                mask_type(&target_type, width),
                 ForceControl {
                     target: name.clone(),
                     role: ForceRole::Hold,
@@ -518,7 +656,7 @@ pub(super) fn lower(
             Controls {
                 enable,
                 value,
-                select,
+                selects,
                 stored,
                 hold,
             },
@@ -536,21 +674,23 @@ pub(super) fn lower(
     let drivers = std::mem::take(&mut lowering.drivers);
     // One process for each target with a varying force: it waits for the
     // select, and keeps the value of the active statement.
-    let mut by_target: Vec<(String, Vec<Driver>)> = Vec::new();
+    let mut by_target: Vec<(String, Range, Vec<Driver>)> = Vec::new();
     for driver in drivers {
+        let bits = range(&driver.lhs);
         match by_target
             .iter_mut()
-            .find(|(target, _)| *target == driver.target)
+            .find(|(target, range, _)| *target == driver.target && *range == bits)
         {
-            Some((_, drivers)) => drivers.push(driver),
-            None => by_target.push((driver.target.clone(), vec![driver])),
+            Some((_, _, drivers)) => drivers.push(driver),
+            None => by_target.push((driver.target.clone(), bits, vec![driver])),
         }
     }
-    for (target, drivers) in by_target {
+    for (target, bits, drivers) in by_target {
         let controls = &controls[&target];
-        let (select, _) = controls
-            .select
-            .as_ref()
+        let (_, select, _) = controls
+            .selects
+            .iter()
+            .find(|(selected, _, _)| *selected == bits)
             .expect("a varying force has a select");
         let mut body = vec![Stmt::WaitEvent(vec![any_change(Expr::Ident(
             select.clone(),
@@ -559,17 +699,21 @@ pub(super) fn lower(
         for driver in drivers.into_iter().rev() {
             body = vec![Stmt::If {
                 condition: select_is(select, driver.number),
-                then_body: [assign(&controls.value, driver.rhs.clone())]
-                    .into_iter()
-                    .chain(controls.stored.then(|| Stmt::ForceStore {
-                        lhs: LValue::Ident(target.clone()),
-                        rhs: Expr::Ident(controls.value.clone()),
-                    }))
-                    .chain([Stmt::WaitEvent(vec![
-                        any_change(Expr::Ident(select.clone())),
-                        any_change(driver.rhs),
-                    ])])
-                    .collect(),
+                then_body: [Stmt::Assign {
+                    lhs: renamed(&driver.lhs, &controls.value),
+                    rhs: driver.rhs.clone(),
+                    nonblocking: false,
+                }]
+                .into_iter()
+                .chain(controls.stored.then(|| Stmt::ForceStore {
+                    lhs: driver.lhs.clone(),
+                    rhs: read_part(&driver.lhs, &controls.value),
+                }))
+                .chain([Stmt::WaitEvent(vec![
+                    any_change(Expr::Ident(select.clone())),
+                    any_change(driver.rhs),
+                ])])
+                .collect(),
                 else_body: body,
             }];
         }
@@ -610,7 +754,7 @@ pub(super) fn lower(
                 .collect(),
             always_comb: process.kind != CombProcessKind::AlwaysStar,
         }];
-        body.extend(holds.iter().map(|hold| assign(hold, literal("1'b0"))));
+        body.extend(holds.iter().map(|hold| assign(hold, literal("'0"))));
         initial.push(InitialProcess {
             creation_order: process.creation_order,
             site: process.process_site.clone().map(|mut site| {

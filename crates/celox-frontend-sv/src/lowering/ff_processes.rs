@@ -924,7 +924,8 @@ pub(super) fn emit_ff_commits(
                 offset.clone(),
                 width,
             ));
-            let selected = force_select(builder, (enabled, forced), offset.clone(), next);
+            let hold = pm.force_holds.get(&target.id).copied();
+            let selected = force_select(builder, (enabled, forced), hold, offset.clone(), next);
             builder.emit(SIRInstruction::Store(
                 RegionedVarAddrBase {
                     region: STABLE_REGION,
@@ -954,39 +955,124 @@ pub(super) fn emit_ff_commits(
     }
 }
 
-/// `value`, the bits at `offset` of a variable, or the forced value of the
-/// variable while the force `controls` (enable, value) is on.
+/// `value`, the bits at `offset` of a variable, with the bits a
+/// procedural force `controls` (enable mask, value) forces, or its `hold`
+/// mask holds, taken from the forced value (IEEE 1800-2023 10.6.2).
 pub(super) fn force_select(
     builder: &mut SIRBuilder<RegionedVarAddr>,
     controls: (SourceVarId, SourceVarId),
+    hold: Option<SourceVarId>,
     offset: SIROffset,
     value: celox_sir::RegisterId,
 ) -> celox_sir::RegisterId {
     let (enabled, forced) = controls;
     let width = builder.register(&value).width();
-    let condition = builder.alloc_bit(1, false);
+    let stable = |var_id| RegionedVarAddrBase {
+        region: STABLE_REGION,
+        var_id,
+    };
+    let mut mask = builder.alloc_bit(width, false);
     builder.emit(SIRInstruction::Load(
-        condition,
-        RegionedVarAddrBase {
-            region: STABLE_REGION,
-            var_id: enabled,
-        },
-        SIROffset::Static(0),
-        1,
+        mask,
+        stable(enabled),
+        offset.clone(),
+        width,
     ));
+    if let Some(hold) = hold {
+        let held = builder.alloc_bit(width, false);
+        builder.emit(SIRInstruction::Load(
+            held,
+            stable(hold),
+            offset.clone(),
+            width,
+        ));
+        let either = builder.alloc_bit(width, false);
+        builder.emit(SIRInstruction::Binary(either, mask, BinaryOp::Or, held));
+        mask = either;
+    }
     let replacement = builder.alloc_reg(builder.register(&value).clone());
     builder.emit(SIRInstruction::Load(
         replacement,
-        RegionedVarAddrBase {
-            region: STABLE_REGION,
-            var_id: forced,
-        },
+        stable(forced),
         offset,
         width,
     ));
-    let selected = builder.alloc_reg(builder.register(&value).clone());
-    builder.emit(SIRInstruction::Mux(selected, condition, replacement, value));
-    selected
+    select_masked(builder, mask, replacement, value)
+}
+
+/// The bits of `forced` where the two-state `mask` is set and of `value`
+/// elsewhere. A four-state merge selects the value and the X/Z planes
+/// apart, so a selected Z stays Z.
+pub(super) fn select_masked(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    mask: celox_sir::RegisterId,
+    forced: celox_sir::RegisterId,
+    value: celox_sir::RegisterId,
+) -> celox_sir::RegisterId {
+    let width = builder.register(&value).width();
+    let merge = |builder: &mut SIRBuilder<RegionedVarAddr>, forced, value, logic: bool| {
+        let alloc = |builder: &mut SIRBuilder<RegionedVarAddr>| {
+            if logic {
+                builder.alloc_logic(width)
+            } else {
+                builder.alloc_bit(width, false)
+            }
+        };
+        let keep = builder.alloc_bit(width, false);
+        builder.emit(SIRInstruction::Unary(keep, UnaryOp::BitNot, mask));
+        let taken = alloc(builder);
+        builder.emit(SIRInstruction::Binary(taken, forced, BinaryOp::And, mask));
+        let kept = alloc(builder);
+        builder.emit(SIRInstruction::Binary(kept, value, BinaryOp::And, keep));
+        let merged = alloc(builder);
+        builder.emit(SIRInstruction::Binary(merged, kept, BinaryOp::Or, taken));
+        merged
+    };
+    if !matches!(
+        builder.register(&value),
+        celox_sir::RegisterType::Logic { .. }
+    ) {
+        return merge(builder, forced, value, false);
+    }
+    // The value and X/Z planes of each operand, as two-state registers.
+    let words = width.next_multiple_of(64);
+    let split = |builder: &mut SIRBuilder<RegionedVarAddr>, register| {
+        let padded = builder.alloc_logic(words);
+        if words > width {
+            let zero = builder.alloc_logic(words - width);
+            builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+            builder.emit(SIRInstruction::Concat(padded, vec![zero, register]));
+        } else {
+            builder.emit(SIRInstruction::Unary(padded, UnaryOp::Ident, register));
+        }
+        let planes = builder.alloc_bit(2 * words, false);
+        builder.emit(SIRInstruction::Unary(planes, UnaryOp::ToPlanes, padded));
+        [0, words].map(|lsb| {
+            let plane = builder.alloc_bit(width, false);
+            builder.emit(SIRInstruction::Slice(plane, planes, lsb, width));
+            plane
+        })
+    };
+    let [forced_value, forced_unknown] = split(builder, forced);
+    let [value_value, value_unknown] = split(builder, value);
+    let merged_value = merge(builder, forced_value, value_value, false);
+    let merged_unknown = merge(builder, forced_unknown, value_unknown, false);
+    let mut parts = Vec::new();
+    for plane in [merged_unknown, merged_value] {
+        if words > width {
+            let zero = builder.alloc_bit(words - width, false);
+            builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+            parts.push(zero);
+        }
+        parts.push(plane);
+    }
+    let planes = builder.alloc_bit(2 * words, false);
+    builder.emit(SIRInstruction::Concat(planes, parts));
+    let padded = builder.alloc_logic(words);
+    builder.emit(SIRInstruction::Unary(padded, UnaryOp::FromPlanes, planes));
+    let joined = builder.alloc_logic(width);
+    builder.emit(SIRInstruction::Slice(joined, padded, 0, width));
+    joined
 }
 
 /// The clock that the sampled value functions of an edge-triggered process

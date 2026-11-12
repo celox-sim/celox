@@ -105,25 +105,51 @@ impl Comb<'_, '_> {
         // Runtime initial processes are lowered separately through Ff.
         if !self.initial
             && let Some((enabled, forced)) = self.m.force_controls(id)
+            && self.m.procedurally_forced.contains(&id)
         {
-            let mut condition = self.alloc(SLTNode::Input {
+            // The bits a procedural force forces, or holds until the
+            // procedure writing them executes again, keep the forced value
+            // (IEEE 1800-2023 10.6.2).
+            let input = |this: &mut Self, variable| {
+                this.alloc(SLTNode::Input {
+                    variable,
+                    signed: false,
+                    index: vec![],
+                    access,
+                })
+            };
+            let mut mask = input(self, enabled)?;
+            if let Some(&hold) = self.m.force_holds.get(&id) {
+                let held = input(self, hold)?;
+                mask = self.alloc(SLTNode::Binary(mask, BinaryOp::Or, held))?;
+                value
+                    .1
+                    .insert(VarAtomBase::new(hold, access.lsb, access.msb));
+            }
+            let replacement = input(self, forced)?;
+            value.0 = crate::lowering::masked::select_masked(
+                self.arena,
+                mask,
+                replacement,
+                value.0,
+                access.msb - access.lsb + 1,
+                self.m.var(id).is_4state,
+            )
+            .map_err(slt_error)?;
+            for control in [enabled, forced] {
+                value
+                    .1
+                    .insert(VarAtomBase::new(control, access.lsb, access.msb));
+            }
+        } else if !self.initial
+            && let Some((enabled, forced)) = self.m.force_controls(id)
+        {
+            let condition = self.alloc(SLTNode::Input {
                 variable: enabled,
                 signed: false,
                 index: vec![],
                 access: full(1),
             })?;
-            // A released target holds the forced value until the procedure
-            // writing it executes again (IEEE 1800-2023 10.6.2).
-            if let Some(&hold) = self.m.force_holds.get(&id) {
-                let held = self.alloc(SLTNode::Input {
-                    variable: hold,
-                    signed: false,
-                    index: vec![],
-                    access: full(1),
-                })?;
-                condition = self.alloc(SLTNode::Binary(condition, BinaryOp::Or, held))?;
-                value.1.insert(VarAtomBase::new(hold, 0, 0));
-            }
             let replacement = self.alloc(SLTNode::Input {
                 variable: forced,
                 signed: false,

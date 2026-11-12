@@ -191,7 +191,7 @@ impl BodyBuilder<'_, '_, '_> {
                 "force of a variable or net that is not of a packed integral type",
             ));
         };
-        if *assigned != lhs {
+        if assigned.name() != lhs.name() {
             return Err(unsupported(
                 "force of a variable or net that is not of a packed integral type",
             ));
@@ -236,24 +236,49 @@ impl BodyBuilder<'_, '_, '_> {
         }
         let native = self.tree.declarations();
         let id = expression_binding::ungroup(target, native);
-        match &native.expression(id).kind {
-            celox_sv_syntax::ExprKind::Select { .. } => {
-                return Err(unsupported(
-                    "force or release of a bit-select or part-select",
-                ));
-            }
-            celox_sv_syntax::ExprKind::Concatenation(_) => {
-                return Err(unsupported("force or release of a concatenation"));
-            }
-            _ => {}
+        if let celox_sv_syntax::ExprKind::Concatenation(_) = &native.expression(id).kind {
+            return Err(unsupported("force or release of a concatenation"));
         }
         let (_, renamed) = self.native_lvalue(target, false)?;
-        let LValue::Ident(name) = &renamed else {
-            return Err(unsupported(
-                "force or release of a member or an element of a variable or net",
-            ));
+        // A constant bit-select or part-select of a vector net, and as an
+        // extension a constant select or a member of a variable, names a
+        // constant range of bits of the target (10.6.2).
+        let renamed = match renamed {
+            LValue::Ident(_) => renamed,
+            LValue::Select {
+                name,
+                msb,
+                lsb,
+                signed,
+                array_slice_width: None,
+                array_slice_reversed: false,
+                is_2state,
+            } => {
+                let bound = |bound: &ConstExpr| {
+                    eval_ast_const_expr(&self.tree.functions, bound, &self.dims.const_env)
+                };
+                let (Some(msb), Some(lsb)) = (bound(&msb), bound(&lsb)) else {
+                    return Err(unsupported(
+                        "force or release of a select whose bounds are not constant",
+                    ));
+                };
+                LValue::Select {
+                    name,
+                    msb: ConstExpr::Literal(msb.to_string()),
+                    lsb: ConstExpr::Literal(lsb.to_string()),
+                    signed,
+                    array_slice_width: None,
+                    array_slice_reversed: false,
+                    is_2state,
+                }
+            }
+            _ => {
+                return Err(unsupported(
+                    "force or release of an element of an unpacked array or of an object",
+                ));
+            }
         };
-        if self.is_local(name) {
+        if self.is_local(renamed.name()) {
             return Err(unsupported(
                 "force or release of a variable of a procedural block",
             ));

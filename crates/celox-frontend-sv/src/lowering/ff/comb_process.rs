@@ -109,8 +109,9 @@ impl Ff<'_, '_> {
                 continue;
             };
             let controls = [Some(enabled), self.m.force_holds.get(&target.id).copied()];
+            let width = self.m.var(target.id).width;
             for control in controls.into_iter().flatten() {
-                let atom = VarAtomBase::new(control, 0, 0);
+                let atom = VarAtomBase::new(control, 0, width - 1);
                 if dependencies.insert(atom) {
                     sources.push(atom);
                 }
