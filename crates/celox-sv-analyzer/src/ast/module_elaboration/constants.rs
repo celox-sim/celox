@@ -182,7 +182,31 @@ impl ScopeElaboration<'_> {
                 0,
             );
         }
-        Ok(parameterized)
+        if self.array_parameters.is_empty() {
+            return Ok(parameterized);
+        }
+        // A constant function may read an unpacked array parameter of the
+        // scope, a variable there, by its shape (IEEE 1800-2023 13.4.3).
+        let variables = self
+            .array_parameters
+            .iter()
+            .map(|parameter| {
+                (
+                    parameter.signal.name().to_string(),
+                    procedural::dimensions_from_type(parameter.signal.r#type()),
+                )
+            })
+            .collect();
+        let functions = with_imported(const_functions::module_constant_functions_with_variables(
+            syntax_tree,
+            session,
+            &self.const_env,
+            &self.type_aliases,
+            &self.constant_types(),
+            &parameter_values,
+            &variables,
+        ));
+        Ok(syntax_tree.with_functions(functions))
     }
 
     /// Rejects the constructs the analysis would silently ignore. A parameter

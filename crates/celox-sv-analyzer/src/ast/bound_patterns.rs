@@ -108,11 +108,13 @@ fn frozen(
             then_expr: freeze(*then_expr)?,
             else_expr: freeze(*else_expr)?,
         },
+        // The actuals are in the order of the formals; the order in which
+        // the call names them does not change the value of a constant one.
         Expr::Call {
             callee: Callee::Subroutine(name),
             args,
-            arg_order,
-        } if arg_order.is_empty() => {
+            arg_order: _,
+        } => {
             let args = args
                 .into_iter()
                 .map(|arg| {
@@ -129,9 +131,31 @@ fn frozen(
                         .ok_or_else(|| unsupported("constant pattern function argument"))
                 })
                 .collect::<Converted<Vec<crate::ir::ConstExpr>>>()?;
-            let literal =
-                const_functions::eval_call_literal(functions, &name, &args, &dims.const_env)
-                    .ok_or_else(|| unsupported("constant parameter pattern function"))?;
+            // The function may read an unpacked array parameter of the
+            // scope, a variable there whose value is a constant.
+            let arrays = dims
+                .array_parameter_values
+                .iter()
+                .filter_map(|(array, value)| {
+                    let Expr::Literal(text) = fold_const_integral_expr_preserving_mask(
+                        tree,
+                        session,
+                        value.clone(),
+                        &dims.const_env,
+                    ) else {
+                        return None;
+                    };
+                    Some((array.clone(), typecheck::parse_integral_literal(&text)?))
+                })
+                .collect::<HashMap<_, _>>();
+            let literal = const_functions::eval_call_literal_with_arrays(
+                functions,
+                &name,
+                &args,
+                &dims.const_env,
+                &arrays,
+            )
+            .ok_or_else(|| unsupported("constant parameter pattern function"))?;
             Expr::Literal(typecheck::format_integral_literal_binary(&literal))
         }
         value => {
