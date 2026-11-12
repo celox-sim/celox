@@ -74,9 +74,11 @@ fn rejects_invalid_or_unsupported_struct_shapes() {
         "struct packed { logic a = 1; } value;",
         "struct packed { missing_t a; } value;",
         "struct packed { logic a; } value; assign y = value.missing;",
-        "struct packed { logic [3:0] a; } value; assign y = value.a[index];",
         // A member select of a subarray, which has no members (7.4.5).
         "struct packed { logic a; } value[2][2]; assign y = value[0].a;",
+        // A run-time select of a member of two packed dimensions.
+        "struct packed { logic [1:0][3:0] a; } value; assign y = value.a[1][index];",
+        "struct packed { logic [1:0][3:0] a; } value; assign y = value.a[index][0];",
     ] {
         let source = format!("module Top(input bit index, output logic y); {body} endmodule");
         assert!(

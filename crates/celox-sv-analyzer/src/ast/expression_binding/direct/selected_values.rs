@@ -710,7 +710,15 @@ pub(in crate::ast::expression_binding) fn select_suffix(
             "constant select of `{name}` outside its declared range"
         )));
     }
-    if let Some((msb, lsb, dynamic)) = range {
+    if let Some((mut msb, mut lsb, dynamic)) = range {
+        // Within a structure member, the bounds of a run-time indexed
+        // part-select are offsets in the member, like those of any other
+        // select of it (see `packed_structs::select_member`).
+        if strict && dynamic {
+            (msb, lsb) =
+                selects::dynamic_bounds_as_offsets(&tree.functions, &name, msb, lsb, context)
+                    .ok_or_else(|| unsupported("run-time part-select of a structure member"))?;
+        }
         selects::lvalue_from_range(tree, name, indices, msb, lsb, dynamic, context)
     } else {
         selects::lvalue_from_indices(tree, name, indices, context)

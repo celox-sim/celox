@@ -18,8 +18,9 @@ pub(super) fn constant_packed_indices_in_range(
         return false;
     }
     indices.iter().enumerate().all(|(position, index)| {
+        // An index known only at run time is checked when it is used.
         let Some(index) = eval_ast_const_expr(functions, index, &dimensions.const_env) else {
-            return false;
+            return true;
         };
         let Some(dimension) = variable.packed.get(position) else {
             // A scalar integral member can only select bit zero.
@@ -356,6 +357,32 @@ fn dynamic_bounds_from_shape(shape: DynamicIndexed) -> (ConstExpr, ConstExpr) {
         (true, true) => (shape.start.clone(), add(shape.start, tail)),
         (true, false) => (const_sub(shape.start.clone(), tail), shape.start),
     }
+}
+
+/// The bounds `(msb, lsb)` of a run-time indexed part-select of `name`,
+/// which [`indexed_range_values`] gives in declared index coordinates, as
+/// offsets from the least significant bit of its one packed dimension
+/// (IEEE 1800-2023 7.4.6, 11.5.1).
+pub(super) fn dynamic_bounds_as_offsets(
+    functions: &const_functions::ConstantFunctions,
+    name: &str,
+    msb: ConstExpr,
+    lsb: ConstExpr,
+    dimensions: &PackedDimensions,
+) -> Option<(ConstExpr, ConstExpr)> {
+    let variable = dimensions.get(name)?;
+    let [dimension] = variable.packed.as_slice() else {
+        return None;
+    };
+    let left = eval_ast_const_expr(functions, &dimension.left, &dimensions.const_env)?;
+    let right = eval_ast_const_expr(functions, &dimension.right, &dimensions.const_env)?;
+    let descending = left >= right;
+    let right = const_expr_from_i128(right);
+    Some(if descending {
+        (const_sub(msb, right.clone()), const_sub(lsb, right))
+    } else {
+        (const_sub(right.clone(), msb), const_sub(right, lsb))
+    })
 }
 
 /// Syntax-independent static or supported dynamic indexed range endpoints.

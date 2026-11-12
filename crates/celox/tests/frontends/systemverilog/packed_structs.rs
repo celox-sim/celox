@@ -377,3 +377,130 @@ sv_backends! {
         assert_eq!(u64::try_from(sim.get(sim.signal("nested"))).unwrap(), 0x4);
     }
 }
+
+/// A select of a member of a packed structure whose index is known only at
+/// run time reads and writes the member's bits; an index outside the member
+/// reads X (0 in two-state simulation) and writes nothing, never a
+/// neighboring member (IEEE 1800-2023 7.2.1, 11.5.1).
+#[test]
+fn dynamic_selects_of_packed_struct_members_stay_within_the_member() {
+    let source = r#"`timescale 1ns/1ns
+module top;
+  typedef struct packed { logic [3:0] dirty; logic [7:5] high; logic [2:0] lru_bits; } stat_s;
+  stat_s s;
+  logic [2:0] w;
+  logic [2:0] k;
+  logic d, h, l;
+  logic [1:0] part;
+  always_comb begin
+    d = s.dirty[w];
+    h = s.high[k];
+    l = s.lru_bits[w];
+    part = s.dirty[w +: 2];
+  end
+  initial begin
+    s = 10'b1010_011_001;
+    for (int i = 0; i < 8; i++) begin
+      w = i[2:0]; k = 3'(i + 3);
+      #1 if (w == 3) $display("w=%0d d=%b l=%b k=%0d h=%b", w, d, l, k, h);
+         else $display("w=%0d d=%b l=%b k=%0d h=%b part=%b", w, d, l, k, h, part);
+    end
+    w = 3'd6; s.lru_bits[w] = 1'b1;
+    w = 3'd1; s.dirty[w] = 1'b0;
+    k = 3'd6; s.high[k] = 1'b0;
+    k = 3'd2; s.high[k] = 1'b0;
+    #1 $display("s=%b", s);
+    $finish;
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let x = if four_state { "x" } else { "0" };
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("dynamic_member.sv"))],
+            "top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(20).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        let expected = [
+            format!("w=0 d=0 l=1 k=3 h={x} part=10"),
+            format!("w=1 d=1 l=0 k=4 h={x} part=01"),
+            "w=2 d=0 l=0 k=5 h=1 part=10".to_string(),
+            format!("w=3 d=1 l={x} k=6 h=1"),
+            format!("w=4 d={x} l={x} k=7 h=0 part={x}{x}"),
+            format!("w=5 d={x} l={x} k=0 h={x} part={x}{x}"),
+            format!("w=6 d={x} l={x} k=1 h={x} part={x}{x}"),
+            format!("w=7 d={x} l={x} k=2 h={x} part={x}{x}"),
+            "s=1000001001".to_string(),
+        ];
+        assert_eq!(lines, expected, "four_state={four_state}");
+    }
+}
+
+/// A run-time indexed part-select of a member of a range that is not
+/// `[n-1:0]`, descending or ascending, selects the bits its declared
+/// indices name (IEEE 1800-2023 7.4.6, 11.5.1). Verilator 5.054 prints
+/// the same lines.
+#[test]
+fn dynamic_indexed_part_selects_of_members_use_the_declared_range() {
+    let source = r#"`timescale 1ns/1ns
+module top;
+  typedef struct packed { logic [7:4] hi; logic [0:3] asc; logic [3:0] lo; } s_t;
+  s_t s;
+  int i;
+  initial begin
+    s = 12'b1010_0110_1100;
+    for (i = 4; i <= 6; i++)
+      $display("i=%0d up=%b asc=%b", i, s.hi[i +: 2], s.asc[i - 4 +: 2]);
+    for (i = 5; i <= 7; i++)
+      $display("i=%0d down=%b asc=%b", i, s.hi[i -: 2], s.asc[i - 4 -: 2]);
+    i = 5; s.hi[i +: 2] = 2'b01;
+    i = 1; s.asc[i +: 2] = 2'b01;
+    $display("s=%b", s);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("dynamic_member_ranges.sv"))],
+            "top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "i=4 up=10 asc=01",
+                "i=5 up=01 asc=11",
+                "i=6 up=10 asc=10",
+                "i=5 down=10 asc=01",
+                "i=6 down=01 asc=11",
+                "i=7 down=10 asc=10",
+                "s=101000101100",
+            ],
+            "four_state={four_state}"
+        );
+    }
+}

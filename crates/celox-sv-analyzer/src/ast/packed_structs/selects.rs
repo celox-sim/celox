@@ -123,17 +123,31 @@ fn finish_lvalue(
 ) -> Option<LValue> {
     let functions = &tree.functions;
     let width = expr_type_from_type(&tree.functions, r#type, &dimensions.const_env)?.width;
+    let is_2state = matches!(r#type.kind, TypeKind::Bit | TypeKind::Chandle);
     let (msb, lsb, signed) = match relative {
         // A selection within a member is of a variable.
         LValue::Object { .. } => lowered_object(),
         LValue::Ident(_) => (width.checked_sub(1)? as i128, 0, r#type.is_signed),
         LValue::Select {
             msb, lsb, signed, ..
-        } => (
-            eval_ast_const_expr(functions, &msb, &dimensions.const_env)?,
-            eval_ast_const_expr(functions, &lsb, &dimensions.const_env)?,
-            signed,
-        ),
+        } => match (
+            eval_ast_const_expr(functions, &msb, &dimensions.const_env),
+            eval_ast_const_expr(functions, &lsb, &dimensions.const_env),
+        ) {
+            (Some(msb), Some(lsb)) => (msb, lsb, signed),
+            _ => {
+                // A run-time select of a member of more than one packed
+                // dimension is flattened into the member before its window
+                // is known, so an inner index out of range could reach a
+                // neighboring element of the member.
+                if r#type.packed_ranges.len() > 1 {
+                    return None;
+                }
+                return dynamic_member_select(
+                    path, offset, width, msb, lsb, signed, is_2state, dimensions,
+                );
+            }
+        },
     };
     // Constant member selects must stay within the member, never hit a neighbor.
     if lsb < 0 || msb < lsb || usize::try_from(msb).ok()? >= width {
@@ -146,7 +160,58 @@ fn finish_lvalue(
         signed,
         array_slice_width: None,
         array_slice_reversed: false,
-        is_2state: matches!(r#type.kind, TypeKind::Bit | TypeKind::Chandle),
+        is_2state,
+    })
+}
+
+/// The selection of the variable `path[0]` that a select known only at run
+/// time, `[msb:lsb]` within the member of `width` bits at `offset`, makes
+/// (IEEE 1800-2023 7.2.1, 11.5.1). A selection that does not lie within the
+/// member is moved past the end of the variable, so that reading it gives
+/// the value of bits outside the variable and writing it changes nothing,
+/// as for a select of the variable itself; no neighboring member is read.
+#[allow(clippy::too_many_arguments)]
+fn dynamic_member_select(
+    path: &[String],
+    offset: usize,
+    width: usize,
+    msb: ConstExpr,
+    lsb: ConstExpr,
+    signed: bool,
+    is_2state: bool,
+    dimensions: &PackedDimensions,
+) -> Option<LValue> {
+    let variable = dimensions.get(path.first()?)?;
+    let [dimension] = variable.packed.as_slice() else {
+        return None;
+    };
+    let literal = |value: usize| ConstExpr::Literal(value.to_string());
+    let binary = |left: ConstExpr, op, right: ConstExpr| ConstExpr::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    };
+    // The bits past the variable: its width, which no bit of it has.
+    let outside = dimension.width.clone();
+    let within = binary(
+        binary(lsb.clone(), BinaryOp::Ge, literal(0)),
+        BinaryOp::LogicAnd,
+        binary(msb.clone(), BinaryOp::Lt, literal(width)),
+    );
+    let place = |bound: ConstExpr, past: ConstExpr| ConstExpr::Mux {
+        condition: Box::new(within.clone()),
+        then_expr: Box::new(binary(literal(offset), BinaryOp::Add, bound)),
+        else_expr: Box::new(past),
+    };
+    let span = binary(msb.clone(), BinaryOp::Sub, lsb.clone());
+    Some(LValue::Select {
+        name: path[0].clone(),
+        msb: place(msb, binary(outside.clone(), BinaryOp::Add, span)),
+        lsb: place(lsb, outside),
+        signed,
+        array_slice_width: None,
+        array_slice_reversed: false,
+        is_2state,
     })
 }
 

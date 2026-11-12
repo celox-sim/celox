@@ -128,7 +128,11 @@ blocks in programs. Two region deviations are listed under
   a part-select of an array element or of an inner packed dimension that
   leaves its declared range
   ([#88](https://github.com/celox-sim/celox/issues/88)). Run-time selects
-  follow the standard.
+  follow the standard, except a run-time part-select of a member of a
+  packed structure that lies partly outside the member: it reads X (0 in
+  two-state simulation) for all its bits and writes none of them. A
+  run-time select of a member of more than one packed dimension, such as
+  `s.m[1][i]`, is not supported.
 - Reduction operators in parameter expressions
   ([#456](https://github.com/celox-sim/celox/issues/456)).
 - Type operator (6.23): a type reference compared with a value, range items
