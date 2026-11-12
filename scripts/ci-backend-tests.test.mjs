@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { backendTestFilter, intersectTestFilters } from "./ci-backend-tests.mjs";
+import { backendTestFilter, backendVtestExclusions, intersectTestFilters } from "./ci-backend-tests.mjs";
 
 function excludedNames(filter, kind, name) {
   const expression = new RegExp(`${kind}\\(/([^/]+?)/\\)`, "g");
@@ -53,4 +53,16 @@ test("backend policy intersects the entire scope union", () => {
   assert.equal(intersectTestFilters("package(a) | package(b)", "not test(wasm)"),
     "(package(a) | package(b)) & (not test(wasm))");
   assert.equal(intersectTestFilters("package(a)"), "package(a)");
+});
+
+test("the suite cases leave out the backends the Rust tests leave out", () => {
+  assert.deepEqual(backendVtestExclusions(["crates/celox/src/lib.rs"]),
+    ["cranelift", "cranelift-parallel", "native-parallel", "wasm"]);
+  assert.deepEqual(backendVtestExclusions(["crates/celox-backend-cranelift/src/lib.rs"]),
+    ["cranelift-parallel", "native-parallel", "wasm"]);
+  // A lane stays excluded through any other lane that names its backend.
+  assert.deepEqual(backendVtestExclusions(["crates/celox-runtime/src/parallel.rs"]),
+    ["cranelift", "cranelift-parallel", "wasm"]);
+  for (const files of [null, ["Cargo.lock"]]) assert.deepEqual(backendVtestExclusions(files), []);
+  assert.deepEqual(backendVtestExclusions(["crates/celox/src/lib.rs"], { full: true }), []);
 });

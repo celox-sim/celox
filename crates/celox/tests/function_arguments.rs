@@ -34,51 +34,6 @@ mod test_utils;
 
 all_backends! {
 
-fn test_comb_inout_statement_copies_input_before_mutating_formal(sim) {
-    @case "function_arguments::test_comb_inout_statement_copies_input_before_mutating_formal";
-}
-
-fn test_ff_inout_expression_copyout_commits_with_nonblocking_assignments(sim) {
-    @case "function_arguments::test_ff_inout_expression_copyout_commits_with_nonblocking_assignments";
-}
-
-fn test_ff_function_local_snapshot_ignores_later_assignment(sim) {
-    @ignore_on(veryl);
-    @case "function_arguments::test_ff_function_local_snapshot_ignores_later_assignment";
-}
-
-fn test_comb_output_copyout_freezes_aliased_inputs_and_return(sim) {
-    @case "function_arguments::test_comb_output_copyout_freezes_aliased_inputs_and_return";
-}
-
-fn test_comb_statement_output_copyout_obeys_named_argument_order(sim) {
-    @case "function_arguments::test_comb_statement_output_copyout_obeys_named_argument_order";
-}
-
-fn test_comb_nested_output_copyout_stops_at_early_return(sim) {
-    @ignore_on(veryl);
-    @case "function_arguments::test_comb_nested_output_copyout_stops_at_early_return";
-}
-
-fn test_comb_output_copyout_to_concat_preserves_unselected_bits_and_elements(sim) {
-    // Veryl 0.22.0's simulator copies the whole formal into each concatenated actual instead of
-    // splitting it.
-    @ignore_on(veryl);
-    @case "function_arguments::test_comb_output_copyout_to_concat_preserves_unselected_bits_and_elements";
-}
-
-fn test_output_copyout_converts_formal_width_and_signedness_in_comb_and_ff(sim) {
-    // Veryl 0.22.0 rejects the always_ff half (function_output_in_always_ff), and its simulator
-    // ignores the formal's sign in the comb copy-out.
-    @omit_sv;
-    @ignore_on(veryl);
-    @case "function_arguments::test_output_copyout_converts_formal_width_and_signedness_in_comb_and_ff";
-}
-
-fn test_comb_expression_output_copyout_uses_unsigned_formal_for_signed_body(sim) {
-    @case "function_arguments::test_comb_expression_output_copyout_uses_unsigned_formal_for_signed_body";
-}
-
 fn test_comb_output_copyout_observer_sees_formal_sign_extension(sim) {
     @omit_veryl;
     // The expected values follow Celox's Veryl order, which writes the later
@@ -126,32 +81,6 @@ fn test_comb_output_copyout_observer_sees_formal_sign_extension(sim) {
             }],
         );
     }
-}
-
-fn test_ff_expression_output_copyout_extends_before_splitting_concat(sim) {
-    @omit_sv;
-    @ignore_on(veryl);
-    @case "function_arguments::test_ff_expression_output_copyout_extends_before_splitting_concat";
-}
-
-fn test_ff_statement_output_copyout_freezes_all_inputs(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "function_arguments::test_ff_statement_output_copyout_freezes_all_inputs";
-}
-
-fn test_ff_output_copyout_to_dynamic_slice_preserves_other_bits(sim) {
-    // Veryl rejects function outputs in always_ff (function_output_in_always_ff); this is a
-    // Celox extension.
-    @omit_sv;
-    @ignore_on(veryl);
-    @case "function_arguments::test_ff_output_copyout_to_dynamic_slice_preserves_other_bits";
-}
-
-fn test_ff_nested_output_copyout_is_visible_before_outer_copyout(sim) {
-    @omit_veryl;
-    @omit_sv;
-    @case "function_arguments::test_ff_nested_output_copyout_is_visible_before_outer_copyout";
 }
 
 }

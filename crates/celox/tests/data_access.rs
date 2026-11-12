@@ -1,10 +1,6 @@
 use celox::SimulatorBuilder;
 use insta::assert_snapshot;
 
-#[path = "test_utils/mod.rs"]
-#[macro_use]
-mod test_utils;
-
 fn setup_and_trace(code: &str, top: &str) -> celox::CompilationTrace {
     let result = SimulatorBuilder::new(code, top)
         .optimize(true)
@@ -13,63 +9,6 @@ fn setup_and_trace(code: &str, top: &str) -> celox::CompilationTrace {
         .build_with_trace();
 
     result.trace
-}
-
-all_backends! {
-
-    fn test_dynamic_index_read(sim) {
-        @case "data_access::test_dynamic_index_read";
-    }
-
-    fn test_dynamic_index_write(sim) {
-        @case "data_access::test_dynamic_index_write";
-    }
-
-    fn test_multidimensional_access(sim) {
-        @case "data_access::test_multidimensional_access";
-    }
-
-    fn test_minus_colon_and_step_execution(sim) {
-        @case "data_access::test_minus_colon_and_step_execution";
-    }
-
-    fn test_dynamic_slice_bullying(sim) {
-        @case "data_access::test_dynamic_slice_bullying";
-    }
-
-    fn test_dynamic_minus_colon_and_step_read_write(sim) {
-        @case "data_access::test_dynamic_minus_colon_and_step_read_write";
-    }
-
-    fn test_partial_write_merging(sim) {
-        @case "data_access::test_partial_write_merging";
-    }
-
-    fn test_genvar_const_in_generate(sim) {
-        @ignore_on(veryl);
-        @case "data_access::test_genvar_const_in_generate";
-    }
-
-    fn test_genvar_dynamic_index_issue21(sim) {
-        @ignore_on(veryl);
-        @case "data_access::test_genvar_dynamic_index_issue21";
-    }
-
-    fn test_dynamic_index_with_bitslice(sim) {
-        @case "data_access::test_dynamic_index_with_bitslice";
-    }
-
-    fn test_let_index_with_bitslice_write(sim) {
-        @case "data_access::test_let_index_with_bitslice_write";
-    }
-
-    fn test_let_index_with_bitslice_write_single(sim) {
-        @case "data_access::test_let_index_with_bitslice_write_single";
-    }
-
-    fn test_ff_bit_select_in_generate_loop(sim) {
-        @case "data_access::test_ff_bit_select_in_generate_loop";
-    }
 }
 
 #[test]

@@ -63,6 +63,7 @@ jobs:
       rust_vpi_e2e: ${{ steps.classify.outputs.rust_vpi_e2e }}
       rust_features: ${{ steps.classify.outputs.rust_features }}
       rust_filter: ${{ steps.classify.outputs.rust_filter }}
+      rust_vtest: ${{ steps.classify.outputs.rust_vtest }}
       rust_backend_filter: ${{ steps.classify.outputs.rust_backend_filter }}
       rust_libraries: ${{ steps.classify.outputs.rust_libraries }}
       rust_library_features: ${{ steps.classify.outputs.rust_library_features }}
@@ -224,6 +225,7 @@ jobs:
           bash scripts/tests/run-heliodor-bench-results.sh
           bash scripts/tests/run-heliodor-bench-gate.sh
           python3 -m unittest discover -s .updatecli/tests -v
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_run_vtest.py -v
           python3 -m venv "$RUNNER_TEMP/rtlmeter-tests"
           "$RUNNER_TEMP/rtlmeter-tests/bin/python" -m pip install -r benchmarks/rtlmeter/requirements.txt
           PYTHONDONTWRITEBYTECODE=1 "$RUNNER_TEMP/rtlmeter-tests/bin/python" -m unittest discover -s scripts/tests -p test_rtlmeter_bench.py -v
@@ -265,8 +267,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           # The vtest executor's build plan (profile, scope, features) lives in
-          # run-vtest.mjs; a change of it is a different cache.
-          key: vtest-${{ hashFiles('scripts/run-vtest.mjs') }}
+          # run-vtest.py; a change of it is a different cache.
+          key: vtest-${{ hashFiles('scripts/run-vtest.py') }}
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Initialize Rust test reports
@@ -285,13 +287,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.144
-
-      - name: Build the optimized vtest executor
-        if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_packages), ' celox '))
-        env:
-          CELOX_RUST_FULL: ${{ needs.changes.outputs.rust_full }}
-          BUILDS: ${{ needs.changes.outputs.rust_builds }}
-        run: node scripts/run-vtest.mjs --prepare-ci
 
       # Enable the frontend and suite features together so common integration
       # tests run once, rather than once per Cargo feature combination.
@@ -322,9 +317,34 @@ jobs:
         timeout-minutes: 20
         run: >-
           cargo nextest run --locked -p celox --profile ci
-          --test counter --test hierarchy --test native_exec
+          --test hierarchy --test native_exec
           --test simulation_limits --test sv_unit_scope --test sv_packages
           -E "$CELOX_BACKEND_FILTER"
+
+      # The suite cases run through scripts/run-vtest.py, not nextest: one
+      # executor process per case and backend of crates/celox/vtest.toml.
+      # The executor builds with the test build's profile, packages and
+      # features, so the workspace crates compile once for both.
+      - name: Run the suite cases this change can affect
+        id: vtest
+        if: >-
+          needs.changes.outputs.fast_queue != 'true'
+          && (needs.changes.outputs.rust_full != 'false' || needs.changes.outputs.rust_vtest != '')
+          && (success() || steps.workspace-tests.outcome == 'failure' || steps.scoped-tests.outcome == 'failure')
+        env:
+          CELOX_RUST_FULL: ${{ needs.changes.outputs.rust_full }}
+          BUILDS: ${{ needs.changes.outputs.rust_builds }}
+          SCOPE: ${{ needs.changes.outputs.rust_vtest }}
+        run: python3 scripts/run-vtest.py ${SCOPE:+--scope "$SCOPE"} --junit "$CELOX_CI_REPORT_DIR/vtest.xml"
+
+      - name: Run merge queue suite cases
+        id: queue-vtest
+        if: needs.changes.outputs.fast_queue == 'true' && (success() || steps.queue-tests.outcome == 'failure')
+        timeout-minutes: 20
+        run: >-
+          python3 scripts/run-vtest.py --cargo-profile dev
+          'veryl/counter::' 'veryl/hierarchy::'
+          --junit "$CELOX_CI_REPORT_DIR/vtest.xml"
 
       - name: Collect Rust test reports
         if: success() || failure()
@@ -354,7 +374,7 @@ jobs:
           token: ${{ secrets.MERGIFY_TOKEN }}
           report_path: work/ci-reports/rust/*.xml
           job_name: rust-tests
-          test_step_outcome: ${{ steps.queue-tests.outcome != 'skipped' && steps.queue-tests.outcome || steps.cocotb-tests.outcome == 'failure' && 'failure' || steps.workspace-tests.outcome != 'skipped' && steps.workspace-tests.outcome || steps.scoped-tests.outcome }}
+          test_step_outcome: ${{ (steps.vtest.outcome == 'failure' || steps.queue-vtest.outcome == 'failure') && 'failure' || steps.queue-tests.outcome != 'skipped' && steps.queue-tests.outcome || steps.cocotb-tests.outcome == 'failure' && 'failure' || steps.workspace-tests.outcome != 'skipped' && steps.workspace-tests.outcome || steps.scoped-tests.outcome != 'skipped' && steps.scoped-tests.outcome || steps.vtest.outcome }}
 
       # nextest does not run documentation tests. They build with the tests'
       # profile, so they reuse the libraries the test build compiled.
@@ -511,8 +531,14 @@ jobs:
         with:
           tool: cargo-nextest@0.9.144
 
-      - name: Run the SystemVerilog suite with calls out of line
-        run: node scripts/run-vtest.mjs --test systemverilog --no-fail-fast
+      - name: Run the SystemVerilog tests with calls out of line
+        run: >-
+          cargo nextest run --locked -p celox --cargo-profile vtest --no-fail-fast
+          --features "celox-test-suite/runtime-cases,$CELOX_TEST_FEATURES" --test systemverilog
+
+      - name: Run the SystemVerilog suite cases with calls out of line
+        if: success() || failure()
+        run: python3 scripts/run-vtest.py --language sv
 
   # The driver is built once; the shards run the conformance cases with it.
   # Pull requests run every case except the UVM ones in one job; the UVM

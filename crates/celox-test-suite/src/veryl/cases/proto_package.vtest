@@ -1,5 +1,11 @@
 (group proto_package (category hierarchy))
 
+; Issue #11: `pub module` wrapper causes "PKG doesn't have member lt"
+; when proto package has no `lt` — the `<:` operator is a builtin comparison,
+; not a proto package function call.
+;
+; Uses a combinational circuit to test that `<:` on PKG::Item resolves
+; correctly to the builtin less-than operator.
 (case test_proto_package_builtin_comparison
   (source "test.veryl" #"
 proto package ItemProto {
@@ -40,6 +46,8 @@ inst c: Comparator::<ItemU16> (a, b, a_lt);
     (set b 10))
   (assert_eq a_lt 0))
 
+; Positive control: proto package with an explicit `lt` function works correctly.
+; This confirms that proto package function dispatch is functional.
 (case test_proto_package_with_custom_function
   (source "test.veryl" #"
 proto package ItemProto {

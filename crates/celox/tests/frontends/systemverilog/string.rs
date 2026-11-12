@@ -1,44 +1,6 @@
 use super::*;
 
 sv_backends! {
-    fn string_real_conversions(sim) { @case "string::real_conversions"; }
-
-    fn local_bindings_shadow_imported_string_types(sim) {
-        @case "string::local_bindings_shadow_imported_string_types";
-    }
-
-    fn string_fixed_array_mutations(sim) { @case "string::fixed_array_mutations"; }
-    fn string_fixed_array_mutating_methods(sim) { @case "string::fixed_array_mutating_methods"; }
-    fn string_fixed_array_mutation_indices(sim) { @case "string::fixed_array_mutation_indices"; }
-    fn string_fixed_array_mutations_invalid_indices(sim) { @case "string::fixed_array_mutations_invalid_indices"; }
-
-    fn string_fixed_array_pattern_rows(sim) { @case "string::fixed_array_pattern_rows"; }
-    fn string_fixed_array_continuous_elements(sim) { @case "string::fixed_array_continuous_elements"; }
-
-    fn string_fixed_array_loops_and_copy(sim) { @case "string::fixed_array_loops_and_copy"; }
-    fn string_fixed_array_multidimensional_slices(sim) { @case "string::fixed_array_multidimensional_slices"; }
-    fn string_fixed_array_invalid_indices(sim) { @case "string::fixed_array_invalid_indices"; }
-    fn string_fixed_array_dynamic_indices(sim) { @case "string::fixed_array_dynamic_indices"; }
-    fn string_fixed_array_unknown_indices(sim) { @case "string::fixed_array_unknown_indices"; }
-    fn string_fixed_array_survives_heap_collections(sim) { @case "string::fixed_array_survives_heap_collections"; }
-    fn string_fixed_array_ports_and_local_lifetime(sim) { @case "string::fixed_array_ports_and_local_lifetime"; }
-    fn string_assignment_and_display(sim) { @case "string::assignment_and_display"; }
-    fn string_comparisons(sim) { @case "string::comparisons"; }
-    fn string_concatenation_and_replication(sim) { @case "string::concatenation_and_replication"; }
-    fn string_character_access(sim) { @case "string::character_access"; }
-    fn string_methods(sim) { @case "string::methods"; }
-    fn string_characters_are_signed_bytes(sim) { @case "string::characters_are_signed_bytes"; }
-    fn string_casts_from_integral_values(sim) { @case "string::casts_from_integral_values"; }
-    fn strings_across_clock_edges(sim) { @case "string::strings_across_clock_edges"; }
-}
-
-sv_backends! {
-    fn strings_survive_heap_collections(sim) { @case "string::strings_survive_heap_collections"; }
-}
-
-sv_backends! {
-    fn string_parameters_keep_their_text(sim) { @case "string::string_parameters_keep_their_text"; }
-    fn string_foreach_iterates_the_characters(sim) { @case "string::foreach_iterates_the_characters"; }
     // An omitted index skips the string's only dimension, so the body runs
     // once whatever the string's length (12.7.3).
     fn string_foreach_omitted_index_runs_once(sim) {

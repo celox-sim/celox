@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { clearCurrentReport, saveCurrentReport } from "./ci-rust-reports.mjs";
 import { cargoCommands } from "./run-ci-rust-scope.mjs";
-import { testProfile, workspaceFeatures } from "./run-vtest.mjs";
+import { testProfile, workspaceFeatures } from "./rust-test-build.mjs";
 
 export const cocotbFilter = 'binary_id(celox-vpi::cocotb_e2e) & test(/^cocotb_/)';
 

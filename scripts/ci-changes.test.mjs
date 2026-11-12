@@ -12,6 +12,7 @@ import {
   classifyFiles,
   cutsRelease,
   rustScopeOutputs,
+  vtestScope,
 } from "./ci-changes.mjs";
 
 const none = {
@@ -176,6 +177,8 @@ test("full validation overrides even an empty valid diff", () => {
       rust_vpi_e2e: true,
       rust_features: false,
       rust_filter: false,
+      // Every suite case: "{}".
+      rust_vtest: false,
       rust_libraries: false,
       rust_library_features: false,
     },
@@ -582,4 +585,12 @@ test("disabled bridge is absent from every scoped test, lint and documentation p
     for (const key of ["rust_packages", "rust_libraries", "rust_lint_packages", "rust_doc_libraries", "rust_builds", "rust_lint_builds"])
       assert.ok(!scope[key].includes("lydite-celox"), `${path}: ${key}`);
   }
+});
+
+test("the suite case scope carries the backends the change leaves out", () => {
+  assert.equal(vtestScope("", ["wasm"]), "");
+  assert.equal(vtestScope("{}", []), "{}");
+  assert.deepEqual(JSON.parse(vtestScope('{"select":[{"groups":["sv/latch"]}]}', ["wasm"])),
+    { select: [{ groups: ["sv/latch"] }], exclude_backends: ["wasm"] });
+  assert.equal(rustScopeOutputs(null).rust_vtest, "{}");
 });

@@ -1,18 +1,6 @@
 use super::*;
 
 sv_backends! {
-    fn wide_elements_keep_every_bit(sim) {
-        @case "wide_container_elements::wide_elements_keep_every_bit";
-    }
-    fn wide_elements_default_to_x(sim) {
-        @case "wide_container_elements::wide_elements_default_to_x";
-    }
-    fn wide_elements_of_parameterized_classes(sim) {
-        @case "wide_container_elements::wide_elements_of_parameterized_classes";
-    }
-    fn wide_elements_extend_by_the_value_signedness(sim) {
-        @case "wide_container_elements::wide_elements_extend_by_the_value_signedness";
-    }
     fn structure_elements_have_no_packed_dimensions(sim) {
         // IEEE 1800-2023 20.7: an unpacked structure is not an array, so a
         // queue of them has its one unpacked dimension, though the structure

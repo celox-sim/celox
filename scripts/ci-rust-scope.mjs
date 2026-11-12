@@ -31,6 +31,21 @@ export const VARIANTS = Object.freeze([
   "sv",
 ]);
 
+// The vtest backends (crates/celox/vtest.toml) of each variant.
+export const VTEST_VARIANTS = Object.freeze({
+  native: ["native"],
+  native_parallel: ["native-parallel"],
+  cranelift: ["cranelift"],
+  cranelift_parallel: ["cranelift-parallel"],
+  wasm: ["wasm"],
+  interp: ["interp"],
+  veryl: ["veryl"],
+  sv: ["sv"],
+});
+// vtest backends no variant crate narrows, as the integration tests that are
+// not generated per variant: they run whenever the suite runs on Celox.
+export const VTEST_UNNARROWED = Object.freeze(["native-baseline", "native-image", "interpreter", "hotspot"]);
+
 const NATIVE = Object.freeze({ variants: ["native", "native_parallel"] });
 const SV = Object.freeze({ variants: ["sv"], binaries: ["systemverilog"] });
 
@@ -94,9 +109,10 @@ export function workspacePackages(metadata, root) {
  * Returns `{ full: true }` when the change reaches outside what the workspace
  * graph describes (manifests, the lockfile, toolchain or shared test data),
  * and otherwise the packages to build, the features to enable, a nextest
- * filterset selecting the tests, and the packages whose library code changed
- * with the features they can take (for documentation tests). `packages` is empty when no Rust test is
- * affected.
+ * filterset selecting the tests, the suite cases `scripts/run-vtest.py` runs
+ * (`vtest`: null for none, or its `--scope` selection), and the packages whose
+ * library code changed with the features they can take (for documentation
+ * tests). `packages` is empty when no Rust test is affected.
  *
  * A change to a package's library code affects the package and everything
  * that depends on it. A change to one of its integration test files affects
@@ -119,6 +135,14 @@ export function rustTestScope(files, packages) {
   const wholeTests = new Set();
   const binaries = new Map();
   const moduleFilters = new Map();
+  // Suite cases a change selects without affecting Celox: changed case
+  // scripts, the SV adapter of the executor. `vtestAll` runs every case.
+  const vtestSelect = [];
+  let vtestAll = false;
+  const addModule = (name, module) => {
+    if (!moduleFilters.has(name)) moduleFilters.set(name, new Set());
+    moduleFilters.get(name)?.add(module);
+  };
   const addBinary = (name, binary) => {
     if (!binaries.has(name)) binaries.set(name, new Set());
     binaries.get(name).add(binary);
@@ -140,35 +164,48 @@ export function rustTestScope(files, packages) {
     const inner = path.slice(owner.dir.length + 1);
     const sharedCase = /^src\/(veryl|sv)\/cases\/([^/]+)\.vtest$/.exec(inner);
     if (owner.name === "celox-test-suite" && sharedCase && owner.caseTargets) {
-      const targets = owner.caseTargets[`${sharedCase[1]}/${sharedCase[2]}`];
-      // Unknown/deleted groups retain the dependency-graph fallback.
-      if (targets?.length) {
-        wholeTests.add(owner.name); // Catalogue/parser and retained-report checks.
-        for (const target of targets) {
-          addBinary("celox", target);
-          if (target === "systemverilog") {
-            const modules = owner.caseModules?.[sharedCase[2]];
-            if (modules?.length) {
-              if (!moduleFilters.has("celox")) moduleFilters.set("celox", new Set());
-              for (const module of modules) moduleFilters.get("celox")?.add(module);
-            } else moduleFilters.set("celox", null);
-          }
+      const [, language, group] = sharedCase;
+      // A new, edited or deleted group: the runner runs what remains of it.
+      vtestSelect.push({ groups: [`${language}/${group}`] });
+      wholeTests.add(owner.name); // Catalogue/parser and retained-report checks.
+      // Celox tests that read the group's cases by name.
+      for (const target of owner.caseTargets[`${language}/${group}`] ?? []) {
+        addBinary("celox", target);
+        if (target === "systemverilog") {
+          const modules = owner.caseModules?.[group];
+          if (modules?.length) for (const module of modules) addModule("celox", module);
+          else moduleFilters.set("celox", null);
         }
-        for (const pkg of packages) {
-          // Other catalogue consumers still validate their own tests, but a
-          // script's contents cannot change a Rust library API or its doctests.
-          if (pkg.name !== "celox" && pkg.dependencies.includes(owner.name)) {
-            const pending = [pkg.name];
-            while (pending.length) {
-              const name = pending.pop();
-              if (wholeTests.has(name)) continue;
-              wholeTests.add(name);
-              pending.push(...(dependents.get(name) ?? []));
-            }
-          }
-        }
-        continue;
       }
+      // The checks that compile every SystemVerilog case.
+      if (language === "sv" && owner.svCorpusModule) {
+        addBinary("celox", "systemverilog");
+        if (moduleFilters.get("celox") !== null) addModule("celox", owner.svCorpusModule);
+      }
+      for (const pkg of packages) {
+        // Other catalogue consumers still validate their own tests, but a
+        // script's contents cannot change a Rust library API or its doctests.
+        if (pkg.name !== "celox" && pkg.dependencies.includes(owner.name)) {
+          const pending = [pkg.name];
+          while (pending.length) {
+            const name = pending.pop();
+            if (wholeTests.has(name)) continue;
+            wholeTests.add(name);
+            pending.push(...(dependents.get(name) ?? []));
+          }
+        }
+      }
+      continue;
+    }
+    // The vtest backends of each case, and the executor's SystemVerilog
+    // adapter, which no Rust test binary includes.
+    if (owner.name === "celox" && inner === "vtest.toml") {
+      vtestAll = true;
+      continue;
+    }
+    if (owner.name === "celox" && inner === "tests/frontends/systemverilog/suite.rs") {
+      vtestSelect.push({ groups: ["sv"] });
+      continue;
     }
     const test = /^tests\/([^/]+)\.rs$/.exec(inner);
     // Insta prefixes snapshots with their integration-test binary name.
@@ -186,8 +223,7 @@ export function rustTestScope(files, packages) {
       const module = /^tests\/frontends\/systemverilog\/(\w+)\.rs$/.exec(inner)?.[1];
       // The adapter and unknown shared helpers affect every SV module.
       if (module && owner.svTestModules?.includes(module)) {
-        if (!moduleFilters.has(owner.name)) moduleFilters.set(owner.name, new Set());
-        moduleFilters.get(owner.name)?.add(module);
+        addModule(owner.name, module);
       } else {
         moduleFilters.set(owner.name, null);
       }
@@ -255,6 +291,14 @@ export function rustTestScope(files, packages) {
     ];
     terms.push(`(package(celox) & (${parts.join(" | ")}))`);
     binaries.delete("celox");
+    vtestSelect.push({
+      backends: [...new Set([...[...variants].sort().flatMap((variant) => VTEST_VARIANTS[variant]), ...VTEST_UNNARROWED])],
+    });
+    // A frontend crate runs the SystemVerilog binary whole, its cases too.
+    if (celoxSeeds.some((seed) => VARIANT_CRATES.get(seed).binaries?.includes("systemverilog")))
+      vtestSelect.push({ groups: ["sv"] });
+  } else if (affected.has("celox") || wholeTests.has("celox")) {
+    vtestAll = true;
   }
   for (const [name, names] of [...binaries].sort()) {
     if (selected.has(name)) continue;
@@ -297,6 +341,7 @@ export function rustTestScope(files, packages) {
     packages: [...selected].sort(),
     features: features(selected),
     filter: terms.join(" | "),
+    vtest: vtestAll ? {} : vtestSelect.length ? { select: vtestSelect } : null,
     // A nextest filter controls execution, not Cargo compilation. When only
     // specific binaries of one package changed, avoid building all its tests.
     targets: affected.size === 0 && wholeTests.size === 0 && selected.size === 1
@@ -365,6 +410,8 @@ export function readWorkspace(root) {
         return !svSources
           .some((source) => new RegExp(`(?:crate|super)::${name}::`).test(source));
       });
+    // The module of the checks that compile every SystemVerilog case.
+    suite.svCorpusModule = pkg.svTestModules.includes("corpus") ? "corpus" : undefined;
     suite.caseModules = {};
     for (const key of Object.keys(caseTargets).filter((key) => key.startsWith("sv/"))) {
       const group = key.slice(3);

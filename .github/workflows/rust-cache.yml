@@ -17,7 +17,7 @@ on:
       - ".github/actions/setup-rust/**"
       - ".github/workflows/rust-cache.yml"
       - ".github/workflows/ci.yml"
-      - "scripts/run-vtest.mjs"
+      - "scripts/run-vtest.py"
   # Eviction does not change Cargo files, so push path filters cannot repair it.
   schedule:
     - cron: "17 * * * *"
@@ -54,8 +54,8 @@ jobs:
         id: cache
         with:
           # The vtest executor's build plan (profile, scope, features) lives in
-          # run-vtest.mjs; a change of it is a different cache.
-          key: vtest-${{ hashFiles('scripts/run-vtest.mjs') }}
+          # run-vtest.py; a change of it is a different cache.
+          key: vtest-${{ hashFiles('scripts/run-vtest.py') }}
       - name: Install cargo-nextest
         if: steps.cache.outputs.cache-hit != 'true'
         uses: taiki-e/install-action@v2
@@ -65,7 +65,7 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         env:
           CELOX_RUST_FULL: "true"
-        run: node scripts/run-vtest.mjs --prepare-ci
+        run: python3 scripts/run-vtest.py --build-only
       - name: Build test targets to populate dependencies
         if: steps.cache.outputs.cache-hit != 'true'
         run: >-

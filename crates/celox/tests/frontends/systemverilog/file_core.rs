@@ -147,7 +147,6 @@ sv_backends! {
         assert_eq!(sim.get(ok), BigUint::from(1u8));
     }
 
-    fn flush_and_file_function_types(sim) { @case "file_core::flush_preserves_stdout_order_and_integral_return_types"; }
 }
 
 #[test]

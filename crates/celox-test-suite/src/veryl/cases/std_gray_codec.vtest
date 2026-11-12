@@ -1,5 +1,6 @@
 (group std_gray_codec (category standard_library))
 
+; Gray encode → decode roundtrip: o_bin == i_bin for all 8-bit values
 (case test_gray_roundtrip_8bit
   (source "test.veryl"
     (std "gray/gray_encoder.veryl")
@@ -27,6 +28,7 @@ o_bin,
     (let bin_out (trunc 8 (get o_bin)))
     (assert (== bin_out val) "roundtrip failed")))
 
+; Verify Gray code property: adjacent binary values differ by exactly 1 bit in Gray
 (case test_gray_single_bit_change
   (source "test.veryl"
     (std "gray/gray_encoder.veryl")

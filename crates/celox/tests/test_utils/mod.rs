@@ -2,7 +2,6 @@ pub mod suite;
 #[cfg(feature = "veryl-reference")]
 pub mod veryl_sim;
 pub mod veryl_sv;
-pub mod vtest_exec;
 
 #[path = "../fixtures/veryl_std.rs"]
 #[allow(dead_code)]
@@ -36,6 +35,10 @@ pub enum Frontend {
 /// The `interp` arm calls `build_interpreter()`, which executes every
 /// execution unit on the Tier-0 SIR interpreter against the same memory
 /// image ABI as the compiled backends.
+///
+/// Suite cases (`celox-test-suite`) are not registered here:
+/// `scripts/run-vtest.py` runs them on the backends `crates/celox/vtest.toml`
+/// names.
 ///
 /// ```rust
 /// all_backends! {
@@ -346,11 +349,6 @@ macro_rules! all_backends {
         all_backends!(@parse [$(#[$meta])*] $name $sim $veryl $sv $ignore_list { $($rest)* });
     };
     (@parse [$(#[$meta:meta])*] $name:ident $sim:ident $veryl:ident $sv:ident $ignore:tt
-        { @case $case:literal; }
-    ) => {
-        all_backends!(@case_impl $(#[$meta])* fn $name $ignore $veryl $sv $case);
-    };
-    (@parse [$(#[$meta:meta])*] $name:ident $sim:ident $veryl:ident $sv:ident $ignore:tt
         { @setup { $($setup:tt)* } @build $builder:expr; $($body:tt)* }
     ) => {
         all_backends!(@impl
@@ -376,88 +374,6 @@ macro_rules! all_backends {
             body { $($body)* }
         );
     };
-    (@case_impl $(#[$meta:meta])* fn $name:ident
-        $ignore_list:tt $veryl:ident $sv:ident $case:literal
-    ) => {
-        mod $name {
-            use super::*;
-            all_backends!(@with_ignore native; $ignore_list; {
-                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-                #[test]
-                $(#[$meta])*
-                fn native() {
-                    test_utils::suite::run_case($case, "native");
-                }
-            });
-            all_backends!(@with_ignore native; $ignore_list; {
-                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-                #[test]
-                $(#[$meta])*
-                fn native_parallel() {
-                    test_utils::suite::run_case($case, "native-parallel");
-                }
-            });
-            all_backends!(@with_ignore cranelift; $ignore_list; {
-
-                #[test]
-                $(#[$meta])*
-                #[cfg(feature = "cranelift")]
-                fn cranelift() {
-                    test_utils::suite::run_case($case, "cranelift");
-                }
-            });
-            all_backends!(@with_ignore cranelift; $ignore_list; {
-
-                #[test]
-                $(#[$meta])*
-                #[cfg(feature = "cranelift")]
-                fn cranelift_parallel() {
-                    test_utils::suite::run_case($case, "cranelift-parallel");
-                }
-            });
-            all_backends!(@with_ignore wasm; $ignore_list; {
-
-                #[test]
-                $(#[$meta])*
-                #[cfg(feature = "wasm-runtime")]
-                fn wasm() {
-                    test_utils::suite::run_case($case, "wasm");
-                }
-            });
-            all_backends!(@with_ignore interp; $ignore_list; {
-
-                #[test]
-                $(#[$meta])*
-                fn interp() {
-                    test_utils::suite::run_case($case, "interp");
-                }
-            });
-            all_backends!(@case_sv $sv $ignore_list $(#[$meta])* $case);
-            all_backends!(@case_veryl $veryl $ignore_list $(#[$meta])* $case);
-        }
-    };
-    (@case_veryl emit $ignore_list:tt $(#[$meta:meta])* $case:literal) => {
-        all_backends!(@with_ignore veryl; $ignore_list; {
-            #[test]
-            $(#[$meta])*
-            #[cfg(feature = "veryl-reference")]
-            fn veryl() {
-                test_utils::suite::run_case($case, "veryl");
-            }
-        });
-    };
-    (@case_veryl skip $ignore_list:tt $(#[$meta:meta])* $case:literal) => {};
-    (@case_sv emit $ignore_list:tt $(#[$meta:meta])* $case:literal) => {
-        all_backends!(@with_ignore sv; $ignore_list; {
-            #[test]
-            $(#[$meta])*
-            fn sv() {
-                test_utils::suite::run_case($case, "sv");
-            }
-        });
-    };
-    (@case_sv skip $ignore_list:tt $(#[$meta:meta])* $case:literal) => {};
-
     // ── entry point ─────────────────────────────────────────────────
     ($(
         $(#[$meta:meta])*

@@ -3,57 +3,7 @@
 use super::*;
 
 sv_backends! {
-    fn unpacked_struct_clock_and_reset_events(sim) { @case "unpacked_structs::clock_and_reset_events"; }
-    fn unpacked_struct_clock_four_state_edges(sim) { @case "unpacked_structs::clock_four_state_edges"; }
 
-    fn unpacked_struct_integral_array_member_defaults(sim) { @case "unpacked_structs::integral_array_member_defaults"; }
-    fn unpacked_struct_integral_array_member_defaults_four_state(sim) { @case "unpacked_structs::integral_array_member_defaults_four_state"; }
-
-    fn unpacked_struct_integral_array_members_wide(sim) { @case "unpacked_structs::integral_array_members_wide"; }
-    fn unpacked_struct_integral_array_members_nested(sim) { @case "unpacked_structs::integral_array_members_nested"; }
-
-    fn unpacked_struct_integral_array_members_parameters(sim) { @case "unpacked_structs::integral_array_members_parameters"; }
-    fn unpacked_struct_integral_array_members_replication(sim) { @case "unpacked_structs::integral_array_members_replication"; }
-
-    fn unpacked_struct_integral_array_members_of_arrays(sim) { @case "unpacked_structs::integral_array_members_of_arrays"; }
-    fn unpacked_struct_integral_array_members_of_arrays_four_state(sim) { @case "unpacked_structs::integral_array_members_of_arrays_four_state"; }
-
-    fn unpacked_struct_integral_array_members(sim) { @case "unpacked_structs::integral_array_members"; }
-    fn unpacked_struct_integral_array_members_local(sim) { @case "unpacked_structs::integral_array_members_local"; }
-    fn unpacked_struct_integral_array_members_four_state(sim) { @case "unpacked_structs::integral_array_members_four_state"; }
-
-    fn unpacked_struct_fixed_array_pattern_rows(sim) { @case "unpacked_structs::fixed_array_pattern_rows"; }
-    fn unpacked_struct_fixed_array_pattern_rows_four_state(sim) { @case "unpacked_structs::fixed_array_pattern_rows_four_state"; }
-
-    fn unpacked_struct_fixed_array_wide_and_nba(sim) { @case "unpacked_structs::fixed_array_wide_and_nba"; }
-    fn unpacked_struct_fixed_array_members_and_copies(sim) { @case "unpacked_structs::fixed_array_members_and_copies"; }
-    fn unpacked_struct_fixed_array_nested_members(sim) { @case "unpacked_structs::fixed_array_nested_members"; }
-    fn unpacked_struct_fixed_array_multidimensional_and_bounds(sim) { @case "unpacked_structs::fixed_array_multidimensional_and_bounds"; }
-    fn unpacked_struct_fixed_array_local_lifetime(sim) { @case "unpacked_structs::fixed_array_local_lifetime"; }
-    fn unpacked_struct_fixed_array_four_state(sim) { @case "unpacked_structs::fixed_array_four_state"; }
-
-    fn unpacked_struct_member_initial_values(sim) { @case "unpacked_structs::member_initial_values"; }
-    fn unpacked_struct_member_initial_values_local_lifetimes(sim) { @case "unpacked_structs::member_initial_values_local_lifetimes"; }
-    fn unpacked_struct_member_initial_values_declaration_scope(sim) { @case "unpacked_structs::member_initial_values_declaration_scope"; }
-    fn unpacked_struct_member_initial_values_specialized_functions(sim) { @case "unpacked_structs::member_initial_values_specialized_functions"; }
-    fn unpacked_struct_member_initial_values_assignment_context(sim) { @case "unpacked_structs::member_initial_values_assignment_context"; }
-    fn unpacked_struct_member_initial_values_four_state(sim) { @case "unpacked_structs::member_initial_values_four_state"; }
-    fn unpacked_struct_member_initial_values_class_properties(sim) { @case "unpacked_structs::member_initial_values_class_properties"; }
-
-    fn unpacked_struct_module_port_recursive_defaults(sim) {
-        @case "unpacked_structs::module_port_recursive_defaults";
-    }
-
-    fn unpacked_struct_module_port_patterns(sim) {
-        @case "unpacked_structs::module_port_patterns";
-    }
-    fn unpacked_struct_module_port_four_state_members(sim) {
-        @case "unpacked_structs::module_port_four_state_members";
-    }
-
-    fn unpacked_struct_module_ports(sim) {
-        @case "unpacked_structs::module_ports";
-    }
     fn unpacked_struct_top_level_member_ports(sim) {
         @setup {
             let source = r#"
@@ -79,22 +29,6 @@ sv_backends! {
             assert_eq!(sim.get(ob), BigUint::from((b + 1) & 15));
             assert_eq!(sim.get(same), BigUint::from(0u8));
         }
-    }
-
-    fn unpacked_struct_members_whole_copies_and_equality(sim) {
-        @case "unpacked_structs::members_whole_copies_and_equality";
-    }
-    fn unpacked_struct_assignment_patterns(sim) {
-        @case "unpacked_structs::assignment_patterns";
-    }
-    fn unpacked_struct_subroutine_arguments_and_results(sim) {
-        @case "unpacked_structs::subroutine_arguments_and_results";
-    }
-    fn unpacked_struct_initializers_results_and_defaults(sim) {
-        @case "unpacked_structs::initializers_results_and_defaults";
-    }
-    fn unpacked_struct_results_and_outputs(sim) {
-        @case "unpacked_structs::results_and_outputs";
     }
 
     fn structure_properties_hide_module_variables(sim) {
@@ -511,54 +445,6 @@ sv_backends! {
         sim.run_until(3).unwrap();
         let done = sim.signal("done");
         assert_eq!(sim.get(done), BigUint::from(1u8));
-    }
-    fn unpacked_struct_module_variables(sim) {
-        @case "unpacked_structs::module_variables";
-    }
-    fn unpacked_struct_handle_members_survive_heap_collections(sim) {
-        @case "unpacked_structs::handle_members_survive_heap_collections";
-    }
-    fn unpacked_struct_four_state_members(sim) {
-        @case "unpacked_structs::four_state_members";
-    }
-    fn unpacked_struct_reference_formals(sim) {
-        @case "unpacked_structs::reference_formals";
-    }
-    fn unpacked_struct_reference_formals_of_virtual_methods(sim) {
-        @case "unpacked_structs::reference_formals_of_virtual_methods";
-    }
-    fn unpacked_struct_reference_formals_across_time(sim) {
-        @case "unpacked_structs::reference_formals_across_time";
-    }
-    fn unpacked_struct_reference_formals_four_state(sim) {
-        @case "unpacked_structs::reference_formals_four_state";
-    }
-    fn unpacked_struct_reference_formal_handles_survive_heap_collections(sim) {
-        @case "unpacked_structs::reference_formal_handles_survive_heap_collections";
-    }
-    fn unpacked_struct_class_properties(sim) {
-        @case "unpacked_structs::class_properties";
-    }
-    fn unpacked_struct_class_property_assignment_order(sim) {
-        @case "unpacked_structs::class_property_assignment_order";
-    }
-    fn unpacked_struct_class_property_four_state_members(sim) {
-        @case "unpacked_structs::class_property_four_state_members";
-    }
-    fn unpacked_struct_class_properties_inheritance_and_collections(sim) {
-        @case "unpacked_structs::class_properties_inheritance_and_collections";
-    }
-    fn unpacked_struct_container_elements(sim) {
-        @case "unpacked_structs::container_elements";
-    }
-    fn unpacked_struct_container_element_member_selects(sim) {
-        @case "unpacked_structs::container_element_member_selects";
-    }
-    fn unpacked_struct_container_element_four_state_defaults(sim) {
-        @case "unpacked_structs::container_element_four_state_defaults";
-    }
-    fn unpacked_struct_container_records_survive_heap_collections(sim) {
-        @case "unpacked_structs::container_records_survive_heap_collections";
     }
 }
 

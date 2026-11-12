@@ -3,21 +3,6 @@
 mod test_utils;
 
 all_backends! {
-    fn transparent_chain(sim) {
-        @case "latch::transparent_chain";
-    }
-    fn partial_ranges(sim) {
-        @case "latch::partial_ranges";
-    }
-    fn four_state_enable(sim) {
-        @case "latch::four_state_enable";
-    }
-    fn dynamic_partial_writes(sim) {
-        @case "latch::dynamic_partial_writes";
-    }
-    fn unpacked_array_input(sim) {
-        @case "latch::unpacked_array_input";
-    }
     fn initial_drives_latch(sim) {
         @omit_veryl;
         @omit_sv;

@@ -3,47 +3,11 @@ use std::path::Path;
 use celox::Simulator;
 use num_bigint::BigUint;
 
-#[path = "test_utils/vtest_exec.rs"]
-mod vtest_exec;
-
-// Each entry is either a suite case, `@case "group::name";`, or a test written
-// against the Celox API with `@setup` and `@build`. Either runs on every backend.
+// Each entry is a test written against the Celox API with `@setup` and
+// `@build`; it runs on every backend. scripts/run-vtest.py runs the suite
+// cases.
 macro_rules! sv_backends {
     () => {};
-    (
-        fn $name:ident($sim:ident) { @case $case:literal; }
-        $($rest:tt)*
-    ) => {
-        mod $name {
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            #[test]
-            fn native() {
-                crate::suite::run_case($case, "native");
-            }
-
-            #[test]
-            fn cranelift() {
-                crate::suite::run_case($case, "cranelift");
-            }
-
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-            #[test]
-            fn native_parallel() {
-                crate::suite::run_case($case, "native-parallel");
-            }
-
-            #[test]
-            fn cranelift_parallel() {
-                crate::suite::run_case($case, "cranelift-parallel");
-            }
-
-            #[test]
-            fn wasm() {
-                crate::suite::run_case($case, "wasm");
-            }
-        }
-        sv_backends! { $($rest)* }
-    };
     (
         $(#[$attr:meta])*
         fn $name:ident($sim:ident) {
@@ -101,8 +65,6 @@ macro_rules! sv_backends {
     };
 }
 
-#[path = "frontends/systemverilog/always_comb.rs"]
-mod always_comb;
 #[path = "frontends/systemverilog/array_locators.rs"]
 mod array_locators;
 #[path = "frontends/systemverilog/array_parameters.rs"]
@@ -111,8 +73,8 @@ mod array_parameters;
 mod binary_file_io;
 #[path = "frontends/systemverilog/class.rs"]
 mod class;
-#[path = "frontends/systemverilog/edges.rs"]
-mod edges;
+#[path = "frontends/systemverilog/corpus.rs"]
+mod corpus;
 #[path = "frontends/systemverilog/file_core.rs"]
 mod file_core;
 #[path = "frontends/systemverilog/file_io.rs"]
@@ -127,8 +89,6 @@ mod generate;
 mod hierarchical_references;
 #[path = "frontends/systemverilog/hierarchy.rs"]
 mod hierarchy;
-#[path = "frontends/systemverilog/increment_decrement.rs"]
-mod increment_decrement;
 #[path = "frontends/systemverilog/indexed_select.rs"]
 mod indexed_select;
 #[path = "frontends/systemverilog/interfaces.rs"]
@@ -159,8 +119,6 @@ mod streaming;
 mod string;
 #[path = "frontends/systemverilog/string_format.rs"]
 mod string_format;
-#[path = "frontends/systemverilog/suite.rs"]
-mod suite;
 #[path = "frontends/systemverilog/synthesizable.rs"]
 mod synthesizable;
 #[path = "frontends/systemverilog/system_functions.rs"]
@@ -256,12 +214,6 @@ fn simulates_systemverilog_always_ff() {
 #[path = "frontends/systemverilog/floating_point.rs"]
 mod floating_point;
 
-#[path = "frontends/systemverilog/real_extensions.rs"]
-mod real_extensions;
-
-#[path = "frontends/systemverilog/unions.rs"]
-mod unions;
-
 #[path = "frontends/systemverilog/tagged_unions.rs"]
 mod tagged_unions;
 
@@ -270,12 +222,6 @@ mod references;
 
 #[path = "frontends/systemverilog/virtual_interfaces.rs"]
 mod virtual_interfaces;
-
-#[path = "frontends/systemverilog/wide_class_properties.rs"]
-mod wide_class_properties;
-
-#[path = "frontends/systemverilog/property_selects.rs"]
-mod property_selects;
 
 #[path = "frontends/systemverilog/wide_container_elements.rs"]
 mod wide_container_elements;
@@ -299,9 +245,6 @@ mod containers;
 mod concurrent_assertions;
 #[path = "frontends/systemverilog/unpacked_structs.rs"]
 mod unpacked_structs;
-
-#[path = "frontends/systemverilog/logic_gates.rs"]
-mod logic_gates;
 
 #[path = "frontends/systemverilog/file_errors.rs"]
 mod file_errors;

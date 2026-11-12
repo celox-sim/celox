@@ -406,6 +406,10 @@ assign o = a >> amt;
   (let expected (>> val 8))
   (assert_eq o expected "256-bit shr of cross-chunk value by 8 failed"))
 
+; Regression test: when lhs is narrower than dst, the memory-backed source
+; slot must be zero-padded to num_chunks (= common_logical_width / 64).
+; Without padding, load_or_default reads uninitialised memory beyond the
+; source slot, producing garbage in the upper chunks.
 (case test_narrow_source_wide_dest_shift_left
   (source "test.veryl" #"
 module Top (
