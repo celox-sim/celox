@@ -548,6 +548,8 @@ fn schedule_sources_collecting(
     // A store of a class property that a level wait reads, in any module,
     // wakes the wait (see `ff::property_changes`).
     let mut properties = BTreeSet::new();
+    // Every module shares the format of `%t` if any calls `$timeformat`.
+    let mut time_format = false;
     for module_id in module_ids.values() {
         let key = keys[module_id];
         let ir = analyses
@@ -559,9 +561,11 @@ fn schedule_sources_collecting(
             .find(|module| module.name() == key.name)
         {
             ff::watched_properties(module, &mut properties);
+            time_format |= ff::calls_time_format(module);
         }
     }
     package_watched_properties(&analyzed[&top].packages, &design, &mut properties);
+    time_format |= packages_call_time_format(&analyzed[&top].packages, &design);
 
     // Level-sensitive always blocks in a static combinational loop may
     // converge as event processes. Demote the participating blocks and retry;
@@ -609,6 +613,7 @@ fn schedule_sources_collecting(
                     recursion_report: analysis_options.recursion_report.as_deref(),
                     force_out_of_line: analysis_options.force_out_of_line_calls,
                     properties: &properties,
+                    time_format,
                     virtual_ids: Some(&virtual_ids),
                     discovery: false,
                     shared: SharedAlways {
@@ -727,6 +732,7 @@ fn schedule_sources_collecting(
             four_state,
             parallel.enabled(),
             &properties,
+            time_format,
             warnings,
             analysis_options.force_out_of_line_calls,
             analysis_options.recursion_report.as_deref(),

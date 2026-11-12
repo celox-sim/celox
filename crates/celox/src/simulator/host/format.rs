@@ -32,6 +32,18 @@ impl<B: SimBackend> Simulator<B> {
                 value
             })
             .collect();
+        // The format of `%t` the design's `$timeformat` calls set when the
+        // call ran, its last argument.
+        let time_format = if site
+            .strings
+            .get(1)
+            .is_some_and(|text| text == celox_design::TIME_FORMAT_ARGUMENT)
+        {
+            args.pop()
+                .map_or_else(TimeFormat::default, |format| TimeFormat::of(&format))
+        } else {
+            TimeFormat::default()
+        };
         let template = if site.operation == 0 {
             site.strings[0].clone().into_bytes()
         } else {
@@ -57,6 +69,7 @@ impl<B: SimBackend> Simulator<B> {
             assertion: None,
             deferred: None,
             timestamp_arg: false,
+            time_format_arg: false,
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),
@@ -71,6 +84,7 @@ impl<B: SimBackend> Simulator<B> {
                 tb_time: Some(timestamp),
                 ..Default::default()
             },
+            &time_format,
         );
         let handle = self.backend.heap_mut().intern(&message);
         self.backend.set(site.results[0].id, handle);
@@ -87,6 +101,7 @@ fn render_bytes(
     mut site: RuntimeEventSite,
     args: &[RuntimeEventArgValue],
     ctx: RuntimeFormatContext<'_>,
+    time_format: &TimeFormat,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(template.len());
     let mut position = 0;
@@ -135,10 +150,11 @@ fn render_bytes(
         site.template = Some(
             String::from_utf8(template[start..position].to_vec()).expect("a conversion is ASCII"),
         );
-        out.extend(render_runtime_event_message(
+        out.extend(render_formatted_message(
             &site,
             args.get(index..).unwrap_or_default(),
             ctx,
+            time_format,
         ));
         if converts {
             index += 1;

@@ -190,6 +190,7 @@ fn initial_state_and_runtime_error_schemas_accept_design_owned_ids() {
         assertion: None,
         deferred: None,
         timestamp_arg: false,
+        time_format_arg: false,
         arg_widths: Vec::new(),
         arg_signed: Vec::new(),
         arg_is_string: Vec::new(),
