@@ -63,7 +63,13 @@ impl StateImage {
         let range = state_range(backend);
         assert_eq!(range.len(), self.bytes.len());
         backend.write_memory(range.start, &self.bytes);
+        // The heap's memory-file reader belongs to the simulator, not to
+        // the state.
+        let reader = backend.heap().memory_file_reader();
         backend.heap_mut().clone_from(&self.heap);
+        if let Some(reader) = reader {
+            backend.heap_mut().set_memory_file_reader(reader);
+        }
         Ok(())
     }
 
@@ -224,7 +230,7 @@ impl<B: SimBackend> Simulator<B> {
 
     /// Replace the file-I/O effect handler at a host execution boundary.
     pub fn replace_file_io(&mut self, file_io: celox_runtime::file_io::FileIo) {
-        self.file_io = file_io;
+        self.set_file_io(file_io);
     }
 
     pub(crate) fn check_host_restore_support(&self) -> Result<(), CheckpointError> {

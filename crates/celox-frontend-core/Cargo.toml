@@ -12,12 +12,14 @@ rust-version.workspace = true
 [dependencies]
 celox-design = { workspace = true }
 celox-frontend-sdk = { workspace = true }
+celox-heap = { workspace = true }
 celox-sir = { workspace = true }
 celox-slt = { workspace = true }
 fxhash = { workspace = true }
 miette = { workspace = true }
 num-bigint = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

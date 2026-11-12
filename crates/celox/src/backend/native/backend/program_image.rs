@@ -216,6 +216,14 @@ impl NativeProgramImage {
         if let Some(testbench) = &mut self.testbench {
             testbench.try_map_paths(&mut map)?;
         }
+        // The directories memory files are looked up in when they are read.
+        let mut initial_state = self.design.take_initial_state();
+        let mapped = map_memory_file_bases(&mut initial_state, &mut map);
+        self.design.restore_initial_state(initial_state);
+        mapped?;
+        if let Some(startup) = &mut self.runtime_schema.declaration_startup {
+            map_memory_file_bases(&mut startup.ordinary, &mut map)?;
+        }
         Ok(())
     }
 
@@ -729,4 +737,26 @@ pub(super) fn build_force_bindings(
         }
     }
     Ok(result)
+}
+
+/// Remap the base directories of the memory files `values` load and the
+/// source files of their calls.
+fn map_memory_file_bases<E>(
+    values: &mut [celox_design::InitialStateValue<AbsoluteAddr>],
+    map: &mut impl FnMut(&std::path::Path) -> Result<std::path::PathBuf, E>,
+) -> Result<(), E> {
+    for value in values {
+        let celox_design::InitialStateData::MemoryFile(load) = &mut value.data else {
+            continue;
+        };
+        let location = load.location.as_mut().map(|location| &mut location.file);
+        for path in load.base.iter_mut().chain(location) {
+            if !path.is_empty() {
+                *path = map(std::path::Path::new(path))?
+                    .to_string_lossy()
+                    .into_owned();
+            }
+        }
+    }
+    Ok(())
 }

@@ -119,6 +119,10 @@ impl<B: SimBackend> Simulator<B> {
                 InitialMemoryData::Writes(runs) => {
                     self.apply_initial_memory_writes(signal, runs);
                 }
+                InitialMemoryData::MemoryFile(load) => {
+                    let runs = self.initial_memory_file(init.address, load);
+                    self.apply_initial_memory_writes(signal, &runs);
+                }
             }
         }
         if applied {

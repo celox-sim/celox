@@ -1,6 +1,5 @@
 use crate::logic_tree::node::SLTNodeArena;
 use std::collections::BTreeSet;
-use std::time::Instant;
 
 use super::ExternalModule;
 use crate::{
@@ -218,11 +217,7 @@ impl<'a> ModuleParser<'a> {
             initial_memory_values,
             ff_parser: FfParser::new(module, config.clone()),
             parallel_lanes: config.parallel_lanes,
-            arena: {
-                let mut arena = SLTNodeArena::new();
-                arena.file_dependencies = config.file_dependencies.clone();
-                arena
-            },
+            arena: SLTNodeArena::new(),
             reset_clock_map: HashMap::default(),
             loop_candidates,
             external_modules,
@@ -1235,17 +1230,14 @@ impl<'a> ModuleParser<'a> {
         radix: u32,
         context: &mut veryl_analyzer::Context,
     ) -> Result<ModuleInitialMemoryValue, ParserError> {
-        let image = readmem_image(
-            self.module,
-            filename_arg,
-            output,
-            &self.arena.file_dependencies,
-            radix,
-            |dst| dst.index.eval_value(context),
-        )?;
+        // The file is read when a simulator instance starts (IEEE 1800-2023
+        // 21.4), not when the design is compiled.
+        let (address, load) = readmem_load(self.module, filename_arg, output, radix, |dst| {
+            dst.index.eval_value(context)
+        })?;
         Ok(ModuleInitialMemoryValue {
-            address: image.var_id,
-            data: InitialMemoryData::Writes(image.runs),
+            address,
+            data: InitialMemoryData::MemoryFile(load),
         })
     }
 
@@ -1502,7 +1494,13 @@ impl<'a> ModuleParser<'a> {
             comb_observers: self.comb_observers,
             runtime_errors: self.ff_parser.runtime_errors().clone(),
             runtime_event_sites,
-            initial_memory_values: self.initial_memory_values,
+            // The loads of `always_comb` blocks run at time zero, after the
+            // `initial` blocks (IEEE 1800-2023 9.2.2.2).
+            initial_memory_values: {
+                let mut values = self.initial_memory_values;
+                values.append(&mut self.arena.memory_loads);
+                values
+            },
             comb_boundaries,
             arena: self.arena.into_inner(),
             store: self.store,

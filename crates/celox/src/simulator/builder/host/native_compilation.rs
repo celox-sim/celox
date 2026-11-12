@@ -95,7 +95,9 @@ pub(super) fn initialize_native_backend(
     sim.components.set_injected(injected_components);
     sim.diagnostics = options.diagnostics.clone();
     sim.set_plusargs(options.plusargs.clone());
-    sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
+    sim.set_file_io(celox_runtime::file_io::FileIo::new(
+        options.file_system.create(),
+    ));
     if let Err(error) = validate_native_vcd_layout(sim.layout(), &sim.program, &vcd_path) {
         return Err(error.with_warnings(std::mem::take(&mut sim.warnings)));
     }

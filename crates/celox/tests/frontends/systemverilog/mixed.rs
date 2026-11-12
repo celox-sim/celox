@@ -48,26 +48,22 @@ sv_backends! {
 
     fn reports_sv_warnings_of_a_veryl_top(sim) {
         @setup {
-            let dir = tempfile::tempdir().unwrap();
-            let file = dir.path().join("short.hex");
-            std::fs::write(&file, "aa").unwrap();
             let veryl = "module Top(y: output logic<8>) { inst child: $sv::Child(y); }";
-            let sv = format!(r#"
+            let sv = r#"
                 module Child(output logic [7:0] y);
-                    logic [7:0] mem [0:1];
-                    initial $readmemh("{}", mem);
-                    assign y = mem[0];
+                    assign y = 8'haa;
+                    initial $exit;
                 endmodule
-            "#, file.display());
+            "#;
         }
-        @build Simulator::from_mixed_sources(vec![(veryl, Path::new("top.veryl"))], vec![(&sv, Path::new("child.sv"))], "Top");
+        @build Simulator::from_mixed_sources(vec![(veryl, Path::new("top.veryl"))], vec![(sv, Path::new("child.sv"))], "Top");
         assert_eq!(sim.get(sim.signal("y")), 0xaau8.into());
         let warnings: Vec<_> = sim.warnings().iter().map(ToString::to_string).collect();
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         let celox::CompilationWarning::SystemVerilog(warning) = &sim.warnings()[0] else {
             panic!("{warnings:?}");
         };
-        assert!(matches!(warning.kind, celox::SvFrontendWarningKind::MemoryFileWordCount { .. }));
+        assert!(matches!(warning.kind, celox::SvFrontendWarningKind::ExitOutsideProgram));
         let location = warning.location.as_ref().unwrap();
         assert_eq!((location.path.as_str(), location.line), ("child.sv", 4));
     }
