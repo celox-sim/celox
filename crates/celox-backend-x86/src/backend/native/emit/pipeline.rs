@@ -152,29 +152,25 @@ fn allocate_prepared_eu_inner(
         }
     };
 
-    // A function unit's slots become state objects in its frame window.
+    // A function unit's slots are state objects in its frame window, which
+    // the caller placed in `layout` (`place_frame_slots`).
     let functions = options.functions.as_deref();
-    let mut function_layout = None;
     let mut frame_window = None;
     let sir_eu = match options.function {
         Some(function) => {
             let frame = &functions
                 .expect("a function unit is compiled with the program's functions")
                 .frames[function.0 as usize];
-            let (unit, layout, window) = crate::native::function_unit::prepare(
-                &sir_eu, layout, frame,
-            )
-            .map_err(|message| ChainedEmitError::Analysis {
-                phase: "function unit frame window",
-                message,
-            })?;
-            function_layout = Some(layout);
+            let (unit, window) = crate::native::function_unit::prepare(&sir_eu, layout, frame)
+                .map_err(|message| ChainedEmitError::Analysis {
+                    phase: "function unit frame window",
+                    message,
+                })?;
             frame_window = Some(window);
             std::borrow::Cow::Owned(unit)
         }
         None => sir_eu,
     };
-    let layout = function_layout.as_ref().unwrap_or(layout);
     let sir_eu = match crate::native::function_unit::split_at_calls(&sir_eu) {
         Some(unit) => std::borrow::Cow::Owned(unit),
         None => sir_eu,

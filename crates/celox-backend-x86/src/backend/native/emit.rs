@@ -26,6 +26,7 @@ mod pipeline;
 mod settle_layout;
 mod simd;
 
+pub use crate::native::function_unit::{place_frame_slots, remove_frame_slots};
 use arithmetic::{
     BinOp, DivOp, ShiftOp, emit_and_imm, emit_and_memory_imm, emit_binop_memory, emit_binop_rr,
     emit_cmp_imm_select, emit_cmp_select, emit_divrem, emit_guarded_cmp_select, emit_inverse_jcc,
