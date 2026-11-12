@@ -803,8 +803,14 @@ impl ProcModule<'_> {
                     | sv::ir::Callee::Lookup { .. }
                     | sv::ir::Callee::Stream(_) => {}
                     sv::ir::Callee::Subroutine(callee) => {
-                        if self.dpi_imports.contains_key(&callee) {
-                            note(Reason::HostRequest);
+                        if let Some(import) = self.dpi_imports.get(&callee) {
+                            // UVM's C functions that Celox provides are heap
+                            // calls, which a unit makes as an inlined body
+                            // does (see `Ff::builtin_dpi_call`); a C function
+                            // is not.
+                            if import.builtin().is_none() {
+                                note(Reason::HostRequest);
+                            }
                         } else if let Some(subroutine) = self.subroutine(&callee) {
                             default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
                             callees.push(callee);

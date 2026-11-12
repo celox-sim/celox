@@ -5655,3 +5655,54 @@ endmodule
         }
     }
 }
+
+#[test]
+fn units_call_the_dpi_c_functions_of_uvm_that_celox_provides() {
+    // UVM's regular expressions and tool queries are heap calls: a
+    // recursive function goes out of line with them and gives what the
+    // looped reference, inlined, gives.
+    let recursive = r#"`timescale 1ns/1ns
+module Top(output int r, output int matched);
+    import "DPI-C" function bit uvm_re_compexecfree(string re, string str, bit deglob, output int exec_ret);
+    import "DPI-C" function string uvm_dpi_get_tool_name_c ();
+    function automatic int count(int n, string s);
+        int ret;
+        if (n == 0) return 0;
+        if (uvm_re_compexecfree("a*b", s, 1, ret) && ret == 0) matched++;
+        return count(n - 1, {s, "b"}) + (uvm_dpi_get_tool_name_c() == "Celox");
+    endfunction
+    initial r = count(3, "a");
+endmodule
+"#;
+    let looped = recursive
+        .replace(
+            "        if (n == 0) return 0;\n",
+            "        int k = 0;\n        for (int i = 0; i < n; i++) begin\n",
+        )
+        .replace(
+            "        return count(n - 1, {s, \"b\"}) + (uvm_dpi_get_tool_name_c() == \"Celox\");",
+            "        k += uvm_dpi_get_tool_name_c() == \"Celox\"; s = {s, \"b\"}; end\n        return k;",
+        );
+    assert_ne!(looped, recursive);
+    assert_eq!(function_units(recursive, false), 1, "function units");
+    for four_state in [false, true] {
+        let expected = simulate(
+            &looped,
+            four_state,
+            false,
+            "interpreter",
+            0,
+            &["r", "matched"],
+        )
+        .expect("the looped design runs");
+        // "a" does not match the glob, "ab" and "abb" do.
+        assert_eq!(expected, vec![value(3), value(2)], "the looped reference");
+        for backend in backends() {
+            assert_eq!(
+                simulate(recursive, four_state, false, backend, 0, &["r", "matched"]),
+                Ok(expected.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}

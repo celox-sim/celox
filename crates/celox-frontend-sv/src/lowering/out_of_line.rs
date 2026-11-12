@@ -116,8 +116,9 @@ pub(super) enum Reason {
     /// delayed nonblocking assignment or a concurrent assertion region.
     MaySuspend,
     /// It, or a subroutine it calls, makes a host request a unit cannot
-    /// make: `$exit`, monitors, strobes, VCD tasks, or a DPI-C import; or a caller that cannot suspend calls a
-    /// unit that can suspend.
+    /// make: `$exit`, monitors, strobes, VCD tasks, or a DPI-C import of a C
+    /// function (not one of the UVM functions Celox provides); or a caller
+    /// that cannot suspend calls a unit that can suspend.
     HostRequest,
     /// Anything else, described.
     Other(String),
