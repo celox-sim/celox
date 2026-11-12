@@ -5900,17 +5900,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "width-dependent complement in parameter expression",
-            r#"
-            module Top #(
-                parameter logic [7:0] P = 8'hff,
-                parameter FLAG = (~P == 0)
-            ) (output logic y);
-                assign y = FLAG;
-            endmodule
-        "#,
-        ),
-        (
             "operator on a real operand",
             r#"
             module Top(input logic [1:0] a, output logic [1:0] y);
@@ -9276,4 +9265,39 @@ sv_backends! {
     fn blocking_write_preserves_extracted_snapshot_four_state(sim) {
         @case "review_regressions::blocking_write_preserves_extracted_snapshot_four_state";
     }
+}
+
+// The complement of a parameter has the width of the parameter (IEEE
+// 1800-2023 11.6.1), so its initializer is evaluated with its types.
+#[test]
+fn complements_of_parameters_keep_the_parameter_width() {
+    let source = r#"
+        package cfg_pkg;
+            localparam int XLEN = 64;
+            localparam bit IS_XLEN64 = (XLEN == 32) ? 1'b0 : 1'b1;
+            localparam logic [63:0] SD = {IS_XLEN64, 31'h0, ~IS_XLEN64, 31'h0};
+        endpackage
+        module Top #(
+            parameter logic [7:0] P = 8'hf0,
+            parameter FLAG = (~P == 8'h0f),
+            parameter int Q = 5,
+            parameter int NQ = ~Q
+        ) (output logic [63:0] sd, output logic flag, output logic [31:0] nq,
+           output logic [8:0] wide);
+            localparam logic [8:0] WIDE = ~P;
+            assign sd = cfg_pkg::SD;
+            assign flag = FLAG;
+            assign nq = NQ;
+            assign wide = WIDE;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("complement.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("sd")), 0x8000_0000_0000_0000u64.into());
+    assert_eq!(sim.get(sim.signal("flag")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("nq")), 0xffff_fffau32.into());
+    // The operand is extended to the width of the assignment before it is
+    // complemented (11.6.1).
+    assert_eq!(sim.get(sim.signal("wide")), 0x10fu16.into());
 }
