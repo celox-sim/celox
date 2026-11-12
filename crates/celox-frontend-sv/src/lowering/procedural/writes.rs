@@ -266,7 +266,35 @@ pub(in crate::lowering) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<s
                 array_slice_width: None,
                 array_slice_reversed: false,
             }]),
-            _ => None,
+            // A select of a selected part of a variable, such as one of a
+            // two-state member read through its conversion, selects bits
+            // of the variable from the part's lowest bit.
+            inner => {
+                let parts = lvalue_from_expr(inner)?;
+                let [
+                    sv::ir::LValue::Select {
+                        name,
+                        lsb: base,
+                        array_slice_width: None,
+                        ..
+                    },
+                ] = parts.as_slice()
+                else {
+                    return None;
+                };
+                let offset = |bound: &sv::ir::ConstExpr| sv::ir::ConstExpr::Binary {
+                    left: Box::new(base.clone()),
+                    op: sv::ir::BinaryOp::Add,
+                    right: Box::new(bound.clone()),
+                };
+                Some(vec![sv::ir::LValue::Select {
+                    name: name.clone(),
+                    msb: offset(msb),
+                    lsb: offset(lsb),
+                    array_slice_width: None,
+                    array_slice_reversed: false,
+                }])
+            }
         },
         sv::ir::Expr::Concat(parts) => {
             let mut lvalues = Vec::new();
@@ -275,7 +303,11 @@ pub(in crate::lowering) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<s
             }
             Some(lvalues)
         }
-        sv::ir::Expr::Resize { expr, .. } => lvalue_from_expr(expr),
+        sv::ir::Expr::Resize { expr, .. }
+        | sv::ir::Expr::Unary {
+            op: sv::ir::UnaryOp::ToTwoState,
+            expr,
+        } => lvalue_from_expr(expr),
         sv::ir::Expr::Call {
             callee: sv::ir::Callee::Checked { .. },
             args,

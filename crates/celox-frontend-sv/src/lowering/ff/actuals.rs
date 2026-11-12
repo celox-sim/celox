@@ -83,6 +83,7 @@ impl Ff<'_, '_> {
             SystemActual {
                 parts: captured,
                 place: None,
+                two_state: two_state_member(place),
             },
             read,
             guards,
@@ -272,6 +273,7 @@ impl Ff<'_, '_> {
         Ok(Some((
             SystemActual {
                 parts: vec![part],
+                two_state: false,
                 place: Some(SystemPlace {
                     local,
                     load,
@@ -314,6 +316,16 @@ impl Ff<'_, '_> {
             self.assign(&sv::ir::LValue::Ident(place.local.clone()), &place.load)?;
             self.check_tagged_guards(&place.guards)?;
         }
+        let converted;
+        let value = if actual.two_state {
+            converted = sv::ir::Expr::Unary {
+                op: sv::ir::UnaryOp::ToTwoState,
+                expr: Box::new(value.clone()),
+            };
+            &converted
+        } else {
+            value
+        };
         match actual.parts.as_slice() {
             [one] => self.assign(one, value)?,
             parts => self.assign_concat(parts, value)?,
@@ -346,6 +358,24 @@ impl Ff<'_, '_> {
 pub(in crate::lowering) struct SystemActual {
     pub(in crate::lowering) parts: Vec<sv::ir::LValue>,
     pub(super) place: Option<SystemPlace>,
+    /// The actual is a two-state member of a four-state structure, read
+    /// through a conversion to two states, which its writes apply too.
+    pub(super) two_state: bool,
+}
+
+/// Whether output actual `expr` is read through a conversion to two states,
+/// as a two-state member of a four-state structure is.
+fn two_state_member(expr: &sv::ir::Expr) -> bool {
+    match expr {
+        sv::ir::Expr::Unary {
+            op: sv::ir::UnaryOp::ToTwoState,
+            ..
+        } => true,
+        sv::ir::Expr::Resize { expr, .. } | sv::ir::Expr::Select { expr, .. } => {
+            two_state_member(expr)
+        }
+        _ => false,
+    }
 }
 
 /// The local of a place an output actual writes, its read of the place,
