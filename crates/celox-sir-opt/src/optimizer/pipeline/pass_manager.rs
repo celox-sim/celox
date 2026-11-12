@@ -139,19 +139,40 @@ impl ExecutionUnitPassManager {
 
     /// Run the same ordered pipeline over independent execution units.
     ///
-    /// Units are owned by workers while being optimized and restored to their
-    /// original order afterward.  This keeps event semantics deterministic;
-    /// only unrelated per-unit work overlaps.
+    /// Workers take the units in place, the largest first, so only unrelated
+    /// per-unit work overlaps and each unit ends as a sequential run leaves
+    /// it.
     pub(in crate::optimizer) fn run_parallel(
         &self,
-        units: &mut Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+        units: &mut [ExecutionUnit<RegionedAbsoluteAddr>],
+        options: &PassOptions,
+    ) {
+        self.run_each_parallel(units, |unit| unit, Self::run, options);
+    }
+
+    /// [`Self::run_function`] over the bodies of function units, as
+    /// [`Self::run_parallel`] runs units.
+    pub(in crate::optimizer) fn run_functions_parallel<T: Send>(
+        &self,
+        functions: &mut [T],
+        unit: impl Fn(&mut T) -> &mut ExecutionUnit<RegionedAbsoluteAddr> + Sync,
+        options: &PassOptions,
+    ) {
+        self.run_each_parallel(functions, unit, Self::run_function, options);
+    }
+
+    fn run_each_parallel<T: Send>(
+        &self,
+        items: &mut [T],
+        unit: impl Fn(&mut T) -> &mut ExecutionUnit<RegionedAbsoluteAddr> + Sync,
+        run: impl Fn(&Self, &mut ExecutionUnit<RegionedAbsoluteAddr>, &PassOptions) + Sync,
         options: &PassOptions,
     ) {
         #[cfg(not(target_arch = "wasm32"))]
         const MAX_PARALLEL_UNITS: usize = 4;
 
         #[cfg(not(target_arch = "wasm32"))]
-        let worker_count = units.len().min(
+        let worker_count = items.len().min(
             std::thread::available_parallelism()
                 .map_or(1, usize::from)
                 .min(MAX_PARALLEL_UNITS),
@@ -159,58 +180,48 @@ impl ExecutionUnitPassManager {
         #[cfg(target_arch = "wasm32")]
         let worker_count = 1;
         if worker_count <= 1 {
-            for unit in units {
-                self.run(unit, options);
+            for item in items {
+                run(self, unit(item), options);
             }
             return;
         }
 
-        let mut pending = std::mem::take(units)
-            .into_iter()
+        let mut pending = items
+            .iter_mut()
             .enumerate()
-            .map(|(index, unit)| {
-                let work = unit.blocks.len()
-                    + unit
-                        .blocks
+            .map(|(index, item)| {
+                let eu = unit(item);
+                let work = eu.blocks.len()
+                    + eu.blocks
                         .values()
                         .map(|block| block.instructions.len())
                         .sum::<usize>();
-                (work, index, unit)
+                (work, index, item)
             })
             .collect::<Vec<_>>();
         // Workers pop the largest units first to keep the long tail bounded.
         pending.sort_unstable_by_key(|(work, index, _)| (*work, *index));
         let pending = std::sync::Mutex::new(pending);
-        let completed = std::sync::Mutex::new(Vec::with_capacity(units.capacity()));
 
         std::thread::scope(|scope| {
             for _ in 0..worker_count {
                 let pending = &pending;
-                let completed = &completed;
+                let unit = &unit;
+                let run = &run;
                 scope.spawn(move || {
                     loop {
                         let task = pending
                             .lock()
                             .expect("SIR optimization work queue must not be poisoned")
                             .pop();
-                        let Some((_, index, mut unit)) = task else {
+                        let Some((_, _, item)) = task else {
                             break;
                         };
-                        self.run(&mut unit, options);
-                        completed
-                            .lock()
-                            .expect("SIR optimization result queue must not be poisoned")
-                            .push((index, unit));
+                        run(self, unit(item), options);
                     }
                 });
             }
         });
-
-        let mut completed = completed
-            .into_inner()
-            .expect("SIR optimization result queue must not be poisoned");
-        completed.sort_unstable_by_key(|(index, _)| *index);
-        units.extend(completed.into_iter().map(|(_, unit)| unit));
     }
 }
 
