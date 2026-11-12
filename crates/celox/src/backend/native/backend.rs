@@ -178,6 +178,15 @@ impl super::super::EventHandle for NativeEventRef {
 // Shared compiled code
 // ────────────────────────────────────────────────────────────────
 
+/// A warning or an error of a memory file the initial state of an instance
+/// loads (see [`NativeBackend::load_initial_memory_files`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitialMemoryFileReport {
+    pub severity: celox_design::Severity,
+    pub message: String,
+    pub location: Option<celox_design::ReportLocation>,
+}
+
 /// Shared compiled code for the native backend.
 /// Can be cloned (via Arc) to create multiple simulator instances
 /// that share the same compiled machine code.
@@ -842,6 +851,57 @@ impl NativeBackend {
 
     fn apply_initial_values(&mut self, initial_state: &[InitialStateValue<AbsoluteAddr>]) {
         for init in initial_state {
+            self.apply_initial_value(init);
+        }
+    }
+
+    /// Read memory files from the host file system (IEEE 1800-2023 21.4),
+    /// for an instance that runs without a [`crate::Simulator`], which reads
+    /// them through its own file system: those its code loads when the
+    /// loads execute, and those the initial state loads now, applying the
+    /// initial state again, in order, with their words. Returns the
+    /// warnings and errors of the initial loads.
+    pub fn load_initial_memory_files(&mut self) -> Vec<InitialMemoryFileReport> {
+        // So do the loads its code makes when they execute.
+        self.heap
+            .set_memory_file_reader(Arc::new(crate::simulator::HeapMemoryFileReader::new(None)));
+        let compiled = Arc::clone(&self.compiled);
+        let initial_state = &compiled.program_image.design.initial_state;
+        if !initial_state
+            .iter()
+            .any(|init| matches!(init.data, InitialStateData::MemoryFile(_)))
+        {
+            return Vec::new();
+        }
+        let mut reports = Vec::new();
+        for init in initial_state {
+            let InitialStateData::MemoryFile(load) = &init.data else {
+                self.apply_initial_value(init);
+                continue;
+            };
+            let outcome = celox_frontend_core::memory_file::load_memory_file(load, |path| {
+                std::fs::read_to_string(path)
+            });
+            let signal = self.resolve_signal(&init.address);
+            self.apply_initial_memory_writes(signal, &outcome.runs);
+            for (severity, message) in [
+                (celox_design::Severity::Warning, outcome.warning),
+                (celox_design::Severity::Error, outcome.error),
+            ] {
+                if let Some(message) = message {
+                    reports.push(InitialMemoryFileReport {
+                        severity,
+                        message,
+                        location: load.location.clone(),
+                    });
+                }
+            }
+        }
+        reports
+    }
+
+    fn apply_initial_value(&mut self, init: &InitialStateValue<AbsoluteAddr>) {
+        {
             let signal = self.resolve_signal(&init.address);
             match &init.data {
                 InitialStateData::Packed {
@@ -881,6 +941,9 @@ impl NativeBackend {
                     }
                 }
                 InitialStateData::Writes(runs) => self.apply_initial_memory_writes(signal, runs),
+                // The simulator that runs the instance loads the file through
+                // its file system, applying the initial state again.
+                InitialStateData::MemoryFile(_) => {}
             }
         }
     }

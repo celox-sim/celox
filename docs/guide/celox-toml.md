@@ -152,8 +152,7 @@ Override individual compilation diagnostics by their displayed code:
 [diagnostics]
 mixed_timescale = "warn"
 inferred_latch = "warn"
-exit_outside_program = "allow"
-memory_file_word_count = "error"
+exit_outside_program = "error"
 ```
 
 `allow` suppresses the diagnostic, `warn` retains it without failing compilation,

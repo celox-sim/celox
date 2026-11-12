@@ -20,7 +20,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             live_signals: Vec::new(),
             injected_components: Default::default(),
             frontend_artifact: None,
-            file_dependencies: Default::default(),
             native_file_calls: false,
             value_change_points: true,
             _marker: std::marker::PhantomData,
@@ -44,7 +43,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             live_signals: Vec::new(),
             injected_components: Default::default(),
             frontend_artifact: None,
-            file_dependencies: Default::default(),
             native_file_calls: false,
             value_change_points: true,
             _marker: std::marker::PhantomData,
@@ -68,7 +66,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             live_signals: Vec::new(),
             injected_components: Default::default(),
             frontend_artifact: None,
-            file_dependencies: Default::default(),
             native_file_calls: false,
             value_change_points: true,
             _marker: std::marker::PhantomData,
@@ -97,7 +94,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             live_signals: Vec::new(),
             injected_components: Default::default(),
             frontend_artifact: None,
-            file_dependencies: Default::default(),
             native_file_calls: false,
             value_change_points: true,
             _marker: std::marker::PhantomData,
@@ -126,7 +122,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             live_signals: Vec::new(),
             injected_components: Default::default(),
             frontend_artifact: Some(artifact),
-            file_dependencies: Default::default(),
             native_file_calls: false,
             value_change_points: true,
             _marker: std::marker::PhantomData,
@@ -156,7 +151,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             live_signals: Vec::new(),
             injected_components: Default::default(),
             frontend_artifact: Some(artifact),
-            file_dependencies: Default::default(),
             native_file_calls: false,
             value_change_points: true,
             _marker: std::marker::PhantomData,
@@ -401,7 +395,6 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
                     self.options.allow_inferred_latches,
-                    &self.file_dependencies,
                 )
             }
         } else {
@@ -428,7 +421,6 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
                 !self.options.native_force_support,
                 self.options.allow_always_ff_function_effects,
                 self.options.allow_inferred_latches,
-                &self.file_dependencies,
                 &self.options.signal_access.force_signals,
                 &self.sv_param_literals,
             )
@@ -629,7 +621,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         sim.set_plusargs(options.plusargs.clone());
-        sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
+        sim.set_file_io(celox_runtime::file_io::FileIo::new(
+            options.file_system.create(),
+        ));
         if let Some((path, format)) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::WaveformWriter::new_with_time_precision(
@@ -689,7 +683,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         sim.set_plusargs(options.plusargs.clone());
-        sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
+        sim.set_file_io(celox_runtime::file_io::FileIo::new(
+            options.file_system.create(),
+        ));
         if let Some((path, format)) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::WaveformWriter::new_with_time_precision(
@@ -760,7 +756,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         sim.set_plusargs(options.plusargs.clone());
-        sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
+        sim.set_file_io(celox_runtime::file_io::FileIo::new(
+            options.file_system.create(),
+        ));
         if let Some((path, format)) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::WaveformWriter::new_with_time_precision(
@@ -839,7 +837,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         sim.set_plusargs(options.plusargs.clone());
-        sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
+        sim.set_file_io(celox_runtime::file_io::FileIo::new(
+            options.file_system.create(),
+        ));
         if let Some((path, format)) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::WaveformWriter::new_with_time_precision(
@@ -1063,7 +1063,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         sim.set_plusargs(options.plusargs.clone());
-        sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
+        sim.set_file_io(celox_runtime::file_io::FileIo::new(
+            options.file_system.create(),
+        ));
         if let Some((path, format)) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::WaveformWriter::new_with_time_precision(
@@ -1180,7 +1182,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
                     self.options.allow_inferred_latches,
-                    &self.file_dependencies,
                 )
             }
         } else {
@@ -1207,7 +1208,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 !self.options.native_force_support,
                 self.options.allow_always_ff_function_effects,
                 self.options.allow_inferred_latches,
-                &self.file_dependencies,
                 &self.options.signal_access.force_signals,
                 &self.sv_param_literals,
             )
@@ -1278,7 +1278,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 .set_injected(self.injected_components.clone());
             sim.diagnostics = self.options.diagnostics.clone();
             sim.set_plusargs(self.options.plusargs.clone());
-            sim.file_io = celox_runtime::file_io::FileIo::new(self.options.file_system.create());
+            sim.set_file_io(celox_runtime::file_io::FileIo::new(
+                self.options.file_system.create(),
+            ));
             sim.apply_initial_values();
             sim.modify(|_| {}).map_err(|error| {
                 SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))

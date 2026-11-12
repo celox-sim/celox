@@ -6,25 +6,12 @@ use std::{
 };
 
 use celox::NativeProgramImage;
-use celox_frontend_veryl::FileDependency;
 
 use super::{Options, RunError};
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CachedFileDependency {
-    path: PathBuf,
-    content_hash: Option<String>,
-    fixed_location_hash: Option<String>,
-}
-
-fn location_hash(path: &Path) -> io::Result<String> {
-    let physical = fs::canonicalize(path)?;
-    Ok(blake3::hash(physical.as_os_str().as_encoded_bytes())
-        .to_hex()
-        .to_string())
-}
-
-const MAGIC: &[u8] = b"CELOX-BUILD-CACHE-2\n";
+// Version 3 drops the manifest of memory files, which a run reads when it
+// executes their loads (IEEE 1800-2023 21.4), not when it compiles.
+const MAGIC: &[u8] = b"CELOX-BUILD-CACHE-3\n";
 
 pub(super) struct BuildCache {
     path: PathBuf,
@@ -409,27 +396,7 @@ impl BuildCache {
         };
         let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid build cache envelope");
         let rest = bytes.strip_prefix(MAGIC).ok_or_else(invalid)?;
-        let length = u64::from_le_bytes(rest.get(..8).ok_or_else(invalid)?.try_into().unwrap());
-        let length = usize::try_from(length).map_err(|_| invalid())?;
-        let rest = &rest[8..];
-        let manifest = rest.get(..length).ok_or_else(invalid)?;
-        let dependencies: Vec<CachedFileDependency> =
-            serde_json::from_slice(manifest).map_err(io::Error::other)?;
-        for dependency in dependencies {
-            if !is_project_relative(&dependency.path) {
-                return Err(invalid().into());
-            }
-            let path = bind_path(&dependency.path, &self.root);
-            if dependency_hash(&path)? != dependency.content_hash {
-                return Ok(None);
-            }
-            if let Some(expected) = dependency.fixed_location_hash
-                && location_hash(&path)? != expected
-            {
-                return Ok(None);
-            }
-        }
-        let mut image = NativeProgramImage::from_container_bytes(&rest[length..])?;
+        let mut image = NativeProgramImage::from_container_bytes(rest)?;
         image.try_map_paths(|path| {
             if !is_project_relative(path) {
                 return Err(invalid());
@@ -439,8 +406,8 @@ impl BuildCache {
         Ok(Some(image))
     }
 
-    pub(super) fn store(&self, image: &NativeProgramImage, dependencies: &[FileDependency]) {
-        if let Err(error) = self.try_store(image, dependencies) {
+    pub(super) fn store(&self, image: &NativeProgramImage) {
+        if let Err(error) = self.try_store(image) {
             let _ = writeln!(
                 std::io::stderr().lock(),
                 "build cache write skipped {}: {error}",
@@ -449,33 +416,13 @@ impl BuildCache {
         }
     }
 
-    fn try_store(
-        &self,
-        image: &NativeProgramImage,
-        dependencies: &[FileDependency],
-    ) -> Result<(), RunError> {
-        let dependencies = dependencies
-            .iter()
-            .map(|dependency| {
-                Ok(CachedFileDependency {
-                    path: relative_path(&dependency.path, &self.root)?,
-                    content_hash: dependency_hash(&dependency.path)?,
-                    fixed_location_hash: dependency
-                        .fixed_location
-                        .then(|| location_hash(&dependency.path))
-                        .transpose()?,
-                })
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-        let manifest = serde_json::to_vec(&dependencies).map_err(io::Error::other)?;
+    fn try_store(&self, image: &NativeProgramImage) -> Result<(), RunError> {
         let dir = self.path.parent().expect("cache entry has a parent");
         fs::create_dir_all(dir)?;
         // A reader sees either a complete old entry or a complete new entry.
         // Concurrent writers use distinct files and may replace the same key.
         let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
         temporary.write_all(MAGIC)?;
-        temporary.write_all(&(manifest.len() as u64).to_le_bytes())?;
-        temporary.write_all(&manifest)?;
         let mut image = image.clone();
         image.try_map_paths(|path| relative_path(path, &self.root))?;
         temporary.write_all(&image.to_container_bytes()?)?;

@@ -16,7 +16,9 @@ pub(in crate::lowering) struct RuntimeEvents {
 }
 
 impl Comb<'_, '_> {
-    /// `$readmemh`/`$readmemb`: the words of the file, written as constants.
+    /// `$readmemh`/`$readmemb`, which only an `initial` block folded into
+    /// initial state runs symbolically; other processes run it as
+    /// imperative code, which reads the file when it executes.
     pub(super) fn readmem(
         &mut self,
         store: &mut Store,
@@ -26,6 +28,10 @@ impl Comb<'_, '_> {
         site: Option<&sv::ir::SourceSpan>,
     ) -> Result<(), sv::AnalyzerError> {
         let name = sv::ir::SystemTask::Readmem(format);
+        // Folding needs the file name when the instance starts.
+        if !self.initial || !constant_file_name(args.first()) {
+            return Err(unsupported(format!("`{name}` in symbolic logic")));
+        }
         let mut addresses = [None, None];
         for (slot, arg) in addresses.iter_mut().zip(args.iter().skip(2)) {
             let sv::ir::SystemTaskArg::Expr(expr) = arg else {
@@ -50,15 +56,121 @@ impl Comb<'_, '_> {
         if self.path_condition()?.is_some() {
             return Err(unsupported(format!("`{name}` under a run-time condition")));
         }
-        let (id, words) = self
+        self.initial_readmem(store, format, args, addresses, site)
+    }
+
+    /// `$readmemh`/`$readmemb` in an `initial` block folded into initial
+    /// state: the load runs when a simulator instance starts, reading the
+    /// file then (IEEE 1800-2023 21.4). The words it may load become the
+    /// memory's own state, which is not constant: a read of them makes the
+    /// block run as a process instead. The values the block wrote to them
+    /// before are written before the load, which keeps those the file does
+    /// not give.
+    fn initial_readmem(
+        &mut self,
+        store: &mut Store,
+        format: sv::ir::MemoryFormat,
+        args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+        addresses: [Option<i128>; 2],
+        site: Option<&sv::ir::SourceSpan>,
+    ) -> Result<(), sv::AnalyzerError> {
+        let (id, load) = self
             .m
-            .readmem(format, args, addresses[0], addresses[1], site)?;
-        for word in words {
-            let width = word.access.msb - word.access.lsb + 1;
-            let node = self.alloc(SLTNode::Constant(word.value, word.mask, width, false))?;
-            self.write(store, id, word.access, (node, Sources::default()))?;
+            .readmem_load(format, args, addresses[0], addresses[1], site)?;
+        let width = self.m.var(id).width;
+        // A range outside the array loads nothing; the load reports it.
+        let (left, right, start, finish) = range_addresses(&load);
+        let (low, high) = (left.min(right), left.max(right));
+        let in_range = (low..=high).contains(&start) && (low..=high).contains(&finish);
+        let bits = load
+            .written_bits()
+            .filter(|&(_, msb)| in_range && msb < width);
+        let Some((lsb, msb)) = bits else {
+            self.memory_loads
+                .push((id, InitialStateData::MemoryFile(load), None));
+            return Ok(());
+        };
+        let access = BitAccess::new(lsb, msb);
+        let before = self.written_before_load(store, id, access)?;
+        if !before.is_empty() {
+            self.memory_loads
+                .push((id, InitialStateData::Writes(before), None));
         }
+        let loaded = self.alloc(SLTNode::Input {
+            variable: id,
+            signed: false,
+            index: Vec::new(),
+            access,
+        })?;
+        self.write(store, id, access, (loaded, Sources::default()))?;
+        self.memory_loads
+            .push((id, InitialStateData::MemoryFile(load), Some(loaded)));
         Ok(())
+    }
+
+    /// The values the block wrote to bits `access` of `id` before a load:
+    /// those other than the values it started with and the words of an
+    /// earlier load.
+    fn written_before_load(
+        &mut self,
+        store: &Store,
+        id: SourceVarId,
+        access: BitAccess,
+    ) -> Result<Vec<celox_design::InitialStateWriteRun>, sv::AnalyzerError> {
+        let Some(range) = store.get(&id) else {
+            return Ok(Vec::new());
+        };
+        let node = |value: &Option<(NodeId, Sources)>| value.as_ref().map(|(node, _)| *node);
+        let parts: Vec<_> = range
+            .get_parts_ref(access)
+            .map_err(range_error)?
+            .into_iter()
+            .map(|(value, relative)| (node(value), relative))
+            .collect();
+        let seed: Vec<_> = match self.initial_seed.get(&id) {
+            Some(seed) => seed
+                .get_parts_ref(access)
+                .map_err(range_error)?
+                .into_iter()
+                .map(|(value, relative)| (node(value), relative))
+                .collect(),
+            None => Vec::new(),
+        };
+        let mut runs = Vec::new();
+        let mut lsb = access.lsb;
+        for (value, relative) in parts {
+            let part_width = relative.msb - relative.lsb + 1;
+            let part_lsb = lsb;
+            lsb += part_width;
+            let Some(part) = value else { continue };
+            let from_seed = seed.contains(&(Some(part), relative));
+            let loaded = self
+                .memory_loads
+                .iter()
+                .any(|(load_id, _, loaded)| *load_id == id && *loaded == Some(part));
+            if from_seed || loaded {
+                continue;
+            }
+            let sliced = self.slice(part, relative)?;
+            let (value, mask, _) =
+                slt_const4(self.arena, &mut self.consts, sliced).ok_or_else(|| {
+                    let name = self.m.var(id).path.join(".");
+                    unsupported(format!(
+                        "initial block value of `{name}` that depends on design state"
+                    ))
+                })?;
+            runs.push(celox_design::InitialStateWriteRun {
+                bit_offset: part_lsb,
+                bit_width: part_width,
+                value_bytes: celox_frontend_core::memory_file::biguint_to_fixed_le_bytes(
+                    &value, part_width,
+                ),
+                mask_bytes: celox_frontend_core::memory_file::biguint_to_fixed_le_bytes(
+                    &mask, part_width,
+                ),
+            });
+        }
+        Ok(runs)
     }
 
     pub(super) fn capture(&mut self, expr: NodeId) -> Result<NodeId, sv::AnalyzerError> {

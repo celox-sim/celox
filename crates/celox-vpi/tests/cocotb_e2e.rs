@@ -425,7 +425,7 @@ module Top (
 }
 
 #[test]
-fn compile_resolves_standalone_readmem_relative_to_the_source() {
+fn standalone_readmem_reads_the_file_next_to_the_source() {
     let temporary = tempfile::tempdir().unwrap();
     let source_dir = temporary.path().join("standalone");
     fs::create_dir(&source_dir).unwrap();
@@ -464,11 +464,15 @@ module Top (
         String::from_utf8_lossy(&compile.stderr)
     );
 
+    // The runtime reads the file as it starts, from the source's directory
+    // whatever its working directory is.
+    fs::write(source_dir.join("mem.hex"), "3c\nc3\n").unwrap();
     let bytes = fs::read(executable).unwrap();
     let mut runtime = trusted_attached_instance(&bytes);
     runtime.eval_comb().unwrap();
     let output = runtime.signal_ref("Top.y").unwrap();
-    assert_eq!(runtime.backend().get_as::<u8>(output), 0xa5);
+    assert_eq!(runtime.backend().get_as::<u8>(output), 0x3c);
+    assert!(runtime.drain_runtime_events().is_empty());
 }
 
 #[test]

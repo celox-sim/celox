@@ -31,6 +31,7 @@ mod inline_calls;
 mod kernel;
 mod locators;
 mod loops;
+mod memory_files;
 mod monitors;
 mod nba_stage;
 mod nonblocking;

@@ -226,9 +226,20 @@ impl NativeSimulatorHandle {
         waveform: Option<(&str, celox::WaveformFormat)>,
     ) -> Result<Self> {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        let backend = HandleBackend::Default(celox::NativeBackend::from_shared(Arc::clone(
-            &cached.shared_code,
-        )));
+        let backend = {
+            let mut backend = celox::NativeBackend::from_shared(Arc::clone(&cached.shared_code));
+            // Each instance reads the memory files of its initial state (IEEE
+            // 1800-2023 21.4). A handle has no runtime event for their
+            // messages, which are traced.
+            for report in backend.load_initial_memory_files() {
+                if report.severity == celox::Severity::Warning {
+                    tracing::warn!("{}", report.message);
+                } else {
+                    tracing::error!("{}", report.message);
+                }
+            }
+            HandleBackend::Default(backend)
+        };
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let backend = HandleBackend::Default(celox::JitBackend::from_shared(Arc::clone(
             &cached.shared_code,

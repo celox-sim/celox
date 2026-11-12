@@ -19,7 +19,16 @@ impl Comb<'_, '_> {
     ) -> Result<(Vec<InitialStateValue<SourceVarId>>, Store), sv::AnalyzerError> {
         self.initial = true;
         self.allow_nonblocking = true;
+        self.initial_seed = seed.fork();
         let store = self.exec_block(seed.fork(), &[], body)?;
+        // The memory files the block loads, in order, before the values it
+        // writes after them; the words they load are not written again.
+        let loads = std::mem::take(&mut self.memory_loads);
+        let loaded = |id: SourceVarId, node: NodeId| {
+            loads
+                .iter()
+                .any(|(load_id, _, loaded)| *load_id == id && *loaded == Some(node))
+        };
         // A value is unchanged when the seed holds the same node at the same
         // origin over its bits.
         let unchanged = |id: SourceVarId, lsb: usize, width: usize, node: NodeId, origin: usize| {
@@ -43,7 +52,13 @@ impl Comb<'_, '_> {
             .filter(|id| !self.m.is_hidden(*id))
             .collect();
         ids.sort_by_key(|id| id.0);
-        let mut values = Vec::new();
+        let mut values: Vec<_> = loads
+            .iter()
+            .map(|(id, data, _)| InitialStateValue {
+                address: *id,
+                data: data.clone(),
+            })
+            .collect();
         for id in ids {
             let Some(range) = store.get(&id) else {
                 continue;
@@ -51,7 +66,7 @@ impl Comb<'_, '_> {
             let mut runs = Vec::new();
             for (&lsb, (value, width, origin)) in &range.ranges {
                 let Some((node, _)) = value else { continue };
-                if unchanged(id, lsb, *width, *node, *origin) {
+                if unchanged(id, lsb, *width, *node, *origin) || loaded(id, *node) {
                     continue;
                 }
                 let (value, mask, _) =

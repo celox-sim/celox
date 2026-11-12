@@ -52,15 +52,6 @@ pub enum FrontendWarningKind {
     /// Aggregate defaults are a compatibility extension to IEEE 1800-2023 23.2.2.4.
     #[error("default value on unpacked input port `{module}.{port}` is a language extension")]
     UnpackedPortDefault { module: String, port: String },
-    /// A memory file without address directives holds a different number of
-    /// words than the address range of `$readmemh`/`$readmemb`
-    /// (IEEE 1800-2023 21.4).
-    #[error("`{task}` reading {file}: {detail}")]
-    MemoryFileWordCount {
-        task: String,
-        file: String,
-        detail: String,
-    },
     /// `$exit` outside a thread of a program's `initial` procedure, which
     /// IEEE 1800-2023 24.7 ignores.
     #[error("`$exit` outside a program block is ignored")]
@@ -186,7 +177,6 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::MultipleAlwaysFfDrivers { .. } => "multiple_always_ff_drivers",
             FrontendWarningKind::UnpackedPortDefault { .. } => "unpacked_port_default",
             FrontendWarningKind::InferredLatch => "inferred_latch",
-            FrontendWarningKind::MemoryFileWordCount { .. } => "memory_file_word_count",
             FrontendWarningKind::ExitOutsideProgram => "exit_outside_program",
             FrontendWarningKind::SharedAlwaysTemporary { .. } => "shared_always_temporary",
         }))
@@ -215,9 +205,6 @@ impl miette::Diagnostic for FrontendWarning {
             }
             FrontendWarningKind::UnpackedPortDefault { .. } => {
                 "IEEE 1800-2023 23.2.2.4 permits defaults on singular input ports; use unpacked_port_default=warn or allow to enable aggregate defaults"
-            }
-            FrontendWarningKind::MemoryFileWordCount { .. } => {
-                "give one word per address of the range, or place the words with `@address` directives"
             }
             FrontendWarningKind::ExitOutsideProgram => {
                 "end the simulation with `$finish`, or remove the call"

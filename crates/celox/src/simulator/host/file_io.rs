@@ -51,22 +51,24 @@ impl<B: SimBackend> Simulator<B> {
     /// `%m` of its host requests prints.
     pub(super) fn process_scope(&self, process: usize) -> Option<String> {
         let process = &self.program.runtime_schema.processes[process];
-        self.program
-            .design
-            .instance(process.status.instance_id)
-            .map(|instance| {
-                let top = self
-                    .program
-                    .design
-                    .root_instance()
-                    .map(|root| root.module_name.as_str())
-                    .unwrap_or("");
-                std::iter::once(top)
-                    .chain(instance.display_path.iter().map(String::as_str))
-                    .filter(|part| !part.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(".")
-            })
+        self.instance_scope(process.status.instance_id)
+    }
+
+    /// The hierarchical name of instance `instance`, as `%m` prints it.
+    pub(super) fn instance_scope(&self, instance: celox_design::InstanceId) -> Option<String> {
+        self.program.design.instance(instance).map(|instance| {
+            let top = self
+                .program
+                .design
+                .root_instance()
+                .map(|root| root.module_name.as_str())
+                .unwrap_or("");
+            std::iter::once(top)
+                .chain(instance.display_path.iter().map(String::as_str))
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(".")
+        })
     }
 
     /// Read bytes through the descriptor manager so EOF and pushback retain
@@ -376,130 +378,6 @@ impl<B: SimBackend> Simulator<B> {
                         }),
                     )
                     .map_err(|err| error(format!("$writemem: {err}")))?;
-            }
-            21 | 22 => {
-                let task = if site.operation == 22 {
-                    "$readmemb"
-                } else {
-                    "$readmemh"
-                };
-                let path = string(0)?;
-                let metadata = |index: usize| -> Result<i128, Halt> {
-                    site.strings[index]
-                        .parse()
-                        .map_err(|_| error("invalid memory metadata".into()))
-                };
-                let (left, right) = (metadata(0)?, metadata(1)?);
-                let width = usize::try_from(metadata(2)?)
-                    .map_err(|_| error("invalid memory metadata".into()))?;
-                let address = |index: usize| -> Result<i128, Halt> {
-                    let (value, mask) = &values[index];
-                    if *mask != BigUint::default() {
-                        return Err(error(format!("{task} address contains X or Z")));
-                    }
-                    let mut value = num_bigint::BigInt::from(value.clone());
-                    let arg = &site.args[index];
-                    if arg.signed && arg.width > 0 && value.bit(arg.width as u64 - 1) {
-                        value -= num_bigint::BigInt::from(1u8) << arg.width;
-                    }
-                    value
-                        .try_into()
-                        .map_err(|_| error(format!("{task} address exceeds supported range")))
-                };
-                let (low, high) = (left.min(right), left.max(right));
-                let start = if site.args.len() > 1 {
-                    address(1)?
-                } else {
-                    low
-                };
-                let finish = if site.args.len() > 2 {
-                    address(2)?
-                } else {
-                    high
-                };
-                if start < low || start > high || finish < low || finish > high {
-                    return Err(error(format!(
-                        "{task}: address range [{start}:{finish}] is outside the destination range [{low}:{high}]"
-                    )));
-                }
-                let content = std::fs::read_to_string(&path)
-                    .map_err(|err| error(format!("{task}: failed to read {path}: {err}")))?;
-                let parsed = celox_frontend_core::memory_file::parse_memory_range(
-                    &content,
-                    if site.operation == 22 { 2 } else { 16 },
-                    width,
-                    start,
-                    finish,
-                )
-                .map_err(|err| error(format!("{task}: {}", err.message)))?;
-                // The words the file gives replace those of the copy of the
-                // memory, which keeps the others.
-                let target = site.results[0].id;
-                let (data, unknown) = self.backend.get_four_state(target);
-                let bytes = target.width.div_ceil(8);
-                let mut data = data.to_bytes_le();
-                let mut unknown = unknown.to_bytes_le();
-                data.resize(bytes, 0);
-                unknown.resize(bytes, 0);
-                let bit = |bytes: &[u8], index: usize| {
-                    bytes
-                        .get(index / 8)
-                        .is_some_and(|byte| byte >> (index % 8) & 1 != 0)
-                };
-                let set = |bytes: &mut [u8], index: usize, value: bool| {
-                    let flag = 1u8 << (index % 8);
-                    if value {
-                        bytes[index / 8] |= flag;
-                    } else {
-                        bytes[index / 8] &= !flag;
-                    }
-                };
-                for run in &parsed.writes.runs {
-                    for word in 0..run.bit_width / width {
-                        // Run offsets count from the lowest address read.
-                        let index = start.min(finish) + (run.bit_offset / width + word) as i128;
-                        let base = index.abs_diff(left) as usize * width;
-                        for offset in 0..width {
-                            let source = word * width + offset;
-                            set(&mut data, base + offset, bit(&run.value_bytes, source));
-                            set(&mut unknown, base + offset, bit(&run.mask_bytes, source));
-                        }
-                    }
-                }
-                let data = BigUint::from_bytes_le(&data);
-                let unknown = BigUint::from_bytes_le(&unknown);
-                if self.backend.layout().four_state && target.is_4state {
-                    self.backend.set_four_state(target, data, unknown);
-                } else {
-                    let whole = (BigUint::from(1u8) << target.width) - BigUint::from(1u8);
-                    self.backend.set_wide(target, data & (whole ^ unknown));
-                }
-                // IEEE 1800-2023 21.4: a file without addresses that holds
-                // another number of words than the range is read with a
-                // warning.
-                if let Some(detail) = parsed.warning {
-                    let message = format!("{task} reading {path}: {detail}").replace('%', "%%");
-                    let scope = self.process_scope(site.process.index());
-                    self.queue_host_runtime_event(
-                        RuntimeEventSite {
-                            kind: RuntimeEventKind::Report(Severity::Warning),
-                            template: Some(message),
-                            sizing: DisplaySizing::Ieee,
-                            scope,
-                            location: None,
-                            assertion: None,
-                            deferred: None,
-                            timestamp_arg: false,
-                            time_format_arg: false,
-                            arg_widths: Vec::new(),
-                            arg_signed: Vec::new(),
-                            arg_is_string: Vec::new(),
-                            arg_float_precision: Vec::new(),
-                            arg_is_handle: Vec::new(),
-                        },
-                        Vec::new(),
-                    );
-                }
             }
             _ => return Err(error("unknown file I/O request".into())),
         }

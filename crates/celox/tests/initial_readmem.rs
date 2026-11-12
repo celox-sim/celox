@@ -295,3 +295,91 @@ fn test_initial_readmemh_applies_to_shared_native_simulator() {
     assert_eq!(sim.get(sim.signal("out0")), BigUint::from(0xcau32));
     assert_eq!(sim.get(sim.signal("out1")), BigUint::from(0xfeu32));
 }
+
+/// The file of an `initial` load is read when each simulator instance
+/// starts, not when the design is compiled (IEEE 1800-2023 21.4): an
+/// instance of compiled code sees the file as it is then, and one whose file
+/// is missing reports an error and starts with the memory unloaded.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn test_initial_readmemh_reads_the_file_when_each_instance_starts() {
+    let mem_path = temp_mem_file("readmemh_each_instance", "ca\nfe\n");
+    let code = format!(
+        r#"
+            module Top (out0: output logic<8>, out1: output logic<8>) {{
+                #[allow(initial_assign)]
+                var mem: logic<8>[2];
+                initial {{
+                    $readmemh("{}", mem);
+                }}
+                assign out0 = mem[0];
+                assign out1 = mem[1];
+            }}
+        "#,
+        mem_path
+    );
+    let sim = Simulator::builder(&code, "Top").build_native().unwrap();
+    let shared = sim.shared_code();
+    let instance = || {
+        let (program, _) = celox::compile_to_sir(
+            &[(&code, std::path::Path::new(""))],
+            "Top",
+            &[],
+            &[],
+            false,
+            &celox::TraceOptions::default(),
+            None,
+            None,
+            None,
+            None,
+            &[],
+            &celox::OptimizeOptions::default(),
+        )
+        .unwrap();
+        Simulator::from_shared(shared.clone(), program)
+    };
+    let path = mem_path.replace("\\\\", "\\");
+    std::fs::write(&path, "12\n34\n").unwrap();
+    let mut sim = instance();
+    assert_eq!(sim.get(sim.signal("out0")), BigUint::from(0x12u32));
+    assert_eq!(sim.get(sim.signal("out1")), BigUint::from(0x34u32));
+    assert!(sim.drain_runtime_events().is_empty());
+
+    std::fs::remove_file(&path).unwrap();
+    let mut sim = instance();
+    assert_eq!(sim.get(sim.signal("out0")), BigUint::from(0u32));
+    let events = sim.drain_runtime_events();
+    assert!(
+        matches!(&events[..], [celox::RuntimeEvent::Report(report)]
+            if report.severity == celox::Severity::Error
+                && String::from_utf8_lossy(&report.message).contains("failed to read")),
+        "{events:?}"
+    );
+}
+
+/// A relative file name is looked up next to the source file of the call
+/// first, when the load runs.
+#[test]
+fn test_initial_readmemh_reads_a_relative_file_next_to_its_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_dir = dir.path().join("src");
+    std::fs::create_dir(&source_dir).unwrap();
+    std::fs::write(source_dir.join("words.hex"), "5a\na5\n").unwrap();
+    let code = r#"
+        module Top (out0: output logic<8>, out1: output logic<8>) {
+            #[allow(initial_assign)]
+            var mem: logic<8>[2];
+            initial {
+                $readmemh("words.hex", mem);
+            }
+            assign out0 = mem[0];
+            assign out1 = mem[1];
+        }
+    "#;
+    let source = source_dir.join("top.veryl");
+    let mut sim = Simulator::from_sources(vec![(code, source.as_path())], "Top")
+        .build()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("out0")), BigUint::from(0x5au32));
+    assert_eq!(sim.get(sim.signal("out1")), BigUint::from(0xa5u32));
+}

@@ -41,6 +41,10 @@ impl<B: SimBackend> Simulator<B> {
                     }
                 }
                 InitialStateData::Writes(runs) => self.apply_initial_memory_writes(signal, runs),
+                InitialStateData::MemoryFile(load) => {
+                    let runs = self.initial_memory_file(record.address, load);
+                    self.apply_initial_memory_writes(signal, &runs);
+                }
             }
         }
         self.dirty |= !records.is_empty();

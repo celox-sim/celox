@@ -621,12 +621,14 @@ version = "0.13.0"
 dependencies = [
  "celox-design",
  "celox-frontend-sdk",
+ "celox-heap",
  "celox-sir",
  "celox-slt",
  "fxhash",
  "miette",
  "num-bigint",
  "serde",
+ "serde_json",
  "thiserror",
  "tracing",
 ]
@@ -728,6 +730,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
+ "tracing",
  "veryl-analyzer",
  "veryl-metadata",
  "veryl-parser",

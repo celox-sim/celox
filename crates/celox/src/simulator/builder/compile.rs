@@ -6,7 +6,6 @@ use super::*;
 ///
 /// This is the shared compilation pipeline used by all backends.
 /// Returns verified optimized SIR and any compilation warnings on success.
-/// Use [`compile_to_sir_with_file_dependencies`] to collect external file lookups.
 pub fn compile_to_sir(
     sources: &[(&str, &Path)],
     top: &str,
@@ -28,50 +27,6 @@ pub fn compile_to_sir(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
-    compile_to_sir_with_file_dependencies(
-        sources,
-        top,
-        ignored_loops,
-        true_loops,
-        four_state,
-        trace_opts,
-        trace_out,
-        metadata,
-        clock_type,
-        reset_type,
-        param_overrides,
-        optimize_options,
-        &Default::default(),
-    )
-}
-
-/// Compile to SIR while recording external file lookups in the supplied collector.
-///
-/// Pass the collector supplied by `celox_frontend_veryl::capture_file_dependencies`
-/// to retain readmem lookup paths for cache invalidation. Source files must be
-/// tracked separately.
-pub fn compile_to_sir_with_file_dependencies(
-    sources: &[(&str, &Path)],
-    top: &str,
-    ignored_loops: &[(
-        (Vec<(String, usize)>, Vec<String>),
-        (Vec<(String, usize)>, Vec<String>),
-    )],
-    true_loops: &[(
-        (Vec<(String, usize)>, Vec<String>),
-        (Vec<(String, usize)>, Vec<String>),
-        usize,
-    )],
-    four_state: bool,
-    trace_opts: &crate::debug::TraceOptions,
-    trace_out: Option<&mut crate::debug::CompilationTrace>,
-    metadata: Option<Metadata>,
-    clock_type: Option<ClockType>,
-    reset_type: Option<ResetType>,
-    param_overrides: &[(String, u64)],
-    optimize_options: &crate::optimizer::OptimizeOptions,
-    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
-) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     compile_to_sir_with_latch_policy(
         sources,
         top,
@@ -86,11 +41,10 @@ pub fn compile_to_sir_with_file_dependencies(
         param_overrides,
         optimize_options,
         false,
-        file_dependencies,
     )
 }
 
-/// Compile Veryl with an explicit inferred-latch policy and file lookup collector.
+/// Compile Veryl with an explicit inferred-latch policy.
 ///
 /// The default compilation APIs reject inferred latches. Pass `true` here to
 /// allow them, or use `SimulatorBuilder::allow_inferred_latches` on host targets.
@@ -115,7 +69,6 @@ pub fn compile_to_sir_with_latch_policy(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     allow_inferred_latches: bool,
-    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     compile_to_sir_with_diagnostic_policy(
         sources,
@@ -131,7 +84,6 @@ pub fn compile_to_sir_with_latch_policy(
         param_overrides,
         optimize_options,
         &crate::DiagnosticPolicy::default().with_inferred_latches(allow_inferred_latches),
-        file_dependencies,
     )
 }
 
@@ -157,7 +109,6 @@ pub fn compile_to_sir_with_diagnostic_policy(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostic_policy: &crate::DiagnosticPolicy,
-    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let result = compile_to_sir_with_layout_mode(
         sources,
@@ -181,7 +132,6 @@ pub fn compile_to_sir_with_diagnostic_policy(
         true,
         false,
         true,
-        file_dependencies,
     );
     let (program, mut warnings) =
         result.map_err(|error| error.apply_diagnostic_policy(diagnostic_policy))?;
@@ -304,7 +254,6 @@ pub(super) fn compile_frontend_testbench_to_sir_with_layout_mode(
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
     allow_inferred_latches: bool,
-    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     // The testbench drives time itself and never resumes process kernels.
     if !artifact.processes().is_empty() {
@@ -340,7 +289,6 @@ pub(super) fn compile_frontend_testbench_to_sir_with_layout_mode(
         recover_comb_loops,
         allow_always_ff_function_effects,
         allow_inferred_latches,
-        file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -403,7 +351,6 @@ pub(super) fn compile_to_sir_with_layout_mode(
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
     allow_inferred_latches: bool,
-    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics, elaboration_warnings) = analyze(
         sources,
@@ -429,7 +376,6 @@ pub(super) fn compile_to_sir_with_layout_mode(
         recover_comb_loops,
         allow_always_ff_function_effects,
         allow_inferred_latches,
-        file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -604,7 +550,6 @@ pub(super) fn compile_sv_to_sir_with_layout_mode(
 
 /// Compile a mixed Veryl/SystemVerilog hierarchy to optimized SIR.
 /// Either language may supply the top or instantiate the other language.
-/// Use [`compile_mixed_to_sir_with_file_dependencies`] to collect external file lookups.
 #[allow(clippy::too_many_arguments)]
 pub fn compile_mixed_to_sir(
     sources: &[(&str, &Path)],
@@ -627,52 +572,6 @@ pub fn compile_mixed_to_sir(
     reset_type: Option<ResetType>,
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
-) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
-    compile_mixed_to_sir_with_file_dependencies(
-        sources,
-        sv_sources,
-        top,
-        ignored_loops,
-        true_loops,
-        four_state,
-        trace_opts,
-        trace_out,
-        metadata,
-        clock_type,
-        reset_type,
-        param_overrides,
-        optimize_options,
-        &Default::default(),
-    )
-}
-
-/// Compile to SIR while recording external file lookups in the supplied collector.
-///
-/// Pass the collector supplied by `celox_frontend_veryl::capture_file_dependencies`
-/// to retain readmem lookup paths for cache invalidation. Source files must be
-/// tracked separately.
-pub fn compile_mixed_to_sir_with_file_dependencies(
-    sources: &[(&str, &Path)],
-    sv_sources: &[(&str, &Path)],
-    top: &str,
-    ignored_loops: &[(
-        (Vec<(String, usize)>, Vec<String>),
-        (Vec<(String, usize)>, Vec<String>),
-    )],
-    true_loops: &[(
-        (Vec<(String, usize)>, Vec<String>),
-        (Vec<(String, usize)>, Vec<String>),
-        usize,
-    )],
-    four_state: bool,
-    trace_opts: &crate::debug::TraceOptions,
-    trace_out: Option<&mut crate::debug::CompilationTrace>,
-    metadata: Option<Metadata>,
-    clock_type: Option<ClockType>,
-    reset_type: Option<ResetType>,
-    param_overrides: &[(String, u64)],
-    optimize_options: &crate::optimizer::OptimizeOptions,
-    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let result = compile_mixed_to_sir_with_layout_mode(
         sources,
@@ -697,7 +596,6 @@ pub fn compile_mixed_to_sir_with_file_dependencies(
         true,
         false,
         false,
-        file_dependencies,
     );
     let policy = crate::DiagnosticPolicy::default();
     let (program, mut warnings) = result.map_err(|error| error.apply_diagnostic_policy(&policy))?;
@@ -736,7 +634,6 @@ pub(super) fn compile_mixed_to_sir_with_layout_mode(
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
     allow_inferred_latches: bool,
-    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics, elaboration_warnings) = analyze(
         sources,
@@ -762,7 +659,6 @@ pub(super) fn compile_mixed_to_sir_with_layout_mode(
         recover_comb_loops,
         allow_always_ff_function_effects,
         allow_inferred_latches,
-        file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -846,7 +742,6 @@ pub(super) fn compile_hdl_to_sir_with_layout_mode(
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
     allow_inferred_latches: bool,
-    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
     force_signals: &[String],
     sv_param_literals: &[(String, String)],
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
@@ -885,7 +780,6 @@ pub(super) fn compile_hdl_to_sir_with_layout_mode(
             recover_comb_loops,
             allow_always_ff_function_effects,
             allow_inferred_latches,
-            file_dependencies,
         ),
         (true, false) => compile_sv_to_sir_with_layout_mode(
             sv_sources,
@@ -932,7 +826,6 @@ pub(super) fn compile_hdl_to_sir_with_layout_mode(
             recover_comb_loops,
             allow_always_ff_function_effects,
             allow_inferred_latches,
-            file_dependencies,
         ),
     }
 }

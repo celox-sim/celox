@@ -1,6 +1,5 @@
 use std::collections::hash_map::Entry;
 
-use celox_design::InitialStateData;
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ForRange, HierVarRef, Statement, SystemFunctionKind, SystemFunctionOutput,
@@ -45,19 +44,11 @@ fn prepare_statements(
                         continue;
                     };
                     let instance = source.base_instance(lookup);
-                    let (address, width, data) = read_hierarchical_memory(
-                        filename,
-                        reference,
-                        lookup,
-                        instance,
-                        &source.file_dependencies,
-                    )?;
-                    let InitialStateData::Writes(writes) = data else {
-                        unreachable!("read_memory_file always returns write runs");
-                    };
+                    let (address, width, load) =
+                        hierarchical_memory_load(filename, reference, lookup, instance)?;
                     entry.insert(celox_testbench::TestbenchStatement::WriteMemory {
                         signal: celox_testbench::SemanticSignal { address, width },
-                        writes,
+                        load,
                     });
                 }
                 SystemFunctionKind::Finish => break,
@@ -142,13 +133,14 @@ fn statically_empty_range(range: &ForRange) -> bool {
     }
 }
 
-fn read_hierarchical_memory(
+/// The load of `$readmemh(filename, reference)`, whose file is read when the
+/// statement executes (IEEE 1800-2023 21.4).
+fn hierarchical_memory_load(
     filename: &veryl_analyzer::ir::SystemFunctionInput,
     reference: &HierVarRef,
     lookup: &crate::FrontendLookup,
     instance_id: celox_design::InstanceId,
-    dependencies: &crate::FileDependencyCollector,
-) -> Result<(celox_design::StateAddr, usize, InitialStateData), ParserError> {
+) -> Result<(celox_design::StateAddr, usize, celox_design::MemoryFileLoad), ParserError> {
     let (address, info) =
         super::testbench::resolve_hierarchical_reference_from(lookup, instance_id, reference)?;
     let depth = info
@@ -176,14 +168,6 @@ fn read_hierarchical_memory(
     if info.width == 0 || !info.width.is_multiple_of(depth) {
         return Err(invalid("destination element width could not be resolved"));
     }
-    let data = super::module::read_memory_file(
-        dependencies,
-        filename,
-        16,
-        info.width / depth,
-        0,
-        depth,
-        &reference.comptime.token,
-    )?;
-    Ok((address, info.width, data))
+    let load = super::module::memory_file_load(filename, 16, info.width / depth, 0, depth)?;
+    Ok((address, info.width, load))
 }

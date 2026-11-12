@@ -140,8 +140,7 @@ cocotb から fs 単位のクロックを駆動できます。明示された `t
 [diagnostics]
 mixed_timescale = "warn"
 inferred_latch = "warn"
-exit_outside_program = "allow"
-memory_file_word_count = "error"
+exit_outside_program = "error"
 ```
 
 `allow` は診断を抑制し、`warn` は警告を残してコンパイルを続行し、`error` はコンパイルを失敗させます。指定しない診断は既定のレベルを維持します。既存の Veryl・SystemVerilog の警告にも適用できます。診断に表示されたコードをそのまま指定してください。そのコンパイルで発生しないコードの設定は影響しません。

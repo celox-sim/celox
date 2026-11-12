@@ -31,6 +31,9 @@ pub(super) struct Writes {
     pub(super) nonblocking: HashSet<SourceVarId>,
     /// The bits whose working value is the process result.
     pub(super) targets: Vec<(SourceVarId, BitAccess)>,
+    /// The words `$readmemh`/`$readmemb` calls may load, which the process
+    /// assigns by the call although the file gives only some of them.
+    pub(super) memory_loads: Vec<(SourceVarId, BitAccess)>,
 }
 
 impl Ff<'_, '_> {

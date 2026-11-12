@@ -68,6 +68,11 @@ fn test_always_ff_readmemh_reloads_named_locations(sim) {
     assert_eq!(sim.get(out0), BigUint::from(0x12u32));
     assert_eq!(sim.get(out1), BigUint::from(0xa5u32));
     assert_eq!(sim.get(out2), BigUint::from(0x56u32));
+    // The file is read as the statement executes, at each edge.
+    std::fs::write(mem_path.replace("\\\\", "\\"), "9a\n").unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out0), BigUint::from(0x9au32));
+    assert_eq!(sim.get(out2), BigUint::from(0x56u32));
 }
 
 fn test_always_comb_readmemh_drives_file_contents(sim) {
@@ -152,4 +157,33 @@ fn test_design_finish_is_reported_from_every_block_kind() {
     sim.modify(|io| io.set(a, 0xfeu8)).unwrap();
     sim.tick(clk).unwrap();
     assert!(finish_events(&mut sim) > 0);
+}
+
+/// A combinational block that reads a signal runs again whenever it
+/// changes, and a `$readmemh` in it would read its file each time; it must
+/// load in a clocked or `initial` block instead.
+#[test]
+fn always_comb_readmemh_that_reads_a_signal_is_rejected() {
+    let mem_path = temp_mem_file("comb_readmemh_input", "12\n");
+    let code = format!(
+        r#"
+            module Top (
+                i: input logic<8>,
+                q: output logic<8>,
+                r: output logic<8>,
+            ) {{
+                var mem: logic<8>[2];
+                always_comb {{
+                    $readmemh("{mem_path}", mem);
+                    r = i;
+                }}
+                assign q = mem[1];
+            }}
+        "#
+    );
+    let error = Simulator::builder(&code, "Top").build().unwrap_err();
+    assert!(
+        error.to_string().contains("must not read signals"),
+        "{error}"
+    );
 }

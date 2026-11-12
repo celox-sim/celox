@@ -406,6 +406,82 @@ pub enum InitialStateData {
         written_mask: BigUint,
     },
     Writes(Vec<InitialStateWriteRun>),
+    /// The words of a memory file, read when a simulator instance starts:
+    /// an `initial` `$readmemh` or `$readmemb` that runs at time zero
+    /// (IEEE 1800-2023 21.4).
+    MemoryFile(MemoryFileLoad),
+}
+
+/// A load of a memory file into an unpacked array by `$readmemh` or
+/// `$readmemb` (IEEE 1800-2023 21.4), whose file is read when the load runs.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MemoryFileLoad {
+    /// The digits of the file's words: 16 for `$readmemh`, 2 for
+    /// `$readmemb`.
+    pub radix: u32,
+    /// The file name as the call gives it.
+    pub file: String,
+    /// The directory a relative `file` is looked up in before the working
+    /// directory, such as that of the source file of the call.
+    pub base: Option<String>,
+    /// The width of a word of the memory.
+    pub element_width: usize,
+    pub addressing: MemoryFileAddressing,
+    /// The call, for the messages of the load.
+    pub location: Option<ReportLocation>,
+}
+
+impl MemoryFileLoad {
+    /// The lowest and the highest bit of the destination the load may
+    /// write: those of the words of its range.
+    pub fn written_bits(&self) -> Option<(usize, usize)> {
+        let width = self.element_width;
+        let (first, last) = match self.addressing {
+            MemoryFileAddressing::Range {
+                left,
+                start,
+                finish,
+                ..
+            } => {
+                let (a, b) = (start.abs_diff(left), finish.abs_diff(left));
+                (
+                    usize::try_from(a.min(b)).ok()?,
+                    usize::try_from(a.max(b)).ok()?,
+                )
+            }
+            MemoryFileAddressing::Offset { start, depth } => (start, depth.checked_sub(1)?),
+        };
+        if width == 0 || first > last {
+            return None;
+        }
+        Some((first * width, (last + 1) * width - 1))
+    }
+
+    /// The task, for messages.
+    pub fn task(&self) -> &'static str {
+        if self.radix == 2 {
+            "$readmemb"
+        } else {
+            "$readmemh"
+        }
+    }
+}
+
+/// Which words of the memory a [`MemoryFileLoad`] writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MemoryFileAddressing {
+    /// The addresses of an array declared `[left:right]`, loaded from
+    /// `start` toward `finish`; an address in the file is an index of the
+    /// array, which must lie between the two.
+    Range {
+        left: i128,
+        right: i128,
+        start: i128,
+        finish: i128,
+    },
+    /// The words from position `start` of a `depth`-word array; an address
+    /// in the file counts from `start` (Veryl).
+    Offset { start: usize, depth: usize },
 }
 
 impl InitialStateData {
