@@ -5569,3 +5569,89 @@ endmodule
     let built = simulate(&omits, false, false, "interpreter", 0, &["f"]);
     assert!(built.is_err(), "{built:?}");
 }
+
+#[test]
+fn deferred_assertions_of_units_wait_in_the_queue_of_their_process() {
+    // A recursive function goes out of line; the actions of its deferred
+    // assertions wait in the queue of the process that calls it and mature
+    // as those of the looped reference, inlined, do (IEEE 1800-2023
+    // 16.4.1). The assertions keep their lines.
+    let recursive = r#"`timescale 1ns/1ns
+module Top(output int r);
+    function automatic int count(int n);
+        if (n == 0) return 0;
+        assert #0 (n != 2) else $error("deep %0d", n);
+        assert final (n != 3) else $warning("top %0d", n);
+        return count(n - 1) + 1;
+    endfunction
+    int k = 3;
+    initial begin
+        r = count(k);
+        #1 r = count(k - 1);
+    end
+endmodule
+"#;
+    let looped = recursive
+        .replace("int count(int n);", "int count(int n0);")
+        .replace(
+            "        if (n == 0) return 0;",
+            "        for (int n = n0; n > 0; n--) begin",
+        )
+        .replace("$warning(\"top %0d\", n);", "$warning(\"top %0d\", n); end")
+        .replace("return count(n - 1) + 1;", "return n0;");
+    assert_ne!(looped, recursive);
+    assert_eq!(function_units(recursive, false), 1, "function units");
+    for four_state in [false, true] {
+        let expected = simulate_run(&looped, four_state, false, "interpreter", 2, &["r"])
+            .expect("the looped design runs");
+        assert!(!expected.1.is_empty(), "the looped design reports");
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(recursive, four_state, false, backend, 2, &["r"]),
+                Ok(expected.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn flush_points_of_a_process_discard_the_deferred_actions_of_its_units() {
+    // The unit queues a `$fatal` in the queue of the process; the resume
+    // from the event control comes before the Observed region, a flush
+    // point of the process, which discards it (IEEE 1800-2023 16.4.2).
+    // Without the wait it matures.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit sig;
+    function automatic int count(int n);
+        if (n == 0) return 0;
+        assert #0 (n != 2) else $fatal(1, "not flushed");
+        return count(n - 1) + 1;
+    endfunction
+    initial begin
+        void'(count(3));
+        @(posedge sig);
+        done = 1;
+    end
+    initial #0 sig = 1;
+endmodule
+"#;
+    let matured = source.replace("        @(posedge sig);\n", "");
+    assert_ne!(matured, source);
+    assert_eq!(function_units(source, false), 1, "function units");
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, false, backend, 5, &["done"]),
+                Ok(vec![value(1)]),
+                "{backend}, four-state {four_state}"
+            );
+            assert_eq!(
+                simulate(&matured, four_state, false, backend, 5, &["done"]),
+                Err("not flushed".to_string()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}

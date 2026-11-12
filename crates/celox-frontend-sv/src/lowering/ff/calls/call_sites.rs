@@ -36,6 +36,19 @@ impl Ff<'_, '_> {
             );
             return Ok(None);
         }
+        // The action of a deferred assertion of a unit waits in the queue of
+        // the process the unit runs in (IEEE 1800-2023 16.4.1): a kernel, or
+        // a unit only kernels run; elsewhere the body is inlined, its action
+        // in the queue of the process that inlines it.
+        if self.kernel.is_none() && self.frame.is_none() && self.m.process_state(name).deferred {
+            self.record_outcome(
+                name,
+                Outcome::Inlined(Reason::Other(
+                    "deferred assertion outside a process".to_string(),
+                )),
+            );
+            return Ok(None);
+        }
         // A level wait's predicate observes the events whose `triggered` it
         // reads, which the inlined body tells the host (see
         // `ProcessState::observes_events`).
