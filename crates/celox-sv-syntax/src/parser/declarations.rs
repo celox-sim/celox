@@ -1246,6 +1246,9 @@ impl Parser<'_> {
                     if category == "nettype" {
                         self.record_nettype(start);
                     }
+                    if category == "let" {
+                        self.record_let(start)?;
+                    }
                     frame.builder.complete(
                         self,
                         start,

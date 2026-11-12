@@ -80,6 +80,10 @@ constructs without a dedicated issue point to the frontend roadmap,
   ([#1146](https://github.com/celox-sim/celox/issues/1146)); a package
   variable cannot be a clock or reset.
 - Compilation units: only one source file may declare `$unit` variables.
+- `let` declarations (11.12) only among the items of a module, interface or
+  program, where each call is expanded; one in a package, a generate block
+  or a procedural block is rejected, and so is a call in a scope that
+  declares a name of the body again.
 
 ### Interfaces {#interface-restrictions}
 

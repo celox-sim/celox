@@ -2373,3 +2373,40 @@ endmodule
   (top Top) (run_until 0)
   (assert_eq low 0) (assert_eq odd 1) (assert_eq picked 1) (assert_eq was_rand 1)
   (assert_eq now_fixed 1))
+
+; A `let` declaration is expanded where it is called (IEEE 1800-2023 11.12):
+; positional, named and default arguments, a formal's type casts its
+; actual, a `let` without arguments, one that calls another, and one in a
+; continuous assignment. A formal is replaced inside a type operator, and
+; a generate loop index of the body's name hides it only in the loop.
+(case let_declarations
+  (source "lets.sv" #"
+module Top(output int checks, output logic w);
+    logic [3:0] a = 12, b = 15, c = 7;
+    let op(x, y, z) = |((x | y) & z);
+    let sum(x, y = 4'd3) = x + y;
+    let narrow(bit [1:0] v) = v;
+    let all_ones = &b;
+    let twice(x) = sum(x, x);
+    logic [7:0] wide = 8'h5a;
+    let is_byte(x) = type(x) == type(logic [7:0]);
+    localparam int i = 3;
+    let three = i;
+    for (genvar i = 0; i < 2; i++) begin : g
+    end
+    assign w = op(a, b, c) & all_ones;
+    initial begin
+        #1;
+        checks = 0;
+        checks += (op(.x(a), .y(b), .z(c)) == 1) * 1;
+        checks += (op(.z(4'd0), .x(a), .y(b)) == 0) * 2;
+        checks += (sum(a) == 15 && sum(.y(4'd1), .x(c)) == 8) * 4;
+        checks += (narrow(a) == 0 && narrow(4'd7) == 3) * 8;
+        checks += (all_ones == 1 && w == 1) * 16;
+        checks += (twice(c) == 14) * 32;
+        checks += (is_byte(wide) && !is_byte(a)) * 64;
+        checks += (three == 3) * 128;
+    end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq checks 255))
