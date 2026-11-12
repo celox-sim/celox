@@ -19,6 +19,7 @@ mod writes;
 
 use super::*;
 use num_traits::{ToPrimitive, Zero};
+use std::sync::Arc;
 
 pub(super) use calls::*;
 pub(super) use expr_types::*;
@@ -51,7 +52,7 @@ pub(super) struct ProcModule<'a> {
     pub next_id: SourceVarId,
     pub constants: &'a HashMap<String, i128>,
     pub parameter_types: &'a HashMap<String, (usize, bool)>,
-    pub subroutines: HashMap<String, sv::ir::Subroutine>,
+    pub subroutines: Arc<HashMap<String, sv::ir::Subroutine>>,
     pub constant_functions: sv::RuntimeConstantFunctions<'a>,
     /// DPI-C imports of the module, by SystemVerilog name.
     pub dpi_imports: HashMap<String, sv::ir::DpiImport>,
@@ -134,9 +135,35 @@ pub(super) struct FunctionSites {
     pub flush: Option<u32>,
 }
 
+/// What every lowering of a module reads of its subroutines, made once for
+/// the module: its subroutines by name, and the functions a lowering may
+/// evaluate.
+pub(super) struct ModuleTables {
+    subroutines: Arc<HashMap<String, sv::ir::Subroutine>>,
+    constant_functions: sv::RuntimeConstantTable,
+}
+
+impl ModuleTables {
+    pub fn new(module: &sv::ir::Module) -> Self {
+        Self {
+            subroutines: Arc::new(
+                module
+                    .subroutines()
+                    .iter()
+                    .map(|subroutine| (subroutine.name.clone(), subroutine.clone()))
+                    .collect(),
+            ),
+            constant_functions: sv::RuntimeConstantFunctions::table(module),
+        }
+    }
+}
+
 impl<'a> ProcModule<'a> {
+    /// The lowering state of `module`, whose tables `tables` are.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         module: &sv::ir::Module,
+        tables: &ModuleTables,
         variables: &'a mut HashMap<SourceVarId, SvVariable>,
         name_to_id: &'a mut HashMap<String, SourceVarId>,
         constants: &'a HashMap<String, i128>,
@@ -151,11 +178,6 @@ impl<'a> ProcModule<'a> {
                 .max()
                 .unwrap_or_default(),
         );
-        let subroutines = module
-            .subroutines()
-            .iter()
-            .map(|subroutine| (subroutine.name.clone(), subroutine.clone()))
-            .collect();
         let dpi_imports = module
             .dpi_imports()
             .iter()
@@ -211,8 +233,12 @@ impl<'a> ProcModule<'a> {
             next_id,
             constants,
             parameter_types,
-            subroutines,
-            constant_functions: sv::RuntimeConstantFunctions::new(module, constants, four_state),
+            subroutines: Arc::clone(&tables.subroutines),
+            constant_functions: sv::RuntimeConstantFunctions::with_table(
+                &tables.constant_functions,
+                constants,
+                four_state,
+            ),
             dpi_imports,
             externs: Externs::default(),
             four_state,

@@ -492,6 +492,9 @@ fn lower_module_with_overrides(
         &constants,
         &parameter_types,
     )?;
+    // The level-sensitive lowering below changes processes only: one table
+    // of the subroutines serves every lowering of the module.
+    let tables = procedural::ModuleTables::new(module);
     // `always @(list)` naming exactly the reads of its statement is
     // `always @*` (IEEE 1800-2023 9.4.2.2), which needs no process.
     let level_sensitive = match level_lists {
@@ -507,6 +510,7 @@ fn lower_module_with_overrides(
     .map(|demoted| {
         let pm = procedural::ProcModule::new(
             module,
+            &tables,
             &mut variables,
             &mut name_to_id,
             &constants,
@@ -540,6 +544,7 @@ fn lower_module_with_overrides(
     ) = {
         let mut pm = procedural::ProcModule::new(
             module,
+            &tables,
             &mut variables,
             &mut name_to_id,
             &constants,
@@ -584,6 +589,7 @@ fn lower_module_with_overrides(
         event_assignments,
     ) = lower_initial_processes(
         module,
+        &tables,
         &mut variables,
         &mut name_to_id,
         &constants,

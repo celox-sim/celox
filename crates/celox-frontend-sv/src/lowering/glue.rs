@@ -86,9 +86,11 @@ pub(crate) fn attach_instance_glue(
     // Stateful lowering guards activation, so time alone (or an unrelated
     // input) cannot reevaluate a time-only actual.
     let mut port_assignments = Vec::new();
+    let tables = procedural::ModuleTables::new(&lowered.source);
     {
         let mut pm = procedural::ProcModule::new(
             &lowered.source,
+            &tables,
             &mut parent_variables,
             &mut signal_names,
             &lowered.constants,
@@ -232,6 +234,7 @@ pub(crate) fn attach_instance_glue(
     let (comb_blocks, arena, created, comb_observers, comb_sites, comb_alternatives) =
         lower_comb_processes(
             &lowered.source,
+            &tables,
             &port_assignments,
             &mut parent_variables,
             &mut signal_names,
