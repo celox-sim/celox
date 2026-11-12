@@ -99,9 +99,10 @@ interface と `input` / `output` modport も言語間で接続できます。
 
 ## DPI-C imports
 
-`sv-dpi` を有効にすると、`always_ff` プロセスから C 関数を呼び出せます。
+`sv-dpi` を有効にすると、手続きコードから C 関数を呼び出せます。
 関数や共有ライブラリは `dpi_function` / `dpi_library` で登録します。
 C と SV の型を一致させる必要があるため、どちらも `unsafe` API です。
+`celox run` コマンドは `--dpi-lib PATH` で共有ライブラリをリンクします。
 対応する型と呼び出し位置は [DPI-C imports](./systemverilog-reference#dpi-c-imports)を参照してください。
 
 ## 個別の挙動を調べる {#semantics-worth-knowing}

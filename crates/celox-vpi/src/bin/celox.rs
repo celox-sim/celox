@@ -271,6 +271,15 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .signal_access(arguments.design.signal_access.clone())
         .plusargs(arguments.plusargs.iter().cloned())
         .defer_initialization(arguments.save_state.restore_checkpoint.is_some());
+    let builder = arguments
+        .design
+        .dpi_libraries
+        .iter()
+        .fold(builder, |builder, library| {
+            // SAFETY: the user names the libraries that implement the
+            // design's DPI-C imports, as for any simulator that links C.
+            unsafe { builder.dpi_library(library) }
+        });
     let builder =
         arguments
             .execution
@@ -1018,6 +1027,15 @@ struct SimulationArgs {
 
 fn build(arguments: BuildArgs) -> Result<(), String> {
     let design = resolve_design(arguments.design);
+    // An image is loaded without the command line that names the libraries.
+    if !design.dpi_libraries.is_empty() {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "DPI-C libraries are linked by `celox run` only",
+            )
+            .exit()
+    }
     let runtime = env::current_exe()
         .map_err(|error| format!("failed to locate the celox executable: {error}"))?;
     if arguments.output.exists()

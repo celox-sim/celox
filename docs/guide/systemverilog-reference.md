@@ -604,9 +604,12 @@ lowered symbolically. These remain available within one language.
 
 ## DPI-C imports {#dpi-c-imports}
 
-DPI-C registration is a Celox host API. The `sv-dpi` Cargo feature (which
-implies `systemverilog`) lets a design call C functions declared with
-`import "DPI-C"`; without it, Celox rejects any DPI-C import.
+The `sv-dpi` Cargo feature (which implies `systemverilog`) lets a design
+call C functions declared with `import "DPI-C"`; without it, Celox rejects
+any DPI-C import. The `celox` command is built with it: `celox run` links
+the shared libraries named by `--dpi-lib PATH` (repeatable) and by
+`dpi_libs` in `celox.toml`. In the Rust API, DPI-C registration is a host
+API of the builder:
 
 ```rust
 extern "C" fn c_add(x: i32, y: i32) -> i32 { x.wrapping_add(y) }
