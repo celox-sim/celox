@@ -17,6 +17,7 @@ use std::sync::Arc;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 pub mod containers;
+mod dpi;
 mod edges;
 mod objects;
 pub mod ops;
@@ -128,6 +129,9 @@ pub struct Heap {
     /// with its object.
     #[serde(default)]
     edges: HashMap<Handle, Vec<edges::Watch>>,
+    /// The call area of the DPI-C call being made, which no state outlives.
+    #[serde(skip)]
+    dpi: dpi::CallArea,
 }
 
 impl Default for Heap {
@@ -167,6 +171,7 @@ impl Heap {
             prepared: None,
             solved: Vec::new(),
             edges: HashMap::default(),
+            dpi: dpi::CallArea::default(),
         }
     }
 

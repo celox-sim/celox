@@ -44,6 +44,7 @@ pub(crate) fn signature() -> celox_design::ExternSignature {
         pure: false,
         result: Some(integer),
         arguments: vec![integer; 5],
+        directions: Vec::new(),
     }
 }
 

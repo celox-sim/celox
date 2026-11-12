@@ -233,7 +233,7 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
 - コンテナ仮引数: コンテナ型の関数結果、`output` / `inout` 実引数としての
   クラスプロパティやコンテナ要素、要素型が仮引数と異なる実引数。
 - 文字列 <a id="strings"></a>: `atoreal` / `realtoa`。`$value$plusargs` の書式としての
-  string 変数、ファイル I/O・DPI-C の string 引数、VPI・VCD 出力・TypeScript API での
+  string 変数、ファイル I/O の string 引数、VPI・VCD 出力・TypeScript API での
   string 値。
   固定長文字列配列へのノンブロッキング文字書き込み。文字列配列全体や
   部分配列へのメソッド呼び出し。配列値の string 引数・戻り値。
@@ -509,14 +509,20 @@ let mut sim = unsafe {
 対応部分集合（他は全て拒否）:
 
 - モジュール、package、またはコンパイル単位スコープで宣言した `function` import
-  （task でも `context` でもない）。
-  `always_ff` プロセスとそれが呼ぶ関数からの呼び出し。組み合わせ論理からの
-  呼び出しは拒否します。
-- `input` 引数は最大16個。`output`・`inout` 引数はありません。
-- 引数・結果型は `bit`、`logic`（`svBit` / `svLogic` として）、`byte`、
-  `shortint`、`int`、`longint`（符号有無可）、`chandle`、結果の `void`。
-  packed ベクタ（`svBitVecVal` / `svLogicVecVal`）、`integer`、`real`、
-  `string` は拒否します。
+  （task でも `context` でもない）。手続きコードからの呼び出し: `initial`、
+  `always`（`always @*` を含む）、`always_ff`、およびそれらが呼ぶサブルーチン。
+  継続代入と `always_comb` からの呼び出しは拒否します。
+- 引数は最大16個。`input`・`output`・`inout`。
+- 引数型は `bit`、`logic`（`svBit` / `svLogic` として）、`byte`、`shortint`、
+  `int`、`longint`（符号有無可）、`chandle`、`string`（`const char *` として）、
+  `bit`・`logic`・`reg` の packed 配列、`integer`、`time`
+  （`svBitVecVal` / `svLogicVecVal` のワード列として）。結果型は packed 配列より前の型と
+  `void`（35.5.5）。`real`、`shortreal`、名前付きの型（typedef、列挙型、構造体）、
+  unpacked 配列と open array は拒否します。
+- `output`・`inout` 引数はその C 型へのポインタ、`string` では `const char *` への
+  ポインタです。関数に渡した string と packed 配列は関数が戻るまで有効です。
+  関数が返す、または output に書く string は、関数が戻った時点でコピーします。
+- 2値シミュレーションでは、関数が `logic` 引数に書いた不定ビットは 0 として読みます。
 - `export "DPI-C"` 宣言は受理して検査しますが（35.7）、呼べるのは
   `context` import だけ（35.5.3）なので、C コードからは呼べません。
 - UVM の C ライブラリ関数は `sv-dpi` 無しで Celox が提供し、同名の
