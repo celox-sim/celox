@@ -1237,12 +1237,13 @@ fn scheduler_call(
     Ok(None)
 }
 
-/// `r#type` is a vector with one `[N-1:0]` range, whose select indices are
-/// offsets from bit 0.
-/// The element of a container, or the member of one, that native select
-/// `root` selects bits of, `d[i]` of `d[i][8*j+:8]` or `q[i].m` of
-/// `q[i].m[k]`, with its type: an integral `[N-1:0]` vector of at most 64
-/// bits, which the element holds by value.
+/// The element of a container, or the member of one, that native
+/// expression `root` selects bits or members of, with its type: `d[i]` of
+/// `d[i][8*j+:8]`, `q[i].m` of `q[i].m[k]` when `q[i]` is an unpacked
+/// structure, and `q[i]` of `q[i].m` or `q[i].m[k]` when it is a packed
+/// one. The type is an integral `[N-1:0]` vector or a packed structure,
+/// whose value the element holds: by value, or in a record when it is
+/// wider than 64 bits.
 fn selected_container_element(
     root: ExprId,
     native: &Declarations,
@@ -1250,21 +1251,41 @@ fn selected_container_element(
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<(ExprId, Type)>> {
+    // A member of an element of unpacked structure type, selected after
+    // the member.
+    let mut selected = ungroup(root, native);
+    let mut selects = false;
+    while let ExprKind::Select { expression, .. } = &native.expression(selected).kind {
+        selects = true;
+        selected = ungroup(*expression, native);
+    }
+    if selects
+        && let Some((r#type, _)) =
+            containers::element_member(selected, native, tree, session, dimensions)?
+    {
+        return Ok(zero_based_vector(&r#type, tree, dimensions).then_some((selected, r#type)));
+    }
+    // The selects and members of the variable, innermost first.
     let mut chain = Vec::new();
     let mut base = ungroup(root, native);
-    while let ExprKind::Select { expression, .. } = &native.expression(base).kind {
-        chain.push(base);
-        base = ungroup(*expression, native);
-    }
-    if chain.is_empty() {
-        return Ok(None);
+    loop {
+        match &native.expression(base).kind {
+            ExprKind::Select { expression, .. } => {
+                chain.push((base, false));
+                base = ungroup(*expression, native);
+            }
+            ExprKind::Member {
+                expression,
+                separator,
+                ..
+            } if separator == "." => {
+                chain.push((base, true));
+                base = ungroup(*expression, native);
+            }
+            _ => break,
+        }
     }
     chain.reverse();
-    // A member of an element, selected after the member.
-    if let Some((r#type, _)) = containers::element_member(base, native, tree, session, dimensions)?
-    {
-        return Ok(zero_based_vector(&r#type, tree, dimensions).then_some((base, r#type)));
-    }
     let ExprKind::Name(name) = &native.expression(base).kind else {
         return Ok(None);
     };
@@ -1279,19 +1300,27 @@ fn selected_container_element(
         container = inner;
         levels += 1;
     }
-    if chain.len() <= levels
-        || container.record.is_some()
-        || !zero_based_vector(&container.element, tree, dimensions)
-    {
+    if chain.len() <= levels {
         return Ok(None);
     }
     // Each container level is selected by an element index, `[i]` or the
     // last element `[$]`, not a slice.
-    let indexed = chain[..levels].iter().all(|&id| {
-        matches!(&native.expression(id).kind, ExprKind::Select { dimension, .. }
+    let indexed = chain[..levels].iter().all(|&(id, member)| {
+        !member
+            && matches!(&native.expression(id).kind, ExprKind::Select { dimension, .. }
             if matches!(dimension.kind, DimensionKind::Index(_) | DimensionKind::Queue(None)))
     });
-    Ok(indexed.then(|| (chain[levels - 1], container.element.clone())))
+    let element = &container.element;
+    // A packed structure is a `[N-1:0]` vector with members; only it has
+    // members to select.
+    let structure = !element.members.is_empty()
+        && element.unpacked_struct().is_none()
+        && matches!(element.packed_ranges(), [range]
+            if eval_ast_const_expr(&tree.functions, range.right(), &dimensions.const_env)
+                == Some(0));
+    let member = chain[levels..].iter().any(|&(_, member)| member);
+    let selectable = structure || !member && zero_based_vector(element, tree, dimensions);
+    Ok((indexed && selectable).then(|| (chain[levels - 1].0, element.clone())))
 }
 
 /// The class property of packed structure type that native member path
