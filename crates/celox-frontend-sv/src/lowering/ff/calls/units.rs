@@ -241,14 +241,24 @@ impl Ff<'_, '_> {
             place_slots.push(own);
         }
         // The defaults of the input formals are evaluated by the unit, static
-        // or automatic (see [`Function::omitted`]).
+        // or automatic (see [`Function::omitted`]). A default is evaluated
+        // only by a call that uses it (IEEE 1800-2023 13.5.3): one that names
+        // what the scope does not declare, such as another formal, is left
+        // to the calls, which report it if they use it.
+        let declared = |default: &sv::ir::Expr| {
+            let mut names = HashSet::default();
+            crate::lowering::procedural::expr_idents(default, &mut names);
+            names
+                .iter()
+                .all(|name| self.m.id(name).is_some() || self.m.constants.contains_key(name))
+        };
         let defaulted: Vec<usize> = subroutine
             .params
             .iter()
             .enumerate()
             .filter(|(position, param)| {
                 *position < 64
-                    && param.default.is_some()
+                    && param.default.as_ref().is_some_and(declared)
                     && param.direction.is_read()
                     && !param.direction.is_written()
                     && !param.direction.is_reference()
