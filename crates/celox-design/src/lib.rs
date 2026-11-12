@@ -179,6 +179,11 @@ pub enum DeferredSite {
     /// process's queue are discarded. The events of this site are not
     /// shown.
     ProcessFlushPoint,
+    /// The action of a deferred assertion of a function unit, which serves
+    /// every process: its event waits in the queue of the process the unit
+    /// runs in, until `region` of the time slot. Only a process of its own
+    /// runs such a unit.
+    ProcessAction { region: AssertionDeferral },
 }
 
 /// Which action block of an assertion issues a report.

@@ -535,12 +535,16 @@ impl Ff<'_, '_> {
         };
         let event_kind = kind.event_kind();
         // The action of a deferred assertion waits in its process's queue
-        // until the assertion matures (IEEE 1800-2023 16.4.1).
+        // until the assertion matures (IEEE 1800-2023 16.4.1); in a unit,
+        // which serves every process, in that of the process it runs in.
         let deferred = assertion_site
             .map(|assertion| assertion.deferral)
             .filter(|&region| region != celox_design::AssertionDeferral::None)
-            .zip(self.assertions.flush_site)
-            .map(|(region, queue)| DeferredSite::Action { queue, region });
+            .and_then(|region| match self.assertions.flush_site {
+                _ if self.frame.is_some() => Some(DeferredSite::ProcessAction { region }),
+                Some(queue) => Some(DeferredSite::Action { queue, region }),
+                None => None,
+            });
         let site_id = self.m.event_site(RuntimeEventSite {
             kind: event_kind,
             template: template.clone(),
