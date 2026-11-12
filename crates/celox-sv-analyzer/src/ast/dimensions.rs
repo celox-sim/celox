@@ -346,6 +346,12 @@ pub(super) fn parameter_member_value_marker(name: &str, path: &str) -> String {
     format!("__parameter::member::value::{path}::{name}")
 }
 
+/// Bits `128 * chunk` and up of the value of a member wider than 128 bits,
+/// whose first 128 bits are its value marker.
+pub(super) fn parameter_member_chunk_marker(name: &str, path: &str, chunk: usize) -> String {
+    format!("__parameter::member::value{chunk}::{path}::{name}")
+}
+
 /// The type of that member: its width, shifted left by one, and its sign.
 pub(super) fn parameter_member_type_marker(name: &str, path: &str) -> String {
     format!("__parameter::member::type::{path}::{name}")
