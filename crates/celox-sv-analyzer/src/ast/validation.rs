@@ -30,6 +30,10 @@ pub(super) fn always_kind(
     };
     Ok(match procedure.kind {
         ProcedureKind::AlwaysComb | ProcedureKind::AlwaysLatch => AlwaysKind::Comb,
+        // The one event control of an `always_ff` need not name an edge
+        // (IEEE 1800-2023 9.2.2.4): `always_ff @(clk)` runs at each change
+        // of `clk`, as the same `always` does.
+        ProcedureKind::AlwaysFf if level_sensitive(procedure, native) => AlwaysKind::Process,
         ProcedureKind::AlwaysFf => AlwaysKind::Ff,
         ProcedureKind::Always => {
             let StatementKind::Timing { control, body } = native.statement(procedure.body).kind
@@ -63,6 +67,27 @@ pub(super) fn always_kind(
             ));
         }
     })
+}
+
+/// Whether `procedure` is an event control without an edge or an `iff`
+/// qualifier on any of its events, over a body without timing controls.
+fn level_sensitive(
+    procedure: &celox_sv_syntax::Procedure,
+    native: &celox_sv_syntax::Declarations,
+) -> bool {
+    use celox_sv_syntax::{EventControl, StatementKind, TimingControlKind, TimingEdge};
+    let StatementKind::Timing { control, body } = native.statement(procedure.body).kind else {
+        return false;
+    };
+    let TimingControlKind::Event(EventControl::Items(items)) = &native.timing_control(control).kind
+    else {
+        return false;
+    };
+    !items.is_empty()
+        && items
+            .iter()
+            .all(|item| item.edge == TimingEdge::Any && item.iff.is_none())
+        && !has_timing_control(body, native)
 }
 
 /// Timing controls, including delayed assignments, require process kernels.
