@@ -40,6 +40,34 @@ fn item_ids(ids: &[BodyItemId], native: &Declarations) -> Converted<Vec<Subrouti
     }
     Ok(result)
 }
+/// The names of the functions and tasks that the module of `tree` declares
+/// in its own scope, outside generate blocks and classes: those a
+/// hierarchical name of another module may call (IEEE 1800-2023 23.8).
+pub(crate) fn module_subroutine_names(tree: &SyntaxTree) -> Vec<String> {
+    let Ok(unit) = tree.root_unit() else {
+        return Vec::new();
+    };
+    let native = tree.declarations();
+    let mut pending = unit.items.iter().rev().copied().collect::<Vec<_>>();
+    let mut names = Vec::new();
+    while let Some(id) = pending.pop() {
+        match &native.body_item(id).kind {
+            BodyItemKind::Subroutine(id) => {
+                let routine = native.subroutine(*id);
+                if !routine.prototype
+                    && routine.kind != SubroutineKind::Constructor
+                    && routine.scope.is_empty()
+                {
+                    names.push(instances::normalize_identifier(&routine.name.spelling));
+                }
+            }
+            BodyItemKind::Region(items) => pending.extend(items.iter().rev().copied()),
+            _ => {}
+        }
+    }
+    names
+}
+
 pub(super) fn item(id: BodyItemId, tree: &SyntaxTree) -> Converted<Vec<SubroutineId>> {
     Ok(item_ids(&[id], tree.declarations())?
         .into_iter()
