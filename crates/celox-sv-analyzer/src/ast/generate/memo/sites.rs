@@ -163,7 +163,6 @@ impl CallSites for Type {
             container: _,
             unpacked_struct: _,
             spelling: _,
-            chandle: _,
         } = self;
         packed_ranges.call_sites(visit);
         unpacked_ranges.call_sites(visit);

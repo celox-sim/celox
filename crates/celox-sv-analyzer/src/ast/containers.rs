@@ -69,7 +69,11 @@ pub(super) fn with_dimensions(
                         && !object
                         && (!matches!(
                             ty.kind(),
-                            TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Process
+                            TypeKind::Bit
+                                | TypeKind::Chandle
+                                | TypeKind::Logic
+                                | TypeKind::Reg
+                                | TypeKind::Process
                         ) || !ty.unpacked_ranges.is_empty())
                     {
                         return Err(unsupported(
@@ -134,7 +138,11 @@ pub(super) fn with_dimensions(
             && base.container.is_none()
             && matches!(
                 base.kind(),
-                TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+                TypeKind::Bit
+                    | TypeKind::Chandle
+                    | TypeKind::Logic
+                    | TypeKind::Reg
+                    | TypeKind::Implicit
             ) =>
         {
             let mut field = classes::field(&tree.functions, &base, &context.const_env, 0)?;
@@ -172,7 +180,7 @@ pub(super) fn with_dimensions(
         signed: shape.signed && record.is_none(),
         two_state: matches!(
             base.kind(),
-            TypeKind::Bit | TypeKind::Process | TypeKind::Event
+            TypeKind::Bit | TypeKind::Chandle | TypeKind::Process | TypeKind::Event
         ) || handle.is_some(),
         handle,
     };
@@ -722,7 +730,7 @@ fn element_value(
         unpacked_structs::check_value(structure, id, native, tree, session, dims)?;
     }
     expression_binding::check_chandle_assignment(
-        target.element.chandle && target.element.unpacked_ranges.is_empty(),
+        target.element.is_chandle() && target.element.unpacked_ranges.is_empty(),
         id,
         tree,
         native,
@@ -787,7 +795,7 @@ fn index_value(
         )?;
     }
     // Only an associative array indexed by chandles takes a chandle index.
-    let chandle = target.key.as_ref().is_some_and(|key| key.chandle);
+    let chandle = target.key.as_ref().is_some_and(|key| key.is_chandle());
     expression_binding::check_chandle_assignment(chandle, id, tree, native, dims, session)?;
     // An integral key, declared or wildcard, takes only an integral
     // index: nonintegral values are illegal (7.8.1). A string literal is
@@ -1057,7 +1065,7 @@ pub(super) fn value(
                     }
                     // Chandles have no relational operators (6.14, 7.12.2).
                     if matches!(op, ContainerOp::Sort | ContainerOp::Rsort)
-                        && target.element.chandle
+                        && target.element.is_chandle()
                     {
                         return Err(AnalyzerError::IllegalChandleUse {
                             detail: "sorting chandles".into(),
@@ -1159,7 +1167,7 @@ pub(super) fn value(
                     let key_class = target.key.as_ref().and_then(|key| key.class());
                     // So is the variable of a chandle index, which is no
                     // integral variable (6.14).
-                    if shape.chandle != target.key.as_ref().is_some_and(|key| key.chandle) {
+                    if shape.chandle != target.key.as_ref().is_some_and(|key| key.is_chandle()) {
                         return Err(AnalyzerError::IllegalChandleUse {
                             detail: "an associative traversal index of another type than the index"
                                 .into(),
@@ -1271,7 +1279,7 @@ fn query(
                     + if innermost.layout.handle.is_some()
                         && (innermost.record.is_none()
                             || innermost.element.unpacked_struct().is_some())
-                        || innermost.element.chandle
+                        || innermost.element.is_chandle()
                     {
                         0
                     } else {
@@ -1357,7 +1365,7 @@ pub(super) fn selected_element(
             // elements, see `set`; other elements have no bits to select.
             if ty.container.is_some()
                 || ty.class.is_some()
-                || ty.chandle
+                || ty.is_chandle()
                 || ty.unpacked_struct().is_some()
                 || !ty.unpacked_ranges.is_empty()
                 || target.layout.handle.is_some()

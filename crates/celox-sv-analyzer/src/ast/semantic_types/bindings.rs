@@ -65,7 +65,7 @@ impl ConstantType {
             let mut domain = (*domain).clone();
             domain.width = expr_type_from_type(functions, &base, env)?.width;
             domain.signed = base.is_signed;
-            domain.four_state = base.kind != TypeKind::Bit;
+            domain.four_state = !matches!(base.kind, TypeKind::Bit | TypeKind::Chandle);
             Some(Arc::new(domain))
         });
         Self::of_type(base, functions, table, env)

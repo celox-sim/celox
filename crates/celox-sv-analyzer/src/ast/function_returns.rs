@@ -47,21 +47,23 @@ impl FunctionReturnMetadata {
             // A chandle has no packed dimensions (IEEE 1800-2023 6.14).
             dimensions: ty.map(|ty| {
                 ty.unpacked_ranges().len()
-                    + if ty.chandle || matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal) {
+                    + if ty.is_chandle()
+                        || matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal)
+                    {
                         0
                     } else {
                         ty.packed_ranges().len()
                     }
             }),
             signed: ty.is_some_and(Type::is_signed),
-            is_2state: ty.is_some_and(|ty| ty.kind() == TypeKind::Bit),
+            is_2state: ty.is_some_and(|ty| matches!(ty.kind(), TypeKind::Bit | TypeKind::Chandle)),
             string: ty.is_some_and(|ty| ty.kind() == TypeKind::String),
             enum_domain: ty
                 .filter(|ty| ty.unpacked_ranges.is_empty())
                 .and_then(|ty| ty.enum_domain.clone()),
             virtual_interface: ty.and_then(|ty| ty.virtual_interface.clone()),
             container: ty.and_then(|ty| ty.container.clone()),
-            chandle: ty.is_some_and(|ty| ty.chandle && ty.unpacked_ranges.is_empty()),
+            chandle: ty.is_some_and(|ty| ty.is_chandle() && ty.unpacked_ranges.is_empty()),
             pattern_type: ty
                 .filter(|ty| {
                     !ty.members.is_empty()

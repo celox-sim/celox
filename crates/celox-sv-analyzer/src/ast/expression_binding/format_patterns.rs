@@ -348,7 +348,11 @@ pub(in crate::ast) fn aggregate_text(
             && !element.packed_enum
             && matches!(
                 element.kind,
-                TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+                TypeKind::Bit
+                    | TypeKind::Chandle
+                    | TypeKind::Logic
+                    | TypeKind::Reg
+                    | TypeKind::Implicit
             )
         {
             Element::Integral
@@ -599,7 +603,7 @@ impl Text {
             }
             if ty.container.is_some()
                 || !ty.unpacked_ranges.is_empty()
-                || ty.chandle
+                || ty.is_chandle()
                 || matches!(
                     ty.kind,
                     TypeKind::Real | TypeKind::Shortreal | TypeKind::Event | TypeKind::Process

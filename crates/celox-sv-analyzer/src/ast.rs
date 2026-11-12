@@ -443,9 +443,6 @@ pub struct Type {
     /// The typedef that names an enumeration, struct or union type, and how
     /// `$typename` spells the type where its structure does not tell.
     spelling: type_names::Spelling,
-    /// A `chandle` (IEEE 1800-2023 6.14): an opaque 64-bit C pointer, held
-    /// as 2-state bits, whose uses the analyzer restricts.
-    chandle: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -472,6 +469,9 @@ pub enum TypeKind {
     /// A handle of the synchronization object of a named event (15.5), or
     /// `null`.
     Event,
+    /// A `chandle` (IEEE 1800-2023 6.14): an opaque C pointer, held as 64
+    /// two-state bits, whose uses the analyzer restricts.
+    Chandle,
     Bit,
     Logic,
     Reg,

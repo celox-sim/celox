@@ -404,7 +404,7 @@ pub(super) fn type_with_unpacked_ranges(
     ranges: Vec<UnpackedRange>,
 ) -> Result<Type, AnalyzerError> {
     // UVM keeps chandles in scalars and dynamic containers only.
-    if r#type.chandle && !ranges.is_empty() {
+    if r#type.is_chandle() && !ranges.is_empty() {
         return Err(AnalyzerError::Unsupported(
             "fixed-size unpacked array of chandle".into(),
         ));

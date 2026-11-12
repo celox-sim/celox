@@ -1190,7 +1190,9 @@ impl From<ast::TypeKind> for TypeKind {
             ast::TypeKind::Object => TypeKind::Object,
             ast::TypeKind::Process => TypeKind::Process,
             ast::TypeKind::Event => TypeKind::Event,
-            ast::TypeKind::Bit => TypeKind::Bit,
+            // The IR keeps a chandle as its bits, marked by its own flag
+            // (`Type::is_chandle`).
+            ast::TypeKind::Chandle | ast::TypeKind::Bit => TypeKind::Bit,
             ast::TypeKind::Logic => TypeKind::Logic,
             ast::TypeKind::Reg => TypeKind::Reg,
             ast::TypeKind::Implicit => TypeKind::Implicit,

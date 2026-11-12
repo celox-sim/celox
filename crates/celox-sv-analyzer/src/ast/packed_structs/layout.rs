@@ -54,7 +54,7 @@ pub(in crate::ast) fn native_type(
         .into_iter()
         .map(|(name, ty, is_void)| {
             // A chandle is no packed type (IEEE 1800-2023 6.14).
-            if !names.insert(name.clone()) || ty.chandle {
+            if !names.insert(name.clone()) || ty.is_chandle() {
                 return None;
             }
             Some(PackedMember {
@@ -113,7 +113,7 @@ fn finish_type(
     let kind = if !tagged
         && members
             .iter()
-            .all(|member| member.r#type.kind == TypeKind::Bit)
+            .all(|member| matches!(member.r#type.kind, TypeKind::Bit | TypeKind::Chandle))
     {
         TypeKind::Bit
     } else {

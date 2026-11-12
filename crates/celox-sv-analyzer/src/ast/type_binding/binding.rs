@@ -549,7 +549,7 @@ fn bind_in_mode(
     // through a typedef. This checks in place, which keeps the recursive
     // frame small.
     if let Some(ty) = values.last()
-        && ty.chandle
+        && ty.is_chandle()
     {
         if ty.is_enum {
             return types::chandle_enum();
@@ -827,7 +827,9 @@ pub(in crate::ast) fn validate_enum_initializers(
         previous_unknown = literal
             .as_ref()
             .is_some_and(|value| value.mask != Default::default());
-        if previous_unknown && (base.is_none() || ty.kind == TypeKind::Bit) {
+        if previous_unknown
+            && (base.is_none() || matches!(ty.kind, TypeKind::Bit | TypeKind::Chandle))
+        {
             return Err(unsupported(format!(
                 "enum member `{name}` X/Z value requires an explicit four-state base type"
             )));
@@ -946,7 +948,7 @@ fn enum_values(
             members,
             width: shape.width,
             signed: shape.signed,
-            four_state: !matches!(ty.kind(), TypeKind::Bit),
+            four_state: !matches!(ty.kind(), TypeKind::Bit | TypeKind::Chandle),
         })
     })
 }

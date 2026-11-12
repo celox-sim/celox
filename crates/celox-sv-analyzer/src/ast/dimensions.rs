@@ -136,7 +136,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
             port.name().to_string(),
             VariableDimensions::new(VariableShape {
                 declared: type_names::Declared::new(port.r#type()),
-                chandle: port.r#type().chandle,
+                chandle: port.r#type().is_chandle(),
                 container: port.r#type().container.clone(),
                 randomizable: port.r#type().container.is_none()
                     && !port.r#type().holds_chandle()
@@ -154,6 +154,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 is_2state: matches!(
                     port.r#type().kind(),
                     TypeKind::Bit
+                        | TypeKind::Chandle
                         | TypeKind::Real
                         | TypeKind::Shortreal
                         | TypeKind::String
@@ -185,7 +186,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
             signal.name().to_string(),
             VariableDimensions::new(VariableShape {
                 declared: type_names::Declared::new(signal.r#type()),
-                chandle: signal.r#type().chandle,
+                chandle: signal.r#type().is_chandle(),
                 container: signal.r#type().container.clone(),
                 randomizable: signal.r#type().container.is_none()
                     && !signal.r#type().holds_chandle()
@@ -204,6 +205,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 is_2state: matches!(
                     signal.r#type().kind(),
                     TypeKind::Bit
+                        | TypeKind::Chandle
                         | TypeKind::Real
                         | TypeKind::Shortreal
                         | TypeKind::String
@@ -405,7 +407,6 @@ fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, con
         let packed_ranges = ranges.split_off(unpacked);
         let ty = Type {
             container: None,
-            chandle: false,
             is_enum: false,
             enum_domain: None,
             packed_enum: false,

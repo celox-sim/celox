@@ -222,7 +222,7 @@ impl BodyBuilder<'_, '_, '_> {
                 None => None,
             };
             expression_binding::check_chandle_assignment(
-                property.r#type.chandle && property.r#type.unpacked_ranges.is_empty(),
+                property.r#type.is_chandle() && property.r#type.unpacked_ranges.is_empty(),
                 initializer,
                 self.tree,
                 native,

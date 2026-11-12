@@ -145,10 +145,14 @@ pub(in crate::ast) fn member_default(
     if ty.is_enum
         || ty.unpacked_struct().is_some()
         || ty.class().is_some()
-        || ty.chandle
+        || ty.is_chandle()
         || !matches!(
             ty.kind(),
-            TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+            TypeKind::Bit
+                | TypeKind::Chandle
+                | TypeKind::Logic
+                | TypeKind::Reg
+                | TypeKind::Implicit
         )
     {
         return Err(unsupported(
@@ -210,7 +214,7 @@ pub(in crate::ast) fn native_type(
         .map(|(name, ty, default)| {
             // A chandle is no packed array element (IEEE 1800-2023 6.14).
             if ty.container.is_some()
-                || (ty.chandle && ty.packed_ranges.len() > 1)
+                || (ty.is_chandle() && ty.packed_ranges.len() > 1)
                 // Each event member would need its own synchronization
                 // object (IEEE 1800-2023 15.5).
                 || matches!(
@@ -233,12 +237,16 @@ pub(in crate::ast) fn native_type(
             } else {
                 if ty.unpacked_struct().is_some()
                     || !ty.members.is_empty()
-                    || ty.chandle
+                    || ty.is_chandle()
                     || ty.is_enum
                     || ty.packed_enum
                     || !matches!(
                         ty.kind,
-                        TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+                        TypeKind::Bit
+                            | TypeKind::Chandle
+                            | TypeKind::Logic
+                            | TypeKind::Reg
+                            | TypeKind::Implicit
                     )
                     || default.is_some()
                 {
@@ -302,15 +310,19 @@ pub(in crate::ast) fn array_storage(ty: Type) -> Converted<Type> {
     let leaves = aggregate.leaves();
     let two_state = leaves
         .first()
-        .is_some_and(|leaf| leaf.r#type.kind == TypeKind::Bit);
+        .is_some_and(|leaf| matches!(leaf.r#type.kind, TypeKind::Bit | TypeKind::Chandle));
     if leaves.iter().any(|leaf| {
         leaf.default.is_some()
             || !matches!(
                 leaf.r#type.kind,
-                TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+                TypeKind::Bit
+                    | TypeKind::Chandle
+                    | TypeKind::Logic
+                    | TypeKind::Reg
+                    | TypeKind::Implicit
             )
-            || leaf.r#type.chandle
-            || (leaf.r#type.kind == TypeKind::Bit) != two_state
+            || leaf.r#type.is_chandle()
+            || (matches!(leaf.r#type.kind, TypeKind::Bit | TypeKind::Chandle)) != two_state
     }) {
         return Err(unsupported(
             "array of unpacked structures with non-integral, mixed-state or defaulted members",
@@ -753,7 +765,11 @@ pub(in crate::ast) fn record(
     let two_state = |leaf: &Leaf| {
         matches!(
             leaf.r#type.kind,
-            TypeKind::Bit | TypeKind::String | TypeKind::Object | TypeKind::Process
+            TypeKind::Bit
+                | TypeKind::Chandle
+                | TypeKind::String
+                | TypeKind::Object
+                | TypeKind::Process
         )
     };
     let handles = leaves

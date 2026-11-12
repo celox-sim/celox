@@ -142,10 +142,9 @@ impl Array {
                     signed,
                     two_state: string
                         || object
-                        || container
-                            .key
-                            .as_ref()
-                            .is_some_and(|key| key.kind() == TypeKind::Bit),
+                        || container.key.as_ref().is_some_and(|key| {
+                            matches!(key.kind(), TypeKind::Bit | TypeKind::Chandle)
+                        }),
                     handle: if string {
                         Some(HandleProperty::String)
                     } else if object {
@@ -349,7 +348,7 @@ fn array(
         ty.enum_domain = shape.enum_domain.clone();
         ty.packed_enum = shape.packed_enum;
         ty.signed_element_depth = shape.signed_element_depth;
-        ty.chandle = shape.chandle;
+        ty = ty.with_chandle(shape.chandle);
         ty
     };
     let width = casts::expr_type_from_type(&tree.functions, &element, &dims.const_env)
@@ -535,7 +534,7 @@ pub(super) fn bind(
         None => {
             let key = match &call.array {
                 _ if element.kind() == TypeKind::String => LocatorKey::String,
-                _ if element.chandle
+                _ if element.is_chandle()
                     && matches!(call.method, LocatorMethod::Min | LocatorMethod::Max) =>
                 {
                     return Err(min_max_chandles());
