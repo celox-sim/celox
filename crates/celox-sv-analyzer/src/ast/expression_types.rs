@@ -21,6 +21,32 @@ pub(super) use memo::Memo;
 #[cfg(test)]
 mod tests;
 
+/// The types found while one outermost [`type_of`] runs, for the scope,
+/// declarations and dimensions it was asked with. Typing a member
+/// expression tries several readings of it, and each asks for the type of
+/// its receiver again, so without them the work grows with the depth of a
+/// path.
+#[derive(Debug)]
+pub(super) struct Query {
+    /// The addresses of the outermost call's scope, declarations and
+    /// dimensions, which live while it runs.
+    key: (usize, usize, usize),
+    version: (u64, usize),
+    types: HashMap<ExprId, Option<TyId>>,
+}
+
+fn query_key(
+    tree: &AnalysisContext<'_>,
+    native: &Declarations,
+    dims: &PackedDimensions,
+) -> (usize, usize, usize) {
+    (
+        std::ptr::from_ref(tree).cast::<()>() as usize,
+        std::ptr::from_ref(native) as usize,
+        std::ptr::from_ref(dims) as usize,
+    )
+}
+
 /// The type of native expression `id`.
 pub(super) fn type_of(
     tree: &AnalysisContext<'_>,
@@ -29,18 +55,51 @@ pub(super) fn type_of(
     native: &Declarations,
     dims: &PackedDimensions,
 ) -> Converted<TyId> {
+    let unknown = || unsupported("semantic type of native expression");
+    let key = query_key(tree, native, dims);
+    let version = (
+        session.foreign.revision(),
+        session.class_specializations.len(),
+    );
+    if let Some(query) = &session.type_query
+        && query.key == key
+        && query.version == version
+        && let Some(found) = query.types.get(&id)
+    {
+        return found.ok_or_else(unknown);
+    }
     if let Some(ty) = session
         .expression_types
         .get(tree, session, id, native, dims)
     {
         return Ok(ty);
     }
-    let ty = resolve(tree, session, id, native, dims)
-        .ok_or_else(|| unsupported("semantic type of native expression"))?;
+    let outermost = session.type_query.is_none();
+    if outermost {
+        session.type_query = Some(Query {
+            key,
+            version,
+            types: HashMap::default(),
+        });
+    }
+    let ty = resolve(tree, session, id, native, dims);
     let version = (
         session.foreign.revision(),
         session.class_specializations.len(),
     );
+    if outermost {
+        session.type_query = None;
+    } else if let Some(query) = &mut session.type_query
+        && query.key == key
+    {
+        // What a new specialization or foreign class changes is typed anew.
+        if query.version != version {
+            query.types.clear();
+            query.version = version;
+        }
+        query.types.insert(id, ty);
+    }
+    let ty = ty.ok_or_else(unknown)?;
     session
         .expression_types
         .insert(tree, id, native, dims, version, ty);
