@@ -2494,6 +2494,10 @@ pub fn lookup(name: &str) -> Option<&'static SystemTf> {
 pub enum Body {
     /// `always`, `always_comb`, or `always_ff`.
     Always,
+    /// An `always` or `always_ff` that runs as a process: it suspends on
+    /// its event control, as an initial body may, and it may call the
+    /// procedural system tasks an always body may.
+    Process,
     Initial,
     /// A final procedure, restricted to function statements (9.2.3).
     Final,
