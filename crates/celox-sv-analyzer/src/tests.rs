@@ -3770,6 +3770,65 @@ fn unsupported_constructs_map_to_their_tracking_issues() {
 }
 
 #[test]
+fn modules_carry_only_the_package_subroutines_they_can_call() {
+    // `used` reaches `helper`, `C::new` and, through the dispatcher of
+    // `C::m`, the override `D::m`; `randomize` reaches the hooks. `unused`
+    // and `E::other` are not called from `top`.
+    let source = r#"
+      package p;
+        function automatic int helper(int x); return x + 1; endfunction
+        function automatic int used(int x); return helper(x); endfunction
+        function automatic int unused(int x); return x - 1; endfunction
+        class C;
+          rand int v;
+          virtual function int m(); return 1; endfunction
+          function void pre_randomize(); endfunction
+        endclass
+        class D extends C;
+          virtual function int m(); return 2; endfunction
+        endclass
+        class E;
+          function int other(); return 3; endfunction
+        endclass
+      endpackage
+      module top;
+        import p::*;
+        int r;
+        initial begin
+          C c;
+          c = new;
+          void'(c.randomize());
+          r = used(1) + c.m();
+        end
+      endmodule
+    "#;
+    let ir = analyze_source(source, Path::new("reachable-imports.sv")).unwrap();
+    let names = |module: &str| -> Vec<String> {
+        let module = ir
+            .modules()
+            .iter()
+            .find(|candidate| candidate.name() == module)
+            .unwrap_or_else(|| {
+                let modules: Vec<_> = ir.modules().iter().map(ir::Module::name).collect();
+                panic!("no module {module} in {modules:?}")
+            });
+        module
+            .subroutines()
+            .iter()
+            .map(|subroutine| subroutine.name.clone())
+            .collect()
+    };
+    let top = names("top");
+    let has = |names: &[String], part: &str| names.iter().any(|name| name.contains(part));
+    for reached in ["used", "helper", "C::m", "D::m", "pre_randomize"] {
+        assert!(has(&top, reached), "{reached} missing from {top:?}");
+    }
+    for unreached in ["unused", "E::other"] {
+        assert!(!has(&top, unreached), "{unreached} carried in {top:?}");
+    }
+}
+
+#[test]
 fn analyzes_package_variables_into_a_state_module() {
     // A package variable is one object: the package's state module holds it,
     // and a module's signal for it names that variable.
