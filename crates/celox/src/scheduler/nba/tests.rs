@@ -620,8 +620,11 @@ endmodule"#;
     for mode in [SchedulerMode::Reference, SchedulerMode::Compiled] {
         let mut native = builder().scheduler_mode(mode).build_native().unwrap();
         check("native", native.run_until(u64::MAX));
-        let mut cranelift = builder().scheduler_mode(mode).build_cranelift().unwrap();
-        check("cranelift", cranelift.run_until(u64::MAX));
+        #[cfg(feature = "cranelift")]
+        {
+            let mut cranelift = builder().scheduler_mode(mode).build_cranelift().unwrap();
+            check("cranelift", cranelift.run_until(u64::MAX));
+        }
         let mut interpreter = builder().scheduler_mode(mode).build_interpreter().unwrap();
         check("interpreter", interpreter.run_until(u64::MAX));
         let mut tiered = builder().scheduler_mode(mode).build_tiered().unwrap();
