@@ -421,6 +421,41 @@ sv_backends! {
         }
     }
 
+    // Edge procedures without timing may write one variable together too,
+    // as OpenPiton's monitors do: a clocked `always` assigns bits of it by
+    // nonblocking assignments and an `always @(posedge rst_l)` the whole
+    // variable by a blocking one (IEEE 1800-2023 6.5).
+    fn edge_always_processes_share_a_variable(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            module Top(output logic [3:0] q, r, output logic [7:0] m, output logic [3:0] seen);
+                logic clk = 0, rst_l = 0;
+                logic [3:0] d = 4'b0101;
+                // On the same edge, the nonblocking update comes last.
+                always @(posedge clk) r <= d;
+                always @(posedge clk) r = ~d;
+                always @(posedge clk)
+                    if (~rst_l) begin q[0] <= 1'b0; q[1] <= 1'b0; end
+                    else begin q[0] <= d[0]; q[1] <= d[1]; end
+                always @(posedge rst_l) q = 4'b1100;
+                always @(posedge clk) m <= {4'h0, d};
+                always @(negedge clk) if (~rst_l) m = 8'hff;
+                initial begin
+                    #1 clk = 1;
+                    #1 clk = 0;
+                    #1 seen = m[7:4];
+                    rst_l = 1;
+                    #1 clk = 1;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("edge_shared.sv"))], "Top");
+        sim.run_until(10).unwrap();
+        for (name, value) in [("q", 0b1101u8), ("r", 0b0101), ("m", 0x05), ("seen", 0xf)] {
+            assert_eq!(sim.get(sim.signal(name)), BigUint::from(value), "{name}");
+        }
+    }
+
     // Edge procedures that call timed tasks run as processes, and two of
     // them may write one variable; the later write determines its value.
     fn timed_edge_processes_share_a_variable(sim) {
