@@ -427,6 +427,18 @@ pub(super) fn assignment(
         };
         let size = expression_binding::value(size, native, tree, session, dims)?;
         let init = match initializer {
+            // An assignment pattern is an array of the target's type, as
+            // when it is assigned to the array (10.9.1).
+            Some(id)
+                if matches!(
+                    native
+                        .expression(expression_binding::ungroup(id, native))
+                        .kind,
+                    ExprKind::Pattern { target: None, .. }
+                ) =>
+            {
+                assignment(id, tree, session, dims, target)?
+            }
             Some(id) => {
                 check_compatible(id, native, tree, session, dims, target)?;
                 expression_binding::value(id, native, tree, session, dims)?

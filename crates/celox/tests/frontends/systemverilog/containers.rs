@@ -650,3 +650,33 @@ fn fixed_size_arrays_of_container_typedefs_are_unsupported() {
     sim.run_until(1).unwrap();
     assert_eq!(sim.get(sim.signal("out")), 7u32.into());
 }
+
+sv_backends! {
+    // The initializer of `new[size](init)` may be an assignment pattern: it
+    // is an array of the target's type, copied into the new array, which
+    // keeps `size` elements (IEEE 1800-2023 7.5.1, 10.9.1).
+    fn dynamic_array_new_takes_pattern_initializers(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            module Top(output int sizes, output logic [3:0] strb, output logic [23:0] three,
+                       output logic [7:0] one);
+              logic [7:0] data = 8'h5a;
+              initial begin
+                automatic logic [3:0] s[] = new[1]('{{4{1'b1}}});
+                automatic logic [7:0] t[] = new[3]('{8'h11, data});
+                automatic logic [7:0] o[] = new[1]('{8'h21, 8'h22, 8'h23});
+                sizes = s.size() * 100 + t.size() * 10 + o.size();
+                strb = s[0];
+                three = {t[0], t[1], t[2]};
+                one = o[0];
+              end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("new_patterns.sv"))], "Top");
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("sizes")), BigUint::from(131u32));
+        assert_eq!(sim.get(sim.signal("strb")), BigUint::from(0xfu8));
+        assert_eq!(sim.get(sim.signal("three")), BigUint::from(0x115a00u32));
+        assert_eq!(sim.get(sim.signal("one")), BigUint::from(0x21u8));
+    }
+}

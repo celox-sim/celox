@@ -281,8 +281,8 @@ blocks in programs. Two region deviations are listed under
   nonblocking element assignments, compound element assignments whose
   container or index has a side effect or whose element is a `string`,
   handle, or container, container ports, and `const` containers.
-  A `new[]` initializer requires another compatible dynamic array or queue;
-  fixed-size arrays are unsupported. Explicit index entries, and mixtures
+  A `new[]` initializer is another compatible dynamic array or queue, or an
+  assignment pattern; fixed-size arrays are unsupported. Explicit index entries, and mixtures
   of index entries with `default:`, in associative array literals are
   unsupported (a default-only literal is supported, 7.8.6).
 - Container methods: locator methods returning indices for integral keys
