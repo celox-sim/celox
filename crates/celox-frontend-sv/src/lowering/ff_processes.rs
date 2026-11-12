@@ -438,6 +438,73 @@ pub(super) fn runs_as_process(
                 || writes_other_instance()))
 }
 
+/// Whether plain `always` edge procedure `process` writes a variable that
+/// repeating processes of other modules write through hierarchical names
+/// (`foreign_writes`), other than by nonblocking assignments to a memory.
+/// Those update the selected elements of the shared memory (see
+/// `shared_edge_memories`); any other write must store into the variable
+/// as it executes, since the last write determines the value (IEEE
+/// 1800-2023 6.5), so the procedure runs as a process waiting on its events.
+pub(super) fn shares_foreign_variable(
+    module: &sv::ir::Module,
+    process: &sv::ir::FfProcess,
+    foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
+) -> bool {
+    if process.is_always_ff() || foreign_writes.values().all(|writes| writes.repeating == 0) {
+        return false;
+    }
+    let mut written = HashSet::default();
+    procedural::written_names_with_calls(module, process.body(), &mut written);
+    written.retain(|name| {
+        foreign_writes
+            .get(name)
+            .is_some_and(|writes| writes.repeating > 0)
+    });
+    if written.is_empty() {
+        return false;
+    }
+    // The names the body assigns directly, by the kind of assignment.
+    let mut blocking = HashSet::default();
+    let mut nonblocking = HashSet::default();
+    for stmt in process.body() {
+        stmt.walk(&mut |stmt| match stmt {
+            sv::ir::Stmt::Assign {
+                lhs,
+                nonblocking: queued,
+                ..
+            } => {
+                if *queued {
+                    nonblocking.insert(lhs.name());
+                } else {
+                    blocking.insert(lhs.name());
+                }
+            }
+            sv::ir::Stmt::AssignConcat {
+                parts,
+                nonblocking: queued,
+                ..
+            } => {
+                let names = parts.iter().map(sv::ir::LValue::name);
+                if *queued {
+                    nonblocking.extend(names);
+                } else {
+                    blocking.extend(names);
+                }
+            }
+            _ => {}
+        });
+    }
+    written.iter().any(|name| {
+        let memory = module
+            .signals()
+            .iter()
+            .any(|signal| signal.name() == name && !signal.r#type().unpacked_ranges().is_empty());
+        // A write that is no assignment of the body, such as one of a
+        // called task, is taken as a blocking one.
+        !memory || blocking.contains(name.as_str()) || !nonblocking.contains(name.as_str())
+    })
+}
+
 /// Whether a flip-flop's delayed nonblocking assignments cannot take the
 /// fused staging path: an event control or nonconstant delay, a partial or
 /// array target, a target one run of the body may assign more than once,

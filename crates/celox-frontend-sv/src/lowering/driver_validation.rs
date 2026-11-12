@@ -543,7 +543,9 @@ fn driver_ranges_overlap(drivers: &[(usize, Option<(i128, i128)>)]) -> bool {
 /// continuous or `always_comb` driver excludes every other writer (IEEE
 /// 1800-2023 6.5, 9.2.2.2), an `always_ff` one every other process
 /// (9.2.2.4), and two repeating processes may only write a shared memory,
-/// whose edge writes update selected elements.
+/// whose edge writes update selected elements, unless all of them are
+/// ordinary `always` processes run as processes, whose writes store into
+/// the variable as they execute.
 pub(super) fn validate_foreign_drivers(
     module: &sv::ir::Module,
     drivers: &ModuleDrivers,
@@ -593,7 +595,13 @@ pub(super) fn validate_foreign_drivers(
             Some("an always_ff process writes it")
         } else if local_always_ff {
             Some("an always_ff process of its module writes it")
-        } else if repeating > 1 && !shared_memories.contains(name) {
+        } else if repeating > 1
+            && !shared_memories.contains(name)
+            && (writes.exclusive
+                || drivers
+                    .iter()
+                    .any(|(driver, _)| !shares_variables(module, *driver)))
+        {
             Some("another process writes it too")
         } else {
             None
@@ -640,10 +648,22 @@ pub(super) fn validate_variable_driver_ranges(
         );
     for signal_name in variable_names {
         let local = drivers.local(signal_name);
+        // Several ordinary `always` processes run as processes may write
+        // one variable: each write stores into the variable when it
+        // executes, and the last one determines the value (IEEE 1800-2023
+        // 6.5). Any other procedure is the only writer of what it writes.
+        let exclusive = local
+            .iter()
+            .map(|(driver, _)| !shares_variables(module, *driver))
+            .collect::<Vec<_>>();
         let has_overlap = local.iter().enumerate().any(|(index, left)| {
-            local[index + 1..]
-                .iter()
-                .any(|right| left.0 != right.0 && net_driver_ranges_overlap(left.1, right.1))
+            local[index + 1..].iter().zip(&exclusive[index + 1..]).any(
+                |(right, right_exclusive)| {
+                    left.0 != right.0
+                        && (exclusive[index] || *right_exclusive)
+                        && net_driver_ranges_overlap(left.1, right.1)
+                },
+            )
         });
         let continuous = drivers.continuous(signal_name);
         let function_storage = module.subroutines().iter().any(|subroutine| {

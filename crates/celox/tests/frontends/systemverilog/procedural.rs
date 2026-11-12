@@ -620,3 +620,168 @@ fn plan_builds_report_kernels_and_warnings_without_code() {
         "{report}"
     );
 }
+
+sv_backends! {
+    // Several ordinary `always` processes may write one variable or memory;
+    // each write stores as it executes and the last one determines the
+    // value (IEEE 1800-2023 6.5). Only always_comb, always_latch and
+    // always_ff restrict a variable to one process (9.2.2).
+    fn ordinary_always_processes_share_variables(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            module Top(output logic [3:0] x, m0, m1, seen);
+                logic a = 0, b = 0;
+                logic [3:0] m [0:1];
+                assign m0 = m[0];
+                assign m1 = m[1];
+                always @(a) if (a) begin
+                    x = 4'h3;
+                    m[0] = 4'h3;
+                end
+                always @(b) if (b) begin
+                    x = x | 4'hc;
+                    m[0][3:2] = 2'b11;
+                    m[1] <= 4'h5;
+                end
+                initial begin
+                    #1 a = 1;
+                    #1 b = 1;
+                    #1 seen = {x[3], m[0][3], x[0], m[0][0]};
+                    a = 0;
+                    b = 0;
+                    #1 a = 1;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("shared_always.sv"))], "Top");
+        sim.run_until(10).unwrap();
+        for (name, value) in [("seen", 0xfu8), ("x", 3), ("m0", 3), ("m1", 5)] {
+            assert_eq!(sim.get(sim.signal(name)), BigUint::from(value), "{name}");
+        }
+    }
+
+    // Edge procedures that call timed tasks run as processes, and two of
+    // them may write one variable; the later write determines its value.
+    fn timed_edge_processes_share_a_variable(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            module Top(output bit q, output int changes);
+                bit clk = 0, a = 0;
+                task automatic pause; #1; endtask
+                always @(posedge clk) begin pause(); q = a; end
+                always @(negedge clk) begin pause(); q = ~a; end
+                initial begin
+                    #1 clk = 1;
+                    #3 clk = 0;
+                    #3 a = 1; clk = 1;
+                    #3 clk = 0;
+                end
+                initial begin
+                    changes = 0;
+                    #1 forever @(q) changes = changes + 1;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("timed_shared.sv"))], "Top");
+        sim.run_until(20).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), BigUint::from(0u8));
+        assert_eq!(sim.get(sim.signal("changes")), BigUint::from(2u8));
+    }
+
+    // The writers of a generate loop each write one bit of the element a
+    // run-time address selects, as a behavioural memory with bit write
+    // enables does.
+    fn generated_always_processes_write_the_bits_of_one_memory(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            module Ram #(parameter bits = 4) (
+                input w_clk, input [2:0] w_addr, input [bits-1:0] w_din, w_bwe,
+                input [2:0] r_addr, output [bits-1:0] r_dout);
+                reg [bits-1:0] array [0:7];
+                wire [bits-1:0] bitclk = {bits{w_clk}} & w_bwe;
+                genvar idx;
+                generate
+                    for (idx = 0; idx < bits; idx = idx + 1) begin : write
+                        always @(bitclk[idx] or w_clk or w_addr or w_din[idx]) begin
+                            if (bitclk[idx] && w_clk) array[w_addr][idx] <= w_din[idx];
+                        end
+                    end
+                endgenerate
+                assign r_dout = array[r_addr];
+            endmodule
+            module Top(output logic [3:0] whole, masked, cleared);
+                reg clk = 0, clobber = 0;
+                reg [2:0] wa = 0, ra = 0;
+                reg [3:0] din = 0, bwe = 4'hf;
+                wire [3:0] dout;
+                integer i;
+                Ram ram(.w_clk(clk), .w_addr(wa), .w_din(din), .w_bwe(bwe), .r_addr(ra), .r_dout(dout));
+                // Another module's process writes the memory too.
+                always @(clobber) begin
+                    if (clobber) begin
+                        for (i = 0; i < 8; i = i + 1) ram.array[i] <= 4'b0;
+                    end
+                end
+                initial begin
+                    #1 wa = 5; din = 4'hf; #1 clk = 1; #1 clk = 0;
+                    #1 wa = 3; din = 4'ha; #1 clk = 1; #1 clk = 0;
+                    #1 wa = 5; din = 4'h5; bwe = 4'h3; #1 clk = 1; #1 clk = 0;
+                    #1 ra = 3; #1 whole = dout;
+                    ra = 5; #1 masked = dout;
+                    clobber = 1; #1 cleared = dout;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("bit_writers.sv"))], "Top");
+        sim.run_until(20).unwrap();
+        for (name, value) in [("whole", 0xau8), ("masked", 0xd), ("cleared", 0)] {
+            assert_eq!(sim.get(sim.signal(name)), BigUint::from(value), "{name}");
+        }
+    }
+
+    // An edge procedure that assigns a memory by blocking assignments, while
+    // a process of another module writes the memory too, stores each write
+    // as it executes.
+    fn blocking_edge_writes_share_a_memory_with_another_module(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            module Mem(input clk, we, input [3:0] wa, ra, input [7:0] wd, output logic [7:0] rd);
+                logic [7:0] memory [16];
+                always @(posedge clk) begin
+                    if (we) memory[wa][3:0] = wd[3:0];
+                    rd <= memory[ra];
+                end
+            endmodule
+            module Loader(input clk, load);
+                always @(posedge clk) begin
+                    if (load) begin
+                        Top.m.memory[3] = 8'hb2;
+                        Top.m.memory[4] = 8'hc3;
+                    end
+                end
+            endmodule
+            module Top(output logic [7:0] merged, loaded);
+                logic clk = 0, we = 0, load = 0;
+                logic [3:0] wa = 0, ra = 0;
+                logic [7:0] wd = 0, rd;
+                Mem m(.*);
+                Loader l(.*);
+                always #1 clk = ~clk;
+                initial begin
+                    @(negedge clk) load = 1;
+                    @(negedge clk) load = 0;
+                    we = 1; wa = 3; wd = 8'hff;
+                    @(negedge clk) we = 0; ra = 3;
+                    @(negedge clk) merged = rd;
+                    ra = 4;
+                    @(negedge clk) loaded = rd;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("shared_memory.sv"))], "Top");
+        sim.run_until(20).unwrap();
+        for (name, value) in [("merged", 0xbfu8), ("loaded", 0xc3)] {
+            assert_eq!(sim.get(sim.signal(name)), BigUint::from(value), "{name}");
+        }
+    }
+}

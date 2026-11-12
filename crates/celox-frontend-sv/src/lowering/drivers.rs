@@ -579,6 +579,26 @@ pub(super) fn driver_site(module: &sv::ir::Module, driver: usize) -> Option<Stri
         .map(ToString::to_string)
 }
 
+/// Whether process `driver` of [`ModuleDrivers::local`] runs as a process
+/// whose writes store into a variable as they execute, so that it may write
+/// a variable that other such processes write too (IEEE 1800-2023 6.5): an
+/// ordinary `always` run as a process. An `always_ff` is the only process
+/// that writes its variables (9.2.2.4).
+pub(super) fn shares_variables(module: &sv::ir::Module, driver: usize) -> bool {
+    let edge = module.comb_processes().len() + module.ff_processes().len();
+    driver >= edge
+        && module
+            .initial_processes()
+            .iter()
+            .filter(|process| process.repeats())
+            .nth(driver - edge)
+            .is_some_and(|process| {
+                process
+                    .site()
+                    .is_none_or(|site| site.construct != "always_ff")
+            })
+}
+
 /// Whether process `driver` of [`ModuleDrivers::local`] must be the only writer of
 /// the variables it writes: an `always_comb` or continuous assignment, an
 /// edge procedure, or an `always_ff` run as a process, but not another

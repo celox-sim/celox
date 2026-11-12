@@ -583,6 +583,12 @@ pub(super) struct ForeignWrites {
     pub repeating: usize,
     /// Whether an `always_ff` process writes it.
     pub always_ff: bool,
+    /// Whether a process that is the only writer of what it writes does: an
+    /// `always_ff`, or a combinational process. A plain `always` that writes
+    /// through a hierarchical name runs as a process (see
+    /// `runs_as_process`), whose writes store into the variable as they
+    /// execute.
+    pub exclusive: bool,
 }
 
 /// Add the signals that the hierarchical names of `module` (`module_id`),
@@ -596,16 +602,22 @@ pub(super) fn collect_foreign_writes(
     let mut once = HashSet::default();
     let mut repeatedly = HashSet::default();
     let mut always_ff = HashSet::default();
+    let mut exclusive = HashSet::default();
     for process in module.initial_processes() {
-        let written = if process.repeats() {
+        let ordinary = process
+            .site()
+            .is_none_or(|site| site.construct != "always_ff");
+        let written = if !process.repeats() {
+            &mut once
+        } else if ordinary {
             &mut repeatedly
         } else {
-            &mut once
+            &mut exclusive
         };
         super::procedural::written_names_with_calls(module, process.body(), written);
     }
     for process in module.comb_processes() {
-        super::procedural::written_names_with_calls(module, process.body(), &mut repeatedly);
+        super::procedural::written_names_with_calls(module, process.body(), &mut exclusive);
     }
     for process in module.ff_processes() {
         let written = if process.is_always_ff() {
@@ -618,7 +630,8 @@ pub(super) fn collect_foreign_writes(
     for reference in references {
         let name = &reference.signal.name;
         let by_always_ff = always_ff.contains(name);
-        let repeating = by_always_ff || repeatedly.contains(name);
+        let by_exclusive = by_always_ff || exclusive.contains(name);
+        let repeating = by_exclusive || repeatedly.contains(name);
         if !repeating && !once.contains(name) {
             continue;
         }
@@ -630,6 +643,7 @@ pub(super) fn collect_foreign_writes(
                 .or_default();
             entry.repeating += usize::from(repeating);
             entry.always_ff |= by_always_ff;
+            entry.exclusive |= by_exclusive;
         }
     }
 }
@@ -654,6 +668,7 @@ pub(super) fn collect_virtual_writes(
                 .or_default();
             entry.repeating += foreign.repeating.min(1);
             entry.always_ff |= foreign.always_ff;
+            entry.exclusive |= foreign.exclusive;
         }
     }
 }
