@@ -46,21 +46,7 @@ pub(super) fn read_index_value(
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<ConstExpr> {
-    let value = index_value(id, native, tree, session, dimensions)?;
-    if !dimensions.constant_indexed_base
-        && matches!(
-            native.expression(ungroup(id, native)).kind,
-            ExprKind::Conditional { .. }
-        )
-        && eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env).is_none()
-        && !inlining::calls_subroutine(&bind_value(id, native, tree, session, dimensions, None)?)
-    {
-        return Err(unsupported(format!(
-            "select index `{}`",
-            native.token_text(native.expression(id).tokens).trim()
-        )));
-    }
-    Ok(value)
+    index_value(id, native, tree, session, dimensions)
 }
 
 /// Whether native expression `id` is the element of a dynamic container
