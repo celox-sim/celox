@@ -547,9 +547,9 @@ pub(super) fn rename(expr: Expr, from: &str, to: &str) -> Expr {
     }
 }
 
-/// The virtual interface type of native expression `id`, judged before it
-/// is bound: a variable, a property, or an element of an array or a
-/// container of virtual interfaces.
+/// The virtual interface type of native expression `id`: a variable, a
+/// property, or an element of an array or a container of virtual
+/// interfaces, as its type tells (25.9).
 pub(super) fn native_type(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -558,68 +558,45 @@ pub(super) fn native_type(
     dimensions: &PackedDimensions,
 ) -> Option<Arc<VirtualInterface>> {
     declarations(session)?;
-    let id = expression_binding::ungroup(id, native);
-    if let celox_sv_syntax::ExprKind::Select {
-        expression,
-        dimension,
-    } = &native.expression(id).kind
-        && matches!(dimension.kind, celox_sv_syntax::DimensionKind::Index(_))
-        && let Ok(Some(container)) =
-            containers::native_type(*expression, native, tree, session, dimensions)
-    {
-        return container.element.virtual_interface.clone();
-    }
-    // A variable or package variable `p::v`, or an element of an array of
-    // them that indexes each of its unpacked dimensions.
-    let mut base = id;
-    let mut indices = 0;
-    while let celox_sv_syntax::ExprKind::Select {
-        expression,
-        dimension,
-    } = &native.expression(base).kind
-        && matches!(dimension.kind, celox_sv_syntax::DimensionKind::Index(_))
-    {
-        base = expression_binding::ungroup(*expression, native);
-        indices += 1;
-    }
-    let key = match &native.expression(base).kind {
-        celox_sv_syntax::ExprKind::Name(name) => {
-            Some(instances::normalize_identifier(&name.spelling))
-        }
-        celox_sv_syntax::ExprKind::Member {
-            expression,
-            separator,
-            name,
-        } if separator == "::" => match &native
-            .expression(expression_binding::ungroup(*expression, native))
-            .kind
-        {
-            celox_sv_syntax::ExprKind::Name(package) => Some(format!(
-                "{}::{}",
-                instances::normalize_identifier(&package.spelling),
-                instances::normalize_identifier(&name.spelling)
-            )),
-            _ => None,
-        },
-        _ => None,
-    };
-    if let Some(shape) = key.and_then(|key| dimensions.get(&key)) {
-        return shape
-            .virtual_interface
-            .clone()
-            .filter(|_| shape.unpacked.len() == indices && shape.container.is_none());
-    }
-    if indices > 0 {
+    let ty = expression_types::type_of(tree, session, id, native, dimensions).ok()?;
+    of_type(&session.types, ty)
+}
+
+/// The virtual interface type `ty` is, if it is one.
+pub(super) fn of_type(
+    types: &semantic_types::TyTable,
+    ty: semantic_types::TyId,
+) -> Option<Arc<VirtualInterface>> {
+    let semantic_types::TyData::VirtualInterface {
+        interface: semantic_types::Decl::Interface(interface),
+        modport,
+    } = types.data(ty)
+    else {
         return None;
+    };
+    Some(Arc::new(VirtualInterface {
+        interface: interface.to_string(),
+        modport: modport.as_deref().map(str::to_owned),
+    }))
+}
+
+/// The virtual interface type of the elements of `ty`, if it is a fixed-size
+/// unpacked array, of one or more dimensions, of virtual interfaces.
+pub(super) fn element_of_array(
+    types: &semantic_types::TyTable,
+    ty: semantic_types::TyId,
+) -> Option<Arc<VirtualInterface>> {
+    let mut element = ty;
+    let mut dimensions = 0;
+    while let semantic_types::TyData::Array {
+        kind: semantic_types::ArrayKind::Fixed(_),
+        element: inner,
+    } = types.data(element)
+    {
+        element = *inner;
+        dimensions += 1;
     }
-    let (property, _) = expression_binding::object_property(tree, session, id, native, dimensions)
-        .ok()
-        .flatten()?;
-    property
-        .r#type
-        .virtual_interface
-        .clone()
-        .filter(|_| property.r#type.container.is_none())
+    (dimensions > 0).then(|| of_type(types, element)).flatten()
 }
 
 /// The member access `h.m` that native expression `id` is, through a
@@ -1058,7 +1035,13 @@ fn native_value_type(
                 )
                 && let Ok(Some(container)) =
                     containers::native_type(*receiver, native, tree, session, dimensions)
-                && let Some(element) = &container.element.virtual_interface
+                && let Some(element) = semantic_types::of_type(
+                    &mut session.types,
+                    &tree.functions,
+                    &container.element,
+                    &dimensions.const_env,
+                )
+                .and_then(|element| of_type(&session.types, element))
             {
                 return Ok(Some(element.as_ref().clone()));
             }
@@ -1069,11 +1052,13 @@ fn native_value_type(
                     _ => expression_binding::callable_name(tree, *expression, native)
                         .ok_or_else(|| "the call".to_owned())?,
                 };
-            return match dimensions.function_return_types.get(&name) {
-                Some(result) => match &result.virtual_interface {
-                    Some(ty) => Ok(Some(ty.as_ref().clone())),
-                    None => Err(format!("a call of `{name}`")),
-                },
+            return match dimensions
+                .function_return_types
+                .get(&name)
+                .and_then(|result| result.semantic_type)
+                .and_then(|ty| of_type(&session.types, ty))
+            {
+                Some(ty) => Ok(Some(ty.as_ref().clone())),
                 None => Err(format!("a call of `{name}`")),
             };
         }
@@ -1085,7 +1070,8 @@ fn native_value_type(
             return match dimensions
                 .function_return_types
                 .get(&name)
-                .and_then(|result| result.virtual_interface.as_ref())
+                .and_then(|result| result.semantic_type)
+                .and_then(|ty| of_type(&session.types, ty))
             {
                 Some(ty) => Ok(Some(ty.as_ref().clone())),
                 None => Err(format!("a call of `{name}`")),
@@ -1209,6 +1195,7 @@ pub(super) fn check_copy_out(
 /// of virtual interfaces of type `target`: an array variable of a virtual
 /// interface type that `target` accepts (IEEE 1800-2023 25.9, 7.6).
 pub(super) fn check_array_assignment(
+    tree: &AnalysisContext<'_>,
     session: &mut Session,
     id: celox_sv_syntax::ExprId,
     native: &celox_sv_syntax::Declarations,
@@ -1224,13 +1211,27 @@ pub(super) fn check_array_assignment(
             else_expression,
             ..
         } => {
-            check_array_assignment(session, *then_expression, native, dimensions, target)?;
-            return check_array_assignment(session, *else_expression, native, dimensions, target);
+            check_array_assignment(tree, session, *then_expression, native, dimensions, target)?;
+            return check_array_assignment(
+                tree,
+                session,
+                *else_expression,
+                native,
+                dimensions,
+                target,
+            );
         }
         celox_sv_syntax::ExprKind::Name(name) => {
             let name = instances::normalize_identifier(&name.spelling);
             match dimensions.get(&name) {
-                Some(shape) => match shape.virtual_interface.as_deref() {
+                Some(shape) => match shape
+                    .type_id(&mut session.types, &tree.functions, &dimensions.const_env)
+                    .and_then(|ty| element_of_array(&session.types, ty))
+                    .or_else(|| {
+                        shape
+                            .type_id(&mut session.types, &tree.functions, &dimensions.const_env)
+                            .and_then(|ty| of_type(&session.types, ty))
+                    }) {
                     Some(source) => {
                         let source_type = source.type_id(&mut session.types);
                         let target_type = target.type_id(&mut session.types);

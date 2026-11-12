@@ -62,10 +62,13 @@ pub(super) fn enter_method_call(
         let copied_in = copied_in(dimensions, &name, first + position);
         // The formal is copied out to the actual.
         if let Some(formal) = shape
-            .filter(|shape| !copied_in && shape.unpacked.is_empty())
-            .and_then(|shape| shape.virtual_interface.as_deref())
+            .filter(|_| !copied_in)
+            .and_then(|shape| {
+                shape.type_id(&mut session.types, &tree.functions, &dimensions.const_env)
+            })
+            .and_then(|ty| virtual_interfaces::of_type(&session.types, ty))
         {
-            virtual_interfaces::check_copy_out(tree, session, value, native, dimensions, formal)?;
+            virtual_interfaces::check_copy_out(tree, session, value, native, dimensions, &formal)?;
         }
         let shape = shape
             .filter(|shape| {
@@ -544,12 +547,11 @@ fn enter_subroutine_call(
                 check_tagged_copyout(*id, Some(shape), tree, session, dimensions)?;
                 // The formal is copied out to the actual.
                 if let Some(formal) = shape
-                    .virtual_interface
-                    .as_deref()
-                    .filter(|_| shape.unpacked.is_empty())
+                    .type_id(&mut session.types, &tree.functions, &dimensions.const_env)
+                    .and_then(|ty| virtual_interfaces::of_type(&session.types, ty))
                 {
                     virtual_interfaces::check_copy_out(
-                        tree, session, *id, native, dimensions, formal,
+                        tree, session, *id, native, dimensions, &formal,
                     )?;
                 }
             }
