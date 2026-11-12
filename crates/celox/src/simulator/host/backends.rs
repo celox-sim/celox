@@ -38,7 +38,6 @@ impl Simulator {
     }
 
     /// Build a simulator directly from SystemVerilog sources.
-    #[cfg(feature = "systemverilog")]
     pub fn from_sv_sources<'a>(
         sources: Vec<(&'a str, &'a std::path::Path)>,
         top: &'a str,
@@ -47,7 +46,6 @@ impl Simulator {
     }
 
     /// Build a mixed Veryl/SystemVerilog hierarchy with a top in either language.
-    #[cfg(feature = "systemverilog")]
     pub fn from_mixed_sources<'a>(
         sources: Vec<(&'a str, &'a std::path::Path)>,
         sv_sources: Vec<(&'a str, &'a std::path::Path)>,

@@ -8,7 +8,7 @@ import { cargoCommands } from "./run-ci-rust-scope.mjs";
 
 const builds = [
   { packages: ["celox-test-suite"], targets: [], features: ["celox-test-suite/icarus"] },
-  { packages: ["celox"], targets: ["param_override"], features: ["celox/systemverilog"] },
+  { packages: ["celox"], targets: ["param_override"], features: ["celox/cranelift"] },
 ];
 const filter = "package(celox-test-suite) | binary_id(celox::param_override)";
 
@@ -41,8 +41,8 @@ test("runtime loading is enabled only for Celox test builds, without changing sc
   const lint = cargoCommands("lint", builds, filter);
   assert.equal(tests[0][tests[0].indexOf("--features") + 1], "celox-test-suite/icarus");
   assert.equal(tests[1][tests[1].indexOf("--features") + 1],
-    "celox/systemverilog,celox-test-suite/runtime-cases");
-  assert.equal(lint[1][lint[1].indexOf("--features") + 1], "celox/systemverilog");
+    "celox/cranelift,celox-test-suite/runtime-cases");
+  assert.equal(lint[1][lint[1].indexOf("--features") + 1], "celox/cranelift");
   assert.deepEqual(builds, original);
 });
 

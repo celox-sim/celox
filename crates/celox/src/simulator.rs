@@ -4,7 +4,6 @@ pub(crate) mod checkpoint;
 mod error;
 #[cfg(feature = "host-runtime")]
 mod heap;
-#[cfg(feature = "systemverilog")]
 pub(crate) mod mixed;
 #[cfg(feature = "host-runtime")]
 mod state_file;
@@ -24,7 +23,6 @@ pub use builder::{
     compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_diagnostic_policy,
     compile_to_sir_with_file_dependencies, compile_to_sir_with_latch_policy,
 };
-#[cfg(feature = "systemverilog")]
 pub use builder::{
     compile_mixed_to_sir, compile_mixed_to_sir_with_file_dependencies, compile_sv_to_sir,
 };

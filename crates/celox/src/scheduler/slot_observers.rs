@@ -205,12 +205,7 @@ impl Generator<'_> {
     }
 }
 
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
 mod tests {
     use crate::{SchedulerMode, SignalRef, SimBackend, Simulation, SlotIo, SlotObserver};
     use std::sync::{Arc, Mutex};

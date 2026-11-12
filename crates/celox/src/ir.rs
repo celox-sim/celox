@@ -107,12 +107,7 @@ impl std::ops::Deref for RuntimeDesign {
 }
 
 impl RuntimeDesign {
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn set_event_kind_for_test(
         &mut self,
         address: AbsoluteAddr,
@@ -308,7 +303,6 @@ impl RuntimeDesign {
         &self.semantic
     }
 
-    #[cfg(feature = "systemverilog")]
     pub(crate) fn set_reflection_instance_paths(
         &mut self,
         paths: std::collections::BTreeMap<InstanceId, Vec<String>>,

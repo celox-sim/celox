@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! The compiled scheduler of a four-state design: event levels are 0, 1, x
 //! or z, and a change between them is an edge as IEEE 1800-2023 Table 9-2
 //! has it (9.4.2), for clocks, asynchronous resets, clocks derived from

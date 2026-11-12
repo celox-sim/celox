@@ -24,9 +24,6 @@ cranelift = ["host-runtime", "dep:celox-backend-cranelift"]
 wasm-runtime = ["host-runtime", "dep:wasmtime"]
 veryl-reference = ["host-runtime", "dep:veryl-simulator"]
 wasm-component = ["host-runtime", "dep:wasmtime"]
-systemverilog = ["dep:celox-frontend-sv"]
-# Accept SystemVerilog DPI-C imports, linked to C functions at build time.
-sv-dpi = ["systemverilog", "celox-frontend-sv/dpi"]
 arm64-codegen = ["cranelift", "dep:celox-backend-arm64"]
 x86_64-codegen = [
     "cranelift",
@@ -49,7 +46,7 @@ celox-backend-wasm    = { workspace = true }
 celox-design          = { workspace = true }
 celox-frontend-core   = { workspace = true }
 celox-frontend-sdk    = { workspace = true }
-celox-frontend-sv     = { workspace = true, optional = true }
+celox-frontend-sv     = { workspace = true }
 celox-frontend-veryl  = { workspace = true }
 celox-sir             = { workspace = true }
 celox-sir-opt         = { workspace = true, default-features = false }
@@ -121,12 +118,12 @@ harness = false
 [[test]]
 name = "systemverilog"
 path = "tests/systemverilog.rs"
-required-features = ["systemverilog", "cranelift", "wasm-runtime"]
+required-features = ["cranelift", "wasm-runtime"]
 
 [[test]]
 name = "sv_dpi"
 path = "tests/sv_dpi.rs"
-required-features = ["sv-dpi", "cranelift", "wasm-runtime"]
+required-features = ["cranelift", "wasm-runtime"]
 
 [[bench]]
 name = "compilation"
@@ -141,12 +138,10 @@ harness = false
 [[example]]
 name = "sv_tests"
 path = "examples/sv_tests.rs"
-required-features = ["systemverilog"]
 
 [[example]]
 name = "sched_bench"
 path = "examples/sched_bench.rs"
-required-features = ["systemverilog"]
 
 [[example]]
 name = "frontend_binary"

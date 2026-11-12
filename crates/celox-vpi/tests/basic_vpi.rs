@@ -11,7 +11,6 @@ static VPI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static LONG_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
 static LONG_CALLBACK_DELAY: AtomicUsize = AtomicUsize::new(1);
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn systemverilog_parameters_are_typed_read_only_objects_at_o2() {
     let _serial = lock_vpi();
@@ -76,7 +75,6 @@ fn systemverilog_parameters_are_typed_read_only_objects_at_o2() {
     clear_runtime();
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn interface_parameters_keep_instance_paths_and_specialized_values() {
     let _serial = lock_vpi();
@@ -138,7 +136,6 @@ fn interface_parameters_keep_instance_paths_and_specialized_values() {
     clear_runtime();
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn generate_scopes_with_only_child_instances_are_iterable() {
     let _serial = lock_vpi();
@@ -3062,7 +3059,6 @@ fn finish_during_queued_edge_replay_stops_remaining_callbacks_and_edges() {
     clear_runtime();
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn vpi_time_properties_follow_the_attached_design_precision() {
     let _serial = lock_vpi();
@@ -3095,7 +3091,6 @@ fn vpi_time_properties_follow_the_attached_design_precision() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn vpi_time_properties_preserve_module_scales_in_native_images() {
     let _serial = lock_vpi();
@@ -3249,7 +3244,6 @@ fn callback_teardown_keeps_its_host_selected_until_dispatch_returns() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn interface_members_are_navigable_after_native_image_round_trip() {
     let _serial = lock_vpi();
@@ -3382,7 +3376,6 @@ fn interface_members_are_navigable_after_native_image_round_trip() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn two_state_image_converts_unknown_logic_deposits_and_forces() {
     let _serial = lock_vpi();
@@ -3448,7 +3441,6 @@ fn two_state_image_converts_unknown_logic_deposits_and_forces() {
     clear_runtime();
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn unpacked_array_handles_preserve_declared_indices_and_neighbor_values() {
     let _serial = lock_vpi();
@@ -3568,11 +3560,9 @@ fn unpacked_array_handles_preserve_declared_indices_and_neighbor_values() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 static TIMED_EDGES: std::sync::Mutex<Vec<(u64, i32)>> = std::sync::Mutex::new(Vec::new());
 
 /// Records the count at every rise of the DUT's clock.
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn record_timed_edge(data: *mut VpiCbData) -> i32 {
     // Safety: the callback runtime passes back the registration storage, and
     // its value is an integer.
@@ -3600,7 +3590,6 @@ unsafe extern "C" fn record_timed_edge(data: *mut VpiCbData) -> i32 {
 /// A timed runtime runs the DUT's processes between the callbacks: its own
 /// clock, whose rises a value-change callback sees before the register
 /// updates, and its `$finish`, which ends the run.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_timed_runtime_runs_the_dut_processes_between_callbacks() {
     let _serial = lock_vpi();
@@ -3651,12 +3640,10 @@ fn a_timed_runtime_runs_the_dut_processes_between_callbacks() {
     clear_runtime();
 }
 
-#[cfg(feature = "systemverilog")]
 static SPIN_WRITES: AtomicBool = AtomicBool::new(false);
 
 /// Re-registers itself in the ReadWrite region, writing `Top.x` there when
 /// [`SPIN_WRITES`] is set: a time step that never ends.
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn spin_read_write(_data: *mut VpiCbData) -> i32 {
     // Safety: VPI calls from a callback on the session's thread.
     unsafe {
@@ -3676,7 +3663,6 @@ unsafe extern "C" fn spin_read_write(_data: *mut VpiCbData) -> i32 {
     0
 }
 
-#[cfg(feature = "systemverilog")]
 unsafe fn register_spin() {
     let data = VpiCbData {
         reason: CB_READ_WRITE_SYNCH,
@@ -3693,7 +3679,6 @@ unsafe fn register_spin() {
 
 /// A time step whose ReadWrite callbacks never let it end fails the run,
 /// whether they write or not.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_timed_time_step_that_never_ends_fails_the_run() {
     let _serial = lock_vpi();
@@ -3727,11 +3712,9 @@ fn a_timed_time_step_that_never_ends_fails_the_run() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 static FINISH_EVENTS: AtomicI32 = AtomicI32::new(0);
 
 /// Finishes the run at the first rise of the DUT's clock.
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn finish_at_the_first_rise(data: *mut VpiCbData) -> i32 {
     // Safety: the callback runtime passes back the registration storage, and
     // its value is an integer.
@@ -3742,7 +3725,6 @@ unsafe extern "C" fn finish_at_the_first_rise(data: *mut VpiCbData) -> i32 {
     0
 }
 
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn record_end_of_simulation(_data: *mut VpiCbData) -> i32 {
     FINISH_EVENTS.fetch_or(2, Ordering::SeqCst);
     0
@@ -3751,7 +3733,6 @@ unsafe extern "C" fn record_end_of_simulation(_data: *mut VpiCbData) -> i32 {
 /// `vpiFinish` from a value-change callback inside a time step ends the run
 /// at that time: the design runs nothing later, and the end-of-simulation
 /// callbacks still run.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_finish_inside_a_time_step_ends_a_timed_run() {
     let _serial = lock_vpi();
@@ -3810,12 +3791,10 @@ fn a_finish_inside_a_time_step_ends_a_timed_run() {
     clear_runtime();
 }
 
-#[cfg(feature = "systemverilog")]
 static READ_ONLY_EVENTS: std::sync::Mutex<Vec<(&'static str, u64, bool)>> =
     std::sync::Mutex::new(Vec::new());
 
 /// Tries to write `Top.x`; returns whether the write was accepted.
-#[cfg(feature = "systemverilog")]
 unsafe fn try_write_x() -> bool {
     // Safety: VPI calls from a callback on the session's thread.
     unsafe {
@@ -3830,7 +3809,6 @@ unsafe fn try_write_x() -> bool {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 unsafe fn register_read_only_probe(
     reason: i32,
     callback: unsafe extern "C" fn(*mut VpiCbData) -> i32,
@@ -3853,7 +3831,6 @@ unsafe fn register_read_only_probe(
 }
 
 /// Records a ReadOnly write attempt and schedules a zero-delay timer.
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn read_only_writes(_data: *mut VpiCbData) -> i32 {
     // Safety: VPI calls from a callback on the session's thread.
     let accepted = unsafe { try_write_x() };
@@ -3868,7 +3845,6 @@ unsafe extern "C" fn read_only_writes(_data: *mut VpiCbData) -> i32 {
 
 /// A zero-delay timer from ReadOnly: still read-only, and the ReadWrite it
 /// registers belongs to a later time step.
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn zero_delay_after_read_only(_data: *mut VpiCbData) -> i32 {
     // Safety: VPI calls from a callback on the session's thread.
     let accepted = unsafe { try_write_x() };
@@ -3881,7 +3857,6 @@ unsafe extern "C" fn zero_delay_after_read_only(_data: *mut VpiCbData) -> i32 {
     0
 }
 
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn read_write_after_read_only(_data: *mut VpiCbData) -> i32 {
     // Safety: VPI calls from a callback on the session's thread.
     let accepted = unsafe { try_write_x() };
@@ -3895,7 +3870,6 @@ unsafe extern "C" fn read_write_after_read_only(_data: *mut VpiCbData) -> i32 {
 /// A timed runtime rejects writes in ReadOnly (IEEE 1800-2023 38.36.2), and
 /// a zero-delay timer registered there runs without opening the time
 /// step's regions again.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_timed_read_only_region_rejects_writes_and_stays_closed() {
     let _serial = lock_vpi();
@@ -3930,11 +3904,9 @@ fn a_timed_read_only_region_rejects_writes_and_stays_closed() {
     clear_runtime();
 }
 
-#[cfg(feature = "systemverilog")]
 static ZERO_DELAY_EVENTS: std::sync::Mutex<Vec<(&'static str, u64, i32)>> =
     std::sync::Mutex::new(Vec::new());
 
-#[cfg(feature = "systemverilog")]
 unsafe fn read_int(name: &CStr) -> i32 {
     // Safety: VPI calls on the session's thread.
     unsafe {
@@ -3949,7 +3921,6 @@ unsafe fn read_int(name: &CStr) -> i32 {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 fn zero_delay_event(name: &'static str) {
     // Safety: VPI calls from a callback on the session's thread.
     let y = unsafe { read_int(c"Top.y") };
@@ -3960,7 +3931,6 @@ fn zero_delay_event(name: &'static str) {
 }
 
 /// The timer at 5 registers a zero-delay timer.
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn timer_at_five(_data: *mut VpiCbData) -> i32 {
     zero_delay_event("timer");
     // Safety: VPI registration from a callback on the session's thread.
@@ -3969,7 +3939,6 @@ unsafe extern "C" fn timer_at_five(_data: *mut VpiCbData) -> i32 {
 }
 
 /// Writes `x` and registers a ReadWrite callback.
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn first_zero_delay(_data: *mut VpiCbData) -> i32 {
     zero_delay_event("first zero delay");
     // Safety: VPI calls from a callback on the session's thread.
@@ -3980,7 +3949,6 @@ unsafe extern "C" fn first_zero_delay(_data: *mut VpiCbData) -> i32 {
     0
 }
 
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn read_write_registers_a_timer(_data: *mut VpiCbData) -> i32 {
     zero_delay_event("read-write");
     // Safety: VPI registration from a callback on the session's thread.
@@ -3988,7 +3956,6 @@ unsafe extern "C" fn read_write_registers_a_timer(_data: *mut VpiCbData) -> i32 
     0
 }
 
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn second_zero_delay(_data: *mut VpiCbData) -> i32 {
     zero_delay_event("second zero delay");
     // Safety: VPI registration from a callback on the session's thread.
@@ -3996,7 +3963,6 @@ unsafe extern "C" fn second_zero_delay(_data: *mut VpiCbData) -> i32 {
     0
 }
 
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn read_only_after_timers(_data: *mut VpiCbData) -> i32 {
     zero_delay_event("read-only");
     0
@@ -4004,7 +3970,6 @@ unsafe extern "C" fn read_only_after_timers(_data: *mut VpiCbData) -> i32 {
 
 /// Zero-delay timers that timer and ReadWrite callbacks register run in the
 /// same time step, before its ReadOnly region closes it.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn zero_delay_timers_run_before_a_timed_step_closes() {
     let _serial = lock_vpi();
@@ -4055,16 +4020,13 @@ fn zero_delay_timers_run_before_a_timed_step_closes() {
     clear_runtime();
 }
 
-#[cfg(feature = "systemverilog")]
 static FLAG_AT_END: AtomicI32 = AtomicI32::new(-1);
 
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn finish_from_a_timer(_data: *mut VpiCbData) -> i32 {
     assert_eq!(vpi_control(VPI_FINISH), 1);
     0
 }
 
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn record_flag_at_end(_data: *mut VpiCbData) -> i32 {
     // Safety: VPI calls from a callback on the session's thread.
     FLAG_AT_END.store(unsafe { read_int(c"Top.flag") }, Ordering::SeqCst);
@@ -4073,7 +4035,6 @@ unsafe extern "C" fn record_flag_at_end(_data: *mut VpiCbData) -> i32 {
 
 /// `vpiFinish` from a due timer ends a timed run before the design's slot
 /// at that time runs.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_finish_from_a_timer_stops_before_the_designs_slot() {
     let _serial = lock_vpi();
@@ -4126,14 +4087,12 @@ fn a_finish_from_a_timer_stops_before_the_designs_slot() {
     clear_runtime();
 }
 
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn write_plain_data_input(_data: *mut VpiCbData) -> i32 {
     // Safety: VPI calls on the session's thread.
     assert!(unsafe { try_write_x() });
     0
 }
 
-#[cfg(feature = "systemverilog")]
 fn settle_plain_data_input(action: &str) -> Result<bool, String> {
     let source = format!(
         r#"`timescale 1ns/1ns
@@ -4178,14 +4137,12 @@ fn settle_plain_data_input(action: &str) -> Result<bool, String> {
     result
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_plain_input_settle_finishes_cleanly() {
     let _serial = lock_vpi();
     assert!(settle_plain_data_input("$finish;").unwrap());
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_plain_input_settle_reports_fatal_errors() {
     let _serial = lock_vpi();
@@ -4193,10 +4150,8 @@ fn a_plain_input_settle_reports_fatal_errors() {
     assert!(error.contains("fallback failure"), "{error}");
 }
 
-#[cfg(feature = "systemverilog")]
 static TIMED_CAPTURE_STATUS: AtomicI32 = AtomicI32::new(0);
 
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn capture_timed_read_only(data: *mut VpiCbData) -> i32 {
     // Safety: the test keeps its CString alive until callback dispatch returns.
     let result = unsafe { celox_vpi_save_state((*data).user_data) };
@@ -4204,7 +4159,6 @@ unsafe extern "C" fn capture_timed_read_only(data: *mut VpiCbData) -> i32 {
     0
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn timed_vpi_capture_reads_the_active_slot_without_advancing_it() {
     let _serial = lock_vpi();
@@ -4267,7 +4221,6 @@ fn timed_vpi_capture_reads_the_active_slot_without_advancing_it() {
 }
 
 /// Host deposits after quiescence reopen update regions without advancing time.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn inertial_deposits_resume_a_quiescent_timed_session() {
     let _serial = lock_vpi();
@@ -4337,7 +4290,6 @@ fn inertial_deposits_resume_a_quiescent_timed_session() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn record_resumed_inertial_value(data: *mut VpiCbData) -> i32 {
     // Safety: the test keeps the observation vector live until both callbacks fire.
     unsafe {
@@ -4346,13 +4298,11 @@ unsafe extern "C" fn record_resumed_inertial_value(data: *mut VpiCbData) -> i32 
     }
     0
 }
-#[cfg(feature = "systemverilog")]
 struct CallbackVectorValues {
     words: usize,
     values: Vec<Vec<VpiVecVal>>,
 }
 
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn record_callback_vector_values(data: *mut VpiCbData) -> i32 {
     // Safety: the test retains its context, and VPI supplies the requested vector.
     unsafe {
@@ -4367,7 +4317,6 @@ unsafe extern "C" fn record_callback_vector_values(data: *mut VpiCbData) -> i32 
 
 /// Change detection must observe high bits and changes in only the X/Z mask,
 /// including transitions between values that do and do not fit one machine word.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn value_change_callbacks_compare_full_values_and_unknown_masks() {
     let _serial = lock_vpi();
@@ -4485,7 +4434,6 @@ fn value_change_callbacks_compare_full_values_and_unknown_masks() {
 
 /// String and vector results have independent handle-owned scratch storage.
 /// Exercise repeated formats, word boundaries and partial unknown hex nibbles.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn value_buffers_preserve_formats_and_independent_pointer_lifetimes() {
     let _serial = lock_vpi();
@@ -4603,7 +4551,6 @@ fn value_buffers_preserve_formats_and_independent_pointer_lifetimes() {
 
 /// All writable formats must agree at narrow/wide boundaries, including
 /// truncation, signed extension and two-state conversion of X/Z bits.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn deposits_preserve_formats_at_word_boundaries() {
     let _serial = lock_vpi();
@@ -4768,14 +4715,12 @@ fn deposits_preserve_formats_at_word_boundaries() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 unsafe extern "C" fn record_changed_scalar(data: *mut VpiCbData) -> i32 {
     // Safety: the test requests scalar callback storage, which remains live.
     CALLBACK_VALUE.store(unsafe { (*(*data).value).value.scalar }, Ordering::SeqCst);
     0
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn callback_samples_preserve_signed_integers_and_four_state_scalars() {
     let _serial = lock_vpi();
@@ -4991,7 +4936,6 @@ fn callback_record_storage_is_independent_while_firing_and_reused() {
     clear_runtime();
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn packed_bit_handles_read_and_write_without_changing_neighbors() {
     let _serial = lock_vpi();
@@ -5121,7 +5065,6 @@ unsafe extern "C" fn rearm_later_change(data: *mut VpiCbData) -> i32 {
     0
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn a_callback_can_rearm_another_signals_pending_change() {
     let _serial = lock_vpi();
@@ -5194,7 +5137,6 @@ unsafe extern "C" fn write_overlapping_deposits(data: *mut VpiCbData) -> i32 {
     0
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn overlapping_vector_and_bit_deposits_preserve_callback_write_order() {
     let _serial = lock_vpi();
@@ -5276,7 +5218,6 @@ fn overlapping_vector_and_bit_deposits_preserve_callback_write_order() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn packed_bit_deposits_update_the_containing_vectors_saved_force_value() {
     let _serial = lock_vpi();
@@ -5404,7 +5345,6 @@ fn packed_bit_deposits_update_the_containing_vectors_saved_force_value() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn vpi_real_and_shortreal_values_use_floating_point_formats() {
     let _serial = lock_vpi();
@@ -5485,7 +5425,6 @@ fn vpi_real_and_shortreal_values_use_floating_point_formats() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn vpi_string_deposits_own_bytes_and_expose_the_string_value() {
     let _serial = lock_vpi();
@@ -5534,7 +5473,6 @@ fn vpi_string_deposits_own_bytes_and_expose_the_string_value() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn vpi_escaped_signal_names_round_trip_through_lookup_and_properties() {
     let _serial = lock_vpi();
@@ -5611,7 +5549,6 @@ unsafe extern "C" fn record_string_snapshot(data: *mut VpiCbData) -> i32 {
     );
     0
 }
-#[cfg(feature = "systemverilog")]
 #[test]
 fn string_callbacks_keep_the_triggering_bytes_when_an_earlier_callback_writes() {
     let _serial = lock_vpi();

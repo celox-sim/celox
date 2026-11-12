@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! Explicit edges of four-state clocks that are x or z follow IEEE
 //! 1800-2023 9.4.2, Table 9-2: a rising edge from x or z is a posedge, a
 //! falling one a negedge, and a gated clock is judged from the clock's real

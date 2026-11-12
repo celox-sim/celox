@@ -9,8 +9,6 @@
 //! - `tick(e)` is `s <= A; #H; s <= I; #L;`,
 //! - `tick_events(e1..ek)` makes the moves of all their signals together.
 
-#![cfg(feature = "systemverilog")]
-
 use std::path::Path;
 
 use celox::{Edge, EventHandle, Simulation, Simulator};

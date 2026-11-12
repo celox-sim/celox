@@ -99,7 +99,6 @@ impl DiagnosticPolicy {
         )
     }
 
-    #[cfg(feature = "systemverilog")]
     pub(crate) fn sv_options(
         &self,
         timescale: Option<crate::SvTimescale>,

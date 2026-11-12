@@ -153,7 +153,7 @@ for crate in "${crates[@]}"; do
   if [[ "$crate" == celox ]]; then
     # Cross-backend test targets call these APIs without individual cfg guards.
     # Match the ordinary Celox integration harness, including its SV targets.
-    archive_features=(--features cranelift,wasm-runtime,systemverilog)
+    archive_features=(--features cranelift,wasm-runtime)
   fi
   cargo check \
     --locked \

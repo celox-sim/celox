@@ -604,10 +604,8 @@ lowered symbolically. These remain available within one language.
 
 ## DPI-C imports {#dpi-c-imports}
 
-The `sv-dpi` Cargo feature (which implies `systemverilog`) lets a design
-call C functions declared with `import "DPI-C"`; without it, Celox rejects
-any DPI-C import. The `celox` command is built with it: `celox run` links
-the shared libraries named by `--dpi-lib PATH` (repeatable) and by
+A design can call C functions declared with `import "DPI-C"`. `celox run`
+links the shared libraries named by `--dpi-lib PATH` (repeatable) and by
 `dpi_libs` in `celox.toml`. In the Rust API, DPI-C registration is a host
 API of the builder:
 
@@ -652,8 +650,8 @@ Supported subset; everything else is rejected:
   argument read as zero.
 - `export "DPI-C"` declarations are accepted and checked (35.7) but no C
   code can call them, because only `context` imports may do so (35.5.3).
-- UVM's C library functions are provided by Celox without the `sv-dpi`
-  feature, and shadow any user implementation of the same name. The
+- UVM's C library functions are provided by Celox and shadow any user
+  implementation of the same name. The
   `uvm_re_*` functions use the Rust `regex` crate, whose syntax differs
   from POSIX extended regular expressions in rare constructs;
   `uvm_dpi_get_next_arg_c` returns `celox` followed by the plusargs and

@@ -450,16 +450,16 @@ function cargoArguments(jobName, stepName, env) {
 
 test("scoped Cargo commands build only the selected integration targets", () => {
   const env = {
-    PACKAGES: "celox", FEATURES: "celox/systemverilog",
+    PACKAGES: "celox", FEATURES: "celox/cranelift",
     TARGETS: "flip_flop systemverilog", FILTER: "binary_id(celox::flip_flop) | binary_id(celox::systemverilog)",
   };
   assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", env), [
     "nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest", "--no-tests=pass",
-    "-p", "celox", "--features", "celox/systemverilog,celox-test-suite/runtime-cases",
+    "-p", "celox", "--features", "celox/cranelift,celox-test-suite/runtime-cases",
     "--test", "flip_flop", "--test", "systemverilog", "-E", env.FILTER,
   ]);
   assert.deepEqual(cargoArguments("lint", "Lint the crates this pull request can affect", env), [
-    "clippy", "--locked", "-p", "celox", "--features", "celox/systemverilog",
+    "clippy", "--locked", "-p", "celox", "--features", "celox/cranelift",
     "--test", "flip_flop", "--test", "systemverilog", "--no-deps",
   ]);
   assert.deepEqual(cargoArguments("lint", "Lint the crates this pull request can affect", {
@@ -518,13 +518,13 @@ test("scoped checks preserve full-run fallbacks and use their own package scopes
 
 test("cocotb reuses the original scoped Cargo build", () => {
   const builds = [{ packages: ["celox", "celox-vpi", "celox-test-suite"], targets: [],
-    features: ["celox/systemverilog", "celox-test-suite/icarus"] }];
+    features: ["celox-test-suite/icarus"] }];
   const args = cargoArguments("rust-tests", "Run cocotb VPI end-to-end test", {
     RUST_FULL: "false", BUILDS: JSON.stringify(builds),
   });
   assert.deepEqual(args, ["nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest",
     "-p", "celox", "-p", "celox-vpi", "-p", "celox-test-suite", "--features",
-    "celox/systemverilog,celox-test-suite/icarus,celox-test-suite/runtime-cases",
+    "celox-test-suite/icarus,celox-test-suite/runtime-cases",
     "-E", 'binary_id(celox-vpi::cocotb_e2e) & test(/^cocotb_/)', "--run-ignored", "only"]);
 });
 
@@ -594,7 +594,7 @@ test("upstream SV TB runs on full CI and feeds failure reporting", () => {
   assert.match(upstream, /needs.changes.outputs.full_validation == 'true'/);
   assert.doesNotMatch(upstream, /continue-on-error/);
   assert.match(upstream, /conformance\/common-cells\/revision/);
-  assert.match(upstream, /cargo build --locked -p celox-vpi --features systemverilog --bin celox/);
+  assert.match(upstream, /cargo build --locked -p celox-vpi --bin celox/);
   assert.match(upstream, /node scripts\/run-common-cells.mjs/);
   assert.match(upstream, /if: always\(\)/);
   assert.match(upstream, /retention-days: 14/);
@@ -605,7 +605,7 @@ test("rtlmeter qualification runs all pinned cases and verifies completion and c
   const rtlmeter = job("rtlmeter");
   assert.match(rtlmeter, /needs: changes/);
   assert.doesNotMatch(rtlmeter, /continue-on-error/);
-  assert.match(rtlmeter, /cargo build --locked --release -p celox-vpi --features systemverilog --bin celox/);
+  assert.match(rtlmeter, /cargo build --locked --release -p celox-vpi --bin celox/);
   assert.match(rtlmeter, /python scripts\/run-rtlmeter-bench\.py prepare/);
   assert.match(rtlmeter, /python scripts\/run-rtlmeter-bench\.py check\s+all/);
   assert.match(rtlmeter, /--states two-state,four-state/);
@@ -619,7 +619,7 @@ test("rtlmeter qualification runs all pinned cases and verifies completion and c
 
 test("sv-tests shards reuse one driver and together cover every case", () => {
   const driver = job("sv-tests");
-  assert.match(driver, /cargo build --locked --release -p celox --features systemverilog --example sv_tests/);
+  assert.match(driver, /cargo build --locked --release -p celox --example sv_tests/);
   assert.match(driver, /name: sv-tests-driver/);
   const shard = job("sv-tests-shard");
   assert.match(shard, /needs: \[changes, sv-tests\]/);

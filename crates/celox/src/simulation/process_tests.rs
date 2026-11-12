@@ -136,7 +136,6 @@ fn check_all_backends(four_state: bool, steps: usize) {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn timed_tiered_promotion_preserves_suspended_processes_and_nba() {
     let source = r#"
@@ -501,7 +500,6 @@ fn gated_clocks_share_their_source_edge_on_every_backend() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 const GENERATED_ALIAS_SOURCE: &str = r#"
 module Generator(input logic clk, output logic g);
     initial g = 0;
@@ -517,7 +515,6 @@ module Top(input logic cp, cn, output logic [7:0] p, n);
 endmodule
 "#;
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn generated_alias_edges_keep_their_instances_and_stable_phases() {
     fn check<B: crate::SimBackend>(mut backend: crate::Simulator<B>) {
@@ -574,12 +571,9 @@ fn generated_alias_edges_keep_their_instances_and_stable_phases() {
         check(build().build_native().unwrap());
     }
 }
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 #[test]
 fn timed_alias_edges_and_checkpoint_survive_tiered_promotion() {

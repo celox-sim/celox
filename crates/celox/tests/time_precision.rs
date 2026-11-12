@@ -1,5 +1,3 @@
-#![cfg(feature = "systemverilog")]
-
 use std::path::Path;
 
 use celox::{SimBackend, Simulator, SimulatorBuilder};

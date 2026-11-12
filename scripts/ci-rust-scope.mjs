@@ -7,7 +7,6 @@ import { classifyFiles } from "./ci-changes.mjs";
 // Features the Rust test job enables. Each is passed only when a selected
 // package can see the feature's package, as Cargo requires.
 export const CI_FEATURES = Object.freeze([
-  "celox/systemverilog",
   "celox/cranelift",
   "celox/wasm-runtime",
   "celox/wasm-component",

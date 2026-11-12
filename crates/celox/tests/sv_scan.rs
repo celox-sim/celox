@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 use celox::{SimBackend, Simulation};
 use std::path::Path;
 fn exercise<B: SimBackend>(mut simulation: Simulation<B>) {

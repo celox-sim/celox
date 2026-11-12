@@ -10,7 +10,7 @@ sources when it runs.
 The CLI is currently built from the Celox source tree:
 
 ```sh
-cargo build --release -p celox-vpi --features systemverilog --bin celox
+cargo build --release -p celox-vpi --bin celox
 ```
 
 The `run` command below needs no Python installation. For VPI tests, install
@@ -334,8 +334,7 @@ also accepted. Every nested list resolves paths from its own directory.
 The file-list reader performs no environment, wildcard or shell expansion.
 Unknown options, unknown TOML fields and cyclic file lists are errors.
 The CLI accepts `-I`/`--include-dir` and `-D`/`--define` directly as well.
-Include directories and macros require SystemVerilog inputs and a build with
-`--features systemverilog`.
+Include directories and macros require SystemVerilog inputs.
 
 ## Compile a design
 

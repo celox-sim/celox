@@ -268,7 +268,6 @@ module Top (a_clk: input '_ clock, b_clk: input '_ clock, rst: input '_ reset_as
 
 /// SystemVerilog: a register on `posedge clk` and one on `negedge` of a copy
 /// of `clk` run on the matching edges, in a tick-free and a timed run.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn systemverilog_posedge_and_negedge_on_one_clock() {
     let source = "module Top(input logic clk, input logic rst_n, output logic [7:0] p, n);

@@ -602,46 +602,36 @@ impl Design {
         if let Ok(value) = parse_parameter_value(text) {
             return self.set_parameter(name, value);
         }
-        #[cfg(feature = "systemverilog")]
-        {
-            let literal = if celox_sv_analyzer::typecheck::parse_parameter_literal(text).is_some() {
-                text.to_string()
-            } else if bare_string {
-                // TOML strings are ordinary string values unless they spell a
-                // numeric literal. Encode bytes using SV's escape rules.
-                let mut quoted = String::from("\"");
-                for byte in text.bytes() {
-                    match byte {
-                        b'"' => quoted.push_str("\\\""),
-                        b'\\' => quoted.push_str("\\\\"),
-                        b'\n' => quoted.push_str("\\n"),
-                        b'\t' => quoted.push_str("\\t"),
-                        32..=126 => quoted.push(char::from(byte)),
-                        0..=127 => quoted.push_str(&format!("\\{byte:03o}")),
-                        _ => return Err(format!("non-ASCII string parameter `{name}`")),
-                    }
+        let literal = if celox_sv_analyzer::typecheck::parse_parameter_literal(text).is_some() {
+            text.to_string()
+        } else if bare_string {
+            // TOML strings are ordinary string values unless they spell a
+            // numeric literal. Encode bytes using SV's escape rules.
+            let mut quoted = String::from("\"");
+            for byte in text.bytes() {
+                match byte {
+                    b'"' => quoted.push_str("\\\""),
+                    b'\\' => quoted.push_str("\\\\"),
+                    b'\n' => quoted.push_str("\\n"),
+                    b'\t' => quoted.push_str("\\t"),
+                    32..=126 => quoted.push(char::from(byte)),
+                    0..=127 => quoted.push_str(&format!("\\{byte:03o}")),
+                    _ => return Err(format!("non-ASCII string parameter `{name}`")),
                 }
-                quoted.push('"');
-                quoted
-            } else {
-                return Err(format!(
-                    "invalid parameter value `{text}`: expected an unsigned 64-bit integer or SV literal"
-                ));
-            };
-            // Reuse the name validation and remove whichever representation a
-            // lower-precedence project or target setting used.
-            Self::validate_parameter_name(name)?;
-            self.parameters.remove(name);
-            self.sv_parameters.insert(name.to_string(), literal);
-            Ok(())
-        }
-        #[cfg(not(feature = "systemverilog"))]
-        {
-            let _ = (name, bare_string);
-            Err(format!(
-                "invalid parameter value `{text}`: SV literals require the systemverilog feature"
-            ))
-        }
+            }
+            quoted.push('"');
+            quoted
+        } else {
+            return Err(format!(
+                "invalid parameter value `{text}`: expected an unsigned 64-bit integer or SV literal"
+            ));
+        };
+        // Reuse the name validation and remove whichever representation a
+        // lower-precedence project or target setting used.
+        Self::validate_parameter_name(name)?;
+        self.parameters.remove(name);
+        self.sv_parameters.insert(name.to_string(), literal);
+        Ok(())
     }
 
     pub fn is_sv(&self) -> bool {
@@ -760,7 +750,6 @@ impl Design {
         Ok(())
     }
 
-    #[cfg(feature = "systemverilog")]
     pub fn sv_sources(&self) -> Result<Vec<(String, PathBuf)>, String> {
         let encoding = if self.strict_source_encoding.unwrap_or(false) {
             celox_sv_analyzer::syntax::SourceEncoding::Utf8

@@ -65,7 +65,6 @@ fn invalid_overrides_and_config_levels_fail() {
     );
 }
 
-#[cfg(feature = "systemverilog")]
 mod sv {
     use super::*;
     use std::path::Path;
@@ -177,7 +176,6 @@ mod sv {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn overlapping_always_ff_memories_require_explicit_relaxation() {
     const SOURCE: &str = r#"module Top(input bit a, b, input bit[1:0] x, y,
@@ -221,7 +219,6 @@ mod inferred_latch {
     use std::path::Path;
 
     const VERYL: &str = "module Top(en: input logic, d: input logic<8>, q: output logic<8>, t: output logic<8>) { always_comb { t = d; if en { q = d; } } }";
-    #[cfg(feature = "systemverilog")]
     const SV: &str = "module Top(input logic en, input logic [7:0] d, output logic [7:0] q, t); always_comb begin t=d; if(en) q=d; end endmodule";
 
     fn veryl() -> celox::SimulatorBuilder<'static> {
@@ -272,7 +269,6 @@ mod inferred_latch {
                             .unwrap(),
                         level,
                     );
-                    #[cfg(feature = "systemverilog")]
                     assert_behavior(
                         Simulator::from_sv_sources(vec![(SV, Path::new("latch.sv"))], "Top")
                             .diagnostic_policy(policy("inferred_latch", level))
@@ -303,7 +299,6 @@ mod inferred_latch {
                 "{error}"
             );
             assert!(error.to_string().contains("inferred_latch"), "{error}");
-            #[cfg(feature = "systemverilog")]
             {
                 let error = Simulator::from_sv_sources(vec![(SV, Path::new("latch.sv"))], "Top")
                     .diagnostic_policy(policy("inferred_latch", DiagnosticLevel::Error))
@@ -360,7 +355,6 @@ mod inferred_latch {
         assert!(sim.warnings().is_empty(), "{:?}", sim.warnings());
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn explicit_and_wildcard_latches_do_not_emit_inferred_diagnostics() {
         for keyword in ["always_latch", "always @*"] {
@@ -375,7 +369,6 @@ mod inferred_latch {
         }
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn relaxation_does_not_hide_nba_or_continuous_feedback_errors() {
         for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
@@ -392,7 +385,6 @@ mod inferred_latch {
             }
         }
     }
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn state_reading_processes_use_the_same_latch_diagnostic() {
         let source = "module Top(input logic en, output logic [7:0] q); always_comb if(en) q=$time; endmodule";
@@ -435,7 +427,6 @@ mod inferred_latch {
         }
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn static_block_locals_participate_in_latch_diagnostics() {
         for body in [
@@ -495,7 +486,6 @@ mod inferred_latch {
         }
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn complete_nonzero_lsb_state_reading_slice_does_not_warn() {
         let source = "module Top(input logic en, output logic [7:0] q); always_comb if(en) q[7:4]=$time; else q[7:4]=0; endmodule";
@@ -512,7 +502,6 @@ mod inferred_latch {
     // IEEE 1800-2023 9.2.2.2.1 excludes written expressions from implicit
     // sensitivity. A procedural read of previous q is state, not an endlessly
     // retriggering continuous-assignment feedback loop.
-    #[cfg(feature = "systemverilog")]
     fn assert_complete_read_before_write_activation<B: celox::SimBackend>(
         mut sim: Simulator<B>,
         level: DiagnosticLevel,
@@ -532,7 +521,6 @@ mod inferred_latch {
         }
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn complete_procedural_read_before_write_is_recoverable_state() {
         let source = "module Top(input logic en, output logic q); always_comb q=q^en; endmodule";
@@ -572,7 +560,6 @@ mod inferred_latch {
         }
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn complete_state_reading_array_assignments_do_not_warn() {
         let source = "module Top(output logic [7:0] q); logic [7:0] a[2]; always_comb begin a[0]=$time; a[1]=$time; end assign q=a[0]; endmodule";
@@ -583,7 +570,6 @@ mod inferred_latch {
         assert!(sim.warnings().is_empty(), "{:?}", sim.warnings());
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn an_authored_process_warns_once_across_instances() {
         let source = "module Latch(input logic en,d, output logic q); always_comb if(en) q=d; endmodule module Top(input logic en,d, output logic a,b); Latch u(en,d,a); Latch v(en,d,b); endmodule";
@@ -600,7 +586,6 @@ mod inferred_latch {
         assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn out_of_bounds_state_writes_do_not_expand_diagnostic_masks() {
         let source = "module Top(output logic [7:0] q); logic [7:0] a[2]; always_comb begin q=$time; a[-1]=$time; a[2147483647]=$time; end endmodule";
@@ -616,7 +601,6 @@ mod inferred_latch {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn interface_array_queries_require_a_recoverable_diagnostic_override() {
     use std::path::Path;
@@ -649,7 +633,6 @@ fn interface_array_queries_require_a_recoverable_diagnostic_override() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn interface_array_extension_keeps_interfaces_out_of_data_expressions() {
     use std::path::Path;
@@ -674,7 +657,6 @@ fn interface_array_extension_keeps_interfaces_out_of_data_expressions() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn interface_array_query_warning_survives_a_later_analysis_error() {
     use std::path::Path;
@@ -688,7 +670,6 @@ fn interface_array_query_warning_survives_a_later_analysis_error() {
     assert_eq!(error.warnings().len(), 1, "{error}");
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn interface_array_query_policy_covers_formals_and_generated_scopes() {
     use std::path::Path;
@@ -714,7 +695,6 @@ fn interface_array_query_policy_covers_formals_and_generated_scopes() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn invalid_interface_array_query_dimensions_return_integer_unknowns() {
     use std::path::Path;
@@ -735,7 +715,6 @@ fn invalid_interface_array_query_dimensions_return_integer_unknowns() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn unindexed_interface_array_parameters_have_a_located_recoverable_diagnostic() {
     use std::path::Path;
@@ -770,7 +749,6 @@ fn unindexed_interface_array_parameters_have_a_located_recoverable_diagnostic() 
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn unindexed_interface_parameter_lookup_respects_lexical_shadowing() {
     use std::path::Path;
@@ -787,7 +765,6 @@ fn unindexed_interface_parameter_lookup_respects_lexical_shadowing() {
     assert!(sim.warnings().is_empty());
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn unindexed_interface_parameters_resolve_inside_indexed_generate_paths() {
     use std::path::Path;

@@ -1,5 +1,3 @@
-#![cfg(feature = "systemverilog")]
-
 use std::path::Path;
 
 /// Every instance starts its own site numbering at zero. Interleaved

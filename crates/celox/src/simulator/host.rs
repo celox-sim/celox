@@ -1,7 +1,7 @@
 mod backends;
 mod declaration;
 mod deferred;
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 mod deferred_tests;
 mod distribution;
 mod eval;

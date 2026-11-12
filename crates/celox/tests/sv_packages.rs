@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! Packages resolved as scopes (IEEE 1800-2023 26).
 
 use celox::{ParserError, Simulator, SimulatorErrorKind};

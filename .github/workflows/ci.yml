@@ -174,7 +174,7 @@ jobs:
 
       - name: cargo clippy
         if: needs.changes.outputs.fast_queue != 'true' && ((needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') && needs.changes.outputs.rust_full != 'false')
-        run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim --no-deps
+        run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim --no-deps
 
       - name: Lint the crates this pull request can affect
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_lint_packages != '')
@@ -305,7 +305,7 @@ jobs:
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false')
         run: >-
           cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci --cargo-profile vtest -E "$CELOX_BACKEND_FILTER"
-          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
+          --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the tests this pull request can affect
         id: scoped-tests
@@ -321,7 +321,7 @@ jobs:
         if: needs.changes.outputs.fast_queue == 'true'
         timeout-minutes: 20
         run: >-
-          cargo nextest run --locked -p celox --features systemverilog --profile ci
+          cargo nextest run --locked -p celox --profile ci
           --test counter --test hierarchy --test native_exec
           --test simulation_limits --test sv_unit_scope --test sv_packages
           -E "$CELOX_BACKEND_FILTER"
@@ -362,7 +362,7 @@ jobs:
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false')
         run: >-
           cargo test --locked --workspace --exclude 'lydite*' --doc --profile vtest
-          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
+          --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the documentation tests of the changed libraries
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_libraries != '')
@@ -423,7 +423,7 @@ jobs:
           git -C "$RUNNER_TEMP/common-cells" checkout -q FETCH_HEAD
 
       - name: Build the SystemVerilog CLI
-        run: cargo build --locked -p celox-vpi --features systemverilog --bin celox
+        run: cargo build --locked -p celox-vpi --bin celox
 
       - name: Run upstream TB and assertion negative control
         run: >-
@@ -466,7 +466,7 @@ jobs:
           python scripts/run-rtlmeter-bench.py prepare "$RUNNER_TEMP/rtlmeter"
 
       - name: Build the SystemVerilog CLI
-        run: cargo build --locked --release -p celox-vpi --features systemverilog --bin celox
+        run: cargo build --locked --release -p celox-vpi --bin celox
 
       - name: Verify RTLMeter completion and cycle counts
         run: >-
@@ -496,7 +496,7 @@ jobs:
     timeout-minutes: 120
     env:
       CELOX_SV_FORCE_OUT_OF_LINE: "1"
-      CELOX_TEST_FEATURES: systemverilog,cranelift,wasm-runtime
+      CELOX_TEST_FEATURES: cranelift,wasm-runtime
     steps:
       - uses: actions/checkout@v7
         with:
@@ -536,7 +536,7 @@ jobs:
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Build the Celox single-case driver
-        run: cargo build --locked --release -p celox --features systemverilog --example sv_tests
+        run: cargo build --locked --release -p celox --example sv_tests
 
       - name: Hand the driver to the shards
         uses: actions/upload-artifact@v7
@@ -825,11 +825,11 @@ jobs:
         run: cargo test --locked -p celox --lib --test native_exec
 
       - name: Test hotspot JIT on AArch64
-        run: cargo test --locked -p celox --features systemverilog --lib hotspot
+        run: cargo test --locked -p celox --lib hotspot
 
       - name: Test partial-word reduction AND on AArch64
         run: >-
-          cargo test --locked -p celox --features systemverilog,cranelift,wasm-runtime,wasm-component
+          cargo test --locked -p celox --features cranelift,wasm-runtime,wasm-component
           --test systemverilog wide_reduction_and_respects_partial_storage_words::native
 
       - name: Check x86-64 cross-codegen from AArch64

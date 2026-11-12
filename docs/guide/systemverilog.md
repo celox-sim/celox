@@ -1,8 +1,7 @@
 # SystemVerilog Support
 
 Celox can simulate SystemVerilog through its **Rust API**.
-Enable the `systemverilog` Cargo feature, supply your source files and
-choose a top module. The TypeScript package and Vite plugin currently load
+Supply your source files and choose a top module. The TypeScript package and Vite plugin currently load
 Veryl only.
 
 Celox follows IEEE Std 1800™-2023.
@@ -14,11 +13,11 @@ difference you cannot find there is a bug.
 
 ## Start with a module
 
-Enable the feature in your Rust project:
+Add Celox to your Rust project:
 
 ```toml
 [dependencies]
-celox = { version = "*", features = ["systemverilog"] }
+celox = "*"
 ```
 
 Pass the source text and its path to `Simulator::from_sv_sources`, followed by
@@ -109,7 +108,7 @@ See [mixed-language designs](./systemverilog-reference#mixed-language).
 
 ## DPI-C imports
 
-Enable `sv-dpi` to call C functions from procedural code. Register
+Procedural code can call C functions. Register
 functions or shared libraries with `dpi_function` or `dpi_library`; these
 are `unsafe` APIs because the C signatures must match the SV imports. The
 `celox run` command links shared libraries with `--dpi-lib PATH`. See

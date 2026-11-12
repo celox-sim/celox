@@ -403,7 +403,6 @@ module Top (
 /// SV unpacked arrays start unknown through packed initial values, take
 /// element writes and whole-array NBA commits, and read back whole: the
 /// element-strided interpreter, the packed interpreter and native agree.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn strided_sv_arrays_initialize_commit_and_read_like_packed_ones() {
     const SOURCE: &str = r#"

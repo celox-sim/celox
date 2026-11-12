@@ -377,11 +377,7 @@ impl<B: SimBackend> Simulator<B> {
     }
 }
 
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod tests {
     #[test]
     fn detached_drain_includes_host_messages_in_order_without_replaying_records() {
@@ -419,7 +415,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 mod queue_tests {
     use super::*;
     use std::path::Path;

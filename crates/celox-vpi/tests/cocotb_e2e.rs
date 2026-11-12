@@ -673,7 +673,6 @@ fn compile_reports_a_missing_additional_source() {
     );
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 #[ignore = "requires a cocotb installation"]
 fn cocotb_uses_declared_force_targets_in_an_optimized_native_image() {

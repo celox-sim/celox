@@ -264,22 +264,12 @@ impl HotspotRuntime {
         }
     }
 
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn scheduler_is_prepared_for_test(&self) -> bool {
         self.scheduler_index.is_some()
     }
 
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn request_comb_for_test(&mut self, units: &[ExecutionUnit<RegionedAbsoluteAddr>]) {
         if !self.busy
             && self
@@ -292,34 +282,19 @@ impl HotspotRuntime {
         }
     }
 
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn set_inline_budget_for_test(&mut self, budget: usize) {
         self.inline_budget = budget;
     }
 
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn scheduler_stages_for_test(&self) -> usize {
         self.scheduler_stages
     }
 
     /// Complete the scheduler entry's job with a failure, or with code the
     /// code budget rejects, as the worker would.
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn finish_scheduler_for_test(
         &mut self,
         layout: &crate::backend::MemoryLayout,
@@ -350,12 +325,7 @@ impl HotspotRuntime {
             .unwrap();
     }
 
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn holds_scheduler_program_for_test(&self) -> bool {
         self.scheduler_program.is_some()
     }
@@ -880,7 +850,6 @@ module Top (
 }
 "#;
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn hotspot_scheduler_preserves_wide_unknowns_and_derived_edges() {
         const SOURCE: &str = r#"`timescale 1ns/1ns

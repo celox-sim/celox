@@ -484,9 +484,7 @@ interface と `input` / `output` modport は双方向に境界を跨げます。
 
 ## DPI-C imports {#dpi-c-imports}
 
-`sv-dpi` Cargo feature（`systemverilog` を含む）で、`import "DPI-C"` で宣言した
-C 関数を呼べます。無効な場合、Celox は全ての DPI-C import を拒否します。
-`celox` コマンドはこの feature 付きでビルドされ、`celox run` は
+`import "DPI-C"` で宣言した C 関数を呼べます。`celox run` は
 `--dpi-lib PATH`（繰り返し可）と `celox.toml` の `dpi_libs` で指定した
 共有ライブラリをリンクします。Rust API では、DPI-C 登録はビルダーのホスト API です。
 
@@ -527,7 +525,7 @@ let mut sim = unsafe {
 - 2値シミュレーションでは、関数が `logic` 引数に書いた不定ビットは 0 として読みます。
 - `export "DPI-C"` 宣言は受理して検査しますが（35.7）、呼べるのは
   `context` import だけ（35.5.3）なので、C コードからは呼べません。
-- UVM の C ライブラリ関数は `sv-dpi` 無しで Celox が提供し、同名の
+- UVM の C ライブラリ関数は Celox が提供し、同名の
   ユーザー実装を覆い隠します。`uvm_re_*` は Rust の `regex` クレートを使うため、
   まれな構文で POSIX 拡張正規表現と異なります。`uvm_dpi_get_next_arg_c` は
   `celox` と plusargs を返し、`uvm_dpi_get_tool_name_c` は `Celox` を返します。

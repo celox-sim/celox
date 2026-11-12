@@ -1861,12 +1861,7 @@ impl InterpBackend {
     /// Publish the real Hotspot scheduler without executing HDL during test
     /// setup. Finite testbenches must not finish before compilation completes.
     // Scheduler tests that publish it need x86-64-only scheduler services.
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn publish_scheduler_for_test(&mut self) {
         let runtime = self.hotspots.as_mut().expect("Hotspot must be enabled");
         assert!(runtime.scheduler_is_prepared_for_test());
@@ -1898,12 +1893,7 @@ impl InterpBackend {
     }
 
     /// Generate the first scheduler stage with this inline budget.
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn set_hotspot_inline_budget_for_test(&mut self, budget: usize) {
         self.hotspots
             .as_mut()
@@ -1912,12 +1902,7 @@ impl InterpBackend {
     }
 
     /// Wait until `stages` scheduler stages are published, without running HDL.
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn wait_for_scheduler_stages_for_test(&mut self, stages: usize) {
         let runtime = self.hotspots.as_mut().expect("Hotspot must be enabled");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
