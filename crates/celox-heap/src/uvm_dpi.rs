@@ -125,6 +125,7 @@ fn class_unit(unit: Unit) -> String {
 /// starts at `units[start]`, and the index after it.
 fn bracket(units: &[Unit], start: usize) -> Result<(String, usize), &'static str> {
     const UNMATCHED: &str = "Unmatched [, [^, [:, [., or [=";
+    const INVALID_RANGE_END: &str = "Invalid range end";
     /// The character classes POSIX defines, which the crate knows too.
     const CLASSES: &[&str] = &[
         "alnum", "alpha", "blank", "cntrl", "digit", "graph", "lower", "print", "punct", "space",
@@ -179,12 +180,19 @@ fn bracket(units: &[Unit], start: usize) -> Result<(String, usize), &'static str
                 .ok_or("Invalid character class name")?;
             class.push_str(&format!("[:{name}:]"));
             index = name_end + 2;
+            // A class is no end of a range.
+            if char_at(index) == Some('-') && char_at(index + 1).is_some_and(|next| next != ']') {
+                return Err(INVALID_RANGE_END);
+            }
             continue;
         }
         let (low, after) = element(index)?;
         // A range, unless the `-` is the last character of the list.
         if char_at(after) == Some('-') && char_at(after + 1) != Some(']') && after + 1 < units.len()
         {
+            if char_at(after + 1) == Some('[') && char_at(after + 2) == Some(':') {
+                return Err(INVALID_RANGE_END);
+            }
             let (high, end) = element(after + 1)?;
             class.push_str(&format!("{}-{}", class_unit(low), class_unit(high)));
             index = end;
@@ -473,6 +481,11 @@ mod tests {
             pattern_text(b"[[:word:]]"),
             Err("Invalid character class name")
         );
+        // A class is no end of a range; a `-` after one that ends the list
+        // is a character.
+        assert_eq!(pattern_text(b"[[:alpha:]-z]"), Err("Invalid range end"));
+        assert_eq!(pattern_text(b"[a-[:alpha:]]"), Err("Invalid range end"));
+        assert!(matches(b"^[[:digit:]-]$", b"-"));
         let mut heap = Heap::new();
         let bad = heap.intern(b"[[:word:]]") as u64;
         assert_eq!(heap.call(ops::UVM_RE_COMP, bad, 0, 0), 0);
