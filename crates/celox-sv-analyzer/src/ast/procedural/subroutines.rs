@@ -711,7 +711,7 @@ pub(in crate::ast) fn lower_subroutine(
         state,
         system_functions::Body::Subroutine,
     );
-    builder.owner = Some(qualified_name.clone());
+    builder.set_owner(qualified_name.clone());
     builder.dims.scope_name = Some(std::sync::Arc::new(scope));
     builder.task_timing = native.kind == celox_sv_syntax::SubroutineKind::Task;
     let first_local = builder.state.locals.len();

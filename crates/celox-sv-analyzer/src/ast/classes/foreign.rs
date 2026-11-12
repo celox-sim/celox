@@ -776,6 +776,77 @@ mod tests {
     use crate::procedural::{ParamDirection, StmtBase, SubroutineParamBase};
 
     #[test]
+    fn every_variable_of_a_subroutine_is_named_by_it() {
+        // Blocks, loops, `foreach`, locators and the temporaries of calls:
+        // whichever analysis lowers a subroutine, of its scope or of a
+        // package that takes its class, names its variables the same, and
+        // after the subroutine (see `BodyBuilder::declare`).
+        let source = "package p;
+            class Obj; virtual function int code(int x); return x; endfunction endclass
+            function automatic int twice(int x); return 2 * x; endfunction
+            function automatic int total(int n);
+                int sum;
+                int q[$];
+                for (int i = 0; i < n; i++) begin int t; t = twice(i); q.push_back(t); end
+                foreach (q[k]) sum += q[k];
+                begin int found[$]; found = q.find with (item > 2); sum += found.size(); end
+                return sum;
+            endfunction
+            class Registry #(type T = Obj);
+                static int registered = register();
+                static function int register(); T t = new; return t.code(total(3)); endfunction
+            endclass
+        endpackage
+        import p::*;
+        class Item extends Obj;
+            virtual function int code(int x);
+                int v;
+                for (int j = 0; j < x; j++) begin int w; w = twice(j); v += w; end
+                return v;
+            endfunction
+        endclass
+        module Top(output int o);
+            typedef Registry#(Item) R;
+            initial o = R::registered;
+        endmodule";
+        let ir = crate::analyze_source(source, std::path::Path::new("names.sv"))
+            .expect("the source analyzes");
+        let mut checked = 0;
+        for module in ir.modules() {
+            let owned = module
+                .locals()
+                .iter()
+                .map(|local| (local.name.as_str(), local.owned))
+                .collect::<HashMap<_, _>>();
+            for subroutine in module.subroutines() {
+                let mut declared: Vec<String> = subroutine
+                    .params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .chain(subroutine.return_var.clone())
+                    .collect();
+                for stmt in &subroutine.body {
+                    stmt.walk(&mut |stmt| {
+                        if let StmtBase::Local { name, .. } = stmt {
+                            declared.push(name.clone());
+                        }
+                    });
+                }
+                for name in declared {
+                    assert_eq!(
+                        owned.get(name.as_str()),
+                        Some(&true),
+                        "`{name}` of `{}`",
+                        subroutine.name
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 10, "{checked}");
+    }
+
+    #[test]
     fn handed_over_variables_never_take_a_counted_name_of_the_receiver() {
         // `$unit`'s count named the method's locals `v@8` and, escaped,
         // `\v%foo@8`; the package that takes the method may have named

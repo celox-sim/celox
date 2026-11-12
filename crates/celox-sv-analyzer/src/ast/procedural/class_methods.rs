@@ -416,6 +416,7 @@ pub(super) fn lower_class(
             system_functions::Body::Subroutine,
         );
         builder.automatic = true;
+        builder.set_owner(item.name(&classes::Class::subroutine_name(name, "new")));
         let first_local = builder.state.locals.len();
         builder.push_scope();
         builder.enter_class_scope(&class);
@@ -519,6 +520,7 @@ pub(super) fn lower_cast(
         system_functions::Body::Subroutine,
     );
     builder.automatic = true;
+    builder.set_owner(item.name(&classes::Class::cast_name(name)));
     let first_local = builder.state.locals.len();
     builder.push_scope();
     let destination = builder.declare(CAST_DESTINATION, handle.clone());

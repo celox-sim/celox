@@ -305,8 +305,10 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     return_chandle: Option<bool>,
     pub(super) sensitivity_body: Vec<Stmt>,
     /// The name of the subroutine whose body this is, which the names of
-    /// its static variables carry (see [`Self::declare_static`]).
+    /// its variables carry (see [`Self::declare_static`], [`Self::declare`]).
     owner: Option<String>,
+    /// The variables of the subroutine [`Self::declare`] named so far.
+    owned_locals: usize,
     /// The named blocks enclosing the current statement that a `disable`
     /// can leave (9.6.2): their labels and block ids, innermost last, and
     /// whether a `disable` in the body has named the block. Only such a
@@ -628,6 +630,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             return_chandle: None,
             sensitivity_body: Vec::new(),
             owner: None,
+            owned_locals: 0,
             named_blocks: Vec::new(),
             fork_blocks: Vec::new(),
             tree,
@@ -765,9 +768,33 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     }
 
     /// Declare a local in the innermost scope and return its unique name.
+    /// One of a subroutine is named by the subroutine and the order of its
+    /// declaration in it: every analysis that lowers the subroutine names it
+    /// the same, and none names a variable of another subroutine so (see
+    /// [`Self::declare_owned`]). The counter of the analysis names the
+    /// others.
     pub(super) fn declare(&mut self, source: &str, r#type: Type) -> String {
-        let unique = format!("{source}@{}", *self.state.counter);
-        self.declare_as(source, r#type, unique, false)
+        let unique = match &self.owner {
+            Some(owner) => {
+                let ordinal = self.owned_locals;
+                self.owned_locals += 1;
+                format!(
+                    "{source}%{:016x}@{ordinal}",
+                    fxhash::hash64(&(owner.as_str(), "local", ordinal))
+                )
+            }
+            None => format!("{source}@{}", *self.state.counter),
+        };
+        let owned = self.owner.is_some();
+        self.declare_as(source, r#type, unique, owned)
+    }
+
+    /// Name the variables of the body after subroutine `owner` (see
+    /// [`Self::declare`]).
+    pub(super) fn set_owner(&mut self, owner: String) {
+        self.dims.locator_locals = Some(locators::LocalSink::owned(&owner));
+        self.owner = Some(owner);
+        self.owned_locals = 0;
     }
 
     /// Declare a local with a static lifetime, declared at token
