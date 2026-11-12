@@ -482,6 +482,50 @@ pub(super) fn array_parameters_from_scope(
             )?);
         }
     }
+    // An array parameter of a generate block is a constant variable of the
+    // block, named by it (IEEE 1800-2023 27.2), whose type and value are
+    // those of the block.
+    for item in generate::items(tree, session, const_env, type_aliases)? {
+        if item.scope_name().is_empty() {
+            continue;
+        }
+        let celox_sv_syntax::BodyItemKind::Parameter(id) =
+            tree.declarations().body_item(item.id).kind
+        else {
+            continue;
+        };
+        let scoped = item.scoped(tree);
+        let entered = item.enter(&scoped);
+        let aliases = item.type_aliases(type_aliases);
+        let authored = tree
+            .declarations()
+            .parameter_declaration(id)
+            .parameters
+            .iter()
+            .filter(|parameter| is_array_parameter(parameter, tree.declarations()))
+            .collect::<Vec<_>>();
+        let mut local = array_parameters_from_declaration(
+            &authored,
+            &entered,
+            session,
+            &item.env,
+            &aliases,
+            &mut |_| {},
+        )?;
+        let dims = PackedDimensions::new(HashMap::default(), &item.env, aliases.as_ref());
+        for parameter in &mut local {
+            // The value names the constants of the block, such as its
+            // genvar: bind it there, as an override is bound where it is
+            // given.
+            if parameter.bound.is_none()
+                && let Some(root) = parameter.native_pattern
+            {
+                parameter.bound = Some(bound_patterns::from_param(root, &entered, session, &dims)?);
+            }
+            parameter.signal.name = item.name(&parameter.signal.name);
+        }
+        parameters.extend(local);
+    }
     Ok(parameters)
 }
 
