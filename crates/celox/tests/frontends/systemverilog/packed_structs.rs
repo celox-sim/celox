@@ -377,3 +377,63 @@ sv_backends! {
         assert_eq!(u64::try_from(sim.get(sim.signal("nested"))).unwrap(), 0x4);
     }
 }
+
+// A cast in an item of a pattern-valued parameter is evaluated by the
+// pattern, in the type of its member, as any other item is. The parameter
+// is initialized at time zero, so the design runs as a timed simulation.
+macro_rules! pattern_parameter_casts_backend {
+    ($name:ident, $backend:ident) => {
+        #[test]
+        fn $name() {
+            let source = r#"
+    package tl_pkg;
+      typedef enum logic [2:0] { PutFull = 3'h0, Get = 3'h4 } op_e;
+      typedef struct packed { logic [1:0] rsvd; logic [3:0] instr; } user_t;
+      localparam user_t USER_DEFAULT = '{ instr: 4'h9, default: '0 };
+      localparam logic [7:0] Blanked = {8{1'b1}};
+      typedef struct packed {
+        logic       d_ready;
+        op_e        a_opcode;
+        user_t      a_user;
+        logic [7:0] a_data;
+        logic       a_valid;
+      } h2d_t;
+      localparam h2d_t H2D_DEFAULT = '{
+        d_ready:  1'b1,
+        a_opcode: op_e'('0),
+        a_user:   USER_DEFAULT,
+        a_data:   Blanked,
+        default:  '0
+      };
+    endpackage
+    module Sink(input tl_pkg::h2d_t tl_i, output logic [18:0] seen);
+      assign seen = tl_i;
+    endmodule
+    module Top(output logic [18:0] through_port, output logic [18:0] assigned);
+      Sink sink(.tl_i(tl_pkg::H2D_DEFAULT), .seen(through_port));
+      assign assigned = tl_pkg::H2D_DEFAULT;
+    endmodule
+  "#;
+            let mut sim = celox::Simulation::from_sv_sources(
+                vec![(source, Path::new("pattern_parameter_casts.sv"))],
+                "Top",
+            )
+            .$backend()
+            .unwrap();
+            sim.run_until(0).unwrap();
+            for name in ["through_port", "assigned"] {
+                let signal = sim.signal(name);
+                assert_eq!(
+                    u64::try_from(sim.get(signal)).unwrap(),
+                    0b1_000_001001_11111111_0,
+                    "{name}"
+                );
+            }
+        }
+    };
+}
+pattern_parameter_casts_backend!(pattern_parameter_casts_interpreter, build_interpreter);
+pattern_parameter_casts_backend!(pattern_parameter_casts_cranelift, build);
+#[cfg(target_arch = "x86_64")]
+pattern_parameter_casts_backend!(pattern_parameter_casts_native, build_native);
+pattern_parameter_casts_backend!(pattern_parameter_casts_wasm, build_wasm);
