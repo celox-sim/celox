@@ -3,6 +3,17 @@
 use super::*;
 
 impl ScopeElaboration<'_> {
+    /// The types of the constants that an item of the scope may name: its
+    /// parameters, which hide a constant of the same name of a package it
+    /// uses (IEEE 1800-2023 26.3), its enumeration members and the
+    /// constants of those packages.
+    fn enum_constant_types(&self) -> HashMap<String, semantic_types::ConstantType> {
+        let mut constant_types = self.imported.constant_types.clone();
+        constant_types.extend(self.enum_constants.declarations.clone());
+        parameters::hide_constant_types(&mut constant_types, &self.parameters);
+        constant_types
+    }
+
     /// The parameters, constants, types, enumeration members and array parameters
     /// of the scope. Returns the context that calls its constant functions, which
     /// the later phases bind in.
@@ -88,13 +99,18 @@ impl ScopeElaboration<'_> {
         // discarded during the initial pass. Materialize only enum-member
         // references so exported parameter expressions retain dependencies
         // on other parameters for later specialization.
-        self.parameters = parameters_from_scope(
+        let outer = session
+            .enum_constant_types
+            .replace(Arc::new(self.enum_constant_types()));
+        let parameters = parameters_from_scope(
             syntax_tree,
             session,
             &self.type_aliases,
             &self.const_env,
             self.applicable_parameter_overrides,
-        )?;
+        );
+        session.enum_constant_types = outer;
+        self.parameters = parameters?;
         for parameter in &mut self.parameters {
             parameter.value = parameter.value.take().map(|value| {
                 substitute_typed_parameter_literals(
@@ -212,6 +228,7 @@ impl ScopeElaboration<'_> {
                 &self.const_env,
                 self.imported,
             );
+            let constant_types = Arc::new(self.enum_constant_types());
             let mut arrays: HashMap<String, Expr> = HashMap::default();
             for process in &self.imported.initial_processes {
                 for statement in &process.body {
@@ -244,6 +261,10 @@ impl ScopeElaboration<'_> {
                     PackedDimensions::new(shapes.clone(), &self.const_env, &self.type_aliases);
                 dims.parameter_values = values.clone().into();
                 dims.array_parameter_values = arrays.clone().into();
+                // A pattern item may be a member of an enumeration, of the
+                // scope or of a package it uses: it has the enumeration's
+                // type (IEEE 1800-2023 6.19.3).
+                dims.constant_types = constant_types.clone();
                 if let Some(elements) = parameter.constant_elements(syntax_tree, session, &dims) {
                     for (key, value) in
                         parameters::element_markers(parameter.signal.name(), &elements)

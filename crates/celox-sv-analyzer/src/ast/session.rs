@@ -55,6 +55,11 @@ pub(crate) struct Session {
     /// The semantic types of the design.
     pub(super) types: semantic_types::TyTable,
     pub(super) expression_types: expression_types::Memo,
+    /// While the parameters of a module are collected once its enumeration
+    /// members are constants, their types: an item of the pattern of an
+    /// array parameter may name one (see
+    /// [`array_parameters::constant_elements`]).
+    pub(super) enum_constant_types: Option<Arc<HashMap<String, semantic_types::ConstantType>>>,
 }
 
 impl Session {

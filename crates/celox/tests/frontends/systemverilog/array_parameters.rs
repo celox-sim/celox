@@ -312,3 +312,69 @@ endmodule"#;
         );
     }
 }
+
+/// The elements of an array parameter whose pattern names members of an
+/// enumeration, of a package or of the module, are constants too (6.19.3).
+/// Verilator 5.054 prints the same line.
+#[test]
+fn array_parameter_elements_given_by_enumeration_members() {
+    let source = r#"`timescale 1ns/1ns
+package K; typedef enum logic [2:0] { KeyA, KeyB } key_sel_e; endpackage
+package P;
+  import K::*;
+  typedef enum logic [1:0] { Unbuffered, Buffered, LifeCycle } part_variant_e;
+  typedef struct packed { part_variant_e variant; logic [3:0] offset; key_sel_e key_sel; } part_info_t;
+  localparam part_info_t PartInfo [2] = '{
+    '{variant: Unbuffered, offset: 4'd5, key_sel: key_sel_e'('0)},
+    '{variant: LifeCycle, offset: 4'd9, key_sel: KeyB}
+  };
+endpackage
+module top import P::*; ;
+  typedef enum logic [1:0] { Red, Green, Blue } color_e;
+  localparam color_e Colors [3] = '{Blue, Red, Green};
+  localparam part_info_t E1 = PartInfo[1];
+  localparam int O = E1[6:3];
+  localparam int V = E1[8:7];
+  localparam int C = Colors[0];
+  logic [O-1:0] w;
+  if (V == 2 && C == 2) begin : selected
+    initial #1 $display("%0d %0d %0d %0d %0d", $bits(w), O, V, C, E1[2:0]);
+  end
+  initial #2 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            ["9 9 2 2 1"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// A pattern item may name a parameter of the module, of its own type, also
+/// one that hides a member of an enumeration of a package the module uses
+/// (IEEE 1800-2023 26.3). Verilator 5.054 prints the same line.
+#[test]
+fn array_parameter_pattern_items_name_parameters_that_hide_imports() {
+    let source = r#"`timescale 1ns/1ns
+package P;
+  typedef enum logic [1:0] {A = 2'd1, B = 2'd2} pe_t;
+endpackage
+module top
+  import P::*;
+  ;
+  typedef enum logic [3:0] {X = 4'd5, Y = 4'd9} le_t;
+  localparam le_t A = Y;
+  localparam le_t Q = X;
+  localparam le_t tbl_p [0:1] = '{A, Q};
+  logic [tbl_p[0]-1:0] w;
+  initial #1 $display("%0d %0d %0d %0d", tbl_p[0], tbl_p[1], $bits(w), B);
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            sorted_lines(source, four_state),
+            ["9 5 9 2"],
+            "four_state={four_state}"
+        );
+    }
+}

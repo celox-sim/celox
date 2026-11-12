@@ -132,6 +132,21 @@ pub(super) fn element_markers(
     markers
 }
 
+/// Give each of `parameters` its own type in `constant_types`, hiding a
+/// constant of the same name of a package (IEEE 1800-2023 26.3); one whose
+/// type is not known has none.
+pub(super) fn hide_constant_types(
+    constant_types: &mut HashMap<String, semantic_types::ConstantType>,
+    parameters: &[Parameter],
+) {
+    for parameter in parameters {
+        match &parameter.semantic_type {
+            Some(r#type) => constant_types.insert(parameter.name().to_string(), r#type.clone()),
+            None => constant_types.remove(parameter.name()),
+        };
+    }
+}
+
 /// The typed literal of the element that `index` selects in the unpacked
 /// array parameter `name`, when its elements are published. An index out of
 /// range reads the value of a nonexistent entry of the element type: zero
@@ -672,7 +687,17 @@ pub(super) fn parameters_from_native_with_environment(
                 environment.constants.insert(marker, 0);
                 // The variable holds the array; its elements are constants
                 // of the scope when its value is one here, also a value it
-                // takes from an earlier array parameter.
+                // takes from an earlier array parameter. An item may name a
+                // member of an enumeration, which has its type (IEEE
+                // 1800-2023 6.19.3), and an earlier parameter of the scope
+                // has its own type, also when a package it uses has a
+                // constant of its name (26.3).
+                let mut constant_types = session
+                    .enum_constant_types
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(imported.constant_types.clone()));
+                hide_constant_types(Arc::make_mut(&mut constant_types), parameters);
+                context.constant_types = constant_types;
                 if environment.arrays.is_empty() {
                     for process in &imported.initial_processes {
                         for statement in &process.body {
