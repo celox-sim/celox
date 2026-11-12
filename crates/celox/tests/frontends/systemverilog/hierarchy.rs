@@ -405,13 +405,19 @@ fn rejects_array_values_in_scalar_port_pattern_elements() {
     }
 }
 
+/// A default of a port pattern fills each packed union element as a whole
+/// (IEEE 1800-2023 10.9.2, 7.3.1), never by its overlapping fields one by
+/// one, for module and interface ports and parameters.
 #[test]
-fn rejects_recursive_port_pattern_defaults_for_packed_unions() {
-    for connection in [
-        "Child c(.cfg('{default:'x}));",
-        "Child c(.cfg(P::items_t'{default:'x}));",
-        "Cfg c(.cfg('{default:'x}));",
-        "WithParam #(.CFG('{default:'x})) c();",
+fn port_pattern_defaults_fill_packed_unions_whole() {
+    for (connection, value) in [
+        ("Child c(.cfg('{default:'x}), .o(o));", None),
+        (
+            "Child c(.cfg(P::items_t'{default:'1}), .o(o));",
+            Some(0b11u8),
+        ),
+        ("Cfg c(.cfg('{default:'x})); assign o = '0;", Some(0)),
+        ("WithParam #(.CFG('{default:'1})) c(.o(o));", Some(0b11)),
     ] {
         let source = format!(
             r#"
@@ -419,28 +425,33 @@ fn rejects_recursive_port_pattern_defaults_for_packed_unions() {
                 typedef union packed {{logic a; bit b;}} item_t;
                 typedef item_t items_t[2];
             endpackage
-            module Child(input P::item_t cfg[2]); endmodule
+            module Child(input P::item_t cfg[2], output logic [1:0] o);
+                assign o = {{cfg[1], cfg[0]}};
+            endmodule
             interface Cfg(input P::item_t cfg[2]); endinterface
-            module WithParam #(parameter P::item_t CFG[2]='{{'0,'0}})(); endmodule
-            module Top;
+            module WithParam #(parameter P::item_t CFG[2]='{{'0,'0}})(output logic [1:0] o);
+                assign o = {{CFG[1], CFG[0]}};
+            endmodule
+            module Top(output logic [1:0] o);
                 {connection}
             endmodule
             "#
         );
-        let error = match Simulator::from_sv_sources(
+        let mut sim = Simulator::from_sv_sources(
             vec![(&source, Path::new("union_pattern_default.sv"))],
             "Top",
         )
         .four_state(true)
         .build_cranelift()
-        {
-            Err(error) => error,
-            Ok(_) => panic!("unsupported union default must be rejected: {connection}"),
-        };
-        assert!(
-            error.to_string().contains("packed union"),
-            "{connection}: {error}"
-        );
+        .unwrap_or_else(|error| panic!("{connection}: {error}"));
+        let (bits, mask) = sim.get_four_state(sim.signal("o"));
+        match value {
+            // Each union element is X as a whole.
+            None => assert_eq!(mask, 0b11u8.into(), "{connection}"),
+            Some(value) => {
+                assert_eq!((bits, mask), (value.into(), 0u8.into()), "{connection}")
+            }
+        }
     }
 }
 
