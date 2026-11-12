@@ -1362,6 +1362,19 @@ pub(super) fn parameter_element_literal(
     indices: &[i128],
     env: &ConstEnv,
 ) -> Option<String> {
+    let (bounds, signed) = parameter_element_shape(name, indices, env)?;
+    packed_select_literal(&bounds, indices, signed, 'x', || env.get(name).copied())
+}
+
+/// The bounds of the packed dimensions of the packed parameter `name`,
+/// outermost first, and whether the element that `indices` select is of a
+/// signed named type (IEEE 1800-2023 7.4.1), when `indices` select within
+/// its dimensions.
+fn parameter_element_shape(
+    name: &str,
+    indices: &[i128],
+    env: &ConstEnv,
+) -> Option<(Vec<(i128, i128)>, bool)> {
     let count = usize::try_from(*env.get(&parameter_dimensions_marker(name))?).ok()?;
     if indices.is_empty() || indices.len() > count {
         return None;
@@ -1377,7 +1390,26 @@ pub(super) fn parameter_element_literal(
     let signed = env
         .get(&parameter_signed_element_marker(name))
         .is_some_and(|depth| usize::try_from(*depth).ok() == Some(indices.len()));
-    packed_select_literal(&bounds, indices, signed, 'x', || env.get(name).copied())
+    Some((bounds, signed))
+}
+
+/// The number of packed dimensions of the parameter `name`, when `env`
+/// publishes them.
+pub(super) fn parameter_rank(name: &str, env: &ConstEnv) -> Option<usize> {
+    usize::try_from(*env.get(&parameter_dimensions_marker(name))?).ok()
+}
+
+/// Where constant `indices` select in the packed parameter `name`, of any
+/// width: the element's bits, from the least significant one, of its width
+/// and sign, or `Err` of its width and sign when an index is out of range
+/// (IEEE 1800-2023 7.4.1, 11.5.1).
+pub(super) fn parameter_element_window(
+    name: &str,
+    indices: &[i128],
+    env: &ConstEnv,
+) -> Option<(Result<(usize, usize), usize>, bool)> {
+    let (bounds, signed) = parameter_element_shape(name, indices, env)?;
+    Some((packed_element_window(&bounds, indices)?, signed))
 }
 
 /// The bits that the constant packed `selects` make of the element that
@@ -1436,6 +1468,28 @@ pub(super) fn packed_width(bounds: &[(i128, i128)]) -> Option<usize> {
     })
 }
 
+/// Where constant `indices` select in a value of packed dimensions `bounds`,
+/// outermost first: the offset of the selected element's least significant
+/// bit and its width, or `Err` of its width when an index is out of range.
+fn packed_element_window(
+    bounds: &[(i128, i128)],
+    indices: &[i128],
+) -> Option<Result<(usize, usize), usize>> {
+    let element_width = packed_width(&bounds[indices.len()..])?;
+    let mut offset = 0usize;
+    for (position, index) in indices.iter().enumerate() {
+        let (left, right) = bounds[position];
+        if *index < left.min(right) || *index > left.max(right) {
+            return Some(Err(element_width));
+        }
+        // The right bound is the least significant element.
+        let from_right = usize::try_from(index.abs_diff(right)).ok()?;
+        offset =
+            offset.checked_add(from_right.checked_mul(packed_width(&bounds[position + 1..])?)?)?;
+    }
+    Some(Ok((offset, element_width)))
+}
+
 /// The bits that constant `indices` select in the value of packed dimensions
 /// `bounds`, outermost first, that `value` gives, as a sized literal of the
 /// remaining dimensions; an index out of range gives `fill` bits (IEEE
@@ -1447,26 +1501,20 @@ fn packed_select_literal(
     fill: char,
     value: impl FnOnce() -> Option<i128>,
 ) -> Option<String> {
-    let element_width = packed_width(&bounds[indices.len()..])?;
     let total_width = packed_width(bounds)?;
     if total_width > 128 {
         return None;
     }
     let signing = if signed { "s" } else { "" };
-    let mut offset = 0usize;
-    for (position, index) in indices.iter().enumerate() {
-        let (left, right) = bounds[position];
-        if *index < left.min(right) || *index > left.max(right) {
+    let (offset, element_width) = match packed_element_window(bounds, indices)? {
+        Ok(window) => window,
+        Err(element_width) => {
             return Some(format!(
                 "{element_width}'{signing}b{}",
                 fill.to_string().repeat(element_width)
             ));
         }
-        // The right bound is the least significant element.
-        let from_right = usize::try_from(index.abs_diff(right)).ok()?;
-        offset =
-            offset.checked_add(from_right.checked_mul(packed_width(&bounds[position + 1..])?)?)?;
-    }
+    };
     let mask = |width| {
         if width == 128 {
             u128::MAX

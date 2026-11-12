@@ -583,12 +583,38 @@ fn bind_in_context(
                     // constants here; a bit-select of the name would select
                     // from another value.
                     return Ok(None);
-                } else if let Some(indices) = constant_indices
+                } else if let Some(constant) = &constant_indices
                     && let Some(literal) =
-                        parameter_element_literal(&name, &indices, &dimensions.const_env)
+                        parameter_element_literal(&name, constant, &dimensions.const_env)
                 {
                     values.push(ConstExpr::Literal(literal));
-                } else if indices.len() == 1 {
+                } else if let Some(constant) = &constant_indices
+                    && let Some((window, signed)) =
+                        parameters::parameter_element_window(&name, constant, &dimensions.const_env)
+                {
+                    // An element of a parameter wider than the numeric
+                    // environment holds: a select of its value, which folds
+                    // where the value is known (IEEE 1800-2023 7.4.1).
+                    values.push(match window {
+                        Ok((offset, width)) => ConstExpr::SelectRange {
+                            expr: Box::new(ConstExpr::Ident(name)),
+                            msb: Box::new(ConstExpr::Literal((offset + width - 1).to_string())),
+                            lsb: Box::new(ConstExpr::Literal(offset.to_string())),
+                            signed,
+                        },
+                        // An index out of range reads X bits (11.5.1).
+                        Err(width) => ConstExpr::Literal(format!(
+                            "{width}'{}b{}",
+                            if signed { "s" } else { "" },
+                            "x".repeat(width)
+                        )),
+                    });
+                } else if indices.len() == 1
+                    && parameters::parameter_rank(&name, &dimensions.const_env)
+                        .is_none_or(|rank| rank <= 1)
+                {
+                    // A bit of a vector; an element of a parameter of more
+                    // packed dimensions is no bit of it.
                     values.push(ConstExpr::Select {
                         expr: Box::new(ConstExpr::Ident(name)),
                         bit: Box::new(indices.pop().unwrap()),
