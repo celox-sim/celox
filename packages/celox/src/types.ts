@@ -152,6 +152,9 @@ export interface WasmFrontendSimulatorHandle
 	combWasmBytes(): Uint8Array | number[];
 	/** Internal floating-point helper for generated simulation modules. */
 	evaluateFloat?(lhs: bigint, rhs: bigint, code: bigint): bigint;
+	/** Internal heap helper for generated simulation modules, which loads
+	 * the memory files of `$readmemh`. */
+	heapCall?(code: bigint, a: bigint, b: bigint, c: bigint): bigint;
 	eventWasmBytes(name: string): Uint8Array | number[];
 	/**
 	 * Per event name, the derived domains its ticks and edges run, as JSON.

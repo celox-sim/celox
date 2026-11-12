@@ -87,6 +87,7 @@ impl ProcModule<'_> {
             radix: format.base(),
             file: filename,
             base: None,
+            base_key: None,
             element_width,
             addressing: celox_design::MemoryFileAddressing::Range {
                 left,

@@ -8,8 +8,18 @@ use celox_frontend_core::memory_file::{MemoryLoad, load_memory_file};
 /// The memory files an instance's initial state loads, each read once.
 #[derive(Default)]
 pub(crate) struct MemoryFiles {
-    loaded: crate::HashMap<(crate::AbsoluteAddr, MemoryFileLoad), Arc<[InitialStateWriteRun]>>,
+    /// By the load, its destination and how many equal loads before it the
+    /// initial state makes (see [`LoadOccurrences`]).
+    loaded:
+        crate::HashMap<(crate::AbsoluteAddr, MemoryFileLoad, usize), Arc<[InitialStateWriteRun]>>,
 }
+
+/// How many times one application of the initial state has made each load so
+/// far: equal loads, such as those of an unrolled loop, are separate calls,
+/// each read and reported, while applying the initial state again repeats
+/// them.
+#[derive(Default)]
+pub(super) struct LoadOccurrences(crate::HashMap<(crate::AbsoluteAddr, MemoryFileLoad), usize>);
 
 impl<B: SimBackend> Simulator<B> {
     /// The words `load` writes into `address` when the instance starts. The
@@ -19,8 +29,11 @@ impl<B: SimBackend> Simulator<B> {
         &mut self,
         address: crate::AbsoluteAddr,
         load: &MemoryFileLoad,
+        occurrences: &mut LoadOccurrences,
     ) -> Arc<[InitialStateWriteRun]> {
-        let key = (address, load.clone());
+        let occurrence = occurrences.0.entry((address, load.clone())).or_default();
+        let key = (address, load.clone(), *occurrence);
+        *occurrence += 1;
         if let Some(runs) = self.memory_files.loaded.get(&key) {
             return Arc::clone(runs);
         }
@@ -33,12 +46,13 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     /// Run `load`, reading its file through the simulation's file system.
-    pub(super) fn run_memory_file(&self, load: &MemoryFileLoad) -> MemoryLoad {
-        load_memory_file(load, |path| self.file_io.read_to_string(path))
+    pub(super) fn run_memory_file(&mut self, load: &MemoryFileLoad) -> MemoryLoad {
+        let file_io = &mut self.file_io;
+        load_memory_file(load, |path| file_io.read_to_string(path))
     }
 
     /// Run the load of a testbench statement.
-    pub(crate) fn run_testbench_memory_file(&self, load: &MemoryFileLoad) -> MemoryLoad {
+    pub(crate) fn run_testbench_memory_file(&mut self, load: &MemoryFileLoad) -> MemoryLoad {
         self.run_memory_file(load)
     }
 
@@ -80,6 +94,7 @@ impl<B: SimBackend> Simulator<B> {
                     assertion: None,
                     deferred: None,
                     timestamp_arg: false,
+                    time_format_arg: false,
                     arg_widths: Vec::new(),
                     arg_signed: Vec::new(),
                     arg_is_string: Vec::new(),
@@ -92,81 +107,29 @@ impl<B: SimBackend> Simulator<B> {
     }
 }
 
-/// Loads the memory files compiled code reads when its `$readmemh` or
-/// `$readmemb` executes (IEEE 1800-2023 21.4), through a simulation's file
-/// system, or the host's when it has none.
-pub(crate) struct HeapMemoryFileReader {
-    files: Option<celox_runtime::file_io::FileReader>,
-}
-
-impl HeapMemoryFileReader {
-    pub(crate) fn new(files: Option<celox_runtime::file_io::FileReader>) -> Self {
-        Self { files }
-    }
-}
-
-impl celox_heap::memory_files::MemoryFileReader for HeapMemoryFileReader {
-    fn load(
-        &self,
-        descriptor: &[u8],
-        file: &[u8],
-        range: Option<(i64, i64)>,
-    ) -> celox_heap::memory_files::MemoryFileWords {
-        let Some(load) =
-            celox_frontend_core::memory_file::decode_descriptor(descriptor, file, range)
-        else {
-            return celox_heap::memory_files::MemoryFileWords {
-                error: Some(b"invalid memory file load".to_vec()),
-                ..Default::default()
-            };
-        };
-        let outcome = load_memory_file(&load, |path| match &self.files {
-            Some(files) => files.read_to_string(path),
-            None => std::fs::read_to_string(path),
-        });
-        memory_file_words(load.element_width, outcome)
-    }
-}
-
-/// The words of `outcome`, whose words are `width` bits wide, one by one.
-fn memory_file_words(
-    width: usize,
-    outcome: MemoryLoad,
-) -> celox_heap::memory_files::MemoryFileWords {
-    let chunks = width.div_ceil(64);
-    let mut words = celox_heap::memory_files::MemoryFileWords {
-        chunks,
-        warning: outcome.warning.map(String::into_bytes),
-        error: outcome.error.map(String::into_bytes),
-        ..Default::default()
-    };
-    if width == 0 {
-        return words;
-    }
-    let word_mask = (BigUint::from(1u8) << width) - 1u8;
-    for run in outcome.runs {
-        let value = BigUint::from_bytes_le(&run.value_bytes);
-        let mask = BigUint::from_bytes_le(&run.mask_bytes);
-        for k in 0..run.bit_width / width {
-            words.positions.push((run.bit_offset / width + k) as u64);
-            for (plane, out) in [(&value, &mut words.values), (&mask, &mut words.masks)] {
-                let mut digits = ((plane >> (k * width)) & &word_mask).to_u64_digits();
-                digits.resize(chunks, 0);
-                out.extend(digits);
-            }
-        }
-    }
-    words
-}
-
 impl<B: SimBackend> Simulator<B> {
-    /// Simulate with file system `file_io`, through which the design's file
-    /// I/O and memory files go.
-    pub(crate) fn set_file_io(&mut self, file_io: celox_runtime::file_io::FileIo) {
-        let reader = HeapMemoryFileReader::new(Some(file_io.reader()));
+    /// Simulate with the file systems `files` makes: one for the design's
+    /// file I/O, and one through which its code reads memory files.
+    pub(crate) fn use_file_system(
+        &mut self,
+        files: &celox_runtime::file_io_backend::FileSystemFactory,
+    ) {
+        let reader = crate::HostMemoryFileReader::with_file_system(
+            self.program.design.memory_file_bases(),
+            files.create(),
+        );
         self.backend
             .heap_mut()
-            .set_memory_file_reader(Arc::new(reader));
-        self.file_io = file_io;
+            .set_memory_file_reader(reader.into_heap_reader());
+        self.file_io = celox_runtime::file_io::FileIo::new(files.create());
+    }
+
+    /// Read memory files of the code from the host file system, as the
+    /// design's default file I/O does.
+    pub(super) fn use_host_memory_files(&mut self) {
+        let reader = crate::HostMemoryFileReader::new(self.program.design.memory_file_bases());
+        self.backend
+            .heap_mut()
+            .set_memory_file_reader(reader.into_heap_reader());
     }
 }

@@ -1494,6 +1494,7 @@ impl<'a> ModuleParser<'a> {
             comb_observers: self.comb_observers,
             runtime_errors: self.ff_parser.runtime_errors().clone(),
             runtime_event_sites,
+            memory_file_bases: self.ff_parser.memory_file_bases().to_vec(),
             // The loads of `always_comb` blocks run at time zero, after the
             // `initial` blocks (IEEE 1800-2023 9.2.2.2).
             initial_memory_values: {

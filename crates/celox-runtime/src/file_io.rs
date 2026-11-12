@@ -698,7 +698,11 @@ pub struct FileIoSnapshot {
 pub fn read_to_string(backend: &mut dyn FileSystem, path: impl AsRef<Path>) -> io::Result<String> {
     let id = backend.open(path.as_ref(), FileMode::parse("r").unwrap())?;
     let mut content = String::new();
-    let read = BackendFile { backend: &mut *backend, id }.read_to_string(&mut content);
+    let read = BackendFile {
+        backend: &mut *backend,
+        id,
+    }
+    .read_to_string(&mut content);
     let closed = backend.close(id);
     read.and(closed).map(|()| content)
 }

@@ -65,7 +65,7 @@ impl StateImage {
         backend.write_memory(range.start, &self.bytes);
         // The heap's memory-file reader belongs to the simulator, not to
         // the state.
-        let reader = backend.heap().memory_file_reader();
+        let reader = backend.heap_mut().take_memory_file_reader();
         backend.heap_mut().clone_from(&self.heap);
         if let Some(reader) = reader {
             backend.heap_mut().set_memory_file_reader(reader);
@@ -228,9 +228,11 @@ impl<B: SimBackend> Simulator<B> {
         &self.file_io
     }
 
-    /// Replace the file-I/O effect handler at a host execution boundary.
+    /// Replace the file-I/O effect handler at a host execution boundary. The
+    /// memory files the code loads keep being read from the file system the
+    /// simulator was built with.
     pub fn replace_file_io(&mut self, file_io: celox_runtime::file_io::FileIo) {
-        self.set_file_io(file_io);
+        self.file_io = file_io;
     }
 
     pub(crate) fn check_host_restore_support(&self) -> Result<(), CheckpointError> {

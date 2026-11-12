@@ -119,6 +119,9 @@ pub struct SimModule {
     pub comb_observers: Vec<CombObserver<SourceVarId>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
+    /// The directories the memory file loads of the module's units look
+    /// relative names up in.
+    pub memory_file_bases: Vec<celox_design::MemoryFileBase>,
     /// Extern functions the module calls; its `ExternCall`s index this list.
     pub extern_functions: Vec<ExternFunction>,
     pub initial_memory_values: Vec<InitialStateValue<SourceVarId>>,

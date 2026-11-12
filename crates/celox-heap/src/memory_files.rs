@@ -3,17 +3,29 @@
 //! code calls [`crate::ops::MEMORY_FILE_LOAD`]; the code then stores the
 //! words the file gives, one at a time.
 
-use std::sync::Arc;
-
 use crate::{EMPTY_STRING, Handle, Heap};
 
 /// How the host loads a memory file for compiled code.
-pub trait MemoryFileReader: Send + Sync {
+pub trait MemoryFileReader: Send {
     /// Run the load `descriptor` describes, an encoding of the call's
     /// constant parameters that the compiler chose, reading file `file`;
     /// `range` holds the addresses the call loads from and toward when it
     /// gives them.
-    fn load(&self, descriptor: &[u8], file: &[u8], range: Option<(i64, i64)>) -> MemoryFileWords;
+    fn load(
+        &mut self,
+        descriptor: &[u8],
+        file: &[u8],
+        range: Option<MemoryFileRange>,
+    ) -> MemoryFileWords;
+}
+
+/// The addresses a memory file load is given at run time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemoryFileRange {
+    pub start: i64,
+    pub finish: i64,
+    /// Whether either address has an unknown bit, which loads nothing.
+    pub unknown: bool,
 }
 
 /// The words a memory file load gives, and its messages.
@@ -36,11 +48,23 @@ pub struct MemoryFileWords {
 }
 
 /// The reader of a heap and the load compiled code is storing.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub(crate) struct MemoryFiles {
-    reader: Option<Arc<dyn MemoryFileReader>>,
-    range: Option<(i64, i64)>,
+    reader: Option<Box<dyn MemoryFileReader>>,
+    range: Option<MemoryFileRange>,
     loaded: MemoryFileWords,
+}
+
+/// A copy of a heap, such as a checkpoint's, takes its state, not the
+/// reader of the simulator that owns it.
+impl Clone for MemoryFiles {
+    fn clone(&self) -> Self {
+        Self {
+            reader: None,
+            range: self.range,
+            loaded: self.loaded.clone(),
+        }
+    }
 }
 
 impl std::fmt::Debug for MemoryFiles {
@@ -55,27 +79,38 @@ impl std::fmt::Debug for MemoryFiles {
 
 impl Heap {
     /// Load the memory files of compiled code through `reader`.
-    pub fn set_memory_file_reader(&mut self, reader: Arc<dyn MemoryFileReader>) {
+    pub fn set_memory_file_reader(&mut self, reader: Box<dyn MemoryFileReader>) {
         self.memory_files.reader = Some(reader);
     }
 
-    /// The reader [`Self::set_memory_file_reader`] installed.
-    pub fn memory_file_reader(&self) -> Option<Arc<dyn MemoryFileReader>> {
-        self.memory_files.reader.clone()
+    /// Take the reader [`Self::set_memory_file_reader`] installed.
+    pub fn take_memory_file_reader(&mut self) -> Option<Box<dyn MemoryFileReader>> {
+        self.memory_files.reader.take()
     }
 
-    pub(crate) fn memory_file_call(&mut self, op: u64, parameter: u64, a: u64, b: u64) -> u64 {
+    pub(crate) fn memory_file_call(
+        &mut self,
+        op: u64,
+        parameter: u64,
+        a: u64,
+        b: u64,
+        c: u64,
+    ) -> u64 {
         let files = &mut self.memory_files;
         match op {
             crate::ops::MEMORY_FILE_RANGE => {
-                files.range = Some((a as i64, b as i64));
+                files.range = Some(MemoryFileRange {
+                    start: a as i64,
+                    finish: b as i64,
+                    unknown: c != 0,
+                });
                 0
             }
             crate::ops::MEMORY_FILE_LOAD => {
                 let range = files.range.take();
                 let descriptor = self.string(a as Handle).to_vec();
                 let file = self.string(b as Handle).to_vec();
-                let loaded = match &self.memory_files.reader {
+                let loaded = match &mut self.memory_files.reader {
                     Some(reader) => reader.load(&descriptor, &file, range),
                     None => MemoryFileWords {
                         error: Some(b"memory files cannot be read by this simulator".to_vec()),

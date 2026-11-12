@@ -17,6 +17,9 @@ pub struct NativeSimulatorHandle {
     pub(super) warnings_json: String,
     pub(super) stable_size: u32,
     pub(super) total_size: u32,
+    /// The heap the generated modules call, whose memory-file reader loads
+    /// the memory files of `$readmemh` statements (IEEE 1800-2023 21.4).
+    pub(super) heap: celox_heap::Heap,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -53,6 +56,7 @@ impl NativeSimulatorHandle {
         let stable_size = layout.total_size as u32;
         let total_size = layout.merged_total_size as u32;
 
+        let heap = Self::heap(&laid_out);
         Ok(Self {
             program: laid_out,
             four_state: opts.four_state,
@@ -62,6 +66,7 @@ impl NativeSimulatorHandle {
             warnings_json,
             stable_size,
             total_size,
+            heap,
         })
     }
 }
@@ -130,7 +135,6 @@ impl NativeSimulatorHandle {
                     .diagnostic_policy
                     .clone()
                     .with_inferred_latches(opts.allow_inferred_latches),
-                &Default::default(),
             ),
             (true, false) => celox::compile_sv_to_sir(
                 &sv_refs,
@@ -175,6 +179,7 @@ impl NativeSimulatorHandle {
 
         let stable_size = layout.total_size as u32;
         let total_size = layout.merged_total_size as u32;
+        let heap = Self::heap(&laid_out);
         Ok(Self {
             program: laid_out,
             four_state: opts.four_state,
@@ -184,6 +189,7 @@ impl NativeSimulatorHandle {
             warnings_json,
             stable_size,
             total_size,
+            heap,
         })
     }
 
@@ -241,7 +247,6 @@ impl NativeSimulatorHandle {
                 .diagnostic_policy
                 .clone()
                 .with_inferred_latches(opts.allow_inferred_latches),
-            &Default::default(),
         )
         .map_err(|error| Error::from_reason(error.to_string()))?;
         let laid_out = program
@@ -255,6 +260,7 @@ impl NativeSimulatorHandle {
 
         let stable_size = layout.total_size as u32;
         let total_size = layout.merged_total_size as u32;
+        let heap = Self::heap(&laid_out);
         Ok(Self {
             program: laid_out,
             four_state: opts.four_state,
@@ -264,6 +270,7 @@ impl NativeSimulatorHandle {
             warnings_json,
             stable_size,
             total_size,
+            heap,
         })
     }
 
@@ -335,6 +342,30 @@ impl NativeSimulatorHandle {
     #[napi(getter)]
     pub fn total_size(&self) -> u32 {
         self.total_size
+    }
+
+    /// Perform heap operation `code` for generated WASM modules (see
+    /// `celox_heap::ops`), such as the load of a memory file.
+    #[napi]
+    pub fn heap_call(&mut self, code: BigInt, a: BigInt, b: BigInt, c: BigInt) -> BigInt {
+        fn bits(value: BigInt) -> u64 {
+            let word = value.words.first().copied().unwrap_or(0);
+            if value.sign_bit {
+                word.wrapping_neg()
+            } else {
+                word
+            }
+        }
+        napi_bigint(self.heap.call(bits(code), bits(a), bits(b), bits(c)))
+    }
+
+    /// The heap of the generated modules of `program`.
+    pub(super) fn heap(program: &celox::LaidOutProgram) -> celox_heap::Heap {
+        let mut heap = celox_heap::Heap::new();
+        heap.set_memory_file_reader(
+            celox::HostMemoryFileReader::new(&program.design.memory_file_bases).into_heap_reader(),
+        );
+        heap
     }
 
     /// Evaluate an internal floating-point operation for generated WASM modules.

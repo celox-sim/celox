@@ -505,9 +505,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         sim.set_plusargs(options.plusargs.clone());
-        sim.set_file_io(celox_runtime::file_io::FileIo::new(
-            options.file_system.create(),
-        ));
+        sim.use_file_system(&options.file_system);
         if let Some((path, format)) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::WaveformWriter::new_with_time_precision(

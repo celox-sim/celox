@@ -23,7 +23,6 @@ mod system;
 mod tick;
 mod waveform;
 use super::*;
-pub(crate) use memory_files::HeapMemoryFileReader;
 pub(crate) use monitor::MonitorState;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -278,9 +277,9 @@ impl<B: SimBackend> Simulator<B> {
             event_edges,
         };
         sim.initialize_copies();
-        // The design's memory files go through its file system.
-        let file_io = std::mem::take(&mut sim.file_io);
-        sim.set_file_io(file_io);
+        // The code reads memory files from the host file system, as the
+        // default file I/O does, until a builder gives the simulator its own.
+        sim.use_host_memory_files();
         sim.comb_observers.snapshots = sim.snapshot_all_comb_observers();
         sim
     }

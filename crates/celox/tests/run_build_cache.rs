@@ -47,6 +47,27 @@ module t {
 }
 "#;
 
+/// [`MEMORY_SOURCE`] with the load in an `always_ff`, whose generated code
+/// reads the file at each edge.
+const CLOCKED_MEMORY_SOURCE: &str = r#"
+module Rom (clk: input clock, q: output logic<8>) {
+    var mem: logic<8>[4];
+    always_ff (clk) { $readmemh("mem.hex", mem); }
+    assign q = mem[0];
+}
+#[test(t)]
+module t {
+    inst clk: $tb::clock_gen;
+    var q: logic<8>;
+    inst dut: Rom (clk, q);
+    initial {
+        clk.next(1);
+        $assert(q == 8'h12);
+        $finish();
+    }
+}
+"#;
+
 fn project(source: &str) -> tempfile::TempDir {
     let project = tempfile::tempdir().unwrap();
     fs::write(
@@ -306,7 +327,7 @@ fn reuses_relative_cache_after_project_move() {
         "$assert(q == 4);",
         "if q == 4 { for _i in 0..2 { $assert(q == 4); } } else { $assert(q == 4); }",
     );
-    for source in [&nested, MEMORY_SOURCE] {
+    for source in [&nested, MEMORY_SOURCE, CLOCKED_MEMORY_SOURCE] {
         check_project_move(source);
     }
 }
@@ -374,7 +395,7 @@ fn check_project_move(source: &str) {
         &["--native-image-input", image_path.to_str().unwrap()],
         true,
     );
-    if source == MEMORY_SOURCE {
+    if source == MEMORY_SOURCE || source == CLOCKED_MEMORY_SOURCE {
         // The run looks the file up against the relocated root, where a
         // source-relative file outranks the root-relative one.
         fs::write(moved.join("src/mem.hex"), "34\n34\n34\n34\n").unwrap();
