@@ -63,6 +63,13 @@ constructs without a dedicated issue point to the frontend roadmap,
   Internal nets without a driver are rejected
   ([#460](https://github.com/celox-sim/celox/issues/460)), except undriven
   bits of a net with an independent delay, which read as `z`.
+- Variables that a clocked `always` in flip-flop form and another process
+  of the same module both write (6.5), other than a memory that clocked
+  procedures share by nonblocking element writes and a variable they share
+  by blocking writes. Ordinary `always` processes that run as processes
+  (level-sensitive, delayed, or not in flip-flop form) share variables with
+  each other and with processes of other modules that write them through
+  hierarchical names.
 - Gate and switch primitives other than scalar `and`, `nand`, `or`, `nor`,
   `xor`, `xnor` without delays or strengths (Clause 28); gate delays,
   strengths, and instance arrays are also unsupported

@@ -8797,10 +8797,6 @@ fn timed_task_edge_processes_preserve_driver_checks() {
             "multiple variable drivers for `q`",
         ),
         (
-            "always @(posedge clk) begin pause(); q = a; end always @(negedge clk) begin pause(); q = a; end",
-            "multiple variable drivers for `q`",
-        ),
-        (
             "always @(posedge clk) copy(q); assign q = a;",
             "multiple variable drivers for `q`",
         ),
