@@ -165,6 +165,9 @@ fn bind_in_mode(
                         let Some(mut ty) = builtin_type(name, data.signed) else {
                             return Ok(None);
                         };
+                        if ty.is_chandle() {
+                            session.types.declare_chandle();
+                        }
                         if ty.packed_ranges.is_empty() {
                             ty.packed_ranges = ranges;
                         }

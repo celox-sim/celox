@@ -186,6 +186,8 @@ pub(super) struct TyTable {
     /// the hash of the shape: such a shape has the same type in every
     /// context (see `VariableShape::is_closed`).
     closed_shapes: HashMap<u64, Vec<(crate::ast::variable_dimensions::VariableShape, TyId)>>,
+    /// Whether a `chandle` type has been interned (6.14).
+    chandle: bool,
 }
 
 /// The classes a class extends and implements.
@@ -324,10 +326,24 @@ impl TyTable {
             None => TyId(self.types.len() as u32),
         };
         let id = TyId(self.types.len() as u32);
+        self.chandle |= matches!(data, TyData::Chandle);
         let data = Arc::new(data);
         self.types.push((data.clone(), canonical));
         self.ids.insert(data, id);
         id
+    }
+
+    /// Whether some type of the analysis is a `chandle` (6.14): binding the
+    /// `chandle` type, a DPI formal of it or a type parameter bound to one
+    /// interns it ([`Self::declare_chandle`]), as typing any value of it does.
+    pub fn has_chandle(&self) -> bool {
+        self.chandle
+    }
+
+    /// Record that the analysis has a `chandle` type: a declaration, a
+    /// formal or a type argument names one.
+    pub fn declare_chandle(&mut self) {
+        self.intern(TyData::Chandle);
     }
 
     /// The type `id` names.

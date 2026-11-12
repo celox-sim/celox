@@ -7093,6 +7093,30 @@ fn class_visibility_rejects_inaccessible_members() {
     }
 }
 
+/// A module analyzed apart from the sources of its packages types its
+/// chandles although none of those sources names one (IEEE 1800-2023 6.14).
+#[test]
+fn modules_of_other_sources_than_their_packages_check_chandles() {
+    let packages = analyze_packages(&[(
+        "package p; localparam int N = 1; endpackage",
+        Path::new("chandle-free-package.sv"),
+    )])
+    .unwrap();
+    let error = analyze_source_module_with_packages(
+        "module Top; chandle h; int n; initial n = $countones(h); endmodule",
+        Path::new("chandle-top.sv"),
+        "Top",
+        &HashMap::default(),
+        &packages,
+        &mut packages.design(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, AnalyzerError::IllegalChandleUse { .. }),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn imported_class_member_types_keep_declaration_dimensions() {
     let package = r#"
