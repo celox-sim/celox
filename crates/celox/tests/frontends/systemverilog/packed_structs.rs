@@ -1064,3 +1064,81 @@ fn run_time_element_selects_of_structure_members_stay_in_the_member() {
         assert_eq!(write(2, 0x6), known(0x183c));
     }
 }
+
+// A run-time bit-select of a member of an element of an array of packed
+// structures, packed or unpacked, as OpenPiton's write buffer reads
+// `tx_stat_q[rtrn_id].be[k]`: a bit outside the member reads X and writes
+// nothing, also in an element outside the array (IEEE 1800-2023 7.4.5,
+// 11.5.1).
+#[test]
+fn run_time_bits_of_members_of_array_elements_stay_in_the_member() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+            typedef struct packed { logic vld; logic [7:0] be; logic [2:0] ptr; } tx_t;
+            tx_t [3:0] packed_q;
+            tx_t unpacked_q [4];
+            logic [2:0] id;
+            int k;
+            initial begin
+                packed_q = '0;
+                foreach (unpacked_q[e]) unpacked_q[e] = '0;
+                packed_q[2] = {1'b1, 8'b1010_0110, 3'b111};
+                unpacked_q[2] = {1'b1, 8'b1010_0110, 3'b111};
+                id = 2;
+                for (k = 0; k < 10; k++)
+                    $display("%0d %b %b", k, packed_q[id].be[k], unpacked_q[id].be[k]);
+                id = 5;
+                k = 1;
+                $display("%b %b", packed_q[id].be[k], unpacked_q[id].be[k]);
+                id = 1;
+                k = 3;
+                packed_q[id].be[k] = 1'b1;
+                unpacked_q[id].be[k] = 1'b1;
+                k = 8;
+                packed_q[id].be[k] = 1'b1;
+                unpacked_q[id].be[k] = 1'b1;
+                id = 5;
+                k = 0;
+                packed_q[id].be[k] = 1'b1;
+                unpacked_q[id].be[k] = 1'b1;
+                $display("%h %h %h %h", packed_q, unpacked_q[1], unpacked_q[2], unpacked_q[3]);
+            end
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let x = if four_state { "x" } else { "0" };
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("element_members.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build_cranelift()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let displayed: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8(message).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut expected = (0..8)
+            .map(|k| {
+                let bit = (0b1010_0110 >> k) & 1;
+                format!("{k} {bit} {bit}")
+            })
+            .collect::<Vec<_>>();
+        // Bits 8 and 9 are past `be`, next to `vld`.
+        expected.push(format!("8 {x} {x}"));
+        expected.push(format!("9 {x} {x}"));
+        // Element 5 is past the array.
+        expected.push(format!("{x} {x}"));
+        // Only be[3] of element 1 is written.
+        expected.push("000d37040000 040 d37 000".to_string());
+        assert_eq!(displayed, expected, "four_state={four_state}");
+    }
+}
