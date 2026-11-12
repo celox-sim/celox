@@ -145,6 +145,7 @@ fn block_variable_operand(
         tree,
         session,
         &context.type_aliases,
+        None,
         &context.const_env,
         Some(&name),
         &mut signals,

@@ -3731,3 +3731,26 @@ fn external_constraints_resolve_unqualified_names_in_their_lexical_scope() {
     assert!(classes[0].constraints[0].expressions.is_some());
     assert!(classes[1].constraints[0].expressions.is_none());
 }
+
+/// The parser records the names that covergroups (IEEE 1800-2023 19.3) and
+/// user-defined nettypes (6.6.7) declare, whose declarations stay
+/// unconverted.
+#[test]
+fn unconverted_type_declarations_record_their_names() {
+    let syntax = parse(
+        "module M; bit x; covergroup cg @(posedge x); Label: coverpoint x; endgroup \
+         nettype logic [3:0] wide with resolve; nettype wide alias_t; endmodule",
+    );
+    let covergroups = syntax
+        .covergroups
+        .iter()
+        .map(|declaration| declaration.name.value())
+        .collect::<Vec<_>>();
+    assert_eq!(covergroups, ["cg"]);
+    let nettypes = syntax
+        .nettypes
+        .iter()
+        .map(|declaration| declaration.name.value())
+        .collect::<Vec<_>>();
+    assert_eq!(nettypes, ["wide", "alias_t"]);
+}

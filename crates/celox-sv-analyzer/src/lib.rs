@@ -175,6 +175,9 @@ pub enum AnalyzerError {
     UnknownParameterOverride { name: String },
     #[error("localparam override `{name}`")]
     LocalParameterOverride { name: String },
+    /// A name that nothing in the design declares (IEEE 1800-2023 6.18).
+    #[error("`{name}` is not declared: {context}")]
+    UndeclaredIdentifier { name: String, context: String },
     /// A `$name` call that is not a system task or function Celox knows.
     #[error("unknown system task or function `{name}`")]
     UnknownSystemTf { name: String },
@@ -361,6 +364,20 @@ impl AnalyzerError {
             Self::WithWarnings { warnings, .. } => warnings,
             _ => &[],
         }
+    }
+
+    /// The underlying source error, as [`Self::into_error`] gives it.
+    pub fn source_error(&self) -> &Self {
+        match self {
+            Self::WithWarnings { error, .. } => error.source_error(),
+            error => error,
+        }
+    }
+
+    /// Whether this rejects a construct Celox does not support, not an
+    /// illegal design.
+    pub fn is_unsupported(&self) -> bool {
+        matches!(self.source_error(), Self::Unsupported(_))
     }
 
     /// The underlying source error, without its separately reported diagnostics.

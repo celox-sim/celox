@@ -70,6 +70,11 @@ pub struct Declarations {
     pub package_bindings: Vec<PackageBinding>,
     pub modport_declarations: Vec<ModportDeclaration>,
     pub assertion_declarations: Vec<AssertionDeclaration>,
+    /// The headers of every covergroup declaration, whose bodies stay
+    /// unconverted.
+    pub covergroups: Vec<CovergroupDeclaration>,
+    /// Every user-defined nettype declaration, which stays unconverted.
+    pub nettypes: Vec<NettypeDeclaration>,
     pub sequences: Vec<Sequence>,
     pub type_aliases: Vec<TypeAlias>,
     pub time_declarations: Vec<TimeDeclaration>,
@@ -123,6 +128,8 @@ impl Declarations {
             package_bindings: Vec::new(),
             modport_declarations: Vec::new(),
             assertion_declarations: Vec::new(),
+            covergroups: Vec::new(),
+            nettypes: Vec::new(),
             sequences: Vec::new(),
             type_aliases: Vec::new(),
             time_declarations: Vec::new(),
@@ -152,6 +159,8 @@ impl Declarations {
         let package_bindings = parser.package_bindings;
         let modport_declarations = parser.modport_declarations;
         let assertion_declarations = parser.assertion_declarations;
+        let covergroups = parser.covergroups;
+        let nettypes = parser.nettypes;
         let sequences = parser.sequences;
         let type_aliases = parser.type_aliases;
         let time_declarations = parser.time_declarations;
@@ -177,6 +186,8 @@ impl Declarations {
             package_bindings,
             modport_declarations,
             assertion_declarations,
+            covergroups,
+            nettypes,
             sequences,
             type_aliases,
             time_declarations,
@@ -355,6 +366,8 @@ struct Parser<'a> {
     package_bindings: Vec<PackageBinding>,
     modport_declarations: Vec<ModportDeclaration>,
     assertion_declarations: Vec<AssertionDeclaration>,
+    covergroups: Vec<CovergroupDeclaration>,
+    nettypes: Vec<NettypeDeclaration>,
     sequences: Vec<Sequence>,
     type_aliases: Vec<TypeAlias>,
     time_declarations: Vec<TimeDeclaration>,

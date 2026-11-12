@@ -3253,8 +3253,8 @@ generic/typedef/typedef_test_26.sv	2state	pass
 generic/typedef/typedef_test_26.sv	4state	pass
 generic/typedef/typedef_test_27.sv	2state	pass
 generic/typedef/typedef_test_27.sv	4state	pass
-generic/typedef/typedef_test_28__bad.sv	2state	fail
-generic/typedef/typedef_test_28__bad.sv	4state	fail
+generic/typedef/typedef_test_28__bad.sv	2state	pass
+generic/typedef/typedef_test_28__bad.sv	4state	pass
 generic/typedef/typedef_test_3.sv	2state	pass
 generic/typedef/typedef_test_3.sv	4state	pass
 generic/typedef/typedef_test_4.sv	2state	pass
@@ -3267,8 +3267,8 @@ generic/typedef/typedef_test_7.sv	2state	pass
 generic/typedef/typedef_test_7.sv	4state	pass
 generic/typedef/typedef_test_8.sv	2state	pass
 generic/typedef/typedef_test_8.sv	4state	pass
-generic/typedef/typedef_test_8__bad.sv	2state	fail
-generic/typedef/typedef_test_8__bad.sv	4state	fail
+generic/typedef/typedef_test_8__bad.sv	2state	pass
+generic/typedef/typedef_test_8__bad.sv	4state	pass
 generic/typedef/typedef_test_9.sv	2state	pass
 generic/typedef/typedef_test_9.sv	4state	pass
 generic/union/union_test_0.sv	2state	pass

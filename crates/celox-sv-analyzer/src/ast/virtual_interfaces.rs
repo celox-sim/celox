@@ -310,10 +310,15 @@ pub(super) fn bind_type(
     let Some(declarations) = declarations(state) else {
         return Ok(value_type(VirtualInterface { interface, modport }));
     };
-    let declaration = declarations
-        .interfaces
-        .get(&interface)
-        .ok_or_else(|| unsupported(format!("virtual interface type of `{interface}`")))?;
+    // The declarations hold every interface that a virtual interface type
+    // of any source names (see `VirtualInterfaces::declarations_of`), so one
+    // they lack is declared in no source (IEEE 1800-2023 25.9).
+    let declaration = declarations.interfaces.get(&interface).ok_or_else(|| {
+        AnalyzerError::UndeclaredIdentifier {
+            name: name.value().to_owned(),
+            context: "no interface of this name is declared".into(),
+        }
+    })?;
     if arguments.is_some() || declaration.parameterized {
         return Err(unsupported(format!(
             "virtual interface type of parameterized interface `{interface}`"
