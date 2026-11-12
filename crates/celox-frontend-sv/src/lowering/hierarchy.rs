@@ -597,10 +597,17 @@ pub(super) fn collect_foreign_writes(
     let mut repeatedly = HashSet::default();
     let mut always_ff = HashSet::default();
     for process in module.initial_processes() {
-        let written = if process.repeats() {
-            &mut repeatedly
-        } else {
+        // An `always_ff` that runs as a process is still one (IEEE
+        // 1800-2023 9.2.2.4).
+        let written = if !process.repeats() {
             &mut once
+        } else if process
+            .site()
+            .is_some_and(|site| site.construct == "always_ff")
+        {
+            &mut always_ff
+        } else {
+            &mut repeatedly
         };
         super::procedural::written_names_with_calls(module, process.body(), written);
     }

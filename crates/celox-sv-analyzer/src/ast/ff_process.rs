@@ -77,12 +77,10 @@ fn ff_process_from_procedure(
     if always_kind(procedure, syntax_tree.declarations())? != AlwaysKind::Ff {
         return Ok(None);
     }
+    // The procedure runs as a process (see `always_falls_back_to_process`).
     let Some((events, body)) =
         ff_event_control_and_body(procedure.body, syntax_tree, session, packed_dimensions)?
     else {
-        if procedure.kind == celox_sv_syntax::ProcedureKind::AlwaysFf {
-            return Err(unsupported("always_ff event expression"));
-        }
         return Ok(None);
     };
     let mut local_dimensions = packed_dimensions.clone();
@@ -112,19 +110,31 @@ fn ff_process_from_procedure(
     }))
 }
 
-/// A plain `always` sensitive to edges runs as a process when its events are
-/// not all `posedge` or `negedge` of a variable, such as `@(posedge v[0])`,
-/// `@(edge a)` or `@(posedge clk or a)`. Only `always_ff` must have this shape
-/// (IEEE 1800-2023 9.2.2.4).
+/// An `always` or `always_ff` sensitive to edges runs as a process when its
+/// events are not all `posedge` or `negedge` of a variable, such as
+/// `@(posedge v[0])`, `@(posedge s.clk)`, `@(edge a)` or `@(posedge clk or
+/// a)`. An `always_ff` still has its one event control and no blocking timing
+/// control (IEEE 1800-2023 9.2.2.4).
 pub(super) fn always_falls_back_to_process(
     procedure: &celox_sv_syntax::Procedure,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Result<bool, AnalyzerError> {
-    Ok(procedure.kind == celox_sv_syntax::ProcedureKind::Always
-        && always_kind(procedure, tree.declarations())? == AlwaysKind::Ff
-        && ff_event_control_and_body(procedure.body, tree, session, dimensions)?.is_none())
+    let always_ff = procedure.kind == celox_sv_syntax::ProcedureKind::AlwaysFf;
+    if !(always_ff || procedure.kind == celox_sv_syntax::ProcedureKind::Always)
+        || always_kind(procedure, tree.declarations())? != AlwaysKind::Ff
+        || ff_event_control_and_body(procedure.body, tree, session, dimensions)?.is_some()
+    {
+        return Ok(false);
+    }
+    if always_ff && validation::always_ff_body_suspends(procedure, tree.declarations()) {
+        return Err(AnalyzerError::TimingControlOutsideProcess {
+            construct: "timing control",
+            context: "an always_comb or always_ff body",
+        });
+    }
+    Ok(true)
 }
 
 /// The events of a flip-flop shaped event control and the body it controls,

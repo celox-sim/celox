@@ -5831,14 +5831,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "always_ff event expression",
-            r#"
-            module Top(input logic clk, enable, d, output logic q);
-                always_ff @(posedge (clk & enable)) q <= d;
-            endmodule
-        "#,
-        ),
-        (
             "streaming concatenation",
             r#"
             module Top(input logic clk, a, b, output logic q);

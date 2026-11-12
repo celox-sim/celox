@@ -90,6 +90,20 @@ fn level_sensitive(
         && !has_timing_control(body, native)
 }
 
+/// Whether the statement an `always_ff` procedure controls with its event
+/// control has a blocking timing control of its own, which the procedure
+/// may not have (IEEE 1800-2023 9.2.2.4).
+pub(super) fn always_ff_body_suspends(
+    procedure: &celox_sv_syntax::Procedure,
+    native: &celox_sv_syntax::Declarations,
+) -> bool {
+    matches!(
+        native.statement(procedure.body).kind,
+        celox_sv_syntax::StatementKind::Timing { body, .. }
+            if has_timing_control(body, native)
+    )
+}
+
 /// Timing controls, including delayed assignments, require process kernels.
 /// Typed leaf restrictions remain in their semantic binders.
 fn has_timing_control(
