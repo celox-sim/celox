@@ -1350,6 +1350,12 @@ impl<'a> Frame<'a> {
                 op: *op,
                 right: Box::new(placeholder(self.expression_type(right)?)),
             },
+            // The guard of a division by zero has the operation's type.
+            Expr::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } if division_guard(then_expr) => return self.expression_type(else_expr),
             Expr::Mux {
                 then_expr,
                 else_expr,
@@ -1511,6 +1517,29 @@ impl<'a> Frame<'a> {
         then_expr: &Expr,
         else_expr: &Expr,
     ) -> Option<ConstExpr> {
+        // The guard of a division or modulus by an operand that may be zero
+        // (see `guard_zero_divisions`): the operation itself, or for a zero
+        // divisor the operation by an unknown one, every bit of whose result
+        // is unknown at the width its context gives it (IEEE 1800-2023
+        // 11.4.2, 11.8.2).
+        if division_guard(then_expr) {
+            if self.eval(condition)?.truth() == Some(false) {
+                return self.lower(else_expr);
+            }
+            let Expr::Binary { left, op, right } = else_expr else {
+                return None;
+            };
+            let ExprType { width, signed } = self.expression_type(right)?;
+            return Some(ConstExpr::Binary {
+                left: Box::new(self.lower(left)?),
+                op: *op,
+                right: Box::new(ConstExpr::Literal(format!(
+                    "{width}'{}b{}",
+                    if signed { "s" } else { "" },
+                    "x".repeat(width.max(1))
+                ))),
+            });
+        }
         let condition = self.eval(condition)?;
         let truth = condition.truth();
         let condition = self.temporary(condition)?;
@@ -1906,3 +1935,8 @@ thread_local! {
 
 #[cfg(test)]
 mod tests;
+
+/// Whether `expr` is the unknown arm of the guard of a division by zero.
+fn division_guard(expr: &Expr) -> bool {
+    matches!(expr, Expr::Literal(text) if text == crate::DIV_ZERO_UNKNOWN_LITERAL)
+}
