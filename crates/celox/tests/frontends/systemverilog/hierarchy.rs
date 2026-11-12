@@ -549,3 +549,62 @@ fn rejects_malformed_non_ansi_port_declarations() {
         assert!(error.contains(message), "{source}: {error}");
     }
 }
+
+/// A port range may name a member of an enumeration of a package that the
+/// module header imports (IEEE 1800-2023 26.4), here in modules of two
+/// specializations. Verilator 5.054 prints the same lines.
+#[test]
+fn port_ranges_name_enumeration_members_of_header_imports() {
+    let source = r#"`timescale 1ns/1ns
+package noc_pkg;
+  typedef enum logic [2:0] {P = 3'd0, W, E, N, S} Dirs;
+endpackage
+module child
+  import noc_pkg::*;
+  #(parameter width_p = 4)
+  (input [S:W][width_p-1:0] outs_i,
+   input logic [E:W][width_p-1:0] hor_i,
+   output [E:W][width_p-1:0] hor_o);
+  assign hor_o = {hor_i[W], hor_i[E]};
+  initial #1 $display("%m %0d %0d %h %h %h", $bits(outs_i), $bits(hor_o), outs_i[N], hor_i[E], hor_o[E]);
+endmodule
+module top;
+  logic [3:0][3:0] outs;
+  logic [1:0][3:0] hi, ho;
+  logic [3:0][7:0] wouts;
+  logic [1:0][7:0] whi, who;
+  child c(.outs_i(outs), .hor_i(hi), .hor_o(ho));
+  child #(.width_p(8)) w(.outs_i(wouts), .hor_i(whi), .hor_o(who));
+  initial begin
+    outs = 16'h4321; hi = 8'hA5;
+    wouts = 32'h44332211; whi = 16'hBBAA;
+    #2 $display("%h %h", ho, who);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("port_enum_ranges.sv"))],
+            "top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let mut lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        lines.sort();
+        assert_eq!(
+            lines,
+            ["5a aabb", "top.c 16 8 3 a 5", "top.w 32 16 33 bb aa"],
+            "four_state={four_state}"
+        );
+    }
+}
