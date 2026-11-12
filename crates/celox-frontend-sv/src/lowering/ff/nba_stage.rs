@@ -377,6 +377,18 @@ pub(super) fn emit_nba_merges(
             builder.alloc_bit(width, false)
         };
         builder.emit(SIRInstruction::Binary(merged, kept, BinaryOp::Or, taken));
+        // A forced variable keeps its forced value (IEEE 1800-2023 10.6.2).
+        let merged = match pm.force_controls(stage.id) {
+            Some(controls) if pm.procedurally_forced.contains(&stage.id) => {
+                crate::lowering::ff_processes::force_select(
+                    builder,
+                    controls,
+                    SIROffset::Static(0),
+                    merged,
+                )
+            }
+            _ => merged,
+        };
         builder.emit(SIRInstruction::Store(
             stable(stage.id),
             SIROffset::Static(0),

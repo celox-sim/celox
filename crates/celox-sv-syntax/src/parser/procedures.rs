@@ -1330,16 +1330,36 @@ impl Parser<'_> {
                                 StatementKind::ProceduralDeassign(target),
                             )?);
                         }
-                        "disable" | "force" | "release" | "##" => {
+                        "force" => {
+                            let id = self.assign_statement_with("force")?;
+                            values.push(
+                                self.statement_node(header, StatementKind::ProceduralForce(id))?,
+                            );
+                        }
+                        "release" => {
+                            // procedural_continuous_assignment (IEEE
+                            // 1800-2023 A.6.2): `release variable_lvalue ;`
+                            // or `release net_lvalue ;`.
+                            self.at += 1;
+                            let target = self.expression(0)?;
+                            if !self.variable_lvalue(target) {
+                                return Err(self.error("expected release lvalue"));
+                            }
+                            self.expect(";")?;
+                            values.push(self.statement_node(
+                                header,
+                                StatementKind::ProceduralRelease(target),
+                            )?);
+                        }
+                        "disable" | "##" => {
                             let tokens = self.semicolon_range()?;
                             let kind = match word.as_str() {
                                 "disable" => StatementKind::Disable(tokens),
-                                "##" => StatementKind::Unconverted {
+                                _ => StatementKind::Unconverted {
                                     category: "clocking drive".into(),
                                     tokens,
                                     items: Vec::new(),
                                 },
-                                _ => StatementKind::ProceduralRelease(tokens),
                             };
                             values.push(self.statement_node(header, kind)?);
                         }

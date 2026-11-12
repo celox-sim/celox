@@ -225,6 +225,7 @@ impl Source {
                             net_drive: NetDrive::None,
                             package_variable: None,
                             hierarchical: signal.paths.first().cloned(),
+                            force_control: None,
                         });
                     }
                     if let Some(mut module) = interface_binding::analyze_module(

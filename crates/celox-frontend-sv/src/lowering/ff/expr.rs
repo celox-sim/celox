@@ -114,7 +114,7 @@ impl Ff<'_, '_> {
         } else {
             std::borrow::Cow::Owned(self.propagate(&expr))
         };
-        let expr = if self.m.forceable.is_empty() {
+        let expr = if !self.m.forces_reads() {
             expr
         } else {
             std::borrow::Cow::Owned(force_reads(&expr, self.m))

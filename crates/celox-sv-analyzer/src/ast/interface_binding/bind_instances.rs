@@ -259,6 +259,7 @@ impl ModuleBinding<'_> {
                         is_const: false,
                         package_variable: None,
                         hierarchical: None,
+                        force_control: None,
                     };
                     module.symbols.as_mut().unwrap().signals.push(signal);
                     let Some(connection) = connections

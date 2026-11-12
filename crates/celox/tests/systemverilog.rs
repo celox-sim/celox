@@ -111,6 +111,8 @@ mod packed_structs;
 mod procedural;
 #[path = "frontends/systemverilog/procedural_assigns.rs"]
 mod procedural_assigns;
+#[path = "frontends/systemverilog/procedural_forces.rs"]
+mod procedural_forces;
 #[path = "frontends/systemverilog/realtime.rs"]
 mod realtime;
 #[path = "frontends/systemverilog/review_regressions.rs"]

@@ -138,7 +138,18 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
 
 ### プロセス・タイミング・制御 {#timing-controls}
 
-- 手続き文としての `force` / `release` と、`disable fork` 以外の `disable` 文。
+- `disable fork` 以外の `disable` 文。
+- `initial` / `always` プロシージャ以外に書かれた手続き的な `force` /
+  `release`（IEEE 1800-2023 10.6.2）。サブルーチン、`final` プロシージャ、
+  `always_comb` / `always_latch` / `always_ff` 内は非対応です。これを含む
+  `always` プロシージャはプロセスとして実行されます。対象はモジュールの
+  packed な整数型の変数またはネット全体に限られ、ビット選択・部分選択・
+  メンバ・連接・他インスタンスの名前、`real`・`string`・ハンドル・unpacked
+  な対象（規格が許す singular なものを含む）、`always_comb` / `always_latch`
+  / `always @*` プロシージャが代入する変数、代入内遅延付きノンブロッキング
+  代入が書く変数は拒否されます。副作用のある式、サブルーチンやシステム関数を
+  呼ぶ式、手続きブロック内の変数を読む式も拒否されます。ホストからも
+  強制（`Simulator::force`）される対象も拒否されます。
 - `initial` / `always` プロシージャ以外に書かれた手続き的継続代入
   （`assign` / `deassign`、IEEE 1800-2023 10.6.1）。サブルーチン、`final`
   プロシージャ、`always_comb` / `always_latch` / `always_ff` 内は非対応です。

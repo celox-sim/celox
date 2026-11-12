@@ -264,7 +264,7 @@ impl Comb<'_, '_> {
                 access,
             } => {
                 if index.is_empty() {
-                    if self.m.force_controls(variable).is_some()
+                    if self.m.force_read_controls(variable).is_some()
                         || store.get(&variable).is_some_and(|range| {
                             range
                                 .get_parts_ref(access)
@@ -295,7 +295,7 @@ impl Comb<'_, '_> {
                         });
                     }
                     let var_width = self.m.var(variable).width;
-                    let written = self.m.force_controls(variable).is_some()
+                    let written = self.m.force_read_controls(variable).is_some()
                         || store.get(&variable).is_some_and(|range| {
                             range.ranges.values().any(|(value, _, _)| value.is_some())
                         });

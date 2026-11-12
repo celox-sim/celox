@@ -590,6 +590,31 @@ pub struct Signal {
     net_resolution: crate::ast::NetResolution,
     package_variable: Option<(String, String)>,
     hierarchical: Option<String>,
+    force_control: Option<ForceControl>,
+}
+
+/// What a hidden variable holds for the procedural force of a variable or
+/// net of its module (IEEE 1800-2023 10.6.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForceRole {
+    /// Whether the target is forced. Every write of the target stores the
+    /// forced value while it is set.
+    Enable,
+    /// The forced value.
+    Value,
+}
+
+/// The force control a hidden variable is (see [`ForceRole`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForceControl {
+    /// The name of the forced variable or net in the module.
+    pub target: String,
+    pub role: ForceRole,
+    /// Whether a force stores its value into the target: a variable that
+    /// procedures write, or an input port. A target that continuous
+    /// assignments or port connections drive takes the value through them,
+    /// and a net with no driver takes it from a driver the frontend adds.
+    pub stored: bool,
 }
 
 impl Signal {
@@ -602,7 +627,19 @@ impl Signal {
             net_resolution: crate::ast::NetResolution::Wire,
             package_variable: None,
             hierarchical: None,
+            force_control: None,
         }
+    }
+
+    pub(crate) fn with_force_control(mut self, control: Option<&ForceControl>) -> Self {
+        self.force_control = control.cloned();
+        self
+    }
+
+    /// The force control the signal is, for a hidden variable that the
+    /// lowering of `force` declares.
+    pub fn force_control(&self) -> Option<&ForceControl> {
+        self.force_control.as_ref()
     }
 
     pub(crate) fn with_hierarchical(mut self, hierarchical: Option<&str>) -> Self {

@@ -269,14 +269,6 @@ fn rejected_procedural_continuous_assignments_name_their_reason() {
         // A `deassign` without an `assign` names a valid target too.
         ("wire w; initial deassign w;", "net `w`"),
         ("real r; initial deassign r;", "packed integral variable"),
-        (
-            "logic v; initial force v = 1'b1;",
-            "`force` or `release` statement",
-        ),
-        (
-            "logic v; initial release v;",
-            "`force` or `release` statement",
-        ),
     ] {
         let source = format!("module top; {body} endmodule");
         let error = match simulation(&source, false).build() {

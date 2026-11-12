@@ -153,6 +153,114 @@ impl BodyBuilder<'_, '_, '_> {
         Ok(renamed)
     }
 
+    /// `force target = value;` (IEEE 1800-2023 10.6.2), kept as one
+    /// statement for `procedural_forces::lower`.
+    pub(super) fn procedural_force(
+        &mut self,
+        id: celox_sv_syntax::AssignId,
+    ) -> Converted<Vec<Stmt>> {
+        let assign = self.tree.declarations().assign_statement(id);
+        // A force is one `variable_assignment` or `net_assignment`
+        // without a strength or a delay (A.6.2).
+        let [assignment] = assign.assignments.as_slice() else {
+            return Err(AnalyzerError::Parse(
+                "a force assigns one variable or net".into(),
+            ));
+        };
+        if assign.strength.is_some() || assign.delay.is_some() {
+            return Err(AnalyzerError::Parse(
+                "a force has no drive strength or delay".into(),
+            ));
+        }
+        let (left, right) = (assignment.left, assignment.right);
+        let lhs = self.force_target(left)?;
+        if !self.effects(&[left, right])?.is_empty() {
+            return Err(unsupported("force of an expression with side effects"));
+        }
+        // The value converts to the target's type as in an assignment.
+        let stmts = self.assignment_value("=", false, (left, right))?;
+        let [
+            Stmt::Assign {
+                lhs: assigned,
+                rhs,
+                nonblocking: false,
+            },
+        ] = stmts.as_slice()
+        else {
+            return Err(unsupported(
+                "force of a variable or net that is not of a packed integral type",
+            ));
+        };
+        if *assigned != lhs {
+            return Err(unsupported(
+                "force of a variable or net that is not of a packed integral type",
+            ));
+        }
+        let rhs = rhs.clone();
+        // The forced value follows the variables of the expression, which
+        // no call may be part of but one that only reads a string, an
+        // object or a container.
+        if inlining::effectful(&rhs) {
+            return Err(unsupported(
+                "force of an expression that calls a subroutine or a system function",
+            ));
+        }
+        // The value follows the variables of the expression after the
+        // statement has executed, which a variable of a block or of a
+        // subroutine call does not outlive; an automatic one is illegal
+        // here (6.21).
+        let mut local = false;
+        procedural_assigns::reads(&rhs, &mut |name| local |= self.is_local(name));
+        if local {
+            return Err(unsupported(
+                "force of an expression that reads a variable of a procedural block",
+            ));
+        }
+        Ok(vec![Stmt::Force { lhs, rhs }])
+    }
+
+    /// The variable or net `force` or `release` names: a whole variable or
+    /// net of the module (IEEE 1800-2023 10.6.2). Constant selects of a
+    /// vector net, members, and names in other modules are not supported.
+    pub(super) fn force_target(&mut self, target: celox_sv_syntax::ExprId) -> Converted<LValue> {
+        // An `always` procedure with one runs as a process (see
+        // `validation::always_kind`), whose body is a process body.
+        if !matches!(
+            self.body,
+            system_functions::Body::Initial | system_functions::Body::Process
+        ) || self.subroutine
+        {
+            return Err(unsupported(
+                "force or release in a subroutine, a final procedure, or an `always_comb`, `always_latch` or `always_ff` procedure",
+            ));
+        }
+        let native = self.tree.declarations();
+        let id = expression_binding::ungroup(target, native);
+        match &native.expression(id).kind {
+            celox_sv_syntax::ExprKind::Select { .. } => {
+                return Err(unsupported(
+                    "force or release of a bit-select or part-select",
+                ));
+            }
+            celox_sv_syntax::ExprKind::Concatenation(_) => {
+                return Err(unsupported("force or release of a concatenation"));
+            }
+            _ => {}
+        }
+        let (_, renamed) = self.native_lvalue(target, false)?;
+        let LValue::Ident(name) = &renamed else {
+            return Err(unsupported(
+                "force or release of a member or an element of a variable or net",
+            ));
+        };
+        if self.is_local(name) {
+            return Err(unsupported(
+                "force or release of a variable of a procedural block",
+            ));
+        }
+        Ok(renamed)
+    }
+
     /// Whether the assertions of this body check the assertion control
     /// state of the design (see [`assertion_control`]): those of a module of
     /// a design that calls an assertion control task. A constant function
@@ -275,8 +383,10 @@ impl BodyBuilder<'_, '_, '_> {
                 let target = self.procedural_assign_target(*target)?;
                 Ok(vec![Stmt::Deassign { lhs: target }])
             }
-            StatementKind::ProceduralRelease(_) => {
-                Err(unsupported("procedural `force` or `release` statement"))
+            StatementKind::ProceduralForce(id) => self.procedural_force(*id),
+            StatementKind::ProceduralRelease(target) => {
+                let target = self.force_target(*target)?;
+                Ok(vec![Stmt::Release { lhs: target }])
             }
             StatementKind::Disable(tokens) => {
                 let mut words = self

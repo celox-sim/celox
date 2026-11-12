@@ -114,10 +114,19 @@ impl ScopeElaboration<'_> {
         {
             self.signals.push(assertion_control::signal());
         }
+        let forced = procedural_forces::lower(
+            &self.packed_dimensions,
+            &self.ports,
+            &mut self.signals,
+            &self.comb_processes,
+            &self.ff_processes,
+            &mut self.initial_processes,
+        )?;
         procedural_assigns::lower(
             &self.packed_dimensions,
             &self.ports,
             &mut self.signals,
+            &forced,
             &self.comb_processes,
             &mut self.ff_processes,
             &mut self.initial_processes,

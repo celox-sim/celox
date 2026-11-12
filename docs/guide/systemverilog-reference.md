@@ -169,8 +169,20 @@ blocks in programs. Two region deviations are listed under
 
 ### Processes, timing, and control flow {#timing-controls}
 
-- Procedural `force` / `release` statements, and the `disable` statement,
-  except `disable fork`.
+- The `disable` statement, except `disable fork`.
+- Procedural `force` / `release` (IEEE 1800-2023 10.6.2) outside `initial`
+  and `always` procedures: in a subroutine, a `final` procedure, or an
+  `always_comb`, `always_latch` or `always_ff` procedure. An `always`
+  procedure with one runs as a process. The target is a whole packed
+  integral variable or net of the module: a bit-select, part-select,
+  member, concatenation or name of another instance, a `real`, `string`,
+  handle or unpacked target (singular ones the standard allows), and a
+  variable that an `always_comb`, `always_latch` or `always @*` procedure
+  assigns, or that a nonblocking assignment with an intra-assignment delay
+  writes, are rejected. So are an expression with side effects or with a
+  call of a subroutine or a system function, and one that reads a variable
+  of a procedural block. A target that the host also forces
+  (`Simulator::force`) is rejected.
 - Procedural continuous assignments (`assign` / `deassign`, IEEE 1800-2023
   10.6.1) outside `initial` and `always` procedures: in a subroutine, a
   `final` procedure, or an `always_comb`, `always_latch` or `always_ff`

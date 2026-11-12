@@ -94,8 +94,17 @@ impl Comb<'_, '_> {
         stmt: &sv::ir::Stmt,
     ) -> Result<Store, sv::AnalyzerError> {
         match stmt {
-            sv::ir::Stmt::ProceduralAssign { .. } | sv::ir::Stmt::Deassign { .. } => {
-                unreachable!("the analyzer lowers procedural continuous assignments")
+            sv::ir::Stmt::ProceduralAssign { .. }
+            | sv::ir::Stmt::Deassign { .. }
+            | sv::ir::Stmt::Force { .. }
+            | sv::ir::Stmt::Release { .. } => {
+                unreachable!("the analyzer lowers procedural continuous assignments and forces")
+            }
+            // The initial state of a force: the target takes the forced
+            // value (see `procedural_forces`).
+            sv::ir::Stmt::ForceStore { lhs, rhs } => {
+                self.assign(&mut store, frames, lhs, rhs)?;
+                Ok(store)
             }
             sv::ir::Stmt::DisableFork => Ok(store),
             sv::ir::Stmt::Fork { .. }

@@ -63,6 +63,9 @@ pub(super) struct ProcModule<'a> {
     /// `$exit` (24.7).
     pub program: bool,
     pub forceable: HashMap<SourceVarId, (SourceVarId, SourceVarId)>,
+    /// The targets of `forceable` a procedural force controls (see
+    /// [`super::ForceSlot`]): their reads are not redirected.
+    pub procedurally_forced: HashSet<SourceVarId>,
     /// Hidden variables created while lowering, for the caller to publish.
     pub created: Vec<SourceVarId>,
     temp_counter: usize,
@@ -213,20 +216,29 @@ impl<'a> ProcModule<'a> {
                 unpacked_bounds.insert(id, bounds);
             }
         }
-        let forceable = variables
+        let forceable: HashMap<_, _> = variables
             .iter()
             .filter_map(|(&enabled, var)| {
-                let (target, true) = var.force_control? else {
+                let slot = var.force_control?;
+                if !slot.enable {
                     return None;
-                };
+                }
                 let value = variables.iter().find_map(|(&id, var)| {
-                    (var.force_control == Some((target, false))).then_some(id)
+                    var.force_control
+                        .is_some_and(|other| other.target == slot.target && !other.enable)
+                        .then_some(id)
                 })?;
-                Some((target, (enabled, value)))
+                Some((slot.target, (enabled, value)))
             })
+            .collect();
+        let procedurally_forced = variables
+            .values()
+            .filter_map(|var| var.force_control.filter(|slot| slot.procedural))
+            .map(|slot| slot.target)
             .collect();
         Self {
             forceable,
+            procedurally_forced,
             variables,
             name_to_id,
             storage: None,
@@ -292,8 +304,24 @@ impl<'a> ProcModule<'a> {
         self.name_to_id.get(name).copied()
     }
 
+    /// The enable and value controls of a forced variable: every write of
+    /// the variable takes them into account.
     pub fn force_controls(&self, id: SourceVarId) -> Option<(SourceVarId, SourceVarId)> {
         self.forceable.get(&id).copied()
+    }
+
+    /// The controls a read of variable `id` takes into account: those of a
+    /// host force. A procedural force stores its value in the variable.
+    pub fn force_read_controls(&self, id: SourceVarId) -> Option<(SourceVarId, SourceVarId)> {
+        if self.procedurally_forced.contains(&id) {
+            return None;
+        }
+        self.force_controls(id)
+    }
+
+    /// Whether a read of some variable takes force controls into account.
+    pub fn forces_reads(&self) -> bool {
+        self.forceable.len() > self.procedurally_forced.len()
     }
 
     pub fn var(&self, id: SourceVarId) -> &SvVariable {
