@@ -4,42 +4,83 @@ const MAX_WORKERS: usize = 4;
 
 /// Dispatch in priority order, but return results in stable task-index order.
 /// Each worker owns at most one expanded process and its compilation state.
-pub(super) fn compile_tasks<T: Send>(
+/// The first task that fails stops the others from taking more tasks, and its
+/// error is returned.
+pub(super) fn compile_tasks<T: Send, E: Send>(
     order: &[usize],
     workers: usize,
-    compile: impl Fn(usize) -> T + Sync,
-) -> std::thread::Result<Vec<T>> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let mut results = if workers <= 1 || order.len() <= 1 {
-        order
-            .iter()
-            .map(|&index| (index, compile(index)))
-            .collect::<Vec<_>>()
+    compile: impl Fn(usize) -> Result<T, E> + Sync,
+) -> std::thread::Result<Result<Vec<T>, E>> {
+    compile_tasks_with(order, workers, || (), |(), index| compile(index))
+}
+
+/// [`compile_tasks`], with state of each worker: `state` makes it in the
+/// worker, once, and the worker passes it to each task it compiles.
+pub(super) fn compile_tasks_with<S, T: Send, E: Send>(
+    order: &[usize],
+    workers: usize,
+    state: impl Fn() -> S + Sync,
+    compile: impl Fn(&mut S, usize) -> Result<T, E> + Sync,
+) -> std::thread::Result<Result<Vec<T>, E>> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let mut results = Vec::with_capacity(order.len());
+    let mut failure = None;
+    if workers <= 1 || order.len() <= 1 {
+        let mut state = state();
+        for &index in order {
+            match compile(&mut state, index) {
+                Ok(result) => results.push((index, result)),
+                Err(error) => {
+                    failure = Some((index, error));
+                    break;
+                }
+            }
+        }
     } else {
         let next = AtomicUsize::new(0);
+        let stopped = AtomicBool::new(false);
         std::thread::scope(|scope| {
             let handles = (0..workers.min(order.len()))
                 .map(|_| {
                     let next = &next;
+                    let stopped = &stopped;
+                    let state = &state;
                     let compile = &compile;
                     scope.spawn(move || {
+                        let mut state = state();
                         let mut results = Vec::new();
-                        loop {
+                        let mut failure = None;
+                        while !stopped.load(Ordering::Relaxed) {
                             let position = next.fetch_add(1, Ordering::Relaxed);
                             let Some(&index) = order.get(position) else {
                                 break;
                             };
-                            results.push((index, compile(index)));
+                            match compile(&mut state, index) {
+                                Ok(result) => results.push((index, result)),
+                                Err(error) => {
+                                    stopped.store(true, Ordering::Relaxed);
+                                    failure = Some((index, error));
+                                    break;
+                                }
+                            }
                         }
-                        results
+                        (results, failure)
                     })
                 })
                 .collect::<Vec<_>>();
-            let mut results = Vec::new();
             let mut panic = None;
             for handle in handles {
                 match handle.join() {
-                    Ok(completed) => results.extend(completed),
+                    Ok((completed, failed)) => {
+                        results.extend(completed);
+                        // Of the tasks that failed before the others
+                        // stopped, the first by index.
+                        if let Some(failed) = failed
+                            && failure.as_ref().is_none_or(|(index, _)| failed.0 < *index)
+                        {
+                            failure = Some(failed);
+                        }
+                    }
                     Err(error) => {
                         if panic.is_none() {
                             panic = Some(error);
@@ -47,25 +88,79 @@ pub(super) fn compile_tasks<T: Send>(
                     }
                 }
             }
-            if let Some(error) = panic {
-                Err(error)
-            } else {
-                Ok(results)
+            match panic {
+                Some(error) => Err(error),
+                None => Ok(()),
             }
-        })?
-    };
+        })?;
+    }
+    if let Some((_, error)) = failure {
+        return Ok(Err(error));
+    }
     results.sort_unstable_by_key(|(index, _)| *index);
-    Ok(results.into_iter().map(|(_, result)| result).collect())
+    Ok(Ok(results.into_iter().map(|(_, result)| result).collect()))
 }
 
+/// What compiling a unit of `blocks` blocks and `instructions` instructions
+/// is estimated to cost, in bytes of compiler state: the order in which
+/// tasks are dispatched, the largest first, and the memory each worker
+/// needs, at least [`MIN_TASK_MEMORY`], both follow it.
+pub(super) fn compile_cost(blocks: usize, instructions: usize) -> u64 {
+    (blocks as u64)
+        .saturating_mul(24 * 1024)
+        .max((instructions as u64).saturating_mul(4096))
+}
+
+const MIN_TASK_MEMORY: u64 = 128 * 1024 * 1024;
+
+/// The budget assumed when the host reports no available memory and each
+/// worker needs state of its own: a copy that does not fit it twice leaves
+/// one worker.
+const ASSUMED_BUDGET: u64 = 2 * 1024 * 1024 * 1024;
+
 pub(super) fn workers(blocks: usize, instructions: usize, tasks: usize) -> usize {
-    choose_workers(
+    workers_with_state(blocks, instructions, tasks, 0)
+}
+
+/// [`workers`] for tasks that each worker compiles with state of its own,
+/// such as a copy of the layout, of `state` bytes.
+pub(super) fn workers_with_state(
+    blocks: usize,
+    instructions: usize,
+    tasks: usize,
+    state: u64,
+) -> usize {
+    choose_workers_with_state(
         blocks,
         instructions,
         tasks,
         std::thread::available_parallelism().map_or(1, usize::from),
         available_memory(),
+        state,
     )
+}
+
+/// About the heap a copy of `table` takes. A hash table holds a control byte
+/// besides each entry.
+fn table_bytes<K, V>(table: &fxhash::FxHashMap<K, V>) -> u64 {
+    (table.capacity() as u64).saturating_mul((size_of::<K>() + size_of::<V>() + 1) as u64)
+}
+
+/// About the heap a copy of `layout` takes: its tables of objects.
+pub(super) fn layout_bytes<A>(layout: &celox_state_layout::MemoryLayout<A>) -> u64 {
+    [
+        table_bytes(&layout.offsets),
+        table_bytes(&layout.widths),
+        table_bytes(&layout.is_4states),
+        table_bytes(&layout.unpacked_arrays),
+        table_bytes(&layout.working_offsets),
+        table_bytes(&layout.sparse_offsets),
+        table_bytes(&layout.sparse_layouts),
+        (layout.runtime_event_site_layouts.capacity() as u64)
+            .saturating_mul(size_of::<celox_state_layout::RuntimeEventSiteLayout>() as u64),
+    ]
+    .into_iter()
+    .fold(0, u64::saturating_add)
 }
 
 /// One primary circuit and a queue of smaller independent event functions.
@@ -108,10 +203,7 @@ fn choose_workers_with_primary(
 }
 
 fn estimated_memory(blocks: usize, instructions: usize) -> u64 {
-    (blocks as u64)
-        .saturating_mul(24 * 1024)
-        .max((instructions as u64).saturating_mul(4096))
-        .max(128 * 1024 * 1024)
+    compile_cost(blocks, instructions).max(MIN_TASK_MEMORY)
 }
 
 fn choose_workers(
@@ -121,20 +213,35 @@ fn choose_workers(
     cpus: usize,
     available: Option<u64>,
 ) -> usize {
+    choose_workers_with_state(blocks, instructions, tasks, cpus, available, 0)
+}
+
+fn choose_workers_with_state(
+    blocks: usize,
+    instructions: usize,
+    tasks: usize,
+    cpus: usize,
+    available: Option<u64>,
+    state: u64,
+) -> usize {
     let maximum = MAX_WORKERS.min(cpus.max(1)).min(tasks.max(1));
-    let Some(available) = available else {
-        // Retain the conservative large-design fallback when the OS cannot
-        // report a usable budget; small designs keep their usual parallelism.
-        return if blocks >= 65_536 { 1 } else { maximum };
-    };
     // Budget the additional SIR/MIR copies and allocator analyses: the shared
     // input is already deducted from available memory. Three overlapping
     // eight-hart functions peaked at 6.54 GiB for the entire process tree.
     // Account for straight-line designs too, not only CFG size.
     // These are conservative estimates, not reservations or memory limits.
-    let per_function = estimated_memory(blocks, instructions);
-    // Leave room for the running simulator and unrelated host activity.
-    let budget = available - available / 5;
+    let per_function = estimated_memory(blocks, instructions).saturating_add(state);
+    let budget = match available {
+        // Leave room for the running simulator and unrelated host activity.
+        Some(available) => available - available / 5,
+        // Retain the conservative large-design fallback when the OS cannot
+        // report a usable budget; small designs keep their usual parallelism
+        // unless each worker needs state of its own, which is charged
+        // against an assumed budget.
+        None if blocks >= 65_536 => return 1,
+        None if state == 0 => return maximum,
+        None => ASSUMED_BUDGET,
+    };
     (budget / per_function).min(maximum as u64).max(1) as usize
 }
 
@@ -254,6 +361,74 @@ mod tests {
     const GIB: u64 = 1024 * 1024 * 1024;
 
     #[test]
+    fn per_worker_state_counts_against_the_memory_budget() {
+        let small = (100, 1_000);
+        // Small units alone take every CPU the tasks can use.
+        assert_eq!(
+            choose_workers_with_state(small.0, small.1, 100, 16, Some(8 * GIB), 0),
+            4
+        );
+        // A large copy for each worker leaves room for two workers only.
+        assert_eq!(
+            choose_workers_with_state(small.0, small.1, 100, 16, Some(8 * GIB), 3 * GIB),
+            2
+        );
+        // A copy that does not fit twice leaves one worker, which reuses one.
+        assert_eq!(
+            choose_workers_with_state(small.0, small.1, 100, 16, Some(8 * GIB), 6 * GIB),
+            1
+        );
+        assert_eq!(
+            choose_workers_with_state(small.0, small.1, 100, 16, Some(8 * GIB), 64 * GIB),
+            1
+        );
+    }
+
+    #[test]
+    fn a_table_copy_is_estimated_from_its_capacity() {
+        let mut table = fxhash::FxHashMap::<u64, usize>::default();
+        assert_eq!(table_bytes(&table), 0);
+        table.extend((0..100_000).map(|object| (object, 0)));
+        assert!(table_bytes(&table) >= 100_000 * 17);
+    }
+
+    #[test]
+    fn worker_state_is_made_once_per_worker_and_results_keep_task_order() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let order = [3, 0, 2, 1, 4];
+        for workers in [1, 3] {
+            let made = AtomicUsize::new(0);
+            let results = compile_tasks_with(
+                &order,
+                workers,
+                || {
+                    made.fetch_add(1, Ordering::Relaxed);
+                    Vec::new()
+                },
+                |seen: &mut Vec<usize>, index| {
+                    seen.push(index);
+                    Ok::<_, ()>((index, seen.len()))
+                },
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                results.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+                [0, 1, 2, 3, 4]
+            );
+            let made = made.load(Ordering::Relaxed);
+            assert!((1..=workers).contains(&made));
+            if workers == 1 {
+                // One state takes the tasks in priority order.
+                assert_eq!(
+                    results.iter().map(|(_, seen)| *seen).collect::<Vec<_>>(),
+                    [2, 4, 3, 1, 5]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn primary_worker_budget_keeps_capacity_for_smaller_functions() {
         let primary = (65_536, 1_000_000);
         let small = (100, 1_000);
@@ -310,8 +485,9 @@ mod tests {
                 seen.fetch_or(1 << index, Ordering::SeqCst);
                 std::thread::yield_now();
                 active.fetch_sub(1, Ordering::SeqCst);
-                index * 3
+                Ok::<_, ()>(index * 3)
             })
+            .unwrap()
             .unwrap();
             assert_eq!(results, (0..16).map(|index| index * 3).collect::<Vec<_>>());
             assert_eq!(seen.load(Ordering::SeqCst), (1 << 16) - 1);
@@ -322,22 +498,78 @@ mod tests {
 
     #[test]
     fn indexed_tasks_preserve_errors_and_return_worker_panics() {
-        let results = compile_tasks(&[3, 2, 1, 0], 2, |index| {
+        // One worker stops at the first task, in priority order, that fails.
+        let failing = |index| {
             if index == 1 || index == 3 {
                 Err(index)
             } else {
                 Ok(index)
             }
-        })
-        .unwrap();
-        assert_eq!(results.into_iter().collect::<Result<Vec<_>, _>>(), Err(1));
+        };
+        assert_eq!(compile_tasks(&[3, 2, 1, 0], 1, failing).unwrap(), Err(3));
+        // Several workers stop taking tasks once one fails, and return the
+        // error of a task that failed.
+        let error = compile_tasks(&[3, 2, 1, 0], 2, failing)
+            .unwrap()
+            .unwrap_err();
+        assert!(error == 1 || error == 3, "{error}");
         assert!(
             compile_tasks(&[0, 1, 2], 2, |index| {
                 assert_ne!(index, 1, "worker panic probe");
-                index
+                Ok::<_, ()>(index)
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_failed_task_stops_the_workers_from_taking_more() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for workers in [1, 2, 4] {
+            let taken = AtomicUsize::new(0);
+            let order = (0..1000).collect::<Vec<_>>();
+            let result = compile_tasks(&order, workers, |index| {
+                taken.fetch_add(1, Ordering::SeqCst);
+                if index == 0 { Err("first") } else { Ok(index) }
+            })
+            .unwrap();
+            assert_eq!(result, Err("first"));
+            // One worker takes no task after the one that failed; several
+            // stop well before they have taken every task.
+            let taken = taken.load(Ordering::SeqCst);
+            if workers == 1 {
+                assert_eq!(taken, 1);
+            }
+            assert!(taken < 1000, "{workers} workers took every task");
+        }
+    }
+
+    #[test]
+    fn per_worker_state_is_charged_without_memory_information() {
+        let small = (100, 1_000);
+        // Without state, small units keep every CPU the tasks can use.
+        assert_eq!(
+            choose_workers_with_state(small.0, small.1, 100, 16, None, 0),
+            4
+        );
+        // A small copy fits the assumed budget several times.
+        assert_eq!(
+            choose_workers_with_state(small.0, small.1, 100, 16, None, 64 * 1024 * 1024),
+            4
+        );
+        // A copy that alone is large leaves one worker.
+        assert_eq!(
+            choose_workers_with_state(small.0, small.1, 100, 16, None, GIB),
+            1
+        );
+    }
+
+    #[test]
+    fn dispatch_cost_counts_blocks_as_well_as_instructions() {
+        // A unit of many small blocks costs more than one of more
+        // instructions in few blocks.
+        assert!(compile_cost(10_000, 20_000) > compile_cost(10, 50_000));
+        assert!(compile_cost(10, 50_000) > compile_cost(10, 40_000));
     }
 
     #[cfg(target_os = "linux")]
