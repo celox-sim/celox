@@ -8232,12 +8232,119 @@ fn out_of_range_bits_of_a_two_state_packed_select_read_zero() {
     );
 }
 
+// A continuous assignment is evaluated again when its own target changes
+// (IEEE 1800-2023 10.3.2). One that reads its target through a loop whose
+// condition depends on values is refused, as the symbolic form refuses
+// one without such a loop, rather than run once per change of its other
+// operands.
 #[test]
-fn run_time_bound_loop_return_reports_unsupported_on_a_small_stack() {
+fn self_dependent_assignments_with_value_dependent_loops_are_refused() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input bit [7:0] a, output bit [7:0] y);
+          function automatic bit [7:0] step(input bit [7:0] v, input bit [7:0] limit);
+            bit [7:0] r;
+            r = v;
+            if (r < limit) r = r + 1;
+            while (r < limit && r[1:0] != 0) r = r + 1;
+            return r;
+          endfunction
+          bit [7:0] state;
+          assign state = step(state, a);
+          assign y = state;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("continuous assignment that reads its own target through a loop"),
+        "{error}"
+    );
+}
+
+// A continuous assignment that reads other bits of its target variable
+// than it writes, through a loop whose condition depends on values, runs
+// like one that reads another variable: `y[3:0]` follows `y[7:4]`, also
+// through a concatenated target.
+#[test]
+fn assignments_with_value_dependent_loops_read_disjoint_bits_of_their_target() {
+    let source = r#"
+        module Top(input bit [3:0] a, output bit [7:0] y, output bit [7:0] w,
+                   output bit [3:0] v, output bit [3:0] u);
+          function automatic bit [3:0] step(input bit [3:0] v);
+            bit [3:0] r;
+            r = v;
+            while (r != 0 && r[0] == 0) r = r >> 1;
+            return r;
+          endfunction
+          bit [3:0] z;
+          assign y[7:4] = a;
+          assign y[3:0] = step(y[7:4]);
+          assign w[7:4] = a;
+          assign {w[3:0], z[a[1:0]]} = {step(w[7:4]), 1'b0};
+          // A loop the values bound after loops that spend most of the
+          // process's unroll budget.
+          always_comb begin
+            int n;
+            n = 0;
+            for (int i = 0; i < 9600; i++) n = n + 1;
+            v = step(a);
+            while (v != 0 && v[0] == 0 && n > 0) v = v >> 1;
+          end
+          // A loop whose first condition folds, after a loop that spends
+          // the whole budget: its later iterations depend on `a`.
+          always_comb begin
+            int n;
+            bit [1:0] x;
+            n = 0;
+            for (int i = 0; i < 10000; i++) n = n + 1;
+            x = 1;
+            u = 0;
+            while (x != 0) begin
+              u = u + 1;
+              if (a[0] && x == 1) x = 2;
+              else x = 0;
+            end
+          end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("disjoint.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let a = sim.signal("a");
+    for (value, expected) in [(0b1000u8, 0x81u8), (0b0110, 0x63), (0, 0), (0b0101, 0x55)] {
+        sim.modify(|io| io.set(a, value)).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("y")),
+            BigUint::from(expected),
+            "{value:#b}"
+        );
+        // Also through a concatenated target with a part at a run-time
+        // position.
+        assert_eq!(
+            sim.get(sim.signal("w")),
+            BigUint::from(expected),
+            "{value:#b}"
+        );
+        assert_eq!(
+            sim.get(sim.signal("v")),
+            BigUint::from(expected & 0xf),
+            "{value:#b}"
+        );
+        assert_eq!(
+            sim.get(sim.signal("u")),
+            BigUint::from(1 + (value & 1)),
+            "{value:#b}"
+        );
+    }
+}
+
+#[test]
+fn run_time_bound_loop_return_runs_on_a_small_stack() {
     // Each symbolically unrolled iteration deepens the loop's `break` and
     // `return` conditions. Constant evaluation of those conditions must not
-    // recurse once per level: the diagnostic is reported on a 2 MiB thread,
-    // libtest's default, in a debug build.
+    // recurse once per level: the symbolic form gives the loop up, and the
+    // process runs as a guarded unit, on a 2 MiB thread, libtest's
+    // default, in a debug build.
     let source = r#"
         module Top (
             input  logic [7:0] a,
@@ -8269,16 +8376,27 @@ fn run_time_bound_loop_return_reports_unsupported_on_a_small_stack() {
             end
         endmodule
     "#;
-    let error = std::thread::Builder::new()
+    let outs = std::thread::Builder::new()
         .stack_size(2 * 1024 * 1024)
-        .spawn(move || cranelift_build_error(source))
+        .spawn(move || {
+            let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("review.sv"))], "Top")
+                .build_cranelift()
+                .unwrap();
+            let (a, stop, count) = (sim.signal("a"), sim.signal("stop"), sim.signal("count"));
+            [(1u8, 3u8), (0, 3), (0, 0)].map(|(early, iterations)| {
+                sim.modify(|io| {
+                    io.set(a, 5u8);
+                    io.set(stop, early);
+                    io.set(count, iterations);
+                })
+                .unwrap();
+                u8::try_from(sim.get(sim.signal("out"))).unwrap()
+            })
+        })
         .unwrap()
         .join()
         .unwrap();
-    assert!(
-        error.contains("loop condition that depends on run-time values"),
-        "{error}"
-    );
+    assert_eq!(outs, [6, 5, 5]);
 }
 
 #[test]

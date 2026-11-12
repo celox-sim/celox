@@ -55,8 +55,9 @@ constructs without a dedicated issue point to the frontend roadmap,
   module to a `wire`, `tri`, `wand`, `triand`, `wor` or `trior` net, which
   are resolved (6.6.1 to 6.6.3). Still rejected are drivers below an
   instance (so a tri-state bus across modules), assignments with a drive
-  strength, `tri0`, `tri1` and supply nets with several drivers, and, in
-  two-state simulation, drivers with an X or Z literal, whose high
+  strength, `tri0`, `tri1` and supply nets with several drivers, drivers
+  that call a function with a loop whose condition depends on values, and,
+  in two-state simulation, drivers with an X or Z literal, whose high
   impedance a two-state value cannot hold. `inout` ports of the top module
   are rejected. An `inout` below the top is supported only with one
   continuous driver on either side, such as `assign io = oe ? d : 'z;`.
