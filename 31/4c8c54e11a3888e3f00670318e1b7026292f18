@@ -1,0 +1,1 @@
+Keep the format of %t in the design's state (a shared $timeformat variable that each %t site captures), one %t formatter with half-away rounding, zero padding and decoded suffixes; no host-side copies
