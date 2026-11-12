@@ -1314,7 +1314,7 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
             let lsb = integral_literal_as_i128(&lsb, lsb.signed)?;
             let low = msb.min(lsb);
             let width = usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)?;
-            if width > 65_536 {
+            if width > crate::ast::MAX_CONSTANT_VALUE_BITS {
                 return None;
             }
             let mut value = BigUint::default();

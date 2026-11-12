@@ -256,7 +256,7 @@
 (case constant_parameter_initializers_short_circuit_four_state_bindings
   ; IEEE 1800-2023 11.3.5: X/Z combined with a deciding logical
   ; operand produces a known truth value before the wide operand.
-  ; Cross Celox's 65536-bit materialization guard without evaluating it.
+  ; Cross Celox's 1048576-bit constant value guard without evaluating it.
   (four_state)
   (source "short_circuit_four_state_bindings.sv" #"
     package flags;
@@ -267,12 +267,12 @@
       import flags::*;
       localparam FLAG = 1'bx;
       localparam ZFLAG = 1'bz;
-      localparam A = FLAG && 0 && 65537'd0;
-      localparam B = FLAG || 1 || 65537'd0;
-      localparam C = ZFLAG && 0 && 65537'd0;
-      localparam D = ZFLAG || 1 || 65537'd0;
-      localparam E = IMPORTED_X && 0 && 65537'd0;
-      localparam F = IMPORTED_Z || 1 || 65537'd0;
+      localparam A = FLAG && 0 && 1048577'd0;
+      localparam B = FLAG || 1 || 1048577'd0;
+      localparam C = ZFLAG && 0 && 1048577'd0;
+      localparam D = ZFLAG || 1 || 1048577'd0;
+      localparam E = IMPORTED_X && 0 && 1048577'd0;
+      localparam F = IMPORTED_Z || 1 || 1048577'd0;
       assign checks = {A === 1'b0, B === 1'b1, C === 1'b0,
                        D === 1'b1, E === 1'b0, F === 1'b1};
       assign width = $bits(A) + $bits(B) + $bits(C) + $bits(D) + $bits(E) + $bits(F);
