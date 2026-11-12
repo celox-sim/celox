@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! The event control of an `always_ff` need not name an edge (IEEE
 //! 1800-2023 9.2.2.4): `always_ff @(clk)` runs at each change of `clk`, as
 //! the same `always` does.
