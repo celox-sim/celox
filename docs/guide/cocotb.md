@@ -70,6 +70,21 @@ For a SystemVerilog testbench, a positional argument starting with `+` (or
 celox run tb.v --top tb +iterations=9 --plusarg +trace
 ```
 
+A SystemVerilog design that imports C functions through DPI-C names the
+shared libraries that provide them with `--dpi-lib PATH` (repeatable), or
+with `dpi_libs = ["lib/model.so"]` at the root or in a target of
+`celox.toml`. An import is linked to the first library that defines its C
+name: the root's libraries, then the target's, then those of the command
+line. Building the library from C sources is left to the project's build;
+`svdpi.h` is not shipped with Celox. See
+[DPI-C imports](./systemverilog-reference#dpi-c-imports) for the supported
+argument types.
+
+```sh
+cc -shared -fPIC -o model.so model.c
+celox run tb.sv --top tb --dpi-lib model.so
+```
+
 ## Select execution and collect measurements
 
 `celox run` accepts `--threads N` (1–64, default 1) and `--four-state` for both

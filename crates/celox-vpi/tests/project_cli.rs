@@ -1093,3 +1093,115 @@ fn line_comments_at_included_file_eof_do_not_swallow_the_caller() {
         assert_eq!(output.stdout, b"alive\n");
     }
 }
+
+/// Build `source` into the shared library `name` under `root` with the
+/// host's C compiler.
+#[cfg(all(feature = "systemverilog", target_os = "linux"))]
+fn c_library(root: &Path, name: &str, source: &str) {
+    let path = root.join(name);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let c_source = path.with_extension("c");
+    fs::write(&c_source, source).unwrap();
+    let compiled = std::process::Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&path)
+        .arg(&c_source)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+}
+
+#[cfg(all(feature = "systemverilog", target_os = "linux"))]
+#[test]
+fn dpi_libraries_link_from_the_project_the_target_and_the_command_line() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    fs::write(
+        root.join("top.sv"),
+        r#"import "DPI-C" function int scale(input int value);
+        import "DPI-C" function string greeting(input string name);
+        module Top;
+            import "DPI-C" function void fill(output longint data);
+            longint data;
+            initial begin
+                fill(data);
+                $display("%0d %s %h", scale(4), greeting("celox"), data);
+                $finish;
+            end
+        endmodule"#,
+    )
+    .unwrap();
+    c_library(
+        root,
+        "lib/base.so",
+        r#"#include <stdio.h>
+        int scale(int value) { return value * 10; }
+        const char *greeting(const char *name) {
+            static char buffer[64];
+            snprintf(buffer, sizeof buffer, "hello %s", name);
+            return buffer;
+        }
+        void fill(long long *data) { *data = 0x1122334455667788LL; }"#,
+    );
+    // An earlier library provides a function first.
+    c_library(
+        root,
+        "lib/scale.so",
+        "int scale(int value) { return value * 2; }",
+    );
+    fs::write(
+        root.join("celox.toml"),
+        r#"
+        sources = ["top.sv"]
+        top = "Top"
+        default_target = "base"
+        [targets.base]
+        dpi_libs = ["lib/base.so"]
+        [targets.scaled]
+        dpi_libs = ["lib/scale.so", "lib/base.so"]
+        [targets.unlinked]
+    "#,
+    )
+    .unwrap();
+    let nested = root.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    for state in ["--two-state", "--four-state"] {
+        let output = invoke(&nested, &["run", state]);
+        success(&output);
+        assert_eq!(output.stdout, b"40 hello celox 1122334455667788\n");
+    }
+    let output = invoke(root, &["run", "--target", "scaled"]);
+    success(&output);
+    assert_eq!(output.stdout, b"8 hello celox 1122334455667788\n");
+    // Command-line libraries resolve from the working directory and follow
+    // those of the project.
+    let output = invoke(
+        &nested,
+        &["run", "--target", "unlinked", "--dpi-lib", "../lib/base.so"],
+    );
+    success(&output);
+    assert_eq!(output.stdout, b"40 hello celox 1122334455667788\n");
+    let output = invoke(
+        root,
+        &["run", "top.sv", "--top", "Top", "--dpi-lib", "lib/scale.so"],
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("is not provided by any registered function or library"),
+        "{stderr}"
+    );
+    let output = invoke(
+        root,
+        &["run", "--target", "unlinked", "--dpi-lib", "missing.so"],
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot load DPI-C library"), "{stderr}");
+    let output = invoke(root, &["vpi", "build", "-o", "sim"]);
+    rejected(&output, "DPI-C libraries are linked by `celox run` only");
+}

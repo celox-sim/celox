@@ -484,9 +484,11 @@ interface と `input` / `output` modport は双方向に境界を跨げます。
 
 ## DPI-C imports {#dpi-c-imports}
 
-DPI-C 登録は Celox のホスト API です。`sv-dpi` Cargo feature
-（`systemverilog` を含む）で、`import "DPI-C"` で宣言した C 関数を呼べます。
-無効な場合、Celox は全ての DPI-C import を拒否します。
+`sv-dpi` Cargo feature（`systemverilog` を含む）で、`import "DPI-C"` で宣言した
+C 関数を呼べます。無効な場合、Celox は全ての DPI-C import を拒否します。
+`celox` コマンドはこの feature 付きでビルドされ、`celox run` は
+`--dpi-lib PATH`（繰り返し可）と `celox.toml` の `dpi_libs` で指定した
+共有ライブラリをリンクします。Rust API では、DPI-C 登録はビルダーのホスト API です。
 
 ```rust
 extern "C" fn c_add(x: i32, y: i32) -> i32 { x.wrapping_add(y) }
