@@ -1,0 +1,1 @@
+Rebase onto master: keep master's class constant types when binding class typedefs with the declaration record
