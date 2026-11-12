@@ -50,11 +50,15 @@ impl ScopeElaboration<'_> {
             apply_parameter_overrides(&mut self.parameters, self.parameter_overrides)?;
         }
         self.const_env = self.imported.const_env.clone().into();
-        self.const_env.extend(const_env_from_parameters(
+        let mut own = ConstEnv::default();
+        parameters::extend_const_env_with_imported_parameters(
             syntax_tree,
             session,
+            &mut own,
             &self.parameters,
-        ));
+            &self.imported.parameter_values,
+        );
+        self.const_env.extend(own);
         self.type_aliases =
             type_aliases_from_scope_with_env(syntax_tree, session, &self.const_env)?.into();
         self.enum_constants = enum_member_constants_from_scope(
@@ -102,11 +106,12 @@ impl ScopeElaboration<'_> {
         if self.name == self.override_module_name {
             apply_parameter_overrides(&mut self.parameters, self.parameter_overrides)?;
         }
-        extend_const_env_with_parameters(
+        parameters::extend_const_env_with_imported_parameters(
             syntax_tree,
             session,
             &mut self.const_env,
             &self.parameters,
+            &self.imported.parameter_values,
         );
         self.type_aliases =
             type_aliases_from_scope_with_env(syntax_tree, session, &self.const_env)?.into();
@@ -158,11 +163,12 @@ impl ScopeElaboration<'_> {
                 &parameter_values,
             )));
         let syntax_tree = &parameterized;
-        extend_const_env_with_parameters(
+        parameters::extend_const_env_with_imported_parameters(
             syntax_tree,
             session,
             &mut self.const_env,
             &self.parameters,
+            &self.imported.parameter_values,
         );
 
         self.array_parameters = array_parameters::array_parameters_from_scope(

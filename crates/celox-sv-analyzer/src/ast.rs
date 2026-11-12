@@ -141,13 +141,13 @@ use dimensions::{
     enum_marker, extend_const_env_with_variable_types, function_packed_dimension_widths,
     insert_parameter_type_markers, local_parameter_marker,
     packed_dimensions_from_ports_and_signals, parameter_dimension_marker,
-    parameter_dimensions_marker, parameter_marker, parameter_member_type_marker,
-    parameter_member_value_marker, parameter_members_marker, parameter_packed_dimensions,
-    parameter_rank_marker, parameter_signed_element_marker, parameter_signed_marker,
-    parameter_type_from_const_env, parameter_types_from_const_env, parameter_width_marker,
-    unpacked_dimension_widths, variable_bits_marker, variable_dimensions_marker,
-    variable_signed_marker, variable_size_function_width, variable_size_marker,
-    variable_unpacked_dimensions_marker,
+    parameter_dimensions_marker, parameter_marker, parameter_member_chunk_marker,
+    parameter_member_type_marker, parameter_member_value_marker, parameter_members_marker,
+    parameter_packed_dimensions, parameter_rank_marker, parameter_signed_element_marker,
+    parameter_signed_marker, parameter_type_from_const_env, parameter_types_from_const_env,
+    parameter_width_marker, unpacked_dimension_widths, variable_bits_marker,
+    variable_dimensions_marker, variable_signed_marker, variable_size_function_width,
+    variable_size_marker, variable_unpacked_dimensions_marker,
 };
 use expressions::guard_zero_divisions;
 use ff_process::ff_processes_from_scope;
@@ -155,12 +155,13 @@ use functions::{functions_from_scope, procedural_truth_condition};
 use inlining::{expand_expr_calls, expr_signedness_with_return_types, substitute_expr_idents};
 pub(crate) use instances::normalize_identifier;
 use instances::{expr_ident_name, instances_from_scope};
+#[cfg(test)]
+use parameters::const_env_from_parameters;
 use parameters::{
-    apply_parameter_overrides, coerce_const_parameter_value, const_env_from_parameters,
-    const_expr_from_i128, const_expr_to_expr, enum_member_constants_from_scope,
-    extend_const_env_with_parameters, format_typed_parameter_literal, infer_const_expr_type,
-    infer_parameter_value_type, parameter_element_literal, parameter_value_env,
-    substitute_typed_parameter_literals,
+    apply_parameter_overrides, coerce_const_parameter_value, const_expr_from_i128,
+    const_expr_to_expr, enum_member_constants_from_scope, extend_const_env_with_parameters,
+    format_typed_parameter_literal, infer_const_expr_type, infer_parameter_value_type,
+    parameter_element_literal, parameter_value_env, substitute_typed_parameter_literals,
 };
 use scoped_map::{ScopedMap, Signedness};
 use selects::{add_expr, product_expr};

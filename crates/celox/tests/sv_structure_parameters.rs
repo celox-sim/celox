@@ -316,3 +316,53 @@ fn rejects_members_that_are_no_constants() {
     );
     assert!(unknown.contains("nothing.n"), "{unknown}");
 }
+
+/// A member of a parameter wider than 128 bits is a constant as well, of
+/// 128 bits or more itself: it initializes a parameter and overrides one of
+/// an instance, from the default value of the parameter, which names a
+/// package's constant, and from an override.
+#[test]
+fn members_of_parameters_wider_than_128_bits() {
+    let source = r#"
+    `timescale 1ns/1ns
+    package Keys;
+      typedef logic [127:0] key_t;
+      typedef struct packed { key_t key; key_t nonce; logic [7:0] tag; } init_t;
+      localparam init_t Default =
+          264'hcebeb96ffe0eced795f8b2cfe23c1e519e4fa08047a6bcfb811b04f0a479006e_5a;
+    endpackage
+    module Flop #(parameter int Width = 8, parameter logic [Width-1:0] ResetValue = 0) ();
+      initial #1 $display("%m %h", ResetValue);
+    endmodule
+    module Child import Keys::*; #(parameter init_t Init = Default) ();
+      localparam key_t Key = Init.key;
+      Flop #(.Width(128), .ResetValue(Init.key)) u_key();
+      Flop #(.Width(128), .ResetValue(Init.nonce)) u_nonce();
+      Flop #(.Width(8), .ResetValue(Init.tag)) u_tag();
+      initial #2 $display("%m key=%h", Key);
+    endmodule
+    module Top import Keys::*; ;
+      Child u_default();
+      Child #(.Init({128'h1111_2222_3333_4444_5555_6666_7777_8888,
+                     128'h9999_aaaa_bbbb_cccc_dddd_eeee_ffff_0000, 8'h3c})) u_over();
+    endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut lines = display(source, four_state);
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                "Top.u_default key=cebeb96ffe0eced795f8b2cfe23c1e51",
+                "Top.u_default.u_key cebeb96ffe0eced795f8b2cfe23c1e51",
+                "Top.u_default.u_nonce 9e4fa08047a6bcfb811b04f0a479006e",
+                "Top.u_default.u_tag 5a",
+                "Top.u_over key=11112222333344445555666677778888",
+                "Top.u_over.u_key 11112222333344445555666677778888",
+                "Top.u_over.u_nonce 9999aaaabbbbccccddddeeeeffff0000",
+                "Top.u_over.u_tag 3c",
+            ],
+            "four-state {four_state}"
+        );
+    }
+}
