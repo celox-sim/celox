@@ -560,6 +560,16 @@ pub(super) fn declared_name(
     }
 }
 
+/// The identifier that names class `name` of the compilation unit, which
+/// [`declared_name`] made: `C` of `$unit::C@<hash>`.
+pub(super) fn unit_class_identifier(name: &str) -> Option<&str> {
+    let (identifier, hash) = name
+        .strip_prefix(packages::UNIT)?
+        .strip_prefix("::")?
+        .rsplit_once('@')?;
+    (hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(identifier)
+}
+
 /// The class declarations of the current scope, not those of the scopes
 /// nested in it.
 pub(super) fn scope_declarations<'a>(

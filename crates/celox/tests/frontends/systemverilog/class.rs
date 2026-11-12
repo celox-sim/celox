@@ -2250,6 +2250,30 @@ fn a_package_specialization_runs_methods_of_the_classes_it_takes() {
 }
 
 #[test]
+fn package_classes_name_the_compilation_unit_classes_of_other_files() {
+    // `$typename` of a type parameter of a package class, specialized with
+    // a class of the compilation unit of another file, as
+    // `uvm_resource_db#(C)` is (IEEE 1800-2023 20.6.1, 3.12.1).
+    let package = "package p;
+        class R #(type T = int);
+            static function string name(); return $typename(T); endfunction
+        endclass
+    endpackage";
+    let top = "class C; endclass
+    module Top(output bit named);
+        initial named = p::R#(C)::name() == \"$unit::C\";
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(package, Path::new("p.sv")), (top, Path::new("top.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("named")), 1u32.into());
+}
+
+#[test]
 fn a_class_of_another_module_does_not_hide_a_package() {
     let source = "package P; typedef bit [2:0] T; endpackage
         module Other; class P; typedef int T; endclass endmodule

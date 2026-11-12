@@ -682,8 +682,12 @@ fn declared_class_name(
             &instances::normalize_identifier(&declaration.name.spelling),
         )),
         // A class of a package that another scope declares is named by
-        // its package already.
+        // its package already; one of a compilation unit of another file,
+        // by the identifier it declares.
         None if generic.contains("::") && !generic.starts_with(packages::UNIT) => Ok(generic),
+        None if let Some(identifier) = classes::unit_class_identifier(&generic) => {
+            Ok(scoped_name(None, identifier))
+        }
         None => Err(unsupported_operand(format!("class `{class}`"))),
     }
 }
