@@ -407,7 +407,7 @@ fn rejects_overlapping_always_ff_variable_drivers() {
 #[test]
 fn rejects_loop_indices_shared_with_always_ff() {
     // Only plain always processes may share a variable (IEEE 1800-2023
-    // 9.2.2.4); nonblocking writes from several processes stay rejected.
+    // 9.2.2.4): one written by an `always_ff` stays rejected.
     for (first, second) in [
         ("always_ff", "always_ff"),
         ("always_ff", "always"),
@@ -430,20 +430,6 @@ fn rejects_loop_indices_shared_with_always_ff() {
             "{first}/{second}: unexpected error: {error}"
         );
     }
-    let error = cranelift_build_error(
-        r#"
-        module Top(input logic clk, a, b, output wire y);
-            logic q;
-            always @(posedge clk) q <= a;
-            always @(posedge clk) q = b;
-            assign y = q;
-        endmodule
-        "#,
-    );
-    assert!(
-        error.contains("multiple variable drivers for `q`"),
-        "unexpected error: {error}"
-    );
 }
 
 #[test]
