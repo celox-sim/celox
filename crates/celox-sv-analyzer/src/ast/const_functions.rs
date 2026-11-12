@@ -10,7 +10,7 @@
 mod value;
 use value::Value;
 mod runtime;
-pub use runtime::RuntimeConstantFunctions;
+pub use runtime::{RuntimeConstantFunctions, RuntimeConstantTable};
 
 use num_bigint::BigUint;
 
