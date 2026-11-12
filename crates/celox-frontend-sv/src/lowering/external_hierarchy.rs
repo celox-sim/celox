@@ -337,6 +337,8 @@ fn prepare_external_hierarchy_collecting(
     // module or package, whose stores every module counts (see
     // `ff::property_changes`), collected while discovering the hierarchy.
     let mut properties = BTreeSet::new();
+    // Every module shares the format of `%t` if any calls `$timeformat`.
+    let mut time_format = false;
     let mut index = 0;
     while index < queue.len() {
         let key = queue[index].clone();
@@ -421,6 +423,7 @@ fn prepare_external_hierarchy_collecting(
             None,
         )?;
         ff::watched_properties(&lowered.source, &mut properties);
+        time_format |= ff::calls_time_format(&lowered.source);
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name)
@@ -439,6 +442,7 @@ fn prepare_external_hierarchy_collecting(
 
     if let Some(module) = analyzed.values().next() {
         package_watched_properties(&module.packages, &design, &mut properties);
+        time_format |= packages_call_time_format(&module.packages, &design);
     }
     let mut lowered_modules = module_ids
         .iter()
@@ -464,6 +468,7 @@ fn prepare_external_hierarchy_collecting(
                     LevelLists::Processes,
                     HierarchicalNames {
                         properties: &properties,
+                        time_format,
                         ..HierarchicalNames::default()
                     },
                     None,
@@ -540,6 +545,7 @@ fn prepare_external_hierarchy_collecting(
         four_state,
         false,
         &properties,
+        time_format,
         warnings,
         force_out_of_line,
         None,

@@ -166,10 +166,14 @@ impl Ff<'_, '_> {
                 } => {
                     writes.extend(parts.iter().map(|part| (part.clone(), !nonblocking)));
                 }
-                // `$readmemh` writes its destination immediately.
+                // `$readmemh` writes its destination immediately, and
+                // `$timeformat` the design's format of `%t`.
                 sv::ir::Stmt::SystemTask { task, args, .. } => {
                     if let Some(destination) = readmem_destination(*task, args) {
                         writes.push((sv::ir::LValue::Ident(destination.to_string()), true));
+                    }
+                    if *task == sv::ir::SystemTask::Timeformat {
+                        writes.push((sv::ir::LValue::Ident(TIME_FORMAT.to_string()), true));
                     }
                 }
                 _ => {}

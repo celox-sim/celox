@@ -570,6 +570,8 @@ sv_backends! {
     fn character_formats_preserve_non_utf8_bytes(sim) { @case "system_functions::character_formats_preserve_non_utf8_bytes"; }
     fn time_format_consumes_its_expression_argument(sim) { @case "system_functions::time_format_consumes_its_expression_argument"; }
     fn time_format_defaults_to_the_smallest_precision(sim) { @case "system_functions::time_format_defaults_to_the_smallest_precision"; }
+    fn time_format_sets_the_format_of_later_conversions(sim) { @case "system_functions::time_format_sets_the_format_of_later_conversions"; }
+    fn time_format_in_an_always_ff_procedure(sim) { @case "system_functions::time_format_in_an_always_ff_procedure"; }
     fn time_format_scales_each_scope_to_the_smallest_precision(sim) { @case "system_functions::time_format_scales_each_scope_to_the_smallest_precision"; }
     fn time_format_scales_string_literals(sim) { @case "system_functions::time_format_scales_string_literals"; }
     fn time_format_values_are_self_determined(sim) { @case "system_functions::time_format_values_are_self_determined"; }
@@ -2317,6 +2319,143 @@ fn finish_in_an_initial_block_ends_the_simulation() {
             message: b"before".to_vec(),
         }],
     );
+}
+
+/// A units number of `$timeformat` computed outside 2 to -15, or a negative
+/// precision or field width, ends the simulation with an error, as a
+/// constant one fails the analysis, before the format changes (IEEE
+/// 1800-2023 20.4.3); so does a precision or field width above the most
+/// Celox prints, which it does not bound silently.
+#[test]
+fn time_format_arguments_computed_out_of_range_fail_the_simulation() {
+    const UNITS: &str = "units number is outside -15..2";
+    const PRECISION: &str = "precision number is outside 0..";
+    const WIDTH: &str = "minimum field width is outside 0..";
+    const MOST_PRECISION: &str = "precision number above 4096 is not supported";
+    const MOST_WIDTH: &str = "minimum field width above 4096 is not supported";
+    let units = "n, 0, \"\", 0";
+    let precision = "-9, n, \"\", 0";
+    let width = "-9, 0, \"\", n";
+    for (args, n, error) in [
+        (units, -15, None),
+        (units, 2, None),
+        (units, -16, Some(UNITS)),
+        (units, 3, Some(UNITS)),
+        (units, 1_000_000, Some(UNITS)),
+        (precision, 0, None),
+        (precision, 4096, None),
+        (precision, -1, Some(PRECISION)),
+        (precision, 4097, Some(MOST_PRECISION)),
+        (precision, i32::MAX, Some(MOST_PRECISION)),
+        (width, 0, None),
+        (width, 4096, None),
+        (width, -1, Some(WIDTH)),
+        (width, 4097, Some(MOST_WIDTH)),
+        (width, i32::MAX, Some(MOST_WIDTH)),
+    ] {
+        let source = format!(
+            r#"
+            module Top(output logic y);
+                int n = {n};
+                initial begin
+                    $timeformat(-9, 0, " ns", 0);
+                    $timeformat({args});
+                    $write("%t", 32'd7);
+                end
+                assign y = 1'b0;
+            endmodule
+            "#
+        );
+        let mut sim = initial_simulation(&source);
+        let result = sim.step();
+        let events = bare(sim.drain_runtime_events());
+        match error {
+            Some(error) => {
+                let message = result.unwrap_err().to_string();
+                assert!(message.contains(error), "{source}: {message}");
+                assert_eq!(events, Vec::new(), "{source}");
+            }
+            None => {
+                result.unwrap();
+                assert_eq!(events.len(), 1, "{source}");
+            }
+        }
+    }
+}
+
+/// The suffix of `$timeformat` keeps every byte it is written with, NUL
+/// bytes too: IEEE 1800-2023 20.4.3 does not make it a `string`, whose
+/// assignment would drop them (6.16).
+#[test]
+fn time_format_suffix_keeps_its_nul_bytes() {
+    let source = r#"
+        module Top(output logic y);
+            initial begin
+                $timeformat(-9, 0, "ns\000x", 0);
+                $write("%t|", 32'd7);
+                $timeformat(-9, 0, "\0ns", 0);
+                $write("%t|", 32'd7);
+                $timeformat(-9, 0, "", 0);
+                $write("%t|", 32'd7);
+            end
+            assign y = 1'b0;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.step().unwrap();
+    let written: Vec<u8> = bare(sim.drain_runtime_events())
+        .into_iter()
+        .flat_map(|event| match event {
+            celox::RuntimeEvent::Write { message } => message,
+            event => panic!("{event:?}"),
+        })
+        .collect();
+    assert_eq!(written, b"7ns\x00x|7\x00ns|7|".to_vec());
+}
+
+/// The escape sequences of a string literal (IEEE 1800-2023 5.9.1) are
+/// decoded in the format and the string arguments of a display, in a file
+/// output and in a `$timeformat` suffix, also those writing a byte that is
+/// not UTF-8 text.
+#[test]
+fn string_literal_escapes_decode_in_system_tasks() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("escapes.txt");
+    let source = format!(
+        r#"
+        module Top(output logic y);
+            int fd;
+            initial begin
+                $write("<\101\x42\v\f\a\\\">");
+                $write("%0d\377%0d|", 1, 2);
+                $write("%s", "\x43\104\n");
+                $timeformat(-9, 0, "ns\123", 0);
+                $write("%t\n", 32'd7);
+                fd = $fopen("{}", "w");
+                $fwrite(fd, "\x41\377%0d\102", 3);
+                $fclose(fd);
+            end
+            assign y = 1'b0;
+        endmodule
+        "#,
+        path.display()
+    );
+    let mut sim = initial_simulation(&source);
+    sim.step().unwrap();
+    let written: Vec<u8> = bare(sim.drain_runtime_events())
+        .into_iter()
+        .flat_map(|event| match event {
+            celox::RuntimeEvent::Write { message } => message,
+            event => panic!("{event:?}"),
+        })
+        .collect();
+    assert_eq!(
+        written,
+        b"<AB\x0b\x0c\x07\\\">1\xff2|CD\n7nsS\n".to_vec(),
+        "{}",
+        String::from_utf8_lossy(&written)
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"A\xff3B".to_vec());
 }
 
 #[test]

@@ -2,6 +2,7 @@
 //! the observers of displays, messages and `$finish`.
 
 use super::*;
+use crate::lowering::ff::{converts_time, time_format_operand};
 
 /// Combinational runtime events, their sites, and the inputs their
 /// operands read.
@@ -97,7 +98,7 @@ impl Comb<'_, '_> {
         } else {
             None
         };
-        let (template, mut values) = system_task_template(self.m, &kind, args);
+        let (template, mut values) = system_task_template(self.m, &kind, args)?;
         prepare_time_operands(self.m, template.as_deref(), &mut values)?;
         let mut captured = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
@@ -127,7 +128,7 @@ impl Comb<'_, '_> {
                     node
                 }
                 sv::ir::SystemTaskArg::Str(text) => {
-                    let bytes = unescape(text).into_bytes();
+                    let bytes = unescape(text)?;
                     let width = (bytes.len() * 8).max(8);
                     let value = bytes.iter().fold(BigUint::zero(), |value, byte| {
                         (value << 8u32) | BigUint::from(*byte)
@@ -145,6 +146,23 @@ impl Comb<'_, '_> {
             arg_widths.push(self.width(node));
             captured.push(self.capture(node)?);
         }
+        // A `%t` reports in the format the design's `$timeformat` calls set
+        // when the process runs (IEEE 1800-2023 20.4.3). The format does not
+        // run the process.
+        let time_format_arg =
+            match time_format_operand(self.m, template.as_deref().is_some_and(converts_time)) {
+                Some(format) => {
+                    let (node, _) = self.eval(store, frames, &format, None)?;
+                    arg_signed.push(false);
+                    arg_is_string.push(false);
+                    arg_float_precision.push(None);
+                    arg_is_handle.push(false);
+                    arg_widths.push(self.width(node));
+                    captured.push(self.capture(node)?);
+                    true
+                }
+                None => false,
+            };
         // A report carries the time it is issued at (IEEE 1800-2023 20.10).
         // The time does not run the process.
         let timestamp_arg = matches!(kind, SystemTaskKind::Message(_) | SystemTaskKind::Fatal);
@@ -232,6 +250,7 @@ impl Comb<'_, '_> {
             assertion: assertion_site.cloned(),
             deferred,
             timestamp_arg,
+            time_format_arg,
             arg_widths,
             arg_signed,
             arg_is_string,

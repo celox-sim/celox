@@ -26,7 +26,8 @@ impl ProcModule<'_> {
         let name = sv::ir::SystemTask::Readmem(format).name();
         let radix = format.base();
         let filename = match args.first() {
-            Some(sv::ir::SystemTaskArg::Str(filename)) => unescape(filename),
+            Some(sv::ir::SystemTaskArg::Str(filename)) => String::from_utf8(unescape(filename)?)
+                .map_err(|_| unsupported(format!("`{name}` with a file name that is not UTF-8")))?,
             Some(sv::ir::SystemTaskArg::Expr(sv::ir::Expr::Literal(value)))
                 if let Some(filename) = literal_characters(value) =>
             {

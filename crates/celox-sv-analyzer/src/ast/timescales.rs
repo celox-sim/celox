@@ -994,11 +994,23 @@ pub(super) fn precision_steps_per_tick(
     divisor(node, tree, Timescales::precision_steps_per_tick_in_unit)
 }
 
-fn divisor(
+/// The power of ten seconds of the simulation's time unit, the global time
+/// precision (3.14.3), in which `%t` reports by default (20.4.3, Table
+/// 20-3).
+pub(super) fn tick_exponent(
     node: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
-    in_unit: fn(&Timescales, usize, &Unit) -> Option<u64>,
-) -> Converted<u64> {
+) -> Converted<i32> {
+    divisor(node, tree, |design, _, _| {
+        Some(design.precision.unwrap_or(DEFAULT.precision))
+    })
+}
+
+fn divisor<T>(
+    node: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    in_unit: fn(&Timescales, usize, &Unit) -> Option<T>,
+) -> Converted<T> {
     let finer = || unsupported("a time unit finer than the global time precision");
     let context = &*tree.timescale;
     let at = tree.declarations().expression(node).tokens.start;

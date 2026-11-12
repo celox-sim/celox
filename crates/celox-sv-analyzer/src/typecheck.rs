@@ -1930,6 +1930,70 @@ pub fn parse_parameter_literal(text: &str) -> Option<ConstExpr> {
     })
 }
 
+/// The bytes of the text of a string literal, between its quotes, after
+/// its escape sequences (IEEE 1800-2023 5.9.1): `\n`, `\t`, `\\`, `\"`,
+/// `\v`, `\f`, `\a`, octal `\ddd` and hexadecimal `\xdd`; a backslash
+/// before a newline continues the line. `None` for a `\x` without a digit
+/// or a trailing backslash.
+pub fn unescape_string_literal(text: &str) -> Option<Vec<u8>> {
+    let mut input = text.bytes().peekable();
+    let mut bytes = Vec::new();
+    while let Some(byte) = input.next() {
+        if byte != b'\\' {
+            bytes.push(byte);
+            continue;
+        }
+        let escaped = input.next()?;
+        let value = match escaped {
+            b'n' => b'\n',
+            b't' => b'\t',
+            b'v' => 11,
+            b'f' => 12,
+            b'a' => 7,
+            b'\\' => b'\\',
+            b'"' => b'"',
+            b'\n' => continue,
+            b'\r' if input.peek() == Some(&b'\n') => {
+                input.next();
+                continue;
+            }
+            b'0'..=b'7' => {
+                let mut value = escaped - b'0';
+                for _ in 0..2 {
+                    if let Some(&digit @ b'0'..=b'7') = input.peek() {
+                        input.next();
+                        value = value.wrapping_mul(8).wrapping_add(digit - b'0');
+                    } else {
+                        break;
+                    }
+                }
+                value
+            }
+            b'x' => {
+                let mut value = 0u8;
+                let mut count = 0;
+                for _ in 0..2 {
+                    if let Some(digit) = input.peek().and_then(|byte| (*byte as char).to_digit(16))
+                    {
+                        input.next();
+                        value = value * 16 + digit as u8;
+                        count += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if count == 0 {
+                    return None;
+                }
+                value
+            }
+            other => other,
+        };
+        bytes.push(value);
+    }
+    Some(bytes)
+}
+
 // IEEE 1800-2023 5.9 and 5.9.1: in integral expressions a string
 // literal is an unsigned packed sequence of bytes, including decoded escapes.
 fn parse_string_literal(text: &str) -> Option<IntegralLiteral> {

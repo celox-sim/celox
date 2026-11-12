@@ -466,3 +466,59 @@ pub(super) fn scale_time_conversions(
     }
     Ok(())
 }
+
+/// The arguments of `$timeformat` (IEEE 1800-2023 20.4.3): the units
+/// number, the precision, the suffix and the minimum field width, without
+/// arguments the defaults of Table 20-3, then the power of ten seconds
+/// `tick` of the simulation's time unit, from which the frontend counts the
+/// units.
+pub(super) fn timeformat_arguments(
+    args: Vec<SystemTaskArg<Expr>>,
+    tick: i32,
+) -> Result<Vec<SystemTaskArg<Expr>>, AnalyzerError> {
+    let literal = |value: u32| Expr::Literal(format!("32'sd{value}"));
+    // A literal that is never negative, subtracted from zero if need be.
+    let signed = |value: i32| {
+        if value < 0 {
+            Expr::Binary {
+                left: Box::new(literal(0)),
+                op: BinaryOp::Sub,
+                right: Box::new(literal(value.unsigned_abs())),
+            }
+        } else {
+            literal(value.unsigned_abs())
+        }
+    };
+    let mut args = match args.len() {
+        0 => vec![
+            SystemTaskArg::Expr(signed(tick)),
+            SystemTaskArg::Expr(literal(0)),
+            SystemTaskArg::Str(String::new()),
+            SystemTaskArg::Expr(literal(20)),
+        ],
+        4 => args,
+        count => {
+            return Err(AnalyzerError::InvalidSystemTfCall {
+                name: "$timeformat".into(),
+                detail: format!(
+                    "{count} arguments instead of none or four (IEEE 1800-2023 20.4.3)"
+                ),
+            });
+        }
+    };
+    if !matches!(
+        (&args[0], &args[1], &args[3]),
+        (
+            SystemTaskArg::Expr(_),
+            SystemTaskArg::Expr(_),
+            SystemTaskArg::Expr(_)
+        )
+    ) {
+        return Err(AnalyzerError::InvalidSystemTfCall {
+            name: "$timeformat".into(),
+            detail: "the units, precision and minimum field width are integers".into(),
+        });
+    }
+    args.push(SystemTaskArg::Expr(signed(tick)));
+    Ok(args)
+}

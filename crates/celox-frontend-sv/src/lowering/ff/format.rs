@@ -53,6 +53,13 @@ impl Ff<'_, '_> {
             };
             inputs.push(self.format_input(value)?);
         }
+        // The format of `%t`, for a format that converts a time or is read
+        // at run time (IEEE 1800-2023 20.4.3).
+        let time_format =
+            time_format_operand(self.m, template.as_deref().is_none_or(converts_time));
+        if let Some(format) = &time_format {
+            inputs.push(self.format_input(format)?);
+        }
         let (result, name) = self
             .m
             .temp("format", celox_design::HANDLE_WIDTH, false, false);
@@ -86,7 +93,13 @@ impl Ff<'_, '_> {
                 signed: false,
                 is_string: false,
             }],
-            strings: vec![text],
+            strings: std::iter::once(text)
+                .chain(
+                    time_format
+                        .is_some()
+                        .then(|| celox_design::TIME_FORMAT_ARGUMENT.to_string()),
+                )
+                .collect(),
         });
         self.request_host(HostRequestKind::Format, site)?;
         Ok(sv::ir::Expr::Ident(name))

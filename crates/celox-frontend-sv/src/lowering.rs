@@ -405,6 +405,9 @@ struct HierarchicalNames<'a> {
     /// read, whose stores the module counts (see `ff::property_changes`).
     /// A wait that reads any other property is rejected.
     properties: &'a BTreeSet<u32>,
+    /// Whether the design calls `$timeformat`, whose format every module
+    /// shares (see `ff::TIME_FORMAT`).
+    time_format: bool,
     /// The ids of the instances of each interface of the elaborated design,
     /// which the module's virtual interface accesses are repeated for (see
     /// `sv::ir::Module::expand_virtual_interface_instances`); none before
@@ -429,6 +432,7 @@ impl Default for HierarchicalNames<'_> {
             recursion_report: None,
             force_out_of_line: false,
             properties: &NO_PROPERTIES,
+            time_format: false,
             virtual_ids: None,
             discovery: false,
         }

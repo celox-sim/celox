@@ -753,62 +753,7 @@ pub(in crate::ast) fn string_literal_bytes(text: &str) -> Option<Vec<u8>> {
     } else {
         text.strip_prefix('"')?.strip_suffix('"')?
     };
-    let mut input = text.bytes().peekable();
-    let mut bytes = Vec::new();
-    while let Some(byte) = input.next() {
-        if byte != b'\\' {
-            bytes.push(byte);
-            continue;
-        }
-        let escaped = input.next()?;
-        let value = match escaped {
-            b'n' => b'\n',
-            b't' => b'\t',
-            b'v' => 11,
-            b'f' => 12,
-            b'a' => 7,
-            b'\\' => b'\\',
-            b'"' => b'"',
-            b'\n' => continue,
-            b'\r' if input.peek() == Some(&b'\n') => {
-                input.next();
-                continue;
-            }
-            b'0'..=b'7' => {
-                let mut value = escaped - b'0';
-                for _ in 0..2 {
-                    if let Some(&digit @ b'0'..=b'7') = input.peek() {
-                        input.next();
-                        value = value.wrapping_mul(8).wrapping_add(digit - b'0');
-                    } else {
-                        break;
-                    }
-                }
-                value
-            }
-            b'x' => {
-                let mut value = 0u8;
-                let mut count = 0;
-                for _ in 0..2 {
-                    if let Some(digit) = input.peek().and_then(|byte| (*byte as char).to_digit(16))
-                    {
-                        input.next();
-                        value = value * 16 + digit as u8;
-                        count += 1;
-                    } else {
-                        break;
-                    }
-                }
-                if count == 0 {
-                    return None;
-                }
-                value
-            }
-            other => other,
-        };
-        bytes.push(value);
-    }
-    Some(bytes)
+    crate::typecheck::unescape_string_literal(text)
 }
 
 pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> bool {

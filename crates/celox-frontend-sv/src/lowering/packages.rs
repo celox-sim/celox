@@ -24,6 +24,7 @@ pub(super) fn lower_package_states(
     four_state: bool,
     ff_parts: bool,
     properties: &BTreeSet<u32>,
+    time_format: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
     force_out_of_line: bool,
     recursion_report: Option<&Path>,
@@ -54,6 +55,21 @@ pub(super) fn lower_package_states(
             ff::PROPERTY_CHANGES,
             &names,
             ff::PROPERTY_CHANGES_WIDTH,
+        ));
+    }
+    // The format of `%t` of a design that calls `$timeformat` (see
+    // `ff::TIME_FORMAT`), which the packages' sites read too.
+    if time_format {
+        let names = [ff::TIME_FORMAT.to_string()];
+        let width = celox_design::time_format::WIDTH;
+        states = states
+            .into_iter()
+            .map(|state| state.with_shared_variables(ff::TIME_FORMAT, &names, width))
+            .collect();
+        states.push(sv::ir::Module::shared_variables(
+            ff::TIME_FORMAT,
+            &names,
+            width,
         ));
     }
     let mut states = states.iter().collect::<Vec<_>>();
@@ -127,6 +143,15 @@ pub(super) fn package_watched_properties(
     for state in packages.specialized_state_modules(design) {
         ff::watched_properties(&state, keys);
     }
+}
+
+/// Whether a state module of `packages` calls `$timeformat` (see
+/// `ff::TIME_FORMAT`).
+pub(super) fn packages_call_time_format(packages: &sv::Packages, design: &sv::Design) -> bool {
+    packages
+        .specialized_state_modules(design)
+        .iter()
+        .any(ff::calls_time_format)
 }
 
 /// The names of the change counts of the class properties with keys

@@ -151,6 +151,44 @@ pub(in crate::ast) fn classify<'a>(
                 });
                 continue;
             }
+            // `$timeformat` sets the format of every `%t` in the design's
+            // state, which a combinational process does not write. Such a
+            // process runs as a process instead: `always_comb` and
+            // `always_latch` once at time zero, then after each change of
+            // their implicit sensitivity (IEEE 1800-2023 9.2.2.2.1), and
+            // `always @*` after each change of its implicit event list
+            // (9.4.2.2).
+            if effects.time_format && process.kind != CombProcessKind::ContinuousAssign {
+                let always_star = process.kind == CombProcessKind::AlwaysStar;
+                let wait = timing::implicit_event_kind(
+                    &process.body,
+                    &process.sensitivity_body,
+                    !always_star,
+                );
+                let mut body = process.body;
+                if always_star {
+                    body.insert(0, wait);
+                } else {
+                    body.push(wait);
+                }
+                processes.push(InitialProcess {
+                    creation_order: process.creation_order,
+                    site: process.process_site,
+                    condition: process.condition,
+                    body: vec![Stmt::Loop {
+                        kind: LoopKind::Forever,
+                        init: Vec::new(),
+                        condition: None,
+                        step: Vec::new(),
+                        body,
+                    }],
+                    kind: celox_design::ProcessKind::Regular,
+                    validation_body: Vec::new(),
+                    synthetic: false,
+                    repeats: true,
+                });
+                continue;
+            }
             if process.kind == CombProcessKind::AlwaysStar && assigns_nonblocking(&process.body) {
                 return Err(unsupported("nonblocking assignment inside always_comb"));
             }
@@ -460,6 +498,9 @@ struct Effects {
     /// process kernel can run.
     reads_process: bool,
     nonblocking: bool,
+    /// They call `$timeformat`, which sets the format of every module's
+    /// `%t` in the design's state.
+    time_format: bool,
 }
 
 impl Effects {
@@ -469,6 +510,7 @@ impl Effects {
             controls: self.controls || other.controls,
             reads_process: self.reads_process || other.reads_process,
             nonblocking: self.nonblocking || other.nonblocking,
+            time_format: self.time_format || other.time_format,
         }
     }
 
@@ -509,6 +551,13 @@ fn statement_effects(statement: &Stmt) -> Effects {
         | Stmt::Eval(_)
         | Stmt::SystemTask { .. }
         | Stmt::Local { .. } => {}
+    }
+    if let Stmt::SystemTask {
+        task: SystemTask::Timeformat,
+        ..
+    } = statement
+    {
+        effects.time_format = true;
     }
     for expr in lifetimes::stmt_exprs(statement) {
         effects = effects.union(expression_effects(expr));

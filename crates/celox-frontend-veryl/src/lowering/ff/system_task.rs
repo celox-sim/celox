@@ -67,6 +67,7 @@ impl<'a> FfParser<'a> {
             assertion: None,
             deferred: None,
             timestamp_arg: false,
+            time_format_arg: false,
             arg_widths: value_args
                 .iter()
                 .map(|arg| self.get_expression_width(&arg.0))

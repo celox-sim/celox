@@ -845,6 +845,41 @@ impl BodyBuilder<'_, '_, '_> {
             Ok(Some(value))
         };
         scale_time_conversions(task, &mut args, divisor, &mut bind)?;
+        if matches!(task, SystemTask::Timeformat) {
+            // A constant units number is a time unit, from 2 to -15; the
+            // precision and minimum field width are not negative (IEEE
+            // 1800-2023 20.4.3).
+            for (index, name, range) in [
+                (0, "units number", -15..=2),
+                (1, "precision number", 0..=i128::MAX),
+                (3, "minimum field width", 0..=i128::MAX),
+            ] {
+                let Some(id) = arguments.get(index).and_then(|arg| arg.value) else {
+                    continue;
+                };
+                let value = constant_binding::bind(id, self.tree, self.session, &self.dims)
+                    .ok()
+                    .flatten()
+                    .and_then(|value| {
+                        eval_ast_const_expr(&self.tree.functions, &value, &self.dims.const_env)
+                    });
+                if let Some(value) = value.filter(|value| !range.contains(value)) {
+                    return Err(AnalyzerError::InvalidSystemTfCall {
+                        name: "$timeformat".into(),
+                        detail: format!(
+                            "{name} {value} is outside {}..{} (IEEE 1800-2023 20.4.3)",
+                            range.start(),
+                            if *range.end() == i128::MAX {
+                                String::new()
+                            } else {
+                                range.end().to_string()
+                            }
+                        ),
+                    });
+                }
+            }
+            args = timeformat_arguments(args, timescales::tick_exponent(root, self.tree)?)?;
+        }
         // Keep Veryl's assertion calls as calls: their message arguments
         // execute even on success, unlike an SV assertion's fail action.
         Ok(vec![Stmt::SystemTask {

@@ -2418,6 +2418,105 @@ endmodule
   (run_to_finish)
   (expect_output "[                2000] [2000] [1500] [7000] [2]\nw=1500\n"))
 
+; `$timeformat` sets the unit, decimal places, suffix and minimum field width
+; of the %t conversions after it, also of those the host formats at once
+; (`$sformatf`, file output), until the next call; one without arguments
+; restores the defaults (IEEE 1800-2023 20.4.3). A display issued before the
+; call in the same time step keeps the format it was issued in. The time,
+; also a real one, rounds half away from zero; the width of a conversion
+; replaces the minimum field width, and a leading zero of it pads with
+; zeros. The suffix is the value of its string literal.
+(case time_format_sets_the_format_of_later_conversions
+  (source "time_format_calls.sv" #"
+module Top;
+    int units;
+    function int show();
+        $write("%s|", $sformatf("%t", 32'd7));
+        return 1;
+    endfunction
+    initial begin
+        #1.5;
+        $display("[%t]", $realtime);
+        $timeformat(-9, 3, " ns", 12);
+        $display("[%t] [%0t]", $realtime, $time);
+        $write("%s\n", $sformatf("%t", 32'd7));
+        $fdisplay(32'h8000_0001, "f[%t]", $realtime);
+        $timeformat(-9, 0, "ns", 0);
+        $display("[%t]", $realtime);
+        $timeformat(-12, 0, "", 0);
+        $display("[%t]", $realtime);
+        $timeformat(-9, 0, "ns\n", 0);
+        $display("[%t] [%t] [%05t]", 2.5, -2.5, 32'd7);
+        $timeformat;
+        $display("[%t]", $realtime);
+        // An argument is evaluated before the format changes.
+        $timeformat(-12, 0, "", 0);
+        $timeformat(-9, show(), " ns", 0);
+        $display("[%t]", 32'd7);
+        // A units number computed in its range, and real times to one,
+        // two and three decimal places.
+        units = -9;
+        $timeformat(units, 1, "", 0);
+        $display("[%t]", $realtime);
+        $timeformat(-9, 2, "", 0);
+        $display("[%t]", $realtime);
+        $timeformat(-9, 3, "", 0);
+        $display("[%t] [%t]", $realtime, 1.2346);
+        $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "[                1500]\n[    1.500 ns] [2.000 ns]\n    7.000 ns\nf[    1.500 ns]\n[2ns]\n[1500]\n[3ns\n] [-3ns\n] [07ns\n]\n[                1500]\n7000|[7.0 ns]\n[1.5]\n[1.50]\n[1.500] [1.235]\n"))
+
+; `$timeformat` in an `always_ff` procedure, a host request like file output.
+(case time_format_in_an_always_ff_procedure
+  (source "time_format_ff.sv" #"
+module Top;
+    logic clk = 0;
+    always #5 clk = ~clk;
+    always_ff @(posedge clk) begin
+        $timeformat(-9, 1, "ns", 0);
+        $display("[%t]", $realtime);
+    end
+    initial #7 $finish;
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "[5.0ns]\n"))
+
+; `$timeformat` in a combinational process, also through a function it
+; calls: `always_comb` runs at time zero and after each change of what it
+; reads, `always @*` after each change.
+(case time_format_in_combinational_processes
+  (source "time_format_comb.sv" #"
+module Top;
+    int places = 1;
+    int width = 0;
+    function automatic void set_width(int w);
+        $timeformat(-9, 2, " ns", w);
+    endfunction
+    always_comb $timeformat(-9, places, " ns", 0);
+    always @* if (width > 0) set_width(width);
+    initial begin
+        #1;
+        $display("[%t]", $realtime);
+        places = 3;
+        #1;
+        $display("[%t]", $realtime);
+        width = 10;
+        #1;
+        $display("[%t]", $realtime);
+        $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "[1.0 ns]\n[2.000 ns]\n[   3.00 ns]\n"))
+
 ; The smallest precision of all the design's time scales sets the unit of
 ; %t in every scope.
 (case time_format_scales_each_scope_to_the_smallest_precision

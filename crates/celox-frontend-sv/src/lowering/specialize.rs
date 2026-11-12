@@ -215,6 +215,19 @@ pub(super) fn specialize_module(
             ff::PROPERTY_CHANGES_WIDTH,
         ))
     };
+    // Every module shares the format of `%t` of a design that calls
+    // `$timeformat`; discovery sees whether this module does.
+    let specialized = if hierarchical.time_format
+        || (hierarchical.discovery && ff::calls_time_format(&specialized))
+    {
+        std::borrow::Cow::Owned(specialized.into_owned().with_shared_variables(
+            ff::TIME_FORMAT,
+            &[ff::TIME_FORMAT.to_string()],
+            celox_design::time_format::WIDTH,
+        ))
+    } else {
+        specialized
+    };
     let local_forces = key
         .force_signals
         .iter()

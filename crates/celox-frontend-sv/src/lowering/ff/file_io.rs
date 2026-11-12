@@ -27,7 +27,7 @@ impl Ff<'_, '_> {
                 )
             }
             sv::ir::SystemTaskArg::Str(text) => {
-                let bytes = unescape(text).into_bytes();
+                let bytes = unescape(text)?;
                 let reg = self.b.alloc_bit((bytes.len() * 8).max(8), false);
                 self.b.emit(SIRInstruction::Imm(
                     reg,
@@ -327,11 +327,18 @@ impl Ff<'_, '_> {
             SystemTask::Fdisplay(radix) | SystemTask::Fwrite(radix) => {
                 let descriptor = self.file_io_arg(&args[0])?;
                 let kind = SystemTaskKind::Print(RuntimeEventKind::Write, radix.letter());
-                let (template, mut args) = system_task_template(self.m, &kind, &args[1..]);
+                let (template, mut args) = system_task_template(self.m, &kind, &args[1..])?;
                 prepare_time_operands(self.m, template.as_deref(), &mut args)?;
                 let mut values = vec![descriptor];
                 for arg in &args {
                     values.push(self.file_io_arg(arg)?);
+                }
+                // The format of `%t` when the call runs (IEEE 1800-2023
+                // 20.4.3), the last value.
+                let time_format =
+                    time_format_operand(self.m, template.as_deref().is_some_and(converts_time));
+                if let Some(format) = &time_format {
+                    values.push(self.file_io_arg(&sv::ir::SystemTaskArg::Expr(format.clone()))?);
                 }
                 let operation = if matches!(task, SystemTask::Fdisplay(_)) {
                     3
@@ -342,7 +349,13 @@ impl Ff<'_, '_> {
                     operation,
                     values,
                     Vec::new(),
-                    vec![template.unwrap_or_default()],
+                    std::iter::once(template.unwrap_or_default())
+                        .chain(
+                            time_format
+                                .is_some()
+                                .then(|| celox_design::TIME_FORMAT_ARGUMENT.to_string()),
+                        )
+                        .collect(),
                 )?;
             }
             SystemTask::Writemem(format) => {
