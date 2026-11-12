@@ -1021,6 +1021,9 @@ struct Locals<'a> {
     constants: &'a dyn ConstantEnvironment,
     values: HashMap<String, Value>,
     types: HashMap<String, (usize, bool)>,
+    /// The declared range `(left, right)` of each variable with one packed
+    /// dimension, whose selects name declared indices.
+    ranges: HashMap<String, (i128, i128)>,
     two_state: HashSet<String>,
 }
 
@@ -1074,6 +1077,7 @@ impl<'a> Frame<'a> {
                 constants,
                 values: HashMap::default(),
                 types: HashMap::default(),
+                ranges: HashMap::default(),
                 two_state: HashSet::default(),
             },
             budget,
@@ -1146,7 +1150,36 @@ impl<'a> Frame<'a> {
         self.scope
             .types
             .insert(name.to_string(), (width, r#type.is_signed()));
+        // The bounds the lowering of a process maps selects by.
+        self.scope.ranges.remove(name);
+        let range = match r#type.packed_bounds() {
+            Some(&[bounds]) => Some(bounds),
+            Some(_) => None,
+            None => match r#type.packed_ranges() {
+                [range] => self
+                    .eval_lowered(range.left())
+                    .zip(self.eval_lowered(range.right())),
+                _ => None,
+            },
+        };
+        if let Some(range) = range
+            && r#type.unpacked_ranges().is_empty()
+        {
+            self.scope.ranges.insert(name.to_string(), range);
+        }
         Some(())
+    }
+
+    /// The bit position of declared index `index` of variable `name`: a
+    /// select of a variable with one packed dimension names declared
+    /// indices, counted from its right bound towards its left one (IEEE
+    /// 1800-2023 7.4.1, 11.5.1), as the lowering of a process maps them.
+    fn position(&self, name: &str, index: i128) -> Option<i128> {
+        match self.scope.ranges.get(name) {
+            Some(&(left, right)) if left >= right => index.checked_sub(right),
+            Some(&(_, right)) => right.checked_sub(index),
+            None => Some(index),
+        }
     }
 
     fn initial_value(&self, name: &str) -> Option<Value> {
@@ -1410,8 +1443,12 @@ impl<'a> Frame<'a> {
                 lsb,
                 signed,
             } => {
-                let msb = self.eval_lowered(&msb.clone().into())?;
-                let lsb = self.eval_lowered(&lsb.clone().into())?;
+                let mut msb = self.eval_lowered(&msb.clone().into())?;
+                let mut lsb = self.eval_lowered(&lsb.clone().into())?;
+                if let Expr::Ident(name) = &**expr {
+                    msb = self.position(name, msb)?;
+                    lsb = self.position(name, lsb)?;
+                }
                 ConstExpr::SelectRange {
                     expr: Box::new(self.lower(expr)?),
                     msb: Box::new(const_expr_from_i128(msb)),
@@ -1637,6 +1674,7 @@ impl<'a> Frame<'a> {
                 }
                 let msb = self.eval_lowered(&msb.clone().into())?;
                 let lsb = self.eval_lowered(&lsb.clone().into())?;
+                let (msb, lsb) = (self.position(name, msb)?, self.position(name, lsb)?);
                 let old = self.scope.values.get(name)?.clone();
                 let value = old.write(msb.max(lsb), msb.min(lsb), value)?;
                 self.set(name, value)?;

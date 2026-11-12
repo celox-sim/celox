@@ -211,6 +211,7 @@ fn copied_call(
                     .into_iter()
                     .map(|(name, ty)| (name, (ty.width, ty.signed)))
                     .collect(),
+                ranges: HashMap::default(),
                 two_state: HashSet::default(),
             },
             budget: &mut budget,

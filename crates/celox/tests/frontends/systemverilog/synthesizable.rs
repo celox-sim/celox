@@ -101,3 +101,83 @@ fn default_nettype_none_rejects_undeclared_assignment_targets() {
         .to_string();
     assert!(error.contains("undeclared `x`"), "{error}");
 }
+
+// A constant function selects the bits of its variables by their declared
+// indices (IEEE 1800-2023 7.4.1, 11.5.1, 13.4.3), as the same call at run time
+// does: of an ascending range, as fpnew's format masks `logic [0:N-1]`, and of
+// a range whose right bound is not zero, by bit-selects, part-selects and
+// indexed part-selects that read and write.
+#[test]
+fn constant_functions_select_declared_indices() {
+    let source = r#"
+        module Top;
+            function automatic int unsigned loop_index(logic [0:3] cfg);
+                int unsigned r = 0;
+                for (int i = 0; i < 4; i++) if (cfg[i]) r = r + (1 << i);
+                return r;
+            endfunction
+            function automatic int unsigned const_index(logic [0:3] cfg);
+                return {cfg[0], cfg[1], cfg[2], cfg[3]};
+            endfunction
+            function automatic int unsigned part(logic [0:3] cfg);
+                return cfg[1:2];
+            endfunction
+            function automatic int unsigned indexed(logic [0:3] cfg, int i);
+                return cfg[i +: 2];
+            endfunction
+            function automatic int unsigned shifted(logic [3:0] x);
+                logic [7:4] v;
+                v = x;
+                return v[7:6];
+            endfunction
+            function automatic int unsigned write_ascending();
+                logic [0:3] v;
+                v = '0;
+                v[0] = 1'b1;
+                v[2:3] = 2'b01;
+                return v;
+            endfunction
+            function automatic int unsigned write_shifted();
+                logic [7:4] v;
+                v = '0;
+                v[4] = 1'b1;
+                v[7] = 1'b1;
+                return v;
+            endfunction
+            function automatic int unsigned max_width(logic [0:3] cfg);
+                int unsigned r = 0;
+                for (int i = 0; i < 4; i++) if (cfg[i] && (8 << i) > r) r = 8 << i;
+                return r;
+            endfunction
+            localparam int unsigned A = loop_index(4'b0011);
+            localparam int unsigned B = const_index(4'b0011);
+            localparam int unsigned C = part(4'b0011);
+            localparam int unsigned D = indexed(4'b0011, 2);
+            localparam int unsigned E = shifted(4'b1001);
+            localparam int unsigned F = write_ascending();
+            localparam int unsigned G = write_shifted();
+            localparam int unsigned W = max_width(4'b0011);
+            logic [W-1:0] widest;
+            initial begin
+                $display("%0d %0d %0d %0d %0d %0d %0d %0d", A, B, C, D, E, F, G, $bits(widest));
+                $display("%0d %0d %0d %0d %0d %0d %0d %0d", loop_index(4'b0011),
+                    const_index(4'b0011), part(4'b0011), indexed(4'b0011, 2), shifted(4'b1001),
+                    write_ascending(), write_shifted(), max_width(4'b0011));
+            end
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("declared_indices.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(1).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["12 3 1 3 2 9 9 64"; 2]);
+}
