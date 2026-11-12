@@ -1,1 +1,1 @@
-Address Codex review on PR #3557: cap constant operand widths before formatting a constant sformatf, and keep long string parameter literals when binding parameter overrides in the lowering.
+Fix the clippy unnecessary_lazy_evaluations lint the full-feature lint job reports in the lowering.
