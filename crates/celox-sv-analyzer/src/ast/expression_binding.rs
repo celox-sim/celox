@@ -82,11 +82,9 @@ pub(super) fn selected_pattern(
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
     if matches!(lhs, LValue::Select { .. })
-        && unpacked_structs::native_struct(left, tree.declarations(), tree, session, dimensions)?
-            .is_some()
+        && let Some(structure) =
+            unpacked_structs::value_struct(left, tree.declarations(), tree, session, dimensions)
     {
-        let structure =
-            expression_types::type_of(tree, session, left, tree.declarations(), dimensions)?;
         unpacked_structs::check_value(
             structure,
             right,

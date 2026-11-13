@@ -562,6 +562,21 @@ pub(in crate::ast) fn native_struct(
     })
 }
 
+/// The unpacked structure type of native expression `id`, as its type
+/// tells, or `None` when it is not a value of such a type or its type is
+/// not known.
+pub(in crate::ast) fn value_struct(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Option<semantic_types::TyId> {
+    expression_types::type_of(tree, session, id, native, dims)
+        .ok()
+        .filter(|ty| session.types.is_unpacked_struct(*ty))
+}
+
 /// The names of a native `a.b.c` path, or `None` for another expression.
 fn member_path(mut id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<Vec<String>> {
     let mut parts = Vec::new();
@@ -706,11 +721,11 @@ pub(in crate::ast) fn check_operands(
             right,
         } => {
             if matches!(operator.as_str(), "==" | "!=" | "===" | "!==") {
-                let left_type = native_struct(*left, native, tree, session, dims)?;
-                let right_type = native_struct(*right, native, tree, session, dims)?;
+                let left_type = value_struct(*left, native, tree, session, dims);
+                let right_type = value_struct(*right, native, tree, session, dims);
                 return match (left_type, right_type) {
                     (None, None) => Ok(()),
-                    (Some(left), Some(right)) if left.same_type(&right) => Ok(()),
+                    (Some(left), Some(right)) if session.types.matches(left, right) => Ok(()),
                     _ => Err(unsupported(format!(
                         "operator `{operator}` comparing an unpacked structure with a value of another type"
                     ))),
@@ -725,7 +740,7 @@ pub(in crate::ast) fn check_operands(
         _ => return Ok(()),
     };
     for operand in operands {
-        if native_struct(operand, native, tree, session, dims)?.is_some() {
+        if value_struct(operand, native, tree, session, dims).is_some() {
             return Err(unsupported(
                 "operator, select or cast applied to an unpacked structure",
             ));

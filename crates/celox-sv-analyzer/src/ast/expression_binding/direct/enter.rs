@@ -254,7 +254,7 @@ fn check_received(
     } else if target
         .as_deref()
         .is_some_and(|shape| shape.unpacked.is_empty() && shape.container.is_none())
-        && unpacked_structs::native_struct(id, native, tree, session, dimensions)?.is_some()
+        && unpacked_structs::value_struct(id, native, tree, session, dimensions).is_some()
     {
         return Err(unsupported(
             "unpacked structure value received by a destination that is not of its type",
