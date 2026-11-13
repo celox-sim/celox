@@ -17,8 +17,26 @@ pub(in crate::ast) fn native_chandle(
     // interned when the declarations' types were bound; most designs have
     // none, and typing each expression asked about is costly.
     if !session.types.has_chandle() {
+        // A chandle type that entered the analysis unrecorded would skip
+        // every check of its uses: a debug build types the expression
+        // anyway and fails if it is one.
+        debug_assert!(
+            !typed_chandle(tree, id, native, dimensions, session),
+            "a chandle type entered the analysis without `TyTable::declare_chandle`"
+        );
         return false;
     }
+    typed_chandle(tree, id, native, dimensions, session)
+}
+
+/// Whether the type of native expression `id` is `chandle`.
+fn typed_chandle(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+    session: &mut Session,
+) -> bool {
     expression_types::type_of(tree, session, id, native, dimensions)
         .is_ok_and(|ty| matches!(session.types.data(ty), semantic_types::TyData::Chandle))
 }
