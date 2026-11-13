@@ -76,6 +76,67 @@ pub(super) struct ScopeSymbols {
     /// environment before another source imports them (8.23, 8.25).
     pub class_member_types: HashMap<String, HashMap<String, Type>>,
     pub inline_randomizations: Vec<classes::constraints::InlineRequest>,
+    /// The compilation unit of a scope that names none of its items, which
+    /// it takes when a specialization of a package class it takes names an
+    /// item of the unit (see `Module::from_selected_scope`).
+    pub unit: Option<Arc<DeferredUnit>>,
+}
+
+/// The compilation unit a scope takes only if a specialization it takes
+/// names one of the unit's items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DeferredUnit {
+    /// The identities of the items the unit declares, which tell them from
+    /// the items of the units of other sources (3.12.1).
+    pub items: Vec<String>,
+    /// The unit's symbols, or why it cannot be analyzed, which the scope
+    /// reports when it takes the unit.
+    pub symbols: Result<ScopeSymbols, crate::AnalyzerError>,
+}
+
+impl DeferredUnit {
+    /// Whether `name`, a qualified name such as that of a specialization,
+    /// names an item of the unit.
+    pub fn named_by(&self, name: &str) -> bool {
+        name.contains("$unit::") && self.items.iter().any(|item| name.contains(item.as_str()))
+    }
+
+    /// The unit's symbols when one of `names`, those of the specializations
+    /// the scope takes, names an item of it, or why the unit cannot be
+    /// analyzed.
+    pub fn taken<'a>(
+        &self,
+        mut names: impl Iterator<Item = &'a str>,
+    ) -> Result<Option<&ScopeSymbols>, crate::AnalyzerError> {
+        if !names.any(|name| self.named_by(name)) {
+            return Ok(None);
+        }
+        self.symbols.as_ref().map(Some).map_err(Clone::clone)
+    }
+}
+
+#[cfg(test)]
+mod deferred_unit_tests {
+    use super::*;
+
+    #[test]
+    fn a_deferred_unit_is_taken_only_for_its_items_and_reports_its_error() {
+        let unit = |symbols| DeferredUnit {
+            items: vec!["$unit::C@0000000000000001".into()],
+            symbols,
+        };
+        let named = ["p::Reg#(T=$unit::C@0000000000000001)"];
+        let other = ["p::Reg#(T=$unit::C@0000000000000002)", "p::Reg#(T=int)"];
+        let analyzed = unit(Ok(ScopeSymbols::default()));
+        assert!(analyzed.taken(other.into_iter()).unwrap().is_none());
+        assert!(analyzed.taken(named.into_iter()).unwrap().is_some());
+        // A unit that cannot be analyzed is reported when a specialization
+        // names an item of it, and only then.
+        let error = crate::AnalyzerError::Unsupported("union".into());
+        let failed = unit(Err(error.clone()));
+        assert!(failed.taken(other.into_iter()).unwrap().is_none());
+        assert_eq!(failed.taken(named.into_iter()).unwrap_err(), error);
+    }
 }
 
 /// The name a reference to item `name` of `package` has in the scope being
@@ -384,6 +445,9 @@ impl ScopeSymbols {
             })
             .collect();
         ScopeSymbols {
+            // The symbols of a package, renamed for the scopes that use it,
+            // do not carry a compilation unit.
+            unit: None,
             package_scopes: self.package_scopes.clone(),
             // Classes have their qualified names already.
             classes: self.classes.clone(),
