@@ -175,6 +175,20 @@ pub(super) fn assignment_op_expr(
     rhs: Expr,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
+    let left = expr_from_lvalue(tree, lhs, packed_dimensions);
+    assignment_op_value(tree, session, left, op, rhs, packed_dimensions)
+}
+
+/// The value `left op rhs` that the assignment operator `op` (`+=`, ...)
+/// writes, `left` being the value of its target (IEEE 1800-2023 11.4.1).
+pub(super) fn assignment_op_value(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    left: Expr,
+    op: &str,
+    rhs: Expr,
+    packed_dimensions: &PackedDimensions,
+) -> Converted<Expr> {
     let operator = || unsupported(format!("assignment operator `{op}`"));
     let op = match op.strip_suffix('=').ok_or_else(operator)? {
         "+" => BinaryOp::Add,
@@ -191,7 +205,6 @@ pub(super) fn assignment_op_expr(
         "^" => BinaryOp::BitXor,
         _ => return Err(operator()),
     };
-    let left = expr_from_lvalue(tree, lhs, packed_dimensions);
     if (expression_binding::real_value(&left, packed_dimensions)
         || expression_binding::real_value(&rhs, packed_dimensions))
         && !matches!(
