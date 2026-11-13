@@ -766,7 +766,7 @@ pub(in crate::ast) fn fixed_from_container(
     };
     if target.string
         || target.real
-        || target.class.is_some()
+        || objects::shape_class(target, tree, session, dims).is_some()
         || target.unpacked_struct.is_some()
         || virtual_interfaces::holds_virtual_interface(target, tree, session, dims)
         || chandles::holds_chandle(target)
