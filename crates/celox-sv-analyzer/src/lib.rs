@@ -50,6 +50,16 @@ pub use parsed::ParsedSource;
 /// simulator's two-state/four-state mode is known.
 pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
 
+/// The variable, which no source declares, that is one while `$assertoff`
+/// has stopped the assertions of the design (IEEE 1800-2023 20.11). The
+/// assertions of a process read it, but no expression of its source does.
+pub const ASSERTIONS_OFF: &str = "%assertions_off";
+
+/// The package, which no source declares, of [`ASSERTIONS_OFF`]. Its
+/// variable is simulator state rather than a variable of the design: any
+/// process may write it, so it has no driver restrictions.
+pub const ASSERTION_CONTROL_PACKAGE: &str = "$assertion_control";
+
 /// Language compatibility checks and implementation-defined timing defaults.
 #[derive(Debug, Clone, Default)]
 pub struct AnalysisOptions {

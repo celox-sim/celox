@@ -434,13 +434,23 @@ impl ModuleDrivers {
         let mut walk = |body: &[sv::ir::Stmt],
                         local: Option<usize>,
                         continuous: Option<usize>,
-                        initial: Option<usize>| {
+                        initial: Option<usize>,
+                        process: bool| {
             if local.is_none() && continuous.is_none() && initial.is_none() {
                 return;
             }
             scan.body(
                 &mut |lvalue| {
                     let name = lvalue.name();
+                    // The assertion control state of `$assertoff` and
+                    // `$asserton` is simulator state, not a variable of the
+                    // design: any processes may set it (IEEE 1800-2023
+                    // 20.11). An edge procedure that sets it runs as a
+                    // process (see `controls_assertions`); a combinational
+                    // one remains its only writer.
+                    if process && name == sv::ASSERTIONS_OFF {
+                        return;
+                    }
                     let range = net_lvalue_range(lvalue, constants, parameter_types);
                     let element = match lvalue {
                         sv::ir::LValue::Select { lsb, .. } if range.is_none() => {
@@ -497,10 +507,11 @@ impl ModuleDrivers {
                 (active && process.kind() == sv::ir::CombProcessKind::ContinuousAssign)
                     .then_some(index),
                 None,
+                false,
             );
         }
         for (index, process) in ff.iter().enumerate() {
-            walk(process.body(), Some(comb.len() + index), None, None);
+            walk(process.body(), Some(comb.len() + index), None, None, false);
         }
         // Ordinary always processes with timing (including edge processes
         // converted after timed-task classification) retain their driver
@@ -518,6 +529,7 @@ impl ModuleDrivers {
                 local.filter(|_| active),
                 None,
                 (active && !process.is_scheduled_edge()).then_some(index),
+                true,
             );
         }
         Self { writes }
