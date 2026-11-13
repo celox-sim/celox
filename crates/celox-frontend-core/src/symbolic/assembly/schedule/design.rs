@@ -252,6 +252,25 @@ pub(super) fn relocate_design(
 }
 
 /// The width of every variable and whether it is four-state.
+/// Release the units of every module once each instance holds its relocated
+/// copy of them (see [`relocate_design`]) and the package-driver check has
+/// read them: nothing after relocation runs a module's own units, and a
+/// large design would otherwise keep both copies until its schedule is built.
+pub(super) fn release_module_units(modules: &mut HashMap<ModuleId, SimModule>) {
+    for module in modules.values_mut() {
+        module.eval_only_ff_blocks = Default::default();
+        module.apply_ff_blocks = Default::default();
+        module.eval_apply_ff_blocks = Default::default();
+        module.split_commit_ff_blocks = Default::default();
+        module.parallel_ff_parts = Default::default();
+        module.functions = Default::default();
+        for process in &mut module.processes {
+            process.kernel.blocks = Default::default();
+            process.kernel.register_map = Default::default();
+        }
+    }
+}
+
 pub(super) fn variable_shapes(design: &Design) -> HashMap<AbsoluteAddr, (usize, bool)> {
     let Design {
         instance_modules,

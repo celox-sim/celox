@@ -125,6 +125,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &design.package_instances,
         &logic.comb_blocks,
     )?;
+    release_module_units(&mut design.modules);
     let ignored_loops = parse_ignored_loops(
         ignored_loops,
         &design.instance_modules,
