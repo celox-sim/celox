@@ -460,6 +460,7 @@ pub(super) fn lower(
     dimensions: &PackedDimensions,
     ports: &[Port],
     signals: &mut Vec<Signal>,
+    forced: &HashMap<String, String>,
     comb: &[CombProcess],
     ff: &mut [FfProcess],
     initial: &mut Vec<InitialProcess>,
@@ -601,6 +602,11 @@ pub(super) fn lower(
             events.push(any_change(driver.rhs.clone()));
         }
         events.push(any_change(Expr::Ident(driver.lhs.name().to_string())));
+        // A release of the variable ends the force over the assignment,
+        // which then drives the variable again (IEEE 1800-2023 10.6.2).
+        if let Some(enable) = forced.get(driver.lhs.name()) {
+            events.push(any_change(Expr::Ident(enable.clone())));
+        }
         let owner = &initial[driver.process];
         let creation_order = owner.creation_order;
         let site = owner.site.clone().map(|mut site| {

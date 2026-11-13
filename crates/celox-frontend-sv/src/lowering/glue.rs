@@ -382,6 +382,7 @@ pub(crate) fn attach_instance_glue(
                 arena: glue.2,
             });
     }
+    add_forced_net_drivers(module, &parent_variables)?;
     if waits {
         candidates.extend(lowered.repeated_ff_writes.iter().map(|&(signal, _)| signal));
         for alternative in &comb_alternatives {
@@ -842,6 +843,18 @@ fn build_instance_glue(
                 if !child_var.is_4state || collapse_unknown_literal {
                     expr = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
                 }
+                let mut sources = sources;
+                if let Some(controls) = procedural_force_controls(&child.variables, *child_port_id)
+                {
+                    expr = force_select(
+                        &mut arena,
+                        &mut sources,
+                        controls,
+                        GlueAddr::Child,
+                        BitAccess::new(0, width - 1),
+                        expr,
+                    )?;
+                }
                 input_ports.push((
                     source_ids,
                     LogicPath {
@@ -986,6 +999,18 @@ fn build_instance_glue(
                         0,
                         width - 1,
                     ));
+                    if let Some(controls) =
+                        procedural_force_controls(parent_variables, parent_signal_id)
+                    {
+                        expr = force_select(
+                            &mut arena,
+                            &mut sources,
+                            controls,
+                            GlueAddr::Parent,
+                            access,
+                            expr,
+                        )?;
+                    }
                     output_ports.push((
                         vec![parent_signal_id],
                         LogicPath {
@@ -1013,6 +1038,141 @@ fn build_instance_glue(
     }
 
     Ok((input_ports, output_ports, arena))
+}
+
+/// Give a procedurally forced target that a force does not store into,
+/// and that no continuous assignment or port connection of the module
+/// drives, the driver `E ? V : 'z`: the target is an undriven net, which
+/// takes the forced value while forced and is high impedance after the
+/// release (IEEE 1800-2023 10.6.2).
+fn add_forced_net_drivers(
+    module: &mut SimModule,
+    variables: &HashMap<SourceVarId, SvVariable>,
+) -> Result<(), ParserError> {
+    let mut targets: Vec<_> = variables
+        .values()
+        .filter_map(|variable| variable.force_control)
+        .filter(|slot| slot.procedural && slot.enable && !slot.stored)
+        .map(|slot| slot.target)
+        .collect();
+    targets.sort_by_key(|target| target.0);
+    for target in targets {
+        let driven = module
+            .comb_blocks
+            .iter()
+            .any(|path| path.target.var().is_some_and(|var| var.id == target))
+            || module.glue_blocks.values().flatten().any(|block| {
+                block.output_ports.iter().any(|(_, path)| {
+                    path.target
+                        .var()
+                        .is_some_and(|var| var.id == GlueAddr::Parent(target))
+                })
+            });
+        if driven {
+            continue;
+        }
+        let Some((enabled, forced)) = procedural_force_controls(variables, target) else {
+            continue;
+        };
+        let variable = &variables[&target];
+        let width = variable.width;
+        let mask = if variable.is_4state {
+            (BigUint::from(1u8) << width) - BigUint::from(1u8)
+        } else {
+            BigUint::default()
+        };
+        let arena = &mut module.arena;
+        let high_impedance =
+            arena.alloc(SLTNode::Constant(BigUint::default(), mask, width, false))?;
+        let cond = arena.alloc(SLTNode::Input {
+            variable: enabled,
+            signed: false,
+            index: Vec::new(),
+            access: BitAccess::new(0, 0),
+        })?;
+        let then_expr = arena.alloc(SLTNode::Input {
+            variable: forced,
+            signed: false,
+            index: Vec::new(),
+            access: BitAccess::new(0, width - 1),
+        })?;
+        let expr = arena.alloc(SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr: high_impedance,
+        })?;
+        module.comb_blocks.push(LogicPath {
+            transparent_copy: false,
+            target: LogicPathTarget::Var(VarAtomBase::new(target, 0, width - 1)),
+            expr,
+            sources: [
+                VarAtomBase::new(enabled, 0, 0),
+                VarAtomBase::new(forced, 0, width - 1),
+            ]
+            .into_iter()
+            .collect(),
+            address_sources: HashSet::default(),
+            previous_sources: HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
+            pre_lower_nodes: Vec::new(),
+        });
+    }
+    Ok(())
+}
+
+/// The enable and value of a procedural force of variable `target`, if
+/// one forces it (IEEE 1800-2023 10.6.2).
+fn procedural_force_controls(
+    variables: &HashMap<SourceVarId, SvVariable>,
+    target: SourceVarId,
+) -> Option<(SourceVarId, SourceVarId)> {
+    let control = |enable: bool| {
+        variables.iter().find_map(|(&id, variable)| {
+            variable
+                .force_control
+                .is_some_and(|slot| {
+                    slot.procedural && slot.target == target && slot.enable == enable
+                })
+                .then_some(id)
+        })
+    };
+    Some((control(true)?, control(false)?))
+}
+
+/// `value`, written to bits `access` of a variable, or the forced value of
+/// the variable while the force `controls` is on: a port connection is a
+/// driver of the variable the force overrides, and drives it again when
+/// the force is released.
+fn force_select(
+    arena: &mut SLTNodeArena<GlueAddr>,
+    sources: &mut HashSet<VarAtomBase<GlueAddr>>,
+    (enabled, forced): (SourceVarId, SourceVarId),
+    address: fn(SourceVarId) -> GlueAddr,
+    access: BitAccess,
+    value: NodeId,
+) -> Result<NodeId, ParserError> {
+    let cond = arena.alloc(SLTNode::Input {
+        variable: address(enabled),
+        signed: false,
+        index: Vec::new(),
+        access: BitAccess::new(0, 0),
+    })?;
+    let then_expr = arena.alloc(SLTNode::Input {
+        variable: address(forced),
+        signed: false,
+        index: Vec::new(),
+        access,
+    })?;
+    sources.insert(VarAtomBase::new(address(enabled), 0, 0));
+    sources.insert(VarAtomBase::new(address(forced), access.lsb, access.msb));
+    Ok(arena.alloc(SLTNode::Mux {
+        cond,
+        then_expr,
+        else_expr: value,
+    })?)
 }
 
 /// The direction in which the connection of `port` carries its value. An

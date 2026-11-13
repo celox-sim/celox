@@ -152,6 +152,7 @@ impl ModuleBinding<'_> {
                         is_const: false,
                         package_variable: None,
                         hierarchical: None,
+                        force_control: None,
                     });
                 }
                 let symbols = interface.symbols.as_ref().unwrap();

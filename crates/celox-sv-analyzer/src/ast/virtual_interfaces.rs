@@ -422,6 +422,7 @@ pub(super) fn member_signals(declarations: &VirtualInterfaces) -> Vec<Signal> {
             is_const: false,
             package_variable: None,
             hierarchical: None,
+            force_control: None,
         }));
     }
     for (interface, declaration) in interfaces {
@@ -431,6 +432,7 @@ pub(super) fn member_signals(declarations: &VirtualInterfaces) -> Vec<Signal> {
         .name();
         signals.push(Signal {
             hierarchical: Some(instance.clone()),
+            force_control: None,
             name: instance,
             r#type: value_type(VirtualInterface {
                 interface: interface.clone(),
@@ -453,6 +455,7 @@ pub(super) fn member_signals(declarations: &VirtualInterfaces) -> Vec<Signal> {
             // name does: that instance's object, not one of this module.
             Signal {
                 hierarchical: Some(name.clone()),
+                force_control: None,
                 name,
                 r#type: member.r#type.clone(),
                 is_net: member.is_net,
@@ -893,6 +896,7 @@ pub(super) fn identity_signal(state: &Session, handle: &str, interface: &str) ->
         is_const: false,
         package_variable: None,
         hierarchical: None,
+        force_control: None,
     })
 }
 

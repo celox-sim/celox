@@ -40,6 +40,7 @@ mod mailboxes;
 mod net_delays;
 mod net_drives;
 mod procedural_assigns;
+mod procedural_forces;
 mod processes;
 mod semaphores;
 pub use bound_patterns::BoundPattern;
@@ -377,6 +378,8 @@ pub struct Signal {
     /// The hierarchical name of the signal of another instance the signal
     /// denotes (IEEE 1800-2023 23.6).
     hierarchical: Option<String>,
+    /// The force control the signal is (see `procedural_forces`).
+    force_control: Option<crate::ir::ForceControl>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

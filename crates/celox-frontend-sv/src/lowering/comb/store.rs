@@ -15,7 +15,7 @@ impl Comb<'_, '_> {
         // Initial-state folding runs before a foreign caller can apply force.
         // Runtime initial processes are lowered separately through Ff.
         if !self.initial
-            && let Some((enabled, forced)) = self.m.force_controls(id)
+            && let Some((enabled, forced)) = self.m.force_read_controls(id)
         {
             let cond = self.alloc(SLTNode::Input {
                 variable: enabled,

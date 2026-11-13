@@ -18,8 +18,15 @@ fn strength(word: &str) -> bool {
 
 impl Parser<'_> {
     pub(super) fn assign_statement(&mut self) -> Result<AssignId> {
+        self.assign_statement_with("assign")
+    }
+
+    /// An assignment statement that starts with `keyword`: `assign`, or
+    /// `force` (IEEE 1800-2023 A.6.2), whose binder rejects a strength, a
+    /// delay and a list as it does for a procedural `assign`.
+    pub(super) fn assign_statement_with(&mut self, keyword: &str) -> Result<AssignId> {
         let start = self.at;
-        self.expect("assign")?;
+        self.expect(keyword)?;
         let drive = self.drive_strength()?;
         let delay = self.assignment_delay()?;
         let mut assignments = Vec::new();
