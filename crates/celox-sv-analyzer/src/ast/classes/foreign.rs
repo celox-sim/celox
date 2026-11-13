@@ -432,7 +432,7 @@ fn specialize(
                     .subroutines
                     .iter()
                     .filter(|subroutine| subroutine.name.contains("::"))
-                    .flat_map(declared_names)
+                    .flat_map(|subroutine| declared_names(subroutine))
                     .collect::<HashSet<_>>();
                 caller
                     .locals
@@ -705,7 +705,7 @@ fn hand_over(known: &mut ScopeSymbols, caller: &ScopeSymbols, package_owner: Opt
     for subroutine in &caller.subroutines {
         if known_subroutines.insert(subroutine.name.clone()) {
             let (subroutine, locals) = handed_over(subroutine, &caller_locals, package_owner);
-            known.subroutines.push(subroutine);
+            known.subroutines.push(Arc::new(subroutine));
             for local in locals {
                 if known_locals.insert(local.name.clone()) {
                     known.locals.push(local);
@@ -832,7 +832,7 @@ fn hand_over_by_scans(
                 .collect::<HashMap<_, _>>();
             let (subroutine, locals) =
                 rename_handed_over(subroutine, &declared, &declarations, package_owner);
-            known.subroutines.push(subroutine);
+            known.subroutines.push(Arc::new(subroutine));
             for local in locals {
                 if !known.locals.iter().any(|old| old.name == local.name) {
                     known.locals.push(local);
