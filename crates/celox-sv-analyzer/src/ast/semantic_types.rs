@@ -188,7 +188,15 @@ pub(super) struct TyTable {
     closed_shapes: HashMap<u64, Vec<(crate::ast::variable_dimensions::VariableShape, TyId)>>,
     /// Whether a `chandle` type has been interned (6.14).
     chandle: bool,
+    /// The members of each named enumeration a type of the table is of
+    /// (6.19), which its `Decl::Named` does not hold.
+    enum_domains: HashMap<EnumKey, Arc<super::enums::EnumDomain>>,
 }
+
+/// A named enumeration as its specialization declares it: its declaration,
+/// and the range and state of its base type (6.19), which the parameters of
+/// a parameterized scope may change.
+type EnumKey = (Arc<str>, Option<Range>, bool);
 
 /// The classes a class extends and implements.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
