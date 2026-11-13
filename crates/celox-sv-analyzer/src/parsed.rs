@@ -700,6 +700,72 @@ mod tests {
         );
     }
 
+    /// A type parameter bound to `chandle` makes its variables chandles,
+    /// although no source of the design names the type (IEEE 1800-2023
+    /// 6.14): their uses as integral operands are rejected.
+    #[test]
+    fn type_parameters_bound_to_chandle_check_chandle_uses() {
+        let code = "module Top #(parameter type T = int);
+            T x;
+            int n;
+            initial n = $countones(x);
+        endmodule";
+        let source = ParsedSource::parse(code, Path::new("chandle-override.sv")).unwrap();
+        let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
+        let types = vec![("T".into(), type_binding("chandle"))];
+        let error = source
+            .analyze_module(
+                "Top",
+                &HashMap::default(),
+                &types,
+                &[],
+                &ModuleInterfaces::default(),
+                &packages,
+                &mut packages.design(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, AnalyzerError::IllegalChandleUse { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// A type parameter bound to a queue of chandles makes its elements
+    /// chandles, although no source of the design names the type (IEEE
+    /// 1800-2023 6.14, 7.10).
+    #[test]
+    fn type_parameters_bound_to_containers_of_chandles_check_chandle_uses() {
+        let caller =
+            "module Caller; typedef chandle handles_t[$]; Child #(.T(handles_t)) c(); endmodule";
+        let ir = crate::analyze_source(caller, Path::new("caller.sv")).unwrap();
+        let handles = ir.modules()[0].instances()[0].parameter_overrides()[0]
+            .bound_type()
+            .unwrap()
+            .clone();
+        let code = "module Top #(parameter type T = int);
+            T x;
+            int n;
+            initial n = $countones(x[0]);
+        endmodule";
+        let source = ParsedSource::parse(code, Path::new("chandle-queue-override.sv")).unwrap();
+        let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
+        let error = source
+            .analyze_module(
+                "Top",
+                &HashMap::default(),
+                &[("T".into(), handles)],
+                &[],
+                &ModuleInterfaces::default(),
+                &packages,
+                &mut packages.design(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, AnalyzerError::IllegalChandleUse { .. }),
+            "{error:?}"
+        );
+    }
+
     #[test]
     fn type_bindings_preserve_dependent_defaults_and_instance_isolation() {
         let code = r#"

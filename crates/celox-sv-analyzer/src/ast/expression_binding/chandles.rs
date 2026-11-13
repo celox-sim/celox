@@ -13,6 +13,12 @@ pub(in crate::ast) fn native_chandle(
     dimensions: &PackedDimensions,
     session: &mut Session,
 ) -> bool {
+    // An expression is a chandle only if its type, a chandle, has been
+    // interned when the declarations' types were bound; most designs have
+    // none, and typing each expression asked about is costly.
+    if !session.types.has_chandle() {
+        return false;
+    }
     expression_types::type_of(tree, session, id, native, dimensions)
         .is_ok_and(|ty| matches!(session.types.data(ty), semantic_types::TyData::Chandle))
 }
