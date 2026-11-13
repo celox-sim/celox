@@ -776,14 +776,17 @@ fn resolved_type(module: &ElaboratedModule, r#type: &sv::ir::Type) -> Option<sv:
         .iter()
         .map(|range| unpacked_range_bounds(range, &module.constants, &module.parameter_types))
         .collect::<Option<Vec<_>>>()?;
-    Some(
-        sv::ast::Type::resolved(
-            kind,
-            r#type.is_signed(),
-            r#type.signed_element_depth(),
-            &packed,
-            &unpacked,
-        )
-        .with_chandle(r#type.is_chandle()),
+    let resolved = sv::ast::Type::resolved(
+        kind,
+        r#type.is_signed(),
+        r#type.signed_element_depth(),
+        &packed,
+        &unpacked,
     )
+    .with_chandle(r#type.is_chandle());
+    // The members of a packed structure, which the name selects.
+    Some(match r#type.packed_structure() {
+        Some(structure) => resolved.with_members_of(structure),
+        None => resolved,
+    })
 }

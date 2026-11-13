@@ -202,6 +202,20 @@ impl Type {
 
     /// The type, a `chandle` if `chandle` (see [`crate::ir::Type::is_chandle`]):
     /// the bits of a chandle are two-state.
+    /// Whether the type is a packed structure or union, or a packed array of
+    /// them.
+    pub(crate) fn has_packed_members(&self) -> bool {
+        !self.members.is_empty()
+    }
+
+    /// The type with the members of the packed structure or union `other`:
+    /// a name of a variable of another scope, whose type is resolved there,
+    /// selects them (IEEE 1800-2023 23.6).
+    pub fn with_members_of(mut self, other: &Type) -> Self {
+        self.members = other.members.clone();
+        self
+    }
+
     pub fn with_chandle(mut self, chandle: bool) -> Self {
         if chandle {
             self.kind = TypeKind::Chandle;

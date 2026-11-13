@@ -549,3 +549,56 @@ fn rejects_malformed_non_ansi_port_declarations() {
         assert!(error.contains(message), "{source}: {error}");
     }
 }
+
+/// A hierarchical name selects a member of a packed structure of another
+/// instance, of a package type or of a type the instance's module declares,
+/// to read it and to write it (IEEE 1800-2023 23.6, 7.2). Icarus Verilog
+/// 13.0 and Verilator 5.054 print the same lines.
+#[test]
+fn hierarchical_names_select_members_of_structures() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+  typedef struct packed { logic [1:0] hi; logic [1:0] lo; } s_t;
+endpackage
+module child(input logic [3:0] a);
+  typedef struct packed { logic en; logic [2:0] v; } l_t;
+  p::s_t s;
+  l_t l;
+  always_comb s = a;
+  initial begin
+  end
+endmodule
+module top;
+  logic [3:0] a = 4'd6;
+  child c(.a(a));
+  initial begin
+    #1 $display("A %b %b", c.s.lo, c.s.hi);
+    c.l.v = 3'd5; c.l.en = 1'b1;
+    #1 $display("B %b %b %b", c.l, c.l.v, c.l.en);
+    $finish;
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("members.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            ["A 10 01", "B 1101 101 1"],
+            "four_state={four_state}"
+        );
+    }
+}
