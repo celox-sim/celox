@@ -68,7 +68,7 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 
 ### interface の制約 {#interface-restrictions}
 
-- **宣言:** interface 内の task、暗黙ネット、enum、モジュールインスタンス、
+- **宣言:** interface 内の暗黙ネット、enum、モジュールインスタンス、
   マクロ、コンパイラ指令。再帰する特殊化と64段を超える入れ子は拒否します。
 - **modport と接続:** `inout`、`ref`、式ポート、`export`、clocking modport。
   受け側ポートが modport を宣言していないのに modport を名指す接続。
@@ -77,6 +77,11 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 - **関数呼び出し:** 選択していない interface 配列や実行時添字越しの呼び出し。
   interface インスタンス配列の論理からメンバに触れる関数への呼び出し。
   generate・関数・task 内部で、ポート越しにメンバを書く import 関数を呼ぶこと。
+- **サブルーチンの static 記憶域:** 複数のモジュールが interface ポート越しに呼ぶ
+  static な関数・task の static 変数（中断する task の static な引数を含む）は、
+  interface インスタンスごとに一つではなく、呼び出すモジュールごとに持ちます
+  （13.3.2、13.4.2、[#3739](https://github.com/celox-sim/celox/issues/3739)）。
+  インスタンス自体越しの呼び出しと、一つのモジュールのポート越しの呼び出しは一つを共有します。
 - **宣言の依存:** ポート越しに使う interface のパラメータ・定数・型・メンバ宣言での
   メンバ参照。別のファイルのモジュールや interface より前に使うモジュールが
   コンパイル単位の項目を使う場合。
