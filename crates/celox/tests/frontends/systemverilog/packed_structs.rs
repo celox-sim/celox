@@ -593,3 +593,135 @@ sv_backends! {
         }
     }
 }
+
+/// A member of an element of a packed array member is driven by a
+/// continuous assignment and by an output port, each of which drives only
+/// the bits it selects (IEEE 1800-2023 6.5, 23.3.2.2): OpenTitan's register
+/// slices connect `.q(reg2hw.regs[0].q)` of many instances to one
+/// structure.
+#[test]
+fn ports_and_assignments_drive_members_of_array_member_elements() {
+    let source = r#"
+        `timescale 1ns/1ns
+        package Regs;
+            typedef struct packed { logic [7:0] q; } reg_t;
+            typedef struct packed { logic [3:0] a; reg_t [2:0] regs; logic b; } file_t;
+        endpackage
+        module Nibble(input logic [3:0] d, output logic [3:0] q);
+            assign q = d;
+        endmodule
+        module Byte(input logic [7:0] d, output logic [7:0] q);
+            assign q = d;
+        endmodule
+        module Top;
+            Regs::file_t ports;
+            Nibble u_low(.d(4'h5), .q(ports.regs[1].q[3:0]));
+            Nibble u_high(.d(4'ha), .q(ports.regs[1].q[7:4]));
+            Nibble u_a(.d(4'h3), .q(ports.a));
+            Byte u_two(.d(8'h77), .q(ports.regs[2].q));
+            assign ports.regs[0].q = 8'h11;
+            assign ports.b = 1'b1;
+            initial #1 $display("ports=%h element=%h q=%h nibble=%h", ports, ports.regs[1],
+                                ports.regs[1].q, ports.regs[1].q[7:4]);
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("element_ports.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            ["ports=06ef4a23 element=a5 q=a5 nibble=a"],
+            "four-state {four_state}"
+        );
+    }
+}
+
+/// Two output ports that drive the same member of an element are multiple
+/// drivers of those bits (6.5).
+#[test]
+fn rejects_overlapping_port_drivers_of_array_member_elements() {
+    let source = r#"
+        package Regs;
+            typedef struct packed { logic [7:0] q; } reg_t;
+            typedef struct packed { reg_t [1:0] regs; } file_t;
+        endpackage
+        module Byte(input logic [7:0] d, output logic [7:0] q);
+            assign q = d;
+        endmodule
+        module Top;
+            Regs::file_t ports;
+            Byte u_a(.d(8'h01), .q(ports.regs[0].q));
+            Byte u_b(.d(8'h02), .q(ports.regs[0].q[3:0]));
+        endmodule
+    "#;
+    let error = celox::Simulation::from_sv_sources(vec![(source, Path::new("overlap.sv"))], "Top")
+        .build()
+        .map(|_| ())
+        .expect_err("overlapping drivers are rejected")
+        .to_string();
+    assert!(error.contains("multiple variable drivers"), "{error}");
+}
+
+/// A port that drives a select of a member of an array member element
+/// selects by the member's declared indices, ascending or not starting at 0
+/// (IEEE 1800-2023 7.4.6). Verilator 5.054 prints the same.
+#[test]
+fn ports_drive_members_of_array_member_elements_by_their_declared_indices() {
+    let source = r#"
+        `timescale 1ns/1ns
+        package Regs;
+            typedef struct packed { logic [0:7] q; logic [15:8] r; } reg_t;
+            typedef struct packed { logic [3:0] a; reg_t [1:0] regs; } file_t;
+        endpackage
+        module Nibble(input logic [3:0] d, output logic [3:0] q);
+            assign q = d;
+        endmodule
+        module Top;
+            Regs::file_t ports;
+            Nibble u_q0(.d(4'h5), .q(ports.regs[1].q[4:7]));
+            Nibble u_q1(.d(4'ha), .q(ports.regs[1].q[0:3]));
+            Nibble u_r0(.d(4'h3), .q(ports.regs[1].r[11:8]));
+            Nibble u_r1(.d(4'hc), .q(ports.regs[1].r[15:12]));
+            Nibble u_a(.d(4'h7), .q(ports.a));
+            assign ports.regs[0] = 16'h1234;
+            initial #1 $display("%h %h %h", ports, ports.regs[1].q, ports.regs[1].r);
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("element_port_indices.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["7a5c31234 a5 c3"], "four-state {four_state}");
+    }
+}

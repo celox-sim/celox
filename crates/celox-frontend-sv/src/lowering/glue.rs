@@ -1062,6 +1062,27 @@ fn output_lvalue_access(
         sv::ir::Expr::Resize { expr, .. } => {
             output_lvalue_access(expr, variables, name_to_id, constants, parameter_types)
         }
+        // A constant select of a constant select, as of a member of an
+        // element of a packed array member (`s.regs[2].q`), selects bits of
+        // the inner select's value: the analyzer gives its bounds as offsets
+        // from bit 0 of that value, whatever the member's declared range.
+        sv::ir::Expr::Select {
+            expr: inner,
+            msb,
+            lsb,
+            ..
+        } if matches!(&**inner, sv::ir::Expr::Select { .. }) => {
+            let (id, outer) =
+                output_lvalue_access(inner, variables, name_to_id, constants, parameter_types)?;
+            let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
+            let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
+            let (low, high) = (
+                usize::try_from(msb.min(lsb)).ok()?,
+                usize::try_from(msb.max(lsb)).ok()?,
+            );
+            let access = BitAccess::new(outer.lsb.checked_add(low)?, outer.lsb.checked_add(high)?);
+            (access.msb <= outer.msb).then_some((id, access))
+        }
         sv::ir::Expr::Select { expr, msb, lsb, .. } => {
             let sv::ir::Expr::Ident(name) = &**expr else {
                 return None;
