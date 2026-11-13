@@ -2,8 +2,9 @@
 //!
 //! The analyzer rewrites each `%p` of a literal format into a conversion the
 //! formatter has: an integral value prints as `%0d`, a real as an unformatted
-//! real, and a string, enum value, class handle or container as the `%s` of
-//! its pattern text. Types whose patterns are not supported yet are rejected.
+//! real, and a string, enum value, class handle, container or structure
+//! (unpacked or packed) as the `%s` of its pattern text. Types whose
+//! patterns are not supported yet are rejected.
 
 use std::sync::Arc;
 
@@ -366,7 +367,7 @@ pub(in crate::ast) fn aggregate_text(
     }
     let Some(aggregate) = unpacked_structs::native_struct(id, native, tree, session, dimensions)?
     else {
-        return Ok(None);
+        return packed_structure_text(tree, session, id, value, dimensions);
     };
     // A variable or pattern names each member value; other structure values
     // are rejected by `pattern`.
@@ -376,6 +377,97 @@ pub(in crate::ast) fn aggregate_text(
     let mut text = Text::default();
     text.structure(&aggregate, &mut leaves.into_iter(), dimensions)?;
     Ok(Some(text.format()))
+}
+
+/// The `%p` text of native expression `id`, bound as `value`, when it is a
+/// packed structure: an assignment pattern with named members (IEEE
+/// 1800-2023 21.2.1.6). `None` for any other value.
+fn packed_structure_text(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    value: &Expr,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<Expr>> {
+    let Some(members) = packed_members(tree, session, id, dimensions)? else {
+        return Ok(None);
+    };
+    // Each member is a select of the value, which is read once for each.
+    if !rereadable(value) {
+        return Err(unsupported(
+            "%p of a packed structure value of a call with effects",
+        ));
+    }
+    let mut text = Text::default();
+    text.packed(tree, &members, value, dimensions)?;
+    Ok(Some(text.format()))
+}
+
+/// The members of the packed structure that native expression `id`
+/// denotes: a variable, select, member, cast, pattern or function result of
+/// a packed structure type, or a conditional whose arms both have that type
+/// (IEEE 1800-2023 11.4.11). The other operators make an integral vector
+/// of a packed structure (7.2.1, 11.4), which has no members; `None` then.
+fn packed_members(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<Vec<packed_structs::PackedMember>>> {
+    let native = tree.declarations();
+    let id = ungroup(id, native);
+    match &native.expression(id).kind {
+        ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Assignment { .. }
+        | ExprKind::Concatenation(_)
+        | ExprKind::Replication { .. }
+        | ExprKind::Streaming { .. }
+        | ExprKind::Literal(_) => return Ok(None),
+        ExprKind::Conditional {
+            then_expression,
+            else_expression,
+            ..
+        } => {
+            let (then_expression, else_expression) = (*then_expression, *else_expression);
+            let then_members = packed_members(tree, session, then_expression, dimensions)?;
+            let else_members = packed_members(tree, session, else_expression, dimensions)?;
+            return Ok(then_members.filter(|members| else_members.as_ref() == Some(members)));
+        }
+        // A call of a function binds as bits: the declared return type has
+        // the members.
+        ExprKind::Call { expression, .. } => {
+            if let Some(ty) = direct::call_name(tree, *expression, native)
+                .and_then(|name| {
+                    dimensions
+                        .functions
+                        .get(&name)
+                        .and_then(|function| function.return_type.clone())
+                        .or_else(|| {
+                            dimensions
+                                .function_return_types
+                                .get(&name)
+                                .and_then(|metadata| metadata.pattern_type.clone())
+                        })
+                })
+                .filter(|ty| {
+                    !ty.members.is_empty()
+                        && ty.unpacked_ranges.is_empty()
+                        && ty.packed_ranges.len() == 1
+                })
+            {
+                return Ok(Some(ty.members));
+            }
+        }
+        _ => {}
+    }
+    let Some(shape) = dimensions::operand_shape(id, tree, session, dimensions)? else {
+        return Ok(None);
+    };
+    Ok(
+        (!shape.members.is_empty() && shape.unpacked.is_empty() && shape.packed.len() == 1)
+            .then(|| shape.members.clone()),
+    )
 }
 
 /// How [`container_text`] prints the elements of a container.
@@ -629,6 +721,62 @@ impl Text {
                     self.template.extend_from_slice(b"%0d");
                     self.args.push(leaf);
                 }
+            }
+        }
+        self.template.push(b'}');
+        Ok(())
+    }
+
+    /// Append the assignment pattern of a packed structure with members
+    /// `members` and value `value`, with named members (21.2.1.6): a packed
+    /// structure member as a pattern again, an enum member by the name of
+    /// its value, and any other member as it prints unformatted.
+    fn packed(
+        &mut self,
+        tree: &AnalysisContext<'_>,
+        members: &[packed_structs::PackedMember],
+        value: &Expr,
+        dimensions: &PackedDimensions,
+    ) -> Converted<()> {
+        // A union, whose members share bits, prints none of them by name,
+        // also when it has a single member.
+        if members.iter().any(packed_structs::PackedMember::in_union) {
+            return Err(unsupported("%p of a packed union"));
+        }
+        self.template.extend_from_slice(b"'{");
+        for (position, member) in members.iter().enumerate() {
+            if position > 0 {
+                self.template.extend_from_slice(b", ");
+            }
+            // The name is text of the template, where `%` introduces a
+            // conversion: an escaped identifier may hold one (5.6.1).
+            for &byte in member.name().as_bytes() {
+                if byte == b'%' {
+                    self.template.push(b'%');
+                }
+                self.template.push(byte);
+            }
+            self.template.push(b':');
+            let ty = member.r#type();
+            let width = casts::expr_type_from_type(&tree.functions, ty, &dimensions.const_env)
+                .ok_or_else(|| unsupported("%p of a packed structure member width"))?
+                .width;
+            let select = Expr::Select {
+                expr: Box::new(value.clone()),
+                msb: ConstExpr::Literal((member.offset() + width - 1).to_string()),
+                lsb: ConstExpr::Literal(member.offset().to_string()),
+                signed: ty.is_signed,
+            };
+            if !ty.members.is_empty() && ty.packed_ranges.len() == 1 {
+                self.packed(tree, &ty.members, &select, dimensions)?;
+            } else if let Some(domain) = ty.enum_domain.as_ref().filter(|_| !ty.packed_enum) {
+                self.template.extend_from_slice(b"%s");
+                self.args.push(enums::pattern_text(domain, select));
+            } else if ty.is_enum || ty.packed_enum {
+                return Err(unsupported("%p of a packed structure with an enum member"));
+            } else {
+                self.template.extend_from_slice(b"%0d");
+                self.args.push(select);
             }
         }
         self.template.push(b'}');

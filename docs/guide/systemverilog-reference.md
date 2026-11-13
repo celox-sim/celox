@@ -401,8 +401,9 @@ nonblocking action statements.
   and non-UTF-8 file names and modes; `$writememh` / `$writememb` of
   dynamic and associative arrays.
 - Formatted output <a id="formatted-output-to-strings"></a>: `%p` of an enum value
-  returned by a function call or popped from a queue, packed structures,
-  packed arrays of enums, fixed-size unpacked arrays, structures with
+  returned by a function call or popped from a queue, packed unions, a packed
+  structure returned by a function call or computed by another call with
+  side effects, packed arrays of enums, fixed-size unpacked arrays, structures with
   `real` members, other aggregate function results, and containers of other
   aggregates. `%p` with a run-time format prints a string in quotes and any
   other value as `%0d`.
