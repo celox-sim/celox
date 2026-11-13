@@ -20,7 +20,10 @@ impl ScopeElaboration<'_> {
         (self.is_package || self.export_symbols).then(|| scope::ScopeSymbols {
             unit: None,
             package_scopes: self.imported.package_scopes.clone(),
-            classes: classes::scope_classes(syntax_tree, session, &self.const_env),
+            classes: classes::scope_classes(syntax_tree, session, &self.const_env)
+                .into_iter()
+                .map(Arc::new)
+                .collect(),
             class_member_types: classes::specializations::export_member_types(syntax_tree, session),
             inline_randomizations,
             declarations_only: self.imported.declarations_only,
@@ -47,9 +50,13 @@ impl ScopeElaboration<'_> {
             function_return_types: (*self.packed_dimensions.function_return_types).clone(),
             constant_functions: syntax_tree.functions.clone(),
             subroutine_params: self.subroutine_params.clone(),
-            subroutine_shapes: self.subroutine_shapes.clone(),
+            subroutine_shapes: self
+                .subroutine_shapes
+                .iter()
+                .map(|(name, shapes)| (name.clone(), Arc::new(shapes.clone())))
+                .collect(),
             subroutines: self.subroutines.iter().cloned().map(Arc::new).collect(),
-            locals: self.locals.clone(),
+            locals: self.locals.iter().cloned().map(Arc::new).collect(),
             dpi_imports: self.dpi_imports.clone(),
             // A package's signals are its array parameters and constant
             // variables, initialized by its initial processes.
@@ -113,7 +120,7 @@ impl ScopeElaboration<'_> {
                 .locals
                 .iter()
                 .filter(|local| known.insert(local.name.as_str()))
-                .cloned()
+                .map(|local| (**local).clone())
                 .collect::<Vec<_>>();
             self.locals.extend(missing);
         }
