@@ -130,13 +130,24 @@ fn lower_module_with_overrides(
         None => None,
     };
     let shared_process_variables = shared_process_variables.as_ref();
+    let level = always_star_processes_sharing_edge_variables(&module, &constants, &parameter_types);
+    if !level.is_empty() {
+        module = std::borrow::Cow::Owned(
+            module
+                .into_owned()
+                .run_comb_processes_as_processes(|index, _| level.contains(&index)),
+        );
+    }
     // The rewrite visits the edge processes in order, once each.
+    let sharing = edge_processes_sharing_variables(&module, &constants, &parameter_types);
     let fallbacks = module
         .ff_processes()
         .iter()
-        .map(|process| {
+        .enumerate()
+        .map(|(index, process)| {
             runs_as_process(&module, process, &constants, &parameter_types)
                 || shares_foreign_variable(&module, process, foreign_writes)
+                || sharing.contains(&index)
         })
         .collect::<Vec<_>>();
     if fallbacks.contains(&true) {
