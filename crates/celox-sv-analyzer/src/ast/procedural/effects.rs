@@ -123,6 +123,13 @@ fn operands(kind: &ExprKind) -> Vec<ExprId> {
                 dimension_operands(&dimension.kind, &mut operands);
             }
         }
+        ExprKind::Dist { expression, items } => {
+            operands.push(*expression);
+            for item in items {
+                dimension_operands(&item.value.kind, &mut operands);
+                operands.extend(item.weight.map(|weight| weight.value));
+            }
+        }
         ExprKind::Streaming {
             slice, expressions, ..
         } => {

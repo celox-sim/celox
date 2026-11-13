@@ -298,19 +298,26 @@ blocks in programs. Two region deviations are listed under
   enums with unsupported or unresolved domains, unpacked arrays, nets,
   constants, selects, and concatenation arguments.
 - Class `randomize()`: 4-state and aggregate properties, static random
-  properties, random arrays of elements other than 2-state integral ones
-  of at most 64 bits, `randc` arrays, random object and string properties,
+  properties, random arrays of elements other than 2-state integral ones of
+  at most 64 bits, `randc` arrays, random object and string properties,
   constrained enums and `randc`, a `foreach` or `sum()` over a random array
-  whose size a constraint names, `sum() with`, `soft` constraints, `dist`,
+  whose size a constraint names, `sum() with`, `soft` constraints, `dist`
+  with `default :/`, weights other than constant expressions or ranges
+  weighted per value with bounds other than constant expressions,
   `solve before`, external and static constraint blocks, typed parameters
   in constraints, array sets, X/Z wildcard items and `$` bounds in `inside`
-  sets, and `randc` domains beyond 1–8-bit integers and scalar enums with
-  up to 256 members. Named constraint blocks cover only 1–64-bit two-state
+  sets, and `randc` domains beyond 1–8-bit integers and scalar enums with up
+  to 256 members. Named constraint blocks cover only 1–64-bit two-state
   scalar integer properties with comparisons, logical and bitwise
   operations, addition, subtraction, and multiplication. The elements of a
   random array, fixed-size or dynamic, that a `foreach` or a `sum()` of a
   constraint names are solver variables (18.5.8); the others are drawn at
-  random.
+  random. A `dist` allows the values of its items of nonzero total weight, a
+  range bound `$` being the lowest or highest value of the type of its
+  expression; the solver first tries one item of each `dist`, picked by its
+  weight (one under `if` or `->` where its condition holds, one in a
+  `foreach` for each element), and then any allowed value, so the weights
+  bias the values without sampling them exactly.
 - Inline `with` constraints: four-state and aggregate caller-scope inputs,
   typed parameter inputs, qualified `this` / `super` references, restricted
   `with (names)` lookup, and scope `std::randomize(…) with`.

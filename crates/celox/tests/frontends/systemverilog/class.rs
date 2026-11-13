@@ -1830,7 +1830,7 @@ sv_backends! {
                     function void post_randomize(); calls++; endfunction
                 endclass
                 class Derived extends Base;
-                    constraint c { x dist {1 := 2}; }
+                    constraint c { (x == 1) <-> (x < 3); }
                 endclass
                 Base b;
                 Derived d;
@@ -2237,6 +2237,371 @@ fn package_classes_name_the_compilation_unit_classes_of_other_files() {
     .unwrap();
     sim.run_until(1).unwrap();
     assert_eq!(sim.get(sim.signal("named")), 1u32.into());
+}
+
+#[test]
+fn distributions_constrain_values_and_weigh_their_items() {
+    // `dist` allows the values of its items of nonzero total weight, weighs
+    // a range by its values with `:=` and as a whole with `:/`, and its
+    // weights never make a call fail; with the class's, an inline one that
+    // leaves no value fails the call (IEEE 1800-2023 18.5.3, 18.7).
+    let source = "class C;
+        rand int b;
+        rand bit [3:0] r;
+        constraint c { b dist {3 := 0, 10 := 5}; }
+        constraint d { r dist {[0:3] :/ 1, [4:15] := 0, 15 := 3}; }
+    endclass
+    module Top;
+        C c;
+        int ok, fifteen, low, failed;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (200) begin
+                ok &= c.randomize() && c.b == 10 && (c.r <= 3 || c.r == 15);
+                if (c.r == 15) fifteen++; else low++;
+            end
+            $display(\"%0d %0d %0d\", ok, fifteen > 120, low > 20);
+            ok = c.randomize() with { b dist {10 := 1, 3 := 9}; };
+            failed = c.randomize() with { b dist {3 := 1, 10 := 0}; };
+            $display(\"%0d %0d %0d\", ok, c.b, failed);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1 1 1", "1 10 0"]
+    );
+    let source = "class C;
+        rand int b;
+        int w = 2;
+        constraint c { b dist {10 := w}; }
+    endclass
+    module Top; C c; initial begin c = new; void'(c.randomize()); end endmodule";
+    let error =
+        match celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+            .build()
+        {
+            Err(error) => error.to_string(),
+            Ok(mut sim) => sim
+                .run_until(1)
+                .expect_err("a weight that is no constant")
+                .to_string(),
+        };
+    assert!(
+        error.contains("distribution weight other than a constant"),
+        "{error}"
+    );
+    // However the operand names the randc property.
+    for operand in ["b", "(b)"] {
+        let source = format!(
+            "class C;
+                randc bit [3:0] b;
+                constraint c {{ {operand} dist {{3 := 0, 10 := 5}}; }}
+            endclass
+            module Top; C c; initial begin c = new; void'(c.randomize()); end endmodule"
+        );
+        let error = match celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        {
+            Err(error) => error.to_string(),
+            Ok(mut sim) => sim.run_until(1).expect_err(operand).to_string(),
+        };
+        assert!(
+            error.contains("distribution of a randc variable"),
+            "{operand}: {error}"
+        );
+    }
+    // A soft distribution, the only constraint of its block, keeps the block
+    // unsupported rather than taking another expression as its operand.
+    let source = "class C;
+        rand int b;
+        constraint c { soft b dist {10 := 1}; }
+    endclass
+    module Top; C c; initial begin c = new; void'(c.randomize()); end endmodule";
+    let error =
+        match celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+            .build()
+        {
+            Err(error) => error.to_string(),
+            Ok(mut sim) => sim
+                .run_until(1)
+                .expect_err("a soft distribution")
+                .to_string(),
+        };
+    assert!(error.contains("constraint block form"), "{error}");
+}
+
+#[test]
+fn distribution_ranges_count_their_values_in_their_type() {
+    // `:=` counts the values of a range in the type the items compare in:
+    // [LOW:2] of a signed `int` with LOW = -2 holds five values, as many as
+    // the other item weighs (IEEE 1800-2023 18.5.3).
+    let source = "class C;
+        localparam int LOW = -2;
+        rand int b;
+        constraint c { b dist {[LOW:2] := 1, 100 := 5}; }
+    endclass
+    module Top;
+        C c;
+        int ok, range, hundred;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (200) begin
+                ok &= c.randomize() && (c.b inside {[-2:2], 100});
+                if (c.b == 100) hundred++; else range++;
+            end
+            $display(\"%0d %0d %0d\", ok, range > 60, hundred > 60);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1 1"]);
+}
+
+#[test]
+fn distribution_weights_and_bounds_are_constant_expressions() {
+    // A weight, and a bound of a range weighted per value, is any constant
+    // expression (IEEE 1800-2023 18.5.3).
+    let source = "class C;
+        rand int e;
+        constraint d { e dist {1 := 2 + 3, [1 + 2:5] := 1}; }
+    endclass
+    module Top;
+        C c;
+        int ok, one, three;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (200) begin
+                ok &= c.randomize() && (c.e inside {1, [3:5]});
+                if (c.e == 1) one++; else three++;
+            end
+            $display(\"%0d %0d %0d\", ok, one > 60, three > 40);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1 1"]);
+}
+
+#[test]
+fn distribution_ranges_may_be_open_ended() {
+    // `$` bounds a range by the lowest or highest value of the type of the
+    // expression (IEEE 1800-2023 11.4.13, 18.5.3): [$:-3] of an `int` is
+    // every value up to -3, [250:$] of an 8-bit unsigned one 250 to 255.
+    let source = "class C;
+        rand int b;
+        rand bit [7:0] u;
+        constraint c { b dist {[$:-3] :/ 1, [10:12] :/ 1}; }
+        constraint d { u dist {[250:$] := 1, [0:5] := 1}; }
+    endclass
+    module Top;
+        C c;
+        int ok, low, high;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (200) begin
+                ok &= c.randomize() && (c.b <= -3 || c.b inside {[10:12]})
+                    && (c.u >= 250 || c.u <= 5);
+                if (c.b <= -3) low++;
+                if (c.u >= 250) high++;
+            end
+            $display(\"%0d %0d %0d\", ok, low > 60, high > 60);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1 1"]);
+}
+
+#[test]
+fn distribution_weights_keep_their_width() {
+    // A weight is the full value of its constant expression: a 64-bit one
+    // of 2^32 is not 0 (IEEE 1800-2023 18.5.3), so its item stays allowed,
+    // also from a constant function.
+    let source = "package P;
+        function automatic longint unsigned big(); return 64'h1_0000_0000; endfunction
+    endpackage
+    class C;
+        rand int b;
+        constraint c { b dist {7 := 64'h3_0000_0000 / 3, 7 := P::big()}; }
+    endclass
+    module Top;
+        C c;
+        int ok;
+        initial begin
+            c = new;
+            ok = c.randomize() && c.b == 7;
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn distribution_range_totals_keep_their_ratio_beyond_64_bits() {
+    // A `:=` range weighs its weight times its size (IEEE 1800-2023
+    // 18.5.3): three values of weight 2^63 against one of 2^63 are tried
+    // 3:1, a total past 64 bits kept.
+    let source = "class C;
+        rand bit [1:0] x;
+        constraint c { x dist {[0:2] := 64'h8000_0000_0000_0000, 3 := 64'h8000_0000_0000_0000}; }
+    endclass
+    module Top;
+        C c;
+        int ok, three;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (1000) begin
+                ok &= c.randomize();
+                if (c.x == 3) three++;
+            end
+            $display(\"%0d %0d\", ok, three > 200 && three < 290);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1"]);
+}
+
+#[test]
+fn distribution_weights_keep_every_bit() {
+    // A weight is an unsigned value of any width (IEEE 1800-2023 18.5.3):
+    // a range of three values of weight W = 2^127 - 1 totals past 128 bits
+    // and is tried 3:2 against one value of weight 2W, so 3 is picked about
+    // 40% of the time, not the 25% of a pick by value; and 2^127 from an
+    // unsigned 128-bit constant function stays 2^127, about 1:1 against
+    // 2^127 - 1.
+    let source = "package P;
+        function automatic bit [127:0] top(); return 128'h8000_0000_0000_0000_0000_0000_0000_0000; endfunction
+    endpackage
+    class C;
+        rand bit [1:0] x;
+        rand bit y;
+        constraint c {
+            x dist {[0:2] := 128'h7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff, 3 := 129'h0_ffff_ffff_ffff_ffff_ffff_ffff_ffff_fffe};
+            y dist {0 := P::top(), 1 := 128'h7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff};
+        }
+    endclass
+    module Top;
+        C c;
+        int ok, three, zero;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (1000) begin
+                ok &= c.randomize();
+                if (c.x == 3) three++;
+                if (!c.y) zero++;
+            end
+            $display(\"%0d %0d %0d\", ok, three > 340 && three < 460, zero > 430 && zero < 570);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1 1"]);
+}
+
+#[test]
+fn distributions_of_array_sums_solve_the_elements() {
+    // The sum of a random array as the operand of a distribution makes its
+    // elements solver variables (IEEE 1800-2023 18.5.3, 18.5.8.2), so the
+    // sum, of the elements' 4 bits, takes a value of an item.
+    let source = "class C;
+        rand bit [3:0] a[2];
+        constraint c { a.sum() dist {[5:6] :/ 1}; }
+    endclass
+    module Top;
+        C c;
+        int ok;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (20) ok &= c.randomize() && c.a.sum() inside {[5:6]};
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn inline_distributions_take_open_ranges() {
+    // `$`, an open bound of a range of an inline distribution (IEEE
+    // 1800-2023 11.4.13, 18.7), names no variable of the caller.
+    let source = "class C; rand int b; endclass
+    module Top;
+        C c;
+        int ok;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (20) ok &= c.randomize() with { b dist {[$:3] :/ 1}; } && c.b <= 3;
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn negative_distribution_weights_are_unsigned() {
+    // A weight is read as unsigned at the width of its type (IEEE 1800-2023
+    // 18.5.3): -1 of an `int` constant function is 2^32 - 1, which outweighs
+    // a weight of 1.
+    let source = "package P;
+        function automatic int neg(); return -1; endfunction
+    endpackage
+    class C;
+        rand bit x;
+        constraint c { x dist {0 := P::neg(), 1 := 1}; }
+    endclass
+    module Top;
+        C c;
+        int ok, ones;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (100) begin
+                ok &= c.randomize();
+                if (c.x) ones++;
+            end
+            $display(\"%0d %0d\", ok, ones);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 0"]);
+}
+
+#[test]
+fn distributions_under_conditions_and_loops_weigh_their_items() {
+    // The weights of a distribution under `if`/`else` or `->`, also in a
+    // `foreach`, apply where its condition does (IEEE 1800-2023 18.5.3,
+    // 18.5.6, 18.5.7, 18.5.8.1).
+    let source = "class C;
+        rand int b;
+        rand int e;
+        bit mode;
+        int sel[];
+        constraint c { if (mode) b dist {10 := 1, 20 := 9}; else b dist {10 := 9, 20 := 1}; }
+        constraint d { foreach (sel[i]) sel[i] == 1 -> e dist {30 := 9, 40 := 1}; }
+    endclass
+    module Top;
+        C c;
+        int ok, twenty, ten, thirty;
+        initial begin
+            c = new;
+            c.sel = '{0, 1};
+            ok = 1;
+            repeat (200) begin
+                c.mode = 1;
+                ok &= c.randomize() && (c.b inside {10, 20}) && (c.e inside {30, 40});
+                if (c.b == 20) twenty++;
+                if (c.e == 30) thirty++;
+                c.mode = 0;
+                ok &= c.randomize();
+                if (c.b == 10) ten++;
+            end
+            $display(\"%0d %0d %0d %0d\", ok, twenty > 150, ten > 150, thirty > 150);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1 1 1 1"]
+    );
 }
 
 #[test]

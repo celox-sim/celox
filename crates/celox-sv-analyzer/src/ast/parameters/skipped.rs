@@ -370,6 +370,15 @@ pub(in crate::ast) fn validate(
                     dimension_jobs(&part.kind, &mut jobs, query);
                 }
             }
+            ExprKind::Dist { expression, items } => {
+                push(&mut jobs, *expression);
+                for item in items {
+                    dimension_jobs(&item.value.kind, &mut jobs, query);
+                    if let Some(weight) = item.weight {
+                        push(&mut jobs, weight.value);
+                    }
+                }
+            }
             ExprKind::MinTypMax {
                 minimum,
                 typical,

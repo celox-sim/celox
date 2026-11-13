@@ -80,6 +80,23 @@ pub enum Expr {
         right: Box<Expr>,
         signed: bool,
     },
+    /// `value dist { ... }` (IEEE 1800-2023 18.5.3): true while `membership`
+    /// is, the value being one of an item of nonzero weight. As a constraint
+    /// of its own, the solver first tries one of `choices`, each an item's
+    /// membership, picked by its weight.
+    Dist {
+        membership: Box<Expr>,
+        choices: Vec<DistChoice>,
+    },
+}
+
+/// An item of a distribution, by its membership and its weight: an
+/// unsigned value (IEEE 1800-2023 18.5.3) of any size, as a `:=` range
+/// weighs its weight times its size.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct DistChoice {
+    pub predicate: Expr,
+    pub weight: num_bigint::BigUint,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -240,6 +257,66 @@ fn shifted(op: &str, a: Term, b: Term, signed: bool) -> Term {
     }
 }
 
+/// The attempt that decides a call: each of `tiers` in order, first
+/// without and then with the restarts of `restarts`, until one is not
+/// unsatisfiable. The first `weighted` tiers, which add the items picked
+/// from distributions, also give way when the solver cannot decide them,
+/// so that the weights never make a call fail (IEEE 1800-2023 18.5.3).
+fn search<T>(
+    tiers: usize,
+    weighted: usize,
+    restarts: &[bool],
+    mut attempt: impl FnMut(usize, bool) -> T,
+    verdict: impl Fn(&T) -> &Verdict,
+) -> T {
+    let mut found = None;
+    for &restart in restarts {
+        for tier in 0..tiers {
+            let outcome = attempt(tier, restart);
+            let decided = match verdict(&outcome) {
+                Verdict::Unsat => false,
+                Verdict::Unknown => tier >= weighted,
+                Verdict::Sat => true,
+            };
+            if decided {
+                return outcome;
+            }
+            found = Some(outcome);
+        }
+    }
+    found.expect("a solver attempt")
+}
+
+/// The distributions of `constraint`, each with the operands whose truth
+/// keeps it from applying: the other operand of each `||` above it, such as
+/// the negated condition of an `if` or `->` (IEEE 1800-2023 18.5.6, 18.5.7).
+fn distributions_of<'a>(
+    constraint: &'a Expr,
+    guards: &mut Vec<&'a Expr>,
+    found: &mut Vec<(Vec<&'a Expr>, &'a [DistChoice])>,
+) {
+    match constraint {
+        Expr::Dist { choices, .. } => found.push((guards.clone(), choices)),
+        Expr::Binary {
+            op, left, right, ..
+        } if op == "&&" => {
+            distributions_of(left, guards, found);
+            distributions_of(right, guards, found);
+        }
+        Expr::Binary {
+            op, left, right, ..
+        } if op == "||" => {
+            guards.push(left);
+            distributions_of(right, guards, found);
+            guards.pop();
+            guards.push(right);
+            distributions_of(left, guards, found);
+            guards.pop();
+        }
+        _ => {}
+    }
+}
+
 fn truth(value: Term) -> Term {
     let Sort::Bv(width) = value.0.sort else {
         unreachable!()
@@ -263,6 +340,15 @@ impl Expr {
             Self::Binary { left, right, .. } => {
                 left.names_elements(index) || right.names_elements(index)
             }
+            Self::Dist {
+                membership,
+                choices,
+            } => {
+                membership.names_elements(index)
+                    || choices
+                        .iter()
+                        .any(|choice| choice.predicate.names_elements(index))
+            }
             Self::Literal(..)
             | Self::Field(_)
             | Self::Size(_)
@@ -283,6 +369,15 @@ impl Expr {
             Self::Binary { left, right, .. } => left.names_size(index) || right.names_size(index),
             Self::Foreach { body, .. } => body.names_size(index),
             Self::Sum(_) => false,
+            Self::Dist {
+                membership,
+                choices,
+            } => {
+                membership.names_size(index)
+                    || choices
+                        .iter()
+                        .any(|choice| choice.predicate.names_size(index))
+            }
             Self::Literal(..)
             | Self::Field(_)
             | Self::Input { .. }
@@ -303,6 +398,7 @@ impl Expr {
     ) -> Result<Term, String> {
         Ok(match self {
             Self::Enabled { .. } => return Err("nested constraint mode predicate".into()),
+            Self::Dist { membership, .. } => membership.term(terms, base, sizes, inputs)?,
             Self::Literal(width, value) => bv(*width, *value),
             Self::Input { index, width } => {
                 if !(1..=64).contains(width) {
@@ -609,6 +705,31 @@ impl Heap {
                     self.unroll(object, program, right, loops, solved, elements, check_only)?,
                 ),
                 signed: *signed,
+            },
+            Expr::Dist {
+                membership,
+                choices,
+            } => Expr::Dist {
+                membership: boxed(self.unroll(
+                    object, program, membership, loops, solved, elements, check_only,
+                )?),
+                choices: choices
+                    .iter()
+                    .map(|choice| {
+                        Ok(DistChoice {
+                            predicate: self.unroll(
+                                object,
+                                program,
+                                &choice.predicate,
+                                loops,
+                                solved,
+                                elements,
+                                check_only,
+                            )?,
+                            weight: choice.weight.clone(),
+                        })
+                    })
+                    .collect::<Result<_, String>>()?,
             },
             Expr::Literal(..)
             | Expr::Field(_)
@@ -964,6 +1085,9 @@ impl Heap {
                     }
                 }
             }
+            // The items of each distribution the call solves, with their
+            // weights (18.5.3).
+            let mut distributions: Vec<Vec<(Term, num_bigint::BigUint)>> = Vec::new();
             // The first solver variable of each object the call solves.
             let solved: fxhash::FxHashMap<Handle, (usize, &Program)> = members
                 .iter()
@@ -991,6 +1115,31 @@ impl Heap {
                         formula,
                         truth(constraint.term(&terms, base, sizes, inputs)?),
                     );
+                    // Each distribution, also one under `if` or `->`, whose
+                    // item is tried only where its guards let it apply, or
+                    // in a `foreach`, one for each element.
+                    let mut found = Vec::new();
+                    distributions_of(&constraint, &mut Vec::new(), &mut found);
+                    for (guards, choices) in found {
+                        // The distribution applies unless a guard holds.
+                        let mut skipped = boolv(false);
+                        for guard in guards {
+                            let guard = truth(guard.term(&terms, base, sizes, inputs)?);
+                            skipped = not(and(not(skipped), not(guard)));
+                        }
+                        let mut weighted = Vec::new();
+                        for choice in choices
+                            .iter()
+                            .filter(|choice| choice.weight != num_bigint::BigUint::ZERO)
+                        {
+                            let item = truth(choice.predicate.term(&terms, base, sizes, inputs)?);
+                            weighted.push((
+                                not(and(not(skipped.clone()), not(item))),
+                                choice.weight.clone(),
+                            ));
+                        }
+                        distributions.push(weighted);
+                    }
                 }
             }
             let seed = if projection.is_empty() {
@@ -1062,7 +1211,7 @@ impl Heap {
             };
             // Sizes up to the preferred bound are sought first, then any
             // supported size, each before a randc cycle restarts (18.4.2).
-            let tiers = if bounded {
+            let mut tiers = if bounded {
                 vec![
                     and(formula.clone(), preferred),
                     and(formula.clone(), limited),
@@ -1070,21 +1219,63 @@ impl Heap {
             } else {
                 vec![formula.clone()]
             };
-            let mut found = None;
-            'search: for restart in [false, true] {
-                if restart && cyclic.is_empty() {
-                    break;
-                }
-                for tier in &tiers {
-                    let attempt = run(self, tier, restart);
-                    let unsat = matches!(attempt.0.verdict, Verdict::Unsat);
-                    found = Some(attempt);
-                    if !unsat {
-                        break 'search;
+            // An item of each distribution, picked by its weight, is tried
+            // first; the weights never make the call fail (18.5.3).
+            let mut weighted = 0;
+            if !distributions.is_empty() {
+                let mut state = seed ^ 0x9e37_79b9_7f4a_7c15;
+                let mut next = || {
+                    // splitmix64
+                    state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                    let mut z = state;
+                    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                    z ^ (z >> 31)
+                };
+                let mut picked = boolv(true);
+                for items in &distributions {
+                    let total = items
+                        .iter()
+                        .map(|(_, weight)| weight)
+                        .sum::<num_bigint::BigUint>();
+                    if total == num_bigint::BigUint::ZERO {
+                        continue;
+                    }
+                    // A point drawn with 64 bits more than the total, so
+                    // that each is as likely as the weights say to 1 part
+                    // in 2^64.
+                    let words = total.bits().div_ceil(64) + 1;
+                    let bytes = (0..words)
+                        .flat_map(|_| next().to_le_bytes())
+                        .collect::<Vec<_>>();
+                    let mut point = num_bigint::BigUint::from_bytes_le(&bytes) % &total;
+                    for (predicate, weight) in items {
+                        if point < *weight {
+                            picked = and(picked, predicate.clone());
+                            break;
+                        }
+                        point -= weight;
                     }
                 }
+                let preferred: Vec<Term> = tiers
+                    .iter()
+                    .map(|tier| and(tier.clone(), picked.clone()))
+                    .collect();
+                weighted = preferred.len();
+                tiers.splice(0..0, preferred);
             }
-            let (outcome, restarted) = found.expect("a solver attempt");
+            let restarts: &[bool] = if cyclic.is_empty() {
+                &[false]
+            } else {
+                &[false, true]
+            };
+            let (outcome, restarted) = search(
+                tiers.len(),
+                weighted,
+                restarts,
+                |tier, restart| run(self, &tiers[tier], restart),
+                |attempt| &attempt.0.verdict,
+            );
             // Only sizes above the supported ones satisfy the constraints.
             if bounded
                 && matches!(outcome.verdict, Verdict::Unsat)
@@ -1208,6 +1399,36 @@ impl Heap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn weighted_attempts_give_way_when_undecided() {
+        // Tiers 0 and 1 add the picked items of distributions: one the
+        // solver cannot decide goes on to the next tier, as an
+        // unsatisfiable one does, while an undecided unweighted tier
+        // decides the call (IEEE 1800-2023 18.5.3).
+        let verdicts = [Verdict::Unknown, Verdict::Unsat, Verdict::Sat];
+        let mut tried = Vec::new();
+        let found = search(
+            3,
+            2,
+            &[false],
+            |tier, _| {
+                tried.push(tier);
+                (tier, verdicts[tier])
+            },
+            |attempt| &attempt.1,
+        );
+        assert_eq!((found.0, tried), (2, vec![0, 1, 2]));
+        let verdicts = [Verdict::Unsat, Verdict::Unknown, Verdict::Sat];
+        let found = search(
+            3,
+            1,
+            &[false],
+            |tier, _| (tier, verdicts[tier]),
+            |attempt| &attempt.1,
+        );
+        assert_eq!(found.0, 1);
+    }
 
     fn program() -> Program {
         Program {

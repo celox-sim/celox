@@ -6790,11 +6790,6 @@ fn class_randomize_rejects_unsupported_semantics() {
             "c.randomize()",
             "constraints",
         ),
-        (
-            "rand int x; constraint c { x dist {1 := 2}; }",
-            "c.randomize()",
-            "constraints",
-        ),
         ("randc bit [8:0] x;", "c.randomize()", "randc"),
         ("rand int x;", "c.srandom()", "argument"),
         ("rand int x;", "c.srandom(1, 2)", "arguments"),

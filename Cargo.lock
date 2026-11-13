@@ -693,6 +693,7 @@ dependencies = [
  "aplite",
  "fxhash",
  "imbl",
+ "num-bigint",
  "regex",
  "serde",
  "serde_json",
