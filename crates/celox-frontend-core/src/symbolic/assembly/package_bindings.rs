@@ -209,11 +209,25 @@ pub(super) fn check_package_variable_drivers(
     comb_blocks: &[celox_slt::LogicPath<AbsoluteAddr>],
 ) -> Result<(), ParserError> {
     let package_instance_ids: HashSet<InstanceId> = package_instances.values().copied().collect();
+    // Simulator state bound as a package variable has no driver
+    // restrictions; see [`PackageBinding::simulator_state`].
+    let simulator_state: HashSet<AbsoluteAddr> = instance_modules
+        .iter()
+        .flat_map(|(&instance, module_id)| {
+            modules[module_id]
+                .package_bindings
+                .iter()
+                .filter(|(_, binding)| binding.simulator_state)
+                .map(move |(&var_id, _)| bindings.locate(instance, var_id))
+        })
+        .collect();
     let packages: HashSet<AbsoluteAddr> = bindings
         .targets
         .values()
         .copied()
-        .filter(|target| package_instance_ids.contains(&target.instance_id))
+        .filter(|target| {
+            package_instance_ids.contains(&target.instance_id) && !simulator_state.contains(target)
+        })
         .collect();
     if packages.is_empty() {
         return Ok(());

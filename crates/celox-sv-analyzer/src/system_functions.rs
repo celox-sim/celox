@@ -652,6 +652,10 @@ pub enum SystemTask {
     LoadCoverageDb,
     /// `$fatal` (20.10).
     Fatal,
+    /// `$asserton` and `$assertoff` (20.11); the analyzer rewrites them
+    /// into assignments of the assertion control state of the design.
+    AssertOn,
+    AssertOff,
     /// `$error`, `$warning`, `$info` (20.10).
     Severity(Severity),
     /// `$display` and its `b`, `o` and `h` variants (21.2.1).
@@ -781,6 +785,8 @@ impl SystemTask {
             Self::SetCoverageDbName => "$set_coverage_db_name",
             Self::LoadCoverageDb => "$load_coverage_db",
             Self::Fatal => "$fatal",
+            Self::AssertOn => "$asserton",
+            Self::AssertOff => "$assertoff",
             Self::Severity(Severity::Error) => "$error",
             Self::Severity(Severity::Warning) => "$warning",
             Self::Severity(Severity::Info) => "$info",
@@ -2088,8 +2094,8 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
         None,
     ),
     // 20.11 Assertion control system tasks
-    unsupported("$asserton", Task),
-    unsupported("$assertoff", Task),
+    task(SystemTask::AssertOn, ProceduralAndInitial, 0, None),
+    task(SystemTask::AssertOff, ProceduralAndInitial, 0, None),
     unsupported("$assertkill", Task),
     unsupported("$assertpasson", Task),
     unsupported("$assertpassoff", Task),

@@ -186,6 +186,7 @@ pub(super) fn bind_package_variables<'a>(
         Ok::<_, sv::AnalyzerError>(PackageBinding {
             package: *module_id,
             var_id,
+            simulator_state: package == sv::ASSERTION_CONTROL_PACKAGE,
         })
     };
     let mut bindings = Vec::new();

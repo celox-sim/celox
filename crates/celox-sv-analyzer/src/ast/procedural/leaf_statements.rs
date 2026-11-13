@@ -153,6 +153,17 @@ impl BodyBuilder<'_, '_, '_> {
         Ok(renamed)
     }
 
+    /// Whether the assertions of this body check the assertion control
+    /// state of the design (see [`assertion_control`]): those of a module of
+    /// a design that calls an assertion control task. A constant function
+    /// has no state to read.
+    pub(super) fn controls_assertions(&self) -> bool {
+        self.session.controls_assertions
+            && self.tree.package.is_none()
+            && !self.state.constant_evaluation
+            && !self.dims.constant_function_bodies
+    }
+
     /// Whether `name` is a variable a procedural block or a subroutine
     /// declares, by its module-unique name.
     pub(super) fn is_local(&self, name: &str) -> bool {
