@@ -57,6 +57,9 @@ pub enum Expr {
         member: Option<u32>,
         width: u32,
     },
+    /// The sum of the elements of array `0` of the program, at their width
+    /// (IEEE 1800-2023 7.12.3, 18.5.8.2).
+    Sum(usize),
     /// Read-only scalar supplied by this call, never a solver variable.
     Input {
         index: usize,
@@ -248,6 +251,28 @@ fn boolean(value: Term) -> Term {
 }
 
 impl Expr {
+    /// Whether the expression names the elements of array `index`: a loop
+    /// over it or its sum.
+    fn names_elements(&self, index: usize) -> bool {
+        match self {
+            Self::Sum(array) => *array == index,
+            Self::Foreach { array, body } => *array == index || body.names_elements(index),
+            Self::Enabled { value, .. }
+            | Self::Resize { value, .. }
+            | Self::Unary { value, .. } => value.names_elements(index),
+            Self::Binary { left, right, .. } => {
+                left.names_elements(index) || right.names_elements(index)
+            }
+            Self::Literal(..)
+            | Self::Field(_)
+            | Self::Size(_)
+            | Self::Input { .. }
+            | Self::Index { .. }
+            | Self::Solved(_)
+            | Self::Element { .. } => false,
+        }
+    }
+
     /// Whether the expression names the size of array `index`.
     fn names_size(&self, index: usize) -> bool {
         match self {
@@ -257,6 +282,7 @@ impl Expr {
             | Self::Unary { value, .. } => value.names_size(index),
             Self::Binary { left, right, .. } => left.names_size(index) || right.names_size(index),
             Self::Foreach { body, .. } => body.names_size(index),
+            Self::Sum(_) => false,
             Self::Literal(..)
             | Self::Field(_)
             | Self::Input { .. }
@@ -296,6 +322,7 @@ impl Expr {
             Self::Foreach { .. } | Self::Index { .. } | Self::Element { .. } => {
                 return Err("constraint loop outside its array".into());
             }
+            Self::Sum(_) => return Err("constraint sum of an unread array".into()),
             Self::Resize {
                 value,
                 width,
@@ -398,6 +425,7 @@ impl Heap {
         constraint: &Expr,
         loops: &mut Vec<(usize, u64)>,
         solved: &fxhash::FxHashMap<Handle, (usize, &Program)>,
+        elements: &fxhash::FxHashMap<(Handle, usize), usize>,
         check_only: bool,
     ) -> Result<Expr, String> {
         let boxed = |value: Expr| Box::new(value);
@@ -408,17 +436,21 @@ impl Heap {
                     .get(*array)
                     .ok_or("invalid constraint array")?;
                 let offset = looped.offset;
-                // An array the call randomizes, as `randomize(a)` selects it
-                // (18.11), would have its elements constrained, which the
-                // solver does not take yet.
-                if !check_only && self.random_mode(object, offset, looped.random) {
+                // An array the call randomizes has a solver variable for
+                // each element (see `element_bases`).
+                if !check_only
+                    && self.random_mode(object, offset, looped.random)
+                    && !elements.contains_key(&(object, *array))
+                {
                     return Err("a constraint loop over an array the call randomizes".into());
                 }
                 let contents = self.load(object, offset as usize, crate::HANDLE_BYTES) as Handle;
                 let mut each = Vec::new();
                 for index in 0..self.sequence_len(contents) as u64 {
                     loops.push((*array, index));
-                    each.push(self.unroll(object, program, body, loops, solved, check_only)?);
+                    each.push(
+                        self.unroll(object, program, body, loops, solved, elements, check_only)?,
+                    );
                     loops.pop();
                 }
                 // A balanced conjunction stays within the solver's depth.
@@ -456,6 +488,11 @@ impl Heap {
                 let &(array, index) = loops
                     .get(*level as usize)
                     .ok_or("invalid constraint loop")?;
+                if member.is_none()
+                    && let Some(&base) = elements.get(&(object, array))
+                {
+                    return Ok(Expr::Solved(base + index as usize));
+                }
                 let offset = program.arrays[array].offset;
                 let contents = self.load(object, offset as usize, crate::HANDLE_BYTES) as Handle;
                 let value = self
@@ -483,22 +520,80 @@ impl Heap {
                 };
                 Expr::Literal(*width, value & (u64::MAX >> (64 - width)))
             }
+            Expr::Sum(array) => {
+                let summed = program
+                    .arrays
+                    .get(*array)
+                    .ok_or("invalid constraint array")?;
+                let width = summed.width;
+                if !(1..=64).contains(&width) {
+                    return Err("invalid constraint array element width".into());
+                }
+                let contents =
+                    self.load(object, summed.offset as usize, crate::HANDLE_BYTES) as Handle;
+                let length = self.sequence_len(contents);
+                let mask = u64::MAX >> (64 - width);
+                match elements.get(&(object, *array)) {
+                    // The sum of the solver variables of its elements, at
+                    // their width, as a balanced tree.
+                    Some(&base) => {
+                        fn add(mut each: Vec<Expr>, width: u32) -> Expr {
+                            match each.len() {
+                                0 => Expr::Literal(width, 0),
+                                1 => each.pop().expect("one term"),
+                                len => {
+                                    let right = each.split_off(len / 2);
+                                    Expr::Binary {
+                                        op: "+".into(),
+                                        left: Box::new(add(each, width)),
+                                        right: Box::new(add(right, width)),
+                                        signed: false,
+                                    }
+                                }
+                            }
+                        }
+                        add(
+                            (0..length)
+                                .map(|index| Expr::Solved(base + index))
+                                .collect(),
+                            width,
+                        )
+                    }
+                    // The sum of its elements' values.
+                    None => {
+                        let mut total = 0u64;
+                        for index in 0..length {
+                            let value = self
+                                .sequence_element(contents, index)
+                                .ok_or("constraint array element")?;
+                            total = total.wrapping_add(value);
+                        }
+                        Expr::Literal(width, total & mask)
+                    }
+                }
+            }
             Expr::Enabled { index, value } => Expr::Enabled {
                 index: *index,
-                value: boxed(self.unroll(object, program, value, loops, solved, check_only)?),
+                value: boxed(
+                    self.unroll(object, program, value, loops, solved, elements, check_only)?,
+                ),
             },
             Expr::Resize {
                 value,
                 width,
                 signed,
             } => Expr::Resize {
-                value: boxed(self.unroll(object, program, value, loops, solved, check_only)?),
+                value: boxed(
+                    self.unroll(object, program, value, loops, solved, elements, check_only)?,
+                ),
                 width: *width,
                 signed: *signed,
             },
             Expr::Unary { op, value } => Expr::Unary {
                 op: op.clone(),
-                value: boxed(self.unroll(object, program, value, loops, solved, check_only)?),
+                value: boxed(
+                    self.unroll(object, program, value, loops, solved, elements, check_only)?,
+                ),
             },
             Expr::Binary {
                 op,
@@ -507,8 +602,12 @@ impl Heap {
                 signed,
             } => Expr::Binary {
                 op: op.clone(),
-                left: boxed(self.unroll(object, program, left, loops, solved, check_only)?),
-                right: boxed(self.unroll(object, program, right, loops, solved, check_only)?),
+                left: boxed(
+                    self.unroll(object, program, left, loops, solved, elements, check_only)?,
+                ),
+                right: boxed(
+                    self.unroll(object, program, right, loops, solved, elements, check_only)?,
+                ),
                 signed: *signed,
             },
             Expr::Literal(..)
@@ -705,6 +804,10 @@ impl Heap {
             let mut size_terms = Vec::new();
             let mut size_bases = Vec::new();
             let mut refills = Vec::new();
+            // The first solver variable of the elements of each random array
+            // a constraint names the elements of, by object and array.
+            let mut element_bases: fxhash::FxHashMap<(Handle, usize), usize> =
+                fxhash::FxHashMap::default();
             let mut preferred = boolv(true);
             let mut limited = boolv(true);
             let mut bounded = false;
@@ -824,8 +927,40 @@ impl Heap {
                         Some(name) => var(name.clone(), Sort::Bv(32)),
                         None => bv(32, length as u64),
                     });
+                    // A random array whose elements a constraint names has a
+                    // solver variable for each (18.4, 18.5.8): its size is
+                    // the one it has.
+                    let named = enabled
+                        && constraints[position]
+                            .iter()
+                            .any(|constraint| constraint.names_elements(index));
+                    let elements = if named {
+                        if term.is_some() {
+                            return Err(
+                                "a constraint on the elements of a random array whose size a constraint names"
+                                    .into(),
+                            );
+                        }
+                        let base = terms.len();
+                        for _ in 0..length {
+                            let name = terms.len().to_string();
+                            let element = var(name.clone(), Sort::Bv(array.width));
+                            projection.insert(name, element.clone());
+                            if !array.domain.is_empty() {
+                                formula = and(
+                                    formula,
+                                    member(&element, array.width, array.domain.iter().copied()),
+                                );
+                            }
+                            terms.push(element);
+                        }
+                        element_bases.insert((object, index), base);
+                        Some(base)
+                    } else {
+                        None
+                    };
                     if enabled {
-                        refills.push((object, array, term, length));
+                        refills.push((object, array, term, length, elements));
                     }
                 }
             }
@@ -849,6 +984,7 @@ impl Heap {
                         constraint,
                         &mut Vec::new(),
                         &solved,
+                        &element_bases,
                         check_only,
                     )?;
                     formula = and(
@@ -978,7 +1114,7 @@ impl Heap {
                     // other value before anything changes.
                     let resized = refills
                         .into_iter()
-                        .map(|(object, array, size, length)| {
+                        .map(|(object, array, size, length, elements)| {
                             let length = match size {
                                 Some(name) => match model.get(&name) {
                                     Some(Scalar::Bv { value, .. }) => *value,
@@ -991,7 +1127,19 @@ impl Heap {
                                     "random array size {length} above the limit of {ARRAY_SIZE_LIMIT}"
                                 ));
                             }
-                            Ok((object, array, length))
+                            // The solved elements, each of the model.
+                            let solved = match elements {
+                                Some(base) => Some(
+                                    (base..base + length as usize)
+                                        .map(|index| match model.get(&index.to_string()) {
+                                            Some(Scalar::Bv { value, .. }) => Ok(*value),
+                                            _ => Err("missing constraint array element".to_owned()),
+                                        })
+                                        .collect::<Result<Vec<_>, _>>()?,
+                                ),
+                                None => None,
+                            };
+                            Ok((object, array, length, solved))
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     for ((object, field, _), restart) in cyclic.iter().zip(&restarted) {
@@ -1014,20 +1162,22 @@ impl Heap {
                             value,
                         );
                     }
-                    // Each random array, resized to its size, gets random
-                    // elements: a constraint names none of them yet.
-                    for (object, array, length) in resized {
+                    // Each random array, resized to its size, gets the solved
+                    // elements, or random ones when no constraint names them.
+                    for (object, array, length, solved) in resized {
                         let mask = u64::MAX >> (64 - array.width);
-                        let elements = (0..length)
-                            .map(|_| {
-                                let draw = self.random_object(object);
-                                if array.domain.is_empty() {
-                                    draw & mask
-                                } else {
-                                    array.domain[(draw % array.domain.len() as u64) as usize]
-                                }
-                            })
-                            .collect();
+                        let elements = solved.unwrap_or_else(|| {
+                            (0..length)
+                                .map(|_| {
+                                    let draw = self.random_object(object);
+                                    if array.domain.is_empty() {
+                                        draw & mask
+                                    } else {
+                                        array.domain[(draw % array.domain.len() as u64) as usize]
+                                    }
+                                })
+                                .collect()
+                        });
                         let contents =
                             self.load(object, array.offset as usize, crate::HANDLE_BYTES);
                         let contents =

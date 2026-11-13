@@ -73,9 +73,10 @@ impl Property {
         self.array_storage().is_some()
     }
 
-    /// Whether the property is a rand dynamic array or queue.
+    /// Whether the property is a rand array: a dynamic array or queue, or
+    /// a fixed-size array (18.4).
     pub fn rand_array(&self) -> bool {
-        (self.rand || self.randc) && self.sequence()
+        (self.rand || self.randc) && (self.sequence() || self.storage.is_some())
     }
 
     pub fn rand_object(&self) -> bool {
@@ -1091,10 +1092,10 @@ pub(super) fn shared_class(
                         "static class property with unpacked dimensions",
                     ));
                 }
-                if property.qualifiers.rand || property.qualifiers.randc {
-                    return Err(unsupported(
-                        "random class property with unpacked dimensions",
-                    ));
+                // A rand one is a random array of its size (18.4); a
+                // cyclic one would cycle each element.
+                if property.qualifiers.randc {
+                    return Err(unsupported("randc fixed-size array class property"));
                 }
                 // Its element type keeps its meaning outside the class too.
                 Some(containers::fixed_storage(

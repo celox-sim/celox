@@ -215,7 +215,7 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
   package の名前付き4値・string 定数（クラス自身の同種パラメータは名前で渡せます）。
 - package クラス特殊化の型引数としてのモジュール内クラス。型引数としての
   匿名 enum・構造体・union 型。
-- `real` のプロパティ。`static`・`rand`・`randc` の固定長配列プロパティ、
+- `real` のプロパティ。`static`・`randc` の固定長配列プロパティ、
   unpacked 次元が複数あるもの、負の境界や `int` に収まらない境界をもつもの、
   unpacked 構造体要素のメンバへの書き込み、自身と同じそのようなプロパティ
   または自身が名前で示す配列変数（unpacked 構造体要素ではそもそも変数）以外の
@@ -232,13 +232,16 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
 
 - スコープ `randomize()` / `std::randomize()`（18.12）: `with` 制約、未対応・
   未解決ドメインの enum、unpacked 配列、ネット、定数、選択、連結引数は未対応です。
-- クラス `randomize()`: 4値・集約プロパティ、static な rand プロパティ、配列・
-  オブジェクト・string の rand プロパティ、制約付き enum と `randc`、`foreach`・
-  `soft` 制約、`dist`、`solve before`、外部・static 制約ブロック、制約中の
+- クラス `randomize()`: 4値・集約プロパティ、static な rand プロパティ、
+  64ビット以下の2値整数以外を要素に持つ rand 配列、`randc` 配列、オブジェクト・string の
+  rand プロパティ、制約付き enum と `randc`、サイズを制約される rand 配列への `foreach`・
+  `sum()`、`sum() with`、`soft` 制約、`dist`、`solve before`、外部・static 制約ブロック、制約中の
   型パラメータ、`inside` 集合の配列集合・X/Z ワイルドカード・`$` 境界、
   1–8ビット整数と256メンバまでのスカラ enum を超える `randc` ドメインは未対応です。
   名前付き制約ブロックは、比較・論理・ビット演算・加減乗算を使う
-  1–64ビット2値スカラ整数プロパティだけを扱います。
+  1–64ビット2値スカラ整数プロパティだけを扱います。制約の `foreach` や `sum()` が
+  参照する rand 配列（固定長・動的）の要素はソルバ変数になり（18.5.8）、それ以外は
+  ランダムに引かれます。
 - インライン `with` 制約: 4値・集約の呼び出し側入力、型パラメータ入力、
   修飾付き `this` / `super` 参照、制限付き `with (names)` 検索、
   スコープ `std::randomize(…) with` は未対応です。
