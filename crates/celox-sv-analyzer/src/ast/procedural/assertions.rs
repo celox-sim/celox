@@ -82,6 +82,99 @@ pub(super) struct SequenceMonitor {
     /// The statements that start each tick in the Observed region, before
     /// any action runs: they read whether assertions are on (20.11).
     pub start: Vec<Stmt>,
+    /// The record of its disable condition, with `disable iff`.
+    pub disabled: Option<DisableHistory>,
+}
+
+/// Whether the disable condition of a concurrent assertion over cycles was
+/// true since each attempt started (IEEE 1800-2023 16.12): an attempt is
+/// disabled when the condition is true at any time from its start in the
+/// Observed region to its end, over the current values of its variables,
+/// and then neither passes nor fails.
+pub(super) struct DisableHistory {
+    /// A vector of a bit for each age of an attempt, up to the sequence's
+    /// length: whether the attempt of that age was disabled so far. Each
+    /// tick shifts it by one age and sets the bits of the older attempts
+    /// when the condition was true since the previous tick; the bit of the
+    /// attempt that starts is the condition at this tick.
+    pub bits: String,
+    /// Whether the condition was true since the previous tick, which a
+    /// process that waits on its changes records (see
+    /// `BodyBuilder::disable_watchers`).
+    pub seen: String,
+}
+
+impl DisableHistory {
+    /// Whether the attempt `age` ticks old was disabled.
+    pub fn of_age(&self, age: u32) -> Expr {
+        Expr::Select {
+            expr: Box::new(Expr::Ident(self.bits.clone())),
+            msb: ConstExpr::Literal(age.to_string()),
+            lsb: ConstExpr::Literal(age.to_string()),
+            signed: false,
+        }
+    }
+
+    /// The statements of a tick, before its decisions, for a sequence
+    /// `length` ticks long and disable condition `disable`: each attempt
+    /// ages by one tick and is disabled if it was, or if the condition was
+    /// true since the previous tick or is now; the attempt that starts is
+    /// disabled if the condition is true now.
+    pub fn tick(&self, disable: &Expr, length: u32) -> Vec<Stmt> {
+        let bits = || Expr::Ident(self.bits.clone());
+        let width = u64::from(length) + 1;
+        let older = format!("{width}'b{}0", "1".repeat(length as usize));
+        vec![
+            Stmt::Assign {
+                lhs: LValue::Ident(self.bits.clone()),
+                rhs: Expr::Binary {
+                    left: Box::new(bits()),
+                    op: BinaryOp::Shl,
+                    right: Box::new(Expr::Literal("1".into())),
+                },
+                nonblocking: false,
+            },
+            Stmt::If {
+                condition: Expr::Binary {
+                    left: Box::new(Expr::Ident(self.seen.clone())),
+                    op: BinaryOp::LogicOr,
+                    right: Box::new(disable.clone()),
+                },
+                then_body: vec![Stmt::Assign {
+                    lhs: LValue::Ident(self.bits.clone()),
+                    rhs: Expr::Binary {
+                        left: Box::new(bits()),
+                        op: BinaryOp::BitOr,
+                        right: Box::new(Expr::Literal(older)),
+                    },
+                    nonblocking: false,
+                }],
+                else_body: Vec::new(),
+            },
+            Stmt::If {
+                condition: disable.clone(),
+                then_body: vec![Stmt::Assign {
+                    lhs: LValue::Select {
+                        name: self.bits.clone(),
+                        msb: ConstExpr::Literal("0".into()),
+                        lsb: ConstExpr::Literal("0".into()),
+                        signed: false,
+                        array_slice_width: None,
+                        array_slice_reversed: false,
+                        is_2state: true,
+                    },
+                    rhs: Expr::Literal("1'b1".into()),
+                    nonblocking: false,
+                }],
+                else_body: Vec::new(),
+            },
+            Stmt::Assign {
+                lhs: LValue::Ident(self.seen.clone()),
+                rhs: Expr::Literal("1'b0".into()),
+                nonblocking: false,
+            },
+        ]
+    }
 }
 
 /// A value of an attempt that a later tick reads, a step's match or a
@@ -829,6 +922,7 @@ impl BodyBuilder<'_, '_, '_> {
             ticks: ticks.map(|ticks| (ticks, length)),
             updates,
             start: Vec::new(),
+            disabled: None,
         })
     }
 }

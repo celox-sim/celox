@@ -383,6 +383,10 @@ concurrent assertions is unsupported:
   most 1024 ways to match, and only in a sequence that is the whole
   property: not in an implication, an `expect` statement, or one with local
   variables or match items.
+- `disable iff` of a sequence over cycles: an attempt is disabled, and
+  neither passes nor fails, when the condition is true at any time from
+  its start to its end, also between the ticks of the clock, over the
+  current values of its variables (16.12).
 - `p iff q` of two Boolean expressions, also as the consequent of `|->`
   (`a |-> b iff c` is `a |-> (b iff c)`).
 - `expect (property_spec) action_block` (16.17) in a process or task, with an
@@ -406,7 +410,7 @@ arguments or in other scopes, unbounded cycle-delay ranges (`##[1:$]`),
 repetition, the sequence operator `within`, `intersect` of sequences that
 never match at one tick, instances of named sequences clocked differently
 or with local variables inside a
-multi-cycle sequence, `disable iff` with a multi-cycle sequence, `iff`
+multi-cycle sequence, `iff`
 with an operand over cycles or a named operand, user
 function calls in predicates and match-item values, and timed or
 nonblocking action statements.

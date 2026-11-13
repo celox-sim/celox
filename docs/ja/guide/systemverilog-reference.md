@@ -300,6 +300,9 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
   なった最初のティックで失敗します。一致の仕方は最大1024通りで、property 全体が
   その sequence である場合だけです（含意、`expect` 文、ローカル変数や match 項目を
   持つものは未対応）。
+- 複数サイクル sequence への `disable iff`。条件が試行の開始から終了までのいずれかの時点で
+  真になると（クロックのティックの間も含みます）、その試行は無効となり成功も失敗もしません。
+  条件はサンプル値ではなく現在の値で評価します（16.12）。
 - 2 つの Boolean 式の `p iff q`。`|->` の後件にも書けます（`a |-> b iff c` は `a |-> (b iff c)`）。
 - プロセスや task 内の明示クロック付き `expect (property_spec) action_block`（16.17）。
   次のクロックイベントから 1 回だけ評価し、各ステップをサンプル値で判定した後、Reactive
@@ -315,7 +318,7 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
 他スコープの名前付き property・sequence、上限の無いサイクル遅延範囲（`##[1:$]`）、
 繰り返し、sequence 演算子 `within`、同じティックで一致し得ない sequence の `intersect`、
 異なるクロックやローカル変数を持つ名前付き sequence の sequence 内インスタンス、複数サイクル
-sequence 内のインスタンス、複数サイクル sequence への `disable iff`、
+sequence 内のインスタンス、
 複数サイクルや名前付きの被演算子を持つ `iff`、
 述語や match 項目値中のユーザー関数呼び出し、時間付き・ノンブロッキングなアクション文。
 
