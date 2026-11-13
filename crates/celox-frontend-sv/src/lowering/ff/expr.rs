@@ -114,6 +114,18 @@ impl Ff<'_, '_> {
         } else {
             std::borrow::Cow::Owned(self.propagate(&expr))
         };
+        // Before forced reads wrap the vectors it selects.
+        let expr = match out_of_range_constant_selects(
+            &expr,
+            self.m.variables,
+            self.m.name_to_id,
+            self.m.constants,
+            self.m.parameter_types,
+            self.m.four_state,
+        ) {
+            Some(rewritten) => std::borrow::Cow::Owned(rewritten),
+            None => expr,
+        };
         let expr = if self.m.forceable.is_empty() {
             expr
         } else {
