@@ -13,6 +13,9 @@ crates.ioから`celox`コマンドをインストールします。
 cargo install celox
 ```
 
+`cargo binstall celox`を使うと、コンパイルせずにリリースのビルド済みバイナリを取得します。
+ビルド済みバイナリは各[GitHub Release](https://github.com/celox-sim/celox/releases)にも
+Linux、macOS、Windows向けの`celox-<target>`アーカイブとして添付されています。
 対応するホストはx86-64とAArch64です。Celoxのソースツリーにあるコマンドを使う場合は、
 `cargo build --release -p celox --bin celox`でビルドすると`target/release/celox`ができます。
 
