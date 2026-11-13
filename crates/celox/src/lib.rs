@@ -31,6 +31,7 @@ mod diagnostics;
 mod dpi;
 mod interpreter;
 mod ir;
+mod memory_file_reader;
 mod optimizer;
 mod parser;
 pub(crate) mod portable;
@@ -58,6 +59,7 @@ pub use celox_design::{
     ElaboratedDesign, EventTopology, ProcessOrigin, ReportLocation, RuntimeSchema, Severity,
 };
 pub use celox_frontend_core::FrontendArtifactError;
+pub use celox_frontend_core::memory_file::{MemoryLoad, load_memory_file};
 pub use celox_frontend_sdk as frontend_sdk;
 pub use celox_frontend_sdk::FrontendArtifact;
 /// Warnings of the SystemVerilog frontend, in [`CompilationWarning::SystemVerilog`].
@@ -91,6 +93,7 @@ pub use ir::{
     RuntimeVariable, SignalRef, SirProgram, SourceAddr, SourceVarId, UnoptimizedSir, VariableInfo,
     VariableKind,
 };
+pub use memory_file_reader::HostMemoryFileReader;
 pub use num_bigint::BigUint;
 pub use optimizer::OptLevel;
 pub use optimizer::OptimizeOptions;
@@ -306,9 +309,9 @@ mod host_api {
         target_arch = "aarch64"
     ))]
     pub use crate::backend::native::{
-        AppendedNativeImage, NativeBackend, NativeCodeEntry, NativeImageArchitecture,
-        NativeImageContainerError, NativeProgramImage, NativeProgramInstance,
-        NativeProgramLoadError, NativeSignalIdentity, SharedNativeCode,
+        AppendedNativeImage, InitialMemoryFileReport, NativeBackend, NativeCodeEntry,
+        NativeImageArchitecture, NativeImageContainerError, NativeProgramImage,
+        NativeProgramInstance, NativeProgramLoadError, NativeSignalIdentity, SharedNativeCode,
     };
     #[cfg(any(
         target_arch = "x86_64",
@@ -342,11 +345,9 @@ pub use backend::wasm_codegen;
 // Public compilation API (available on all targets)
 pub use simulator::{
     compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_diagnostic_policy,
-    compile_to_sir_with_file_dependencies, compile_to_sir_with_latch_policy,
+    compile_to_sir_with_latch_policy,
 };
-pub use simulator::{
-    compile_mixed_to_sir, compile_mixed_to_sir_with_file_dependencies, compile_sv_to_sir,
-};
+pub use simulator::{compile_mixed_to_sir, compile_sv_to_sir};
 
 #[cfg(test)]
 mod flatting_tests;

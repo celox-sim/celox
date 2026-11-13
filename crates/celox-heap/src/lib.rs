@@ -19,6 +19,7 @@ use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 pub mod containers;
 mod dpi;
 mod edges;
+pub mod memory_files;
 mod objects;
 pub mod ops;
 pub mod randomization;
@@ -132,6 +133,10 @@ pub struct Heap {
     /// The call area of the DPI-C call being made, which no state outlives.
     #[serde(skip)]
     dpi: dpi::CallArea,
+    /// The reader of memory files and the load being stored, which no state
+    /// outlives.
+    #[serde(skip)]
+    memory_files: memory_files::MemoryFiles,
 }
 
 impl Default for Heap {
@@ -172,6 +177,7 @@ impl Heap {
             solved: Vec::new(),
             edges: HashMap::default(),
             dpi: dpi::CallArea::default(),
+            memory_files: memory_files::MemoryFiles::default(),
         }
     }
 

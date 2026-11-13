@@ -50,6 +50,9 @@ pub struct NativeProgramInstance {
     comb_observer_reads: crate::comb_activation::ObserverReads,
     comb_observer_initial_eval: bool,
     forced_values: crate::HashMap<NativeSignalIdentity, (BigUint, BigUint)>,
+    /// The reports of the memory files the initial state loaded, which the
+    /// next drain returns first.
+    initial_reports: Vec<RuntimeEvent>,
 }
 
 impl NativeProgramInstance {
@@ -99,7 +102,17 @@ impl NativeProgramInstance {
             unsafe { SharedNativeCode::from_image(image) }
                 .map_err(NativeProgramLoadError::Attach)?,
         );
-        let backend = NativeBackend::from_shared(Arc::clone(&shared));
+        let mut backend = NativeBackend::from_shared(Arc::clone(&shared));
+        let initial_reports = backend
+            .load_initial_memory_files()
+            .into_iter()
+            .map(|report| {
+                RuntimeEvent::Report(crate::Report {
+                    location: report.location,
+                    ..crate::Report::new(report.severity, report.message.into_bytes())
+                })
+            })
+            .collect();
         let comb_observer_reads = crate::comb_activation::ObserverReads::new(
             &backend,
             &shared.program_image().runtime_schema().comb_observers,
@@ -113,6 +126,7 @@ impl NativeProgramInstance {
             comb_observer_reads,
             comb_observer_initial_eval: true,
             forced_values: crate::HashMap::default(),
+            initial_reports,
         };
         instance.comb_observer_snapshots = instance.snapshot_all_comb_observers();
         instance
@@ -317,7 +331,8 @@ impl NativeProgramInstance {
         &mut self,
         context: RuntimeFormatContext<'_>,
     ) -> Vec<RuntimeEvent> {
-        crate::simulator::collect_runtime_events_for_backend(
+        let mut events = std::mem::take(&mut self.initial_reports);
+        events.extend(crate::simulator::collect_runtime_events_for_backend(
             &self.backend,
             &self
                 .shared
@@ -326,7 +341,8 @@ impl NativeProgramInstance {
                 .runtime_event_sites,
             &mut self.runtime_event_read_seq,
             context,
-        )
+        ));
+        events
     }
 
     /// Direct access used by foreign-interface adapters for value and event

@@ -363,10 +363,10 @@ fn bind_statement<B: SimBackend>(
         }),
         GenericTestbenchStatement::Break => Some(GenericTestbenchStatement::Break),
         GenericTestbenchStatement::Finish => Some(GenericTestbenchStatement::Finish),
-        GenericTestbenchStatement::WriteMemory { signal, writes } => {
+        GenericTestbenchStatement::WriteMemory { signal, load } => {
             Some(GenericTestbenchStatement::WriteMemory {
                 signal: backend.resolve_signal(&signal.address),
-                writes,
+                load,
             })
         }
     }

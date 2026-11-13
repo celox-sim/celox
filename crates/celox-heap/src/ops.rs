@@ -215,6 +215,24 @@ const _: () = assert!(
         && UVM_TOOL_VERSION <= 0xff
 );
 
+/// `range(start, finish, unknown)`: the addresses the next
+/// [`MEMORY_FILE_LOAD`] loads from and toward, as signed integers, and
+/// whether either has an unknown bit (IEEE 1800-2023 21.4).
+pub const MEMORY_FILE_RANGE: u64 = 150;
+/// `load(descriptor, file)`: read memory file string `file` as string
+/// `descriptor` describes, through the reader of the heap (see
+/// [`crate::memory_files`]), and return the number of words it gives.
+pub const MEMORY_FILE_LOAD: u64 = 151;
+/// `position(k)`: the position of word `k` of the last load in the storage
+/// order of the array.
+pub const MEMORY_FILE_POSITION: u64 = 152;
+/// `word(k, chunk)`: 64-bit chunk `chunk` of word `k` of the last load, of
+/// its value plane, or of its unknown plane when the parameter is 1.
+pub const MEMORY_FILE_WORD: u64 = 153;
+/// `message()`: the warning of the last load, or its error when the
+/// parameter is 1, as a string; the empty string when it has none.
+pub const MEMORY_FILE_MESSAGE: u64 = 154;
+
 impl Heap {
     /// Perform the operation selected by `code` on `a`, `b` and `c`.
     pub fn call(&mut self, code: u64, a: u64, b: u64, c: u64) -> u64 {
@@ -239,6 +257,9 @@ impl Heap {
             }
             op @ UVM_RE_COMP..=UVM_TOOL_VERSION => self.uvm_call(op, a, b, c),
             op @ DPI_AREA..=DPI_FROM_C_STRING => self.dpi_call(op, a, b),
+            op @ MEMORY_FILE_RANGE..=MEMORY_FILE_MESSAGE => {
+                self.memory_file_call(op, parameter, a, b, c)
+            }
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {
                 let lower = |handle| {

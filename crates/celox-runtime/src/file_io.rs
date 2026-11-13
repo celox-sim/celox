@@ -51,6 +51,32 @@ struct InputFile {
     input: InputState,
 }
 
+/// Reads whole files through the backend of a [`FileIo`].
+#[derive(Debug, Clone)]
+pub struct FileReader {
+    backend: Arc<Mutex<Box<dyn FileSystem>>>,
+}
+
+impl FileReader {
+    /// The contents of `path`.
+    pub fn read_to_string(&self, path: impl AsRef<Path>) -> io::Result<String> {
+        let id = self
+            .backend
+            .lock()
+            .unwrap()
+            .open(path.as_ref(), FileMode::parse("r").unwrap())?;
+        let mut file = BackendFile {
+            id,
+            closed: false,
+            backend: self.backend.clone(),
+        };
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+        file.close()?;
+        Ok(content)
+    }
+}
+
 impl Default for FileIo {
     fn default() -> Self {
         Self::new(Box::<HostFileSystem>::default())
@@ -591,6 +617,20 @@ impl FileIo {
             ));
         }
         Ok(file)
+    }
+
+    /// The contents of `path`, read through the injected backend, such as
+    /// the memory file of a `$readmemh` (IEEE 1800-2023 21.4).
+    pub fn read_to_string(&self, path: impl AsRef<Path>) -> io::Result<String> {
+        self.reader().read_to_string(path)
+    }
+
+    /// A reader of whole files through the injected backend, which other
+    /// threads may use.
+    pub fn reader(&self) -> FileReader {
+        FileReader {
+            backend: self.backend.clone(),
+        }
     }
 
     /// Write memory through the injected backend, including its snapshot policy.

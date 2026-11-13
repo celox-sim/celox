@@ -10,6 +10,7 @@ mod file_io;
 mod format;
 mod fread;
 mod init;
+mod memory_files;
 mod monitor;
 mod native_arena;
 pub(crate) mod native_io;
@@ -70,6 +71,8 @@ pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     /// The heap handles of the design state and of running processes.
     pub(crate) heap: super::heap::HeapRoots,
     pub(super) file_io: celox_runtime::file_io::FileIo,
+    /// The memory files the initial state has loaded.
+    memory_files: memory_files::MemoryFiles,
     /// What native process code asks of its host.
     pub(crate) native: NativeHost,
     pending_host_events: Arc<std::sync::Mutex<PendingRuntimeEvents>>,
@@ -225,6 +228,7 @@ impl<B: SimBackend> Simulator<B> {
             warnings,
             heap: Default::default(),
             file_io: Default::default(),
+            memory_files: Default::default(),
             native,
             pending_host_events: Arc::new(std::sync::Mutex::new(PendingRuntimeEvents {
                 deferred: DeferredQueues {
@@ -255,6 +259,9 @@ impl<B: SimBackend> Simulator<B> {
             event_edges,
         };
         sim.initialize_copies();
+        // The design's memory files go through its file system.
+        let file_io = std::mem::take(&mut sim.file_io);
+        sim.set_file_io(file_io);
         sim.comb_observers.snapshots = sim.snapshot_all_comb_observers();
         sim
     }

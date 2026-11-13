@@ -86,6 +86,42 @@ impl ProcModule<'_> {
     /// Whether a process calls a system function that reads the state of
     /// the simulation, such as `$urandom` or `$time`, including through user
     /// subroutines and omitted argument defaults.
+    /// Whether `body`, or a subroutine it calls, runs `$readmemh` or
+    /// `$readmemb`, which reads its file when it executes (IEEE 1800-2023
+    /// 21.4): imperative code runs it.
+    pub fn loads_memory_file(&self, body: &[sv::ir::Stmt]) -> bool {
+        let mut pending: Vec<&[sv::ir::Stmt]> = vec![body];
+        let mut visited = HashSet::default();
+        while let Some(statements) = pending.pop() {
+            let mut loads = false;
+            let mut calls = Vec::new();
+            for stmt in statements {
+                stmt.walk(&mut |stmt| {
+                    loads |= matches!(
+                        stmt,
+                        sv::ir::Stmt::SystemTask {
+                            task: sv::ir::SystemTask::Readmem(_),
+                            ..
+                        }
+                    );
+                    stmt_calls(stmt, &mut calls);
+                });
+            }
+            if loads {
+                return true;
+            }
+            for (callee, _) in calls {
+                if let sv::ir::Callee::Subroutine(name) = callee
+                    && let Some(subroutine) = self.subroutine(&name)
+                    && visited.insert(name)
+                {
+                    pending.push(&subroutine.body);
+                }
+            }
+        }
+        false
+    }
+
     pub fn reads_simulation_state(&mut self, body: &[sv::ir::Stmt]) -> bool {
         let mut calls = Vec::new();
         for stmt in body {

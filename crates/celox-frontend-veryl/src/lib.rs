@@ -8,7 +8,6 @@ mod component;
 mod config;
 mod dynamic_for_check;
 mod error;
-mod file_dependencies;
 mod float;
 pub mod hierarchy;
 mod interface_captures;
@@ -36,7 +35,6 @@ pub(crate) use celox_frontend_core::{
 pub use config::BuildConfig;
 pub use dynamic_for_check::{check_dynamic_for_bounds, check_elaborated_dynamic_for_bounds};
 pub use error::{FrontendDiagnostic, LoweringPhase, ParserError, SourceLocation};
-pub use file_dependencies::{FileDependency, FileDependencyCollector, capture_file_dependencies};
 pub use hierarchy::parse_ir_with_external_hierarchy_and_native_modules;
 pub use hierarchy::{parse_ir, parse_ir_with_external_hierarchy, parse_ir_with_loop_provenance};
 pub use interface_captures::lower_interface_captures;

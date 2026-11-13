@@ -83,8 +83,28 @@ pub(crate) fn initial_memory_bytes(
                     }
                 }
             }
-            celox_design::InitialStateData::Writes(runs) => {
-                for run in runs {
+            celox_design::InitialStateData::Writes(_)
+            | celox_design::InitialStateData::MemoryFile(_) => {
+                // A memory file is read as the image is built (IEEE
+                // 1800-2023 21.4); the bridge has no runtime event for its
+                // messages, which are traced.
+                let runs: std::borrow::Cow<'_, [celox_design::InitialStateWriteRun]> =
+                    match &initial.data {
+                        celox_design::InitialStateData::MemoryFile(load) => {
+                            let outcome =
+                                celox::load_memory_file(load, |path| std::fs::read_to_string(path));
+                            if let Some(message) = &outcome.warning {
+                                tracing::warn!("{message}");
+                            }
+                            if let Some(message) = &outcome.error {
+                                tracing::error!("{message}");
+                            }
+                            outcome.runs.into()
+                        }
+                        celox_design::InitialStateData::Writes(runs) => runs.into(),
+                        _ => Default::default(),
+                    };
+                for run in runs.iter() {
                     // Two-state storage has no mask plane to hold an X or a
                     // Z: their bits are zero (IEEE 1800-2023 6.11.2, 21.4.2).
                     let run = if write_mask {

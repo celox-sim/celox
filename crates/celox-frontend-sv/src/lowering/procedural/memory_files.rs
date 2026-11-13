@@ -3,28 +3,21 @@
 
 use super::*;
 
-/// One word a memory file writes: its bits in the destination, value, and
-/// unknown mask.
-pub(in crate::lowering) struct MemoryWord {
-    pub access: BitAccess,
-    pub value: BigUint,
-    pub mask: BigUint,
-}
-
 impl ProcModule<'_> {
-    /// The words `$readmemh`/`$readmemb` (IEEE 1800-2023 21.4) write, with
-    /// the values of its optional start and finish addresses: the file is
-    /// read when the design is compiled.
-    pub fn readmem(
+    /// The load `$readmemh`/`$readmemb` (IEEE 1800-2023 21.4) makes, with
+    /// the values of its optional start and finish addresses, and the
+    /// variable it loads. The file is read when the load runs; a name that
+    /// is not a constant string (see [`constant_file_name`]) is left empty
+    /// for the code that runs it to give.
+    pub fn readmem_load(
         &mut self,
         format: sv::ir::MemoryFormat,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
         start: Option<i128>,
         finish: Option<i128>,
         site: Option<&sv::ir::SourceSpan>,
-    ) -> Result<(SourceVarId, Vec<MemoryWord>), sv::AnalyzerError> {
+    ) -> Result<(SourceVarId, celox_design::MemoryFileLoad), sv::AnalyzerError> {
         let name = sv::ir::SystemTask::Readmem(format).name();
-        let radix = format.base();
         let filename = match args.first() {
             Some(sv::ir::SystemTaskArg::Str(filename)) => String::from_utf8(unescape(filename)?)
                 .map_err(|_| unsupported(format!("`{name}` with a file name that is not UTF-8")))?,
@@ -33,11 +26,8 @@ impl ProcModule<'_> {
             {
                 filename
             }
-            _ => {
-                return Err(unsupported(format!(
-                    "`{name}` with a file name that is not a constant string"
-                )));
-            }
+            // A name the task evaluates when it executes.
+            _ => String::new(),
         };
         // Veryl also emits a constant element select, which loads from that
         // element on.
@@ -93,62 +83,21 @@ impl ProcModule<'_> {
                 left - position
             }
         });
-        let start = start.or(selected).unwrap_or(low);
-        let finish = finish.unwrap_or(high);
-        if start < low || start > high || finish < low || finish > high {
-            return Err(sv::AnalyzerError::MemoryFile(format!(
-                "{name}: address range [{start}:{finish}] is outside the destination range [{low}:{high}]"
-            )));
-        }
-        let content = std::fs::read_to_string(&filename).map_err(|error| {
-            sv::AnalyzerError::MemoryFile(format!("{name}: failed to read {filename}: {error}"))
-        })?;
-        let parsed = celox_frontend_core::memory_file::parse_memory_range(
-            &content,
-            radix,
+        let load = celox_design::MemoryFileLoad {
+            radix: format.base(),
+            file: filename,
+            base: None,
+            base_key: None,
             element_width,
-            start,
-            finish,
-        )
-        .map_err(|error| sv::AnalyzerError::MemoryFile(format!("{name}: {}", error.message)))?;
-        let warning =
-            parsed
-                .warning
-                .map(|detail| crate::FrontendWarningKind::MemoryFileWordCount {
-                    task: name.to_string(),
-                    file: filename.clone(),
-                    detail,
-                });
-        let writes = parsed.writes;
-        let word_mask = (BigUint::from(1u8) << element_width) - BigUint::from(1u8);
-        let mut words = Vec::new();
-        for run in writes.runs {
-            let value = BigUint::from_bytes_le(&run.value_bytes);
-            let mask = BigUint::from_bytes_le(&run.mask_bytes);
-            for k in 0..run.bit_width / element_width {
-                let index = start.min(finish) + (run.bit_offset / element_width + k) as i128;
-                let position = usize::try_from(index.abs_diff(left)).unwrap_or(usize::MAX);
-                let shift = k * element_width;
-                let mut word_value = (&value >> shift) & &word_mask;
-                let mut word_unknown = (&mask >> shift) & &word_mask;
-                if !(self.four_state && variable.is_4state) {
-                    word_value &= &word_mask ^ &word_unknown;
-                    word_unknown = BigUint::zero();
-                }
-                words.push(MemoryWord {
-                    access: BitAccess::new(
-                        position * element_width,
-                        (position + 1) * element_width - 1,
-                    ),
-                    value: word_value,
-                    mask: word_unknown,
-                });
-            }
-        }
-        if let Some(warning) = warning {
-            self.warn(warning, site);
-        }
-        Ok((id, words))
+            addressing: celox_design::MemoryFileAddressing::Range {
+                left,
+                right,
+                start: start.or(selected).unwrap_or(low),
+                finish: finish.unwrap_or(high),
+            },
+            location: report_location(site),
+        };
+        Ok((id, load))
     }
 
     pub fn file_memory_shape(
@@ -166,6 +115,27 @@ impl ProcModule<'_> {
             _ => (0, (self.var(id).width / width) as i128 - 1),
         };
         Ok((left, right, width))
+    }
+}
+
+/// The bounds of the array a SystemVerilog load writes and the addresses it
+/// loads from and toward: `(left, right, start, finish)`.
+pub(in crate::lowering) fn range_addresses(
+    load: &celox_design::MemoryFileLoad,
+) -> (i128, i128, i128, i128) {
+    match load.addressing {
+        celox_design::MemoryFileAddressing::Range {
+            left,
+            right,
+            start,
+            finish,
+        } => (left, right, start, finish),
+        // [`ProcModule::readmem_load`] addresses a range; an offset load
+        // counts its positions from zero.
+        celox_design::MemoryFileAddressing::Offset { start, depth } => {
+            let last = depth as i128 - 1;
+            (0, last, start as i128, last)
+        }
     }
 }
 

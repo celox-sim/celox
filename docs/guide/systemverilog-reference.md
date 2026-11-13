@@ -442,17 +442,6 @@ Code that must stay portable should avoid relying on them.
   with a run-time initializer in a procedure that runs once, such as
   `initial`. In an `always` procedure a run-time initializer without the
   keyword is rejected; declare the local `static` or `automatic`.
-- **`$readmemh` / `$readmemb` of a constant file name read at compile
-  time.** The file is read when the design is compiled, not when the call
-  executes; a missing or malformed file is a compile-time `MemoryFile`
-  error. In `always_ff` the file's words are written on every activation.
-  An `@` address directive outside the requested range is an error; without
-  directives, a word-count mismatch is a compilation warning (excess words
-  are ignored, missing words leave memory unchanged). A file name that is
-  not a constant string, such as a `string` variable that
-  `$value$plusargs` reads, is read when the call executes in a process:
-  the same errors end the simulation and the mismatch is a run-time
-  warning. Such a call takes a whole unpacked array as its memory.
 - **Program continuous assignments do not run in the Reactive region.**
   Continuous assignments in a program are evaluated with the design's
   combinational logic, and design logic that a program writes settles while
@@ -633,6 +622,19 @@ which designs need the timed `Simulation` API and what the host can observe.
   or container layouts must be regenerated.
 - **Loop progress.** A run-time loop in `always_ff` that stops making
   progress reports a runtime error naming its loop variable.
+- **Memory files.** <a id="memory-files"></a> `$readmemh` and `$readmemb`
+  read their file when they execute (21.4), never when the design is
+  compiled, so compiled code, a JIT cache, and native images see the file
+  as it is then. A load in an `initial` block that neither waits nor reads
+  design state before it runs when each `Simulator` or `Simulation`
+  instance is created, in both APIs; any other load runs at its statement,
+  in `always_ff` at every activation and in `always_comb` whenever the
+  block runs. A relative name is looked up in the working directory of the
+  simulating process. The word-count warning and the errors of a load are
+  `RuntimeEvent::Report`s; an error terminates the load, keeping the words
+  loaded before it, and the simulation continues. An `initial` block that
+  reads loaded words afterwards runs as a process. For the inferred-latch
+  check of `always_comb`, a load assigns all the words it may load.
 
 ## Mixing Veryl and SystemVerilog {#mixed-language}
 

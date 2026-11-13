@@ -187,7 +187,6 @@ pub(super) fn analyze(
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
     _allow_inferred_latches: bool,
-    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> (
     Result<OptimizedSir, SimulatorError>,
     Vec<AnalyzerError>,
@@ -401,7 +400,6 @@ pub(super) fn analyze(
     let mut build_config = BuildConfig::from(&metadata.build);
     build_config.allow_inferred_latches = true;
     build_config.four_state = four_state;
-    build_config.file_dependencies = file_dependencies.clone();
     if let Some(ct) = clock_type {
         build_config.clock_type = ct;
     }

@@ -93,9 +93,9 @@ The areas most likely to require changes when porting a design are:
   `inferred_latch = "warn"` or `"allow"` is set.
 
 The [deviations page](./systemverilog-reference#what-is-not-supported) is
-the complete list, including intentional differences such as compile-time
-`$readmemh` and implementation-defined choices for random numbers, time
-defaults, and event scheduling order.
+the complete list, including intentional differences and
+implementation-defined choices for random numbers, time defaults, and event
+scheduling order.
 
 ## Mix SystemVerilog and Veryl
 

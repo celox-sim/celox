@@ -157,7 +157,7 @@ fn native_image_roundtrip_preserves_concurrent_processes_and_periods() {
 }
 
 #[test]
-fn readmem_after_another_process_finish_is_prepared_and_runs_at_its_wait() {
+fn readmem_after_another_process_finish_reads_its_file_at_its_wait() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("words.hex");
     std::fs::write(&path, "ab\ncd\n").unwrap();

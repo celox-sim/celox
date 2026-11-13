@@ -83,3 +83,65 @@ for (const [name, create] of [
 		expect(evaluateFloat.mock.calls.length).toBeGreaterThanOrEqual(2);
 	});
 }
+
+// A WASM module calling the heap helper ABI of generated code, as the load of
+// a memory file does, with a signed operand.
+function heapHelperModule(): Uint8Array {
+	const text = (s: string) => [s.length, ...new TextEncoder().encode(s)];
+	const section = (id: number, bytes: number[]) => [id, bytes.length, ...bytes];
+	// i64.const 151; i64.const -1; i64.const 2; i64.const 3; call 0
+	const body = [
+		0, 0x42, 0x97, 0x01, 0x42, 0x7f, 0x42, 2, 0x42, 3, 0x10, 0, 0x0b,
+	];
+	return new Uint8Array([
+		0,
+		0x61,
+		0x73,
+		0x6d,
+		1,
+		0,
+		0,
+		0,
+		...section(
+			1,
+			[2, 0x60, 4, 0x7e, 0x7e, 0x7e, 0x7e, 1, 0x7e, 0x60, 0, 1, 0x7e],
+		),
+		...section(2, [
+			1,
+			...text("env"),
+			...text("celox_extern_4294967294"),
+			0,
+			0,
+		]),
+		...section(3, [1, 1]),
+		...section(7, [1, ...text("run"), 0, 1]),
+		...section(10, [1, body.length, ...body]),
+	]);
+}
+
+for (const [name, create] of [
+	["sync", createWasmSimulatorBridge],
+	["async", createWasmSimulatorBridgeAsync],
+] as const) {
+	test(`${name} bridge binds the heap helper for comb and event modules`, async () => {
+		const heapCall = vi.fn(() => 0n);
+		const raw: RawWasmSimulatorHandle = {
+			layoutJson: "{}",
+			eventsJson: '{"clk":0}',
+			hierarchyJson: "{}",
+			warningsJson: "[]",
+			stableSize: 8,
+			totalSize: 8,
+			dispose: vi.fn(),
+			initialMemoryBytes: () => new Uint8Array(8),
+			combWasmBytes: heapHelperModule,
+			eventWasmBytes: heapHelperModule,
+			heapCall,
+		};
+		const { handle } = await create(raw);
+		handle.evalComb();
+		handle.tick(0);
+		expect(heapCall).toHaveBeenCalledWith(151n, -1n, 2n, 3n);
+		expect(heapCall.mock.calls.length).toBeGreaterThanOrEqual(2);
+	});
+}

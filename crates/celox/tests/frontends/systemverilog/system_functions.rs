@@ -896,15 +896,26 @@ sv_backends! {
         assert_eq!(sim.get(y), 0xbbcc3344u32.into());
         assert_eq!(sim.get(short_y), 0x112233aau32.into());
         // IEEE 1800-2023 21.4: a count mismatch without address directives
-        // issues a warning, at each call.
-        let warned = readmem_warnings(sim.warnings());
-        assert_eq!(warned, vec![
-            ("readmem.sv".to_string(), source_line(&source, "short_mem, 3, 2"), short.display().to_string()),
-            ("readmem.sv".to_string(), source_line(&source, "mem, -1, 0"), long.display().to_string()),
-        ]);
+        // issues a warning, at each call as it executes.
+        let warned: Vec<_> = readmem_reports(sim.drain_runtime_events())
+            .into_iter()
+            .map(|(severity, path, line, message)| {
+                assert_eq!(severity, celox::Severity::Warning);
+                (path, line, message)
+            })
+            .collect();
+        assert_eq!(warned.len(), 2, "{warned:?}");
+        for ((path, line, message), (call, file)) in warned.iter().zip([
+            ("short_mem, 3, 2", &short),
+            ("mem, -1, 0", &long),
+        ]) {
+            assert_eq!((path.as_str(), *line), ("readmem.sv", source_line(&source, call)));
+            assert!(message.contains(&file.display().to_string()), "{message}");
+        }
+        assert!(sim.warnings().is_empty(), "{:?}", sim.warnings());
     }
 
-    fn readmem_count_mismatch_warns_once_per_call(sim) {
+    fn readmem_count_mismatch_warns_at_each_load(sim) {
         @setup {
             let dir = tempfile::tempdir().unwrap();
             let file = dir.path().join("short.hex");
@@ -928,17 +939,32 @@ sv_backends! {
         }
         @build Simulator::from_sv_sources(vec![(&source, Path::new("calls.sv"))], "Top");
         assert_eq!(sim.get(sim.signal("y")), 0xabaaaaaau32.into());
-        // Calls that read the same file into equal ranges warn separately;
-        // a call in a module specialized twice warns once.
+        // IEEE 1800-2023 21.4: each load the file is short for warns when it
+        // runs, as the instance starts: once per call and instance.
+        let mut warned = readmem_reports(sim.drain_runtime_events());
+        warned.sort();
         let file = file.display().to_string();
-        assert_eq!(readmem_warnings(sim.warnings()), vec![
-            ("calls.sv".to_string(), source_line(&source, "\", mem);"), file.clone()),
-            ("calls.sv".to_string(), source_line(&source, "\", a);"), file.clone()),
-            ("calls.sv".to_string(), source_line(&source, "\", b);"), file),
-        ]);
-        let rendered = celox::render_diagnostic(&sim.warnings()[1]);
-        let line = source_line(&source, "\", a);");
-        assert!(rendered.contains(&format!("[calls.sv:{line}:29]")), "{rendered}");
+        let mut expected: Vec<_> = ["\", mem);", "\", mem);", "\", a);", "\", b);"]
+            .into_iter()
+            .map(|call| {
+                (
+                    celox::Severity::Warning,
+                    "calls.sv".to_string(),
+                    source_line(&source, call),
+                    file.clone(),
+                )
+            })
+            .collect();
+        expected.sort();
+        assert_eq!(
+            warned.iter().map(|(severity, path, line, message)| {
+                assert!(message.contains("requested range [0:1]"), "{message}");
+                assert!(message.contains(&file), "{message}");
+                (*severity, path.clone(), *line, file.clone())
+            }).collect::<Vec<_>>(),
+            expected
+        );
+        assert!(sim.warnings().is_empty(), "{:?}", sim.warnings());
     }
 
     fn drain_runtime_events_returns_always_comb_fatal(sim) {
@@ -1046,19 +1072,21 @@ fn typename_rejects_types_without_an_exact_spelling() {
     }
 }
 
-/// The file, line and memory file of each `$readmem` word-count warning.
-fn readmem_warnings(warnings: &[celox::CompilationWarning]) -> Vec<(String, usize, String)> {
-    warnings
-        .iter()
-        .map(|warning| match warning {
-            celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
-                kind: celox::SvFrontendWarningKind::MemoryFileWordCount { task, file, .. },
-                location: Some(location),
-            }) => {
-                assert_eq!(task, "$readmemh");
-                (location.path.clone(), location.line, file.clone())
+/// The severity, file, line and message of each `$readmem` report among
+/// `events`.
+fn readmem_reports(
+    events: Vec<celox::RuntimeEvent>,
+) -> Vec<(celox::Severity, String, usize, String)> {
+    events
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Report(report) => {
+                let message = String::from_utf8_lossy(&report.message).into_owned();
+                assert!(message.contains("$readmem"), "{message}");
+                let location = report.location.expect("a located report");
+                Some((report.severity, location.file, location.line, message))
             }
-            warning => panic!("unexpected warning: {warning}"),
+            _ => None,
         })
         .collect()
 }
@@ -1240,28 +1268,58 @@ fn printtimescale_interface_arrays_preserve_integer_boundary_indices() {
     }
 }
 
+/// An error in a memory file terminates the load when it runs, keeping the
+/// words loaded before it, and the simulation goes on (IEEE 1800-2023 21.4).
 #[test]
-fn readmem_diagnostics_identify_task_and_requested_range() {
+fn readmem_errors_terminate_the_load_at_run_time() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("invalid.mem");
     for name in ["$readmemh", "$readmemb"] {
-        for (content, expected) in [
-            ("@4", "requested range [3:2]"),
-            ("g", "invalid data token g"),
+        for (content, expected, loaded) in [
+            ("@4", "requested range [3:2]", 0x11u8),
+            ("1 @4", "requested range [3:2]", 0x01),
+            ("g", "invalid data token g", 0x11),
+            ("1 g", "invalid data token g", 0x01),
         ] {
             std::fs::write(&file, content).unwrap();
             let source = format!(
-                r#"module Top(output logic [7:0] y);
-                logic [7:0] mem [0:3]; initial {name}("{}", mem, 3, 2);
-                assign y = mem[2]; endmodule"#,
+                r#"module Top(output logic [7:0] y, z);
+                logic [7:0] mem [0:3] = '{{default: 8'h11}};
+                initial {name}("{}", mem, 3, 2);
+                assign y = mem[3]; assign z = mem[2]; endmodule"#,
                 file.display()
             );
-            let error = build_error(&source);
-            assert!(error.contains(name), "{error}");
-            assert!(error.contains(expected), "{error}");
-            assert!(!error.contains("destination depth"), "{error}");
+            let mut sim = Simulator::from_sv_sources(vec![(&source, Path::new("error.sv"))], "Top")
+                .build()
+                .unwrap();
+            assert_eq!(sim.get(sim.signal("y")), loaded.into(), "{name} {content}");
+            assert_eq!(sim.get(sim.signal("z")), 0x11u8.into(), "{name} {content}");
+            let reports = readmem_reports(sim.drain_runtime_events());
+            let [(severity, path, line, message)] = &reports[..] else {
+                panic!("{reports:?}");
+            };
+            assert_eq!(*severity, celox::Severity::Error);
+            assert_eq!((path.as_str(), *line), ("error.sv", 3));
+            assert!(message.contains(name), "{message}");
+            assert!(message.contains(expected), "{message}");
+            assert!(!message.contains("destination depth"), "{message}");
         }
     }
+    // A file that cannot be read loads nothing.
+    let source = r#"module Top(output logic [7:0] y);
+        logic [7:0] mem [0:1] = '{default: 8'h11};
+        initial $readmemh("missing.hex", mem);
+        assign y = mem[0]; endmodule"#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("missing.sv"))], "Top")
+        .build()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x11u8.into());
+    let reports = readmem_reports(sim.drain_runtime_events());
+    assert!(
+        matches!(&reports[..], [(celox::Severity::Error, _, _, message)]
+            if message.contains("failed to read missing.hex")),
+        "{reports:?}"
+    );
 }
 
 /// The action of a deferred cover, like that of a deferred assertion, is
@@ -3076,37 +3134,6 @@ fn time_is_zero_in_a_simulator_without_time() {
 }
 
 #[test]
-fn readmem_warnings_survive_a_later_lowering_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("short.hex");
-    std::fs::write(&file, "aa").unwrap();
-    // The top's inout port fails the build after its processes lowered.
-    let source = format!(
-        r#"
-        module Top(inout wire x, output logic [7:0] y);
-            logic [7:0] mem [0:1];
-            initial $readmemh("{}", mem);
-            assign y = mem[0];
-        endmodule
-    "#,
-        file.display()
-    );
-    let Err(error) =
-        Simulator::from_sv_sources(vec![(&source, Path::new("inout.sv"))], "Top").build_cranelift()
-    else {
-        panic!("design unexpectedly compiled");
-    };
-    assert_eq!(
-        readmem_warnings(error.warnings()),
-        vec![(
-            "inout.sv".to_string(),
-            source_line(&source, "$readmemh"),
-            file.display().to_string()
-        )]
-    );
-}
-
-#[test]
 fn exit_warnings_survive_analyzer_errors() {
     for source in [
         r#"module Top(output int y);
@@ -3183,31 +3210,6 @@ fn review_warnings_survive_test_runner_errors() {
             exit_warning_locations(error.warnings()),
             vec![source_position(source, "$exit;")]
         );
-    }
-}
-
-sv_backends! {
-    fn review_warnings_deduplicate_parameterized_readmem_calls(sim) {
-        @setup {
-            let dir = tempfile::tempdir().unwrap();
-            let file = dir.path().join("short.hex");
-            std::fs::write(&file, "aa").unwrap();
-            let source = format!(r#"module Child #(parameter N = 2)(output logic [7:0] y);
-                logic [7:0] mem [0:N-1];
-                initial $readmemh("{}", mem);
-                assign y = mem[0];
-            endmodule
-            module Top(output logic [7:0] a, b, c);
-                Child #(.N(2)) one(a);
-                Child #(.N(3)) two(b);
-                Child #(.N(4)) three(c);
-            endmodule"#, file.display());
-        }
-        @build Simulator::from_sv_sources(vec![(&source, Path::new("specialized.sv"))], "Top");
-        let warnings = readmem_warnings(sim.warnings());
-        assert_eq!(warnings.len(), 1, "{:?}", sim.warnings());
-        assert_eq!(warnings[0].0, "specialized.sv");
-        assert_eq!(warnings[0].1, source_line(&source, "$readmemh"));
     }
 }
 
@@ -3410,7 +3412,7 @@ fn bare(events: Vec<celox::RuntimeEvent>) -> Vec<celox::RuntimeEvent> {
 
 /// A file whose name is a `string` variable is read when the task executes
 /// (IEEE 1800-2023 21.4): the words it does not give keep their values, a
-/// shorter file is a warning, and a file that cannot be read ends the run.
+/// shorter file is a warning, and a file that cannot be read is an error.
 #[test]
 fn readmem_reads_a_file_named_at_run_time() {
     let dir = tempfile::tempdir().unwrap();
@@ -3471,14 +3473,251 @@ fn readmem_reads_a_file_named_at_run_time() {
             "{warnings:?}"
         );
     }
+    // A file that cannot be read terminates the load, which reports an
+    // error; the simulation goes on.
     let missing = source.replace("words.bin", "missing.bin");
     let mut sim =
         celox::Simulation::from_sv_sources(vec![(&missing, Path::new("readmem_run.sv"))], "top")
             .build()
             .unwrap();
-    let error = sim.run_until(10).unwrap_err().to_string();
+    sim.run_until(10).unwrap();
+    let mut errors = Vec::new();
+    let mut lines = Vec::new();
+    for event in sim.drain_runtime_events() {
+        match event {
+            celox::RuntimeEvent::Display { message } => {
+                lines.push(String::from_utf8_lossy(&message).into_owned())
+            }
+            celox::RuntimeEvent::Report(report) if report.severity == celox::Severity::Error => {
+                errors.push(String::from_utf8_lossy(&report.message).into_owned())
+            }
+            _ => {}
+        }
+    }
     assert!(
-        error.contains("$readmemb: failed to read") && error.contains("missing.bin"),
-        "{error}"
+        matches!(&errors[..], [error] if error.contains("$readmemb: failed to read")
+            && error.contains("missing.bin")),
+        "{errors:?}"
+    );
+    assert_eq!(lines, ["12 34 50 ee", "11 00 00 22"]);
+}
+
+/// An `initial` load folded into initial state keeps its place among the
+/// block's writes: the words the file gives replace the values written
+/// before it, those it does not give keep them, and a later write replaces
+/// a loaded word. The file is read as the instance starts, with the
+/// warning of a short file then (IEEE 1800-2023 21.4).
+#[test]
+fn readmem_keeps_its_order_among_the_writes_of_an_initial_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("short.hex");
+    std::fs::write(&file, "aa bb").unwrap();
+    let source = format!(
+        r#"module Top(output logic [31:0] y);
+            logic [7:0] mem [0:3];
+            initial begin
+                mem[1] = 8'h22;
+                mem[3] = 8'h44;
+                $readmemh("{}", mem);
+                mem[0] = 8'h11;
+            end
+            assign y = {{mem[0], mem[1], mem[2], mem[3]}};
+        endmodule"#,
+        file.display()
+    );
+    for four_state in [false, true] {
+        let mut sim = Simulator::from_sv_sources(vec![(&source, Path::new("order.sv"))], "Top")
+            .four_state(four_state)
+            .build()
+            .unwrap();
+        let (y, unknown) = sim.get_four_state(sim.signal("y"));
+        if four_state {
+            assert_eq!(unknown, 0xff00u32.into());
+        }
+        assert_eq!(y & BigUint::from(0xffff_00ffu32), 0x11bb0044u32.into());
+        let reports = readmem_reports(sim.drain_runtime_events());
+        assert!(
+            matches!(&reports[..], [(celox::Severity::Warning, path, line, _)]
+                if path == "order.sv" && *line == source_line(&source, "$readmemh")),
+            "{reports:?}"
+        );
+    }
+}
+
+/// `$readmemh` reads its file each time it executes (IEEE 1800-2023 21.4):
+/// an `always_ff` sees the file as it is at each edge, and an
+/// `always_comb` whenever a change of what it reads runs it.
+#[test]
+fn readmem_reads_the_file_each_time_it_executes() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("words.hex");
+    std::fs::write(&file, "11 22").unwrap();
+    let source = format!(
+        r#"module Top(input logic clk, input logic [7:0] x, output logic [7:0] q, y, z);
+            logic [7:0] ff_mem [0:1];
+            logic [7:0] comb_mem [0:1];
+            always_ff @(posedge clk) begin
+                $readmemh("{file}", ff_mem);
+                q <= ff_mem[1];
+            end
+            always_comb begin
+                comb_mem[0] = x;
+                $readmemh("{file}", comb_mem, 1, 1);
+                y = comb_mem[1];
+                z = comb_mem[0];
+            end
+        endmodule"#,
+        file = file.display()
+    );
+    for four_state in [false, true] {
+        std::fs::write(&file, "22").unwrap();
+        let mut sim = Simulator::from_sv_sources(vec![(&source, Path::new("rerun.sv"))], "Top")
+            .four_state(four_state)
+            .build()
+            .unwrap();
+        let (clk, x) = (sim.event("clk"), sim.signal("x"));
+        let (q, y, z) = (sim.signal("q"), sim.signal("y"), sim.signal("z"));
+        assert_eq!(sim.get(y), 0x22u8.into());
+        std::fs::write(&file, "33 44").unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(q), 0x44u8.into());
+        // The block does not run while nothing it reads changes.
+        assert_eq!(sim.get(y), 0x22u8.into());
+        sim.modify(|io| io.set(x, 5u8)).unwrap();
+        assert_eq!((sim.get(y), sim.get(z)), (0x33u8.into(), 5u8.into()));
+        std::fs::write(&file, "55 66").unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(q), 0x66u8.into());
+        // The `always_comb` load read a file of two words for its one
+        // address once; the `always_ff` files had a word per address.
+        let reports = readmem_reports(sim.drain_runtime_events());
+        assert!(
+            matches!(&reports[..], [(celox::Severity::Warning, path, line, message)]
+                if path == "rerun.sv"
+                    && *line == source_line(&source, "comb_mem, 1, 1")
+                    && message.contains("requested range [1:1]")),
+            "{reports:?}"
+        );
+    }
+}
+
+/// A process reads the file a `$writememh` before it wrote (IEEE 1800-2023
+/// 21.4, 21.5).
+#[test]
+fn readmem_reads_the_file_a_writemem_wrote() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("round_trip.hex");
+    let source = format!(
+        r#"`timescale 1ns/1ns
+        module top;
+            logic [11:0] a [0:2];
+            logic [11:0] b [0:2];
+            initial begin
+                a[0] = 12'h123; a[1] = 12'h456; a[2] = 12'h789;
+                $writememh("{file}", a);
+                $readmemh("{file}", b);
+                $display("%h %h %h", b[0], b[1], b[2]);
+                a[1] = 12'habc;
+                #1 $writememh("{file}", a);
+                $readmemh("{file}", b);
+                $display("%h %h %h", b[0], b[1], b[2]);
+                $finish;
+            end
+        endmodule"#,
+        file = file.display()
+    );
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(&source, Path::new("round_trip.sv"))], "top")
+            .build()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let mut lines = Vec::new();
+    let mut reports = Vec::new();
+    for event in sim.drain_runtime_events() {
+        match event {
+            celox::RuntimeEvent::Display { message } => {
+                lines.push(String::from_utf8_lossy(&message).into_owned())
+            }
+            celox::RuntimeEvent::Report(report) => reports.push(report),
+            _ => {}
+        }
+    }
+    assert_eq!(lines, ["123 456 789", "123 abc 789"]);
+    assert!(reports.is_empty(), "{reports:?}");
+}
+
+/// An address with an unknown bit names no word: the load reports an
+/// error and loads nothing (IEEE 1800-2023 21.4).
+#[test]
+fn readmem_reports_an_unknown_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("words.hex");
+    std::fs::write(&file, "12 34").unwrap();
+    let source = format!(
+        r#"`timescale 1ns/1ns
+        module top;
+            logic [7:0] mem [0:1];
+            logic [3:0] start;
+            initial begin
+                mem[0] = 8'h55; mem[1] = 8'h66;
+                start = 4'bx;
+                #1 $readmemh("{}", mem, start);
+                $display("%h %h", mem[0], mem[1]);
+                $finish;
+            end
+        endmodule"#,
+        file.display()
+    );
+    let mut sim = celox::Simulation::from_sv_sources(vec![(&source, Path::new("x.sv"))], "top")
+        .four_state(true)
+        .build()
+        .unwrap();
+    sim.run_until(10).unwrap();
+    let mut lines = Vec::new();
+    let mut errors = Vec::new();
+    for event in sim.drain_runtime_events() {
+        match event {
+            celox::RuntimeEvent::Display { message } => {
+                lines.push(String::from_utf8_lossy(&message).into_owned())
+            }
+            celox::RuntimeEvent::Report(report) if report.severity == celox::Severity::Error => {
+                errors.push(String::from_utf8_lossy(&report.message).into_owned())
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(lines, ["55 66"]);
+    assert!(
+        matches!(&errors[..], [error] if error.contains("$readmemh: address contains X or Z")),
+        "{errors:?}"
+    );
+}
+
+/// Each call of a load reports, also equal calls of an unrolled loop in
+/// an `initial` block that the instance runs as it starts.
+#[test]
+fn readmem_reports_each_call_of_an_unrolled_loop() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("short.hex");
+    std::fs::write(&file, "aa").unwrap();
+    let source = format!(
+        r#"module Top(output logic [7:0] y);
+            logic [7:0] mem [0:1];
+            initial for (int i = 0; i < 2; i++) $readmemh("{}", mem);
+            assign y = mem[0];
+        endmodule"#,
+        file.display()
+    );
+    let mut sim = Simulator::from_sv_sources(vec![(&source, Path::new("loop.sv"))], "Top")
+        .build()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xaau8.into());
+    let reports = readmem_reports(sim.drain_runtime_events());
+    assert_eq!(reports.len(), 2, "{reports:?}");
+    assert!(
+        reports
+            .iter()
+            .all(|(severity, _, _, _)| *severity == celox::Severity::Warning),
+        "{reports:?}"
     );
 }

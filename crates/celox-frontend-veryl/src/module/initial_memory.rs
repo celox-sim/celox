@@ -92,23 +92,86 @@ pub(super) fn has_initial_memory_effect(stmt: &Statement) -> bool {
     false
 }
 
-/// The writes performed by `$readmemh(filename, destination)`.
-pub(crate) struct ReadmemImage {
-    pub var_id: VarId,
-    pub runs: Vec<InitialMemoryWriteRun>,
-}
-
-/// Validate a `$readmemh` destination and read the file into write runs.
+/// Validate a `$readmemh` destination and describe the load, whose file is
+/// read when it runs (IEEE 1800-2023 21.4).
 ///
 /// `index_values` resolves the destination's constant index prefix, if any.
-pub(crate) fn readmem_image(
+pub(crate) fn readmem_load(
     module: &veryl_analyzer::ir::Module,
     filename_arg: &SystemFunctionInput,
     output: &[AssignDestination],
-    dependencies: &crate::FileDependencyCollector,
     radix: u32,
     index_values: impl FnOnce(&AssignDestination) -> Option<Vec<usize>>,
-) -> Result<ReadmemImage, ParserError> {
+) -> Result<(VarId, celox_design::MemoryFileLoad), ParserError> {
+    let destination = readmem_destination(module, output, index_values)?;
+    let load = memory_file_load(
+        filename_arg,
+        radix,
+        destination.element_width,
+        destination.start,
+        destination.depth,
+    )?;
+    Ok((destination.var_id, load))
+}
+
+/// The load of file `filename_arg` into `depth` words of `element_width`
+/// bits from position `start`.
+pub(crate) fn memory_file_load(
+    filename_arg: &SystemFunctionInput,
+    radix: u32,
+    element_width: usize,
+    start: usize,
+    depth: usize,
+) -> Result<celox_design::MemoryFileLoad, ParserError> {
+    let Some(file) = static_string_expr(&filename_arg.0) else {
+        return Err(ParserError::illegal_context(
+            if radix == 2 {
+                "$readmemb filename expression"
+            } else {
+                "$readmemh filename expression"
+            },
+            "filename must be a compile-time string",
+            Some(&filename_arg.0.comptime().token),
+        ));
+    };
+    let token = &filename_arg.0.comptime().token;
+    let base = (!std::path::Path::new(&file).is_absolute())
+        .then(|| readmem_base(token))
+        .flatten();
+    let location = token
+        .beg
+        .source
+        .get_path()
+        .and_then(veryl_parser::resource_table::get_path_value)
+        .map(|path| celox_design::ReportLocation {
+            file: path.to_string_lossy().into_owned(),
+            line: token.beg.line as usize,
+        });
+    Ok(celox_design::MemoryFileLoad {
+        radix,
+        file,
+        base,
+        base_key: None,
+        element_width,
+        addressing: celox_design::MemoryFileAddressing::Offset { start, depth },
+        location,
+    })
+}
+
+/// The array a `$readmemh` loads and the words it may load.
+struct ReadmemDestination {
+    var_id: VarId,
+    element_width: usize,
+    /// The position of the first word.
+    start: usize,
+    depth: usize,
+}
+
+fn readmem_destination(
+    module: &veryl_analyzer::ir::Module,
+    output: &[AssignDestination],
+    index_values: impl FnOnce(&AssignDestination) -> Option<Vec<usize>>,
+) -> Result<ReadmemDestination, ParserError> {
     let dst = match output {
         [dst] if dst.select.is_empty() && dst.select.1.is_none() => dst,
         [dst] => {
@@ -168,119 +231,28 @@ pub(crate) fn readmem_image(
             var.r#type.to_string(),
         ));
     }
-
-    let InitialMemoryData::Writes(runs) = read_memory_file(
-        dependencies,
-        filename_arg,
-        radix,
-        element_width,
-        start_addr,
-        depth,
-        &dst.token,
-    )?
-    else {
-        unreachable!("memory files are read as write runs");
-    };
-    Ok(ReadmemImage {
+    Ok(ReadmemDestination {
         var_id: dst.id,
-        runs,
+        element_width,
+        start: start_addr,
+        depth,
     })
 }
 
-pub(crate) fn read_memory_file(
-    dependencies: &crate::FileDependencyCollector,
-    filename_arg: &SystemFunctionInput,
-    radix: u32,
-    element_width: usize,
-    start_addr: usize,
-    depth: usize,
-    destination_token: &veryl_parser::token_range::TokenRange,
-) -> Result<InitialMemoryData, ParserError> {
-    let task = if radix == 2 { "$readmemb" } else { "$readmemh" };
-    let Some(filename) = static_string_expr(&filename_arg.0) else {
-        return Err(ParserError::illegal_context(
-            if radix == 2 {
-                "$readmemb filename expression"
-            } else {
-                "$readmemh filename expression"
-            },
-            "filename must be a compile-time string",
-            Some(&filename_arg.0.comptime().token),
-        ));
+/// The directory a relative memory file name of the call at `token` is
+/// looked up in first: that of its source file, as an absolute path.
+fn readmem_base(token: &veryl_parser::token_range::TokenRange) -> Option<String> {
+    let source = token.beg.source.to_string();
+    let parent = std::path::Path::new(&source).parent()?;
+    if parent.as_os_str().is_empty() {
+        return None;
+    }
+    let base = if parent.is_absolute() {
+        parent.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(parent)
     };
-    let path = resolve_readmem_path(&filename, &filename_arg.0.comptime().token, dependencies);
-    let timing = readmem_timing_enabled();
-    let total_start = timing.then(Instant::now);
-    if timing {
-        tracing::debug!(
-            "[readmem-timing] start file={} depth={} element_width={} start_addr={} radix={}",
-            path.display(),
-            depth,
-            element_width,
-            start_addr,
-            radix
-        );
-    }
-
-    let read_start = timing.then(Instant::now);
-    let content = std::fs::read_to_string(&path).map_err(|err| {
-        ParserError::memory_file(
-            format!("{task}: failed to read {}: {err}", path.display()),
-            Some(&filename_arg.0.comptime().token),
-        )
-    })?;
-    if let Some(start) = read_start {
-        tracing::debug!(
-            "[readmem-timing] read file={} bytes={} elapsed={:?}",
-            path.display(),
-            content.len(),
-            start.elapsed()
-        );
-    }
-
-    let parse_start = timing.then(Instant::now);
-    let writes = celox_frontend_core::memory_file::parse_memory_write_runs(
-        &content,
-        radix,
-        element_width,
-        start_addr,
-        depth,
-    )
-    .map_err(|error| {
-        ParserError::memory_file(
-            format!("{task}: {}", error.message),
-            error.at_destination.then_some(destination_token),
-        )
-    })?;
-    if let Some(start) = parse_start {
-        tracing::debug!(
-            "[readmem-timing] parse file={} words={} runs={} elapsed={:?}",
-            path.display(),
-            writes.words,
-            writes.runs.len(),
-            start.elapsed()
-        );
-    }
-    if let Some(start) = total_start {
-        tracing::debug!(
-            "[readmem-timing] done file={} elapsed={:?}",
-            path.display(),
-            start.elapsed()
-        );
-    }
-
-    Ok(InitialMemoryData::Writes(writes.runs))
-}
-
-pub(super) fn resolve_readmem_path(
-    filename: &str,
-    token: &veryl_parser::token_range::TokenRange,
-    dependencies: &crate::FileDependencyCollector,
-) -> std::path::PathBuf {
-    let source_path = token.beg.source.to_string();
-    let source_path = (!source_path.is_empty()).then(|| std::path::Path::new(&source_path));
-    let cwd = std::env::current_dir().ok();
-    resolve_readmem_path_with_fallback(filename, source_path, cwd.as_deref(), dependencies)
+    Some(base.to_string_lossy().into_owned())
 }
 
 pub(super) fn static_string_expr(expr: &Expression) -> Option<String> {
@@ -289,40 +261,4 @@ pub(super) fn static_string_expr(expr: &Expression) -> Option<String> {
     }
     let value = expr.comptime().get_value().ok()?;
     byte_value_to_string(value)
-}
-
-pub(super) fn readmem_timing_enabled() -> bool {
-    tracing::enabled!(tracing::Level::DEBUG)
-}
-
-pub(super) fn resolve_readmem_path_with_fallback(
-    filename: &str,
-    source_path: Option<&std::path::Path>,
-    cwd: Option<&std::path::Path>,
-    dependencies: &crate::FileDependencyCollector,
-) -> std::path::PathBuf {
-    let path = std::path::PathBuf::from(filename);
-    if path.is_absolute() {
-        dependencies.record(&path, true);
-        return path;
-    }
-
-    let source_relative = source_path
-        .and_then(std::path::Path::parent)
-        .map(|parent| parent.join(&path))
-        .unwrap_or_else(|| path.clone());
-    dependencies.record(&source_relative, false);
-    if source_relative.exists() {
-        return source_relative;
-    }
-
-    if let Some(cwd) = cwd {
-        let cwd_relative = cwd.join(&path);
-        dependencies.record(&cwd_relative, false);
-        if cwd_relative.exists() {
-            return cwd_relative;
-        }
-    }
-
-    source_relative
 }

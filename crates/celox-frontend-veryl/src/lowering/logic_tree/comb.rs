@@ -20,22 +20,38 @@ pub(super) fn parse_comb(
     parse_comb_with_loop_recovery(module, decl, arena, &[], 0)
 }
 
+type ParsedComb = (
+    Vec<LogicPath<VarId>>,
+    SymbolicStore<VarId>,
+    BoundaryMap<VarId>,
+    Vec<CombObserver<VarId>>,
+    Vec<RuntimeEventSite>,
+);
+
 pub fn parse_comb_with_loop_recovery(
     module: &Module,
     decl: &CombDeclaration,
     arena: &mut SLTNodeArena<VarId>,
     loop_candidates: &[LoopRecoveryCandidate],
     capture_namespace: u32,
-) -> Result<
-    (
-        Vec<LogicPath<VarId>>,
-        SymbolicStore<VarId>,
-        BoundaryMap<VarId>,
-        Vec<CombObserver<VarId>>,
-        Vec<RuntimeEventSite>,
-    ),
-    ParserError,
-> {
+) -> Result<ParsedComb, ParserError> {
+    // A failed attempt, which may be retried, loads nothing.
+    let loads = arena.memory_loads.len();
+    let parsed = parse_comb_attempt(module, decl, arena, loop_candidates, capture_namespace);
+    if parsed.is_err() {
+        arena.memory_loads.truncate(loads);
+    }
+    parsed
+}
+
+fn parse_comb_attempt(
+    module: &Module,
+    decl: &CombDeclaration,
+    arena: &mut SLTNodeArena<VarId>,
+    loop_candidates: &[LoopRecoveryCandidate],
+    capture_namespace: u32,
+) -> Result<ParsedComb, ParserError> {
+    let loads = arena.memory_loads.len();
     let mut written_accesses = HashMap::default();
     collect_written_accesses(module, &decl.statements, &mut written_accesses)?;
 
@@ -144,6 +160,15 @@ pub fn parse_comb_with_loop_recovery(
     }
     let process_sensitivity = subtract_written_sensitivity(process_sensitivity, &written_atoms);
     let process_sensitivity: Vec<_> = process_sensitivity.into_iter().collect();
+    // A block that loads a memory file runs once, at time zero, only when it
+    // reads no signal (see `apply_readmem_writes`).
+    if arena.memory_loads.len() > loads && !process_sensitivity.is_empty() {
+        return Err(ParserError::illegal_context(
+            "$readmemh in always_comb",
+            "a block that loads a memory file must not read signals; load it in an initial or always_ff block",
+            arena.memory_load_call.as_ref(),
+        ));
+    }
     for observer in &mut effects.observers {
         observer.sensitivity = process_sensitivity.clone();
         observer.written_input_atoms = observer

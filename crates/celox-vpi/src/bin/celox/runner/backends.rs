@@ -41,14 +41,8 @@ pub(super) fn run_native(
         }
         builder.build_native_from_image(image)?
     } else if let Some(cache) = build_cache {
-        let (compiled, dependencies) =
-            celox_frontend_veryl::capture_file_dependencies(|collector| {
-                builder
-                    .file_dependency_collector(collector.clone())
-                    .compile_native()
-            });
-        let compiled = compiled?;
-        cache.store(compiled.program_image(), &dependencies);
+        let compiled = builder.compile_native()?;
+        cache.store(compiled.program_image());
         compiled.initialize()?
     } else {
         builder.build_native()?

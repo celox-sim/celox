@@ -76,6 +76,7 @@ impl<B: SimBackend> Simulator<B> {
     pub(crate) fn apply_initial_values(&mut self) {
         let mut applied = false;
         let initial_memory_values = self.program.design.take_initial_state();
+        let mut occurrences = memory_files::LoadOccurrences::default();
         for init in &initial_memory_values {
             applied = true;
             let signal = self.backend.resolve_signal(&init.address);
@@ -118,6 +119,10 @@ impl<B: SimBackend> Simulator<B> {
                 }
                 InitialMemoryData::Writes(runs) => {
                     self.apply_initial_memory_writes(signal, runs);
+                }
+                InitialMemoryData::MemoryFile(load) => {
+                    let runs = self.initial_memory_file(init.address, load, &mut occurrences);
+                    self.apply_initial_memory_writes(signal, &runs);
                 }
             }
         }

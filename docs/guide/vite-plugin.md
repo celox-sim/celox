@@ -84,13 +84,18 @@ module memory_test {
 }
 ```
 
-Hex files are read when the simulator is compiled. In the root testbench, each
-memory write executes at its statement position, so conditions, repeated calls,
-and clock edges retain their order. The destination must be a whole unpacked
+Hex files are read when the load executes, never when the simulator is
+compiled, so a changed file needs no recompilation. A module's `initial` load
+runs as each simulator instance starts. In the root testbench, each memory
+write executes at its statement position, so conditions, repeated calls, and
+clock edges retain their order. The destination must be a whole unpacked
 array. Address directives and X/Z values use the same parsing as local memory
 initialization; X/Z masks are retained when 4-state simulation is enabled.
 Relative paths are resolved from the Veryl source file, with the working
-directory as a fallback.
+directory of the simulating process as a fallback. A missing or malformed
+file is reported as an error when the load runs. A combinational block that
+loads a file must not read signals, since it would run, and read the file,
+again whenever they change.
 
 ### Custom Project Root
 

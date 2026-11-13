@@ -21,6 +21,7 @@ napi              = { workspace = true, features = ["napi8", "serde-json"] }
 napi-derive       = { workspace = true }
 celox-ts-gen      = { workspace = true }
 celox-design      = { workspace = true }
+celox-heap        = { workspace = true }
 veryl-analyzer    = { workspace = true }
 veryl-metadata    = { workspace = true }
 veryl-parser      = { workspace = true }
@@ -31,6 +32,7 @@ serde_json        = { workspace = true }
 toml              = { workspace = true }
 globset           = "0.4"
 fxhash            = { workspace = true }
+tracing           = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 celox = { workspace = true, features = ["host-runtime"] }
