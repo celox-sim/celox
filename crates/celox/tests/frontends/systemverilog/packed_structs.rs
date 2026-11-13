@@ -725,3 +725,104 @@ fn ports_drive_members_of_array_member_elements_by_their_declared_indices() {
         assert_eq!(lines, ["7a5c31234 a5 c3"], "four-state {four_state}");
     }
 }
+
+/// A member of an element of a packed array member of a structure of an
+/// interface instance is read and written at a run-time index through the
+/// instance (IEEE 1800-2023 25.5, 7.4.5). Verilator 5.054 prints the same
+/// line.
+#[test]
+fn members_of_packed_array_member_elements_of_interfaces_at_run_time_indices() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+  typedef struct packed { logic [3:0] q; logic qe; } k_t;
+  typedef struct packed { logic [7:0] pre; k_t [3:0] key_share0; } r_t;
+endpackage
+interface regs_if;
+  p::r_t reg2hw;
+endinterface
+module top;
+  regs_if ifc();
+  int i;
+  logic [3:0] v;
+  initial begin
+    ifc.reg2hw = '0;
+    for (i = 0; i < 4; i++) ifc.reg2hw.key_share0[i].q = 4'(i + 3);
+    i = 2; v = ifc.reg2hw.key_share0[i].q;
+    $display("A %h %h", v, ifc.reg2hw);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("members.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["A 5 0062906"], "four_state={four_state}");
+    }
+}
+
+/// A member of an element of a packed array member of a structure, at a
+/// run-time index, such as Caliptra's `reg2hw.key_share0[i].q`, is read and
+/// written (IEEE 1800-2023 7.2.1, 7.4.5); an index outside the array reads
+/// X and writes nothing, also of the members next to the array.
+#[test]
+fn members_of_packed_array_member_elements_at_run_time_indices() {
+    let source = r#"`timescale 1ns/1ns
+module top;
+  typedef struct packed { logic [3:0] q; logic qe; } k_t;
+  typedef struct packed { logic [7:0] pre; k_t [3:0] key_share0; logic [7:0] post; } r_t;
+  r_t reg2hw;
+  logic [3:0] out [4];
+  int i;
+  initial begin
+    reg2hw = '0;
+    reg2hw.pre = 8'haa; reg2hw.post = 8'h55;
+    for (i = 0; i < 4; i++) reg2hw.key_share0[i].q = 4'(i + 3);
+    for (i = 0; i < 4; i++) out[i] = reg2hw.key_share0[i].q;
+    $display("A %h %h %h %h", out[0], out[1], out[2], out[3]);
+    i = 5;
+    i = -1; reg2hw.key_share0[i].qe = 1'b1; i = 5;
+    reg2hw.key_share0[i].q = 4'hf;
+    $display("B %h %h %b", reg2hw.pre, reg2hw.post, reg2hw.key_share0[i].q);
+    $display("C %h", reg2hw);
+  end
+endmodule"#;
+    for (four_state, unknown) in [(false, "0000"), (true, "xxxx")] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("members.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "A 3 4 5 6".to_string(),
+                format!("B aa 55 {unknown}"),
+                "C aa6290655".to_string()
+            ],
+            "four_state={four_state}"
+        );
+    }
+}

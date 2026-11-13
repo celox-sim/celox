@@ -1144,6 +1144,24 @@ fn path_context(
         return Ok(None);
     }
     if let Some(element) = element_members::element_member(root, native, tree, session, dims) {
+        let view;
+        // The members before the array may cross tags of tagged unions,
+        // which each read and write of the element checks (7.3.2).
+        let mut guards = Vec::new();
+        let dims = if element.prefix.is_empty() {
+            dims
+        } else {
+            let mut path = vec![element.name.clone()];
+            path.extend(element.prefix.iter().cloned());
+            if let Some((prefix_guards, _)) =
+                packed_structs::member_access(path.clone(), dims, tree)?
+            {
+                guards = prefix_guards;
+            }
+            view = packed_structs::member_view(tree, &path, dims)
+                .ok_or_else(|| unsupported("structure array member"))?;
+            &view
+        };
         let (_, ty) = packed_structs::element_member(&element.name, &element.members, dims)?;
         let ty = if ty.unpacked_ranges.is_empty() {
             ty.clone()
@@ -1152,7 +1170,7 @@ fn path_context(
                 .and_then(|shape| shape.pattern_type(&tree.functions, dims))
                 .ok_or_else(|| unsupported("structure array member type"))?
         };
-        return Ok(Some((Vec::new(), ty)));
+        return Ok(Some((guards, ty)));
     }
     let (mut parts, qualified) = path(root, native, tree, session, dims)?;
     if let Some(name) = qualified {
