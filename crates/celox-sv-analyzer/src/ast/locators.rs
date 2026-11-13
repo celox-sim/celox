@@ -344,8 +344,9 @@ fn array(
     let right = bound(&shape.unpacked[0].right)?;
     let element = if shape.string {
         type_binding::builtin_type("string", None).expect("string is a builtin type")
-    } else if let Some(class) = &shape.class {
-        classes::handle(class)
+    } else if let Some(class) = expression_binding::objects::shape_class(shape, tree, session, dims)
+    {
+        classes::handle(&class)
     } else {
         let mut ty = Type::new(if shape.is_2state {
             TypeKind::Bit
@@ -372,7 +373,7 @@ fn array(
         .ok_or_else(|| unsupported("array locator method on elements wider than 64 bits"))?;
     let handle = if shape.string {
         Some(HandleProperty::String)
-    } else if shape.class.is_some() {
+    } else if expression_binding::objects::shape_class(shape, tree, session, dims).is_some() {
         Some(HandleProperty::Object)
     } else {
         None
