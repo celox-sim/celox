@@ -182,6 +182,16 @@ required-features = ["host-runtime"]
 [lints]
 workspace = true
 
+# `cargo binstall celox` downloads the archives that publish-cli.yml attaches
+# to the GitHub Release instead of compiling the command.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/celox-{ target }{ archive-suffix }"
+bin-dir = "celox-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [[test]]
 name = "component_method"
 required-features = ["cranelift", "wasm-runtime"]
