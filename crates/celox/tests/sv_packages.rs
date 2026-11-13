@@ -1754,3 +1754,43 @@ fn restricted_processes_may_share_disjoint_package_slices() {
     sim.run_until(1).unwrap();
     assert_eq!(sim.get(sim.signal("y")) >> 4u32, 5u32.into());
 }
+
+/// A select of a parameter wider than 128 bits whose value is another
+/// parameter, such as OpenTitan's `RndCnstTriviumLfsrSeed` defaulting to its
+/// package's `RndCnstTriviumLfsrSeedDefault`, reads the bits of that value
+/// (IEEE 1800-2023 6.20.2, 11.5.1), imported, qualified or overridden.
+#[test]
+fn selects_of_wide_parameters_valued_by_package_parameters() {
+    let source = r#"
+        package p;
+            parameter int W = 288;
+            typedef logic [W-1:0] seed_t;
+            parameter seed_t SeedDefault = {32'h758a4420, 256'h31e1c461_6ea343ec_153282a3_0c132b57_23c5a4cf_4743b3c7_c32d580f_74f1713a};
+            parameter seed_t Other = {32'h01234567, 256'h0};
+            // A chain longer than any fixed bound.
+            parameter seed_t C0 = SeedDefault;
+            parameter seed_t C1 = C0, C2 = C1, C3 = C2, C4 = C3, C5 = C4, C6 = C5, C7 = C6,
+                C8 = C7, C9 = C8, C10 = C9, C11 = C10, C12 = C11, C13 = C12, C14 = C13,
+                C15 = C14, C16 = C15, C17 = C16, C18 = C17, C19 = C18, C20 = C19;
+        endpackage
+        module Imported import p::*; #(parameter seed_t Seed = SeedDefault) (output logic [63:0] low);
+            localparam logic [63:0] Low = Seed[63:0];
+            assign low = Low;
+        endmodule
+        module Qualified #(parameter p::seed_t Seed = p::SeedDefault, parameter int unsigned SW = 288)
+            (output logic [31:0] top);
+            localparam logic [SW-1:0] State = Seed[SW-1:0];
+            assign top = State[287:256];
+        endmodule
+        module Top(output logic [63:0] low, output logic [31:0] top, overridden, chained);
+            Imported imported(.low);
+            Qualified qualified(.top);
+            Qualified #(.Seed(p::Other)) other(.top(overridden));
+            Qualified #(.Seed(p::C20)) chain(.top(chained));
+        endmodule
+    "#;
+    assert_eq!(
+        outputs(source, &["low", "top", "overridden", "chained"]),
+        [0xc32d_580f_74f1_713a, 0x758a_4420, 0x0123_4567, 0x758a_4420]
+    );
+}
