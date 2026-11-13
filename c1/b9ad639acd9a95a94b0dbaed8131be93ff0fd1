@@ -1,1 +1,6 @@
-Restack onto the reworked #3733 and current master; static class-handle guard operands; map soft and restricted nodes
+Revision history for #3856:
+
+rev 2 (content) 2026-11-13 18:30 UTC — Restack onto the reworked #3733 and current master; static class-handle guard operands; map soft and restricted nodes
+rev 1 (initial) 2026-11-13 18:30 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3856,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"486b430f8c740446710f163763f9ad4d48001d56","timestamp_iso":"2026-11-13T18:30:40Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"486b430f8c740446710f163763f9ad4d48001d56","new_sha":"c1b9ad639acd9a95a94b0dbaed8131be93ff0fd1","timestamp_iso":"2026-11-13T18:30:40Z","reason":"Restack onto the reworked #3733 and current master; static class-handle guard operands; map soft and restricted nodes","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/486b430f8c740446710f163763f9ad4d48001d56...c1b9ad639acd9a95a94b0dbaed8131be93ff0fd1"}]} -->
