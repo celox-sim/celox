@@ -519,14 +519,14 @@ fn specialize(
 /// package `name` inherits from classes of the package alone, whose members
 /// its syntax tells: through the class it extends, and for an interface
 /// class through those it extends (IEEE 1800-2023 8.26.3).
-fn inherits_within(name: &str, classes: &[Class], open: &HashSet<String>) -> bool {
+fn inherits_within(name: &str, classes: &[Arc<Class>], open: &HashSet<String>) -> bool {
     if open.is_empty() {
         return true;
     }
     let prefix = format!("{name}::");
     let by_name = classes
         .iter()
-        .map(|class| (class.name.as_str(), class))
+        .map(|class| (class.name.as_str(), &**class))
         .collect::<HashMap<_, _>>();
     // The name of a specialization is that of its class with its
     // arguments after it; the name itself may hold any text.
@@ -542,6 +542,7 @@ fn inherits_within(name: &str, classes: &[Class], open: &HashSet<String>) -> boo
     let mut seen = HashSet::default();
     let mut pending = classes
         .iter()
+        .map(|class| &**class)
         .filter(|class| specializes(class))
         .collect::<Vec<_>>();
     while let Some(class) = pending.pop() {
@@ -708,7 +709,7 @@ fn hand_over(known: &mut ScopeSymbols, caller: &ScopeSymbols, package_owner: Opt
             known.subroutines.push(Arc::new(subroutine));
             for local in locals {
                 if known_locals.insert(local.name.clone()) {
-                    known.locals.push(local);
+                    known.locals.push(Arc::new(local));
                 }
             }
         }
@@ -720,12 +721,12 @@ fn hand_over(known: &mut ScopeSymbols, caller: &ScopeSymbols, package_owner: Opt
 
 /// The positions of the variables of a scope, by name.
 struct LocalIndex<'a> {
-    locals: &'a [LocalVariable],
+    locals: &'a [Arc<LocalVariable>],
     positions: HashMap<&'a str, Vec<usize>>,
 }
 
 impl<'a> LocalIndex<'a> {
-    fn new(locals: &'a [LocalVariable]) -> Self {
+    fn new(locals: &'a [Arc<LocalVariable>]) -> Self {
         let mut positions: HashMap<&str, Vec<usize>> = HashMap::default();
         for (position, local) in locals.iter().enumerate() {
             positions
@@ -747,7 +748,7 @@ impl<'a> LocalIndex<'a> {
         positions.sort_unstable();
         positions
             .into_iter()
-            .map(|position| &self.locals[position])
+            .map(|position| &*self.locals[position])
             .collect()
     }
 }
@@ -828,14 +829,14 @@ fn hand_over_by_scans(
                 .locals
                 .iter()
                 .filter(|local| declared.contains(local.name.as_str()))
-                .map(|local| (local.name.as_str(), local))
+                .map(|local| (local.name.as_str(), &**local))
                 .collect::<HashMap<_, _>>();
             let (subroutine, locals) =
                 rename_handed_over(subroutine, &declared, &declarations, package_owner);
             known.subroutines.push(Arc::new(subroutine));
             for local in locals {
                 if !known.locals.iter().any(|old| old.name == local.name) {
-                    known.locals.push(local);
+                    known.locals.push(Arc::new(local));
                 }
             }
         }
@@ -1076,7 +1077,11 @@ mod tests {
             local(this, "this", true),
             local("w@9", "w", false),
         ];
-        let (handed, locals) = handed_over(&subroutine, &LocalIndex::new(&locals), Some("$unit"));
+        let (handed, locals) = handed_over(
+            &subroutine,
+            &LocalIndex::new(&locals.map(Arc::new)),
+            Some("$unit"),
+        );
         let declared = |index: usize| match &handed.body[index] {
             StmtBase::Local { name, .. } => name.clone(),
             other => panic!("{other:?}"),
