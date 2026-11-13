@@ -14,7 +14,8 @@ mod tests;
 
 pub(super) use layout::{AggregateKind, capture_member_type, native_type};
 pub(super) use selects::{
-    bind_interface_path, element_member, select_element_member, select_member, whole_member,
+    bind_interface_path, element_member, member_view, select_element_member, select_member,
+    select_member_element_member, whole_member,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
