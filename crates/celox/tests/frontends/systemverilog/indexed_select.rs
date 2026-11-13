@@ -257,3 +257,132 @@ sv_backends! {
         }
     }
 }
+
+// A counted loop over a module variable, as Verilog-2001 memory models
+// write their masked words: each iteration selects a constant part of the
+// addressed word, though other processes can see the loop variable.
+#[test]
+fn loops_over_module_variables_select_parts_of_memory_words() {
+    let source = r#"
+        module Top(
+            input logic clk, en, input logic [2:0] addr, input logic [1:0] mask,
+            input logic [99:0] wdata, output logic [99:0] rdata, output integer last
+        );
+            reg [99:0] ram [7:0];
+            integer i;
+            always @(posedge clk)
+                if (en) begin
+                    for (i = 0; i < 2; i = i + 1) begin
+                        if (mask[i]) ram[addr][i*50 +: 50] <= wdata[i*50 +: 50];
+                    end
+                end
+            assign rdata = ram[addr];
+            assign last = i;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("memory.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let clk = sim.event("clk");
+    let (en, addr, mask, wdata) = (
+        sim.signal("en"),
+        sim.signal("addr"),
+        sim.signal("mask"),
+        sim.signal("wdata"),
+    );
+    let (rdata, last) = (sim.signal("rdata"), sim.signal("last"));
+    let word = |high: u64, low: u64| (BigUint::from(high) << 50u32) | BigUint::from(low);
+    sim.modify(|io| {
+        io.set(en, 1u8);
+        io.set(addr, 3u8);
+        io.set(mask, 0b11u8);
+        io.set_wide(wdata, word(0x1234567, 0x89abcde));
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(rdata), word(0x1234567, 0x89abcde));
+    // The variable holds the value that ended the loop.
+    assert_eq!(sim.get(last), 2u8.into());
+    sim.modify(|io| {
+        io.set(mask, 0b10u8);
+        io.set_wide(wdata, word(0x3_ffff_ffff_ffff, 0));
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(rdata), word(0x3_ffff_ffff_ffff, 0x89abcde));
+    // Another word is untouched.
+    sim.modify(|io| io.set(addr, 4u8)).unwrap();
+    assert_eq!(sim.get(rdata), 0u8.into());
+}
+
+// A loop whose body changes its module variable through a system function
+// that writes an argument runs as written: `$random(i)` stores the next
+// seed in `i` (IEEE 1800-2023 20.14.1), which ends this loop after one
+// iteration.
+#[test]
+fn loops_whose_body_writes_the_variable_through_a_system_function_run_as_written() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+            integer i, count, x;
+            initial begin
+                count = 0;
+                for (i = 1; i < 4; i = i + 1) begin
+                    x = $random(i);
+                    count = count + 1;
+                end
+                #1 $display("%0d %0d", count, i > 4);
+            end
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("seed.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["1 1"]);
+}
+
+// A sampled value of the variable of a loop over a module variable is that
+// of the start of the time slot (IEEE 1800-2023 16.9.3), whatever the
+// iterations give the variable.
+#[test]
+fn loops_over_module_variables_keep_sampled_values() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+            integer i, s0, s1;
+            initial begin
+                i = 7;
+                #1;
+                s0 = 0; s1 = 0;
+                for (i = 0; i < 3; i = i + 1) begin
+                    s0 = s0 + $sampled(i);
+                    s1 = s1 + i;
+                end
+                $display("%0d %0d", s0, s1);
+            end
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("sampled.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["21 3"]);
+}

@@ -14,10 +14,12 @@ impl Ff<'_, '_> {
         if !(self.observation.observe_blocking_assignments && self.kernel.is_some())
             && let sv::ir::LoopKind::For = kind
             && let Some(canonical) = canonical_for_loop(init, condition, step)
+            // A variable that other processes can read or write has its
+            // value at each iteration only while none of them can run.
             && self
                 .m
                 .id(&canonical.var)
-                .is_some_and(|id| self.m.is_hidden(id))
+                .is_some_and(|id| self.m.is_hidden(id) || runs_without_others(body))
             && let Some((values, last)) = self.unrolled_values(&canonical, condition, step, body)?
         {
             return self.unroll(&canonical, &values, last, body);
@@ -355,6 +357,40 @@ impl Ff<'_, '_> {
 /// Iterations, as a power of two, between the yields of a kernel loop that
 /// may not suspend.
 pub(super) const LOOP_YIELD_BITS: usize = 16;
+
+/// Whether `body` runs from its first statement to its last with no other
+/// process, and nothing but its own assignments that could write a variable
+/// it reads, in between: it has no timing control and calls nothing that
+/// has an effect, which a subroutine, a method of a process and a system
+/// function that writes an argument, as `$random(seed)`, have.
+fn runs_without_others(body: &[sv::ir::Stmt]) -> bool {
+    let mut alone = true;
+    let mut calls = Vec::new();
+    for stmt in body {
+        stmt.walk(&mut |stmt| {
+            alone &= !matches!(
+                stmt,
+                sv::ir::Stmt::Delay { .. }
+                    | sv::ir::Stmt::DelayedNonblocking { .. }
+                    | sv::ir::Stmt::WaitEvent(_)
+                    | sv::ir::Stmt::WaitImplicit { .. }
+                    | sv::ir::Stmt::Wait(_)
+                    | sv::ir::Stmt::Fork { .. }
+                    | sv::ir::Stmt::WaitFork
+                    | sv::ir::Stmt::Call { .. }
+                    | sv::ir::Stmt::SystemTask { .. }
+            );
+            stmt_calls(stmt, &mut calls);
+        });
+    }
+    // A sampled value is that of the start of the time slot (16.9.3), not
+    // the value an iteration gives the variable.
+    alone
+        && calls.iter().all(|(callee, _)| {
+            !callee.is_effectful()
+                && !matches!(callee, sv::ir::Callee::System(function) if function.reads_sampled_values())
+        })
+}
 
 /// Whether every pass through `stmts` suspends the process.
 pub(super) fn always_suspends(stmts: &[sv::ir::Stmt]) -> bool {
