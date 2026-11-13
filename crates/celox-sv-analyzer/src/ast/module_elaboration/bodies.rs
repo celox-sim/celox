@@ -115,6 +115,7 @@ impl ScopeElaboration<'_> {
             self.signals.push(assertion_control::signal());
         }
         let forced = procedural_forces::lower(
+            syntax_tree,
             &self.packed_dimensions,
             &self.ports,
             &mut self.signals,

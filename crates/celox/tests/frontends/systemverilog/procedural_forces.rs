@@ -371,6 +371,69 @@ module top;
   end
 endmodule"#;
 
+/// Forces of members and constant selects: of a structure an
+/// `always_comb` assigns, held after the release, with genvar indices, of a
+/// vector with a declared range, of a part of a net, of a varying member,
+/// and a forced high impedance bit. The lines are those of Icarus Verilog,
+/// with the varying member of Verilator.
+const SELECTS: &str = r#"`timescale 1ns/1ns
+module top;
+  typedef struct packed { logic [3:0] hi; logic [3:0] lo; } p_t;
+  p_t s;
+  logic [7:4] v;
+  wire [3:0] w;
+  logic [3:0] a = 4'd5, b = 4'd1;
+  assign w = a;
+  always_comb begin
+    s.hi = a;
+    s.lo = ~a;
+  end
+  for (genvar i = 0; i < 2; i++) begin : g
+    initial #10 force s.lo[i] = 1'b1;
+  end
+  initial begin
+    v = 4'b0000;
+    #1 $display("A %h %b %b", s, v, w);
+    force s.hi = 4'hc; force v[5] = 1'b1; force w[2:1] = 2'b00; force w[3] = 1'bz;
+    #1 $display("B %h %b %b", s, v, w);
+    a = 4'd3; v = 4'b0000;
+    #1 $display("C %h %b %b", s, v, w);
+    release s.hi; release v[5]; release w[2:1]; release w[3];
+    #1 $display("D %h %b %b", s, v, w);
+    a = 4'd9;
+    #1 $display("E %h %b %b", s, v, w);
+    #6 $display("F %h %b %b", s, v, w);
+    force s.hi = b;
+    #1 $display("G %h", s);
+    b = 4'd7;
+    #1 $display("H %h", s);
+    release s.hi;
+    #1 $display("I %h", s);
+    a = 4'd2;
+    #1 $display("J %h", s);
+    $finish;
+  end
+endmodule"#;
+
+/// Forces of the elements of a multidimensional packed array and of a
+/// bit of an ascending vector.
+const PACKED_ELEMENTS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic [1:0][3:0] m;
+  logic [0:3] r;
+  initial begin
+    m = '0; r = '0;
+    force m[1] = 4'ha; force m[0][2] = 1'b1; force r[1] = 1'b1;
+    #1 $display("A %h %b", m, r);
+    m = 8'hff; r = 4'b0000;
+    #1 $display("B %h %b", m, r);
+    release m[1]; release m[0][2]; release r[1];
+    m = 8'h00; r = 4'b0000;
+    #1 $display("C %h %b", m, r);
+    $finish;
+  end
+endmodule"#;
+
 sv_backends! {
     fn delayed_drivers_drive_again_after_the_release(sim) {
         @setup {}
@@ -431,6 +494,30 @@ sv_backends! {
         @build simulation(COMB_CLOCKS, true);
         sim.run_until(100).unwrap();
         assert_eq!(display_lines(&mut sim), ["A 1 1", "B 2 2", "C 2 2", "D 2 2 1", "E 3 3", "F 4 3", "G 4 3 0"]);
+    }
+    fn forces_of_members_and_selects(sim) {
+        @setup {}
+        @build simulation(SELECTS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 5a 0000 0101", "B ca 0010 0001", "C cc 0010 0001", "D cc 0010 0011", "E 96 0010 1001", "F 97 0010 1001", "G 17", "H 77", "I 77", "J 2f"]);
+    }
+    fn forces_of_members_and_selects_four_state(sim) {
+        @setup {}
+        @build simulation(SELECTS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 5a 0000 0101", "B ca 0010 z001", "C cc 0010 z001", "D cc 0010 0011", "E 96 0010 1001", "F 97 0010 1001", "G 17", "H 77", "I 77", "J 2f"]);
+    }
+    fn forces_of_packed_elements(sim) {
+        @setup {}
+        @build simulation(PACKED_ELEMENTS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A a4 0100", "B af 0100", "C 00 0000"]);
+    }
+    fn forces_of_packed_elements_four_state(sim) {
+        @setup {}
+        @build simulation(PACKED_ELEMENTS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A a4 0100", "B af 0100", "C 00 0000"]);
     }
     fn lrm_example_forces_and_releases(sim) {
         @setup {}
@@ -560,16 +647,20 @@ fn forced_clocks_give_edges_on_interpreter_and_tiered() {
 fn rejected_forces_name_their_reason() {
     for (body, expected) in [
         (
-            "logic [3:0] v; initial force v[0] = 1'b1;",
-            "force or release of a bit-select or part-select",
+            "logic [3:0] v; int i; initial force v[i] = 1'b1;",
+            "whose bounds are not constant",
+        ),
+        (
+            "logic [3:0] v, a; initial begin force v[1] = a; force v = 4'd0; end",
+            "overlapping parts of `v`",
         ),
         (
             "logic a, b; initial force {a, b} = 2'b01;",
             "force or release of a concatenation",
         ),
         (
-            "typedef struct packed { logic a; logic b; } s_t; s_t s; initial force s.a = 1'b1;",
-            "of a member or an element",
+            "logic [3:0] m [2]; initial force m[0] = 4'd1;",
+            "not of a packed integral type",
         ),
         (
             "logic q, d, c; always @(posedge c) q <= #1 d; initial force q = 1'b1;",

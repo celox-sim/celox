@@ -383,6 +383,7 @@ pub(super) fn emit_nba_merges(
                 crate::lowering::ff_processes::force_select(
                     builder,
                     controls,
+                    pm.force_holds.get(&stage.id).copied(),
                     SIROffset::Static(0),
                     merged,
                 )
