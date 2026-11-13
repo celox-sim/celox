@@ -103,6 +103,19 @@ pub(super) fn bound_callable_name(
     {
         return Ok(Some(name));
     }
+    interface_member_name(tree, session, id, native, dimensions)
+}
+
+/// The flattened name of the member `id` selects of an interface handle:
+/// an instance or a port, or an element of an array of them that the
+/// constant environment selects (IEEE 1800-2023 25.3).
+pub(in crate::ast) fn interface_member_name(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<String>> {
     let ExprKind::Member {
         expression,
         separator,
@@ -111,6 +124,11 @@ pub(super) fn bound_callable_name(
     else {
         return Ok(None);
     };
+    // The handles of the scope are those of its own arena: an expression of
+    // another arena names none of them.
+    if !std::ptr::eq(native, tree.declarations()) {
+        return Ok(None);
+    }
     // Only a call through an interface handle names an interface method;
     // other receivers, such as the package-scoped `p::q` of
     // `p::q.push_back(x)`, are bound as values.

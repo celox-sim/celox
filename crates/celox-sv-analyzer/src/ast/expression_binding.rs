@@ -24,6 +24,7 @@ pub(super) use chandles::{
     native_chandle, read as check_chandle_read, type_holds_chandle,
 };
 pub(super) use direct::bind_argument;
+pub(super) use direct::interface_member_name;
 pub(super) use direct::{
     arguments, bind_chandle_value, bind_value, call_name as native_name, callable_name,
     cast_target_class, cast_target_native, formal_arguments, format_arguments, member_context,
