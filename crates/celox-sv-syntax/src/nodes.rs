@@ -1295,6 +1295,12 @@ pub enum SequenceExpr {
         condition: SequenceBoolean,
         sequence: Box<SequenceExpr>,
     },
+    /// `@(event) sequence` (16.13): `sequence` clocked by `clock`, which
+    /// starts at a tick of it.
+    Clocked {
+        clock: TimingControlId,
+        sequence: Box<SequenceExpr>,
+    },
 }
 
 impl SequenceExpr {
@@ -1324,6 +1330,7 @@ impl SequenceExpr {
                     found.push(condition);
                     pending.push(sequence);
                 }
+                SequenceExpr::Clocked { sequence, .. } => pending.push(sequence),
             }
         }
         found

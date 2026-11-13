@@ -84,6 +84,9 @@ pub(super) struct SequenceMonitor {
     pub start: Vec<Stmt>,
     /// The record of its disable condition, with `disable iff`.
     pub disabled: Option<DisableHistory>,
+    /// For a multiclocked sequence (16.13), its decisions instead of the
+    /// stages of one clock.
+    pub multiclock: Option<super::multiclock::Multiclock>,
 }
 
 /// Whether the disable condition of a concurrent assertion over cycles was
@@ -615,6 +618,13 @@ fn expand_paths(
             }
             paths
         }
+        // A clocking event of a subsequence (16.13) joins only a
+        // concatenation of subsequences, which `multiclock` takes.
+        SequenceExpr::Clocked { .. } => {
+            return Err(unsupported(
+                "multiclocked sequence with a clock change other than one joined by ##0 or ##1 (IEEE 1800-2023 16.13.1)",
+            ));
+        }
         SequenceExpr::Throughout {
             condition,
             sequence,
@@ -923,6 +933,7 @@ impl BodyBuilder<'_, '_, '_> {
             updates,
             start: Vec::new(),
             disabled: None,
+            multiclock: None,
         })
     }
 }
