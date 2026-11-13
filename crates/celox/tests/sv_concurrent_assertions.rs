@@ -711,6 +711,30 @@ endmodule"#;
     }
 }
 
+/// `$assertoff` keeps the first clock of a multiclocked sequence from
+/// starting attempts, and those it started go on over the next clock to
+/// their end (IEEE 1800-2023 20.11).
+#[test]
+fn multiclocked_sequences_start_no_attempt_while_assertions_are_off() {
+    // ca and cb rise together at 5, 15, ..., 95. Each attempt fails at the
+    // next cb tick. Those of 35, 45 and 55 do not start; that of 25 fails at
+    // 35, after `$assertoff`, and that of 95 ends with the simulation.
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit ca, cb;
+ int failed;
+ assert property (@(posedge ca) 1 ##1 @(posedge cb) 0) else failed++;
+ initial forever begin #5 ca = 1; cb = 1; #5 ca = 0; cb = 0; end
+ initial begin #32 $assertoff; #30 $asserton; end
+endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("multiclock.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(100).unwrap();
+    assert_eq!(sim.get(sim.signal("failed")), 6u32.into());
+}
+
 /// The clock of each subsequence of a multiclocked sequence ticks as its
 /// event control would wake a process, by the edges of 4-state values
 /// (IEEE 1800-2023 9.4.2, Table 9-2): `posedge` on 0 to X, `negedge` on X

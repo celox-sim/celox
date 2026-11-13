@@ -272,9 +272,16 @@ impl BodyBuilder<'_, '_, '_> {
                 .collect::<Vec<_>>();
             let mut tick = Vec::new();
             // The attempts that start at this tick: one of each tick of the
-            // first clock, those handed over to a later subsequence.
+            // first clock while assertions are on, read in the Observed region
+            // before any action of the tick (4.4.2.5, 20.11), and those
+            // handed over to a later subsequence, which an attempt started
+            // before `$assertoff` goes on to.
             let start = if index == 0 {
-                int(1)
+                if self.controls_assertions() {
+                    assertion_control::on()
+                } else {
+                    int(1)
+                }
             } else {
                 tick.push(release(index));
                 Expr::Ident(ready[index].clone())
