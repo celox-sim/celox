@@ -113,3 +113,35 @@ fn increments_evaluate_place_addresses_once() {
     assert_eq!(sim.get(first), BigUint::from(0x00u8));
     assert_eq!(sim.get(calls), BigUint::from(1u8));
 }
+
+/// An output container formal is copied out to its actual when the
+/// subroutine returns (IEEE 1800-2023 13.5.1): the actual is not a value
+/// passed in, so what it held before the call does not reach the formal.
+#[test]
+fn output_container_formals_copy_out_only() {
+    let source = r#"
+    module Top(output int size, output int first, output int seen);
+        parameter int W = 4;
+        logic [W-1:0] r[$];
+        task automatic fill(output logic [W-1:0] q[$], output int held);
+            held = q.size();
+            q.push_back(4'd5);
+            q.push_back(4'd7);
+        endtask
+        initial begin
+            r = '{4'd1, 4'd2, 4'd3};
+            fill(r, seen);
+            size = r.size();
+            first = r[0];
+        end
+    endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("output-queue.sv"))], "Top")
+            .build()
+            .unwrap();
+    let (size, first, seen) = (sim.signal("size"), sim.signal("first"), sim.signal("seen"));
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(size), BigUint::from(2u8));
+    assert_eq!(sim.get(first), BigUint::from(5u8));
+    assert_eq!(sim.get(seen), BigUint::from(0u8));
+}

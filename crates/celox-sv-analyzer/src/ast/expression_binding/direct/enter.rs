@@ -59,7 +59,10 @@ pub(super) fn enter(
     // its operands receiving the array in turn.
     if let Some(shape) = target
         .as_deref()
-        .filter(|shape| !shape.unpacked.is_empty() && shape.container.is_none())
+        .filter(|shape| {
+            !shape.unpacked.is_empty()
+                && !containers::holds_container(shape, tree, session, dimensions)
+        })
         .filter(|_| {
             !matches!(
                 native.expression(ungroup(id, native)).kind,
@@ -233,7 +236,10 @@ fn check_received(
     if id == root
         && let Some(enumeration) = target
             .as_deref()
-            .filter(|shape| shape.unpacked.is_empty() && shape.container.is_none())
+            .filter(|shape| {
+                shape.unpacked.is_empty()
+                    && !containers::holds_container(shape, tree, session, dimensions)
+            })
             .and_then(|shape| {
                 shape.type_id(&mut session.types, &tree.functions, &dimensions.const_env)
             })
@@ -251,10 +257,9 @@ fn check_received(
         .and_then(|shape| unpacked_structs::shape_struct(shape, tree, session, dimensions))
     {
         unpacked_structs::check_value(structure, id, native, tree, session, dimensions)?;
-    } else if target
-        .as_deref()
-        .is_some_and(|shape| shape.unpacked.is_empty() && shape.container.is_none())
-        && unpacked_structs::value_struct(id, native, tree, session, dimensions).is_some()
+    } else if target.as_deref().is_some_and(|shape| {
+        shape.unpacked.is_empty() && !containers::holds_container(shape, tree, session, dimensions)
+    }) && unpacked_structs::value_struct(id, native, tree, session, dimensions).is_some()
     {
         return Err(unsupported(
             "unpacked structure value received by a destination that is not of its type",

@@ -622,7 +622,7 @@ pub(in crate::ast) fn bind_native(
                 // An item of an enumerated element is of its type (6.19.3).
                 if !pattern
                     && shape.unpacked.is_empty()
-                    && shape.container.is_none()
+                    && !containers::holds_container(&shape, tree, session, dims)
                     && let Some(enumeration) = shape
                         .type_id(&mut session.types, &tree.functions, &dims.const_env)
                         .filter(|ty| session.types.is_enum(*ty))
@@ -904,7 +904,7 @@ fn check_subarray_item(
     let Some(item) = dimensions::operand_shape(id, tree, session, dims)? else {
         return Ok(());
     };
-    if !item.unpacked.is_empty() || item.container.is_some() {
+    if !item.unpacked.is_empty() || containers::holds_container(&item, tree, session, dims) {
         return Ok(());
     }
     let Some(target) = shape.type_id(&mut session.types, &tree.functions, &dims.const_env) else {

@@ -349,7 +349,7 @@ fn array(
     let Some(shape) = dims.get(&instances::normalize_identifier(&name.spelling)) else {
         return Ok(None);
     };
-    if shape.container.is_some() || shape.unpacked.is_empty() {
+    if containers::holds_container(shape, tree, session, dims) || shape.unpacked.is_empty() {
         return Ok(None);
     }
     if shape.unpacked.len() != 1 {

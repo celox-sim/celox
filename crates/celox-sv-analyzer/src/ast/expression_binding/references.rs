@@ -115,7 +115,7 @@ pub(super) fn check_actual(
                     "ref argument of `{name}` bound to an element of a class property"
                 )));
             };
-            if array.container.is_some() {
+            if containers::holds_container(array, tree, session, dimensions) {
                 if indices == 1 {
                     // Elements of dynamically sized arrays: their reference
                     // must outlive a resize or a deletion of the element.
