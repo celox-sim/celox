@@ -260,9 +260,15 @@ fn reads_input(expr: &celox_heap::randomization::Expr) -> bool {
     use celox_heap::randomization::Expr;
     match expr {
         Expr::Input { .. } => true,
-        Expr::Enabled { value, .. } | Expr::Resize { value, .. } | Expr::Unary { value, .. } => {
-            reads_input(value)
-        }
+        Expr::Enabled { value, .. }
+        | Expr::Soft { value, .. }
+        | Expr::Resize { value, .. }
+        | Expr::Unary { value, .. } => reads_input(value),
+        Expr::DisableSoft {
+            variable,
+            condition,
+            ..
+        } => reads_input(variable) || condition.as_deref().is_some_and(reads_input),
         Expr::Foreach { body, .. } => reads_input(body),
         Expr::Binary { left, right, .. } => reads_input(left) || reads_input(right),
         Expr::Dist {
@@ -369,6 +375,9 @@ pub(super) struct Class {
     /// The static properties its constraints read, input `n` of its program
     /// the `n`th (see [`StaticInput`]).
     pub static_inputs: Vec<StaticInput>,
+    /// The number of classes it derives from, whose constraints are below
+    /// its own (IEEE 1800-2023 18.5.13.1).
+    pub depth: usize,
     /// The slots its randomize calls solve its static rand properties in,
     /// those of its base first, [`Expr::Static`] `n` the `n`th.
     ///
@@ -1648,7 +1657,10 @@ pub(super) fn shared_class(
     let scope = (name.to_owned(), base.as_ref().map(|base| base.name.clone()));
     session.constraint_owners.push(scope.clone());
     session.constraint_scopes.push(scope);
-    for block in &declaration.constraints {
+    // The classes above this one, whose constraints are below its own
+    // (IEEE 1800-2023 18.5.13.1).
+    let depth = base.as_ref().map_or(0, |base| base.depth + 1);
+    for (position, block) in declaration.constraints.iter().enumerate() {
         let block_name = block.name.spelling.clone();
 
         let expressions = block
@@ -1658,7 +1670,8 @@ pub(super) fn shared_class(
             .and_then(|expressions| {
                 expressions
                     .iter()
-                    .map(|&id| {
+                    .enumerate()
+                    .map(|(index, &id)| {
                         constraints::bind_inputs(
                             id,
                             tree,
@@ -1668,6 +1681,12 @@ pub(super) fn shared_class(
                             env,
                             &HashMap::default(),
                         )
+                        .map(|constraint| {
+                            constraints::prioritize(
+                                constraint,
+                                constraints::class_priority(depth, position, index),
+                            )
+                        })
                     })
                     .collect()
             });
@@ -1698,6 +1717,7 @@ pub(super) fn shared_class(
         aggregates,
         statics,
         static_inputs,
+        depth,
         static_slots,
         property_bits,
         slot_bits,
@@ -1823,6 +1843,7 @@ fn interface_class(
         aggregates: Vec::new(),
         statics: Vec::new(),
         static_inputs: Vec::new(),
+        depth: 0,
         static_slots: Vec::new(),
         property_bits: Vec::new(),
         slot_bits: Vec::new(),
