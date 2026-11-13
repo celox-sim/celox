@@ -3394,6 +3394,84 @@ sv_backends! {
     }
 }
 
+// A signing cast or `$signed`/`$unsigned` of a call in a constant function
+// keeps the width of the callee's result (IEEE 1800-2023 6.24.1, 11.7,
+// 13.4.3), whether the callee is of the same package or module or of another
+// package, a static function of a class or a function of a generate block
+// whose result is sized by the block's parameter, as fpnew's format widths
+// take `unsigned'(maximum(...))`: a four-bit all-ones result is -1 signed,
+// not 15.
+#[test]
+fn constant_functions_cast_call_results_by_their_width() {
+    let source = r#"
+        `timescale 1ns/1ns
+        package p;
+            function automatic int unsigned maximum(int unsigned a, int unsigned b);
+                return a > b ? a : b;
+            endfunction
+            function automatic logic [3:0] ones();
+                return 4'hf;
+            endfunction
+            function automatic int unsigned widest();
+                int unsigned res = 0;
+                for (int i = 0; i < 4; i++) res = unsigned'(maximum(res, i * 3));
+                return res;
+            endfunction
+            function automatic int negative();
+                return signed'(ones());
+            endfunction
+        endpackage
+        module Top;
+            class C;
+                static function logic [3:0] ones();
+                    return 4'hf;
+                endfunction
+            endclass
+            function automatic int from_class();
+                return signed'(C::ones());
+            endfunction
+            if (1) begin : block
+                localparam int W = 4;
+                function automatic logic [W-1:0] ones();
+                    return '1;
+                endfunction
+                function automatic int block_negative();
+                    return signed'(ones());
+                endfunction
+                localparam int B = block_negative();
+                initial $display("block %0d", B);
+            end
+            localparam int K = from_class();
+            function automatic int unsigned twice(int unsigned x);
+                return $unsigned(p::maximum(x, 1)) * 2;
+            endfunction
+            function automatic int negative();
+                return $signed(p::ones()) + signed'(p::ones());
+            endfunction
+            localparam int unsigned W = p::widest();
+            localparam int N = p::negative();
+            localparam int unsigned T = twice(3);
+            localparam int M = negative();
+            logic [W-1:0] wide;
+            logic [T-1:0] doubled;
+            initial #1 $display("%0d %0d %0d %0d %0d", $bits(wide), N, $bits(doubled), M, K);
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("casts.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    sim.run_until(2).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["block -1", "9 -1 6 -2 -1"]);
+}
+
 /// The drained events without the time, scope, location and assertion of
 /// their reports, which these tests do not check.
 fn bare(events: Vec<celox::RuntimeEvent>) -> Vec<celox::RuntimeEvent> {
