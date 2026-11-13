@@ -300,3 +300,52 @@ fn interface_array_parameter_shorthand_does_not_bind_runtime_members() {
         .unwrap();
     assert!(error.to_string().contains("bus.data"), "{error}");
 }
+
+// A module with a non-ANSI header beside an interface declaration, as
+// OpenPiton's `monitor`: the declarations of its header ports are in its body
+// (IEEE 1800-2023 23.2.2.1), and the interface does not change them.
+#[test]
+fn non_ansi_modules_beside_interfaces_keep_their_ports() {
+    let source = r#"
+        `timescale 1ns/1ns
+        interface bus_if;
+            logic v;
+        endinterface
+        module counter(/*AUTOARG*/
+            // Inputs
+            clk, n
+            );
+            input clk;
+            output integer n;
+            initial n = 0;
+            always @(posedge clk) n = n + 1;
+        endmodule
+        module Top;
+            logic clk = 0;
+            integer n;
+            bus_if b();
+            always #5 clk = ~clk;
+            counter c(.clk(clk), .n(n));
+            initial #32 $display("%0d", n);
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("non_ansi.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        sim.run_until(40).unwrap();
+        let displayed: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8(message).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(displayed, ["3"], "four_state={four_state}");
+    }
+}
