@@ -954,6 +954,10 @@ pub struct Type {
     /// The type of an associative or dynamic array or of a queue, whose
     /// variable holds the handle of the container.
     container: Option<std::sync::Arc<ast::Type>>,
+    /// The declared type of a packed structure or union, or of a packed
+    /// array of them, whose members a name of the variable from another
+    /// scope selects (IEEE 1800-2023 7.2, 23.6).
+    packed_structure: Option<std::sync::Arc<ast::Type>>,
 }
 
 /// Shared metadata, allocated only for unpacked structure types. Ordinary
@@ -965,6 +969,12 @@ struct StructureType {
 }
 
 impl Type {
+    /// The declared type of a packed structure or union, or of a packed
+    /// array of them (see [`ast::Type::with_members_of`]).
+    pub fn packed_structure(&self) -> Option<&ast::Type> {
+        self.packed_structure.as_deref()
+    }
+
     /// Nominal identity of a non-storage unpacked structure declaration.
     pub fn structure_identity(&self) -> Option<&str> {
         self.structure
@@ -1118,6 +1128,7 @@ impl Type {
             class: None,
             chandle: false,
             container: None,
+            packed_structure: None,
         }
     }
 
@@ -1153,6 +1164,8 @@ impl Type {
                     .unwrap_or_else(|| r#type.clone()),
             )
         });
+        let packed_structure = (r#type.has_packed_members() && container.is_none())
+            .then(|| std::sync::Arc::new(r#type.clone()));
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
             structure,
@@ -1167,6 +1180,7 @@ impl Type {
             class,
             chandle,
             container,
+            packed_structure,
         }
     }
 }
