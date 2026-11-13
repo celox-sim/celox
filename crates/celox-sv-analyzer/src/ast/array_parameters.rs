@@ -189,15 +189,10 @@ pub(super) fn packed_pattern_value(
         .ok()
         .flatten()?;
     let shape = procedural::dimensions_from_type(&ty);
-    if !shape.unpacked.is_empty()
-        || shape.packed.is_empty()
-        || shape.real
-        || shape.string
-        || shape.chandle
-        || shape.class.is_some()
-        || shape.container.is_some()
-        || shape.virtual_interface.is_some()
-        || shape.unpacked_struct.is_some()
+    if shape.packed.is_empty()
+        || !shape
+            .type_id(&mut session.types, &tree.functions, &dims.const_env)
+            .is_some_and(|ty| session.types.is_integral(ty))
     {
         return None;
     }
