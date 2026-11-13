@@ -901,6 +901,23 @@ pub(in crate::ast) fn shape(
                     values.push(shape);
                     continue;
                 }
+                // A fixed-size array property has the shape of its type,
+                // though an object holds it in a container (see
+                // `classes::Property::storage`).
+                if let Some((property, _)) =
+                    expression_binding::object_property(tree, session, id, native, context)?
+                    && property.storage.is_some()
+                {
+                    // Bound, so an element of unpacked structure type
+                    // has the widths of its members.
+                    values.push(procedural::bound_dimensions_from_type(
+                        &property.r#type,
+                        &tree.functions,
+                        &mut session.types,
+                        &context.const_env,
+                    ));
+                    continue;
+                }
                 let callee = match native.expression(id).kind {
                     ExprKind::Call { expression, .. } => expression,
                     _ => id,

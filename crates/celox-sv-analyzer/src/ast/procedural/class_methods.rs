@@ -184,6 +184,26 @@ impl BodyBuilder<'_, '_, '_> {
         let own = class.base_properties..class.properties.len();
         for (index, property) in own.clone().zip(class.own_properties()) {
             body.extend(self.aggregate_initializers(class, this, index)?);
+            // A fixed-size array property holds its elements in a container
+            // of its own (see `classes::Property::storage`).
+            if let Some(storage) = property.storage.as_deref() {
+                let mut value = match property.initializer {
+                    Some(initializer) => containers::fixed_assignment(
+                        initializer,
+                        self.tree,
+                        self.session,
+                        &self.dims,
+                        storage,
+                    )?,
+                    None => containers::fixed_default(storage),
+                };
+                self.rename_expr(&mut value);
+                body.push(Stmt::Eval(classes::object_call(
+                    system_functions::ObjectOp::Store(property.field),
+                    vec![Expr::Ident(this.to_owned()), value],
+                )));
+                continue;
+            }
             let Some(initializer) = property.initializer else {
                 // Each object has its own synchronization object for each
                 // event property (IEEE 1800-2023 15.5).
