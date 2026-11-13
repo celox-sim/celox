@@ -1,1 +1,7 @@
-Move let expansion to the analyzer: scoped lookup, subroutine argument binder, substitution in type operators
+Revision history for #3831:
+
+rev 3 (content) 2026-11-13 15:02 UTC — Move let expansion to the analyzer: scoped lookup, subroutine argument binder, substitution in type operators
+rev 2 (content) 2026-11-13 12:35 UTC — Review fixes: scoped shadowing, child units, iterative substitution, attributes
+rev 1 (initial) 2026-11-13 12:35 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3831,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"9fefdc4e15881435e86c66984a4bb51d914bdc5f","timestamp_iso":"2026-11-13T12:35:10Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"9fefdc4e15881435e86c66984a4bb51d914bdc5f","new_sha":"070bfe1762ae370f322dbef665a074d0e994b5a5","timestamp_iso":"2026-11-13T12:35:10Z","reason":"Review fixes: scoped shadowing, child units, iterative substitution, attributes","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/9fefdc4e15881435e86c66984a4bb51d914bdc5f...070bfe1762ae370f322dbef665a074d0e994b5a5"},{"number":3,"change_type":"content","old_sha":"070bfe1762ae370f322dbef665a074d0e994b5a5","new_sha":"0309e4ede490c5f5df418dd7b095f91a672080c1","timestamp_iso":"2026-11-13T15:02:39Z","reason":"Move let expansion to the analyzer: scoped lookup, subroutine argument binder, substitution in type operators","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/070bfe1762ae370f322dbef665a074d0e994b5a5...0309e4ede490c5f5df418dd7b095f91a672080c1"}]} -->
