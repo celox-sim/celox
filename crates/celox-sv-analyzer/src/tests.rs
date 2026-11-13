@@ -4987,6 +4987,10 @@ fn rejects_unsupported_interface_uses() {
             "interface I; logic a; modport m(inout a); endinterface",
             "inout or ref modport port in interface `I`",
         ),
+        (
+            "interface I; function new(); endfunction endinterface",
+            "constructor in interface `I`",
+        ),
     ] {
         assert_eq!(
             elaborate(interface),
