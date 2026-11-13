@@ -2811,9 +2811,10 @@ impl InterfaceDecl {
                         self.name
                     )));
                 }
-                if subroutine.kind != native::SubroutineKind::Function {
+                // A constructor belongs to a class (IEEE 1800-2023 8.7).
+                if subroutine.kind == native::SubroutineKind::Constructor {
                     return Err(unsupported(format!(
-                        "task, class, or verification declaration in interface `{}`",
+                        "constructor in interface `{}`",
                         self.name
                     )));
                 }

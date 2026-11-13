@@ -450,3 +450,56 @@ fn variables_hide_interface_arrays_of_their_name() {
         .collect();
     assert_eq!(displayed, ["10 10 10 10"]);
 }
+
+sv_backends! {
+    // A task declared in an interface is called through the instance or a
+    // port, also through an imported modport task (IEEE 1800-2023 25.7),
+    // and its timing controls wait on the interface's signals.
+    fn interface_tasks_wait_on_interface_signals(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            interface bus_if(input logic clk);
+              logic [7:0] data;
+              logic valid;
+              task automatic send(input logic [7:0] value);
+                @(posedge clk);
+                data <= value;
+                valid <= 1'b1;
+                @(posedge clk);
+                valid <= 1'b0;
+              endtask
+              task get(output logic [7:0] value);
+                do @(posedge clk); while (!valid);
+                value = data;
+              endtask
+              modport drv(output data, output valid, import send);
+            endinterface
+            module Driver(bus_if.drv b);
+              initial begin
+                b.send(8'h11);
+                b.send(8'h22);
+              end
+            endmodule
+            module Top(output logic [7:0] got, seen, output int got_at);
+              logic clk = 0;
+              always #5 clk = ~clk;
+              bus_if bus(.clk(clk));
+              bus_if loop(.clk(clk));
+              Driver d(.b(bus));
+              always @(posedge clk) if (bus.valid) seen <= bus.data;
+              initial begin
+                loop.valid = 0;
+                fork
+                  begin loop.send(8'h5a); loop.send(8'h3c); end
+                  begin loop.get(got); got_at = $time; end
+                join
+              end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("interface_tasks.sv"))], "Top");
+        sim.run_until(60).unwrap();
+        assert_eq!(sim.get(sim.signal("got")), BigUint::from(0x5au8));
+        assert_eq!(sim.get(sim.signal("got_at")), BigUint::from(15u8));
+        assert_eq!(sim.get(sim.signal("seen")), BigUint::from(0x22u8));
+    }
+}
