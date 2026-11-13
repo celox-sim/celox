@@ -772,6 +772,36 @@ endmodule"#;
 }
 
 #[test]
+fn deeply_nested_sequences_are_a_diagnostic() {
+    // Each clocking event of a subsequence nests the rest of the sequence
+    // (IEEE 1800-2023 16.13), as a group does: past a bound, a chain of them
+    // is reported, not parsed into an ever deeper tree.
+    let build = |property: String| {
+        let source = format!(
+            "module Top; bit c0, c1, a; assert property (@(posedge c0) {property}); endmodule"
+        );
+        celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("multiclock.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default()
+    };
+    for property in [
+        format!("{}a", "@(posedge c1) ".repeat(1025)),
+        format!("{}a ##1 a{}", "(".repeat(1025), ")".repeat(1025)),
+    ] {
+        let error = build(property);
+        assert!(error.contains("nested more than 64 deep"), "{error}");
+    }
+    // Within the bound, a chain of clocks is no such diagnostic.
+    let error = build(format!("a ##1 {}a", "@(posedge c1) ".repeat(64)));
+    assert!(!error.contains("nested more than"), "{error}");
+}
+
+#[test]
 fn multiclocked_sequences_name_what_they_do_not_support() {
     for (property, message) in [
         (

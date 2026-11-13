@@ -49,6 +49,9 @@ const TEMPORAL: &[&str] = &[
 /// The most Boolean operands of one property specification.
 const MAX_SEQUENCE_OPERANDS: usize = 1024;
 
+/// The most groups and clocked subsequences one sequence nests.
+const MAX_SEQUENCE_DEPTH: usize = 64;
+
 impl Parser<'_> {
     /// The offset after the clocking event `@(...)` or `@name` that starts at
     /// `offset`, whose event expression may use `or`, `,` and `iff` (IEEE
@@ -114,6 +117,7 @@ impl Parser<'_> {
         locals: Vec<SequenceLocal>,
     ) -> Result<PropertySpec> {
         self.sequence_operands = 0;
+        self.sequence_depth = 0;
         let clock = if self.peek() == "@" {
             Some(self.typed_timing_control()?)
         } else {
@@ -274,27 +278,44 @@ impl Parser<'_> {
 
     /// A parenthesized sequence `(s)`, a Boolean expression, or a Boolean
     /// expression with match items `(b, item {, item})` (16.7, 16.10).
+    /// Nest a group or a clocked subsequence in the sequence being parsed,
+    /// whose parse recurses as deep.
+    fn enter_sequence(&mut self) -> Result<()> {
+        self.sequence_depth += 1;
+        if self.sequence_depth > MAX_SEQUENCE_DEPTH {
+            return Err(self.unsupported(format!(
+                "sequence with groups or clocked subsequences nested more than {MAX_SEQUENCE_DEPTH} deep"
+            )));
+        }
+        Ok(())
+    }
+
     fn sequence_operand(&mut self) -> Result<SequenceExpr> {
-        // `@(event) s` clocks the rest of the sequence (16.13).
+        // The tree of a longer one would nest as deep.
+        self.sequence_operands += 1;
+        if self.sequence_operands > MAX_SEQUENCE_OPERANDS {
+            return Err(self.unsupported(format!(
+                "property with more than {MAX_SEQUENCE_OPERANDS} Boolean operands and clocking events"
+            )));
+        }
+        // `@(event) s` clocks the rest of the sequence (16.13), which nests
+        // in it as in a group.
         if self.peek() == "@" {
+            self.enter_sequence()?;
             let clock = self.typed_timing_control()?;
             let sequence = self.sequence_expr()?;
+            self.sequence_depth -= 1;
             return Ok(SequenceExpr::Clocked {
                 clock,
                 sequence: Box::new(sequence),
             });
         }
-        // The tree of a longer one would nest as deep.
-        self.sequence_operands += 1;
-        if self.sequence_operands > MAX_SEQUENCE_OPERANDS {
-            return Err(self.unsupported(format!(
-                "property with more than {MAX_SEQUENCE_OPERANDS} Boolean operands"
-            )));
-        }
         if self.peek() == "(" && self.group_holds_sequence() {
+            self.enter_sequence()?;
             self.at += 1;
             let group = self.sequence_expr()?;
             self.expect(")")?;
+            self.sequence_depth -= 1;
             return Ok(group);
         }
         let start = self.at;

@@ -394,7 +394,8 @@ concurrent assertions is unsupported:
   edges, `iff` judged when the event occurs), not a named event. After `##1` the next subsequence starts at the nearest tick
   of its clock strictly after the end of the one before, after `##0` also at
   it. Not with `disable iff`, in an implication, or with local variables or
-  match items; other operators across a clock change are rejected.
+  match items; other operators across a clock change are rejected. A
+  sequence nests at most 64 groups and clocked subsequences.
 - `p iff q` of two Boolean expressions, also as the consequent of `|->`
   (`a |-> b iff c` is `a |-> (b iff c)`).
 - `expect (property_spec) action_block` (16.17) in a process or task, with an

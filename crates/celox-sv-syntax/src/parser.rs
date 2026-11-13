@@ -123,6 +123,7 @@ impl Declarations {
             next_parameter_id: 0,
             inline_constraint_depth: 0,
             sequence_operands: 0,
+            sequence_depth: 0,
             keyword_versions: Vec::new(),
             source_items: Vec::new(),
             expressions: Vec::new(),
@@ -384,6 +385,8 @@ struct Parser<'a> {
     inline_constraint_depth: usize,
     /// The Boolean operands of the property specification being parsed.
     sequence_operands: usize,
+    /// The groups and clocked subsequences the sequence being parsed is in.
+    sequence_depth: usize,
     keyword_versions: Vec<keywords::KeywordVersion>,
     source_items: Vec<SourceItem>,
     expressions: Vec<Expr>,
