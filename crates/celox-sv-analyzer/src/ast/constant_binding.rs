@@ -556,10 +556,35 @@ fn bind_in_context(
             Job::Select(name, count) => {
                 let start = values.len().checked_sub(count).ok_or_else(disagreement)?;
                 let mut indices = values.split_off(start);
-                if let Some(indices) = indices
+                let constant_indices = indices
                     .iter()
                     .map(|index| eval_ast_const_expr(&tree.functions, index, &dimensions.const_env))
-                    .collect::<Option<Vec<_>>>()
+                    .collect::<Option<Vec<_>>>();
+                if let Some([index]) = constant_indices.as_deref()
+                    && let Some(literal) =
+                        parameters::array_element_literal(&name, *index, &dimensions.const_env)
+                {
+                    values.push(ConstExpr::Literal(literal));
+                } else if let Some([index, selects @ ..]) = constant_indices.as_deref()
+                    && let Some(literal) = parameters::array_element_select_literal(
+                        &name,
+                        *index,
+                        selects,
+                        &dimensions.const_env,
+                    )
+                {
+                    // A select of the element's packed dimensions, such as
+                    // `table_p[0][1]`.
+                    values.push(ConstExpr::Literal(literal));
+                } else if dimensions
+                    .get(&name)
+                    .is_some_and(|shape| !shape.unpacked.is_empty())
+                {
+                    // An element of an unpacked array whose elements are not
+                    // constants here; a bit-select of the name would select
+                    // from another value.
+                    return Ok(None);
+                } else if let Some(indices) = constant_indices
                     && let Some(literal) =
                         parameter_element_literal(&name, &indices, &dimensions.const_env)
                 {

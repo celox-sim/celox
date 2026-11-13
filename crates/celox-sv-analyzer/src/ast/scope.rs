@@ -157,9 +157,10 @@ pub(super) fn imported(tree: &AnalysisContext<'_>) -> Arc<ScopeSymbols> {
 /// The name a constant-environment marker key describes, with the marker
 /// text before it.
 pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
-    const FIXED: [&str; 14] = [
+    const FIXED: [&str; 15] = [
         "__parameter::local::",
         "__parameter::members::",
+        "__parameter::elements::",
         "__parameter::unbounded::",
         "__parameter::width::",
         "__parameter::signed_element::",
@@ -189,6 +190,11 @@ pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
         debug_assert_eq!(&key[prefix_len - 2..prefix_len], "::");
         let _ = (index, bound);
         return Some((&key[..prefix_len], name));
+    }
+    // `__parameter::element::{fact}::{name}`
+    if let Some(rest) = key.strip_prefix("__parameter::element::") {
+        let (_, name) = rest.split_once("::")?;
+        return Some((&key[..key.len() - name.len()], name));
     }
     // `__parameter::member::{value,type}::{path}::{name}`
     if let Some(rest) = key.strip_prefix("__parameter::member::") {
