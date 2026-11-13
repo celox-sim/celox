@@ -499,7 +499,25 @@ impl Parser<'_> {
             "#" => {
                 self.at += 1;
                 let parenthesized = self.peek() == "(";
-                let value = self.expression(14)?;
+                // An unparenthesized delay value is a number, a time literal
+                // or an identifier (IEEE 1800-2023 A.2.2.3): in `#Tp (c) ?
+                // a : b` the parentheses begin the delayed expression, not
+                // arguments of a call.
+                let value = if !parenthesized
+                    && self.token().is_some_and(|token| {
+                        matches!(
+                            token.kind,
+                            TokenKind::Identifier | TokenKind::EscapedIdentifier
+                        )
+                    })
+                    && self.nth(1) == "("
+                {
+                    let name_start = self.at;
+                    let name = self.name()?;
+                    self.node(name_start, ExprKind::Name(name))?
+                } else {
+                    self.expression(14)?
+                };
                 TimingControlKind::Delay {
                     value,
                     parenthesized,

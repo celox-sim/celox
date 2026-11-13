@@ -3237,6 +3237,30 @@ fn intra_assignment_delays_have_native_operands() {
 }
 
 #[test]
+fn identifier_delays_leave_parentheses_to_the_delayed_expression() {
+    // `#Tp (c) ? a : b`: the delay value is the identifier (IEEE 1800-2023
+    // A.2.2.3), the parentheses begin the conditional.
+    let syntax =
+        parse("module M; parameter Tp = 1; bit a, c; initial a <= #Tp (c) ? 1 : 0; endmodule");
+    let StatementKind::Assignment {
+        timing_control: Some(control),
+        right,
+        ..
+    } = syntax.statement(syntax.procedures[0].body).kind
+    else {
+        panic!()
+    };
+    let TimingControlKind::Delay { value, .. } = syntax.timing_control(control).kind else {
+        panic!()
+    };
+    assert_eq!(syntax.token_text(syntax.expression(value).tokens), "Tp");
+    assert!(matches!(
+        syntax.expression(right).kind,
+        ExprKind::Conditional { .. }
+    ));
+}
+
+#[test]
 fn clocked_overlapped_implication_retains_both_boolean_operands() {
     let syntax = parse(
         "module M; p: assert property (@(posedge clk) disable iff (reset) (a && ready) |-> b == 3) else $error; endmodule",
