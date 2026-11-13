@@ -1328,11 +1328,22 @@ impl<'a> Design<'a> {
                 }
                 called.insert(item.clone());
             }
+            // An `output` of the modport lets the module drive the member;
+            // only a module that does is a driver of it (25.5). Several
+            // modports of one interface may list a member as an output
+            // that one of the modules connected through them assigns.
+            let mut driven: HashSet<String> = uses
+                .writes
+                .iter()
+                .filter(|(handle, _, _)| handle == port_name)
+                .map(|(_, member, _)| member.clone())
+                .collect();
             let functions = interface.function_closure(&called);
             for (member, direction) in interface.captured_members(&functions) {
-                let listed = listed.entry(member).or_insert(direction);
+                let listed = listed.entry(member.clone()).or_insert(direction);
                 if direction == Direction::Output {
                     *listed = Direction::Output;
+                    driven.insert(member);
                 }
             }
             for child in uses
@@ -1348,6 +1359,9 @@ impl<'a> Design<'a> {
                     &child.bindings,
                 )?;
                 for (member, direction) in child_expansion.members {
+                    if direction == Direction::Output {
+                        driven.insert(member.clone());
+                    }
                     let Some(access) = imported.get(&member) else {
                         continue;
                     };
@@ -1369,9 +1383,14 @@ impl<'a> Design<'a> {
                     .members
                     .iter()
                     .filter_map(|member| {
-                        listed
-                            .get(&member.name)
-                            .map(|direction| (member.name.clone(), *direction))
+                        listed.get(&member.name).map(|direction| {
+                            let direction = if driven.contains(&member.name) {
+                                *direction
+                            } else {
+                                Direction::Input
+                            };
+                            (member.name.clone(), direction)
+                        })
                     })
                     .collect(),
                 functions,

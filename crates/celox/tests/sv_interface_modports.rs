@@ -81,6 +81,51 @@ fn connections_name_modports_of_instances() {
     }
 }
 
+/// `src` and `tap` both list `clk` as an output; only the module connected
+/// through `src` assigns it.
+#[test]
+fn unassigned_modport_outputs_are_no_drivers() {
+    let source = format!(
+        r#"{BUS}
+    module Source(input logic clk, input logic [7:0] din, Bus.src port);
+      assign port.clk   = clk;
+      assign port.wdata = din;
+    endmodule
+    module Tap(Bus.tap port, output logic [7:0] seen, output logic seen_clk);
+      assign seen     = port.wdata;
+      assign seen_clk = port.clk;
+    endmodule
+    // Passes its port on to the module that assigns the output.
+    module Relay(input logic clk, input logic [7:0] din, Bus.src port);
+      Source source(.clk(clk), .din(din), .port(port));
+    endmodule
+    module Top;
+      logic       clk = 1;
+      logic [7:0] din = 8'h5a;
+      logic [7:0] seen [2];
+      logic       seen_clk [2];
+      Bus direct();
+      Bus relayed();
+      Source source(.port(direct.src), .clk(clk), .din(din));
+      Tap    tap(.port(direct.tap), .seen(seen[0]), .seen_clk(seen_clk[0]));
+      Relay  relay(.port(relayed.src), .clk(clk), .din(din));
+      Tap    relayed_tap(.port(relayed.tap), .seen(seen[1]), .seen_clk(seen_clk[1]));
+      initial begin
+        #1;
+        $display("seen=%h %h clk=%b %b", seen[0], seen[1], seen_clk[0], seen_clk[1]);
+      end
+    endmodule
+    "#
+    );
+    for four_state in [false, true] {
+        assert_eq!(
+            display(&source, four_state),
+            ["seen=5a 5a clk=1 1"],
+            "four-state {four_state}"
+        );
+    }
+}
+
 /// The modport of the connection is that of the port (25.5).
 #[test]
 fn rejects_a_modport_other_than_that_of_the_port() {
