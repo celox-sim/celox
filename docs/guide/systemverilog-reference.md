@@ -327,8 +327,11 @@ blocks in programs. Two region deviations are listed under
   integers and scalar enums with up to 256 members. Named constraint blocks
   cover only 1–64-bit two-state scalar integer properties with comparisons,
   logical and bitwise operations, addition, subtraction, and multiplication,
-  and class handle properties compared with each other or `null` by `==` and
-  `!=`. The elements of a random array, fixed-size or dynamic, that a
+  class handle properties compared with each other or `null` by `==` and
+  `!=`, and calls of functions of the class with input arguments (18.5.11);
+  a call in a constraint loop, in inline constraints, in the constraints of
+  an object a rand handle reaches, or in an argument of another is
+  unsupported. The elements of a random array, fixed-size or dynamic, that a
   `foreach` or a `sum()` of a constraint names are solver variables
   (18.5.8); the others are drawn at random. A `dist` allows the values of
   its items of nonzero total weight, a range bound `$` being the lowest or
@@ -635,6 +638,12 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
   kept before it allow it, and is otherwise discarded; a `disable soft`
   discards the lower soft constraints that name its variable (18.5.13.2).
   The search for each keeps the seed, so the choice is reproducible.
+- A function a constraint calls (18.5.11) runs as any call of it does,
+  the override of the object's class included, after the random variables
+  in its arguments are solved by the constraints that name only them; its
+  value is state to the other constraints, so they can leave the call no
+  solution, and a random variable it reads that is no argument has its
+  value before the call.
 - Array `shuffle` draws from the calling process's random stream.
 
 ### Host-dependent results

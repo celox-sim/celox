@@ -329,6 +329,31 @@ pub(super) struct StaticInput {
     pub signed: bool,
 }
 
+/// A call of a function of the class in a constraint (IEEE 1800-2023
+/// 18.5.11): the function, by the name the class's randomize call calls it
+/// by, so that an override of the object's class runs, each argument with
+/// its width and signedness, which the call converts as any call does, and
+/// the width and signedness of the function's value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConstraintCall {
+    pub method: String,
+    /// The class that declares the method the class of the constraint
+    /// sees, which a call of a non-virtual method runs; a call of a
+    /// virtual one runs the override of the object's class (IEEE
+    /// 1800-2023 8.20).
+    pub owner: String,
+    pub is_virtual: bool,
+    pub arguments: Vec<(celox_heap::randomization::Expr, u32, bool)>,
+    pub width: u32,
+    pub signed: bool,
+    /// The constraint block that makes the call, by index among
+    /// [`Class::constraints`], whose constraint mode its arguments follow.
+    pub block: u32,
+    /// Whether the block is the class's: a block a derived class overrides
+    /// makes no call.
+    pub live: bool,
+}
+
 /// A method of a class.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Method {
@@ -408,6 +433,10 @@ pub(super) struct Class {
     /// declares it, whose objects share its constraint mode (IEEE 1800-2023
     /// 18.5.11); the heap keeps the mode (see `program_registration`).
     pub static_constraints: Vec<(u32, u32)>,
+    /// The calls of functions its constraints make, those of its base
+    /// first, value `k` of a constraint the input
+    /// [`constraints::RESULT_INPUTS`]` + k` (IEEE 1800-2023 18.5.11).
+    pub constraint_calls: Vec<ConstraintCall>,
     /// Methods visible in the class, overrides replacing inherited ones.
     pub methods: Vec<Method>,
     /// The parameters and typedefs of an interface class, its own and
@@ -505,7 +534,12 @@ impl Class {
                 if !self.static_slots.is_empty() || program.constraints.iter().any(reads_input) =>
             {
                 Registered::Unsupported(
-                    "a rand object member whose constraints name static properties".into(),
+                    if self.constraint_calls.is_empty() {
+                        "a rand object member whose constraints name static properties"
+                    } else {
+                        "a rand object member whose constraints call functions"
+                    }
+                    .into(),
                 )
             }
             Ok(program) => Registered::Program(program.into()),
@@ -1776,6 +1810,13 @@ pub(super) fn shared_class(
     let scope = (name.to_owned(), base.as_ref().map(|base| base.name.clone()));
     session.constraint_owners.push(scope.clone());
     session.constraint_scopes.push(scope);
+    session.constraint_methods.push((
+        methods.clone(),
+        base.as_ref()
+            .map(|base| base.constraint_calls.clone())
+            .unwrap_or_default(),
+        0,
+    ));
     // The classes above this one, whose constraints are below its own
     // (IEEE 1800-2023 18.5.13.1).
     let depth = base.as_ref().map_or(0, |base| base.depth + 1);
@@ -1785,6 +1826,18 @@ pub(super) fn shared_class(
         .unwrap_or_default();
     for (position, block) in declaration.constraints.iter().enumerate() {
         let block_name = block.name.spelling.clone();
+        // The index the block takes, which the calls it makes record; a
+        // block it overrides makes none (IEEE 1800-2023 18.5.11).
+        let block_index = constraints
+            .iter()
+            .position(|(name, _)| *name == block_name)
+            .unwrap_or(constraints.len()) as u32;
+        if let Some((_, calls, current)) = session.constraint_methods.last_mut() {
+            *current = block_index;
+            for call in calls.iter_mut().filter(|call| call.block == block_index) {
+                call.live = false;
+            }
+        }
 
         let expressions = block
             .expressions
@@ -1834,6 +1887,7 @@ pub(super) fn shared_class(
     }
     session.constraint_owners.pop();
     session.constraint_scopes.pop();
+    let (_, constraint_calls, _) = session.constraint_methods.pop().unwrap_or_default();
     let (property_bits, slot_bits) =
         Class::selection_bits(base.as_deref(), properties.len(), static_slots.len());
     let mut class = Class {
@@ -1858,6 +1912,7 @@ pub(super) fn shared_class(
         slot_bits,
         lineage,
         static_constraints,
+        constraint_calls,
         methods,
         declarations: Vec::new(),
         size: size.max(1),
@@ -1985,6 +2040,7 @@ fn interface_class(
         slot_bits: Vec::new(),
         lineage: vec![name.to_owned()],
         static_constraints: Vec::new(),
+        constraint_calls: Vec::new(),
         methods,
         declarations,
         size: 1,

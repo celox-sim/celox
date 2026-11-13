@@ -156,6 +156,32 @@ pub struct Program {
     /// size a constraint may name, and which are solved when random.
     #[serde(default)]
     pub arrays: Vec<Array>,
+    /// The arguments of the functions the constraints call, in the order of
+    /// the calls and their arguments, each converted to its formal (IEEE
+    /// 1800-2023 18.5.11). The random variables in them are solved first
+    /// ([`Heap::solve_arguments`]); the values of the calls are inputs of
+    /// the solve of the rest.
+    #[serde(default)]
+    pub arguments: Vec<Expr>,
+}
+
+/// The solution of a solve of arguments (see [`Heap::solve_arguments`]):
+/// the object, the values of the random variables in the arguments by
+/// solver variable, and the value of each argument.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Arguments {
+    object: Handle,
+    variables: Vec<(String, u64)>,
+    values: Vec<u64>,
+}
+
+/// What a solve takes: every constraint, or only those that name no
+/// variable but the random variables in the arguments of the functions the
+/// constraints call (IEEE 1800-2023 18.5.11).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    All,
+    Arguments,
 }
 
 /// A dynamic array or queue property of a constraint program.
@@ -489,6 +515,50 @@ impl Expr {
             | Self::Index { .. }
             | Self::Member { .. }
             | Self::Element { .. } => {}
+        }
+    }
+
+    /// Whether the expression reads an input from index `first` on.
+    pub fn reads_input_from(&self, first: usize) -> bool {
+        match self {
+            Self::Input { index, .. } => *index >= first,
+            Self::Enabled { value, .. }
+            | Self::Soft { value, .. }
+            | Self::Resize { value, .. }
+            | Self::Unary { value, .. } => value.reads_input_from(first),
+            Self::DisableSoft {
+                variable,
+                condition,
+                ..
+            } => {
+                variable.reads_input_from(first)
+                    || condition
+                        .as_deref()
+                        .is_some_and(|condition| condition.reads_input_from(first))
+            }
+            Self::Binary { left, right, .. } => {
+                left.reads_input_from(first) || right.reads_input_from(first)
+            }
+            Self::Foreach { body, .. } => body.reads_input_from(first),
+            Self::Dist {
+                membership,
+                choices,
+            } => {
+                membership.reads_input_from(first)
+                    || choices
+                        .iter()
+                        .any(|choice| choice.predicate.reads_input_from(first))
+            }
+            Self::Literal(..)
+            | Self::Sum(_)
+            | Self::Field(_)
+            | Self::Static(_)
+            | Self::Handle(_)
+            | Self::Size(_)
+            | Self::Index { .. }
+            | Self::Solved(_)
+            | Self::Member { .. }
+            | Self::Element { .. } => false,
         }
     }
 
@@ -1243,6 +1313,43 @@ impl Heap {
         self.randomize_object_with_limits(handle, program, check_only, inputs, Limits::default())
     }
 
+    /// Solve the random variables in the arguments of the functions the
+    /// constraints of `program` call, by the constraints that name no other
+    /// variable and read no value of a call, `inputs` the values those read
+    /// (IEEE 1800-2023 18.5.11): whether they have a solution. The object
+    /// keeps its values; the solution is the values of the arguments
+    /// ([`Heap::argument_value`]) and holds the variables for the next
+    /// solve of the object, which takes every constraint.
+    pub fn solve_arguments(
+        &mut self,
+        handle: Handle,
+        program: &Program,
+        check_only: bool,
+        inputs: &[u64],
+    ) -> bool {
+        // A solve of this object that did not reach its solve of the rest
+        // left its solution behind.
+        self.arguments
+            .retain(|arguments| arguments.object != handle);
+        self.solve(
+            handle,
+            program,
+            check_only,
+            inputs,
+            Limits::default(),
+            Phase::Arguments,
+        )
+    }
+
+    /// The value of argument `index` of the solve of arguments of the
+    /// innermost randomize call in progress.
+    pub fn argument_value(&self, index: usize) -> u64 {
+        self.arguments
+            .last()
+            .and_then(|arguments| arguments.values.get(index).copied())
+            .unwrap_or(0)
+    }
+
     fn randomize_object_with_limits(
         &mut self,
         handle: Handle,
@@ -1250,6 +1357,18 @@ impl Heap {
         check_only: bool,
         inputs: &[u64],
         limits: Limits,
+    ) -> bool {
+        self.solve(handle, program, check_only, inputs, limits, Phase::All)
+    }
+
+    fn solve(
+        &mut self,
+        handle: Handle,
+        program: &Program,
+        check_only: bool,
+        inputs: &[u64],
+        limits: Limits,
+        phase: Phase,
     ) -> bool {
         if !self.check_object(handle, 0) {
             return false;
@@ -1269,6 +1388,19 @@ impl Heap {
                 Some((root, objects)) if root == handle => objects,
                 _ => self.reached(handle, &program.handles),
             };
+            // The arguments of the calls of the blocks that are on, each in
+            // its block's constraint mode (18.5.11, 18.9); those of a block
+            // that is off are none.
+            let arguments = program
+                .arguments
+                .iter()
+                .map(|argument| match argument {
+                    Expr::Enabled { index, value } => self
+                        .constraint_mode(handle, *index)
+                        .then(|| value.as_ref().clone()),
+                    argument => Some(argument.clone()),
+                })
+                .collect::<Vec<_>>();
             for &child in &participants {
                 // A class that registered nothing has nothing to solve.
                 match self.programs.get(&self.class_of(child)) {
@@ -1370,9 +1502,14 @@ impl Heap {
                         return Err("invalid random array element width".into());
                     }
                     let sized = enabled
-                        && constraints[position]
+                        && (constraints[position]
                             .iter()
-                            .any(|constraint| constraint.names_size(index));
+                            .any(|constraint| constraint.names_size(index))
+                            || position == 0
+                                && arguments
+                                    .iter()
+                                    .flatten()
+                                    .any(|argument| argument.names_size(index)));
                     let term = if sized {
                         let name = format!("s{}", size_terms.len());
                         let term = var(name.clone(), Sort::Bv(32));
@@ -1463,6 +1600,17 @@ impl Heap {
                 .zip(&bases)
                 .map(|((object, current), &base)| (*object, (base, current.as_ref())))
                 .collect();
+            // The random variables in the arguments of the calls, which a
+            // solve of arguments takes alone (18.5.11).
+            let mut ordered = Vec::new();
+            for argument in arguments.iter().flatten() {
+                argument.variables(0, 0, &mut ordered);
+            }
+            let first = |names: &[String], value: &Expr| {
+                phase == Phase::All
+                    || (names.iter().all(|name| ordered.contains(name))
+                        && !value.reads_input_from(inputs.len()))
+            };
             for ((((object, current), &base), &size_base), enabled) in members
                 .iter()
                 .zip(&bases)
@@ -1492,6 +1640,9 @@ impl Heap {
                             )?;
                             let mut names = Vec::new();
                             value.variables(base, size_base, &mut names);
+                            if !first(&names, &value) {
+                                continue;
+                            }
                             soft.push((
                                 rank(*priority),
                                 truth(value.term(&terms, base, sizes, inputs)?),
@@ -1529,6 +1680,13 @@ impl Heap {
                                         check_only,
                                         inputs,
                                     )?;
+                                    // A solve of arguments takes a guard that
+                                    // names only their variables.
+                                    let mut guard = Vec::new();
+                                    condition.variables(base, size_base, &mut guard);
+                                    if !first(&guard, &condition) {
+                                        continue;
+                                    }
                                     Some(truth(condition.term(&terms, base, sizes, inputs)?))
                                 }
                                 None => None,
@@ -1550,6 +1708,11 @@ impl Heap {
                                 check_only,
                                 inputs,
                             )?;
+                            let mut names = Vec::new();
+                            constraint.variables(base, size_base, &mut names);
+                            if !first(&names, &constraint) {
+                                continue;
+                            }
                             formula = and(
                                 formula,
                                 truth(constraint.term(&terms, base, sizes, inputs)?),
@@ -1581,6 +1744,27 @@ impl Heap {
                                 distributions.push(weighted);
                             }
                         }
+                    }
+                }
+            }
+            // The solve of the rest keeps the solution of the arguments
+            // (18.5.11).
+            if phase == Phase::All
+                && let Some(position) = self
+                    .arguments
+                    .iter()
+                    .rposition(|arguments| arguments.object == handle)
+            {
+                let arguments = self.arguments.remove(position);
+                for (name, value) in &arguments.variables {
+                    let term = match name.strip_prefix('s') {
+                        Some(index) => index.parse::<usize>().ok().and_then(|i| size_terms.get(i)),
+                        None => name.parse::<usize>().ok().and_then(|i| terms.get(i)),
+                    };
+                    if let Some(term) = term
+                        && let Sort::Bv(width) = term.0.sort
+                    {
+                        formula = and(formula, eq(term.clone(), bv(width, *value)));
                     }
                 }
             }
@@ -1631,6 +1815,85 @@ impl Heap {
                             .unwrap_or_else(|| "soft constraint solving incomplete".into()));
                     }
                 }
+            }
+            // A solve of arguments gives the values of the variables in
+            // them and of each argument, and changes nothing (18.5.11).
+            if phase == Phase::Arguments {
+                let mut projection = projection.clone();
+                let mut attempt = if bounded {
+                    and(formula.clone(), limited.clone())
+                } else {
+                    formula.clone()
+                };
+                let sizes = &size_terms[..program.arrays.len().min(size_terms.len())];
+                for (index, argument) in arguments.iter().enumerate() {
+                    let Some(argument) = argument else {
+                        continue;
+                    };
+                    let argument = self.unroll(
+                        handle,
+                        program,
+                        argument,
+                        &mut Vec::new(),
+                        &solved,
+                        &element_bases,
+                        check_only,
+                        inputs,
+                    )?;
+                    let term = argument.term(&terms, 0, sizes, inputs)?;
+                    let Sort::Bv(width) = term.0.sort else {
+                        return Err("a function argument other than a vector".into());
+                    };
+                    let name = format!("a{index}");
+                    let value = var(name.clone(), Sort::Bv(width));
+                    attempt = and(attempt, eq(value.clone(), term));
+                    projection.insert(name, value);
+                }
+                // A randc variable takes a value its cycle has not produced
+                // yet, unless none of them is a solution (18.4.2).
+                let mut restricted = attempt.clone();
+                for (object, field, term) in &cyclic {
+                    let remaining =
+                        self.cycle_remaining(*object, field.offset, cycle_size(field), false);
+                    restricted = and(
+                        restricted,
+                        member(
+                            term,
+                            field.width,
+                            remaining.into_iter().map(|entry| cycle_value(field, entry)),
+                        ),
+                    );
+                }
+                let mut outcome = solve_seeded(&restricted, &projection, limits.clone(), seed);
+                if !cyclic.is_empty() && matches!(outcome.verdict, Verdict::Unsat) {
+                    outcome = solve_seeded(&attempt, &projection, limits.clone(), seed);
+                }
+                return match outcome.verdict {
+                    Verdict::Unsat => Ok(false),
+                    Verdict::Unknown => Err(outcome
+                        .reason
+                        .unwrap_or_else(|| "constraint solving incomplete".into())),
+                    Verdict::Sat => {
+                        let model = &outcome.context_values;
+                        let value = |name: &str| match model.get(name) {
+                            Some(Scalar::Bv { value, .. }) => Some(*value),
+                            _ => None,
+                        };
+                        let variables = ordered
+                            .iter()
+                            .filter_map(|name| Some((name.clone(), value(name)?)))
+                            .collect();
+                        let values = (0..arguments.len())
+                            .map(|index| value(&format!("a{index}")).unwrap_or(0))
+                            .collect();
+                        self.arguments.push(Arguments {
+                            object: handle,
+                            variables,
+                            values,
+                        });
+                        Ok(true)
+                    }
+                };
             }
             // Initial integration uses seeded SAT search, not hash-cell acceptance.
             // It finds a valid model without claiming uniform sampling (#2187).
@@ -1988,6 +2251,63 @@ mod tests {
         // Soft constraints that contradict each other never fail a call.
         program.constraints = vec![soft(1, field("==", 3)), soft(2, field("==", 4))];
         assert_eq!(value(&mut heap, &program), 4);
+        assert_eq!(heap.take_fault(), None);
+    }
+
+    /// A solve of arguments solves the variables in them by the constraints
+    /// that name only them, gives the values of the arguments and changes
+    /// nothing; the solve of the rest keeps those variables, through a
+    /// nested randomize call, and takes the value of the call as an input
+    /// (IEEE 1800-2023 18.5.11).
+    #[test]
+    fn functions_in_constraints_solve_their_arguments_first() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 8);
+        let field = |offset| Field {
+            offset,
+            width: 8,
+            random: true,
+            domain: Vec::new(),
+            cyclic: false,
+        };
+        let compare = |op: &str, left: Expr, right: Expr| Expr::Binary {
+            op: op.into(),
+            left: Box::new(left),
+            right: Box::new(right),
+            signed: false,
+        };
+        let program = Program {
+            fields: vec![field(0), field(1)],
+            constraints: vec![
+                compare("<", Expr::Field(0), Expr::Literal(8, 4)),
+                compare(">", Expr::Field(0), Expr::Literal(8, 2)),
+                compare("==", Expr::Field(1), Expr::Input { index: 0, width: 8 }),
+            ],
+            arguments: vec![compare("+", Expr::Field(0), Expr::Literal(8, 1))],
+            ..Program::default()
+        };
+        heap.store(object, 0, 1, 9);
+        assert!(heap.solve_arguments(object, &program, false, &[]));
+        assert_eq!(heap.argument_value(0), 4);
+        assert_eq!(heap.load(object, 0, 1), 9);
+        // A function that randomizes another object with a function in its
+        // constraints leaves the solution of this call's arguments as it
+        // was.
+        let nested = heap.new_object(1, 8);
+        let inner = Program {
+            fields: vec![field(0)],
+            constraints: vec![compare("==", Expr::Field(0), Expr::Literal(8, 7))],
+            arguments: vec![Expr::Field(0)],
+            ..Program::default()
+        };
+        assert!(heap.solve_arguments(nested, &inner, false, &[]));
+        assert_eq!(heap.argument_value(0), 7);
+        assert!(heap.randomize_object_with_inputs(nested, &inner, false, &[]));
+        assert_eq!(heap.load(nested, 0, 1), 7);
+        assert_eq!(heap.argument_value(0), 4);
+        assert!(heap.randomize_object_with_inputs(object, &program, false, &[40]));
+        assert_eq!(heap.load(object, 0, 1), 3);
+        assert_eq!(heap.load(object, 1, 1), 40);
         assert_eq!(heap.take_fault(), None);
     }
 

@@ -52,6 +52,10 @@ pub(crate) struct Session {
     /// may access (IEEE 1800-2023 8.18), with a laid out class that it is
     /// or derives from: its base while it is laid out, or itself.
     pub(super) constraint_scopes: Vec<(String, Option<String>)>,
+    /// The methods of the classes whose constraints are being bound, the
+    /// innermost last, the calls of them those constraints make, and the
+    /// index of the block being bound (IEEE 1800-2023 18.5.11).
+    pub(super) constraint_methods: Vec<(Vec<classes::Method>, Vec<classes::ConstraintCall>, u32)>,
     /// How many class specializations are being made, one inside another.
     pub(super) class_specialization_depth: usize,
     /// The specializations of classes made so far, in order.
