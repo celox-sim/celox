@@ -2279,21 +2279,79 @@ fn uniqueness_constraints_keep_their_members_apart() {
             "an array in a uniqueness constraint",
         ),
     ] {
-        let source = format!(
-            "class C; {members} constraint k {{ {constraint} }} endclass
-            module Top; C c; initial begin c = new; void'(c.randomize()); end endmodule"
-        );
-        let error = match celox::Simulation::from_sv_sources(
-            vec![(source.as_str(), Path::new("class.sv"))],
-            "Top",
-        )
-        .build()
-        {
-            Err(error) => error.to_string(),
-            Ok(mut sim) => sim.run_until(1).expect_err(constraint).to_string(),
-        };
+        let error = uniqueness_error(members, constraint);
         assert!(error.contains(message), "{constraint}: {error}");
     }
+}
+
+/// The error of randomizing a class with `members` and `constraint`.
+fn uniqueness_error(members: &str, constraint: &str) -> String {
+    let source = format!(
+        "class C; {members} constraint k {{ {constraint} }} endclass
+        module Top; C c; initial begin c = new; void'(c.randomize()); end endmodule"
+    );
+    match celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("class.sv"))], "Top")
+        .build()
+    {
+        Err(error) => error.to_string(),
+        Ok(mut sim) => sim.run_until(1).expect_err(constraint).to_string(),
+    }
+}
+
+#[test]
+fn uniqueness_constraint_members_are_variables() {
+    // A member is a variable, not a value computed from one (IEEE 1800-2023
+    // 18.5.4).
+    let error = uniqueness_error("rand int a, b;", "unique {a + 1, b};");
+    assert!(
+        error.contains("a uniqueness constraint member that is not a variable"),
+        "{error}"
+    );
+}
+
+#[test]
+fn uniqueness_constraint_members_are_of_equivalent_types() {
+    // Two enumerations of one base type are not equivalent (IEEE 1800-2023
+    // 6.22.2, 18.5.4).
+    let error = uniqueness_error(
+        "typedef enum bit [1:0] {A0, A1} ea; typedef enum bit [1:0] {B0, B1} eb; rand ea a; rand eb b;",
+        "unique {a, b};",
+    );
+    assert!(
+        error.contains("members of types that are not equivalent"),
+        "{error}"
+    );
+}
+
+#[test]
+fn uniqueness_constraints_of_many_members_stay_solvable() {
+    // 33 members make 528 pairwise differences, which the solver takes as
+    // a balanced conjunction (IEEE 1800-2023 18.5.4).
+    let names: Vec<String> = (0..33).map(|index| format!("m{index}")).collect();
+    let source = format!(
+        "class C;
+        rand bit [7:0] {};
+        constraint k {{ unique {{{}}}; }}
+    endclass
+    module Top;
+        C o;
+        int ok, apart;
+        initial begin
+            o = new;
+            ok = o.randomize();
+            apart = 1;
+            {}
+            $display(\"%0d %0d\", ok, apart);
+        end
+    endmodule",
+        names.join(", "),
+        names.join(", "),
+        (0..33)
+            .flat_map(|a| ((a + 1)..33).map(move |b| format!("apart &= o.m{a} != o.m{b};")))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    assert_eq!(super::hierarchical_references::displayed(&source), ["1 1"]);
 }
 
 #[test]
