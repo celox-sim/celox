@@ -349,3 +349,104 @@ fn non_ansi_modules_beside_interfaces_keep_their_ports() {
         assert_eq!(displayed, ["3"], "four_state={four_state}");
     }
 }
+
+// A select of a member of an element of an interface instance array has the
+// type of that member (IEEE 1800-2023 25.3), here a structure member of a
+// width that differs between the two buses.
+#[test]
+fn selects_of_interface_array_element_members_are_typed() {
+    let source = r#"
+        interface Bus #(parameter DATA_SIZE = 1, parameter TAG_WIDTH = 1) ();
+            typedef struct packed {
+                logic [DATA_SIZE*8-1:0] data;
+                logic [TAG_WIDTH-1:0] tag;
+            } rsp_data_t;
+            rsp_data_t rsp_data;
+        endinterface
+        module Top(
+            input logic [21:0] first, second,
+            output logic [19:0] narrowed, output logic [1:0] low, output logic top
+        );
+            localparam TD = 6, TS = 4;
+            Bus #(.DATA_SIZE(2), .TAG_WIDTH(TD)) wide[2]();
+            Bus #(.DATA_SIZE(2), .TAG_WIDTH(TS)) narrow();
+            assign wide[0].rsp_data = first;
+            assign wide[1].rsp_data = second;
+            assign narrow.rsp_data.data = wide[0].rsp_data.data;
+            assign narrow.rsp_data.tag = wide[0].rsp_data.tag[TD-1 -: TS];
+            assign narrowed = narrow.rsp_data;
+            assign low = wide[1].rsp_data.tag[1:0];
+            assign top = wide[1].rsp_data.tag[5];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("array_member.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let (first, second) = (sim.signal("first"), sim.signal("second"));
+    sim.modify(|io| {
+        io.set(first, 0x2a_bcd5u32);
+        io.set(second, 0x3f_ffe2u32);
+    })
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("narrowed")), BigUint::from(0xaaf35u32));
+    assert_eq!(sim.get(sim.signal("low")), BigUint::from(2u8));
+    assert_eq!(sim.get(sim.signal("top")), BigUint::from(1u8));
+}
+
+// A variable of a task, a generate block or a procedure hides an array of
+// interface instances of its name (IEEE 1800-2023 23.9): a member select of
+// its element has the type of the variable's member, here of an ascending
+// range, not that of the interface signal.
+#[test]
+fn variables_hide_interface_arrays_of_their_name() {
+    let source = r#"
+        `timescale 1ns/1ns
+        interface Bus ();
+            logic [7:0] data;
+        endinterface
+        module Top;
+            typedef struct packed { logic [0:3] data; } item_t;
+            Bus bus[2]();
+            logic [3:0] a = 4'b1000;
+            logic [1:0] t, g_out, p_out;
+            assign bus[0].data = 8'h81;
+            assign bus[1].data = 8'h7e;
+            task automatic run(input logic [3:0] v, output logic [1:0] r);
+                item_t bus [2];
+                bus[0].data = v;
+                bus[1].data = ~v;
+                r = {bus[0].data[0], bus[1].data[0 +: 1]};
+            endtask
+            if (1) begin : g
+                item_t bus [2];
+                assign bus[0].data = a;
+                assign bus[1].data = ~a;
+                assign g_out = {bus[0].data[0], bus[1].data[0]};
+            end
+            always_comb begin : p
+                item_t bus [2];
+                bus[0].data = a;
+                bus[1].data = ~a;
+                p_out = {bus[0].data[0], bus[1].data[0]};
+            end
+            initial begin
+                #1 run(a, t);
+                $display("%b %b %b %b%b", t, g_out, p_out, bus[0].data[0], bus[1].data[0]);
+            end
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("hidden_array.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["10 10 10 10"]);
+}

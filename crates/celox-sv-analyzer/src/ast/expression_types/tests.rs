@@ -498,6 +498,37 @@ fn slice_constants_belong_to_the_supplied_native_arena() {
 }
 
 #[test]
+fn member_selects_belong_to_the_supplied_native_arena() {
+    // A member select of another arena is not looked up among the
+    // interface handles of the tree, whose arena has no such expression.
+    let source =
+        crate::source_tree::parse_scope_fixture("module M; endmodule", Path::new("local-arena.sv"))
+            .unwrap();
+    let foreign = crate::source_tree::parse_scope_fixture(
+        "module M;
+            typedef struct packed { logic [3:0] a; logic b; } pair_t;
+            pair_t s [2];
+            assign out = s[1].a;
+        endmodule",
+        Path::new("foreign-arena.sv"),
+    )
+    .unwrap();
+    let tree = AnalysisContext::unspecialized(&source);
+    let foreign = AnalysisContext::unspecialized(&foreign);
+    let id = foreign.declarations().assign_statements[0].assignments[0].right;
+    let mut session = Session::default();
+    let dims = dimensions::query_operand_dimensions_id(
+        id,
+        &foreign,
+        &mut session,
+        &PackedDimensions::default(),
+    )
+    .unwrap();
+    // Typing it reads no expression of the tree's own arena.
+    let _ = type_of(&tree, &mut session, id, foreign.declarations(), &dims);
+}
+
+#[test]
 fn selecting_a_signed_named_packed_element_matches_its_declaration() {
     // IEEE 1800-2023 7.4.1: an element of a packed array of a signed named
     // type retains that type, not merely its bit width and signedness.
