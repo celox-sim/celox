@@ -108,7 +108,11 @@ pub(super) fn bind(
     if expression_binding::holds_chandle(shape) {
         return Err(chandle_elements());
     }
-    if shape.unpacked.len() != 1 || shape.real || shape.string || shape.class.is_some() {
+    if shape.unpacked.len() != 1
+        || shape.real
+        || shape.string
+        || expression_binding::objects::shape_class(shape, tree, session, dims).is_some()
+    {
         return Err(unsupported(
             "array reduction requires one-dimensional integral elements",
         ));

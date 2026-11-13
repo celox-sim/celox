@@ -637,7 +637,8 @@ pub(in crate::ast) fn bind_native(
                 }
                 // A handle is checked where it is one element; a value
                 // given to a subarray is an array, checked as one above.
-                if let Some(class) = shape.class.as_deref()
+                let class = expression_binding::objects::shape_class(&shape, tree, session, dims);
+                if let Some(class) = class.as_deref()
                     && !pattern
                     && shape.unpacked.is_empty()
                 {
@@ -658,7 +659,7 @@ pub(in crate::ast) fn bind_native(
                     )?;
                 }
                 let scalar_string = shape.string && shape.unpacked.is_empty();
-                if (scalar_string || shape.class.is_some()) && !pattern {
+                if (scalar_string || class.is_some()) && !pattern {
                     let value =
                         expression_binding::bind_value(id, native, tree, session, dims, None)?;
                     values.push(if scalar_string {
