@@ -123,6 +123,20 @@ pub(super) fn with_dimensions(
             "dynamic container of fixed-size unpacked arrays",
         ));
     }
+    container_type(base, kind, index_type, None, tree, context)
+}
+
+/// The type of a container of kind `kind` of `base` elements, indexed by
+/// `index_type` for an associative array, holding the fixed-size array
+/// with range `fixed`.
+fn container_type(
+    base: Type,
+    kind: ContainerKind,
+    index_type: Option<Type>,
+    fixed: Option<(i128, i128)>,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+) -> Converted<Type> {
     if matches!(base.kind(), TypeKind::Real | TypeKind::Shortreal) {
         return Err(unsupported("real dynamic container elements"));
     }
@@ -189,11 +203,90 @@ pub(super) fn with_dimensions(
         layout,
         element: base,
         record,
+        fixed,
     }))
 }
 
+/// The most elements of a fixed-size array class property, those of the
+/// largest container the heap makes (see `celox_heap::randomization`).
+const MAX_FIXED_PROPERTY_ELEMENTS: u128 = 1 << 24;
+
+/// The container that holds a fixed-size unpacked array class property of
+/// type `ty` in an object (see `classes::Property::storage`): one element
+/// for each index of its range, in order from left to right (IEEE
+/// 1800-2023 7.4).
+pub(super) fn fixed_storage(
+    ty: &Type,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+) -> Converted<Arc<ContainerType>> {
+    let [range] = ty.unpacked_ranges.as_slice() else {
+        return Err(unsupported(
+            "class property with more than one unpacked dimension",
+        ));
+    };
+    let bound = |expr: &ConstExpr| {
+        eval_ast_const_expr(&tree.functions, expr, &context.const_env)
+            .ok_or_else(|| unsupported("class property with a range that is not constant"))
+    };
+    // The checks of every fixed-size unpacked dimension, then a count of
+    // elements a container holds.
+    types::validate_unpacked_dimension_sizes(
+        &tree.functions,
+        &ty.unpacked_ranges,
+        &context.const_env,
+    )?;
+    let fixed = (bound(range.left())?, bound(range.right())?);
+    // An index of the property is an `int`, as is a foreach index over it
+    // and one a locator method returns (IEEE 1800-2023 12.7.3, 7.12.1).
+    if i32::try_from(fixed.0).is_err() || i32::try_from(fixed.1).is_err() {
+        return Err(unsupported(
+            "fixed-size array class property with a bound outside int",
+        ));
+    }
+    if fixed
+        .0
+        .abs_diff(fixed.1)
+        .checked_add(1)
+        .is_none_or(|count| count > MAX_FIXED_PROPERTY_ELEMENTS)
+    {
+        return Err(unsupported(format!(
+            "fixed-size array class property of more than {MAX_FIXED_PROPERTY_ELEMENTS} elements"
+        )));
+    }
+    let mut element = ty.clone();
+    element.unpacked_ranges.clear();
+    // A container does not give its elements the initial values of their
+    // members (see `unpacked_structs::record`).
+    if element
+        .unpacked_struct()
+        .is_some_and(|aggregate| aggregate.leaves().iter().any(|leaf| leaf.default.is_some()))
+    {
+        return Err(unsupported(
+            "fixed-size array class property of an unpacked structure with member initial values",
+        ));
+    }
+    let storage = container_type(
+        element,
+        ContainerKind::Dynamic,
+        None,
+        Some(fixed),
+        tree,
+        context,
+    )?;
+    Ok(storage.container.expect("a container type"))
+}
+
+impl ContainerType {
+    /// The number of elements of the fixed-size array the container holds.
+    pub(super) fn fixed_size(&self) -> Option<u64> {
+        self.fixed
+            .map(|(left, right)| left.abs_diff(right) as u64 + 1)
+    }
+}
+
 /// The type of a container of type `container`: a heap handle.
-fn of(container: ContainerType) -> Type {
+pub(super) fn of(container: ContainerType) -> Type {
     let mut ty = Type::new(TypeKind::Object);
     ty.packed_ranges.push(PackedRange::new(
         ConstExpr::Literal("31".into()),
@@ -244,7 +337,7 @@ pub(super) fn native_type(
     if let Some((property, _)) =
         expression_binding::object_property(tree, session, id, native, dims)?
     {
-        return Ok(property.r#type.container);
+        return Ok(property.storage.or(property.r#type.container));
     }
     if let Some(name) = expression_binding::object_static_property(tree, session, id, native, dims)?
         && let Some(shape) = dims.get(&name)
@@ -587,6 +680,159 @@ pub(super) fn assignment(
     ))
 }
 
+/// The value received by the container `target` holds of a fixed-size
+/// unpacked array class property (see `classes::Property::storage`): an
+/// assignment pattern of one value for each element (IEEE 1800-2023
+/// 10.9.1), or a fixed-size array property of as many elements, whose
+/// elements it copies (7.6).
+pub(super) fn fixed_assignment(
+    root: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+    target: &ContainerType,
+) -> Converted<Expr> {
+    let native = tree.declarations();
+    let size = target
+        .fixed_size()
+        .expect("the container of a fixed-size array");
+    let mismatch = |actual: String| AnalyzerError::IncompatibleAssignment {
+        context: "fixed-size array class property".into(),
+        actual,
+        target: format!("an array of {size} elements"),
+    };
+    if dynamic_array_new(root, native).is_some() {
+        return Err(mismatch("new[]".into()));
+    }
+    match &native
+        .expression(expression_binding::ungroup(root, native))
+        .kind
+    {
+        ExprKind::Pattern {
+            target: None,
+            items,
+        } if items.iter().all(|item| item.key.is_none()) => {
+            if items.len() as u64 != size {
+                return Err(mismatch(format!(
+                    "an assignment pattern of {} elements",
+                    items.len()
+                )));
+            }
+        }
+        ExprKind::Pattern { .. } | ExprKind::Concatenation(_) => {
+            return Err(unsupported(
+                "keyed assignment pattern or concatenation for a fixed-size array class property",
+            ));
+        }
+        _ => match native_type(root, native, tree, session, dims)? {
+            // The types decide (7.6): an array of as many elements of an
+            // equivalent type. Containers do not change once made (an
+            // update makes another), so the handle of the source's is a
+            // copy of its elements.
+            Some(source) if source.fixed.is_some() => {
+                check_fixed_compatible(
+                    root,
+                    tree,
+                    session,
+                    dims,
+                    target,
+                    "fixed-size array class property",
+                )?;
+                if source.layout != target.layout {
+                    return Err(unsupported(
+                        "assignment between fixed-size array class properties of differently held elements",
+                    ));
+                }
+                return expression_binding::value(root, native, tree, session, dims);
+            }
+            None => {
+                check_fixed_compatible(
+                    root,
+                    tree,
+                    session,
+                    dims,
+                    target,
+                    "fixed-size array class property",
+                )?;
+                return fixed_array_literal(root, tree, dims, target);
+            }
+            Some(_) => {
+                return Err(unsupported(
+                    "assignment to a fixed-size array class property from other than a pattern or a fixed-size array",
+                ));
+            }
+        },
+    }
+    assignment(root, tree, session, dims, target)
+}
+
+/// The container `target` holds of the elements of ordinary fixed-size
+/// array `id`, a variable named by itself, from its left index to its right
+/// one (IEEE 1800-2023 7.6), for an assignment or a comparison.
+fn fixed_array_literal(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+    target: &ContainerType,
+) -> Converted<Expr> {
+    let native = tree.declarations();
+    let other =
+        || unsupported("fixed-size array class property with an array other than a variable");
+    let ExprKind::Name(name) = &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    else {
+        return Err(other());
+    };
+    let name = instances::normalize_identifier(&name.spelling);
+    let shape = dims.get(&name).ok_or_else(other)?;
+    let [range] = shape.unpacked.as_slice() else {
+        return Err(other());
+    };
+    if shape.container.is_some() || target.record.is_some() || target.element.container.is_some() {
+        return Err(unsupported(
+            "fixed-size array class property of unpacked structures or containers with an array",
+        ));
+    }
+    let bound = |expr: &ConstExpr| {
+        eval_ast_const_expr(&tree.functions, expr, &dims.const_env).ok_or_else(other)
+    };
+    let (left, right) = (bound(&range.left)?, bound(&range.right)?);
+    let indices: Vec<i128> = if left <= right {
+        (left..=right).collect()
+    } else {
+        (right..=left).rev().collect()
+    };
+    let mut values = Vec::with_capacity(indices.len());
+    for index in indices {
+        let lvalue = selects::lvalue_from_indices(
+            tree,
+            name.clone(),
+            vec![ConstExpr::Literal(index.to_string())],
+            dims,
+        )?;
+        values.push(statements::expr_from_lvalue(tree, &lvalue, dims));
+    }
+    Ok(call(ContainerOp::Literal, target.layout, values))
+}
+
+/// The container of `target`'s elements that a new object holds for a
+/// fixed-size array class property without an initializer: each element
+/// the default of its type (IEEE 1800-2023 7.4, 8.7).
+pub(super) fn fixed_default(target: &ContainerType) -> Expr {
+    let size = target
+        .fixed_size()
+        .expect("the container of a fixed-size array");
+    inner_levels(
+        call(
+            ContainerOp::New,
+            target.layout,
+            vec![Expr::Literal(size.to_string()), Expr::Literal("0".into())],
+        ),
+        target,
+    )
+}
+
 /// Whether item `id` of an unpacked array concatenation received by
 /// `target` is an array whose elements it contributes (10.10): one that
 /// may be assigned to `target` itself.
@@ -750,6 +996,30 @@ fn check_compatible(
     })
 }
 
+/// Check that value `id` of a fixed-size array may be assigned to, or
+/// compared with, the fixed-size array class property `target` holds: an
+/// array of as many elements of an equivalent type (IEEE 1800-2023 6.22.2,
+/// 7.6).
+fn check_fixed_compatible(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+    target: &ContainerType,
+    context: &str,
+) -> Converted<()> {
+    let native = tree.declarations();
+    let (left, right) = target.fixed.expect("a fixed-size array");
+    let source = expression_types::type_of(tree, session, id, native, dims)
+        .map_err(|_| unsupported(format!("{context} from a value of unknown type")))?;
+    let literal = |value: i128| ConstExpr::Literal(value.to_string());
+    let mut ty = target.element.clone();
+    ty.unpacked_ranges = vec![UnpackedRange::new(literal(left), literal(right))];
+    let target = semantic_types::of_type(&mut session.types, &tree.functions, &ty, &dims.const_env)
+        .ok_or_else(|| unsupported("type of a fixed-size array class property"))?;
+    assignments::check_types(tree, session, dims, source, target, &|| context.into())
+}
+
 fn element_value(
     id: ExprId,
     tree: &AnalysisContext<'_>,
@@ -833,6 +1103,88 @@ fn index_value(
     dims: &PackedDimensions,
     target: &ContainerType,
 ) -> Converted<Expr> {
+    let index = index_value_in(id, base, tree, session, dims, target)?;
+    fixed_position(target, index)
+}
+
+/// Check that native expression `id`, which a write of an element or a
+/// method that changes the array names, may write the fixed-size array
+/// property it is or selects into: every write of the elements of one is a
+/// write of the property (IEEE 1800-2023 8.19), as a write of it whole is.
+pub(super) fn check_written_storage(
+    mut id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<()> {
+    let native = tree.declarations();
+    loop {
+        id = expression_binding::ungroup(id, native);
+        if let Some((property, _)) =
+            expression_binding::object_property(tree, session, id, native, dims)?
+            && property.storage.is_some()
+        {
+            return expression_binding::check_writable(&property, dims);
+        }
+        id = match &native.expression(id).kind {
+            ExprKind::Select { expression, .. } => *expression,
+            ExprKind::Member {
+                expression,
+                separator,
+                ..
+            } if separator == "." => *expression,
+            _ => return Ok(()),
+        };
+    }
+}
+
+/// The position in container `target` of the element at index `index`:
+/// for a fixed-size array the container holds, its distance from the left
+/// bound of the range (IEEE 1800-2023 7.4.6).
+pub(super) fn fixed_position(target: &ContainerType, index: Expr) -> Converted<Expr> {
+    let Some((left, right)) = target.fixed else {
+        return Ok(index);
+    };
+    if left.min(right) < 0 {
+        return Err(unsupported(
+            "class property with a negative unpacked range bound",
+        ));
+    }
+    // As wide as the bound needs, so that it is not cut before the index
+    // is taken from it.
+    let literal = |value: i128| {
+        let width = if i32::try_from(value).is_ok() {
+            32
+        } else if i64::try_from(value).is_ok() {
+            64
+        } else {
+            128
+        };
+        Expr::Literal(format!("{width}'sd{value}"))
+    };
+    Ok(match (left <= right, left) {
+        (true, 0) => index,
+        (true, _) => Expr::Binary {
+            left: Box::new(index),
+            op: BinaryOp::Sub,
+            right: Box::new(literal(left)),
+        },
+        (false, _) => Expr::Binary {
+            left: Box::new(literal(left)),
+            op: BinaryOp::Sub,
+            right: Box::new(index),
+        },
+    })
+}
+
+fn index_value_in(
+    id: ExprId,
+    base: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+    target: &ContainerType,
+) -> Converted<Expr> {
     let native = tree.declarations();
     // A class index takes handles of its class or a derived one.
     if let Some(class) = target.key.as_ref().and_then(|key| key.class()).filter(|_| {
@@ -908,13 +1260,13 @@ fn index_value(
             operator,
             right,
         } if !chandle && (operator == "+" || operator == "-") => Expr::Binary {
-            left: Box::new(index_value(*left, base, tree, session, dims, target)?),
+            left: Box::new(index_value_in(*left, base, tree, session, dims, target)?),
             op: if operator == "+" {
                 BinaryOp::Add
             } else {
                 BinaryOp::Sub
             },
-            right: Box::new(index_value(*right, base, tree, session, dims, target)?),
+            right: Box::new(index_value_in(*right, base, tree, session, dims, target)?),
         },
         _ if chandle => {
             expression_binding::bind_chandle_value(id, native, tree, session, dims, None)?
@@ -955,12 +1307,49 @@ pub(super) fn value(
         } if native_type(*left, native, tree, session, dims)?.is_some()
             || native_type(*right, native, tree, session, dims)?.is_some() =>
         {
+            // A fixed-size array property may be either operand.
+            let (left, right) = match native_type(*left, native, tree, session, dims)? {
+                None if native_type(*right, native, tree, session, dims)?
+                    .is_some_and(|right| right.fixed.is_some()) =>
+                {
+                    (right, left)
+                }
+                _ => (left, right),
+            };
             let Some(target) = native_type(*left, native, tree, session, dims)? else {
                 return Err(unsupported("container comparison requires two containers"));
             };
-            check_compatible(*right, native, tree, session, dims, &target)?;
-            let source =
-                native_type(*right, native, tree, session, dims)?.expect("checked compatibility");
+            // A fixed-size array property compares with an array of its
+            // type, which the types decide (IEEE 1800-2023 7.6, 11.4.5): one
+            // held as it is, or an ordinary array of its elements.
+            let mut other = None;
+            let source = if target.fixed.is_some() {
+                check_fixed_compatible(
+                    *right,
+                    tree,
+                    session,
+                    dims,
+                    &target,
+                    "comparison of a fixed-size array class property",
+                )?;
+                match native_type(*right, native, tree, session, dims)? {
+                    Some(source) if source.fixed.is_some() && source.layout == target.layout => {
+                        source
+                    }
+                    Some(_) => {
+                        return Err(unsupported(
+                            "comparison of a fixed-size array class property with other than one of as many elements",
+                        ));
+                    }
+                    None => {
+                        other = Some(fixed_array_literal(*right, tree, dims, &target)?);
+                        target.clone()
+                    }
+                }
+            } else {
+                check_compatible(*right, native, tree, session, dims, &target)?;
+                native_type(*right, native, tree, session, dims)?.expect("checked compatibility")
+            };
             if std::mem::discriminant(&source.layout.kind)
                 != std::mem::discriminant(&target.layout.kind)
             {
@@ -985,12 +1374,16 @@ pub(super) fn value(
                 "===" | "!==" => ContainerOp::CaseEqual,
                 _ => return Err(unsupported("integral operator on a dynamic container")),
             };
+            let right = match other {
+                Some(other) => other,
+                None => expression_binding::value(*right, native, tree, session, dims)?,
+            };
             let value = call(
                 op,
                 target.layout,
                 vec![
                     expression_binding::value(*left, native, tree, session, dims)?,
-                    expression_binding::value(*right, native, tree, session, dims)?,
+                    right,
                 ],
             );
             Ok(Some(if matches!(operator.as_str(), "!=" | "!==") {
@@ -1009,6 +1402,11 @@ pub(super) fn value(
             let Some(target) = native_type(*expression, native, tree, session, dims)? else {
                 return Ok(None);
             };
+            // A slice of a fixed-size array (7.4.5) would be an array of the
+            // range, which no container holds here.
+            if target.fixed.is_some() && !matches!(dimension.kind, DimensionKind::Index(_)) {
+                return Err(unsupported("slice of a fixed-size array class property"));
+            }
             if let DimensionKind::Range { left, right } = dimension.kind
                 && matches!(target.layout.kind, ContainerKind::Queue { .. })
             {
@@ -1099,6 +1497,18 @@ pub(super) fn value(
                 return Ok(None);
             }
             let (op, count) = match name.spelling.as_str() {
+                // A fixed-size array property has the methods of its type,
+                // the array methods of 7.12, whose locators and reductions
+                // are bound elsewhere; the methods of dynamic arrays, queues
+                // and associative arrays (7.5, 7.9, 7.10) are not its own.
+                method
+                    if target.fixed.is_some()
+                        && !matches!(method, "reverse" | "sort" | "rsort" | "shuffle") =>
+                {
+                    return Err(AnalyzerError::Parse(format!(
+                        "`{method}` is no method of a fixed-size array (IEEE 1800-2023 7.12)"
+                    )));
+                }
                 "reverse" | "sort" | "rsort" | "shuffle"
                     if !matches!(target.layout.kind, ContainerKind::Associative { .. }) =>
                 {
@@ -1184,6 +1594,9 @@ pub(super) fn value(
                 && !statement
             {
                 return Err(unsupported("void container method used as a value"));
+            }
+            if op.mutates() {
+                check_written_storage(*base, tree, session, dims)?;
             }
             if arguments.len() != count
                 || arguments
@@ -1315,6 +1728,11 @@ fn query(
         .any(|arg| arg.name.is_some() || arg.value.is_none())
     {
         return Err(unsupported("dynamic array query arguments"));
+    }
+    // A fixed-size array property is of its type, however it is held: the
+    // queries of that type answer for it (IEEE 1800-2023 20.7).
+    if target.fixed.is_some() {
+        return Ok(None);
     }
     if matches!(
         name.spelling.as_str(),
@@ -1489,6 +1907,7 @@ pub(super) fn set(
     let Some(target) = native_type(*expression, native, tree, session, dims)? else {
         return Ok(None);
     };
+    check_written_storage(*expression, tree, session, dims)?;
     if nonblocking {
         return Err(unsupported("nonblocking dynamic element assignment"));
     }
@@ -1644,8 +2063,16 @@ mod tests {
                 "nonblocking",
             ),
             (
-                "module Top; class C; int q[2]; endclass C c; initial c=new; endmodule",
-                "unpacked dimensions",
+                "module Top; class C; int q[2][3]; endclass C c; initial c=new; endmodule",
+                "more than one unpacked dimension",
+            ),
+            (
+                "module Top; class C; static int q[2]; endclass C c; initial c=new; endmodule",
+                "static class property with unpacked dimensions",
+            ),
+            (
+                "module Top; class C; int q[2] = '{1, 2, 3}; endclass C c; initial c=new; endmodule",
+                "an assignment pattern of 3 elements",
             ),
         ] {
             let error = crate::analyze_source(source, Path::new("class-container-rejection.sv"))

@@ -512,6 +512,7 @@ pub(in crate::ast) fn object_place(
     } else if let Some((element, target, container, index)) =
         containers::selected_element(root, tree, session, dimensions)?
     {
+        containers::check_written_storage(root, tree, session, dimensions)?;
         (
             ObjectPlace::Element {
                 container,

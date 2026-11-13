@@ -9,8 +9,8 @@ use super::*;
 use celox_sv_syntax::{Declarations, ExprId, ExprKind};
 use std::sync::Mutex;
 use system_functions::{
-    ContainerKind, ContainerLayout, HandleProperty, Locator, LocatorKey, LocatorMethod,
-    LocatorSource,
+    ContainerKind, ContainerLayout, ContainerOp, HandleProperty, Locator, LocatorKey,
+    LocatorMethod, LocatorSource,
 };
 
 /// The locals that locator methods declare while a procedural body binds
@@ -114,6 +114,10 @@ enum Array {
         right: i64,
         element: Type,
         layout: ContainerLayout,
+        /// The container that holds a fixed-size array class property,
+        /// whose positions are not its indices (see
+        /// `classes::Property::storage`).
+        storage: Option<Arc<ContainerType>>,
     },
 }
 
@@ -311,6 +315,29 @@ fn array(
         {
             return Err(unsupported("array locator method on a wildcard index"));
         }
+        // A fixed-size array property whose range does not run from 0 up
+        // is searched by its indices, which `item.index` and the index
+        // methods return (7.12.4).
+        if let Some((left, right)) = container.fixed
+            && (left != 0 || right < left)
+        {
+            if container.record.is_some() {
+                return Err(unsupported(
+                    "array locator method on a fixed-size array class property of unpacked structures whose range does not run from 0 up",
+                ));
+            }
+            // Its bounds are within `int` (see `containers::fixed_storage`).
+            return Ok(Some(Array::Fixed {
+                left: left as i64,
+                right: right as i64,
+                element: container.element.clone(),
+                layout: ContainerLayout {
+                    kind: ContainerKind::Queue { capacity: 0 },
+                    ..container.layout
+                },
+                storage: Some(container),
+            }));
+        }
         return Ok(Some(Array::Container(container)));
     }
     let ExprKind::Name(name) = &native
@@ -390,6 +417,7 @@ fn array(
         right,
         element,
         layout,
+        storage: None,
     }))
 }
 
@@ -417,6 +445,7 @@ pub(super) fn result_type(
             call.array.element().clone()
         },
         record,
+        fixed: None,
     })))
 }
 
@@ -588,6 +617,25 @@ pub(super) fn bind(
             LocatorSource::Container(container.layout),
             expression_binding::value(call.base, native, tree, session, dims)?,
         ),
+        Array::Fixed {
+            left,
+            right,
+            storage: Some(storage),
+            ..
+        } => {
+            let receiver = expression_binding::value(call.base, native, tree, session, dims)?;
+            let position = containers::fixed_position(storage, Expr::Ident(index.clone()))?;
+            (
+                LocatorSource::Fixed {
+                    left: *left,
+                    right: *right,
+                },
+                containers::element_read(
+                    storage,
+                    containers::call(ContainerOp::Get, storage.layout, vec![receiver, position]),
+                ),
+            )
+        }
         Array::Fixed { left, right, .. } => {
             let ExprKind::Name(name) = &native
                 .expression(expression_binding::ungroup(call.base, native))

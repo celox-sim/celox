@@ -1466,6 +1466,29 @@ pub(in crate::ast) fn check_argument(
     session: &mut Session,
 ) -> Converted<()> {
     check_chandle_argument(name, position, actual, native, tree, dimensions, session)?;
+    // An object holds a fixed-size array property in a container, to which
+    // the formal of an output or inout argument is not copied back (see
+    // `classes::Property::storage`, and `references::check_actual` for a
+    // `ref` one).
+    if dimensions
+        .subroutine_directions
+        .get(name)
+        .and_then(|directions| directions.get(position))
+        .is_some_and(|direction| {
+            matches!(
+                direction,
+                crate::procedural::ParamDirection::Output
+                    | crate::procedural::ParamDirection::Inout
+            )
+        })
+        && let Some((property, _)) =
+            object_property(tree, session, ungroup(actual, native), native, dimensions)?
+        && property.storage.is_some()
+    {
+        return Err(unsupported(
+            "fixed-size array class property as an output or inout argument",
+        ));
+    }
     if let Some(shape) = dimensions
         .subroutine_param_shapes
         .get(name)
