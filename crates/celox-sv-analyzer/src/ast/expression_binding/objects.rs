@@ -43,21 +43,47 @@ pub(in crate::ast) fn native_class(
 
 /// The class of the handles declared shape `shape` holds: of a handle, or of
 /// the elements of a fixed-size array of handles (8.4), as its type tells.
+/// A shape whose type cannot be formed with the constants of `dimensions`
+/// is told by its class metadata, which every shape keeps until
+/// declarations bind their types.
 pub(in crate::ast) fn shape_class(
     shape: &VariableDimensions,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Option<String> {
-    let mut ty = shape.type_id(&mut session.types, &tree.functions, &dimensions.const_env)?;
+    class_of(
+        shape,
+        &mut session.types,
+        &tree.functions,
+        &dimensions.const_env,
+    )
+}
+
+/// [`shape_class`] with the constants of `env`.
+fn class_of(
+    shape: &VariableDimensions,
+    table: &mut semantic_types::TyTable,
+    functions: &const_functions::ConstantFunctions,
+    env: &ConstEnv,
+) -> Option<String> {
+    let metadata = shape.class.clone().filter(|_| shape.container.is_none());
+    let Some(mut ty) = shape.type_id(table, functions, env) else {
+        return metadata;
+    };
     while let semantic_types::TyData::Array {
         kind: semantic_types::ArrayKind::Fixed(_),
         element,
-    } = session.types.data(ty)
+    } = table.data(ty)
     {
         ty = *element;
     }
-    expression_types::class_name(&session.types, ty)
+    let found = expression_types::class_name(table, ty);
+    debug_assert_eq!(
+        found, metadata,
+        "the type and the class metadata of a shape disagree"
+    );
+    found
 }
 
 /// Access depends on the lexical class, not the class of the receiver (8.18).
@@ -1840,4 +1866,46 @@ pub(in crate::ast) fn method_result(
     Ok(class(tree, session, dimensions, &class_name)?
         .method(&instances::normalize_identifier(&name.spelling))
         .and_then(|method| method.result.clone().flatten()))
+}
+
+#[cfg(test)]
+mod shape_class_tests {
+    use super::*;
+
+    /// `[N-1:0]`, a range that names `N`.
+    fn symbolic_range() -> UnpackedRange {
+        UnpackedRange::new(
+            ConstExpr::Binary {
+                left: Box::new(ConstExpr::Ident("N".into())),
+                op: BinaryOp::Sub,
+                right: Box::new(ConstExpr::Literal("1".into())),
+            },
+            ConstExpr::Literal("0".into()),
+        )
+    }
+
+    #[test]
+    fn shapes_whose_type_is_not_formed_keep_their_class_metadata() {
+        // `C handles[N]` where the scope has no `N`: still handles of `C`.
+        let mut ty = Type::new(TypeKind::Object);
+        ty.class = Some(Arc::from("C"));
+        ty.unpacked_ranges.push(symbolic_range());
+        let shape = procedural::dimensions_from_type(&ty);
+        let functions = const_functions::ConstantFunctions::default();
+        let mut table = semantic_types::TyTable::default();
+        assert!(
+            shape
+                .type_id(&mut table, &functions, &ConstEnv::default())
+                .is_none()
+        );
+        assert_eq!(
+            class_of(&shape, &mut table, &functions, &ConstEnv::default()).as_deref(),
+            Some("C")
+        );
+        let env = ConstEnv::from_iter([("N".into(), 2)]);
+        assert_eq!(
+            class_of(&shape, &mut table, &functions, &env).as_deref(),
+            Some("C")
+        );
+    }
 }

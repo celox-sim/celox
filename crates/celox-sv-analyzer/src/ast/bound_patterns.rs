@@ -385,7 +385,7 @@ impl BoundPattern {
                 // Type keys apply to array and structure elements, not to
                 // the bits of a packed integer (10.9.1-2).
                 if shape.unpacked.is_empty()
-                    && unpacked_structs::shape_struct(shape, tree, session, dims).is_none()
+                    && !unpacked_structs::holds_struct(shape, tree, session, dims)
                     && shape.members.is_empty()
                     && shape.packed.len() <= 1
                     && items.iter().any(|(key, _)| matches!(key, Key::Type(_)))

@@ -588,11 +588,28 @@ pub(super) fn holds_virtual_interface(
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> bool {
-    shape
-        .type_id(&mut session.types, &tree.functions, &dims.const_env)
-        .is_some_and(|ty| {
-            of_type(&session.types, ty).is_some() || element_of_array(&session.types, ty).is_some()
-        })
+    shape_holds_virtual_interface(shape, &mut session.types, &tree.functions, &dims.const_env)
+}
+
+/// [`holds_virtual_interface`] with the constants of `env`. A shape whose
+/// type cannot be formed in `env` is told by its metadata, which every
+/// shape keeps until declarations bind their types.
+fn shape_holds_virtual_interface(
+    shape: &VariableDimensions,
+    table: &mut semantic_types::TyTable,
+    functions: &const_functions::ConstantFunctions,
+    env: &ConstEnv,
+) -> bool {
+    let metadata = shape.virtual_interface.is_some() && shape.container.is_none();
+    let Some(ty) = shape.type_id(table, functions, env) else {
+        return metadata;
+    };
+    let found = of_type(table, ty).is_some() || element_of_array(table, ty).is_some();
+    debug_assert_eq!(
+        found, metadata,
+        "the type and the virtual interface metadata of a shape disagree"
+    );
+    found
 }
 
 /// The virtual interface type of the elements of `ty`, if it is a fixed-size
@@ -1682,4 +1699,50 @@ pub(crate) fn placeholder_interface(name: &str) -> Option<String> {
 /// Whether `name` is a placeholder signal (see [`member_signals`]).
 pub(crate) fn is_placeholder_signal(name: &str) -> bool {
     placeholder_interface(name).is_some()
+}
+
+#[cfg(test)]
+mod holds_virtual_interface_tests {
+    use super::*;
+
+    /// `[N-1:0]`, a range that names `N`.
+    fn symbolic_range() -> UnpackedRange {
+        UnpackedRange::new(
+            ConstExpr::Binary {
+                left: Box::new(ConstExpr::Ident("N".into())),
+                op: BinaryOp::Sub,
+                right: Box::new(ConstExpr::Literal("1".into())),
+            },
+            ConstExpr::Literal("0".into()),
+        )
+    }
+
+    #[test]
+    fn shapes_whose_type_is_not_formed_keep_their_virtual_interface_metadata() {
+        // `virtual I handles[N]` where the scope has no `N`.
+        let mut ty = Type::new(TypeKind::Bit);
+        ty.virtual_interface = Some(Arc::new(VirtualInterface {
+            interface: "I".into(),
+            modport: None,
+        }));
+        ty.unpacked_ranges.push(symbolic_range());
+        let shape = procedural::dimensions_from_type(&ty);
+        let functions = const_functions::ConstantFunctions::default();
+        let mut table = semantic_types::TyTable::default();
+        assert!(
+            shape
+                .type_id(&mut table, &functions, &ConstEnv::default())
+                .is_none()
+        );
+        assert!(shape_holds_virtual_interface(
+            &shape,
+            &mut table,
+            &functions,
+            &ConstEnv::default()
+        ));
+        let env = ConstEnv::from_iter([("N".into(), 2)]);
+        assert!(shape_holds_virtual_interface(
+            &shape, &mut table, &functions, &env
+        ));
+    }
 }
