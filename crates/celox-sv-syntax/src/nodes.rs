@@ -1353,6 +1353,26 @@ pub struct NettypeDeclaration {
     pub tokens: TokenRange,
 }
 
+/// A `let` declaration (IEEE 1800-2023 11.12), `let name [(ports)] =
+/// expression;`, whose item stays unconverted. Its calls are ordinary call
+/// and name expressions, which the analyzer expands.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LetDeclaration {
+    pub name: Name,
+    pub ports: Vec<LetPort>,
+    pub body: ExprId,
+    /// The tokens of the item, from its attributes.
+    pub tokens: TokenRange,
+}
+
+/// A formal argument of a `let`: an untyped one has no type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LetPort {
+    pub name: Name,
+    pub data_type: Option<TypeId>,
+    pub default: Option<ExprId>,
+}
+
 /// A named sequence (IEEE 1800-2023 16.8) or property (16.12) without formal
 /// arguments or assertion variables. A sequence body has no `disable iff` or
 /// implication.
@@ -1504,4 +1524,292 @@ pub struct Statement {
     pub qualifier: Option<String>,
     pub kind: StatementKind,
     pub tokens: TokenRange,
+}
+
+impl ExprKind {
+    /// This node with each expression it holds directly mapped by `map`,
+    /// in a fixed order. The types it holds are kept; see
+    /// [`DataType::map_parts`].
+    pub fn map_expressions(&self, mut map: impl FnMut(ExprId) -> ExprId) -> ExprKind {
+        let kind = self;
+        let map = &mut map;
+        match kind {
+            ExprKind::MinTypMax {
+                minimum,
+                typical,
+                maximum,
+            } => ExprKind::MinTypMax {
+                minimum: map(*minimum),
+                typical: map(*typical),
+                maximum: map(*maximum),
+            },
+            ExprKind::Literal(_) | ExprKind::Name(_) | ExprKind::Type(_) => kind.clone(),
+            ExprKind::Group(inner) => ExprKind::Group(map(*inner)),
+            ExprKind::Unary {
+                operator,
+                expression,
+                postfix,
+            } => ExprKind::Unary {
+                operator: operator.clone(),
+                expression: map(*expression),
+                postfix: *postfix,
+            },
+            ExprKind::Binary {
+                left,
+                operator,
+                right,
+            } => ExprKind::Binary {
+                left: map(*left),
+                operator: operator.clone(),
+                right: map(*right),
+            },
+            ExprKind::Conditional {
+                condition,
+                then_expression,
+                else_expression,
+            } => ExprKind::Conditional {
+                condition: map(*condition),
+                then_expression: map(*then_expression),
+                else_expression: map(*else_expression),
+            },
+            ExprKind::Assignment {
+                left,
+                operator,
+                right,
+            } => ExprKind::Assignment {
+                left: map(*left),
+                operator: operator.clone(),
+                right: map(*right),
+            },
+            ExprKind::Tagged { member, value } => ExprKind::Tagged {
+                member: member.clone(),
+                value: value.map(&mut *map),
+            },
+            ExprKind::Copy(inner) => ExprKind::Copy(map(*inner)),
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } => ExprKind::Member {
+                expression: map(*expression),
+                separator: separator.clone(),
+                name: name.clone(),
+            },
+            ExprKind::Call {
+                expression,
+                arguments: given,
+            } => ExprKind::Call {
+                expression: map(*expression),
+                arguments: map_arguments(given, map),
+            },
+            ExprKind::ArrayMethodWith {
+                expression,
+                predicate,
+            } => ExprKind::ArrayMethodWith {
+                expression: map(*expression),
+                predicate: map(*predicate),
+            },
+            ExprKind::ConstraintForeach {
+                array,
+                variables,
+                body,
+            } => ExprKind::ConstraintForeach {
+                array: map(*array),
+                variables: variables.clone(),
+                body: map(*body),
+            },
+            ExprKind::RandomizeWith {
+                expression,
+                constraints,
+            } => ExprKind::RandomizeWith {
+                expression: map(*expression),
+                constraints: constraints
+                    .as_ref()
+                    .map(|constraints| constraints.iter().map(|id| map(*id)).collect()),
+            },
+            ExprKind::Parameterized {
+                expression,
+                arguments: given,
+            } => ExprKind::Parameterized {
+                expression: map(*expression),
+                arguments: map_arguments(given, map),
+            },
+            ExprKind::Select {
+                expression,
+                dimension: selected,
+            } => ExprKind::Select {
+                expression: map(*expression),
+                dimension: Box::new(map_dimension(selected, map)),
+            },
+            ExprKind::Cast { target, expression } => ExprKind::Cast {
+                target: map(*target),
+                expression: map(*expression),
+            },
+            ExprKind::Concatenation(parts) => {
+                ExprKind::Concatenation(parts.iter().map(|id| map(*id)).collect())
+            }
+            ExprKind::Replication { count, expressions } => ExprKind::Replication {
+                count: map(*count),
+                expressions: expressions.iter().map(|id| map(*id)).collect(),
+            },
+            ExprKind::Pattern { target, items } => ExprKind::Pattern {
+                target: target.map(&mut *map),
+                items: items
+                    .iter()
+                    .map(|item| PatternItem {
+                        key: item.key.map(&mut *map),
+                        value: map(item.value),
+                    })
+                    .collect(),
+            },
+            ExprKind::Set(dimensions) => ExprKind::Set(
+                dimensions
+                    .iter()
+                    .map(|selected| map_dimension(selected, map))
+                    .collect(),
+            ),
+            ExprKind::Streaming {
+                operator,
+                slice,
+                expressions,
+            } => ExprKind::Streaming {
+                operator: operator.clone(),
+                slice: slice.map(&mut *map),
+                expressions: expressions.iter().map(|id| map(*id)).collect(),
+            },
+            ExprKind::StreamSelect {
+                expression,
+                dimension: selected,
+            } => ExprKind::StreamSelect {
+                expression: map(*expression),
+                dimension: Box::new(map_dimension(selected, map)),
+            },
+        }
+    }
+}
+
+impl DataType {
+    /// This type with each expression and type it holds directly mapped,
+    /// such as the operand of `type(...)`, its dimensions and the types of
+    /// its members.
+    pub fn map_parts(
+        &self,
+        expression: &mut dyn FnMut(ExprId) -> ExprId,
+        data_type: &mut dyn FnMut(TypeId) -> TypeId,
+    ) -> DataType {
+        let kind = match &self.kind {
+            DataTypeKind::TypeOf(operand) => DataTypeKind::TypeOf(expression(*operand)),
+            DataTypeKind::Named(segments) => DataTypeKind::Named(
+                segments
+                    .iter()
+                    .map(|segment| TypeSegment {
+                        name: segment.name.clone(),
+                        arguments: segment
+                            .arguments
+                            .as_ref()
+                            .map(|arguments| map_arguments(arguments, expression)),
+                    })
+                    .collect(),
+            ),
+            DataTypeKind::VirtualInterface {
+                name,
+                arguments,
+                modport,
+            } => DataTypeKind::VirtualInterface {
+                name: name.clone(),
+                arguments: arguments
+                    .as_ref()
+                    .map(|arguments| map_arguments(arguments, expression)),
+                modport: modport.clone(),
+            },
+            DataTypeKind::Struct {
+                union,
+                soft,
+                tagged,
+                packed,
+                fields,
+            } => DataTypeKind::Struct {
+                union: *union,
+                soft: *soft,
+                tagged: *tagged,
+                packed: *packed,
+                fields: fields
+                    .iter()
+                    .map(|field| Field {
+                        name: field.name.clone(),
+                        data_type: data_type(field.data_type),
+                        random: field.random.clone(),
+                        dimensions: field
+                            .dimensions
+                            .iter()
+                            .map(|dimension| map_dimension(dimension, expression))
+                            .collect(),
+                        default: field.default.map(&mut *expression),
+                    })
+                    .collect(),
+            },
+            DataTypeKind::Enum { base, items } => DataTypeKind::Enum {
+                base: base.map(&mut *data_type),
+                items: items
+                    .iter()
+                    .map(|item| EnumItem {
+                        name: item.name.clone(),
+                        dimensions: item
+                            .dimensions
+                            .iter()
+                            .map(|dimension| map_dimension(dimension, expression))
+                            .collect(),
+                        value: item.value.map(&mut *expression),
+                    })
+                    .collect(),
+            },
+            DataTypeKind::Implicit | DataTypeKind::Builtin(_) | DataTypeKind::Interface { .. } => {
+                self.kind.clone()
+            }
+        };
+        DataType {
+            kind,
+            signed: self.signed,
+            packed_dimensions: self
+                .packed_dimensions
+                .iter()
+                .map(|dimension| map_dimension(dimension, expression))
+                .collect(),
+            tokens: self.tokens,
+        }
+    }
+}
+
+fn map_dimension(dimension: &Dimension, map: &mut dyn FnMut(ExprId) -> ExprId) -> Dimension {
+    Dimension {
+        kind: match &dimension.kind {
+            DimensionKind::Index(index) => DimensionKind::Index(map(*index)),
+            DimensionKind::Range { left, right } => DimensionKind::Range {
+                left: map(*left),
+                right: map(*right),
+            },
+            DimensionKind::Indexed {
+                base,
+                operator,
+                width,
+            } => DimensionKind::Indexed {
+                base: map(*base),
+                operator: operator.clone(),
+                width: map(*width),
+            },
+            DimensionKind::Queue(bound) => DimensionKind::Queue(bound.map(&mut *map)),
+            other => other.clone(),
+        },
+        tokens: dimension.tokens,
+    }
+}
+
+fn map_arguments(arguments: &[Argument], map: &mut dyn FnMut(ExprId) -> ExprId) -> Vec<Argument> {
+    arguments
+        .iter()
+        .map(|argument| Argument {
+            name: argument.name.clone(),
+            value: argument.value.map(&mut *map),
+        })
+        .collect()
 }

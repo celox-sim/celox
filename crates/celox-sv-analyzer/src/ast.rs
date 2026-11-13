@@ -67,6 +67,7 @@ pub(crate) mod instances;
 mod interface_ast;
 mod interface_binding;
 pub mod interfaces;
+pub(crate) mod lets;
 mod lifetimes;
 pub(crate) mod module_index;
 mod package_owners;

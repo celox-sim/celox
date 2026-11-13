@@ -1470,6 +1470,16 @@ fn hides(
         return Ok(true);
     }
     let owners = owners(tree, target)?;
+    // The index of a generate loop around `target` is a constant of each
+    // of its blocks (27.4), which hides an item of the scope.
+    if hidden == Hidden::ScopeItem
+        && owners.path.iter().any(|id| {
+            matches!(&native.body_item(*id).kind,
+                BodyItemKind::Loop { variable, .. } if named(variable))
+        })
+    {
+        return Ok(true);
+    }
     // The items of the scope and of its blocks replace no marker.
     let frames: &[Vec<BodyItemId>] = if hidden == Hidden::MarkedVariable {
         &[]

@@ -35,8 +35,8 @@ chapter-11/11.10.3--empty_string.sv	2state	pass
 chapter-11/11.10.3--empty_string.sv	4state	pass
 chapter-11/11.11--min_max_avg_delay.sv	2state	pass
 chapter-11/11.11--min_max_avg_delay.sv	4state	pass
-chapter-11/11.12--let_construct.sv	2state	fail
-chapter-11/11.12--let_construct.sv	4state	fail
+chapter-11/11.12--let_construct.sv	2state	pass
+chapter-11/11.12--let_construct.sv	4state	pass
 chapter-11/11.3.5--expr_short_circuit.sv	2state	pass
 chapter-11/11.3.5--expr_short_circuit.sv	4state	pass
 chapter-11/11.3.6--assign_in_exp-sim.sv	2state	pass
