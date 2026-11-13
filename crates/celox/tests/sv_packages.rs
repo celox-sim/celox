@@ -1794,3 +1794,33 @@ fn selects_of_wide_parameters_valued_by_package_parameters() {
         [0xc32d_580f_74f1_713a, 0x758a_4420, 0x0123_4567, 0x758a_4420]
     );
 }
+
+// The element type of a container formal of a package function is that of
+// the package (IEEE 1800-2023 26.3, 7.6), also where the caller declares a
+// constant of the parameter's name (Verilator, Icarus: abc).
+#[test]
+fn package_function_container_formals_take_package_parameters() {
+    let source = "package p;
+          parameter int W = 12;
+          function automatic logic [W-1:0] last(input logic [W-1:0] v []);
+            return v[v.size() - 1];
+          endfunction
+        endpackage
+        module Top(output logic [11:0] y);
+          localparam int W = 4;
+          logic [11:0] a [];
+          initial begin
+            a = new[3];
+            a[2] = 12'habc;
+            y = p::last(a);
+          end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("packages.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap_or_else(|error| panic!("{error}"));
+    sim.run_until(0).unwrap();
+    assert_eq!(u64::try_from(sim.get(sim.signal("y"))).unwrap(), 0xabc);
+}

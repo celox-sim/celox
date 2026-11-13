@@ -122,6 +122,10 @@ impl VariableDimensions {
             .into_iter()
             .map(|member| member.with_type(|ty| renamer.r#type(ty)))
             .collect();
+        self.shape.container = self
+            .shape
+            .container
+            .map(|container| renamer.container(&container));
         self
     }
 }
