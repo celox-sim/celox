@@ -1424,3 +1424,36 @@ fn shared_discovery_analyzes_like_unshared_discovery() {
         assert_eq!(shared, unshared);
     }
 }
+
+#[test]
+fn query_contexts_derive_only_the_variables_their_operands_name() {
+    // The queries of a function's pattern assignments, in a module with
+    // `others` more variables that they do not name.
+    let derived = |others: usize| {
+        let declarations = (0..others)
+            .map(|i| format!("logic [3:0] unused{i};"))
+            .collect::<String>();
+        let assignments = (0..8)
+            .map(|i| format!("s = '{{a: x[{i}], b: $bits(x)}};"))
+            .collect::<String>();
+        let source = format!(
+            "module Top;
+                typedef struct packed {{ logic [7:0] a; logic [7:0] b; }} s_t;
+                logic [15:0] x;
+                {declarations}
+                function automatic s_t f();
+                    s_t s;
+                    {assignments}
+                    return s;
+                endfunction
+                s_t y;
+                assign y = f();
+            endmodule"
+        );
+        QUERY_CONTEXT_VARIABLES.with(|count| count.set(0));
+        crate::analyze_source(&source, Path::new("query-contexts.sv"))
+            .expect("the module analyzes");
+        QUERY_CONTEXT_VARIABLES.with(|count| count.get())
+    };
+    assert_eq!(derived(2), derived(200));
+}

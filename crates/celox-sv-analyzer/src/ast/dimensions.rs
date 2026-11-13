@@ -9,6 +9,8 @@ pub(super) use discovery::local_constants;
 pub(super) use discovery::same_tables;
 mod query_binding;
 pub(super) use discovery::query_operand_dimensions_id;
+#[cfg(test)]
+pub(super) use query_binding::QUERY_CONTEXT_VARIABLES;
 mod queries;
 pub(super) use query_binding::{
     query_context_for_operand, query_value, shape as operand_shape, validate_data_operand,
@@ -391,10 +393,37 @@ fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, con
         let Some(name) = key.strip_prefix("__variable::dimensions::") else {
             continue;
         };
+        extend_variable_dimensions_from_markers(context, const_env, name, *count);
+    }
+}
+
+/// [`extend_variable_dimensions_from_const_env`] for the variables `names`
+/// only.
+fn extend_variable_dimensions_of(
+    context: &mut PackedDimensions,
+    const_env: &ConstEnv,
+    names: &HashSet<String>,
+) {
+    for name in names {
+        if let Some(count) = const_env.get(&variable_dimensions_marker(name)) {
+            extend_variable_dimensions_from_markers(context, const_env, name, *count);
+        }
+    }
+}
+
+/// The shape of variable `name` that the markers of `const_env` describe,
+/// `count` dimensions of it, in `context`.
+fn extend_variable_dimensions_from_markers(
+    context: &mut PackedDimensions,
+    const_env: &ConstEnv,
+    name: &str,
+    count: i128,
+) {
+    {
         let Some(unpacked) = const_env.get(&variable_unpacked_dimensions_marker(name)) else {
-            continue;
+            return;
         };
-        let ranges = (0..*count)
+        let ranges = (0..count)
             .map(|index| {
                 let index = usize::try_from(index).ok()?;
                 let left = *const_env.get(&variable_dimension_marker(name, index, "left"))?;
@@ -405,12 +434,12 @@ fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, con
                 ))
             })
             .collect::<Option<Vec<_>>>();
-        let Some(mut ranges) = ranges else { continue };
+        let Some(mut ranges) = ranges else { return };
         let Ok(unpacked) = usize::try_from(*unpacked) else {
-            continue;
+            return;
         };
         if unpacked > ranges.len() {
-            continue;
+            return;
         }
         let packed_ranges = ranges.split_off(unpacked);
         let ty = Type {
