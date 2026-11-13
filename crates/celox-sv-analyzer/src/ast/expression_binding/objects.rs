@@ -820,7 +820,10 @@ pub(in crate::ast) fn method_of(
             )),
         };
     }
-    if matches!(method_name, "randomize" | "srandom") {
+    if matches!(
+        method_name,
+        "randomize" | "srandom" | "get_randstate" | "set_randstate"
+    ) {
         if receiver == Receiver::Static
             || (receiver == Receiver::This && dimensions.get(THIS).is_none())
         {
@@ -831,9 +834,16 @@ pub(in crate::ast) fn method_of(
         if method_name == "randomize" {
             class.check_randomize()?;
         }
+        // `get_randstate` has no argument but the object (IEEE 1800-2023
+        // 18.13.4).
+        let formals = if method_name == "get_randstate" {
+            Vec::new()
+        } else {
+            vec![None]
+        };
         return Ok(Some((
             Class::subroutine_name(class_name, method_name),
-            vec![None],
+            formals,
             receiver,
         )));
     }

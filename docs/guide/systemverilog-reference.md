@@ -533,8 +533,10 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
   (18.13.1, 18.14); its default seed and sequence are
   implementation-defined and need not match other simulators. `$random`
   and the `$dist_*` functions follow Annex N, so their sequences match
-  other implementations of that annex. `process` random-state strings
-  (`get_randstate`) are opaque and specific to Celox.
+  other implementations of that annex. The random-state strings of
+  `process` and of class objects (`get_randstate`, 18.13.4) are opaque and
+  specific to Celox; `set_randstate` (18.13.5) accepts only a string that
+  `get_randstate` returned and otherwise ends the simulation with an error.
 - In combinational procedures, random draws occur when the process
   activates; repeated evaluation with unchanged inputs does not advance
   the stream.

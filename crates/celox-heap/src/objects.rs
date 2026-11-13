@@ -59,6 +59,9 @@ pub const fn class_identifier(hash: u32) -> u32 {
     }
 }
 
+/// The beginning of the state an object's `get_randstate` returns.
+const RANDSTATE_PREFIX: &str = "celox-object-rng:";
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Object {
     class: u32,
@@ -113,6 +116,9 @@ pub enum Fault {
     /// A dynamically sized array assigned to a fixed-size array of another
     /// number of elements (IEEE 1800-2023 7.6).
     ArraySize,
+    /// `set_randstate` with a string that `get_randstate` did not return
+    /// (IEEE 1800-2023 18.13.5).
+    InvalidRandomState,
 }
 
 impl std::fmt::Display for Fault {
@@ -133,6 +139,9 @@ impl std::fmt::Display for Fault {
             ),
             Self::RandomizationClassMismatch => {
                 f.write_str("class randomization through a base handle is unsupported")
+            }
+            Self::InvalidRandomState => {
+                f.write_str("set_randstate with a state that get_randstate did not return")
             }
         }
     }
@@ -241,6 +250,33 @@ impl Heap {
     pub fn seed_object(&mut self, handle: Handle, seed: u32) {
         if let Some(object) = self.object_mut(handle) {
             object.random_state = u64::from(seed);
+        }
+    }
+
+    /// The state of an object's random stream as `get_randstate` returns it
+    /// (IEEE 1800-2023 18.13.4): a string that `set_randstate` restores.
+    pub fn object_randstate(&mut self, handle: Handle) -> Handle {
+        let Some(state) = self.object_mut(handle).map(|object| object.random_state) else {
+            return self.intern(b"");
+        };
+        self.intern(format!("{RANDSTATE_PREFIX}{state:016x}").as_bytes())
+    }
+
+    /// Restore an object's random stream from `state`, a string that
+    /// `get_randstate` returned (IEEE 1800-2023 18.13.5), so that its
+    /// randomizations repeat; another string is a fault.
+    pub fn set_object_randstate(&mut self, handle: Handle, state: Handle) {
+        let parsed = std::str::from_utf8(self.string(state))
+            .ok()
+            .and_then(|text| text.strip_prefix(RANDSTATE_PREFIX))
+            .filter(|digits| digits.len() == 16)
+            .and_then(|digits| u64::from_str_radix(digits, 16).ok());
+        let Some(state) = parsed else {
+            self.fault.get_or_insert(Fault::InvalidRandomState);
+            return;
+        };
+        if let Some(object) = self.object_mut(handle) {
+            object.random_state = state;
         }
     }
 

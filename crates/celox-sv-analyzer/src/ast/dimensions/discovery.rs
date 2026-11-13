@@ -720,7 +720,7 @@ fn class_builtin_signatures(
     constructor: bool,
     session: &mut Session,
 ) -> Converted<()> {
-    for method in ["randomize", "srandom", "rand_mode"] {
+    for method in procedural::randomization::RANDOMIZATION_METHODS {
         let mut formals = vec![(
             FunctionArgumentMetadata {
                 name: classes::THIS.into(),
@@ -729,39 +729,40 @@ fn class_builtin_signatures(
             },
             handle.clone(),
         )];
-        let (argument, ty) = match method {
-            "randomize" => (
-                "$selection",
-                // Signature discovery must not require an otherwise unused class
-                // to have a supported layout. A call validates the layout before
-                // using this selection formal; lowering reports layout errors.
-                classes::shared_class(
-                    tree,
-                    class_name,
-                    &context.const_env,
-                    &context.type_aliases,
-                    session,
-                )
-                .map_or_else(
-                    |_| classes::unsigned_type(1),
-                    |layout| layout.selection_type(),
-                ),
-            ),
-            "srandom" => ("seed", procedural::int_type()),
-            _ => ("on_off", classes::unsigned_type(1)),
-        };
-        formals.push((
-            FunctionArgumentMetadata {
-                name: argument.into(),
-                direction: ParamDirection::Input,
-                has_default: false,
-            },
-            ty,
-        ));
+        // Signature discovery must not require an otherwise unused class
+        // to have a supported layout. A call validates the layout before
+        // using this selection formal; lowering reports layout errors.
+        let argument = procedural::randomization::randomization_method_argument(method, || {
+            classes::shared_class(
+                tree,
+                class_name,
+                &context.const_env,
+                &context.type_aliases,
+                session,
+            )
+            .map_or_else(
+                |_| classes::unsigned_type(1),
+                |layout| layout.selection_type(),
+            )
+        });
+        if let Some((argument, ty)) = argument {
+            formals.push((
+                FunctionArgumentMetadata {
+                    name: argument.into(),
+                    direction: ParamDirection::Input,
+                    has_default: false,
+                },
+                ty,
+            ));
+        }
         publish_signature(
             classes::Class::subroutine_name(class_name, method),
             formals,
-            Some((method == "randomize").then(procedural::int_type)),
+            Some(match method {
+                "randomize" => Some(procedural::int_type()),
+                "get_randstate" => Some(procedural::randomization::string_type()),
+                _ => None,
+            }),
             tree,
             session,
             context,
