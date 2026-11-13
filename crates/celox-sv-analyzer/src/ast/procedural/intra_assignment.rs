@@ -38,14 +38,13 @@ impl BodyBuilder<'_, '_, '_> {
             .ok_or_else(|| unsupported("intra-assignment target type"))?;
         if type_names::declared_type(&shape)
             .is_some_and(|ty| matches!(ty.kind, TypeKind::Process | TypeKind::Event))
-            || shape.real
-            || shape.string
-            || shape.class.is_some()
-            || shape.container.is_some()
-            || shape.unpacked_struct.is_some()
-            || !shape.unpacked.is_empty()
-            || shape.chandle
-            || shape.virtual_interface.is_some()
+            || !shape
+                .type_id(
+                    &mut self.session.types,
+                    &self.tree.functions,
+                    &self.dims.const_env,
+                )
+                .is_some_and(|ty| self.session.types.is_integral(ty))
         {
             return Err(unsupported("nonintegral intra-assignment target"));
         }
@@ -102,14 +101,13 @@ impl BodyBuilder<'_, '_, '_> {
             let count_shape =
                 dimensions::operand_shape(count, self.tree, self.session, &self.dims)?
                     .ok_or_else(|| unsupported("intra-assignment repeat count type"))?;
-            if count_shape.real
-                || count_shape.string
-                || count_shape.class.is_some()
-                || count_shape.container.is_some()
-                || count_shape.unpacked_struct.is_some()
-                || !count_shape.unpacked.is_empty()
-                || count_shape.chandle
-                || count_shape.virtual_interface.is_some()
+            if !count_shape
+                .type_id(
+                    &mut self.session.types,
+                    &self.tree.functions,
+                    &self.dims.const_env,
+                )
+                .is_some_and(|ty| self.session.types.is_integral(ty))
                 || type_names::declared_type(&count_shape)
                     .is_some_and(|ty| matches!(ty.kind, TypeKind::Process | TypeKind::Event))
             {
