@@ -735,11 +735,21 @@ fn find_signal<'a>(
         .iter()
         .find(|(_, path)| path.segments.join(".") == name)
         .map_or(name, |(flat, _)| flat.as_str());
-    module
-        .signals
-        .iter()
-        .find(|(candidate, _, _)| candidate == flat)
-        .map(|(candidate, r#type, is_net)| (candidate.clone(), r#type, *is_net))
+    let signal = |flat: &str| {
+        module
+            .signals
+            .iter()
+            .find(|(candidate, _, _)| candidate == flat)
+            .map(|(candidate, r#type, is_net)| (candidate.clone(), r#type, *is_net))
+    };
+    signal(flat).or_else(|| {
+        // A member or a port of an interface instance of the module is the
+        // signal `instance$member` of the module.
+        module.interface_scopes.iter().find_map(|scope| {
+            let member = name.strip_prefix(scope.as_str())?.strip_prefix('.')?;
+            signal(&format!("{scope}${member}"))
+        })
+    })
 }
 
 /// `r#type` with the bounds it has in its specialization.

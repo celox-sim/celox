@@ -148,6 +148,41 @@ fn names_resolve_below_instances_with_interface_ports() {
     assert_eq!(displayed(source), ["4 1"]);
 }
 
+// A member of an interface instance of another instance, also of an
+// element of an interface instance array, is named through the instance
+// (IEEE 1800-2023 23.6, 25.3), as Caliptra's bus monitor reads
+// `caliptra_top_dut.responder_inst[sl_i].hreadyout`.
+#[test]
+fn members_of_interface_instances_of_other_instances() {
+    let source = r#"
+        `timescale 1ns/1ns
+        interface Bus #(parameter W = 8); logic [W-1:0] d; logic r; endinterface
+        module Dut(input logic [7:0] base);
+            Bus #(.W(8)) one();
+            Bus #(.W(8)) many[0:2]();
+            assign one.d = base;
+            for (genvar k = 0; k < 3; k++) begin : drive
+                assign many[k].d = base + 8'(k);
+            end
+        endmodule
+        module Top;
+            logic [7:0] base = 8'h10;
+            Dut dut(base);
+            logic [7:0] seen [0:2];
+            for (genvar i = 0; i < 3; i++) begin : mon
+                always @* seen[i] = dut.many[i].d;
+            end
+            initial begin
+                #1 $display("%h %h %h %h %h", dut.one.d, dut.many[0].d, dut.many[2].d, seen[1], seen[2]);
+                base = 8'h40;
+                #1 $display("%h %h %h %h %h", dut.one.d, dut.many[0].d, dut.many[2].d, seen[1], seen[2]);
+            end
+        endmodule
+    "#;
+    // Icarus and Verilator print the same.
+    assert_eq!(displayed(source), ["10 10 12 11 12", "40 40 42 41 42"]);
+}
+
 // An upward name finds its scope from instances at different depths (IEEE
 // 1800-2023 23.8): when that scope is one instance of the design, every
 // instance of the module denotes the same object.
