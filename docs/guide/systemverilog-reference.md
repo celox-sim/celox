@@ -264,7 +264,15 @@ blocks in programs. Two region deviations are listed under
   class passes its own such parameters on by name).
 - Module-local classes as type arguments to package-class specializations,
   and anonymous enumeration, struct, or union types as type arguments.
-- Properties that are `real` or fixed-size arrays; packed structure members
+- Properties that are `real`; fixed-size array properties that are
+  `static`, `rand` or `randc`, have more than one unpacked dimension or a
+  negative bound, are assigned or compared with an array other than another
+  such property or an array variable named by itself (or, for elements of
+  unpacked structures, such a variable at all), are sliced, or are passed to
+  a `ref` formal; a constraint `foreach` over a fixed-size array
+  property whose range is not `[0:N-1]`; array locator methods on a
+  fixed-size array property of unpacked structures whose range is not
+  `[0:N-1]`; packed structure members
   of a property; selects of a member of a property of unpacked structure
   type; reads of bit and part selects of a property not declared
   `[N-1:0]`; nonblocking assignments to a property; properties as `output`

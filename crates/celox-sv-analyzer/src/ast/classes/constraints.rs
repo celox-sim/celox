@@ -339,7 +339,7 @@ fn size(name: String, properties: &[Property]) -> Result<Typed, String> {
         .ok_or_else(|| format!("constraint variable `{name}.size`"))?;
     let array = properties[..index]
         .iter()
-        .filter(|property| property.sequence())
+        .filter(|property| property.constraint_array())
         .count();
     Ok(Typed {
         kind: Kind::Leaf(ConstraintExpr::Size(array)),
@@ -481,26 +481,36 @@ pub(in crate::ast) fn bind_inputs(
                     .enumerate()
                     .rev()
                     .find(|(_, property)| property.name == name)
-                    .filter(|(_, property)| property.sequence())
+                    .filter(|(_, property)| property.constraint_array())
                     .ok_or_else(|| format!("constraint foreach over `{name}`"))?;
                 if property.rand || property.randc {
                     return Err("constraint foreach over a rand array".into());
                 }
+                // The solver iterates positions: those of a fixed-size array
+                // are its indices only from 0 (IEEE 1800-2023 18.5.8.1).
+                if property
+                    .storage
+                    .as_ref()
+                    .is_some_and(|storage| storage.fixed.is_some_and(|(left, _)| left != 0))
+                    || property.storage.as_ref().is_some_and(|storage| {
+                        storage.fixed.is_some_and(|(left, right)| left > right)
+                    })
+                {
+                    return Err(
+                        "constraint foreach over a fixed-size array whose range is not [0:N-1]"
+                            .into(),
+                    );
+                }
                 visible(property, tree, session, env)?;
                 let array = properties[..index]
                     .iter()
-                    .filter(|property| property.sequence())
+                    .filter(|property| property.constraint_array())
                     .count();
                 let mut inner = loops.to_vec();
                 inner.push(Loop {
                     variable: instances::normalize_identifier(&variable.spelling),
                     array: name,
-                    element: property
-                        .r#type
-                        .container
-                        .as_ref()
-                        .expect("a dynamic array or queue")
-                        .clone(),
+                    element: property.array_storage().expect("an array property").clone(),
                 });
                 let body = expression(
                     *body,
@@ -835,7 +845,7 @@ impl Class {
                 handles.push(property.field.offset);
                 continue;
             }
-            if property.sequence() {
+            if property.constraint_array() {
                 arrays.push(array(property, tree, session, env)?);
                 continue;
             }
@@ -928,11 +938,7 @@ pub(in crate::ast) fn array(
     session: &mut Session,
     env: &ConstEnv,
 ) -> Converted<Array> {
-    let container = property
-        .r#type
-        .container
-        .as_ref()
-        .expect("a dynamic array or queue");
+    let container = property.array_storage().expect("an array property");
     let layout = container.layout;
     let random = property.rand || property.randc;
     if random {

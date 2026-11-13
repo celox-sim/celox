@@ -45,6 +45,7 @@ impl BodyBuilder<'_, '_, '_> {
         if separator != "." {
             return Ok(None);
         }
+        containers::check_written_storage(*base, self.tree, self.session, &self.dims)?;
         let Some(target) =
             containers::native_type(*base, native, self.tree, self.session, &self.dims)?
         else {
@@ -115,6 +116,7 @@ impl BodyBuilder<'_, '_, '_> {
             layout: key_layout,
             element: key_type.clone(),
             record: None,
+            fixed: None,
         }));
         let keys = self.declare("$celox_sort_keys", keys_type);
         let index = self.declare("$celox_sort_index", int_type());

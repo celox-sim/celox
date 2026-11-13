@@ -881,6 +881,22 @@ pub(in crate::ast) fn expression_type(
             &context.const_env,
         ));
     }
+    // A fixed-size array property is of its type, though an object holds
+    // its elements in a container (see `classes::Property::storage`).
+    if let Some((property, _)) =
+        expression_binding::object_property(tree, session, root, tree.declarations(), context)?
+        && let Some(storage) = &property.storage
+    {
+        let size = storage.fixed_size().expect("a fixed-size array") as usize;
+        return Ok(
+            expr_type_from_type(&tree.functions, &storage.element, &context.const_env).map(
+                |element| ExprType {
+                    width: element.width * size,
+                    signed: false,
+                },
+            ),
+        );
+    }
     let mut query = context.clone();
     query.expression_signedness.extend(
         context
