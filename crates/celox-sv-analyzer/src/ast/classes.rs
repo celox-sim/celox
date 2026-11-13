@@ -551,12 +551,7 @@ pub(super) fn declared_name(
             instances::normalize_identifier(&unit.name.spelling)
         ),
         Some(_) => name,
-        None => {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = fxhash::FxHasher::default();
-            tree.compilation_path().hash(&mut hasher);
-            format!("{}::{name}@{:016x}", packages::UNIT, hasher.finish())
-        }
+        None => packages::unit_item_identity(tree.compilation_path(), &name),
     }
 }
 
