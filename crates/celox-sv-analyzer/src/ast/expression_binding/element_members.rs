@@ -73,13 +73,23 @@ pub(in crate::ast) fn element_member(
         id = ungroup(*expression, native);
     }
     prefix.reverse();
-    // The variable, or a parameter table of a package, such as `p::T`.
-    let mut name = direct::call_name(tree, id, native)?;
+    // The variable, or a parameter table of a package, such as `p::T`, or
+    // the start of a hierarchical name with constant indices of instance
+    // arrays, such as `key_vault[1]` (23.6).
+    let root = match direct::call_name(tree, id, native) {
+        Some(name) => vec![name],
+        None if !prefix.is_empty() => match direct::path(id, native, tree, session, dimensions) {
+            Ok((components, None)) => components,
+            _ => return None,
+        },
+        None => return None,
+    };
+    let mut name = root[0].clone();
     // A variable of an interface instance, or one that a hierarchical name
     // denotes, whose members the rest of the prefix selects (IEEE 1800-2023
     // 25.5, 23.6): the variable's local signal stands for it.
-    if dimensions.get(&name).is_none() && !prefix.is_empty() {
-        let mut path = vec![name];
+    if (root.len() > 1 || dimensions.get(&name).is_none()) && !prefix.is_empty() {
+        let mut path = root;
         path.extend(prefix);
         if !packed_structs::bind_interface_path(tree, &mut path, dimensions) {
             return None;

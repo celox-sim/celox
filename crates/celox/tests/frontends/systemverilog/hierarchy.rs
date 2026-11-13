@@ -613,3 +613,113 @@ endmodule"#;
         );
     }
 }
+
+/// A hierarchical name of another instance's structure variable selects
+/// members of the elements of its packed array member by run-time indices,
+/// as Caliptra's testbench reads
+/// `key_vault1.kv_reg_hwif_out.KEY_ENTRY[kv_entry_id]` (IEEE 1800-2023
+/// 23.6, 7.4.5); the name is resolved although its scan ends at the index.
+/// Verilator 5.054 prints the same lines.
+#[test]
+fn hierarchical_names_select_member_elements_by_run_time_indices() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+  typedef struct packed { logic [3:0] data; logic v; } e_t;
+  typedef struct packed { logic [7:0] pre; e_t [3:0] KEY_ENTRY; } o_t;
+endpackage
+module kv;
+  p::o_t hwif_out;
+  initial begin
+    hwif_out = '0;
+    for (int k = 0; k < 4; k++) hwif_out.KEY_ENTRY[k].data = 4'(k + 9);
+  end
+endmodule
+module top;
+  kv key_vault1();
+  int id;
+  initial begin
+    #1;
+    for (id = 0; id < 4; id++) $display("R %0d %h", id, key_vault1.hwif_out.KEY_ENTRY[id].data);
+    id = 2;
+    key_vault1.hwif_out.KEY_ENTRY[id].v = 1'b1;
+    #1 $display("W %h", key_vault1.hwif_out);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("indices.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            ["R 0 9", "R 1 a", "R 2 b", "R 3 c", "W 00c5e92"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// The hierarchical name may select an element of an instance array by a
+/// constant index before the variable, as
+/// `key_vault[1].hwif_out.KEY_ENTRY[id]` (IEEE 1800-2023 23.6, 7.4.5).
+/// Verilator 5.054 prints the same lines.
+#[test]
+fn hierarchical_names_of_instance_array_elements_select_member_elements_by_run_time_indices() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+  typedef struct packed { logic [3:0] data; logic v; } e_t;
+  typedef struct packed { logic [7:0] pre; e_t [3:0] KEY_ENTRY; } o_t;
+endpackage
+module kv #(parameter int B = 0);
+  p::o_t hwif_out;
+  initial begin
+    hwif_out = '0;
+    for (int k = 0; k < 4; k++) hwif_out.KEY_ENTRY[k].data = 4'(k + B);
+  end
+endmodule
+module top;
+  kv #(.B(3)) key_vault[2] ();
+  int id;
+  initial begin
+    #1;
+    for (id = 0; id < 4; id++) $display("R %0d %h", id, key_vault[1].hwif_out.KEY_ENTRY[id].data);
+    id = 1;
+    key_vault[1].hwif_out.KEY_ENTRY[id].v = 1'b1;
+    #1 $display("W %h %h", key_vault[0].hwif_out, key_vault[1].hwif_out);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("indices.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            ["R 0 3", "R 1 4", "R 2 5", "R 3 6", "W 0062906 0062926"],
+            "four_state={four_state}"
+        );
+    }
+}
