@@ -187,6 +187,21 @@ pub(in crate::lowering) fn readmem_destination(
     }
 }
 
+/// Whether the file name argument of `$readmemh`/`$readmemb` is a constant
+/// string, whose file [`ProcModule::readmem`] reads when the design is
+/// compiled.
+pub(in crate::lowering) fn constant_file_name(
+    arg: Option<&sv::ir::SystemTaskArg<sv::ir::Expr>>,
+) -> bool {
+    match arg {
+        Some(sv::ir::SystemTaskArg::Str(_)) => true,
+        Some(sv::ir::SystemTaskArg::Expr(sv::ir::Expr::Literal(value))) => {
+            literal_characters(value).is_some()
+        }
+        _ => false,
+    }
+}
+
 /// The characters of a constant integral value that holds a character
 /// string, such as a `string` parameter substituted as its bytes: one per
 /// byte, most significant first, without the zero bytes that only pad it

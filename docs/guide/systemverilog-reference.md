@@ -455,13 +455,17 @@ Code that must stay portable should avoid relying on them.
   with a run-time initializer in a procedure that runs once, such as
   `initial`. In an `always` procedure a run-time initializer without the
   keyword is rejected; declare the local `static` or `automatic`.
-- **`$readmemh` / `$readmemb` read at compile time.** The file is read when
-  the design is compiled, not when the call executes; a missing or
-  malformed file is a compile-time `MemoryFile` error. In `always_ff` the
-  file's words are written on every activation. An `@` address directive
-  outside the requested range is an error; without directives, a word-count
-  mismatch is a compilation warning (excess words are ignored, missing
-  words leave memory unchanged).
+- **`$readmemh` / `$readmemb` of a constant file name read at compile
+  time.** The file is read when the design is compiled, not when the call
+  executes; a missing or malformed file is a compile-time `MemoryFile`
+  error. In `always_ff` the file's words are written on every activation.
+  An `@` address directive outside the requested range is an error; without
+  directives, a word-count mismatch is a compilation warning (excess words
+  are ignored, missing words leave memory unchanged). A file name that is
+  not a constant string, such as a `string` variable that
+  `$value$plusargs` reads, is read when the call executes in a process:
+  the same errors end the simulation and the mismatch is a run-time
+  warning. Such a call takes a whole unpacked array as its memory.
 - **Program continuous assignments do not run in the Reactive region.**
   Continuous assignments in a program are evaluated with the design's
   combinational logic, and design logic that a program writes settles while
