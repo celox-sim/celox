@@ -223,3 +223,37 @@ fn generated_formals_keep_their_declaration_scope_bounds() {
     };
     assert_width(&session.types, *element, 7);
 }
+
+/// A shape whose bounds are literals has the same type in every context:
+/// another declaration of that shape takes the type the first resolved, in
+/// any environment, and a shape that differs does not.
+#[test]
+fn closed_shapes_share_their_type_across_declarations() {
+    let closed = || {
+        let mut ty = Type::new(TypeKind::Bit);
+        ty.packed_ranges.push(PackedRange::new(
+            ConstExpr::Literal("7".into()),
+            ConstExpr::Literal("0".into()),
+        ));
+        procedural::dimensions_from_type(&ty)
+    };
+    let mut table = TyTable::default();
+    let functions = const_functions::ConstantFunctions::default();
+    let first = closed().type_id(&mut table, &functions, &env(5)).unwrap();
+    assert_width(&table, first, 8);
+    assert_eq!(
+        closed().type_id(&mut table, &functions, &env(11)),
+        Some(first)
+    );
+    let mut signed = closed();
+    signed.signed = true;
+    let other = signed.type_id(&mut table, &functions, &env(5)).unwrap();
+    assert_ne!(other, first);
+    assert!(matches!(table.data(other), TyData::Packed(packed) if packed.signed));
+    // A shape with a name in its bounds is still typed in each context.
+    let symbolic = symbolic_shape();
+    let five = symbolic.type_id(&mut table, &functions, &env(5)).unwrap();
+    let eleven = symbolic.type_id(&mut table, &functions, &env(11)).unwrap();
+    assert_width(&table, five, 5);
+    assert_width(&table, eleven, 11);
+}

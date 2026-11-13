@@ -182,6 +182,10 @@ pub(super) struct TyTable {
     /// The base class and the interface classes of each class whose
     /// declaration has been resolved (8.13, 8.26).
     supertypes: HashMap<TyId, Supertypes>,
+    /// The type of each variable shape whose bounds are all literals, by
+    /// the hash of the shape: such a shape has the same type in every
+    /// context (see `VariableShape::is_closed`).
+    closed_shapes: HashMap<u64, Vec<(crate::ast::variable_dimensions::VariableShape, TyId)>>,
 }
 
 /// The classes a class extends and implements.
@@ -285,6 +289,29 @@ impl TyTable {
             id,
             node: Arc::downgrade(&self.types[id.0 as usize].0),
         }
+    }
+
+    /// The type of the closed shape `shape` of hash `key`, once it is known.
+    pub(super) fn closed_shape(
+        &self,
+        key: u64,
+        shape: &crate::ast::variable_dimensions::VariableShape,
+    ) -> Option<TyId> {
+        self.closed_shapes
+            .get(&key)?
+            .iter()
+            .find(|(known, _)| known.same_closed(shape))
+            .map(|(_, id)| *id)
+    }
+
+    /// Remember the type `id` of the closed shape `shape` of hash `key`.
+    pub(super) fn insert_closed_shape(
+        &mut self,
+        key: u64,
+        shape: crate::ast::variable_dimensions::VariableShape,
+        id: TyId,
+    ) {
+        self.closed_shapes.entry(key).or_default().push((shape, id));
     }
 
     /// The id of type `data`.
