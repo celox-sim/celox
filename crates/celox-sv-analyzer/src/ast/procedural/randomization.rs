@@ -159,6 +159,18 @@ fn lower_methods(
                 None
             }
             "rand_mode" => {
+                // That of a static rand property is the bit every object
+                // shares (IEEE 1800-2023 18.8).
+                for slot in &class.static_slots {
+                    body.push(Stmt::Assign {
+                        lhs: LValue::Ident(slot.mode.clone()),
+                        rhs: Expr::Unary {
+                            op: UnaryOp::LogicNot,
+                            expr: Box::new(Expr::Ident(argument.clone())),
+                        },
+                        nonblocking: false,
+                    });
+                }
                 for property in &class.properties {
                     let update = Stmt::Eval(classes::object_call(
                         ObjectOp::ModeSet(property.field.offset),
@@ -324,6 +336,25 @@ fn lower_methods(
                         vec![Expr::Ident(this.clone()), selected],
                     )));
                 }
+                // The bits of the static rand properties follow (see
+                // `classes::Class::selection_type`).
+                for (index, slot) in class.static_slots.iter().enumerate() {
+                    let selected = Expr::Binary {
+                        left: Box::new(Expr::Binary {
+                            left: Box::new(Expr::Ident(argument.clone())),
+                            op: BinaryOp::Shr,
+                            right: Box::new(Expr::Literal(
+                                (class.properties.len() + 1 + index).to_string(),
+                            )),
+                        }),
+                        op: BinaryOp::BitAnd,
+                        right: Box::new(Expr::Literal("1'b1".into())),
+                    };
+                    select.push(Stmt::Eval(classes::object_call(
+                        ObjectOp::ModeSelect(slot.field.offset, true),
+                        vec![Expr::Ident(this.clone()), selected],
+                    )));
+                }
                 if prepare || inline.is_none_or(|inline| inline.inputs.is_empty()) {
                     body.push(Stmt::If {
                         condition: Expr::Ident(argument.clone()),
@@ -336,10 +367,69 @@ fn lower_methods(
                     body.push(Stmt::Return(Some(Expr::Ident(this.clone()))));
                     Some(builder.declare("$prepared", handle.clone()))
                 } else {
+                    // A static rand property is solved in the object's slot
+                    // for it, seeded from the property and random while the
+                    // bit all objects share says so (IEEE 1800-2023 18.4,
+                    // 18.8); the solution is written back below.
+                    let shadows = static_shadows(class);
+                    for (field, variable, off) in &shadows {
+                        body.push(Stmt::Eval(classes::object_call(
+                            ObjectOp::Store(*field),
+                            vec![Expr::Ident(this.clone()), Expr::Ident(variable.clone())],
+                        )));
+                        // A call with arguments names its random variables
+                        // itself, whatever their modes (18.11).
+                        body.push(Stmt::If {
+                            condition: Expr::Unary {
+                                op: UnaryOp::LogicNot,
+                                expr: Box::new(Expr::Ident(argument.clone())),
+                            },
+                            then_body: vec![Stmt::Eval(classes::object_call(
+                                ObjectOp::ModeSet(field.offset),
+                                vec![
+                                    Expr::Ident(this.clone()),
+                                    Expr::Unary {
+                                        op: UnaryOp::LogicNot,
+                                        expr: Box::new(Expr::Ident(off.clone())),
+                                    },
+                                ],
+                            ))],
+                            else_body: Vec::new(),
+                        });
+                    }
+                    // The static properties the constraints read, then the
+                    // values of the call (see `classes::StaticInput`).
+                    let solve_inputs = class
+                        .static_inputs
+                        .iter()
+                        .map(|input| Expr::Ident(input.variable.clone()))
+                        .chain(input_values.iter().cloned())
+                        .collect::<Vec<_>>();
                     if class.solved() || inline.is_some() {
                         let mut program = class.constraint_program()?;
                         if let Some(inline) = inline {
-                            program.constraints.extend(inline.constraints.clone());
+                            // The inline constraints were bound for the class
+                            // of the handle, whose static inputs this class's
+                            // start with; the call's values follow this
+                            // class's (see `classes::static_inputs`).
+                            let first = inline.class.static_inputs.len();
+                            let by = class.static_inputs.len() - first;
+                            // Its static rand properties are the first of
+                            // this class's, whose slots follow the fields
+                            // of the properties.
+                            let slots = program.fields.len() - class.static_slots.len();
+                            program
+                                .constraints
+                                .extend(inline.constraints.iter().cloned().map(
+                                    |mut constraint| {
+                                        shift_inputs(&mut constraint, first, by);
+                                        classes::constraints::resolve_statics(
+                                            &mut constraint,
+                                            slots,
+                                        );
+                                        constraint
+                                    },
+                                ));
                         }
                         let success = builder.declare("$constraint_success", int_type());
                         body.push(Stmt::Assign {
@@ -355,7 +445,7 @@ fn lower_methods(
                                             right: Box::new(Expr::Literal("1".into())),
                                         },
                                     ],
-                                    input_values.clone(),
+                                    solve_inputs,
                                 ]
                                 .concat(),
                             ),
@@ -446,6 +536,16 @@ fn lower_methods(
                                 else_body: Vec::new(),
                             });
                         }
+                    }
+                    for (field, variable, _) in &shadows {
+                        body.push(Stmt::Assign {
+                            lhs: LValue::Ident(variable.clone()),
+                            rhs: classes::object_call(
+                                ObjectOp::Load(*field),
+                                vec![Expr::Ident(this.clone())],
+                            ),
+                            nonblocking: false,
+                        });
                     }
                     body.extend(hook("post_randomize"));
                     body.push(Stmt::If {
@@ -768,4 +868,50 @@ pub(in crate::ast) fn inline_subroutines(
         }
     }
     Ok((result, exported))
+}
+
+/// Shift the inputs of constraint `expr` from index `first` on by `by`.
+fn shift_inputs(expr: &mut celox_heap::randomization::Expr, first: usize, by: usize) {
+    use celox_heap::randomization::Expr;
+    match expr {
+        Expr::Input { index, .. } if *index >= first => *index += by,
+        Expr::Enabled { value, .. } | Expr::Resize { value, .. } | Expr::Unary { value, .. } => {
+            shift_inputs(value, first, by)
+        }
+        Expr::Foreach { body, .. } => shift_inputs(body, first, by),
+        Expr::Binary { left, right, .. } => {
+            shift_inputs(left, first, by);
+            shift_inputs(right, first, by);
+        }
+        Expr::Dist {
+            membership,
+            choices,
+        } => {
+            shift_inputs(membership, first, by);
+            for choice in choices {
+                shift_inputs(&mut choice.predicate, first, by);
+            }
+        }
+        Expr::Input { .. }
+        | Expr::Literal(..)
+        | Expr::Field(_)
+        | Expr::Size(_)
+        | Expr::Sum(_)
+        | Expr::Index { .. }
+        | Expr::Static(_)
+        | Expr::Solved(_)
+        | Expr::Member { .. }
+        | Expr::Element { .. } => {}
+    }
+}
+
+/// The static rand properties of `class` (see `classes::StaticProperty::rand`):
+/// the field of an object that a randomize call solves each in, its
+/// variable, and the variable of the bit that turns it off.
+fn static_shadows(class: &classes::Class) -> Vec<(system_functions::ObjectField, String, String)> {
+    class
+        .static_slots
+        .iter()
+        .map(|slot| (slot.field, slot.variable.clone(), slot.mode.clone()))
+        .collect()
 }
