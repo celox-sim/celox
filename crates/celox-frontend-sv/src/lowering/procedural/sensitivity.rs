@@ -240,7 +240,10 @@ impl ProcModule<'_> {
                     }
                 }
                 Expr::Ident(name) => {
-                    if let Some(id) = m.id(name).filter(|id| !m.is_hidden(*id)) {
+                    if let Some(id) = m
+                        .id(name)
+                        .filter(|id| !m.is_hidden(*id) && !m.is_assertion_control(*id))
+                    {
                         reads.insert(VarAtomBase::new(id, 0, m.var(id).width - 1));
                     }
                 }
