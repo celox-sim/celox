@@ -87,11 +87,12 @@ pub(super) fn result(
                 }));
             }
             // 7.12.3: a reduction gives a value of the element type, or of
-            // the type of its `with` expression.
+            // the type of its `with` expression. Structures are no values
+            // to combine.
             if reduction.is_some() {
                 return match predicate {
                     Some(predicate) => type_of(tree, session, predicate, native, dims).ok(),
-                    None => Some(element),
+                    None => (!session.types.is_unpacked_struct(element)).then_some(element),
                 };
             }
             match (&kind, method) {
