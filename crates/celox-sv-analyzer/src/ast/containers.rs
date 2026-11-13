@@ -248,6 +248,25 @@ fn shape_holds_container(
     found
 }
 
+/// The type of native expression `id` when it is a dynamic array, queue
+/// or associative array value (7.5, 7.8, 7.10), as its type tells, or
+/// `None` for another value or one whose type is not known.
+pub(super) fn value_container(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Option<semantic_types::TyId> {
+    let ty = expression_types::type_of(tree, session, id, native, dims).ok()?;
+    matches!(
+        session.types.data(ty),
+        semantic_types::TyData::Array { kind, .. }
+            if !matches!(kind, semantic_types::ArrayKind::Fixed(_))
+    )
+    .then_some(ty)
+}
+
 pub(super) fn native_type(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
