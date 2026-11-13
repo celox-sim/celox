@@ -59,6 +59,18 @@ pub enum StmtBase<E, L> {
         rhs: E,
         nonblocking: bool,
     },
+    /// `assign lhs = rhs;` in a procedure: the procedural continuous
+    /// assignment of a variable (IEEE 1800-2023 10.6.1). The analyzer lowers
+    /// it with the module's other writes of the variable
+    /// (`ast::procedural_assigns`), so it does not reach the IR.
+    ProceduralAssign {
+        lhs: L,
+        rhs: E,
+    },
+    /// `deassign lhs;` (10.6.1), lowered with [`StmtBase::ProceduralAssign`].
+    Deassign {
+        lhs: L,
+    },
     /// A nonblocking assignment scheduled by an intra-assignment delay.
     /// The control describes the delay; it does not suspend the caller.
     DelayedNonblocking {
@@ -332,6 +344,11 @@ impl<E, L> StmtBase<E, L> {
                 rhs: fe(rhs),
                 nonblocking,
             },
+            StmtBase::ProceduralAssign { lhs, rhs } => StmtBase::ProceduralAssign {
+                lhs: fl(lhs),
+                rhs: fe(rhs),
+            },
+            StmtBase::Deassign { lhs } => StmtBase::Deassign { lhs: fl(lhs) },
             StmtBase::If {
                 condition,
                 then_body,
@@ -492,10 +509,11 @@ impl<E, L> StmtBase<E, L> {
                 control.visit(fe, fl, fcall);
                 assignment.visit(fe, fl, fcall);
             }
-            StmtBase::Assign { lhs, rhs, .. } => {
+            StmtBase::Assign { lhs, rhs, .. } | StmtBase::ProceduralAssign { lhs, rhs } => {
                 fl(lhs);
                 fe(rhs);
             }
+            StmtBase::Deassign { lhs } => fl(lhs),
             StmtBase::AssignConcat { parts, rhs, .. } => {
                 parts.iter().for_each(&mut *fl);
                 fe(rhs);
@@ -625,10 +643,11 @@ impl<E, L> StmtBase<E, L> {
                 control.visit_mut(fe, fl, fname);
                 assignment.visit_mut(fe, fl, fname);
             }
-            StmtBase::Assign { lhs, rhs, .. } => {
+            StmtBase::Assign { lhs, rhs, .. } | StmtBase::ProceduralAssign { lhs, rhs } => {
                 fl(lhs);
                 fe(rhs);
             }
+            StmtBase::Deassign { lhs } => fl(lhs),
             StmtBase::AssignConcat { parts, rhs, .. } => {
                 parts.iter_mut().for_each(&mut *fl);
                 fe(rhs);

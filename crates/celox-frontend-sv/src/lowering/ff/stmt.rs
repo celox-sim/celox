@@ -94,6 +94,9 @@ impl Ff<'_, '_> {
             return Err(unsupported("timed task call outside a suspendable process"));
         }
         match stmt {
+            sv::ir::Stmt::ProceduralAssign { .. } | sv::ir::Stmt::Deassign { .. } => {
+                unreachable!("the analyzer lowers procedural continuous assignments")
+            }
             sv::ir::Stmt::DeferActive => {
                 self.with_kernel(ProcessKernelBuilder::defer_active)
                     .map_err(kernel_error)?;

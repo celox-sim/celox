@@ -143,8 +143,19 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
 
 ### プロセス・タイミング・制御 {#timing-controls}
 
-- 手続き的継続代入（文としての `assign` / `deassign`、`force` / `release`）と、
-  `disable fork` 以外の `disable` 文。
+- 手続き文としての `force` / `release` と、`disable fork` 以外の `disable` 文。
+- `initial` / `always` プロシージャ以外に書かれた手続き的継続代入
+  （`assign` / `deassign`、IEEE 1800-2023 10.6.1）。サブルーチン、`final`
+  プロシージャ、`always_comb` / `always_latch` / `always_ff` 内は非対応です。
+  これを含む `always` プロシージャはプロセスとして実行されます。対象は
+  モジュールの packed な整数型変数全体に限られ、連接、`real`・`string`・
+  ハンドル・unpacked 変数、手続きブロック内の変数は拒否されます。副作用の
+  ある式、サブルーチンやシステム関数を呼ぶ式、手続きブロック内の変数を読む式、
+  `always @*` プロシージャも代入する対象も拒否されます。
+- `assign` が有効な間、単純な代入文以外による対象変数への書き込み（出力引数、
+  連接の代入先、遅延付きノンブロッキング代入、他モジュールからの階層名）は
+  抑止されず、同じタイムステップ内で上書きされます。その変数を待つプロセスは
+  書き込まれた値を観測できます。
 - `always_comb` 内のノンブロッキング代入
   （[#453](https://github.com/celox-sim/celox/issues/453)）と
   `always_latch` 内のノンブロッキング代入

@@ -1346,7 +1346,10 @@ pub enum StatementKind {
     },
     Expression(ExprId),
     Declaration(LocalDeclaration),
+    /// `assign variable_assignment ;` in a procedure (IEEE 1800-2023 10.6.1).
     ProceduralAssign(AssignId),
+    /// `deassign variable_lvalue ;` (10.6.1).
+    ProceduralDeassign(ExprId),
     Return(Option<ExprId>),
     Break,
     Continue,
@@ -1377,6 +1380,7 @@ pub enum StatementKind {
         control: Option<TimingControlId>,
         target: ExprId,
     },
+    /// `force` or `release` (10.6.2), unparsed.
     ProceduralRelease(TokenRange),
     Unconverted {
         category: String,
