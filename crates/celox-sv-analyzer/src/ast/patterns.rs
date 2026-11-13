@@ -230,16 +230,19 @@ pub(super) fn assignment_value(
                     .collect::<Converted<_>>()?,
             ));
         }
-        if !shape.members.is_empty() {
-            if shape
-                .members
-                .iter()
-                .any(packed_structs::PackedMember::is_tagged)
-                || (shape.members.len() > 1
-                    && shape.members.iter().all(|member| member.offset() == 0))
-            {
-                return Err(unsupported("assignment pattern for a packed union"));
-            }
+        if shape
+            .members
+            .iter()
+            .any(packed_structs::PackedMember::is_tagged)
+        {
+            return Err(unsupported("assignment pattern for a packed union"));
+        }
+        // A default reaches the members of a nested structure only (10.9.2):
+        // a packed union member takes the value as a whole, as any other
+        // packed member does (7.3.1).
+        let union =
+            shape.members.len() > 1 && shape.members.iter().all(|member| member.offset() == 0);
+        if !shape.members.is_empty() && !union {
             return Ok(Expr::Concat(
                 shape
                     .members

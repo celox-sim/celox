@@ -555,3 +555,41 @@ endmodule"#;
         assert_eq!(lines, ["6 18 5 30 5"], "four_state={four_state}");
     }
 }
+
+/// A `default` of a structure pattern reaches the members of nested
+/// structures only (IEEE 1800-2023 10.9.2): a packed union member takes the
+/// value as a whole, as BlackParrot's command structures with an operand
+/// union do (Verilator: 000, 1ff).
+const UNION_MEMBER_DEFAULTS: &str = r#"
+    module Top(output logic [11:0] zero, ones, named);
+        typedef struct packed { logic [3:0] a; logic [3:0] b; } ab_t;
+        typedef struct packed { logic [7:0] c; } c_t;
+        typedef union packed { ab_t ab; c_t c; } u_t;
+        typedef struct packed { logic [3:0] npc; u_t operands; } s_t;
+        s_t z, o, n;
+        assign z = '{default: '0};
+        assign o = '{npc: 4'h1, default: '1};
+        assign n = '{npc: 4'h2, operands: 8'h5a};
+        assign zero = z;
+        assign ones = o;
+        assign named = n;
+    endmodule
+"#;
+
+sv_backends! {
+    fn pattern_defaults_fill_packed_union_members(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(vec![(UNION_MEMBER_DEFAULTS, Path::new("union_defaults.sv"))], "Top");
+        for (name, value) in [("zero", 0x000u16), ("ones", 0x1ff), ("named", 0x25a)] {
+            assert_eq!(sim.get(sim.signal(name)), value.into(), "{name}");
+        }
+    }
+
+    fn pattern_defaults_fill_packed_union_members_four_state(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(vec![(UNION_MEMBER_DEFAULTS, Path::new("union_defaults.sv"))], "Top").four_state(true);
+        for (name, value) in [("zero", 0x000u16), ("ones", 0x1ff), ("named", 0x25a)] {
+            assert_eq!(sim.get_four_state(sim.signal(name)), (value.into(), 0u8.into()), "{name}");
+        }
+    }
+}
