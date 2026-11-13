@@ -1332,6 +1332,10 @@ pub enum ObjectOp {
     RegisterProgram(u32, celox_heap::randomization::Registered),
     /// Whether class `0` registered its constraint program.
     ProgramRegistered(u32),
+    /// Register the static constraint blocks of class `0`: each block's
+    /// index with the class that declares it, whose objects share its mode
+    /// (IEEE 1800-2023 18.5.11).
+    RegisterStaticBlocks(u32, Vec<(u32, u32)>),
     /// The number of objects the enabled rand object handles of the object
     /// in the argument refer to, whose pre_randomize hooks run (18.6.2);
     /// `VisitExpand` adds those of the visited object in the argument once
@@ -1559,6 +1563,7 @@ impl ObjectOp {
             Self::ProgramRegistered(_) => (1, false),
             Self::Randomize(_)
             | Self::RegisterProgram(..)
+            | Self::RegisterStaticBlocks(..)
             | Self::VisitBegin
             | Self::VisitExpand
             | Self::VisitSolved
@@ -1606,6 +1611,7 @@ impl fmt::Display for ObjectOp {
             Self::Random => "object random bits",
             Self::Randomize(_) => "constrained object randomization",
             Self::RegisterProgram(..) => "constraint program registration",
+            Self::RegisterStaticBlocks(..) => "static constraint block registration",
             Self::ProgramRegistered(_) => "constraint program query",
             Self::VisitBegin => "begin randomization visits",
             Self::VisitSolved => "begin solved randomization visits",

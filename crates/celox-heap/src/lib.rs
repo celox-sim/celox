@@ -111,6 +111,16 @@ pub struct Heap {
     /// [`Heap::register_program`].
     #[serde(default)]
     programs: HashMap<u32, randomization::Registered>,
+    /// The static constraint blocks of classes by class id, each block's
+    /// index with the class that declares it, see
+    /// [`Heap::register_static_blocks`].
+    #[serde(default)]
+    static_blocks: HashMap<u32, Vec<(u32, u32)>>,
+    /// The constraint modes of static constraint blocks, by the class that
+    /// declares a block and its index (see [`Heap::static_block_key`]):
+    /// each one of every object of the class (IEEE 1800-2023 18.5.11).
+    #[serde(default)]
+    static_modes: HashMap<u64, bool>,
     /// The objects each randomize call in progress runs the hooks of, see
     /// [`Heap::begin_visits`].
     #[serde(default)]
@@ -167,6 +177,8 @@ impl Heap {
             live_after_collection: 1,
             uvm: uvm_dpi::UvmDpi::default(),
             programs: HashMap::default(),
+            static_blocks: HashMap::default(),
+            static_modes: HashMap::default(),
             visits: Vec::new(),
             prepared: None,
             solved: Vec::new(),
@@ -229,6 +241,8 @@ impl Heap {
             && self.containers == other.containers
             && self.uvm == other.uvm
             && self.programs == other.programs
+            && self.static_blocks == other.static_blocks
+            && self.static_modes == other.static_modes
             // The occurrences of watched properties decide the waits.
             && self.edges == other.edges
     }

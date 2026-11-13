@@ -5460,3 +5460,73 @@ module Top(output int checks);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq checks 127))
+
+; A static constraint block has one constraint mode for every object of the
+; class that declares it, which constraint_mode through any of them sets and
+; reads, by the object's class, also for an object a rand handle reaches
+; (IEEE 1800-2023 18.5.11); a block a derived class overrides is the derived
+; class's. constraint_mode() is an int.
+(case static_constraint_blocks
+  (source "static_blocks.sv" #"
+module Top(output int checks);
+    class A;
+        rand int b;
+        static constraint c1 { b == 5; }
+        static constraint c2 { b >= 2; b <= 3; }
+        constraint c3 { b != 3; }
+    endclass
+    class B extends A;
+        constraint c1 { b > 0; }
+    endclass
+    class C;
+        rand int x;
+        extern static constraint c;
+        constraint d { soft x == 8; }
+    endclass
+    constraint C::c { x == 7; }
+    class Base;
+        rand int v;
+        static constraint s { v == 1; }
+    endclass
+    class Derived extends Base;
+        static constraint s { v == 2; }
+    endclass
+    class Holder;
+        rand C member;
+        function new(); member = new; endfunction
+    endclass
+    initial begin
+        A a1 = new, a2 = new;
+        B b = new;
+        C c = new, other = new;
+        Derived d = new;
+        Base h = d, base = new;
+        Holder holder = new;
+        checks = 0;
+        checks += (!a1.randomize() && !a2.randomize()) * 1;
+        a1.c1.constraint_mode(0);
+        checks += (a1.c1.constraint_mode() == 0 && a2.c1.constraint_mode() == 0) * 2;
+        checks += (a2.randomize() && a2.b == 2 && a1.randomize() && a1.b == 2) * 4;
+        checks += (b.randomize() && b.b == 2 && b.c1.constraint_mode() == 1) * 8;
+        a2.c2.constraint_mode(0);
+        a2.c1.constraint_mode(1);
+        checks += (a1.randomize() && a1.b == 5) * 16;
+        checks += (c.randomize() && c.x == 7) * 32;
+        // Through a rand handle: the block is off for every C, which
+        // leaves its soft constraint.
+        other.c.constraint_mode(0);
+        checks += (holder.randomize() && holder.member.x == 8) * 64;
+        // Through a Base handle, the Derived override's mode.
+        h.s.constraint_mode(0);
+        checks += (d.s.constraint_mode() == 0 && base.s.constraint_mode() == 1
+                   && base.randomize() && base.v == 1) * 128;
+        checks += ($bits(h.s.constraint_mode()) == 32 && h.s.constraint_mode() == 0) * 256;
+        h.s.constraint_mode();
+        // Every block of an object, its static ones for every object.
+        a1.constraint_mode(0);
+        checks += (a2.c1.constraint_mode() == 0 && a2.c3.constraint_mode() == 1
+                   && a1.c3.constraint_mode() == 0) * 512;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 1023))

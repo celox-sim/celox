@@ -403,6 +403,11 @@ pub(super) struct Class {
     pub slot_bits: Vec<usize>,
     /// The class and its bases, from the class to its root.
     pub lineage: Vec<String>,
+    /// The static constraint blocks of the class, by index among
+    /// [`Class::constraints`], each with the identifier of the class that
+    /// declares it, whose objects share its constraint mode (IEEE 1800-2023
+    /// 18.5.11); the heap keeps the mode (see `program_registration`).
+    pub static_constraints: Vec<(u32, u32)>,
     /// Methods visible in the class, overrides replacing inherited ones.
     pub methods: Vec<Method>,
     /// The parameters and typedefs of an interface class, its own and
@@ -515,10 +520,20 @@ impl Class {
                 op: BinaryOp::Eq,
                 right: Box::new(Expr::Literal("1'b0".into())),
             },
-            then_body: vec![Stmt::Eval(object_call(
+            then_body: std::iter::once(Stmt::Eval(object_call(
                 ObjectOp::RegisterProgram(self.id, program),
                 Vec::new(),
-            ))],
+            )))
+            // The heap keeps the modes of its static blocks, which every
+            // constraint_mode call and randomize call of an object of the
+            // class reads by the object's class (18.5.11).
+            .chain((!self.static_constraints.is_empty()).then(|| {
+                Stmt::Eval(object_call(
+                    ObjectOp::RegisterStaticBlocks(self.id, self.static_constraints.clone()),
+                    Vec::new(),
+                ))
+            }))
+            .collect(),
             else_body: Vec::new(),
         })
     }
@@ -1735,6 +1750,10 @@ pub(super) fn shared_class(
     // The classes above this one, whose constraints are below its own
     // (IEEE 1800-2023 18.5.13.1).
     let depth = base.as_ref().map_or(0, |base| base.depth + 1);
+    let mut static_constraints = base
+        .as_ref()
+        .map(|base| base.static_constraints.clone())
+        .unwrap_or_default();
     for (position, block) in declaration.constraints.iter().enumerate() {
         let block_name = block.name.spelling.clone();
 
@@ -1766,10 +1785,22 @@ pub(super) fn shared_class(
                     .collect()
             });
         // Constraint indices survive overrides, including calls via base handles.
-        if let Some((_, inherited)) = constraints.iter_mut().find(|(name, _)| *name == block_name) {
-            *inherited = expressions;
-        } else {
-            constraints.push((block_name, expressions));
+        let index = match constraints.iter().position(|(name, _)| *name == block_name) {
+            Some(index) => {
+                constraints[index].1 = expressions;
+                index
+            }
+            None => {
+                constraints.push((block_name.clone(), expressions));
+                constraints.len() - 1
+            }
+        } as u32;
+        // A static block has one constraint mode, which every object of
+        // the class that declares it shares (IEEE 1800-2023 18.5.11); a
+        // block that overrides it is the overriding class's.
+        static_constraints.retain(|(known, _)| *known != index);
+        if block.is_static {
+            static_constraints.push((index, class_id(name)));
         }
     }
     session.constraint_owners.pop();
@@ -1797,6 +1828,7 @@ pub(super) fn shared_class(
         property_bits,
         slot_bits,
         lineage,
+        static_constraints,
         methods,
         declarations: Vec::new(),
         size: size.max(1),
@@ -1923,6 +1955,7 @@ fn interface_class(
         property_bits: Vec::new(),
         slot_bits: Vec::new(),
         lineage: vec![name.to_owned()],
+        static_constraints: Vec::new(),
         methods,
         declarations,
         size: 1,
