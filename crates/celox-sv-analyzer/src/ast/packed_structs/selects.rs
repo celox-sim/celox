@@ -211,13 +211,28 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
     result
 }
 
+/// Whether a select of a member may have run-time bounds, and where a bit
+/// outside the member goes.
+#[derive(Clone, Copy)]
+enum RunTime {
+    /// Only constant bounds.
+    Rejected,
+    /// A member of the structure variable `path[0]`: past the variable.
+    Structure,
+    /// A member of an element of array variable `path[0]`, whose element
+    /// the select is then placed in: bit `beyond` of the element, past the
+    /// whole variable wherever the element is. A part-select, whose window
+    /// would move with a run-time element, is not taken.
+    Element { beyond: usize },
+}
+
 fn finish_lvalue(
     tree: &AnalysisContext<'_>,
     path: &[String],
     offset: usize,
     r#type: &Type,
     relative: LValue,
-    dynamic: bool,
+    run_time: RunTime,
     dimensions: &PackedDimensions,
 ) -> Option<LValue> {
     let functions = &tree.functions;
@@ -237,9 +252,9 @@ fn finish_lvalue(
             // member is moved above the whole structure, where a read gives
             // X and a write is ignored (IEEE 1800-2023 11.5.1), so that it
             // never reaches a neighboring member.
-            _ if dynamic && !r#type.packed_ranges.is_empty() => {
+            _ if !matches!(run_time, RunTime::Rejected) && !r#type.packed_ranges.is_empty() => {
                 return dynamic_member_select(
-                    tree, path, offset, r#type, width, msb, lsb, signed, dimensions,
+                    tree, path, offset, r#type, width, msb, lsb, signed, run_time, dimensions,
                 );
             }
             _ => return None,
@@ -290,6 +305,7 @@ fn dynamic_member_select(
     msb: ConstExpr,
     lsb: ConstExpr,
     signed: bool,
+    run_time: RunTime,
     dimensions: &PackedDimensions,
 ) -> Option<LValue> {
     let functions = &tree.functions;
@@ -305,8 +321,10 @@ fn dynamic_member_select(
         is_2state: matches!(r#type.kind, TypeKind::Bit | TypeKind::Chandle),
     };
     if msb == lsb {
-        let structure =
-            lvalue_expr_type(functions, &LValue::Ident(path[0].clone()), dimensions)?.width;
+        let structure = match run_time {
+            RunTime::Element { beyond } => beyond,
+            _ => lvalue_expr_type(functions, &LValue::Ident(path[0].clone()), dimensions)?.width,
+        };
         let position = ConstExpr::Mux {
             condition: Box::new(ConstExpr::Binary {
                 left: Box::new(lsb.clone()),
@@ -317,6 +335,9 @@ fn dynamic_member_select(
             else_expr: Box::new(literal(structure)),
         };
         return Some(select(position.clone(), position, None));
+    }
+    if let RunTime::Element { .. } = run_time {
+        return None;
     }
     let window = Some(crate::ir::SelectWindow {
         lsb: u32::try_from(offset).ok()?,
@@ -410,7 +431,7 @@ pub(in crate::ast) fn whole_member(
         offset,
         &ty,
         LValue::Ident(path[0].clone()),
-        false,
+        RunTime::Rejected,
         dimensions,
     )
     .ok_or_else(|| {
@@ -447,12 +468,47 @@ pub(in crate::ast) fn select_member(
         &member_dimensions(&path[0], &ty, dimensions),
         true,
     )?;
-    finish_lvalue(tree, &path, offset, &ty, relative, true, dimensions).ok_or_else(|| {
+    finish_lvalue(
+        tree,
+        &path,
+        offset,
+        &ty,
+        relative,
+        RunTime::Structure,
+        dimensions,
+    )
+    .ok_or_else(|| {
         unsupported(format!(
             "select of structure member `{}` outside the member",
             path.join(".")
         ))
     })
+}
+
+/// An upper bound of the bits of variable `name`: a bit past it is in no
+/// element of the variable.
+fn variable_bits_bound(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    dimensions: &PackedDimensions,
+) -> Option<usize> {
+    let variable = dimensions.get(name)?;
+    let mut bits = lvalue_expr_type(
+        &tree.functions,
+        &LValue::Ident(name.to_string()),
+        dimensions,
+    )?
+    .width;
+    for width in variable
+        .unpacked
+        .iter()
+        .map(|dimension| &dimension.width)
+        .chain(variable.packed.iter().map(|dimension| &dimension.width))
+    {
+        let width = eval_ast_const_expr(&tree.functions, width, &dimensions.const_env)?;
+        bits = bits.checked_mul(usize::try_from(width).ok()?)?;
+    }
+    Some(bits)
 }
 
 /// Select member path `members` of the element of fixed array variable
@@ -480,13 +536,15 @@ pub(in crate::ast) fn select_element_member(
     if !ty.unpacked_ranges.is_empty() {
         return array_member_selection(tree, name, indices, (offset, ty), relative, dimensions);
     }
+    let beyond = variable_bits_bound(tree, &name, dimensions);
+    let run_time = beyond.map_or(RunTime::Rejected, |beyond| RunTime::Element { beyond });
     let Some(LValue::Select {
         msb,
         lsb,
         signed,
         is_2state,
         ..
-    }) = finish_lvalue(tree, &path, offset, ty, relative, false, dimensions)
+    }) = finish_lvalue(tree, &path, offset, ty, relative, run_time, dimensions)
     else {
         return Err(unsupported(format!(
             "select of structure member `{}` outside the member",
