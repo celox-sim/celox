@@ -61,6 +61,10 @@ struct ScopeElaboration<'a> {
     comb_processes: Vec<CombProcess>,
     ff_processes: Vec<FfProcess>,
     initial_processes: Vec<InitialProcess>,
+    /// The functions called in the concurrent assertion operands of the
+    /// bodies, checked with the other subroutines (see
+    /// `procedural::BodyState::assertion_callees`).
+    assertion_callees: Vec<String>,
 }
 
 impl Module {
@@ -243,6 +247,7 @@ impl Module {
                 comb_processes: Vec::new(),
                 ff_processes: Vec::new(),
                 initial_processes: Vec::new(),
+                assertion_callees: Vec::new(),
             };
             let parameterized = scope.constants(syntax_tree, session)?;
             let syntax_tree = &parameterized;

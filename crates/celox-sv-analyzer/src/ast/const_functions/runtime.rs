@@ -28,7 +28,7 @@ fn lvalue(value: crate::ir::LValue) -> LValue {
 /// Without arguments and without reading that result, every call performs the
 /// same assignments, so the bits no call assigns keep their initial value and
 /// each call returns what the first one does.
-fn persistent_state_is_unobservable(subroutine: &Subroutine) -> bool {
+pub(in crate::ast) fn persistent_state_is_unobservable(subroutine: &Subroutine) -> bool {
     match subroutine.persistent_locals.as_slice() {
         [] => true,
         [result] => {
