@@ -3483,6 +3483,11 @@ fn sequences_keep_their_operators() {
                 syntax.token_text(syntax.expression(condition.expression).tokens),
                 show(syntax, sequence)
             ),
+            SequenceExpr::Clocked { clock, sequence } => format!(
+                "({} {})",
+                syntax.token_text(syntax.timing_control(*clock).tokens),
+                show(syntax, sequence)
+            ),
         }
     }
     let shown = |source: &str| {
@@ -3532,6 +3537,16 @@ fn sequences_keep_their_operators() {
             "module M; assert property (@(posedge clk) a throughout b throughout c ##1 d intersect e); endmodule"
         ),
         "((a throughout (b throughout (c ##[1:1] d))) intersect e)"
+    );
+    // A clocking event clocks the rest of the sequence (16.13); one written
+    // as the clock around it is no clock change (16.13.1).
+    assert_eq!(
+        shown("module M; assert property (@(posedge c0) a ##1 @(posedge c1) b ##1 c); endmodule"),
+        "(a ##[1:1] (@(posedge c1) (b ##[1:1] c)))"
+    );
+    assert_eq!(
+        shown("module M; assert property (@(posedge c0) a ##1 @(posedge c0) b); endmodule"),
+        "(a ##[1:1] b)"
     );
     // A named sequence in a sequence is its body, clocked as the assertion
     // or leading it with its clock (16.8, 16.16.1).
@@ -3583,7 +3598,8 @@ fn sequences_over_cycles_keep_steps_and_local_variables() {
                 SequenceExpr::Or(..)
                 | SequenceExpr::And(..)
                 | SequenceExpr::Intersect(..)
-                | SequenceExpr::Throughout { .. } => panic!("a linear sequence"),
+                | SequenceExpr::Throughout { .. }
+                | SequenceExpr::Clocked { .. } => panic!("a linear sequence"),
             }
         }
         let steps = |expr: &SequenceExpr| {

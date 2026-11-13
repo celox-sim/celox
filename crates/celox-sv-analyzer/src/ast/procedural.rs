@@ -21,6 +21,7 @@ mod intra_assignment;
 mod leaf_statements;
 mod locals;
 mod loops;
+mod multiclock;
 mod ordering;
 use foreach::ForeachLoop;
 mod places;

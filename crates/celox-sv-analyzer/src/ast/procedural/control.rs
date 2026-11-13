@@ -710,7 +710,33 @@ impl BodyBuilder<'_, '_, '_> {
                                 if !matches!(keyword.as_str(), "assert" | "assume" | "cover") {
                                     return Err(unsupported("concurrent assertion directive"));
                                 }
-                                if let Some(sequence) = sequence {
+                                if let Some(sequence) = sequence
+                                    && multiclock::clocked(
+                                        &self.tree.declarations().sequence(*sequence).consequent,
+                                    )
+                                {
+                                    // A multiclocked sequence (16.13): its
+                                    // own decisions over each of its clocks.
+                                    if disable.is_some() {
+                                        return Err(unsupported(
+                                            "disable iff of a multiclocked sequence",
+                                        ));
+                                    }
+                                    let body = self.tree.declarations().sequence(*sequence).clone();
+                                    let multiclock = self.multiclock_monitor(
+                                        clock.expect("a leading clock"),
+                                        &body,
+                                    )?;
+                                    stages = Some(assertions::SequenceMonitor {
+                                        stages: Vec::new(),
+                                        ticks: None,
+                                        updates: Vec::new(),
+                                        start: Vec::new(),
+                                        disabled: None,
+                                        multiclock: Some(multiclock),
+                                    });
+                                    (Expr::Literal("1'b1".into()), &None, Some(None))
+                                } else if let Some(sequence) = sequence {
                                     let mut monitor = self.sequence_stages(*sequence)?;
                                     let disable = disable
                                         .map(|id| {
@@ -962,7 +988,7 @@ impl BodyBuilder<'_, '_, '_> {
                 Job::AssertionFinish {
                     concurrent,
                     condition,
-                    stages,
+                    mut stages,
                     expect,
                     mut then_body,
                     assertion,
@@ -1005,6 +1031,44 @@ impl BodyBuilder<'_, '_, '_> {
                     }
                     // A sequence over cycles decides each step that an
                     // attempt reaches at this tick, the oldest attempt first.
+                    if let Some(multiclock) = stages
+                        .as_mut()
+                        .and_then(|monitor| monitor.multiclock.take())
+                    {
+                        // The decisions, then the actions of the attempts that
+                        // passed and failed, each once an attempt.
+                        output.extend(multiclock.observed);
+                        output.push(Stmt::AssertionRegion { reactive: true });
+                        for (count, body) in [
+                            (multiclock.passes, then_body),
+                            (multiclock.fails, else_body),
+                        ] {
+                            let index = self.declare("repeat@multiclock", int_type());
+                            output.push(Stmt::Loop {
+                                kind: LoopKind::For,
+                                init: vec![Stmt::Local {
+                                    name: index.clone(),
+                                    init: Some(Expr::Literal("0".into())),
+                                }],
+                                condition: Some(Expr::Binary {
+                                    left: Box::new(Expr::Ident(index.clone())),
+                                    op: BinaryOp::Lt,
+                                    right: Box::new(Expr::Ident(count)),
+                                }),
+                                step: vec![Stmt::Assign {
+                                    lhs: LValue::Ident(index.clone()),
+                                    rhs: Expr::Binary {
+                                        left: Box::new(Expr::Ident(index)),
+                                        op: BinaryOp::Add,
+                                        right: Box::new(Expr::Literal("1".into())),
+                                    },
+                                    nonblocking: false,
+                                }],
+                                body: body.into_iter().skip(1).collect(),
+                            });
+                        }
+                        continue;
+                    }
                     if let Some(monitor) = stages {
                         // Whether assertions are on for the attempt that
                         // starts at this tick, read in the Observed region
@@ -1861,6 +1925,7 @@ impl BodyBuilder<'_, '_, '_> {
             updates,
             start,
             disabled: None,
+            multiclock: None,
         })
     }
 

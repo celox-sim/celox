@@ -649,3 +649,98 @@ fn sequences_with_several_ways_to_match_name_what_they_do_not_support() {
         assert!(error.contains(message), "{property}: {error}");
     }
 }
+
+/// A multiclocked sequence (IEEE 1800-2023 16.13.1): after `##1` the next
+/// subsequence starts at the nearest tick of its clock strictly after the
+/// end of the one before, after `##0` possibly at it.
+#[test]
+fn multiclocked_sequences_hand_attempts_to_the_next_clock() {
+    // clk0 rises at 50, 450, 850, ...; clk1 at 200, 600, 1000, ...; out0
+    // is sampled 1 from 450, out1 from 600 on. The attempt of each clk0
+    // tick t ends its first subsequence at t + 400 and checks out1 at the
+    // clk1 tick t + 550: those of 50, 450, 850 and 1250 end by 2000.
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit clk0, clk1, out0, out1;
+ int passed, failed, n_passed, n_failed;
+ always @(posedge clk0) out0 <= 1;
+ always @(posedge clk1) out1 <= 1;
+ assert property (@(posedge clk0) ##1 out0 ##1 @(posedge clk1) out1) passed++; else failed++;
+ assert property (@(posedge clk0) ##1 out0 ##1 @(posedge clk1) !out1) n_passed++; else n_failed++;
+ initial forever begin #50 clk0 = ~clk0; #150 clk1 = ~clk1; end
+endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("multiclock.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(2000).unwrap();
+    for (name, expected) in [
+        ("passed", 4u32),
+        ("failed", 0),
+        ("n_passed", 0),
+        ("n_failed", 4),
+    ] {
+        assert_eq!(sim.get(sim.signal(name)), expected.into(), "{name}");
+    }
+    // ca and cb rise together, at 5, 15, ..., 95, when cnt is sampled 0 to
+    // 9. With `##0` an attempt of an even cnt checks the second subsequence
+    // at its own tick and passes; with `##1` at the next one, of an odd cnt,
+    // and fails.
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit ca, cb;
+ int cnt, z_passed, z_failed, o_passed, o_failed;
+ always @(posedge ca) cnt <= cnt + 1;
+ assert property (@(posedge ca) cnt % 2 == 0 ##0 @(posedge cb) cnt % 2 == 0) z_passed++; else z_failed++;
+ assert property (@(posedge ca) cnt % 2 == 0 ##1 @(posedge cb) cnt % 2 == 0) o_passed++; else o_failed++;
+ initial forever begin #5 ca = 1; cb = 1; #5 ca = 0; cb = 0; end
+endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("multiclock.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(100).unwrap();
+    for (name, expected) in [
+        ("z_passed", 5u32),
+        ("z_failed", 5),
+        ("o_passed", 0),
+        // The attempt of cnt 8 checks cnt 9 at 95; that of 9 fails at once.
+        ("o_failed", 10),
+    ] {
+        assert_eq!(sim.get(sim.signal(name)), expected.into(), "{name}");
+    }
+}
+
+#[test]
+fn multiclocked_sequences_name_what_they_do_not_support() {
+    for (property, message) in [
+        (
+            "@(posedge c0) a ##2 @(posedge c1) b",
+            "a cycle delay other than ##0 or ##1 at a clock change",
+        ),
+        (
+            "@(posedge c0) a or @(posedge c1) b",
+            "a clock change other than one joined by ##0 or ##1",
+        ),
+        (
+            "@(posedge c0) disable iff (a) a ##1 @(posedge c1) b",
+            "disable iff of a multiclocked sequence",
+        ),
+        (
+            "@(posedge c0) a |-> ##1 @(posedge c1) b",
+            "implication of multiclocked sequences",
+        ),
+    ] {
+        let source =
+            format!("module Top; bit c0, c1, a, b; assert property ({property}); endmodule");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("multiclock.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+        assert!(error.contains(message), "{property}: {error}");
+    }
+}
