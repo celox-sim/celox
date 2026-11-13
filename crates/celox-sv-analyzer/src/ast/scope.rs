@@ -38,7 +38,7 @@ pub(super) struct ScopeSymbols {
     pub constant_functions: const_functions::ConstantFunctions,
     pub subroutine_params: HashMap<String, Vec<String>>,
     pub subroutine_shapes: HashMap<String, Vec<VariableDimensions>>,
-    pub subroutines: Vec<Subroutine>,
+    pub subroutines: Vec<Arc<Subroutine>>,
     pub locals: Vec<LocalVariable>,
     pub dpi_imports: Vec<crate::ir::DpiImport>,
     /// Array parameters and constant variables, which are constant signals
@@ -493,7 +493,7 @@ impl ScopeSymbols {
             subroutines: self
                 .subroutines
                 .iter()
-                .map(|subroutine| rename.subroutine(subroutine.clone()))
+                .map(|subroutine| Arc::new(rename.subroutine((**subroutine).clone())))
                 .collect(),
             locals: self
                 .locals

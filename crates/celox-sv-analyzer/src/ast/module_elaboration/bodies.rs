@@ -273,9 +273,12 @@ impl ScopeElaboration<'_> {
             .chain(self.ports.iter().filter(|port| port.is_net).map(Port::name))
             .collect();
         procedural::references::validate(
-            self.subroutines
-                .iter()
-                .chain(self.imported.subroutines.iter()),
+            self.subroutines.iter().chain(
+                self.imported
+                    .subroutines
+                    .iter()
+                    .map(|subroutine| &**subroutine),
+            ),
             &self.comb_processes,
             &self.ff_processes,
             &self.initial_processes,
@@ -284,9 +287,12 @@ impl ScopeElaboration<'_> {
             &nets,
         )?;
         procedural::timed_tasks::classify(
-            self.subroutines
-                .iter()
-                .chain(self.imported.subroutines.iter()),
+            self.subroutines.iter().chain(
+                self.imported
+                    .subroutines
+                    .iter()
+                    .map(|subroutine| &**subroutine),
+            ),
             &mut self.comb_processes,
             &mut self.ff_processes,
             &mut self.initial_processes,
