@@ -73,6 +73,17 @@ pub enum FrontendWarningKind {
     /// Aggregate defaults are a compatibility extension to IEEE 1800-2023 23.2.2.4.
     #[error("default value on unpacked input port `{module}.{port}` is a language extension")]
     UnpackedPortDefault { module: String, port: String },
+    /// A specialization whose variables or nets `force` statements force
+    /// through hierarchical names: every instance of it carries the force
+    /// controls (IEEE 1800-2023 10.6.2).
+    #[error(
+        "the force of {forced} in an instance of `{module}` gives all {instances} instances of the specialization force controls"
+    )]
+    ForcedSpecialization {
+        module: String,
+        forced: String,
+        instances: usize,
+    },
     /// `$exit` outside a thread of a program's `initial` procedure, which
     /// IEEE 1800-2023 24.7 ignores.
     #[error("`$exit` outside a program block is ignored")]
@@ -223,6 +234,7 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::ExitOutsideProgram => "exit_outside_program",
             FrontendWarningKind::SharedAlwaysTemporary { .. } => "shared_always_temporary",
             FrontendWarningKind::ImplicitStaticInitializer { .. } => "implicit_static_initializer",
+            FrontendWarningKind::ForcedSpecialization { .. } => "forced_specialization",
         }))
     }
 
@@ -255,6 +267,9 @@ impl miette::Diagnostic for FrontendWarning {
             }
             FrontendWarningKind::ExitOutsideProgram => {
                 "end the simulation with `$finish`, or remove the call"
+            }
+            FrontendWarningKind::ForcedSpecialization { .. } => {
+                "the instances no force names never set the controls; their writes only check them"
             }
             FrontendWarningKind::SharedAlwaysTemporary { .. } => {
                 "a language deviation enabled by the shared_always_temporary compatibility opt-in; declare the variable inside each block to keep IEEE 1800-2023 semantics"

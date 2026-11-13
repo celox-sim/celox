@@ -121,6 +121,7 @@ impl Source {
                 types: &[],
                 patterns: &[],
                 hierarchical: &[],
+                forced: &[],
             },
             extra_interfaces,
             &packages,
@@ -210,6 +211,7 @@ impl Source {
                         type_parameters::bind_patterns(syntax_tree, bindings.patterns)?;
                     // A hierarchical name reads and writes the local signal
                     // bound to the other instance's object.
+                    imported.external_forces = bindings.forced.to_vec();
                     for signal in bindings.hierarchical {
                         // A name of the body of an interface instance binds
                         // there; the module holds the signal of an object
@@ -423,6 +425,7 @@ mod scope_tests {
                 types,
                 patterns: &[],
                 hierarchical: &[],
+                forced: &[],
             },
             table,
         )
