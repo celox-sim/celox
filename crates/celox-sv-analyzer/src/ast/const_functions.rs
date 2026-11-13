@@ -386,16 +386,48 @@ pub(super) fn module_constant_functions(
     constant_types: &Arc<HashMap<String, semantic_types::ConstantType>>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> ConstantFunctions {
-    symbolic_module_constant_functions(
+    module_constant_functions_with_variables(
         tree,
         session,
         const_env,
         type_aliases,
         constant_types,
         parameter_literals,
-        &HashSet::default(),
-        procedural::ClassMethods::StaticFunctions,
+        &HashMap::default(),
     )
+}
+
+/// [`module_constant_functions`] whose bodies may read the module variables
+/// `variables`, such as the variables that hold its unpacked array
+/// parameters, by their shapes.
+pub(super) fn module_constant_functions_with_variables(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    const_env: &ConstEnv,
+    type_aliases: &TypeAliases,
+    constant_types: &Arc<HashMap<String, semantic_types::ConstantType>>,
+    parameter_literals: &HashMap<String, Expr>,
+    variables: &HashMap<String, VariableDimensions>,
+) -> ConstantFunctions {
+    let (has_functions, has_controls) = scope_flags(tree);
+    if !has_functions {
+        return ConstantFunctions::default();
+    }
+    let symbolic_parameters = HashSet::default();
+    let collect = |tree: &AnalysisContext<'_>, session: &mut Session| {
+        collect_module_constant_functions(
+            tree,
+            session,
+            const_env,
+            type_aliases,
+            constant_types,
+            parameter_literals,
+            &symbolic_parameters,
+            procedural::ClassMethods::StaticFunctions,
+            variables,
+        )
+    };
+    bootstrapped(tree, session, has_controls, collect)
 }
 
 pub(super) fn symbolic_module_constant_functions(
@@ -412,9 +444,9 @@ pub(super) fn symbolic_module_constant_functions(
     if !has_functions {
         return ConstantFunctions::default();
     }
-    let needs_bootstrap = !tree.root_subroutines && has_controls;
-    if !needs_bootstrap {
-        return collect_module_constant_functions(
+    let variables = HashMap::default();
+    let collect = |tree: &AnalysisContext<'_>, session: &mut Session| {
+        collect_module_constant_functions(
             tree,
             session,
             const_env,
@@ -423,38 +455,41 @@ pub(super) fn symbolic_module_constant_functions(
             parameter_literals,
             symbolic_parameters,
             class_methods,
-        );
+            &variables,
+        )
+    };
+    bootstrapped(tree, session, has_controls, collect)
+}
+
+/// The functions that `collect` collects in `tree`, whose generate
+/// conditions may call them: those of the scope itself are collected
+/// first, before the generate scopes select their items.
+fn bootstrapped(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    has_controls: bool,
+    collect: impl Fn(&AnalysisContext<'_>, &mut Session) -> ConstantFunctions,
+) -> ConstantFunctions {
+    let needs_bootstrap = !tree.root_subroutines && has_controls;
+    if !needs_bootstrap {
+        return collect(tree, session);
     }
     // Seed the module's functions before conditions need to call them:
     // generate scopes still select their items, but their subroutines are
     // left for the full pass.
-    let mut roots = collect_module_constant_functions(
+    let mut roots = collect(
         &AnalysisContext {
             root_subroutines: true,
             ..tree.clone()
         },
         session,
-        const_env,
-        type_aliases,
-        constant_types,
-        parameter_literals,
-        symbolic_parameters,
-        class_methods,
     );
     roots.extend_missing(&scope::imported(tree).constant_functions);
     let tree = &tree.with_functions(roots);
-    collect_module_constant_functions(
-        tree,
-        session,
-        const_env,
-        type_aliases,
-        constant_types,
-        parameter_literals,
-        symbolic_parameters,
-        class_methods,
-    )
+    collect(tree, session)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_module_constant_functions(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -464,6 +499,7 @@ fn collect_module_constant_functions(
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
     class_methods: procedural::ClassMethods,
+    variables: &HashMap<String, VariableDimensions>,
 ) -> ConstantFunctions {
     let (has_functions, _) = scope_flags(tree);
     if !has_functions {
@@ -496,7 +532,7 @@ fn collect_module_constant_functions(
             Ok(names) => names,
             Err(error) => return ConstantFunctions::unconverted(error),
         };
-    let mut dimensions = PackedDimensions::new(HashMap::default(), const_env, type_aliases);
+    let mut dimensions = PackedDimensions::new(variables.clone(), const_env, type_aliases);
     dimensions.constant_types = constant_types.clone();
     let mut returns = scope::imported(tree).function_return_types.clone();
     match procedural::function_returns(tree, session, &type_aliases.clone().into(), const_env) {
@@ -930,6 +966,39 @@ pub(super) fn eval_call_literal(
     eval_ir_call(name, args, &env, &mut Budget::default()).map(Value::into_literal)
 }
 
+/// The constants of a scope with the values of its unpacked array
+/// parameters, each of which a function reads as one wide value.
+struct WithArrays<'a> {
+    constants: &'a ConstEnv,
+    arrays: &'a HashMap<String, typecheck::IntegralLiteral>,
+}
+
+impl ConstantEnvironment for WithArrays<'_> {
+    fn get(&self, name: &str) -> Option<&i128> {
+        self.constants.get(name)
+    }
+    fn literal(&self, name: &str) -> Option<&typecheck::IntegralLiteral> {
+        self.arrays.get(name)
+    }
+}
+
+/// [`eval_call_literal`] of a function that may read the unpacked array
+/// parameters `arrays` of the caller's scope.
+pub(super) fn eval_call_literal_with_arrays(
+    functions: &ConstantFunctions,
+    name: &str,
+    args: &[crate::ir::ConstExpr],
+    constants: &ConstEnv,
+    arrays: &HashMap<String, typecheck::IntegralLiteral>,
+) -> Option<typecheck::IntegralLiteral> {
+    let constants = WithArrays { constants, arrays };
+    let env = Environment {
+        constants: &constants,
+        functions,
+    };
+    eval_ir_call(name, args, &env, &mut Budget::default()).map(Value::into_literal)
+}
+
 /// The value of a call of function `name` of `constants`, whose frame sees
 /// the constants of the caller's scope but not the caller's locals.
 fn call_value(
@@ -1122,7 +1191,6 @@ impl<'a> Frame<'a> {
         }
         if !r#type.unpacked_ranges().is_empty() {
             self.scope.constants.functions()?;
-            self.budget.two_state?;
         }
         // Resolved runtime types already include unpacked dimensions.
         // Elaboration types still need their dimensions evaluated here.

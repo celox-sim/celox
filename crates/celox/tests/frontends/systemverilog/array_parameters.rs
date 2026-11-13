@@ -71,3 +71,60 @@ fn conditional_array_parameter_value_checks_the_operand_it_does_not_select() {
         );
     }
 }
+
+/// An unpacked array parameter may be overridden by a call of a constant
+/// function that returns an unpacked array, built in a local variable from
+/// an array parameter of the instantiating module (IEEE 1800-2023 13.4.1,
+/// 13.4.3). An element the function does not write keeps the initial value
+/// of its type: 0 for `int`, X for `logic`. The call may name its actuals in
+/// another order. Verilator 5.054 prints the same lines.
+#[test]
+fn array_parameter_overrides_call_functions_that_return_arrays() {
+    let source = r#"`timescale 1ns/1ns
+module child #(parameter int v_p [0:3] = '{default:7}, parameter logic [3:0] l_p [0:1] = '{default:4'd5}) ();
+  initial #1 $display("%m %0d %0d %0d %0d %b %b", v_p[0], v_p[1], v_p[2], v_p[3], l_p[0], l_p[1]);
+endmodule
+module top #(parameter int vec_p [0:7] = '{0, 1, 2, 3, 4, 5, 6, 7});
+  typedef int sub_t [0:3];
+  typedef logic [3:0] nib_t [0:1];
+  function sub_t get(int x);
+    sub_t vec;
+    for (int i = 0; i < 4; i++) vec[i] = vec_p[x * 4 + i] * 10;
+    return vec;
+  endfunction
+  function sub_t pick(int base, int scale);
+    sub_t vec;
+    for (int i = 0; i < 4; i++) vec[i] = vec_p[base + i] * scale;
+    return vec;
+  endfunction
+  function sub_t sparse(int x);
+    sub_t vec;
+    vec[1] = x + 1;
+    return vec;
+  endfunction
+  function nib_t nib(int x);
+    nib_t n;
+    n[0] = x;
+    return n;
+  endfunction
+  for (genvar x = 0; x < 2; x++) begin : g
+    child #(.v_p(get(x))) c ();
+  end
+  child #(.v_p(sparse(4)), .l_p(nib(3))) s ();
+  child #(.v_p(pick(.scale(2), .base(3)))) named ();
+  initial #2 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        let x = if four_state { "xxxx" } else { "0000" };
+        assert_eq!(
+            sorted_lines(source, four_state),
+            [
+                "top.g[0].c 0 10 20 30 0101 0101".to_string(),
+                "top.g[1].c 40 50 60 70 0101 0101".to_string(),
+                "top.named 6 8 10 12 0101 0101".to_string(),
+                format!("top.s 0 5 0 0 0011 {x}"),
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
