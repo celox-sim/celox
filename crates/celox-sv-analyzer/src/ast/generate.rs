@@ -777,14 +777,18 @@ impl<'a> Elaborator<'a, '_> {
         root: ExprId,
         scope: &Scope,
     ) -> Result<Option<ConstExpr>, AnalyzerError> {
-        let Some(expr) = constant_binding::expression(
-            root,
-            self.tree.declarations(),
-            &self.tree,
-            self.session,
+        // A select of a parameter names indices of its declared range,
+        // which may be ascending (IEEE 1800-2023 7.4.1, 11.5.1).
+        let parameters = PackedDimensions::new(
+            scope
+                .parameter_dimensions
+                .iter()
+                .map(|(name, dimensions)| (name.clone(), dimensions.clone()))
+                .collect::<HashMap<_, _>>(),
             &scope.env,
             &*self.aliases,
-        )?
+        );
+        let Some(expr) = constant_binding::bind(root, &self.tree, self.session, &parameters)?
         else {
             return Ok(None);
         };
