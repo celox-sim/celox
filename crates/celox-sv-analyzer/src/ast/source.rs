@@ -120,6 +120,7 @@ impl Source {
                 types: &[],
                 patterns: &[],
                 hierarchical: &[],
+                forced: &[],
             },
             extra_interfaces,
             &packages,
@@ -205,6 +206,7 @@ impl Source {
                         type_parameters::bind_patterns(syntax_tree, bindings.patterns)?;
                     // A hierarchical name reads and writes the local signal
                     // bound to the other instance's object.
+                    imported.external_forces = bindings.forced.to_vec();
                     for signal in bindings.hierarchical {
                         for path in &signal.paths {
                             imported

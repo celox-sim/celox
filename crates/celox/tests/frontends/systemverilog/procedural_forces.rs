@@ -434,6 +434,80 @@ module top;
   end
 endmodule"#;
 
+/// Forces through hierarchical names of a flip-flop of a child, of a part
+/// of a variable an `always_comb` of another child assigns, held after the
+/// release, and of a varying expression. The lines are those of Icarus
+/// Verilog, with the varying expression of Verilator.
+const HIERARCHICAL: &str = r#"`timescale 1ns/1ns
+module flop(input logic clk, input logic d, output logic q);
+  always @(posedge clk) q <= d;
+endmodule
+module comb(input logic [3:0] a, output logic [3:0] y);
+  logic [3:0] v;
+  always_comb v = a;
+  assign y = v;
+endmodule
+module top;
+  logic clk = 0, d = 1;
+  logic [3:0] a = 4'd5;
+  wire q;
+  wire [3:0] y;
+  flop u_flop(.clk(clk), .d(d), .q(q));
+  comb u_comb(.a(a), .y(y));
+  initial begin
+    #1 clk = 1; #1 clk = 0;
+    #1 $display("A %b %h", q, y);
+    force u_flop.q = 1'b0; force u_comb.v[1:0] = 2'b10;
+    #1 $display("B %b %h %b %h", q, y, u_flop.q, u_comb.v);
+    clk = 1; #1 clk = 0;
+    #1 $display("C %b %h", q, y);
+    release u_flop.q; release u_comb.v[1:0];
+    #1 $display("D %b %h", q, y);
+    a = 4'd8;
+    #1 $display("E %b %h", q, y);
+    clk = 1; #1 clk = 0;
+    #1 $display("F %b %h", q, y);
+    force u_flop.q = a[0];
+    #1 $display("G %b", q);
+    a = 4'd3;
+    #1 $display("H %b", q);
+    release u_flop.q;
+    $finish;
+  end
+endmodule"#;
+
+/// Forces through hierarchical names of an input port of one instance and
+/// of a bit of a net of another instance of the same module: the other
+/// instance keeps its values. Verilator 5.054 prints the same lines; Icarus
+/// Verilog collapses the input port onto the net of the parent, which it
+/// then forces too (10.6.2 leaves collapsed ports to the implementation).
+const HIERARCHICAL_INSTANCES: &str = r#"`timescale 1ns/1ns
+module leaf(input logic clk, input logic [3:0] din, output logic [3:0] q);
+  wire [3:0] w;
+  assign w = ~din;
+  always @(posedge clk) q <= w;
+endmodule
+module top;
+  logic clk = 0;
+  logic [3:0] din = 4'd3;
+  logic [3:0] q0, q1;
+  leaf u0(.clk(clk), .din(din), .q(q0));
+  leaf u1(.clk(clk), .din(din), .q(q1));
+  initial begin
+    #1 clk = 1; #1 clk = 0;
+    #1 $display("A %h %h", q0, q1);
+    force u0.din = 4'd5; force u1.w[2] = 1'b0;
+    #1 $display("B %h %h %h %h", u0.din, u0.w, u1.w, din);
+    clk = 1; #1 clk = 0;
+    #1 $display("C %h %h", q0, q1);
+    release u0.din; release u1.w[2];
+    #1 $display("D %h %h %h", u0.din, u0.w, u1.w);
+    clk = 1; #1 clk = 0;
+    #1 $display("E %h %h", q0, q1);
+    $finish;
+  end
+endmodule"#;
+
 sv_backends! {
     fn delayed_drivers_drive_again_after_the_release(sim) {
         @setup {}
@@ -518,6 +592,30 @@ sv_backends! {
         @build simulation(PACKED_ELEMENTS, true);
         sim.run_until(100).unwrap();
         assert_eq!(display_lines(&mut sim), ["A a4 0100", "B af 0100", "C 00 0000"]);
+    }
+    fn forces_through_hierarchical_names(sim) {
+        @setup {}
+        @build simulation(HIERARCHICAL, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 5", "B 0 6 0 6", "C 0 6", "D 0 6", "E 0 8", "F 1 8", "G 0", "H 1"]);
+    }
+    fn forces_through_hierarchical_names_four_state(sim) {
+        @setup {}
+        @build simulation(HIERARCHICAL, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 5", "B 0 6 0 6", "C 0 6", "D 0 6", "E 0 8", "F 1 8", "G 0", "H 1"]);
+    }
+    fn forces_of_one_instance_through_hierarchical_names(sim) {
+        @setup {}
+        @build simulation(HIERARCHICAL_INSTANCES, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A c c", "B 5 a 8 3", "C a 8", "D 3 c c", "E c c"]);
+    }
+    fn forces_of_one_instance_through_hierarchical_names_four_state(sim) {
+        @setup {}
+        @build simulation(HIERARCHICAL_INSTANCES, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A c c", "B 5 a 8 3", "C a 8", "D 3 c c", "E c c"]);
     }
     fn lrm_example_forces_and_releases(sim) {
         @setup {}
@@ -707,14 +805,20 @@ fn rejected_forces_name_their_reason() {
     }
 }
 
-/// A name of another instance is not a target yet.
+/// Every instance of a forced specialization carries the force controls,
+/// which a warning reports when several instances share it.
 #[test]
-fn force_of_another_instance_is_rejected() {
-    let source = "module child; logic v; endmodule \
-                  module top; child c(); initial force c.v = 1'b1; endmodule";
-    let error = match simulation(source, false).build() {
-        Ok(_) => panic!("accepted"),
-        Err(error) => error.to_string(),
-    };
-    assert!(error.contains("another instance"), "{error}");
+fn forced_specializations_with_several_instances_are_reported() {
+    let sim = simulation(HIERARCHICAL_INSTANCES, false).build().unwrap();
+    let warnings = sim
+        .warnings()
+        .iter()
+        .map(|warning| warning.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("gives all 2 instances of the specialization")),
+        "{warnings:?}"
+    );
 }

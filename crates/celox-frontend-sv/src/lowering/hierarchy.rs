@@ -541,6 +541,55 @@ pub(super) fn bindings(
     lowered: &LoweredSvModule,
     lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
 ) -> Result<HashMap<SourceVarId, HierarchicalBinding>, sv::AnalyzerError> {
+    let mut bindings = signal_bindings(references, lowered, lowered_modules)?;
+    // The controls of a force through a hierarchical name denote the
+    // controls of the target in its own module (IEEE 1800-2023 10.6.2). A
+    // target that no procedure of its module holds has no hold, and the
+    // forcing module's hold stays its own.
+    for signal in lowered.source.signals() {
+        let (Some(control), Some(_)) = (signal.force_control(), signal.hierarchical()) else {
+            continue;
+        };
+        let Some(reference) = references
+            .iter()
+            .find(|reference| reference.signal.name == control.target)
+        else {
+            continue;
+        };
+        let targets: Option<Vec<_>> = reference
+            .targets
+            .iter()
+            .map(|(module, target)| {
+                let name = sv::ir::force_control_name(&control.role, target);
+                Some((*module, *lowered_modules[module].signal_names.get(&name)?))
+            })
+            .collect();
+        let Some(targets) = targets else {
+            if control.role == sv::ir::ForceRole::Hold {
+                continue;
+            }
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "force of `{}` through a hierarchical name",
+                reference.signal.name
+            )));
+        };
+        bindings.insert(
+            lowered.signal_names[signal.name()],
+            HierarchicalBinding {
+                start: reference.start,
+                path: reference.path.clone(),
+                targets,
+            },
+        );
+    }
+    Ok(bindings)
+}
+
+fn signal_bindings(
+    references: &[HierarchicalReference],
+    lowered: &LoweredSvModule,
+    lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
+) -> Result<HashMap<SourceVarId, HierarchicalBinding>, sv::AnalyzerError> {
     references
         .iter()
         .filter(|reference| !reference.signal.local)

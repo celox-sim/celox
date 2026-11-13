@@ -174,11 +174,17 @@ blocks in programs. Two region deviations are listed under
   and `always` procedures: in a subroutine, a `final` procedure, or an
   `always_comb`, `always_latch` or `always_ff` procedure. An `always`
   procedure with one runs as a process. The target is a packed integral
-  variable or net of the module, or a constant bit-select, part-select or
-  member of one: as an extension, a constant select or a member of a
-  variable is a target too, which the standard allows only of a vector net.
-  A concatenation, a select with nonconstant bounds, a name of another
-  instance, a `real`, `string`, handle or unpacked target (singular ones
+  variable or net of the module or, through a hierarchical name, of another
+  instance, or a constant bit-select, part-select or member of one: as an
+  extension, a constant select or a member of a variable is a target too,
+  which the standard allows only of a vector net. A force of an input port
+  of an instance forces that port, not the net connected to it. Every
+  instance of a module whose variable or net a hierarchical name forces
+  carries the force controls, which the warning `forced_specialization`
+  reports when several instances share them. A write of a forced target
+  through a hierarchical name from a module that does not force it is not
+  overridden. A concatenation, a select
+  with nonconstant bounds, a `real`, `string`, handle or unpacked target (singular ones
   the standard allows), and a variable that a nonblocking assignment with
   an intra-assignment delay writes are rejected, as are overlapping parts
   of one target when a force of one of them has an expression that reads a

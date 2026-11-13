@@ -415,6 +415,9 @@ struct HierarchicalNames<'a> {
     signals: &'a [sv::ast::HierarchicalSignal],
     /// The module's signals that names in other modules write.
     foreign_writes: &'a HashMap<String, hierarchy::ForeignWrites>,
+    /// The module's variables and nets that `force` statements of other
+    /// modules force through hierarchical names (IEEE 1800-2023 10.6.2).
+    forced: &'a [String],
     /// How `always @*` blocks that write a common variable run.
     shared: SharedAlways<'a>,
     /// The analysis of the module with `signals`, if it is done already.
@@ -450,6 +453,7 @@ impl Default for HierarchicalNames<'_> {
         Self {
             signals: &[],
             foreign_writes: &EMPTY,
+            forced: &[],
             shared: SharedAlways::default(),
             analyzed: None,
             recursion_report: None,

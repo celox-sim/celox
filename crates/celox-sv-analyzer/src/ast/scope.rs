@@ -57,6 +57,10 @@ pub(super) struct ScopeSymbols {
     /// The paths of `interface_members` that are hierarchical names of the
     /// scope's own declarations.
     pub local_aliases: HashSet<String>,
+    /// The variables and nets of the scope that `force` statements of
+    /// other modules force through hierarchical names (IEEE 1800-2023
+    /// 10.6.2), which have their force controls here.
+    pub external_forces: Vec<String>,
     pub interface_types: HashMap<String, String>,
     /// The modport of each interface port handle declared with one.
     pub interface_modports: HashMap<String, String>,
@@ -402,6 +406,7 @@ impl ScopeSymbols {
                 .map(|(path, name)| (path.clone(), rename.name(name)))
                 .collect(),
             local_aliases: self.local_aliases.clone(),
+            external_forces: self.external_forces.clone(),
             type_parameter_bindings: self.type_parameter_bindings.clone(),
             pattern_parameter_bindings: self.pattern_parameter_bindings.clone(),
             const_env,

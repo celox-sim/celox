@@ -238,6 +238,9 @@ pub(crate) struct ModuleParameterBindings<'a> {
     pub types: &'a [(String, Type)],
     pub patterns: &'a [(String, BoundPattern)],
     pub hierarchical: &'a [HierarchicalSignal],
+    /// The variables and nets of the module that other modules force
+    /// through hierarchical names.
+    pub forced: &'a [String],
 }
 
 /// A signal of another instance that hierarchical names of the analyzed

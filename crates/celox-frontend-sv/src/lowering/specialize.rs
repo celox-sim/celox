@@ -109,6 +109,7 @@ pub(super) fn analyze_specialization(
     design: &mut sv::Design,
     key: &LoweredSvModuleKey,
     hierarchical: &[sv::ast::HierarchicalSignal],
+    forced: &[String],
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<sv::Ir, sv::AnalyzerError> {
     #[cfg(test)]
@@ -123,6 +124,7 @@ pub(super) fn analyze_specialization(
         &module.packages,
         design,
         hierarchical,
+        forced,
     );
     if let Err(error) = &analyzed {
         warnings.extend(crate::warning::analyzer_warnings(error.warnings()));
@@ -179,6 +181,7 @@ pub(super) fn specialize_module(
                         design,
                         key,
                         hierarchical.signals,
+                        hierarchical.forced,
                         warnings,
                     )?;
                     ir.expand_virtual_interface_instances(
