@@ -408,6 +408,29 @@ endmodule"#;
     }
 }
 
+/// The 1024-way cap counts the ways of `intersect` operands of one length,
+/// not every pair: 33 ways on each side share one length (IEEE 1800-2023
+/// 16.9.6).
+#[test]
+fn intersect_counts_only_ways_of_one_length() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit clk;
+ int passed, failed;
+ assert property (@(posedge clk) (1 ##[0:32] 1) intersect (1 ##[32:64] 1)) passed++; else failed++;
+ initial repeat (40) begin #1 clk = 1; #1 clk = 0; end
+endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("intersect.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(81).unwrap();
+    // The attempts of ticks 0 to 7 match 32 ticks later; the others end
+    // with the simulation.
+    assert_eq!(sim.get(sim.signal("passed")), 8u32.into());
+    assert_eq!(sim.get(sim.signal("failed")), 0u32.into());
+}
+
 #[test]
 fn sequences_with_several_ways_to_match_name_what_they_do_not_support() {
     let long = vec!["a"; 1025].join(" ##0 ");

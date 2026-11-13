@@ -473,7 +473,20 @@ fn expand_paths(
             let intersect = matches!(expr, SequenceExpr::Intersect(..));
             let lefts = expand_paths(left)?;
             let rights = expand_paths(right)?;
-            if lefts.len().saturating_mul(rights.len()) > MAX_SEQUENCE_PATHS {
+            // The ways `and` combines are every pair; `intersect` combines
+            // only pairs of one length, which the cap counts.
+            let combined = if intersect {
+                let mut lengths = HashMap::<u64, usize>::default();
+                for left in &lefts {
+                    *lengths.entry(path_length(left)).or_default() += 1;
+                }
+                rights.iter().fold(0usize, |count, right| {
+                    count.saturating_add(lengths.get(&path_length(right)).copied().unwrap_or(0))
+                })
+            } else {
+                lefts.len().saturating_mul(rights.len())
+            };
+            if combined > MAX_SEQUENCE_PATHS {
                 return Err(too_many());
             }
             if lefts
