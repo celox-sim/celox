@@ -25,6 +25,88 @@ fn inactive_member_read_and_write_report_runtime_errors() {
     }
 }
 
+/// A member of an element of a packed array member that a path through a
+/// member of a tagged union selects, at a constant or a run-time index, is
+/// read and written while the member is active, and checks the tag
+/// otherwise (IEEE 1800-2023 7.3.2).
+#[test]
+fn members_of_array_elements_under_tags_check_the_tag() {
+    let types = r#"
+                typedef struct packed { logic [3:0] q; logic qe; } k_t;
+                typedef struct packed { k_t [3:0] regs; } p_t;
+                typedef union tagged packed { p_t Payload; logic [19:0] Other; } u_t;
+    "#;
+    let active = format!(
+        r#"`timescale 1ns/1ns
+            module Top;
+                {types}
+                u_t u;
+                int i;
+                logic [3:0] a, b;
+                initial begin
+                    u = tagged Payload '0;
+                    i = 2;
+                    u.Payload.regs[i].q = 4'h9;
+                    u.Payload.regs[1].q = 4'h6;
+                    a = u.Payload.regs[i].q;
+                    b = u.Payload.regs[1].q;
+                    $display("%h %h %h", a, b, u);
+                end
+            endmodule
+        "#
+    );
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(&active, std::path::Path::new("tagged_elements.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(10).unwrap();
+    let lines: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => {
+                Some(String::from_utf8_lossy(&message).into_owned())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines, ["9 6 004980"]);
+    for statement in [
+        "y = u.Payload.regs[i].q;",
+        "y = u.Payload.regs[1].q;",
+        "u.Payload.regs[i].q = 4'hf;",
+        "u.Payload.regs[1].q = 4'hf;",
+    ] {
+        let source = format!(
+            r#"
+            module Top(output logic [3:0] y);
+                {types}
+                u_t u;
+                int i;
+                initial begin
+                    u = tagged Other 20'h12345;
+                    i = 1;
+                    {statement}
+                end
+            endmodule
+        "#
+        );
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(&source, std::path::Path::new("tagged_elements.sv"))],
+            "Top",
+        )
+        .build()
+        .unwrap();
+        let error = sim.step().unwrap_err();
+        assert!(
+            error.to_string().contains("tagged union member"),
+            "{statement}: {error}"
+        );
+    }
+}
+
 #[test]
 fn rejects_invalid_tagged_constructors() {
     for rhs in [

@@ -8,6 +8,9 @@ use semantic_types::{ArrayKind, Packed, PackedElement, TyData};
 /// and the member path in the element.
 pub(in crate::ast) struct ElementMember {
     pub name: String,
+    /// The member path from the variable to the array, when the array is
+    /// a member of a packed structure variable, as `regs` of `s.regs[i].q`.
+    pub prefix: Vec<String>,
     pub indices: Vec<ExprId>,
     pub members: Vec<String>,
 }
@@ -54,8 +57,45 @@ pub(in crate::ast) fn element_member(
     if members.is_empty() || indices.is_empty() {
         return None;
     }
+    // The array may be a member of a packed structure variable: its
+    // elements are selected within the member (7.2.1, 7.4.5).
+    let mut prefix = Vec::new();
+    while let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(id).kind
+    {
+        if separator != "." {
+            break;
+        }
+        prefix.push(instances::normalize_identifier(&name.spelling));
+        id = ungroup(*expression, native);
+    }
+    prefix.reverse();
     // The variable, or a parameter table of a package, such as `p::T`.
-    let name = direct::call_name(tree, id, native)?;
+    let mut name = direct::call_name(tree, id, native)?;
+    // A variable of an interface instance, or one that a hierarchical name
+    // denotes, whose members the rest of the prefix selects (IEEE 1800-2023
+    // 25.5, 23.6): the variable's local signal stands for it.
+    if dimensions.get(&name).is_none() && !prefix.is_empty() {
+        let mut path = vec![name];
+        path.extend(prefix);
+        if !packed_structs::bind_interface_path(tree, &mut path, dimensions) {
+            return None;
+        }
+        name = path.remove(0);
+        prefix = path;
+    }
+    let view;
+    let dimensions = if prefix.is_empty() {
+        dimensions
+    } else {
+        let mut path = vec![name.clone()];
+        path.extend(prefix.iter().cloned());
+        view = packed_structs::member_view(tree, &path, dimensions)?;
+        &view
+    };
     let shape = dimensions.get(&name)?;
     let packed_indices = indices.len().checked_sub(shape.unpacked.len())?;
     let table = &mut session.types;
@@ -83,6 +123,7 @@ pub(in crate::ast) fn element_member(
     indices.reverse();
     Some(ElementMember {
         name,
+        prefix,
         indices,
         members,
     })

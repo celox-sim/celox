@@ -592,14 +592,27 @@ pub(in crate::ast) fn selected_lvalue(
         )
     };
     let lvalue = if let Some((element, indices)) = element {
-        packed_structs::select_element_member(
-            tree,
-            element.name,
-            &element.members,
-            indices,
-            dimensions,
-            finish,
-        )?
+        if element.prefix.is_empty() {
+            packed_structs::select_element_member(
+                tree,
+                element.name,
+                &element.members,
+                indices,
+                dimensions,
+                finish,
+            )?
+        } else {
+            let mut path = vec![element.name.clone()];
+            path.extend(element.prefix.iter().cloned());
+            packed_structs::select_member_element_member(
+                tree,
+                path,
+                &element.members,
+                indices,
+                dimensions,
+                finish,
+            )?
+        }
     } else if parts.len() > 1 {
         packed_structs::select_member(tree, parts, qualified, dimensions, finish)?
     } else {
