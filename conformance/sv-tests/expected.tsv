@@ -457,8 +457,8 @@ chapter-18/18.14.2--thread-stability_1.sv	2state	fail
 chapter-18/18.14.2--thread-stability_1.sv	4state	fail
 chapter-18/18.14.3--object-stability_0.sv	2state	pass
 chapter-18/18.14.3--object-stability_0.sv	4state	pass
-chapter-18/18.14.3--object-stability_1.sv	2state	pass
-chapter-18/18.14.3--object-stability_1.sv	4state	pass
+chapter-18/18.14.3--object-stability_1.sv	2state	fail
+chapter-18/18.14.3--object-stability_1.sv	4state	fail
 chapter-18/18.15--manually-seeding-randomize_0.sv	2state	pass
 chapter-18/18.15--manually-seeding-randomize_0.sv	4state	pass
 chapter-18/18.15--manually-seeding-randomize_1.sv	2state	fail
