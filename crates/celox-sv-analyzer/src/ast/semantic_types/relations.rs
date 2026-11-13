@@ -62,6 +62,12 @@ pub(in crate::ast) enum Assignable {
 }
 
 impl TyTable {
+    /// Whether `id` is an integral type: a packed type, made of bits, of an
+    /// enumeration or of a packed structure or union (IEEE 1800-2023 6.11.1).
+    pub fn is_integral(&self, id: TyId) -> bool {
+        matches!(self.data(id), TyData::Packed(_))
+    }
+
     /// Whether `id` is an enumerated type, not a packed array of one (6.19).
     pub fn is_enum(&self, id: TyId) -> bool {
         matches!(self.data(id), TyData::Packed(packed) if scalar_enum(packed))
