@@ -331,12 +331,14 @@ impl Alias {
                             lsb,
                             array_slice_width,
                             array_slice_reversed,
+                            window,
                         } if name == self.formal => LValue::Select {
                             name,
                             msb: literal(msb),
                             lsb: literal(lsb),
                             array_slice_width,
                             array_slice_reversed,
+                            window,
                         },
                         lvalue => lvalue,
                     },
@@ -399,6 +401,7 @@ impl Alias {
                 lsb,
                 array_slice_width,
                 array_slice_reversed,
+                window,
                 ..
             } => {
                 let (msb, lsb) =
@@ -408,9 +411,10 @@ impl Alias {
                     msb,
                     lsb,
                     array_slice_width: array_slice_width
-                        .clone()
-                        .map(|width| self.const_expr(width)),
+                        .as_deref()
+                        .map(|width| Box::new(self.const_expr(width.clone()))),
                     array_slice_reversed: *array_slice_reversed,
+                    window: *window,
                 }
             }
         })
@@ -458,12 +462,14 @@ impl Alias {
                 lsb,
                 array_slice_width,
                 array_slice_reversed,
+                window,
             } => LValue::Select {
                 name,
                 msb: self.const_expr(msb),
                 lsb: self.const_expr(lsb),
-                array_slice_width: array_slice_width.map(|width| self.const_expr(width)),
+                array_slice_width: array_slice_width.map(|width| Box::new(self.const_expr(*width))),
                 array_slice_reversed,
+                window,
             },
             lvalue => lvalue,
         }

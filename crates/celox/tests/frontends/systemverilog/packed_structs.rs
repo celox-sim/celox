@@ -725,3 +725,266 @@ fn ports_drive_members_of_array_member_elements_by_their_declared_indices() {
         assert_eq!(lines, ["7a5c31234 a5 c3"], "four-state {four_state}");
     }
 }
+
+// A run-time bit-select or indexed part-select of a member of a packed
+// structure selects within the member (IEEE 1800-2023 7.2.1, 11.5.1): the
+// bits it selects outside the member's range read X and are not written, and
+// are never those of a neighboring member. The members here have a
+// descending range that does not end at 0, an ascending range, and a
+// structure type.
+#[test]
+fn run_time_selects_of_structure_members_stay_in_the_member() {
+    let source = r#"
+        module Top(
+            input logic clk, clear, input logic [1:0] mode, input logic [3:0] idx,
+            input logic [15:0] value, input logic [1:0] pair_in, input logic bit_in,
+            output logic read, any, output logic [3:0] copied,
+            output logic [1:0] pair, lower_pair, rising_pair, inner_pair,
+            output logic [15:0] written
+        );
+            typedef struct packed { logic [1:0] hi; logic [1:0] lo; } inner_t;
+            typedef struct packed {
+                logic valid; logic [7:4] mask; logic [0:3] rising; inner_t inner; logic [2:0] low;
+            } word_t;
+            word_t word, target;
+            assign word = value;
+            assign read = word.mask[idx];
+            assign pair = word.mask[idx +: 2];
+            assign lower_pair = word.mask[idx -: 2];
+            assign rising_pair = word.rising[idx +: 2];
+            assign inner_pair = word.inner[idx +: 2];
+            always_comb begin
+                copied = '0;
+                for (int i = 0; i < 4; ++i) if (word.mask[i + 4]) copied[i] = 1'b1;
+            end
+            always_comb begin
+                any = 1'b0;
+                for (int i = 4; i < 8; ++i) any |= word.mask[i];
+            end
+            always_ff @(posedge clk)
+                if (clear) target <= '0;
+                else case (mode)
+                    2'd0: target.mask[idx] <= bit_in;
+                    2'd1: target.mask[idx +: 2] <= pair_in;
+                    2'd2: target.rising[idx +: 2] <= pair_in;
+                    2'd3: target.inner[idx -: 2] <= pair_in;
+                endcase
+            assign written = target;
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            Simulator::from_sv_sources(vec![(source, Path::new("member_bits.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        let clk = sim.event("clk");
+        let (clear, mode, idx) = (sim.signal("clear"), sim.signal("mode"), sim.signal("idx"));
+        let (value, pair_in, bit_in) = (
+            sim.signal("value"),
+            sim.signal("pair_in"),
+            sim.signal("bit_in"),
+        );
+        let written = sim.signal("written");
+        // valid = 1, mask = 4'b1010, rising = 4'b1100, inner = 4'b1110,
+        // low = 3'b101: every member has a 1 next to its neighbors, which an
+        // overhanging select must not read.
+        sim.modify(|io| {
+            io.set(value, 0xd675u16);
+            io.set(idx, 5u8);
+            io.set(bit_in, 1u8);
+            io.set(pair_in, 3u8);
+        })
+        .unwrap();
+        // The value and the unknown bits of an output, the latter only in
+        // four-state simulation, where two-state reads them as zero.
+        macro_rules! read {
+            ($name:literal) => {{
+                let (value, unknown) = sim.get_four_state(sim.signal($name));
+                let (value, unknown) =
+                    (u8::try_from(value).unwrap(), u8::try_from(unknown).unwrap());
+                (value & !unknown & 3, unknown)
+            }};
+        }
+        let x = |bits: u8| if four_state { bits } else { 0 };
+        assert_eq!(read!("read"), (1, 0));
+        assert_eq!(read!("any"), (1, 0));
+        assert_eq!(sim.get(sim.signal("copied")), 0b1010u8.into());
+        // mask[6:5] and mask[5:4].
+        assert_eq!(read!("pair"), (0b01, 0));
+        assert_eq!(read!("lower_pair"), (0b10, 0));
+        // mask[8:7]: bit 8 is above the member, next to `valid`.
+        sim.modify(|io| io.set(idx, 7u8)).unwrap();
+        assert_eq!(read!("pair"), (0b01, x(0b10)));
+        // mask[4:3] and mask[3:2]: below the member, next to `rising[0]`.
+        sim.modify(|io| io.set(idx, 3u8)).unwrap();
+        assert_eq!(read!("pair"), (0b00, x(0b01)));
+        assert_eq!(read!("lower_pair"), (0b00, x(0b11)));
+        assert_eq!(read!("read"), (0, x(1)));
+        // rising[3:4]: index 4 is past the ascending member, next to `inner`.
+        assert_eq!(read!("rising_pair"), (0b00, x(0b01)));
+        // inner[4:3]: bit 4 is above the nested structure.
+        assert_eq!(read!("inner_pair"), (0b01, x(0b10)));
+        // rising[1:2] and inner[2:1], inside their members.
+        sim.modify(|io| io.set(idx, 1u8)).unwrap();
+        assert_eq!(read!("rising_pair"), (0b10, 0));
+        assert_eq!(read!("inner_pair"), (0b11, 0));
+
+        // Writes: only the bits inside the member change.
+        sim.modify(|io| io.set(clear, 1u8)).unwrap();
+        sim.tick(clk).unwrap();
+        let mut write = |m: u8, i: u8, pair: u8| {
+            sim.modify(|io| {
+                io.set(clear, 0u8);
+                io.set(mode, m);
+                io.set(idx, i);
+                io.set(pair_in, pair);
+            })
+            .unwrap();
+            sim.tick(clk).unwrap();
+            sim.get_four_state(written)
+        };
+        let known = |value: u16| (BigUint::from(value), BigUint::from(0u8));
+        // mask[8:7]: mask[7] only, not `valid`.
+        assert_eq!(write(1, 7, 3), known(0x4000));
+        // mask[4:3]: mask[4] only, not `rising[0]`.
+        assert_eq!(write(1, 3, 3), known(0x4800));
+        // rising[3:4]: rising[3] only, not `inner`.
+        assert_eq!(write(2, 3, 3), known(0x4880));
+        // inner[0:-1]: inner[0] only, not `low`.
+        assert_eq!(write(3, 0, 3), known(0x4888));
+        // A bit-select outside the member writes nothing.
+        assert_eq!(write(0, 3, 3), known(0x4888));
+        // mask[6:5], inside the member.
+        assert_eq!(write(1, 5, 2), known(0x6888));
+    }
+}
+
+/// A select of a member of a packed structure whose index is known only at
+/// run time reads and writes the member's bits, as HammerBlade's
+/// `bsg_cache_miss` does, here also by blocking assignments of a procedure;
+/// an index outside the member reads X (0 in two-state simulation) and
+/// writes nothing, never a neighboring member (IEEE 1800-2023 7.2.1,
+/// 11.5.1).
+#[test]
+fn dynamic_selects_of_packed_struct_members_stay_within_the_member() {
+    let source = r#"`timescale 1ns/1ns
+module top;
+  typedef struct packed { logic [3:0] dirty; logic [7:5] high; logic [2:0] lru_bits; } stat_s;
+  stat_s s;
+  logic [2:0] w;
+  logic [2:0] k;
+  logic d, h, l;
+  logic [1:0] part;
+  always_comb begin
+    d = s.dirty[w];
+    h = s.high[k];
+    l = s.lru_bits[w];
+    part = s.dirty[w +: 2];
+  end
+  initial begin
+    s = 10'b1010_011_001;
+    for (int i = 0; i < 8; i++) begin
+      w = i[2:0]; k = 3'(i + 3);
+      #1 $display("w=%0d d=%b l=%b k=%0d h=%b part=%b", w, d, l, k, h, part);
+    end
+    w = 3'd6; s.lru_bits[w] = 1'b1;
+    w = 3'd1; s.dirty[w] = 1'b0;
+    k = 3'd6; s.high[k] = 1'b0;
+    k = 3'd2; s.high[k] = 1'b0;
+    #1 $display("s=%b", s);
+    $finish;
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let x = if four_state { "x" } else { "0" };
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("dynamic_member.sv"))],
+            "top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(20).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        let expected = [
+            format!("w=0 d=0 l=1 k=3 h={x} part=10"),
+            format!("w=1 d=1 l=0 k=4 h={x} part=01"),
+            "w=2 d=0 l=0 k=5 h=1 part=10".to_string(),
+            // dirty[4] is past the member, next to `high`: only it is X.
+            format!("w=3 d=1 l={x} k=6 h=1 part={x}1"),
+            format!("w=4 d={x} l={x} k=7 h=0 part={x}{x}"),
+            format!("w=5 d={x} l={x} k=0 h={x} part={x}{x}"),
+            format!("w=6 d={x} l={x} k=1 h={x} part={x}{x}"),
+            format!("w=7 d={x} l={x} k=2 h={x} part={x}{x}"),
+            "s=1000001001".to_string(),
+        ];
+        assert_eq!(lines, expected, "four_state={four_state}");
+    }
+}
+
+/// A run-time indexed part-select of a member of a range that is not
+/// `[n-1:0]`, descending or ascending, selects the bits its declared
+/// indices name (IEEE 1800-2023 7.4.6, 11.5.1). Verilator 5.054 prints
+/// the same lines.
+#[test]
+fn dynamic_indexed_part_selects_of_members_use_the_declared_range() {
+    let source = r#"`timescale 1ns/1ns
+module top;
+  typedef struct packed { logic [7:4] hi; logic [0:3] asc; logic [3:0] lo; } s_t;
+  s_t s;
+  int i;
+  initial begin
+    s = 12'b1010_0110_1100;
+    for (i = 4; i <= 6; i++)
+      $display("i=%0d up=%b asc=%b", i, s.hi[i +: 2], s.asc[i - 4 +: 2]);
+    for (i = 5; i <= 7; i++)
+      $display("i=%0d down=%b asc=%b", i, s.hi[i -: 2], s.asc[i - 4 -: 2]);
+    i = 5; s.hi[i +: 2] = 2'b01;
+    i = 1; s.asc[i +: 2] = 2'b01;
+    $display("s=%b", s);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("dynamic_member_ranges.sv"))],
+            "top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "i=4 up=10 asc=01",
+                "i=5 up=01 asc=11",
+                "i=6 up=10 asc=10",
+                "i=5 down=10 asc=01",
+                "i=6 down=01 asc=11",
+                "i=7 down=10 asc=10",
+                "s=101000101100",
+            ],
+            "four_state={four_state}"
+        );
+    }
+}

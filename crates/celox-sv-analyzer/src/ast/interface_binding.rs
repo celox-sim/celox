@@ -516,6 +516,7 @@ fn connection_lvalue(expr: Expr) -> Converted<LValue> {
                 is_2state: false,
                 array_slice_width: None,
                 array_slice_reversed: false,
+                window: None,
             })
         }
         _ => Err(unsupported("interface output connection")),

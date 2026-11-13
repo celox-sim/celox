@@ -265,6 +265,7 @@ pub(in crate::lowering) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<s
                 lsb: lsb.clone(),
                 array_slice_width: None,
                 array_slice_reversed: false,
+                window: None,
             }]),
             // A select of a selected part of a variable, such as one of a
             // two-state member read through its conversion, selects bits
@@ -293,6 +294,7 @@ pub(in crate::lowering) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<s
                     lsb: offset(lsb),
                     array_slice_width: None,
                     array_slice_reversed: false,
+                    window: None,
                 }])
             }
         },

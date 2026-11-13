@@ -190,6 +190,7 @@ pub(super) fn lower(
                 signed: false,
                 array_slice_width: None,
                 array_slice_reversed: false,
+                window: None,
                 is_2state: shape.is_2state,
             };
             let lhs = select(name.into());
