@@ -74,7 +74,11 @@ pub(super) fn enter_method_call(
             .filter(|shape| {
                 shape.unpacked_struct.is_some()
                     || chandles::receives_chandle(shape)
-                    || (shape.container.is_some() || shape.virtual_interface.is_some()) && copied_in
+                    || (shape.container.is_some()
+                        || virtual_interfaces::holds_virtual_interface(
+                            shape, tree, session, dimensions,
+                        ))
+                        && copied_in
             })
             .cloned()
             .map(Rc::new);

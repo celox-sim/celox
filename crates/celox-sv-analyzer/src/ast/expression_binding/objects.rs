@@ -1156,7 +1156,8 @@ pub(in crate::ast) fn constructor(
                 session,
             )?;
         }
-        let target = super::direct::copied_in_target(dimensions, &name, position + 1);
+        let target =
+            super::direct::copied_in_target(tree, session, dimensions, &name, position + 1);
         args.push(
             actual
                 .map(|value| bind_value(value, native, tree, session, dimensions, target))

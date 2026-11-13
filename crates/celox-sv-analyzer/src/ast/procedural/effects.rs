@@ -880,6 +880,7 @@ impl BodyBuilder<'_, '_, '_> {
             &container,
             &shape,
             self.tree,
+            self.session,
             &self.dims,
         )?;
         self.bind_effect(id, elements);
@@ -1241,7 +1242,12 @@ impl BodyBuilder<'_, '_, '_> {
             && shape.as_ref().is_some_and(|shape| {
                 shape.enum_domain.is_some()
                     || shape.class.is_some()
-                    || shape.virtual_interface.is_some()
+                    || virtual_interfaces::holds_virtual_interface(
+                        shape,
+                        self.tree,
+                        self.session,
+                        &self.dims,
+                    )
                     || shape.chandle
                     || !shape.members.is_empty()
             })
