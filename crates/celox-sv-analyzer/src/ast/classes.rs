@@ -239,6 +239,16 @@ fn static_inputs(
         if property.owner != owner || property.rand || property.mode_of.is_some() {
             continue;
         }
+        // A class handle, which a guard compares (18.5.13), by its handle.
+        if property.r#type.class().is_some() {
+            inputs.push(StaticInput {
+                name: property.name.clone(),
+                variable: property.variable.clone(),
+                width: 8 * celox_heap::HANDLE_BYTES as u32,
+                signed: false,
+            });
+            continue;
+        }
         if constraints::solver_type(&property.r#type, tree, session, env).is_err() {
             continue;
         }
@@ -277,6 +287,7 @@ fn reads_input(expr: &celox_heap::randomization::Expr) -> bool {
         } => reads_input(membership) || choices.iter().any(|choice| reads_input(&choice.predicate)),
         Expr::Literal(..)
         | Expr::Field(_)
+        | Expr::Handle(_)
         | Expr::Size(_)
         | Expr::Sum(_)
         | Expr::Index { .. }
