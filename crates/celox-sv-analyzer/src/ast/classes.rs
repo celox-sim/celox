@@ -1168,7 +1168,12 @@ pub(super) fn shared_class(
         let method_name = instances::normalize_identifier(&subroutine.name.spelling);
         if matches!(
             method_name.as_str(),
-            "randomize" | "srandom" | "rand_mode" | "constraint_mode"
+            "randomize"
+                | "srandom"
+                | "rand_mode"
+                | "constraint_mode"
+                | "get_randstate"
+                | "set_randstate"
         ) {
             return Err(unsupported(
                 "overriding built-in class randomization methods",

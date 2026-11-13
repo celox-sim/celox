@@ -208,6 +208,12 @@ pub const DPI_C_STRING: u64 = 148;
 /// `dpi_from_c_string(pointer)`: the string holding the NUL-terminated C
 /// string at `pointer`, or `""` for a null pointer.
 pub const DPI_FROM_C_STRING: u64 = 149;
+/// `get_randstate(object)`: the string holding the state of the object's
+/// RNG (IEEE 1800-2023 18.13.4).
+pub const OBJECT_GET_RANDSTATE: u64 = 150;
+/// `set_randstate(object, state)`: restore the state of the object's RNG
+/// from string `state`, as `get_randstate` returned it (18.13.5).
+pub const OBJECT_SET_RANDSTATE: u64 = 151;
 
 const _: () = assert!(
     crate::containers::RSORT < UVM_RE_COMP
@@ -435,6 +441,11 @@ impl Heap {
             OBJECT_RANDOM_CYCLIC => self.random_cyclic_object(a as Handle, parameter as u32, b),
             OBJECT_SEED => {
                 self.seed_object(a as Handle, b as u32);
+                0
+            }
+            OBJECT_GET_RANDSTATE => u64::from(self.object_randstate(a as Handle)),
+            OBJECT_SET_RANDSTATE => {
+                self.set_object_randstate(a as Handle, b as Handle);
                 0
             }
             OBJECT_CHECK => u64::from(self.check_object(a as Handle, parameter as u32)),

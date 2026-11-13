@@ -1437,6 +1437,43 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "12 7 hi 4 1 0\n7 1 12 0\n12 0 1\n"))
 
+; An object's get_randstate returns the state of its RNG, which
+; set_randstate restores so that its randomizations repeat; objects seeded
+; alike have equal states and draw alike, and objects created one after
+; the other by a thread have different states (IEEE 1800-2023 18.13.4,
+; 18.13.5, 18.14.3). this.get_randstate names the object itself.
+(case object_random_state
+  (source "randstate.sv" #"
+module Top(output int checks);
+    class Item;
+        rand int x;
+        function new(int seed = 0); if (seed != 0) this.srandom(seed); endfunction
+        function string state(); return this.get_randstate(); endfunction
+    endclass
+    initial begin
+        Item a = new(200), b = new(200), c = new(7);
+        Item d = new, e = new;
+        string sa, sc;
+        int first;
+        sa = a.get_randstate();
+        sc = c.get_randstate();
+        checks = 0;
+        checks += (sa == b.get_randstate()) * 1;
+        checks += (sa != sc && sa != "") * 2;
+        checks += (d.get_randstate() != e.get_randstate()) * 4;
+        void'(a.randomize());
+        first = a.x;
+        a.set_randstate(sa);
+        void'(a.randomize());
+        checks += (a.x == first) * 8;
+        void'(b.randomize());
+        checks += (b.x == first) * 16;
+        checks += (a.state() == a.get_randstate()) * 32;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 63))
+
 (case unconstrained_randomize
   (source "randomize.sv" #"
 module Top(output bit done, output int errors);
