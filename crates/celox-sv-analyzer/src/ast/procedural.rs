@@ -306,6 +306,11 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     reference_formals: HashSet<String>,
     /// Whether the function's result is a chandle, `None` without a result.
     return_chandle: Option<bool>,
+    /// The bodies of the processes that record a disable condition of a
+    /// concurrent assertion over cycles becoming true between the ticks of
+    /// its clock (see `assertions::DisableHistory`), which the process the
+    /// builder lowers needs beside it.
+    pub(super) disable_watchers: Vec<Vec<Stmt>>,
     pub(super) sensitivity_body: Vec<Stmt>,
     /// The name of the subroutine whose body this is, which the names of
     /// its variables carry (see [`Self::declare_static`], [`Self::declare`]).
@@ -633,6 +638,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             reference_formals: HashSet::default(),
             return_chandle: None,
             sensitivity_body: Vec::new(),
+            disable_watchers: Vec::new(),
             owner: None,
             owned_locals: 0,
             named_blocks: Vec::new(),

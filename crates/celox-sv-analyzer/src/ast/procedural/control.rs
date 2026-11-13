@@ -711,15 +711,7 @@ impl BodyBuilder<'_, '_, '_> {
                                     return Err(unsupported("concurrent assertion directive"));
                                 }
                                 if let Some(sequence) = sequence {
-                                    let monitor = self.sequence_stages(*sequence)?;
-                                    // An attempt of one tick is disabled at that tick; a
-                                    // longer one would need the condition at each tick.
-                                    if disable.is_some() && monitor.ticks.is_some() {
-                                        return Err(unsupported(
-                                            "disable iff of a sequence over cycles",
-                                        ));
-                                    }
-                                    stages = Some(monitor);
+                                    let mut monitor = self.sequence_stages(*sequence)?;
                                     let disable = disable
                                         .map(|id| {
                                             self.native_value(id).map(procedural_truth_condition)
@@ -728,7 +720,15 @@ impl BodyBuilder<'_, '_, '_> {
                                     if let Some(disable) = &disable {
                                         assertions::concurrent_operand(disable)?;
                                         assertions::concurrent_disable(disable)?;
+                                        // An attempt of one tick is disabled at that tick;
+                                        // a longer one whenever the condition is true
+                                        // until it ends.
+                                        if let Some((_, length)) = &monitor.ticks {
+                                            monitor.disabled =
+                                                Some(self.disable_history(disable, *length));
+                                        }
                                     }
+                                    stages = Some(monitor);
                                     (Expr::Literal("1'b1".into()), &None, Some(disable))
                                 } else {
                                     let mut operand = self.native_value(*condition)?;
@@ -1038,23 +1038,35 @@ impl BodyBuilder<'_, '_, '_> {
                                 then_body: on_match,
                                 else_body: on_miss,
                             };
-                            decisions.push(match stage.alive {
+                            let decision = match stage.alive {
                                 Some(alive) => Stmt::If {
                                     condition: alive,
                                     then_body: vec![decision],
                                     else_body: Vec::new(),
                                 },
                                 None => decision,
+                            };
+                            // A disabled attempt neither passes nor fails.
+                            decisions.push(match &monitor.disabled {
+                                Some(history) => Stmt::If {
+                                    condition: history.of_age(stage.offset),
+                                    then_body: Vec::new(),
+                                    else_body: vec![decision],
+                                },
+                                None => decision,
                             });
                         }
-                        if let Some(Some(disable)) = &concurrent {
-                            output.push(Stmt::If {
+                        match (&concurrent, &monitor.disabled, &monitor.ticks) {
+                            (Some(Some(disable)), Some(history), Some((_, length))) => {
+                                output.extend(history.tick(disable, *length));
+                                output.extend(decisions);
+                            }
+                            (Some(Some(disable)), _, _) => output.push(Stmt::If {
                                 condition: disable.clone(),
                                 then_body: Vec::new(),
                                 else_body: decisions,
-                            });
-                        } else {
-                            output.extend(decisions);
+                            }),
+                            _ => output.extend(decisions),
                         }
                         // The values later ticks read, once this tick
                         // decided its steps.
@@ -1848,7 +1860,46 @@ impl BodyBuilder<'_, '_, '_> {
             ticks: ticks.map(|ticks| (ticks, length)),
             updates,
             start,
+            disabled: None,
         })
+    }
+
+    /// The record of disable condition `disable` of a concurrent assertion
+    /// over a sequence `length` ticks long (see
+    /// [`assertions::DisableHistory`]), and the process that records the
+    /// condition between the ticks: it wakes on each change of the
+    /// condition, current values rather than sampled ones (16.12).
+    fn disable_history(&mut self, disable: &Expr, length: u32) -> assertions::DisableHistory {
+        let mut bits = Type::new(TypeKind::Bit);
+        bits.packed_ranges = vec![PackedRange::new(
+            ConstExpr::Literal(length.to_string()),
+            ConstExpr::Literal("0".into()),
+        )];
+        let bits = self.declare("disabled@sequence", bits);
+        let seen = self.declare("seen@sequence", Type::new(TypeKind::Bit));
+        self.disable_watchers.push(vec![Stmt::Loop {
+            kind: crate::procedural::LoopKind::Forever,
+            init: Vec::new(),
+            condition: None,
+            step: Vec::new(),
+            body: vec![
+                Stmt::If {
+                    condition: disable.clone(),
+                    then_body: vec![Stmt::Assign {
+                        lhs: LValue::Ident(seen.clone()),
+                        rhs: Expr::Literal("1'b1".into()),
+                        nonblocking: false,
+                    }],
+                    else_body: Vec::new(),
+                },
+                Stmt::WaitEvent(vec![crate::procedural::EventItemBase {
+                    edge: crate::procedural::EventEdge::Any,
+                    expr: disable.clone(),
+                    iff: None,
+                }]),
+            ],
+        }]);
+        assertions::DisableHistory { bits, seen }
     }
 
     /// Rewrite the arguments of match-item call `statement` at `here`. An
