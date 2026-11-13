@@ -503,3 +503,69 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("seen")), BigUint::from(0x22u8));
     }
 }
+
+sv_backends! {
+    // The element types of the container formals of an interface function
+    // are those of the instance it is called through (IEEE 1800-2023 25.7,
+    // 7.6): through an instance, with named arguments, an instance of other
+    // parameter values, an output formal, and an imported modport function
+    // through a port, also where the caller declares a constant of the
+    // parameter's name (Verilator: cf12 80 1000 2).
+    fn interface_container_formals_take_instance_parameters(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            interface Bus #(parameter DW = 32);
+              logic [DW-1:0] base;
+              function automatic logic [DW-1:0] sum(input logic [DW-1:0] data [], input logic [DW/8-1:0] strb []);
+                return base + data[data.size() - 1] + DW'(data.size() * 10 + strb.size()) + DW'(strb[0]);
+              endfunction
+              function automatic void fill(output logic [DW-1:0] data []);
+                data = new[2];
+                data[1] = base;
+              endfunction
+              modport rd(input base, import sum);
+            endinterface
+            module User(Bus.rd b, output logic [7:0] y);
+              logic [7:0] bytes [];
+              logic [0:0] strb [];
+              initial begin
+                #1;
+                bytes = new[2];
+                bytes[1] = 8'h5a;
+                strb = new[1];
+                strb[0] = 1'b1;
+                y = b.sum(.strb(strb), .data(bytes));
+              end
+            endmodule
+            module Top(output logic [15:0] wide, output logic [7:0] narrow, output logic [15:0] back, output int back_size);
+              localparam DW = 4;
+              Bus #(.DW(16)) wide_bus();
+              Bus #(.DW(8)) narrow_bus();
+              assign wide_bus.base = 16'h1000;
+              assign narrow_bus.base = 8'h10;
+              User u(.b(narrow_bus), .y(narrow));
+              logic [15:0] blob [];
+              logic [1:0] wstrb [];
+              logic [15:0] got [];
+              initial begin
+                #1;
+                blob = new[3];
+                blob[2] = 16'hbeef;
+                wstrb = new[2];
+                wstrb[0] = 2'b11;
+                wstrb[1] = 2'b01;
+                wide = wide_bus.sum(.data(blob), .strb(wstrb));
+                wide_bus.fill(got);
+                back = got[1];
+                back_size = got.size();
+              end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("interface_container_formals.sv"))], "Top");
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("wide")), BigUint::from(0xcf12u16));
+        assert_eq!(sim.get(sim.signal("narrow")), BigUint::from(0x80u8));
+        assert_eq!(sim.get(sim.signal("back")), BigUint::from(0x1000u16));
+        assert_eq!(sim.get(sim.signal("back_size")), BigUint::from(2u8));
+    }
+}

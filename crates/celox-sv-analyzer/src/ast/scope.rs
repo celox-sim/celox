@@ -1015,7 +1015,17 @@ impl Renamer<'_> {
             .into_iter()
             .map(|member| member.with_type(|r#type| self.r#type(r#type)))
             .collect();
+        r#type.container = r#type.container.map(|container| self.container(&container));
         r#type
+    }
+
+    /// Container type `container` with the bounds of its element and index
+    /// types renamed; its layout holds their evaluated widths already.
+    pub(super) fn container(&self, container: &ContainerType) -> Arc<ContainerType> {
+        let mut container = container.clone();
+        container.key = container.key.map(|key| self.r#type(key));
+        container.element = self.r#type(container.element);
+        Arc::new(container)
     }
 
     pub fn dimensions(&self, dimensions: VariableDimensions) -> VariableDimensions {
