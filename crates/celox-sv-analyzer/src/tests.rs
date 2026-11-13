@@ -6759,9 +6759,9 @@ fn explicit_output_data_types_default_to_variables() {
 fn class_randomize_rejects_unsupported_semantics() {
     for (members, call, expected) in [
         (
-            "rand int x; constraint c { soft x == 1; }",
+            "rand int x; int a[$]; constraint c { foreach (a[i]) soft x == a[i]; }",
             "c.randomize()",
-            "constraints",
+            "soft constraint in a constraint loop",
         ),
         (
             "rand int x, y; constraint c { solve x before y; x == y; }",

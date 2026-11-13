@@ -389,7 +389,9 @@ pub(in crate::ast) fn validate(
             }
             ExprKind::ArrayMethodWith { .. }
             | ExprKind::RandomizeWith { .. }
-            | ExprKind::ConstraintForeach { .. } => {
+            | ExprKind::ConstraintForeach { .. }
+            | ExprKind::SoftConstraint { .. }
+            | ExprKind::DisableSoft { .. } => {
                 return Err(unsupported("array method with expression"));
             }
             ExprKind::Parameterized { .. } => {
@@ -672,7 +674,9 @@ pub(in crate::ast) fn literal_widths(
         match &native.expression(id).kind {
             ExprKind::ArrayMethodWith { .. }
             | ExprKind::RandomizeWith { .. }
-            | ExprKind::ConstraintForeach { .. } => {
+            | ExprKind::ConstraintForeach { .. }
+            | ExprKind::SoftConstraint { .. }
+            | ExprKind::DisableSoft { .. } => {
                 return Err(unsupported("array method with expression"));
             }
             ExprKind::Literal(text) if evaluated => {
@@ -1271,6 +1275,10 @@ pub(in crate::ast) fn children(
             children.extend([*expression, *predicate]);
         }
         ExprKind::ConstraintForeach { array, body, .. } => children.extend([*array, *body]),
+        ExprKind::SoftConstraint { expression }
+        | ExprKind::DisableSoft {
+            variable: expression,
+        } => children.push(*expression),
         ExprKind::Call {
             expression,
             arguments,

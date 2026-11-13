@@ -87,6 +87,10 @@ fn operands(kind: &ExprKind) -> Vec<ExprId> {
             predicate,
         } => operands.extend([*expression, *predicate]),
         ExprKind::ConstraintForeach { array, body, .. } => operands.extend([*array, *body]),
+        ExprKind::SoftConstraint { expression }
+        | ExprKind::DisableSoft {
+            variable: expression,
+        } => operands.push(*expression),
         ExprKind::RandomizeWith {
             expression,
             constraints,

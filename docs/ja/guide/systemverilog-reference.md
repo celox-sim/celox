@@ -219,8 +219,8 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
 - スコープ `randomize()` / `std::randomize()`（18.12）: `with` 制約、未対応・
   未解決ドメインの enum、unpacked 配列、ネット、定数、選択、連結引数は未対応です。
 - クラス `randomize()`: 4値・集約プロパティ、static な rand プロパティ、配列・
-  オブジェクト・string の rand プロパティ、制約付き enum と `randc`、`foreach`・
-  `soft` 制約、`dist`、`solve before`、外部・static 制約ブロック、制約中の
+  オブジェクト・string の rand プロパティ、制約付き enum と `randc`、rand 配列の
+  `foreach`、`foreach` 内や `dist` 付きの `soft` 制約、`dist`、`solve before`、外部・static 制約ブロック、制約中の
   型パラメータ、`inside` 集合の配列集合・X/Z ワイルドカード・`$` 境界、
   1–8ビット整数と256メンバまでのスカラ enum を超える `randc` ドメインは未対応です。
   名前付き制約ブロックは、比較・論理・ビット演算・加減乗算を使う
@@ -428,6 +428,10 @@ Clause 4.7 がどちらの順序も許すケースで、Celox は決定的です
   （[#2187](https://github.com/celox-sim/celox/issues/2187)）。
   不充足が証明された場合は `0` を返し、プロパティを保持し、post フックを
   省略します（18.6.3）。資源枯渇は実行時エラーです。
+- soft 制約（18.5.13）は優先度の高いものから順に試し（18.5.13.1）、ハード制約と
+  それまでに残した soft 制約が許すときに残し、許さないときは捨てます。
+  `disable soft` は、その変数を含むより低い優先度の soft 制約を捨てます
+  （18.5.13.2）。各探索は同じシードを使うため、選択は再現可能です。
 - 配列の `shuffle` は呼び出しプロセスの乱数ストリームから引きます。
 
 ### ホスト依存の結果

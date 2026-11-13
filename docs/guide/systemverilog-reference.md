@@ -283,7 +283,8 @@ blocks in programs. Two region deviations are listed under
   object that a rand handle reaches (its randomization fails), random
   array, object, and
   string properties, constrained
-  enums and `randc`, `foreach` and `soft` constraints, `dist`,
+  enums and `randc`, `foreach` over a random array, `soft` constraints in
+  a `foreach` or with `dist`, `dist`,
   `solve before`, external and static constraint blocks, typed parameters
   in constraints, array sets, X/Z wildcard items and `$` bounds in `inside`
   sets, and `randc` domains beyond 1–8-bit integers and scalar enums with
@@ -549,6 +550,11 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
   ([#2187](https://github.com/celox-sim/celox/issues/2187)). Proved
   infeasibility returns `0`, preserves the properties, and skips the
   post-hook (18.6.3); resource exhaustion is a runtime error.
+- Soft constraints (18.5.13) are tried from the highest priority down
+  (18.5.13.1): each is kept when the hard constraints and the soft ones
+  kept before it allow it, and is otherwise discarded; a `disable soft`
+  discards the lower soft constraints that name its variable (18.5.13.2).
+  The search for each keeps the seed, so the choice is reproducible.
 - Array `shuffle` draws from the calling process's random stream.
 
 ### Host-dependent results

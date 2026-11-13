@@ -101,6 +101,16 @@ pub enum ExprKind {
         variables: Vec<Option<Name>>,
         body: ExprId,
     },
+    /// A soft constraint `soft expression` (IEEE 1800-2023 18.5.13), also
+    /// one a guard or an implication makes conditional: the guard is part
+    /// of `expression`.
+    SoftConstraint {
+        expression: ExprId,
+    },
+    /// `disable soft variable` (IEEE 1800-2023 18.5.13.2).
+    DisableSoft {
+        variable: ExprId,
+    },
     /// Per-call class constraints (IEEE 1800-2023 18.7).
     RandomizeWith {
         expression: ExprId,

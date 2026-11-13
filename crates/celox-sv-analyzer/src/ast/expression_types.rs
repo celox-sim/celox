@@ -344,7 +344,9 @@ fn resolve(
         | ExprKind::Call { .. }
         | ExprKind::Group(_)
         | ExprKind::ArrayMethodWith { .. }
-        | ExprKind::ConstraintForeach { .. } => None,
+        | ExprKind::ConstraintForeach { .. }
+        | ExprKind::SoftConstraint { .. }
+        | ExprKind::DisableSoft { .. } => None,
         // No self-determined type of their own: a type; a set, a tagged
         // union value and an untyped assignment pattern take their context's
         // (11.4.13, 11.9, 10.9); a streaming concatenation and its select

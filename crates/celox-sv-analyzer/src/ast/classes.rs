@@ -223,9 +223,13 @@ fn reads_input(expr: &celox_heap::randomization::Expr) -> bool {
     use celox_heap::randomization::Expr;
     match expr {
         Expr::Input { .. } => true,
-        Expr::Enabled { value, .. } | Expr::Resize { value, .. } | Expr::Unary { value, .. } => {
-            reads_input(value)
+        Expr::Enabled { value, .. }
+        | Expr::Soft { value, .. }
+        | Expr::DisableSoft {
+            variable: value, ..
         }
+        | Expr::Resize { value, .. }
+        | Expr::Unary { value, .. } => reads_input(value),
         Expr::Foreach { body, .. } => reads_input(body),
         Expr::Binary { left, right, .. } => reads_input(left) || reads_input(right),
         Expr::Literal(..)
@@ -1513,7 +1517,24 @@ pub(super) fn shared_class(
     let scope = (name.to_owned(), base.as_ref().map(|base| base.name.clone()));
     session.constraint_owners.push(scope.clone());
     session.constraint_scopes.push(scope);
-    for block in &declaration.constraints {
+    // The classes above this one, whose constraints are below its own
+    // (IEEE 1800-2023 18.5.13.1).
+    let depth = {
+        let mut depth = 0;
+        let mut above = base.as_ref().and_then(|base| base.base.clone());
+        if base.is_some() {
+            depth += 1;
+        }
+        while let Some(name) = above {
+            depth += 1;
+            above = session
+                .classes
+                .get(&name)
+                .and_then(|class| class.base.clone());
+        }
+        depth
+    };
+    for (position, block) in declaration.constraints.iter().enumerate() {
         let block_name = block.name.spelling.clone();
 
         let expressions = block
@@ -1523,7 +1544,8 @@ pub(super) fn shared_class(
             .and_then(|expressions| {
                 expressions
                     .iter()
-                    .map(|&id| {
+                    .enumerate()
+                    .map(|(index, &id)| {
                         constraints::bind_inputs(
                             id,
                             tree,
@@ -1533,6 +1555,12 @@ pub(super) fn shared_class(
                             env,
                             &HashMap::default(),
                         )
+                        .map(|constraint| {
+                            constraints::prioritize(
+                                constraint,
+                                constraints::class_priority(depth, position, index),
+                            )
+                        })
                     })
                     .collect()
             });

@@ -337,6 +337,10 @@ pub(in crate::ast) fn resolve_statics(expr: &mut ConstraintExpr, first: usize) {
     match expr {
         ConstraintExpr::Static(slot) => *expr = ConstraintExpr::Field(first + *slot),
         ConstraintExpr::Enabled { value, .. }
+        | ConstraintExpr::Soft { value, .. }
+        | ConstraintExpr::DisableSoft {
+            variable: value, ..
+        }
         | ConstraintExpr::Resize { value, .. }
         | ConstraintExpr::Unary { value, .. } => resolve_statics(value, first),
         ConstraintExpr::Foreach { body, .. } => resolve_statics(body, first),
@@ -362,8 +366,10 @@ pub(in crate::ast) fn looped_arrays(expr: &ConstraintExpr, found: &mut Vec<usize
             looped_arrays(body, found);
         }
         ConstraintExpr::Enabled { value, .. }
+        | ConstraintExpr::Soft { value, .. }
         | ConstraintExpr::Resize { value, .. }
         | ConstraintExpr::Unary { value, .. } => looped_arrays(value, found),
+        ConstraintExpr::DisableSoft { .. } => {}
         ConstraintExpr::Binary { left, right, .. } => {
             looped_arrays(left, found);
             looped_arrays(right, found);
@@ -886,21 +892,70 @@ pub(in crate::ast) fn bind_inputs(
             | ExprKind::StreamSelect { .. } => {
                 return Err("unsupported scalar constraint expression".into());
             }
+            ExprKind::SoftConstraint { .. } | ExprKind::DisableSoft { .. } => {
+                return Err("soft constraint in a constraint loop".into());
+            }
         })
     }
-    expression(
-        id,
-        tree,
-        session,
-        properties,
-        names,
-        env,
-        inputs,
-        &[],
-        0,
-        &mut 16_384,
-    )
-    .map(|value| emit(value, None))
+    let mut bound = |id| {
+        expression(
+            id,
+            tree,
+            session,
+            properties,
+            names,
+            env,
+            inputs,
+            &[],
+            0,
+            &mut 16_384,
+        )
+        .map(|value| emit(value, None))
+    };
+    // A soft constraint and `disable soft` take the priority of their place
+    // among the constraints of the class (see [`prioritize`]).
+    match tree.declarations().expression(id).kind {
+        ExprKind::SoftConstraint { expression } => Ok(ConstraintExpr::Soft {
+            priority: 0,
+            value: Box::new(bound(expression)?),
+        }),
+        ExprKind::DisableSoft { variable } => match bound(variable)? {
+            variable @ (ConstraintExpr::Field(_)
+            | ConstraintExpr::Static(_)
+            | ConstraintExpr::Size(_)) => Ok(ConstraintExpr::DisableSoft {
+                priority: 0,
+                variable: Box::new(variable),
+            }),
+            _ => Err("disable soft of other than a random property or array size".into()),
+        },
+        _ => bound(id),
+    }
+}
+
+/// The soft constraint or `disable soft` `constraint` with priority
+/// `priority` (IEEE 1800-2023 18.5.13.1); another constraint as it is.
+pub(in crate::ast) fn prioritize(constraint: ConstraintExpr, priority: u64) -> ConstraintExpr {
+    match constraint {
+        ConstraintExpr::Soft { value, .. } => ConstraintExpr::Soft { priority, value },
+        ConstraintExpr::DisableSoft { variable, .. } => {
+            ConstraintExpr::DisableSoft { priority, variable }
+        }
+        constraint => constraint,
+    }
+}
+
+/// The priority of the constraint at `expression` of block `block` of a
+/// class `depth` classes below its root class: a later constraint of a
+/// block, one of a later block, by the order of the prototypes, and one of
+/// a derived class are above the others (IEEE 1800-2023 18.5.13.1).
+pub(in crate::ast) fn class_priority(depth: usize, block: usize, expression: usize) -> u64 {
+    ((depth as u64) << 40) | ((block as u64 & 0xf_ffff) << 20) | (expression as u64 & 0xf_ffff)
+}
+
+/// The priority of constraint `expression` of an inline constraint block,
+/// above every constraint of the class (18.5.13.1).
+pub(in crate::ast) fn inline_priority(expression: usize) -> u64 {
+    (1 << 62) | expression as u64
 }
 
 impl Class {
