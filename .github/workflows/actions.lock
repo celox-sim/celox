@@ -94,6 +94,11 @@ workflows:
         - 'actions/setup-node@v7'
         - 'dtolnay/rust-toolchain@master'
         - 'rust-lang/crates-io-auth-action@v1'
+    '.github/workflows/publish-cli.yml':
+        - 'actions/checkout@v7'
+        - 'actions/download-artifact@v8'
+        - 'actions/upload-artifact@v7'
+        - 'dtolnay/rust-toolchain@master'
     '.github/workflows/publish-crates.yml':
         - 'actions/checkout@v7'
         - 'dtolnay/rust-toolchain@master'
