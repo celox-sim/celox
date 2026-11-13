@@ -3311,6 +3311,55 @@ fn external_constraints_track_unsupported_definitions_and_static_prototypes() {
     assert_eq!(block.expressions.as_ref().map(Vec::len), Some(1));
 }
 
+/// A restricted constraint block keeps its identifier list, which may be
+/// empty; an array method's `with (...)` stays a predicate (IEEE 1800-2023
+/// 18.7, 7.12).
+#[test]
+fn restricted_inline_constraints_keep_their_identifier_lists() {
+    let restricted = |source: &str| {
+        let syntax = parse(source);
+        syntax
+            .expression_nodes()
+            .find_map(|(_, node)| match &node.kind {
+                ExprKind::RandomizeWith { restricted, .. } => {
+                    Some(restricted.as_ref().map(|names| {
+                        names
+                            .iter()
+                            .map(|name| name.value().to_owned())
+                            .collect::<Vec<_>>()
+                    }))
+                }
+                _ => None,
+            })
+            .expect("a randomize with")
+    };
+    assert_eq!(
+        restricted("module M; initial ok = obj.randomize() with (x, y) { x < y; }; endmodule"),
+        Some(vec!["x".to_owned(), "y".to_owned()])
+    );
+    assert_eq!(
+        restricted("module M; initial ok = obj.randomize() with () { x < 1; }; endmodule"),
+        Some(Vec::new())
+    );
+    assert_eq!(
+        restricted("module M; initial ok = obj.randomize() with { x < 1; }; endmodule"),
+        None
+    );
+    let syntax = parse("module M; initial n = q.sum() with (item * 2); endmodule");
+    assert!(
+        syntax
+            .expression_nodes()
+            .any(|(_, node)| matches!(node.kind, ExprKind::ArrayMethodWith { .. }))
+    );
+    assert!(
+        Declarations::parse(
+            "module M; initial ok = obj.randomize() with (x) x < 1; endmodule",
+            Path::new("restricted.sv")
+        )
+        .is_err()
+    );
+}
+
 #[test]
 fn inline_constraints_retain_ownership_and_bound_nested_calls() {
     let syntax =

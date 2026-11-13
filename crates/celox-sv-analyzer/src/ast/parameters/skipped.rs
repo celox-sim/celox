@@ -1278,6 +1278,7 @@ pub(in crate::ast) fn children(
         ExprKind::RandomizeWith {
             expression,
             constraints,
+            ..
         } => {
             children.push(*expression);
             children.extend(constraints.iter().flatten());

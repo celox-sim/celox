@@ -2029,6 +2029,27 @@ fn caller_inputs(
                 let name = instances::normalize_identifier(&name.spelling);
                 Some((format!("local::{name}"), name))
             }
+            // A dotted name whose first identifier does not resolve into
+            // the class, as one a restricted block does not list, resolves
+            // in the caller's scope (IEEE 1800-2023 18.7), whose members
+            // constraints do not read.
+            ExprKind::Member {
+                expression,
+                separator,
+                ..
+            } if separator == "."
+                && matches!(
+                    &native.expression(ungroup(*expression, native)).kind,
+                    ExprKind::Name(root) if !matches!(root.spelling.as_str(), "this" | "super") && {
+                        let root = instances::normalize_identifier(&root.spelling);
+                        !loops.contains(&root) && !owned(&root)
+                    }
+                ) =>
+            {
+                return Err(unsupported(
+                    "a member of a variable of the caller in inline constraints",
+                ));
+            }
             ExprKind::Group(id) | ExprKind::Unary { expression: id, .. } => {
                 pending.push((*id, loops));
                 None
@@ -2136,9 +2157,32 @@ fn caller_inputs(
         if inputs.contains_key(&key) {
             continue;
         }
-        let variable = dimensions
-            .get(&name)
-            .ok_or_else(|| unsupported(format!("inline local variable `{name}`")))?;
+        let Some(variable) = dimensions.get(&name) else {
+            // A name the caller's scope does not declare, such as a
+            // property of the class of the method that makes the call, is
+            // read as the caller reads it.
+            let value = bind_value(id, native, tree, session, dimensions, None)
+                .map_err(|_| unsupported(format!("inline local variable `{name}`")))?;
+            let ty = expression_types::type_of(tree, session, id, native, dimensions)
+                .map_err(|_| unsupported(format!("inline local variable `{name}`")))?;
+            let semantic_types::TyData::Packed(packed) = session.types.data(ty) else {
+                return Err(unsupported(
+                    "inline inputs require two-state scalar variables",
+                ));
+            };
+            let (width, signed) = (packed.bits(), packed.signed);
+            if packed.four_state || !(1..=64).contains(&width) {
+                return Err(unsupported(
+                    "inline inputs require two-state scalar variables",
+                ));
+            }
+            let mut ty = classes::unsigned_type(width as usize);
+            ty.is_signed = signed;
+            inputs.insert(key, (first_input + input_types.len(), width as u32, signed));
+            input_types.push(ty);
+            input_values.push(Some(value));
+            continue;
+        };
         if variable.chandle {
             return Err(AnalyzerError::IllegalChandleUse {
                 detail: "a chandle in a constraint".into(),
@@ -2180,6 +2224,7 @@ pub(super) fn randomize_with(
     session: &mut Session,
     expression: ExprId,
     constraints: Option<&[ExprId]>,
+    restricted: Option<&[celox_sv_syntax::Name]>,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
@@ -2196,6 +2241,15 @@ pub(super) fn randomize_with(
         native,
         dimensions,
     )? {
+        // A scope randomize has no object class to restrict names to
+        // (18.7).
+        if restricted.is_some() {
+            return Err(AnalyzerError::Parse(
+                "a restricted constraint block `with (...)` in a scope randomize call \
+                 (IEEE 1800-2023 18.7)"
+                    .into(),
+            ));
+        }
         return Ok(call);
     }
     let (method_name, _, receiver) = call_method(tree, session, expression, native, dimensions)?
@@ -2212,6 +2266,14 @@ pub(super) fn randomize_with(
     let first_input = class.static_inputs.len();
     let mut input_types = Vec::new();
     let mut input_values = Vec::new();
+    // In a restricted constraint block, only the names it lists resolve
+    // into the class; the others resolve in the caller's scope (18.7).
+    let listed = restricted.map(|names| {
+        names
+            .iter()
+            .map(|name| instances::normalize_identifier(&name.spelling))
+            .collect::<HashSet<_>>()
+    });
     caller_inputs(
         tree,
         session,
@@ -2220,7 +2282,10 @@ pub(super) fn randomize_with(
         constraint_ids,
         // A member of the class, also a static property: an input or a
         // solver variable of the program (see `classes::StaticInput`).
-        &|name| class.member(name).is_some(),
+        &|name| {
+            class.member(name).is_some()
+                && listed.as_ref().is_none_or(|listed| listed.contains(name))
+        },
         &mut inputs,
         first_input,
         &mut input_types,
