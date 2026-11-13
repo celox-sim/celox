@@ -36,6 +36,11 @@ pub(super) struct Property {
     pub randc: bool,
     /// The initializer of the declaration, evaluated by the constructor.
     pub initializer: Option<celox_sv_syntax::ExprId>,
+    /// The container an object holds a fixed-size unpacked array property
+    /// in, one element for each index (IEEE 1800-2023 7.4): its type stays
+    /// the array, which every type check and query sees, and an assignment
+    /// or a copy of the object copies the elements.
+    pub storage: Option<Arc<ContainerType>>,
 }
 
 impl Property {
@@ -52,6 +57,20 @@ impl Property {
                     ContainerKind::Dynamic | ContainerKind::Queue { .. }
                 )
             })
+    }
+
+    /// The container that holds the elements of an array property a
+    /// constraint program sees as an array: a dynamic array or queue, or a
+    /// fixed-size array (see `Property::storage`).
+    pub fn array_storage(&self) -> Option<&Arc<ContainerType>> {
+        self.storage
+            .as_ref()
+            .or_else(|| self.r#type.container.as_ref().filter(|_| self.sequence()))
+    }
+
+    /// Whether a constraint program holds the property as an array.
+    pub fn constraint_array(&self) -> bool {
+        self.array_storage().is_some()
     }
 
     /// Whether the property is a rand dynamic array or queue.
@@ -1062,14 +1081,33 @@ pub(super) fn shared_class(
                 session,
                 &context,
             )?;
-            if !ty.unpacked_ranges.is_empty() {
-                return Err(unsupported("class property with unpacked dimensions"));
-            }
+            // A fixed-size unpacked array is held in a container of its
+            // elements (see `Property::storage`).
+            let storage = if ty.unpacked_ranges.is_empty() {
+                None
+            } else {
+                if property.qualifiers.is_static {
+                    return Err(unsupported(
+                        "static class property with unpacked dimensions",
+                    ));
+                }
+                if property.qualifiers.rand || property.qualifiers.randc {
+                    return Err(unsupported(
+                        "random class property with unpacked dimensions",
+                    ));
+                }
+                // Its element type keeps its meaning outside the class too.
+                Some(containers::fixed_storage(
+                    &procedural::scoped_type(ty.clone(), env),
+                    tree,
+                    &context,
+                )?)
+            };
             if ty.container.is_some() && property.declaration.constant {
                 return Err(unsupported("const dynamic container class property"));
             }
             let property_name = instances::normalize_identifier(&variable.name.spelling);
-            if let Some(aggregate) = ty.unpacked_struct() {
+            if let Some(aggregate) = ty.unpacked_struct().filter(|_| storage.is_none()) {
                 if property.qualifiers.is_static {
                     return Err(unsupported(
                         "static class property of unpacked structure type",
@@ -1118,6 +1156,7 @@ pub(super) fn shared_class(
                         rand: false,
                         randc: false,
                         initializer: None,
+                        storage: None,
                     });
                 }
                 continue;
@@ -1137,7 +1176,10 @@ pub(super) fn shared_class(
             }
             let owner = name.to_owned();
             let name = property_name;
-            let mut field = field(&tree.functions, &ty, env, size)?;
+            let layout_type = storage
+                .as_ref()
+                .map_or_else(|| ty.clone(), |storage| containers::of((**storage).clone()));
+            let mut field = field(&tree.functions, &layout_type, env, size)?;
             size = field.offset + field.storage();
             field.key = crate::system_functions::ChangeKey::Property(property_key(&owner, &name));
             properties.push(Property {
@@ -1153,6 +1195,7 @@ pub(super) fn shared_class(
                 rand: property.qualifiers.rand,
                 randc: property.qualifiers.randc,
                 initializer: variable.value,
+                storage,
             });
         }
     }
