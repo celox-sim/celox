@@ -846,6 +846,17 @@ pub(super) fn runtime_select_as_shift(
     })
 }
 
+/// The expression of select position `expr`, its calls of system
+/// functions that have a constant value, such as the `$clog2(N)` of an
+/// element width, replaced by their values (see [`fold_constant_calls`]).
+pub(super) fn expr_from_select_position(
+    expr: &sv::ir::ConstExpr,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<sv::ir::Expr> {
+    expr_from_const_expr(&fold_constant_calls(expr, constants, parameter_types))
+}
+
 /// `expr` with each call of a system function that has a constant value,
 /// such as the `$clog2(N)` of an element width in a select position,
 /// replaced by that value: an `integer` (IEEE 1800-2023 20.8.1).
@@ -1183,7 +1194,7 @@ pub(super) fn lower_dynamic_array_element_index_slt(
     arena: &mut SLTNodeArena<SourceVarId>,
     element_width: usize,
 ) -> Option<(celox_slt::NodeId, HashSet<VarAtomBase<SourceVarId>>)> {
-    let offset_expr = expr_from_const_expr(offset)?;
+    let offset_expr = expr_from_select_position(offset, constants, parameter_types)?;
     let (offset, sources) = lower_expr_with_context(
         &offset_expr,
         variables,

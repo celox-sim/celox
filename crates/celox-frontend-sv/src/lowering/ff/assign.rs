@@ -474,8 +474,8 @@ impl Ff<'_, '_> {
         node: NodeId,
     ) -> Result<(), sv::AnalyzerError> {
         let target_width = access.msb - access.lsb + 1;
-        let offset =
-            expr_from_const_expr(offset).ok_or_else(|| unsupported("dynamic assignment index"))?;
+        let offset = expr_from_select_position(offset, self.m.constants, self.m.parameter_types)
+            .ok_or_else(|| unsupported("dynamic assignment index"))?;
         let offset = self.propagate(&offset);
         let (bit_offset, _) = lower_expr_with_context(
             &offset,

@@ -296,7 +296,7 @@ impl Ff<'_, '_> {
         ) {
             // A run-time element: its whole selected part or nothing.
             let width = access.msb - access.lsb + 1;
-            let offset = expr_from_const_expr(&offset)
+            let offset = expr_from_select_position(&offset, constants, parameter_types)
                 .ok_or_else(|| unsupported("dynamic assignment index"))?;
             let offset = self.propagate(&offset);
             let (bit_offset, _) = lower_expr_with_context(
