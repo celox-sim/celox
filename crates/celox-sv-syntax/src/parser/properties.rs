@@ -98,8 +98,9 @@ impl Parser<'_> {
                     || (self.nth(offset + 1) == "["
                         && self.nth(offset + 2).starts_with(|c: char| c.is_ascii_digit()))))
             && word != "|=>"
-            // A sequence disjunction (16.9.7).
-            && word != "or"
+            // The sequence operators `or`, `and` and `intersect` (16.9.5 to
+            // 16.9.7).
+            && !matches!(word, "or" | "and" | "intersect")
     }
 
     /// `[clocking_event] [disable iff (expression)] sequence [|-> sequence]`
@@ -198,13 +199,33 @@ impl Parser<'_> {
         })
     }
 
-    /// A sequence expression of the supported subset of Syntax 16-3:
-    /// `or` (16.9.7) of concatenations, which bind tighter (Table 16-1).
+    /// A sequence expression of the supported subset of Syntax 16-3: `or`
+    /// (16.9.7) of `and` (16.9.5) of `intersect` (16.9.6) of
+    /// concatenations, each binding tighter than the one before it, all
+    /// left-associative (Table 16-1).
     fn sequence_expr(&mut self) -> Result<SequenceExpr> {
-        let mut left = self.sequence_concat()?;
+        let mut left = self.sequence_and()?;
         while self.eat("or") {
-            let right = self.sequence_concat()?;
+            let right = self.sequence_and()?;
             left = SequenceExpr::Or(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn sequence_and(&mut self) -> Result<SequenceExpr> {
+        let mut left = self.sequence_intersect()?;
+        while self.eat("and") {
+            let right = self.sequence_intersect()?;
+            left = SequenceExpr::And(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn sequence_intersect(&mut self) -> Result<SequenceExpr> {
+        let mut left = self.sequence_concat()?;
+        while self.eat("intersect") {
+            let right = self.sequence_concat()?;
+            left = SequenceExpr::Intersect(Box::new(left), Box::new(right));
         }
         Ok(left)
     }
@@ -318,7 +339,7 @@ impl Parser<'_> {
                 }
                 // At any depth: a Boolean expression has no sequence
                 // operator, also in its own parentheses, as `((a or b))`.
-                "##" | "or" if depth >= 1 => return true,
+                "##" | "or" | "and" | "intersect" if depth >= 1 => return true,
                 _ => {}
             }
             offset += 1;

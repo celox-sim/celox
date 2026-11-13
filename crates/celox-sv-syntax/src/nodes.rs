@@ -1243,6 +1243,12 @@ pub enum SequenceExpr {
     },
     /// `left or right` (16.9.7): a match of either.
     Or(Box<SequenceExpr>, Box<SequenceExpr>),
+    /// `left and right` (16.9.5): both start at one tick, and the sequence
+    /// matches at the later of their matches.
+    And(Box<SequenceExpr>, Box<SequenceExpr>),
+    /// `left intersect right` (16.9.6): both start at one tick and match at
+    /// one tick.
+    Intersect(Box<SequenceExpr>, Box<SequenceExpr>),
 }
 
 impl SequenceExpr {
@@ -1259,7 +1265,9 @@ impl SequenceExpr {
                         pending.push(left);
                     }
                 }
-                SequenceExpr::Or(left, right) => {
+                SequenceExpr::Or(left, right)
+                | SequenceExpr::And(left, right)
+                | SequenceExpr::Intersect(left, right) => {
                     pending.push(right);
                     pending.push(left);
                 }

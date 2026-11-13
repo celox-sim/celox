@@ -3408,8 +3408,8 @@ fn named_assertion_declarations_outside_the_subset_keep_their_boundary() {
         "property p; a |-> b ##[0:$] c; endproperty",
         "sequence s; disable iff (r) a; endsequence",
         "sequence s; a |-> b; endsequence",
-        "property p; a and b; endproperty",
-        "property p; @(posedge clk or negedge rst) a and b; endproperty",
+        "property p; a throughout b; endproperty",
+        "property p; @(posedge clk or negedge rst) a within b; endproperty",
         "property p; a; endproperty : q",
     ] {
         let syntax = parse(&format!("module M; {declaration} endmodule"));
@@ -3418,9 +3418,9 @@ fn named_assertion_declarations_outside_the_subset_keep_their_boundary() {
     // Assertions with property operators outside the subset stay opaque,
     // also after a clock using event operators.
     for property in [
-        "a and b",
+        "a within b",
         "not a",
-        "@(posedge clk or negedge rst) a and b",
+        "@(posedge clk or negedge rst) a within b",
         "@(posedge clk) a |-> b |-> c",
     ] {
         let syntax = parse(&format!(
@@ -3469,6 +3469,12 @@ fn sequences_keep_their_operators() {
             SequenceExpr::Or(left, right) => {
                 format!("({} or {})", show(syntax, left), show(syntax, right))
             }
+            SequenceExpr::And(left, right) => {
+                format!("({} and {})", show(syntax, left), show(syntax, right))
+            }
+            SequenceExpr::Intersect(left, right) => {
+                format!("({} intersect {})", show(syntax, left), show(syntax, right))
+            }
         }
     }
     let shown = |source: &str| {
@@ -3504,6 +3510,13 @@ fn sequences_keep_their_operators() {
         shown("module M; assert property (@(posedge clk) ((a or b)) ##1 (((c ##1 d)))); endmodule"),
         "((a or b) ##[1:1] (c ##[1:1] d))"
     );
+    // `intersect` binds tighter than `and`, which binds tighter than `or`.
+    assert_eq!(
+        shown(
+            "module M; assert property (@(posedge clk) a or b and c ##1 d intersect e ##[0:2] f or ((g and h) ##0 i)); endmodule"
+        ),
+        "((a or (b and ((c ##[1:1] d) intersect (e ##[0:2] f)))) or ((g and h) ##[0:0] i))"
+    );
 }
 
 /// A sequence over cycles keeps its steps, their delays and match items,
@@ -3537,7 +3550,9 @@ fn sequences_over_cycles_keep_steps_and_local_variables() {
                     steps.extend(right);
                     steps
                 }
-                SequenceExpr::Or(..) => panic!("a linear sequence"),
+                SequenceExpr::Or(..) | SequenceExpr::And(..) | SequenceExpr::Intersect(..) => {
+                    panic!("a linear sequence")
+                }
             }
         }
         let steps = |expr: &SequenceExpr| {

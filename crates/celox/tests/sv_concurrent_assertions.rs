@@ -361,6 +361,76 @@ endmodule"#;
     }
 }
 
+/// `and` matches when both operands have matched, at the later match, and
+/// `intersect` when both match at one tick (IEEE 1800-2023 16.9.5,
+/// 16.9.6).
+#[test]
+fn sequences_with_and_and_intersect_match_when_both_operands_have() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit clk;
+ int cnt;
+ int f_passed, f_failed, f_late, g_passed, g_failed, h_passed, h_failed, i_passed, i_failed;
+ always @(posedge clk) cnt <= cnt + 1;
+ // The left operand matches a tick after the start, the right one three:
+ // the action runs at the third, when `cnt` is 0 modulo 4 after the NBA.
+ assert property (@(posedge clk) (cnt % 4 == 0 ##1 1) and (cnt % 4 == 0 ##3 cnt % 4 == 3))
+  begin f_passed++; if (cnt % 4 == 0) f_late++; end else f_failed++;
+ // The right operand never matches: an attempt the left one starts fails
+ // at its third tick, every other at its first.
+ assert property (@(posedge clk) (cnt % 4 == 0 ##1 cnt % 4 == 1) and (1 ##2 cnt < 0)) g_passed++; else g_failed++;
+ // Only the left way of two ticks has the right operand's length.
+ assert property (@(posedge clk) (1 ##[1:3] cnt % 4 == 3) intersect (1 ##2 1)) h_passed++; else h_failed++;
+ // Ways of both operands that match at one tick pass the attempt once.
+ assert property (@(posedge clk) (cnt % 2 == 0 ##[1:2] 1) and (1 ##[0:1] 1)) i_passed++; else i_failed++;
+ initial repeat (20) begin #1 clk = 1; #1 clk = 0; end
+endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("and.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(41).unwrap();
+    // Ticks 0 to 19 sample `cnt` 0 to 19.
+    for (name, expected) in [
+        ("f_passed", 5u32),
+        ("f_late", 5),
+        ("f_failed", 15),
+        ("g_passed", 0),
+        ("g_failed", 20),
+        // Attempts at 1, 5, 9, 13 and 17 pass at their third tick; the
+        // others up to tick 17 fail there, and those of 18 and 19 end with
+        // the simulation.
+        ("h_passed", 5),
+        ("h_failed", 13),
+        ("i_passed", 10),
+        ("i_failed", 10),
+    ] {
+        assert_eq!(sim.get(sim.signal(name)), expected.into(), "{name}");
+    }
+}
+
+/// The 1024-way cap counts the ways of `intersect` operands of one length,
+/// not every pair: 33 ways on each side share one length (IEEE 1800-2023
+/// 16.9.6).
+#[test]
+fn intersect_counts_only_ways_of_one_length() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit clk;
+ int passed, failed;
+ assert property (@(posedge clk) (1 ##[0:32] 1) intersect (1 ##[32:64] 1)) passed++; else failed++;
+ initial repeat (40) begin #1 clk = 1; #1 clk = 0; end
+endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("intersect.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(81).unwrap();
+    // The attempts of ticks 0 to 7 match 32 ticks later; the others end
+    // with the simulation.
+    assert_eq!(sim.get(sim.signal("passed")), 8u32.into());
+    assert_eq!(sim.get(sim.signal("failed")), 0u32.into());
+}
+
 #[test]
 fn sequences_with_several_ways_to_match_name_what_they_do_not_support() {
     let long = vec!["a"; 1025].join(" ##0 ");
@@ -391,6 +461,14 @@ fn sequences_with_several_ways_to_match_name_what_they_do_not_support() {
         (
             "@(posedge clk) a ##[0:1000] b",
             "sequence whose monitor takes more than 1048576 terms",
+        ),
+        (
+            "@(posedge clk) (a, note()) and b",
+            "match item in an operand of and",
+        ),
+        (
+            "@(posedge clk) (a ##1 b) intersect (a ##2 b)",
+            "intersect of sequences without ways to match of one length",
         ),
         // The tick `|=>` adds may not overflow the first delay.
         (
