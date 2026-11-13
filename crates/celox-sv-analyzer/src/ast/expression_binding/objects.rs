@@ -1262,10 +1262,10 @@ pub(super) fn random_selection(
                         if class.static_slots[slot].field.four_state {
                             return Err(unsupported("randomization of a 4-state class property"));
                         }
-                        bits[class.properties.len() + 1 + slot] = '1';
+                        bits[class.slot_bits[slot]] = '1';
                         continue;
                     }
-                    None => {
+                    Some(classes::Member::Aggregate(_)) | None => {
                         return Err(unsupported(format!(
                             "randomize argument `{name}` is not an instance property"
                         )));
@@ -1299,7 +1299,7 @@ pub(super) fn random_selection(
                     ));
                 }
                 unsolvable |= !classes::constraints::constrainable(property) && !array;
-                bits[index + 1] = '1';
+                bits[class.property_bits[index]] = '1';
             }
             _ => {
                 return Err(unsupported(
@@ -1500,8 +1500,17 @@ pub(in crate::ast) fn static_rand_mode(
         return Ok(None);
     }
     // `p.rand_mode()` in a method of the class names the member `p` as
-    // `this.p` would (8.9, 18.8): its static property, if that is it.
+    // `this.p` would (8.9, 18.8): its static property, if that is it. A
+    // local or formal `p` of the method hides it (6.21): the call is then
+    // that variable's, an object's or an error.
     let unqualified = match &native.expression(ungroup(*expression, native)).kind {
+        ExprKind::Name(name)
+            if !dimensions
+                .class_static_members
+                .contains(&instances::normalize_identifier(&name.spelling)) =>
+        {
+            None
+        }
         ExprKind::Name(name) => match scope_class(dimensions) {
             Some(scope) => {
                 let class = class(tree, session, dimensions, &scope)?;
@@ -1572,9 +1581,12 @@ pub(in crate::ast) fn rand_mode_call(
                         "rand_mode setter is void and cannot be used as a value",
                     ));
                 }
-                return Ok(Some(Expr::Unary {
-                    op: UnaryOp::LogicNot,
-                    expr: Box::new(Expr::Ident(off)),
+                // The getter's value is an `int` (IEEE 1800-2023 18.8), as
+                // that of an instance property's mode.
+                return Ok(Some(Expr::Mux {
+                    condition: Box::new(Expr::Ident(off)),
+                    then_expr: Box::new(Expr::Literal("32'sd0".into())),
+                    else_expr: Box::new(Expr::Literal("32'sd1".into())),
                 }));
             }
             let property_target = property(tree, session, *expression, native, dimensions)?;
@@ -1872,6 +1884,7 @@ pub(super) fn randomize_with(
                 &class.properties,
                 &classes::constraints::Names {
                     lineage: &class.lineage,
+                    aggregates: &class.aggregates,
                     statics: &class.statics,
                     inputs: &class.static_inputs,
                     slots: &class.static_slots,

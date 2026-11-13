@@ -4901,6 +4901,198 @@ fn static_properties_are_admitted_as_instance_properties_are() {
 }
 
 #[test]
+fn randomize_arguments_select_static_rand_properties_through_base_handles() {
+    // `b.randomize(s)` through a base handle selects the base's static rand
+    // property in the derived object it dispatches to (IEEE 1800-2023 8.20,
+    // 18.11), not a property the derived class adds.
+    let source = "class Base; static rand bit [7:0] s; rand int a; endclass
+    class Derived extends Base; rand int x, y; endclass
+    module Top;
+        Base b;
+        Derived d;
+        int ok, changed;
+        bit [7:0] previous;
+        initial begin
+            d = new;
+            b = d;
+            d.a = 7; d.x = 5; d.y = 6;
+            ok = 1;
+            repeat (8) begin
+                previous = Base::s;
+                ok &= b.randomize(s);
+                changed += Base::s != previous;
+            end
+            $display(\"%0d %0d %0d %0d %0d\", ok, changed >= 6, d.a, d.x, d.y);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1 1 7 5 6"]
+    );
+}
+
+#[test]
+fn locals_hide_static_rand_properties_in_rand_mode_calls() {
+    // A formal or local handle `p` of a method hides the class's static
+    // rand property `p` (IEEE 1800-2023 6.21): `p.rand_mode(0)` sets the
+    // modes of the object it refers to (18.8), every random variable of it.
+    let source = "class C;
+        static rand int p;
+        rand int q;
+        function void formal(C p); p.rand_mode(0); endfunction
+        function void local_(C other); C p = other; p.rand_mode(0); endfunction
+    endclass
+    module Top;
+        C c, o1, o2;
+        initial begin
+            c = new; o1 = new; o2 = new;
+            c.formal(o1);
+            $display(\"%0d %0d\", o1.q.rand_mode(), c.q.rand_mode());
+            o1.rand_mode(1);
+            c.local_(o2);
+            $display(\"%0d %0d\", o2.q.rand_mode(), c.q.rand_mode());
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["0 1", "0 1"]
+    );
+}
+
+#[test]
+fn scalar_locals_hide_static_rand_properties_in_rand_mode_calls() {
+    // Any nearer variable `p` of a method, not only a handle, hides the
+    // class's static rand property `p` (IEEE 1800-2023 6.21):
+    // `p.rand_mode(0)` is then a call on an integral variable, which has no
+    // rand_mode, not the static property's.
+    for method in [
+        "function void f(); int p; p.rand_mode(0); endfunction",
+        "function void f(int p); p.rand_mode(0); endfunction",
+        "function int f(); int p; return p.rand_mode(); endfunction",
+    ] {
+        let source = format!(
+            "class C; static rand int p; {method} endclass
+            module Top; C c; initial begin c = new; void'(c.f()); end endmodule"
+        );
+        let error = class_error(&source, method);
+        assert!(error.contains("rand_mode"), "{method}: {error}");
+    }
+}
+
+#[test]
+fn static_rand_mode_getters_are_ints() {
+    // The rand_mode getter of a static rand property is an `int` (IEEE
+    // 1800-2023 18.8), compared and added as a signed 32-bit value.
+    let source = "class C; static rand int p; endclass
+    module Top;
+        C c;
+        initial begin
+            c = new;
+            $display(\"%0d %0d %0d\", c.p.rand_mode() < -1, c.p.rand_mode() + -2, $bits(c.p.rand_mode()));
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["0 -1 32"]
+    );
+}
+
+#[test]
+fn object_property_expressions_name_the_static_property_that_hides() {
+    // `d.p` names the member `p` denotes in the class of `d` (IEEE 1800-2023
+    // 8.14): a derived static rand `p` that hides a base instance `p`, which
+    // a base handle still reaches.
+    let source = "class Base; int p; endclass
+    class Derived extends Base; static rand int p; endclass
+    module Top;
+        Derived d;
+        Base b;
+        initial begin
+            d = new;
+            b = d;
+            d.p = 5;
+            b.p = 9;
+            $display(\"%0d %0d %0d\", Derived::p, d.p, b.p);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["5 5 9"]);
+}
+
+#[test]
+fn static_properties_and_unpacked_structure_properties_hide_each_other() {
+    // One lookup decides the member `p` denotes in the class of `d` (IEEE
+    // 1800-2023 8.14), whether one of them is of unpacked structure type: a
+    // derived static `p` hides a base structure `p`, which a base handle
+    // still reaches, and a derived structure `p` hides a base static `p`.
+    let source = "typedef struct { int a; int b; } s_t;
+    class Base; s_t p; endclass
+    class Derived extends Base; static int p; endclass
+    class Root; static int p; endclass
+    class Leaf extends Root; s_t p; endclass
+    module Top;
+        Derived d;
+        Base b;
+        Leaf l;
+        initial begin
+            d = new;
+            b = d;
+            l = new;
+            d.p = 5;
+            b.p.a = 9;
+            l.p.a = 3;
+            Root::p = 4;
+            $display(\"%0d %0d %0d %0d %0d\", Derived::p, d.p, b.p.a, l.p.a, Root::p);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["5 5 9 3 4"]
+    );
+}
+
+#[test]
+fn wide_static_rand_properties_without_constraints_are_randomized() {
+    // A static rand scalar wider than 64 bits no constraint names is drawn
+    // as an instance one is, at its width (IEEE 1800-2023 18.4).
+    let source = "class C; static rand bit [99:0] w; endclass
+    module Top;
+        C c;
+        int ok, high;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (8) begin
+                ok &= c.randomize();
+                high += |C::w[99:64];
+            end
+            $display(\"%0d %0d\", ok, high >= 6);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1"]);
+}
+
+#[test]
+fn distributions_constrain_static_rand_properties() {
+    // A distribution over a static rand property constrains the variable
+    // the call solves for it (IEEE 1800-2023 18.4, 18.5.3).
+    let source = "class C;
+        static rand bit [7:0] s;
+        constraint c { s dist {[0:3] :/ 1, [10:13] :/ 1}; }
+    endclass
+    module Top;
+        C c;
+        int ok;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (20) ok &= c.randomize() && (C::s inside {[0:3], [10:13]});
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
 fn static_rand_properties_without_constraints_are_randomized() {
     // A class whose only random variables are static rand properties, and
     // that has no constraints, still solves them (IEEE 1800-2023 18.4).

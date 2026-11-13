@@ -323,7 +323,7 @@ fn lower_methods(
                         left: Box::new(Expr::Binary {
                             left: Box::new(Expr::Ident(argument.clone())),
                             op: BinaryOp::Shr,
-                            right: Box::new(Expr::Literal((index + 1).to_string())),
+                            right: Box::new(Expr::Literal(class.property_bits[index].to_string())),
                         }),
                         op: BinaryOp::BitAnd,
                         right: Box::new(Expr::Literal("1'b1".into())),
@@ -336,16 +336,14 @@ fn lower_methods(
                         vec![Expr::Ident(this.clone()), selected],
                     )));
                 }
-                // The bits of the static rand properties follow (see
-                // `classes::Class::selection_type`).
+                // The bits of the static rand properties (see
+                // `classes::Class::property_bits`).
                 for (index, slot) in class.static_slots.iter().enumerate() {
                     let selected = Expr::Binary {
                         left: Box::new(Expr::Binary {
                             left: Box::new(Expr::Ident(argument.clone())),
                             op: BinaryOp::Shr,
-                            right: Box::new(Expr::Literal(
-                                (class.properties.len() + 1 + index).to_string(),
-                            )),
+                            right: Box::new(Expr::Literal(class.slot_bits[index].to_string())),
                         }),
                         op: BinaryOp::BitAnd,
                         right: Box::new(Expr::Literal("1'b1".into())),
@@ -536,6 +534,33 @@ fn lower_methods(
                                 else_body: Vec::new(),
                             });
                         }
+                        // A static rand property no constraint names is
+                        // drawn in its slot as an instance one is, at any
+                        // width (18.4).
+                        for slot in &class.static_slots {
+                            body.push(Stmt::If {
+                                condition: Expr::Binary {
+                                    left: Box::new(Expr::Binary {
+                                        left: Box::new(Expr::Ident(argument.clone())),
+                                        op: BinaryOp::Ne,
+                                        right: Box::new(Expr::Literal("1".into())),
+                                    }),
+                                    op: BinaryOp::LogicAnd,
+                                    right: Box::new(classes::object_call(
+                                        ObjectOp::ModeGet(slot.field.offset, true),
+                                        vec![Expr::Ident(this.clone())],
+                                    )),
+                                },
+                                then_body: random_field(
+                                    &mut builder,
+                                    slot.field,
+                                    &slot.r#type,
+                                    None,
+                                    &this,
+                                ),
+                                else_body: Vec::new(),
+                            });
+                        }
                     }
                     for (field, variable, _) in &shadows {
                         body.push(Stmt::Assign {
@@ -704,30 +729,42 @@ fn random_property(
     property: &classes::Property,
     this: &str,
 ) -> Vec<Stmt> {
+    let cycle = property.randc.then(|| {
+        property
+            .cyclic_domain_size()
+            .expect("validated randc domain")
+    });
+    random_field(builder, property.field, &property.r#type, cycle, this)
+}
+
+/// The statements that store a random value of `ty` in `field` of `this`,
+/// the next of its cycle of `cycle` values for a randc one (IEEE 1800-2023
+/// 18.4.1, 18.4.2): a member of an enumeration, or as many random bits as
+/// the field has.
+fn random_field(
+    builder: &mut BodyBuilder<'_, '_, '_>,
+    field: system_functions::ObjectField,
+    ty: &Type,
+    cycle: Option<u16>,
+    this: &str,
+) -> Vec<Stmt> {
+    let randc = cycle.is_some();
     let random = || {
-        let op = if property.randc {
-            ObjectOp::RandomCyclic {
-                offset: property.field.offset,
-                count: property
-                    .cyclic_domain_size()
-                    .expect("validated randc domain"),
-            }
-        } else {
-            ObjectOp::Random
+        let op = match cycle {
+            Some(count) => ObjectOp::RandomCyclic {
+                offset: field.offset,
+                count,
+            },
+            None => ObjectOp::Random,
         };
         classes::object_call(op, vec![Expr::Ident(this.into())])
     };
     let mut body = Vec::new();
-    let value = if let Some(values) = property
-        .r#type
-        .enum_domain
-        .as_ref()
-        .map(|domain| domain.values())
-    {
+    let value = if let Some(values) = ty.enum_domain.as_ref().map(|domain| domain.values()) {
         let count = values.len() as u64;
         let threshold = count.wrapping_neg() % count;
         let draw = builder.declare("$enum_draw", classes::unsigned_type(64));
-        if property.randc {
+        if randc {
             body.push(Stmt::Assign {
                 lhs: LValue::Ident(draw.clone()),
                 rhs: random(),
@@ -760,7 +797,7 @@ fn random_property(
             });
         }
         let literal = |value: crate::ast::enums::MemberValue| {
-            Expr::Literal(value.literal(property.field.width as usize, property.field.signed))
+            Expr::Literal(value.literal(field.width as usize, field.signed))
         };
         let mut value = literal(*values.last().unwrap());
         for (index, &member) in values.iter().enumerate().rev().skip(1) {
@@ -775,18 +812,14 @@ fn random_property(
             };
         }
         value
-    } else if property.field.width > 64 && !property.randc {
+    } else if field.width > 64 && !randc {
         // Each draw gives 64 random bits.
-        Expr::Concat(
-            (0..property.field.width.div_ceil(64))
-                .map(|_| random())
-                .collect(),
-        )
+        Expr::Concat((0..field.width.div_ceil(64)).map(|_| random()).collect())
     } else {
         random()
     };
     body.push(Stmt::Eval(classes::object_call(
-        ObjectOp::Store(property.field),
+        ObjectOp::Store(field),
         vec![Expr::Ident(this.into()), value],
     )));
     body

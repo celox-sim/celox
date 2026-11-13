@@ -421,6 +421,7 @@ fn accessible(
 /// which tells which of them a name denotes (see `classes::member`).
 pub(in crate::ast) struct Names<'a> {
     pub lineage: &'a [String],
+    pub aggregates: &'a [super::AggregateProperty],
     pub statics: &'a [super::StaticProperty],
     pub inputs: &'a [super::StaticInput],
     pub slots: &'a [super::StaticSlot],
@@ -433,9 +434,15 @@ fn instance<'p>(
     properties: &'p [Property],
     names: &Names<'_>,
 ) -> Option<(usize, &'p Property)> {
-    match super::member(name, names.lineage, properties, names.statics)? {
+    match super::member(
+        name,
+        names.lineage,
+        properties,
+        names.aggregates,
+        names.statics,
+    )? {
         super::Member::Instance(index) => Some((index, &properties[index])),
-        super::Member::Static(_) => None,
+        super::Member::Aggregate(_) | super::Member::Static(_) => None,
     }
 }
 
@@ -772,7 +779,13 @@ pub(in crate::ast) fn bind_inputs(
             }
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
-                let member = super::member(&name, names.lineage, properties, names.statics);
+                let member = super::member(
+                    &name,
+                    names.lineage,
+                    properties,
+                    names.aggregates,
+                    names.statics,
+                );
                 if let Some(super::Member::Static(index)) = member {
                     // A static property of the class (18.5): the variable
                     // of the rand one the call solves, the value of another.

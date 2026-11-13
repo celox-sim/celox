@@ -59,22 +59,26 @@ pub(super) struct StaticSlot {
 
 /// The member of a class that a name denotes in it (IEEE 1800-2023 8.14):
 /// the one the most derived of the class and its bases declares, an
-/// instance property, or a static property, which hide each other alike.
+/// instance property, one of unpacked structure type, or a static
+/// property, which hide each other alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Member {
     /// Property `0` of [`Class::properties`].
     Instance(usize),
+    /// Property `0` of [`Class::aggregates`], of unpacked structure type.
+    Aggregate(usize),
     /// Property `0` of [`Class::statics`].
     Static(usize),
 }
 
 /// The member that `name` denotes in a class whose lineage, from the class
-/// itself to its root, is `lineage`, with `properties` and `statics` (see
-/// [`Member`]).
+/// itself to its root, is `lineage`, with `properties`, `aggregates` and
+/// `statics` (see [`Member`]).
 pub(super) fn member(
     name: &str,
     lineage: &[String],
     properties: &[Property],
+    aggregates: &[AggregateProperty],
     statics: &[StaticProperty],
 ) -> Option<Member> {
     let instance = |owner: Option<&str>| {
@@ -84,6 +88,14 @@ pub(super) fn member(
                 property.name == name && owner.is_none_or(|owner| property.owner == owner)
             })
             .map(Member::Instance)
+    };
+    let aggregate = |owner: Option<&str>| {
+        aggregates
+            .iter()
+            .rposition(|aggregate| {
+                aggregate.name == name && owner.is_none_or(|owner| aggregate.owner == owner)
+            })
+            .map(Member::Aggregate)
     };
     let shared = |owner: Option<&str>| {
         statics
@@ -95,11 +107,16 @@ pub(super) fn member(
             })
             .map(Member::Static)
     };
+    let declared = |owner: Option<&str>| {
+        instance(owner)
+            .or_else(|| aggregate(owner))
+            .or_else(|| shared(owner))
+    };
     lineage
         .iter()
-        .find_map(|owner| instance(Some(owner)).or_else(|| shared(Some(owner))))
+        .find_map(|owner| declared(Some(owner)))
         // A class whose lineage is not known names its members as declared.
-        .or_else(|| instance(None).or_else(|| shared(None)))
+        .or_else(|| declared(None))
 }
 
 impl Property {
@@ -357,6 +374,13 @@ pub(super) struct Class {
     ///
     /// [`Expr::Static`]: celox_heap::randomization::Expr::Static
     pub static_slots: Vec<StaticSlot>,
+    /// The bit of the argument of a randomize call that selects each of
+    /// `properties` and each of `static_slots` (see
+    /// [`Class::selection_type`]): a base's bits are those of the base, so
+    /// that a mask a call through a base handle builds selects the same
+    /// members in the class it dispatches to.
+    pub property_bits: Vec<usize>,
+    pub slot_bits: Vec<usize>,
     /// The class and its bases, from the class to its root.
     pub lineage: Vec<String>,
     /// Methods visible in the class, overrides replacing inherited ones.
@@ -393,9 +417,36 @@ impl Class {
         unsigned_type(self.properties.len() + self.static_slots.len() + 1)
     }
 
+    /// The bits of a selection for the members a class adds to those of
+    /// `base`: its new properties and slots take the bits after the base's
+    /// (see [`Class::property_bits`]).
+    fn selection_bits(
+        base: Option<&Class>,
+        properties: usize,
+        slots: usize,
+    ) -> (Vec<usize>, Vec<usize>) {
+        let (mut property_bits, mut slot_bits) = base
+            .map(|base| (base.property_bits.clone(), base.slot_bits.clone()))
+            .unwrap_or_default();
+        let mut next = 1 + property_bits.len() + slot_bits.len();
+        for bits in [(&mut property_bits, properties), (&mut slot_bits, slots)] {
+            while bits.0.len() < bits.1 {
+                bits.0.push(next);
+                next += 1;
+            }
+        }
+        (property_bits, slot_bits)
+    }
+
     /// The member that `name` denotes in the class (see [`Member`]).
     pub(super) fn member(&self, name: &str) -> Option<Member> {
-        member(name, &self.lineage, &self.properties, &self.statics)
+        member(
+            name,
+            &self.lineage,
+            &self.properties,
+            &self.aggregates,
+            &self.statics,
+        )
     }
 
     /// The slot of static rand property `property` (see [`StaticSlot`]).
@@ -459,14 +510,13 @@ impl Class {
     }
 
     /// Whether `randomize` solves the class's constraint program: it has
-    /// constraints, rand object handles, rand arrays or static rand
-    /// properties, whose slots only the program randomizes (see
-    /// `Class::static_slots`).
+    /// constraints, rand object handles or rand arrays. Otherwise each
+    /// random property, and each static rand one in its slot (see
+    /// `Class::static_slots`), is drawn on its own.
     pub fn solved(&self) -> bool {
         self.has_constraints
             || self.has_rand_objects()
             || self.properties.iter().any(Property::rand_array)
-            || !self.static_slots.is_empty()
     }
 
     /// Validate the supported unconstrained subset before binding a call.
@@ -528,6 +578,12 @@ impl Class {
     /// The property `name`; one the class declares hides one of a base
     /// (IEEE 1800-2023 8.14).
     pub fn property(&self, name: &str) -> Option<&Property> {
+        // The member the first name of a path denotes, a static property of
+        // a derived class hiding an instance one of a base too (8.14).
+        let root = name.split('.').next().unwrap_or(name);
+        if matches!(self.member(root), Some(Member::Static(_))) {
+            return None;
+        }
         let (index, property) = self
             .properties
             .iter()
@@ -539,6 +595,12 @@ impl Class {
 
     /// The property or member of unpacked structure type `name`.
     pub fn aggregate(&self, name: &str) -> Option<&AggregateProperty> {
+        // The member the first name of a path denotes, a static property of
+        // a derived class hiding one of a base too (8.14).
+        let root = name.split('.').next().unwrap_or(name);
+        if matches!(self.member(root), Some(Member::Static(_))) {
+            return None;
+        }
         let aggregate = self
             .aggregates
             .iter()
@@ -566,8 +628,13 @@ impl Class {
             })
     }
 
+    /// The static property `name` denotes in the class (see [`member`]):
+    /// none when an instance property of a more derived class hides it.
     pub fn static_property(&self, name: &str) -> Option<&StaticProperty> {
-        self.statics.iter().find(|property| property.name == name)
+        match self.member(name)? {
+            Member::Static(index) => Some(&self.statics[index]),
+            Member::Instance(_) | Member::Aggregate(_) => None,
+        }
     }
 
     pub fn method(&self, name: &str) -> Option<&Method> {
@@ -1573,6 +1640,7 @@ pub(super) fn shared_class(
     );
     let names = constraints::Names {
         lineage: &lineage,
+        aggregates: &aggregates,
         statics: &statics,
         inputs: &static_inputs,
         slots: &static_slots,
@@ -1612,6 +1680,8 @@ pub(super) fn shared_class(
     }
     session.constraint_owners.pop();
     session.constraint_scopes.pop();
+    let (property_bits, slot_bits) =
+        Class::selection_bits(base.as_deref(), properties.len(), static_slots.len());
     let mut class = Class {
         name: name.to_owned(),
         id: class_id(name),
@@ -1629,6 +1699,8 @@ pub(super) fn shared_class(
         statics,
         static_inputs,
         static_slots,
+        property_bits,
+        slot_bits,
         lineage,
         methods,
         declarations: Vec::new(),
@@ -1752,6 +1824,8 @@ fn interface_class(
         statics: Vec::new(),
         static_inputs: Vec::new(),
         static_slots: Vec::new(),
+        property_bits: Vec::new(),
+        slot_bits: Vec::new(),
         lineage: vec![name.to_owned()],
         methods,
         declarations,
