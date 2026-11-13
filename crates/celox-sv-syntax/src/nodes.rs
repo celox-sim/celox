@@ -1216,20 +1216,86 @@ pub struct PropertySpec {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct SequenceId(pub(crate) usize);
 
-/// A sequence of steps a fixed number of clock ticks apart (IEEE 1800-2023
-/// 16.7), or an implication with such an antecedent and consequent
-/// (16.12.7): `|=>` is `|->` with the consequent one tick later. The local
-/// variables are those its declaration declares (16.10).
+/// A sequence (IEEE 1800-2023 16.7), or an implication with a sequence
+/// antecedent and consequent (16.12.7): `|=>` is `|->` with the consequent
+/// one tick later. The local variables are those its declaration declares
+/// (16.10).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Sequence {
-    pub antecedent: Option<Vec<SequenceStep>>,
-    pub consequent: Vec<SequenceStep>,
+    pub antecedent: Option<SequenceExpr>,
+    pub consequent: SequenceExpr,
     pub locals: Vec<SequenceLocal>,
+}
+
+/// A sequence expression in the supported subset of Syntax 16-3.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SequenceExpr {
+    /// A Boolean expression, which matches in one tick, with the match items
+    /// it runs when it matches (16.10, 16.11).
+    Boolean(SequenceBoolean),
+    /// `left ##delay right` (16.7): `right` starts `delay` ticks after the
+    /// tick `left` ends its match at, or after the start of the sequence
+    /// without `left`.
+    Concat {
+        left: Option<Box<SequenceExpr>>,
+        delay: CycleDelay,
+        right: Box<SequenceExpr>,
+    },
+    /// `left or right` (16.9.7): a match of either.
+    Or(Box<SequenceExpr>, Box<SequenceExpr>),
+}
+
+impl SequenceExpr {
+    /// The Boolean expressions of the sequence, from left to right.
+    pub fn booleans(&self) -> Vec<&SequenceBoolean> {
+        let mut found = Vec::new();
+        let mut pending = vec![self];
+        while let Some(expr) = pending.pop() {
+            match expr {
+                SequenceExpr::Boolean(boolean) => found.push(boolean),
+                SequenceExpr::Concat { left, right, .. } => {
+                    pending.push(right);
+                    if let Some(left) = left {
+                        pending.push(left);
+                    }
+                }
+                SequenceExpr::Or(left, right) => {
+                    pending.push(right);
+                    pending.push(left);
+                }
+            }
+        }
+        found
+    }
+
+    /// The Boolean expression the sequence is, without match items.
+    pub fn boolean(&self) -> Option<ExprId> {
+        match self {
+            SequenceExpr::Boolean(boolean) if boolean.items.is_empty() => Some(boolean.expression),
+            _ => None,
+        }
+    }
+}
+
+/// A Boolean expression of a sequence and its match items.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SequenceBoolean {
+    pub expression: ExprId,
+    pub items: Vec<SequenceMatchItem>,
+    pub tokens: TokenRange,
+}
+
+/// A cycle delay `##n` or `##[min:max]` (16.7), in ticks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CycleDelay {
+    pub min: u32,
+    pub max: u32,
 }
 
 /// A Boolean expression `delay` ticks after the previous step (after the
 /// match of the antecedent for the first step of a consequent), and the
-/// match items run when it matches (16.10, 16.11).
+/// match items run when it matches (16.10, 16.11): a step of one way a
+/// sequence matches, a fixed number of ticks after its start.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SequenceStep {
     pub delay: u32,

@@ -3265,7 +3265,6 @@ fn clocked_overlapped_implication_retains_both_boolean_operands() {
     assert!(syntax.expression(antecedent).tokens.end < syntax.expression(condition).tokens.start);
     for property in [
         "a |-> b |-> c",
-        "a ##[1:2] b |-> c",
         "a |=> b[*2]",
         "a |-> b[*2]",
         "a[->1] ##1 b",
@@ -3404,14 +3403,13 @@ fn named_sequence_and_property_instances_are_substituted() {
 #[test]
 fn named_assertion_declarations_outside_the_subset_keep_their_boundary() {
     for declaration in [
-        "sequence s; @(posedge clk) a ##[1:2] b; endsequence",
         "sequence s; a ##1 b[*2]; endsequence",
         "sequence s(x); x; endsequence",
         "property p; a |-> b ##[0:$] c; endproperty",
         "sequence s; disable iff (r) a; endsequence",
         "sequence s; a |-> b; endsequence",
         "property p; a and b; endproperty",
-        "property p; @(posedge clk or negedge rst) a or b; endproperty",
+        "property p; @(posedge clk or negedge rst) a and b; endproperty",
         "property p; a; endproperty : q",
     ] {
         let syntax = parse(&format!("module M; {declaration} endmodule"));
@@ -3420,7 +3418,7 @@ fn named_assertion_declarations_outside_the_subset_keep_their_boundary() {
     // Assertions with property operators outside the subset stay opaque,
     // also after a clock using event operators.
     for property in [
-        "a or b",
+        "a and b",
         "not a",
         "@(posedge clk or negedge rst) a and b",
         "@(posedge clk) a |-> b |-> c",
@@ -3449,6 +3447,65 @@ fn named_assertion_declarations_outside_the_subset_keep_their_boundary() {
     assert_eq!(declaration.name.value(), "p");
 }
 
+/// A sequence is a tree of its operators (IEEE 1800-2023 16.7, 16.9.7):
+/// `or` binds looser than a cycle delay, which may be a range, also leading
+/// one, and a parenthesized sequence is an operand.
+#[test]
+fn sequences_keep_their_operators() {
+    fn show(syntax: &Declarations, expr: &SequenceExpr) -> String {
+        match expr {
+            SequenceExpr::Boolean(boolean) => syntax
+                .token_text(syntax.expression(boolean.expression).tokens)
+                .to_owned(),
+            SequenceExpr::Concat { left, delay, right } => format!(
+                "({}##[{}:{}] {})",
+                left.as_deref()
+                    .map(|left| format!("{} ", show(syntax, left)))
+                    .unwrap_or_default(),
+                delay.min,
+                delay.max,
+                show(syntax, right)
+            ),
+            SequenceExpr::Or(left, right) => {
+                format!("({} or {})", show(syntax, left), show(syntax, right))
+            }
+        }
+    }
+    let shown = |source: &str| {
+        let syntax = parse(source);
+        let property = syntax
+            .statements
+            .iter()
+            .find_map(|stmt| match &stmt.kind {
+                StatementKind::Assertion {
+                    header: AssertionHeader::Concurrent { property, .. },
+                    ..
+                } => Some(*property),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{source}"));
+        let id = property.sequence.unwrap_or_else(|| panic!("{source}"));
+        show(&syntax, &syntax.sequence(id).consequent)
+    };
+    assert_eq!(
+        shown(
+            "module M; sequence s; @(posedge clk) (a ##1 b) or c ##[2:3] d or ##[0:1] e; endsequence assert property (s); endmodule"
+        ),
+        "(((a ##[1:1] b) or (c ##[2:3] d)) or (##[0:1] e))"
+    );
+    assert_eq!(
+        shown(
+            "module M; assert property (@(posedge clk) a ##1 (b or c ##2 d) ##[1:4] e); endmodule"
+        ),
+        "((a ##[1:1] (b or (c ##[2:2] d))) ##[1:4] e)"
+    );
+    // Redundant parentheses around a sequence.
+    assert_eq!(
+        shown("module M; assert property (@(posedge clk) ((a or b)) ##1 (((c ##1 d)))); endmodule"),
+        "((a or b) ##[1:1] (c ##[1:1] d))"
+    );
+}
+
 /// A sequence over cycles keeps its steps, their delays and match items,
 /// and the local variables of its declaration (IEEE 1800-2023 16.7, 16.10).
 #[test]
@@ -3468,10 +3525,25 @@ fn sequences_over_cycles_keep_steps_and_local_variables() {
             .unwrap_or_else(|| panic!("{source}"));
         let id = property.sequence.unwrap_or_else(|| panic!("{source}"));
         let sequence = syntax.sequence(id).clone();
-        let steps = |steps: &[SequenceStep]| {
-            steps
-                .iter()
-                .map(|step| {
+        // The steps of a linear sequence, each with its delay.
+        fn linear(expr: &SequenceExpr) -> Vec<(u32, SequenceBoolean)> {
+            match expr {
+                SequenceExpr::Boolean(boolean) => vec![(0, boolean.clone())],
+                SequenceExpr::Concat { left, delay, right } => {
+                    assert_eq!(delay.min, delay.max, "a fixed delay");
+                    let mut steps = left.as_deref().map(linear).unwrap_or_default();
+                    let mut right = linear(right);
+                    right[0].0 += delay.min;
+                    steps.extend(right);
+                    steps
+                }
+                SequenceExpr::Or(..) => panic!("a linear sequence"),
+            }
+        }
+        let steps = |expr: &SequenceExpr| {
+            linear(expr)
+                .into_iter()
+                .map(|(delay, step)| {
                     let items = step
                         .items
                         .iter()
@@ -3495,7 +3567,7 @@ fn sequences_over_cycles_keep_steps_and_local_variables() {
                         .collect::<Vec<_>>();
                     format!(
                         "{}:{}{}",
-                        step.delay,
+                        delay,
                         syntax.token_text(syntax.expression(step.expression).tokens),
                         items
                             .iter()
@@ -3511,7 +3583,7 @@ fn sequences_over_cycles_keep_steps_and_local_variables() {
             .flat_map(|local| local.names.iter().map(|name| name.spelling.clone()))
             .collect::<Vec<_>>();
         (
-            sequence.antecedent.as_deref().map(steps),
+            sequence.antecedent.as_ref().map(steps),
             steps(&sequence.consequent),
             locals,
         )
@@ -3567,15 +3639,10 @@ fn sequences_over_cycles_keep_steps_and_local_variables() {
             Vec::new()
         )
     );
-    // The tick `|=>` adds may not overflow the first delay.
-    let error = Declarations::parse(
-        "module M; assert property (@(posedge clk) a |=> ##4294967295 b); endmodule",
-        Path::new("overflow.sv"),
-    )
-    .unwrap_err();
-    assert!(
-        format!("{error:?}").contains("cycle delay longer"),
-        "{error:?}"
+    // `|=>` is `|-> ##1`.
+    assert_eq!(
+        sequence("module M; assert property (@(posedge clk) a |=> ##2 b); endmodule"),
+        (Some(strings(&["0:a"])), strings(&["3:b"]), Vec::new())
     );
 }
 

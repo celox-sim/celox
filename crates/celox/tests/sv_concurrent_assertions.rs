@@ -307,3 +307,109 @@ fn unsupported_temporal_and_procedural_forms_are_not_boolean_checks() {
         );
     }
 }
+
+/// Sequences with several ways to match (IEEE 1800-2023 16.7, 16.9.7): an
+/// attempt passes at the first tick one way matches, once, and fails at the
+/// first tick none can match any more.
+#[test]
+fn sequences_with_delay_ranges_and_or_match_their_first_way() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit clk;
+ int cnt;
+ int a_passed, a_failed, b_passed, b_failed, b_early, c_passed, c_failed;
+ int d_passed, d_failed, e_passed, e_failed;
+ always @(posedge clk) cnt <= cnt + 1;
+ // A range: `cnt % 4 == 2` at the first tick misses, `== 3` at the second.
+ assert property (@(posedge clk) cnt % 4 == 1 ##[1:2] cnt % 4 == 3) a_passed++; else a_failed++;
+ // The shorter way matches first; the action runs then, when `cnt`, one
+ // more than sampled, is 2 modulo 4.
+ sequence b; @(posedge clk) (cnt % 4 == 0 ##1 cnt % 4 == 1) or (cnt % 4 == 0 ##2 cnt % 4 == 2); endsequence
+ assert property (b) begin b_passed++; if (cnt % 4 == 2) b_early++; end else b_failed++;
+ // Neither way matches: an attempt fails when the longer one misses, at
+ // its third tick.
+ assert property (@(posedge clk) (1 ##1 cnt < 0) or (1 ##2 cnt < 0)) c_passed++; else c_failed++;
+ // Every later delay of the range matches too; the attempt passes once.
+ assert property (@(posedge clk) cnt % 2 == 0 ##[1:3] cnt % 2 == 1) d_passed++; else d_failed++;
+ // A leading range: the attempt waits for the first tick that matches.
+ assert property (@(posedge clk) ##[0:3] cnt % 4 == 3) e_passed++; else e_failed++;
+ initial repeat (20) begin #1 clk = 1; #1 clk = 0; end
+endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("alternatives.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(41).unwrap();
+    // Ticks 0 to 19 sample `cnt` 0 to 19.
+    for (name, expected) in [
+        ("a_passed", 5u32),
+        ("a_failed", 15),
+        ("b_passed", 5),
+        ("b_early", 5),
+        ("b_failed", 15),
+        ("c_passed", 0),
+        // Those of ticks 18 and 19 end with the simulation undecided.
+        ("c_failed", 18),
+        ("d_passed", 10),
+        ("d_failed", 10),
+        // Every attempt reaches a tick with `cnt % 4 == 3` within three
+        // ticks, by tick 19.
+        ("e_passed", 20),
+        ("e_failed", 0),
+    ] {
+        assert_eq!(sim.get(sim.signal(name)), expected.into(), "{name}");
+    }
+}
+
+#[test]
+fn sequences_with_several_ways_to_match_name_what_they_do_not_support() {
+    let long = vec!["a"; 1025].join(" ##0 ");
+    let long = format!("@(posedge clk) {long}");
+    for (property, message) in [
+        (
+            long.as_str(),
+            "property with more than 1024 Boolean operands",
+        ),
+        ("@(posedge clk) a ##[1:$] b", "without an upper bound"),
+        (
+            "@(posedge clk) (a, note()) or b",
+            "match item in a sequence with more than one way to match",
+        ),
+        (
+            "@(posedge clk) a |-> (a ##1 b) or b",
+            "implication whose consequent sequence has more than one way to match",
+        ),
+        (
+            "@(posedge clk) (a or b) ##1 b |-> b",
+            "implication whose antecedent sequence has more than one way to match",
+        ),
+        (
+            "@(posedge clk) a ##[0:40] b ##[0:40] a",
+            "sequence with more than 1024 ways to match",
+        ),
+        // Many ways over many ticks would make too large a monitor.
+        (
+            "@(posedge clk) a ##[0:1000] b",
+            "sequence whose monitor takes more than 1048576 terms",
+        ),
+        // The tick `|=>` adds may not overflow the first delay.
+        (
+            "@(posedge clk) a |=> ##4294967295 b",
+            "cycle delay longer than 2^32 - 1 ticks",
+        ),
+    ] {
+        let source = format!(
+            "module Top; bit clk, a, b; function automatic void note(); endfunction
+             assert property ({property}); endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("unsupported_sequence.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+        assert!(error.contains(message), "{property}: {error}");
+    }
+}

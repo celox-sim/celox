@@ -1563,13 +1563,41 @@ impl BodyBuilder<'_, '_, '_> {
                 local_types.insert(unique, ty.clone());
             }
         }
+        // The ways the sequence matches; one is decided step by step, with
+        // its local variables and match items.
+        let mut consequent = assertions::sequence_paths(&sequence.consequent)?;
+        let antecedent = match &sequence.antecedent {
+            None => Vec::new(),
+            Some(antecedent) => {
+                let mut paths = assertions::sequence_paths(antecedent)?;
+                if paths.len() > 1 {
+                    return Err(unsupported(
+                        "implication whose antecedent sequence has more than one way to match",
+                    ));
+                }
+                paths.pop().expect("a sequence has a way to match")
+            }
+        };
+        if consequent.len() > 1 {
+            if sequence.antecedent.is_some() {
+                return Err(unsupported(
+                    "implication whose consequent sequence has more than one way to match",
+                ));
+            }
+            if !sequence.locals.is_empty() {
+                return Err(unsupported(
+                    "local variable of a sequence with more than one way to match",
+                ));
+            }
+            let monitor = self.sequence_alternatives(consequent, MAX_SEQUENCE_TICKS);
+            self.pop_scope();
+            return monitor;
+        }
+        let consequent = consequent.pop().expect("a sequence has a way to match");
         let mut steps = Vec::new();
         let mut offset = 0u32;
         let mut order = 0usize;
-        let parts = [
-            (true, sequence.antecedent.clone().unwrap_or_default()),
-            (false, sequence.consequent.clone()),
-        ];
+        let parts = [(true, antecedent), (false, consequent)];
         for (antecedent, part) in parts {
             for step in part {
                 offset = offset
@@ -2002,11 +2030,20 @@ impl BodyBuilder<'_, '_, '_> {
                         "local variable of a sequence in an expect statement",
                     ));
                 }
+                // One way to match, decided step by step.
+                let single = |expr: &celox_sv_syntax::SequenceExpr| {
+                    let mut paths = assertions::sequence_paths(expr)?;
+                    if paths.len() > 1 {
+                        return Err(unsupported(
+                            "sequence with more than one way to match in an expect statement",
+                        ));
+                    }
+                    Ok(paths.pop().expect("a sequence has a way to match"))
+                };
+                let antecedent = sequence.antecedent.as_ref().map(single).transpose()?;
+                let consequent = single(&sequence.consequent)?;
                 let mut offset = 0u32;
-                let parts = [
-                    (true, sequence.antecedent.unwrap_or_default()),
-                    (false, sequence.consequent),
-                ];
+                let parts = [(true, antecedent.unwrap_or_default()), (false, consequent)];
                 for (antecedent, part) in parts {
                     for native in part {
                         if !native.items.is_empty() {
