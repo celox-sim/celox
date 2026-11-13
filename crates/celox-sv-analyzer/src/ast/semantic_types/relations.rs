@@ -118,6 +118,11 @@ impl TyTable {
         matches!(self.data(id), TyData::Packed(packed) if scalar_enum(packed))
     }
 
+    /// Whether `id` is an unpacked structure type, not an array of one (7.2).
+    pub fn is_unpacked_struct(&self, id: TyId) -> bool {
+        matches!(self.data(id), TyData::UnpackedStruct(_))
+    }
+
     /// Whether `a` and `b` are equivalent types (IEEE 1800-2023 6.22.2).
     pub fn equivalent(&self, a: TyId, b: TyId) -> bool {
         if self.matches(a, b) {

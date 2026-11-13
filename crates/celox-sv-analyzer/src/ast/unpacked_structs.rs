@@ -616,10 +616,30 @@ pub(in crate::ast) fn check_assignment(
 ) -> Converted<()> {
     let target = dims
         .get(name)
-        .filter(|shape| shape.unpacked_struct.is_some())
-        .and_then(|shape| shape.type_id(&mut session.types, &tree.functions, &dims.const_env))
+        .filter(|shape| shape.unpacked.is_empty())
+        .and_then(|shape| shape_struct(shape, tree, session, dims))
         .ok_or_else(|| unsupported("unpacked structure target"))?;
     check_value(target, right, tree.declarations(), tree, session, dims)
+}
+
+/// The unpacked structure type declared shape `shape` holds: its own type,
+/// or the element type of a fixed-size array of structures (7.2, 7.4), as
+/// the shape's type tells.
+pub(in crate::ast) fn shape_struct(
+    shape: &VariableDimensions,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Option<semantic_types::TyId> {
+    let mut ty = shape.type_id(&mut session.types, &tree.functions, &dims.const_env)?;
+    while let semantic_types::TyData::Array {
+        kind: semantic_types::ArrayKind::Fixed(_),
+        element,
+    } = session.types.data(ty)
+    {
+        ty = *element;
+    }
+    session.types.is_unpacked_struct(ty).then_some(ty)
 }
 
 /// The semantic type of a place of unpacked structure type `ty`.
