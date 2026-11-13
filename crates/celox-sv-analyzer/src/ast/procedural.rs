@@ -81,6 +81,10 @@ pub(super) struct BodyState<'a> {
     pub static_initializers: Vec<Stmt>,
     /// Constant calls get a fresh frame, even for static declarations (13.4.3).
     pub constant_evaluation: bool,
+    /// The functions called in concurrent assertion operands, whose bodies
+    /// `timed_tasks::classify` checks against IEEE 1800-2023 16.6 once
+    /// every subroutine of the scope is known.
+    pub assertion_callees: Vec<String>,
 }
 
 /// The methods of the classes of a scope that a pass over its subroutines

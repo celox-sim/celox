@@ -6,6 +6,8 @@ pub(in crate::ast) fn classify<'a>(
     comb: &mut Vec<CombProcess>,
     ff: &mut Vec<FfProcess>,
     processes: &mut Vec<InitialProcess>,
+    assertion_callees: &[String],
+    dpi_imports: &HashSet<&str>,
 ) -> Result<(), AnalyzerError> {
     let subroutines: Vec<_> = subroutines.collect();
     super::final_procedures::validate(&subroutines, processes)?;
@@ -25,6 +27,7 @@ pub(in crate::ast) fn classify<'a>(
         reads_triggered(&subroutine.body, readers)
     });
     concurrent_actions(&subroutines, &definitions, &known, comb, ff, processes)?;
+    assertion_functions(assertion_callees, &definitions, dpi_imports)?;
     if !triggered_readers.is_empty() {
         for body in bodies(&subroutines, comb, ff, processes) {
             let mut found = false;
@@ -760,6 +763,196 @@ fn concurrent_actions(
         }
     }
     Ok(())
+}
+
+/// The functions called in concurrent assertion operands, `callees`, with
+/// the functions they call: each is automatic or keeps no state, and has
+/// no side effects (IEEE 1800-2023 16.6). Called on the operand's sampled
+/// values, a function reads current values in its body (16.5.1): it may
+/// read any variable, through a hierarchical name too, but write only its
+/// own formals, result and locals, and run no system task, timing control
+/// or effectful call. A DPI import is not known to be free of effects. A
+/// problem in a called function names that function, `(through `g`)`.
+fn assertion_functions(
+    callees: &[String],
+    definitions: &HashMap<&str, &Subroutine>,
+    dpi_imports: &HashSet<&str>,
+) -> Result<(), AnalyzerError> {
+    let mut visited = HashSet::<&str>::default();
+    // Each function to check, with the operand's function that calls it.
+    let mut pending: Vec<(&str, &str)> = callees
+        .iter()
+        .rev()
+        .map(|name| (name.as_str(), name.as_str()))
+        .collect();
+    while let Some((name, root)) = pending.pop() {
+        if !visited.insert(name) {
+            continue;
+        }
+        let through = (name != root).then(|| format!("through `{name}`"));
+        let Some(subroutine) = definitions.get(name) else {
+            // A function's body reports the calls it makes; only an
+            // operand's own call reaches here.
+            return Err(unsupported(if dpi_imports.contains(name) {
+                format!("call of DPI import `{name}` in a concurrent assertion operand")
+            } else {
+                format!("call `{name}` in concurrent assertion operand")
+            }));
+        };
+        if subroutine.is_task {
+            return Err(unsupported(format!(
+                "call of task `{name}` in a concurrent assertion operand"
+            )));
+        }
+        if name == root
+            && subroutine
+                .params
+                .iter()
+                .any(|param| param.direction != crate::procedural::ParamDirection::Input)
+        {
+            return Err(unsupported(format!(
+                "call `{name}` with an output, inout or ref argument in a concurrent assertion operand"
+            )));
+        }
+        if !const_functions::persistent_state_is_unobservable(subroutine) {
+            return Err(unsupported(format!(
+                "function `{root}` in a concurrent assertion operand keeps state between calls ({})",
+                through.as_deref().unwrap_or("16.6")
+            )));
+        }
+        let side_effect = |detail: String| {
+            unsupported(format!(
+                "function `{root}` in a concurrent assertion operand has a side effect ({})",
+                through.clone().unwrap_or(detail)
+            ))
+        };
+        // The names the function owns: its formals, result and locals.
+        let mut owned: HashSet<&str> = subroutine
+            .params
+            .iter()
+            .map(|param| param.name.as_str())
+            .chain(subroutine.return_var.as_deref())
+            .collect();
+        for statement in &subroutine.body {
+            statement.walk(&mut |statement| {
+                if let Stmt::Local { name, .. } = statement {
+                    owned.insert(name);
+                }
+            });
+        }
+        let mut error = None;
+        // The subroutines the function calls, with their arguments.
+        let mut calls: Vec<(&str, &[Option<Expr>])> = Vec::new();
+        let mut expression = |expr, error: &mut Option<AnalyzerError>| {
+            const_functions::visit_expr_calls(expr, &mut |callee, args| match (callee, args) {
+                (Callee::Subroutine(callee), const_functions::CallArguments::Expressions(args)) => {
+                    calls.push((callee, args));
+                }
+                // A call in a constant select bound passes no variable.
+                (Callee::Subroutine(callee), const_functions::CallArguments::Constants(_)) => {
+                    calls.push((callee, &[]));
+                }
+                (callee, _) if callee.is_effectful() && error.is_none() => {
+                    *error = Some(side_effect(format!("`{callee}`")));
+                }
+                _ => {}
+            });
+        };
+        // The defaults of omitted arguments are evaluated by the call.
+        for default in subroutine
+            .params
+            .iter()
+            .filter_map(|param| param.default.as_ref())
+        {
+            expression(default, &mut error);
+        }
+        for statement in &subroutine.body {
+            statement.walk(&mut |statement| {
+                for expr in lifetimes::stmt_exprs(statement) {
+                    expression(expr, &mut error);
+                }
+                if error.is_some() {
+                    return;
+                }
+                error = match statement {
+                    Stmt::Assign {
+                        lhs, nonblocking, ..
+                    } if *nonblocking || !owned.contains(lhs.name()) => {
+                        Some(side_effect(format!("writes `{}`", lhs.name())))
+                    }
+                    Stmt::AssignConcat {
+                        parts, nonblocking, ..
+                    } => parts
+                        .iter()
+                        .find(|lhs| *nonblocking || !owned.contains(lhs.name()))
+                        .map(|lhs| side_effect(format!("writes `{}`", lhs.name()))),
+                    Stmt::ProceduralAssign { lhs, .. } | Stmt::Deassign { lhs } => {
+                        Some(side_effect(format!("writes `{}`", lhs.name())))
+                    }
+                    Stmt::SystemTask { task, .. } => Some(side_effect(format!("`{task}`"))),
+                    Stmt::DelayedNonblocking { .. }
+                    | Stmt::Delay { .. }
+                    | Stmt::WaitEvent(_)
+                    | Stmt::WaitImplicit { .. }
+                    | Stmt::Wait(_)
+                    | Stmt::Fork { .. }
+                    | Stmt::WaitFork
+                    | Stmt::DisableFork
+                    | Stmt::DeferActive
+                    | Stmt::AssertionRegion { .. } => Some(side_effect("timing control".into())),
+                    _ => None,
+                };
+            });
+        }
+        for statement in &subroutine.body {
+            statement.walk(&mut |statement| {
+                if let Stmt::Call { name, args, .. } = statement {
+                    calls.push((name, args));
+                }
+            });
+        }
+        if let Some(error) = error {
+            return Err(error);
+        }
+        // A called subroutine of the scope may write only the names the
+        // function owns, through its arguments, and its body is checked next.
+        for (callee, args) in calls {
+            let Some(definition) = definitions.get(callee) else {
+                return Err(unsupported(if dpi_imports.contains(callee) {
+                    format!(
+                        "call of DPI import `{callee}` in a concurrent assertion operand (through `{name}`)"
+                    )
+                } else {
+                    format!("call `{callee}` in concurrent assertion operand (through `{name}`)")
+                }));
+            };
+            if definition.is_task {
+                return Err(side_effect(format!("calls task `{callee}`")));
+            }
+            for (param, arg) in definition.params.iter().zip(args) {
+                if let (true, Some(arg)) = (param.direction.is_written(), arg)
+                    && let Some(written) = target_names(arg)
+                        .into_iter()
+                        .find(|written| !owned.contains(written))
+                {
+                    return Err(side_effect(format!("writes `{written}`")));
+                }
+            }
+            pending.push((definition.name.as_str(), root));
+        }
+    }
+    Ok(())
+}
+
+/// The variables an argument passed to an output, inout or ref formal
+/// names, which the call may write.
+fn target_names(expr: &Expr) -> Vec<&str> {
+    match expr {
+        Expr::Ident(name) => vec![name.as_str()],
+        Expr::Select { expr, .. } | Expr::Resize { expr, .. } => target_names(expr),
+        Expr::Concat(parts) => parts.iter().flat_map(target_names).collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Whether `body` reads the `triggered` state of an event, directly or

@@ -726,18 +726,18 @@ impl BodyBuilder<'_, '_, '_> {
                                         })
                                         .transpose()?;
                                     if let Some(disable) = &disable {
-                                        assertions::concurrent_operand(disable)?;
+                                        self.concurrent_operand(disable)?;
                                         assertions::concurrent_disable(disable)?;
                                     }
                                     (Expr::Literal("1'b1".into()), &None, Some(disable))
                                 } else {
                                     let mut operand = self.native_value(*condition)?;
-                                    assertions::concurrent_operand(&operand)?;
+                                    self.concurrent_operand(&operand)?;
                                     // `p iff q` holds when both are true or
                                     // both false; X/Z is false (16.12.8).
                                     if let Some(equivalent) = equivalent {
                                         let equivalent = self.native_value(*equivalent)?;
-                                        assertions::concurrent_operand(&equivalent)?;
+                                        self.concurrent_operand(&equivalent)?;
                                         operand = Expr::Binary {
                                             left: Box::new(procedural_truth_condition(operand)),
                                             op: BinaryOp::Eq,
@@ -746,7 +746,7 @@ impl BodyBuilder<'_, '_, '_> {
                                     }
                                     if let Some(antecedent) = antecedent {
                                         let antecedent = self.native_value(*antecedent)?;
-                                        assertions::concurrent_operand(&antecedent)?;
+                                        self.concurrent_operand(&antecedent)?;
                                         // A Boolean sequence matches only when true.
                                         // X/Z antecedents have no match (16.12.7).
                                         let matched = procedural_truth_condition(antecedent);
@@ -770,7 +770,7 @@ impl BodyBuilder<'_, '_, '_> {
                                         })
                                         .transpose()?;
                                     if let Some(disable) = &disable {
-                                        assertions::concurrent_operand(disable)?;
+                                        self.concurrent_operand(disable)?;
                                         assertions::concurrent_disable(disable)?;
                                     }
                                     (condition, &None, Some(disable))
@@ -1608,7 +1608,7 @@ impl BodyBuilder<'_, '_, '_> {
                     before: order,
                 };
                 let condition = self.native_value(step.expression)?;
-                assertions::concurrent_operand(&condition)?;
+                self.concurrent_operand(&condition)?;
                 let condition = self.sequence_value(&condition, point, &locals, &mut registers)?;
                 let mut calls = Vec::new();
                 for item in &step.items {
@@ -1666,7 +1666,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 self.tree, value, &lvalue, &self.dims,
                             );
                             self.rename_expr(&mut value);
-                            assertions::concurrent_operand(&value)?;
+                            self.concurrent_operand(&value)?;
                             let mut target = Expr::Ident(source);
                             self.rename_expr(&mut target);
                             let Expr::Ident(unique) = target else {
@@ -1826,10 +1826,9 @@ impl BodyBuilder<'_, '_, '_> {
             let by_value = argument == Argument::Value;
             let value = self.sequence_value(expr, here, locals, registers)?;
             *expr = if by_value {
-                // A value read over sampled values, as an operand is: a user
-                // function would read module variables that sampling does
-                // not reach (16.6).
-                assertions::concurrent_operand(&value)?;
+                // A value read over sampled values, as an operand is, with
+                // the same restrictions on the functions it calls (16.6).
+                self.concurrent_operand(&value)?;
                 assertions::sampled(value)
             } else {
                 value
@@ -1985,7 +1984,7 @@ impl BodyBuilder<'_, '_, '_> {
         let mut steps = Vec::new();
         let mut step = |this: &mut Self, offset: u32, id, antecedent| -> Converted<()> {
             let value = this.native_value(id)?;
-            assertions::concurrent_operand(&value)?;
+            this.concurrent_operand(&value)?;
             steps.push((
                 offset,
                 procedural_truth_condition(assertions::sampled(value)),
@@ -2003,9 +2002,9 @@ impl BodyBuilder<'_, '_, '_> {
                     // (16.12.8).
                     Some(equivalent) => {
                         let left = self.native_value(property.condition)?;
-                        assertions::concurrent_operand(&left)?;
+                        self.concurrent_operand(&left)?;
                         let right = self.native_value(equivalent)?;
-                        assertions::concurrent_operand(&right)?;
+                        self.concurrent_operand(&right)?;
                         steps.push((
                             0,
                             Expr::Binary {
@@ -2189,6 +2188,7 @@ mod tests {
             explicit_statics: HashSet::default(),
             static_initializers: Vec::new(),
             constant_evaluation: false,
+            assertion_callees: Vec::new(),
         };
         let mut builder = BodyBuilder::new(
             &tree,
