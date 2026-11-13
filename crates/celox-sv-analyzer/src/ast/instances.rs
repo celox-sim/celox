@@ -565,6 +565,55 @@ pub(crate) fn normalize_identifier(text: &str) -> String {
     }
 }
 
+/// The shape of the unpacked array that a call of a function returns (IEEE
+/// 1800-2023 13.4.1), from the declared result type of the function. A
+/// parameter argument is bound before the functions of the scope are
+/// collected, when the declaration of a function of the module gives it.
+fn call_result_shape(
+    id: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Option<VariableDimensions> {
+    use celox_sv_syntax::{ExprKind, SubroutineKind};
+    let native = tree.declarations();
+    let ExprKind::Call { expression, .. } = native.expression(id).kind else {
+        return None;
+    };
+    let ExprKind::Name(name) = &native
+        .expression(expression_binding::ungroup(expression, native))
+        .kind
+    else {
+        return None;
+    };
+    let name = normalize_identifier(&name.spelling);
+    let ty = match dims
+        .function_return_types
+        .get(&name)
+        .and_then(|metadata| metadata.pattern_type.clone())
+    {
+        Some(ty) => ty,
+        None => {
+            let subroutine = tree
+                .root_unit()
+                .ok()?
+                .subroutines
+                .iter()
+                .map(|id| native.subroutine(*id))
+                .find(|subroutine| {
+                    subroutine.kind == SubroutineKind::Function
+                        && subroutine.scope.is_empty()
+                        && normalize_identifier(&subroutine.name.spelling) == name
+                })?;
+            type_binding::bind(subroutine.return_type?, tree, session, dims)
+                .ok()
+                .flatten()?
+        }
+    };
+    let shape = procedural::dimensions_from_type(&ty);
+    (!shape.unpacked.is_empty()).then_some(shape)
+}
+
 /// Keep whole-array conditional arguments out of the scalar constant path.
 /// Traverse branch types iteratively, including branches a constant condition
 /// does not select. Array sizes and integral element types must agree.
@@ -596,9 +645,10 @@ pub(super) fn array_argument_shape(
                     jobs.push(Job::Enter(else_expression));
                     jobs.push(Job::Enter(then_expression));
                 } else {
-                    values.push(array_compatibility::native_unpacked_shape(
-                        id, tree, session, dims,
-                    )?);
+                    values.push(
+                        array_compatibility::native_unpacked_shape(id, tree, session, dims)
+                            .or_else(|| call_result_shape(id, tree, session, dims))?,
+                    );
                 }
             }
             Job::Conditional => {
