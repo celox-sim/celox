@@ -266,10 +266,20 @@ impl BodyBuilder<'_, '_, '_> {
         }
         let (_, renamed) = self.native_lvalue(target, false)?;
         // A constant bit-select or part-select of a vector net, and as an
-        // extension a constant select or a member of a variable, names a
-        // constant range of bits of the target (10.6.2).
+        // extension a constant select or a member of a variable, and an
+        // element of an unpacked array at constant indices or a constant
+        // select of one, names a constant range of bits of the target
+        // (10.6.2), whose elements are laid out one after the other.
         let renamed = match renamed {
             LValue::Ident(_) => renamed,
+            LValue::Select {
+                array_slice_width: Some(_),
+                ..
+            } => {
+                return Err(unsupported(
+                    "force or release of a slice of an unpacked array",
+                ));
+            }
             LValue::Select {
                 name,
                 msb,
@@ -299,7 +309,7 @@ impl BodyBuilder<'_, '_, '_> {
             }
             _ => {
                 return Err(unsupported(
-                    "force or release of an element of an unpacked array or of an object",
+                    "force or release of a property or an element of an object",
                 ));
             }
         };

@@ -178,15 +178,22 @@ blocks in programs. Two region deviations are listed under
   variable or net of the module or, through a hierarchical name, of another
   instance, or a constant bit-select, part-select or member of one: as an
   extension, a constant select or a member of a variable is a target too,
-  which the standard allows only of a vector net. A force of an input port
+  which the standard allows only of a vector net. As a further extension,
+  an element of a fixed-size unpacked array of a packed integral type at
+  constant indices, or a constant select or member of one, is a target: the
+  array then has force controls of its own shape, which the warning
+  `forced_array` reports with their size, and a write of an element at a
+  run-time index keeps the forced bits of that element. A force of an input port
   of an instance forces that port, not the net connected to it. Every
   instance of a module whose variable or net a hierarchical name forces
   carries the force controls, which the warning `forced_specialization`
   reports when several instances share them. A write of a forced target
   through a hierarchical name from a module that does not force it is not
   overridden. A concatenation, a select
-  with nonconstant bounds, a `real`, `string`, handle or unpacked target (singular ones
-  the standard allows), and a variable that a nonblocking assignment with
+  with nonconstant bounds, a slice of an unpacked array, a `real`, `string`,
+  handle or unpacked structure target (singular ones the standard allows),
+  an unpacked array that several edge-triggered processes write, and a
+  variable that a nonblocking assignment with
   an intra-assignment delay writes are rejected, as are overlapping parts
   of one target when a force of one of them has an expression that reads a
   variable. So are an expression with side effects or with a call of a

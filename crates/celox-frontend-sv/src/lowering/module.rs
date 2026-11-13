@@ -490,6 +490,34 @@ fn lower_module_with_overrides(
             stored: control.stored,
         });
     }
+    // The controls of a forced unpacked array have its shape: report their
+    // size, so that the force of an element of a large memory shows.
+    let mut forced_arrays: Vec<(String, usize)> = Vec::new();
+    for variable in variables.values() {
+        let Some(slot) = variable.force_control.filter(|slot| slot.procedural) else {
+            continue;
+        };
+        let target = &variables[&slot.target];
+        if target.array_dims.is_empty() {
+            continue;
+        }
+        let array = target.path.join(".");
+        match forced_arrays.iter_mut().find(|(name, _)| *name == array) {
+            Some((_, bits)) => *bits += variable.width,
+            None => forced_arrays.push((array, variable.width)),
+        }
+    }
+    forced_arrays.sort();
+    for (array, bits) in forced_arrays {
+        warnings.push((
+            crate::FrontendWarningKind::ForcedArray {
+                module: name.clone(),
+                array,
+                bits,
+            },
+            None,
+        ));
+    }
 
     let forceable = variables
         .iter()
