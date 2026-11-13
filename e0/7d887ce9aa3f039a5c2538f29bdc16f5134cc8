@@ -1,0 +1,1 @@
+Review fixes: soft Unknown/handle ranks/class depth/guarded disable (#3825); one constraint_mode path with per-class static modes in the heap (#3827); functions in constraints dropped for a redesign
