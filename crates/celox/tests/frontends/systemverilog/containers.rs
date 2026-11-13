@@ -589,3 +589,38 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("one")), BigUint::from(0x21u8));
     }
 }
+
+sv_backends! {
+    // `new[size]('{default: v})` gives each of the `size` elements the
+    // value `v` (IEEE 1800-2023 7.5.1, 10.9.1: every element is covered),
+    // as Caliptra's AXI BFM sizes its write strobes; growing the array
+    // later fills the new elements with the type's default (Verilator: the
+    // same values).
+    fn dynamic_array_new_takes_default_patterns(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            module Top(output int sizes, output logic [11:0] strb, output logic [15:0] data,
+                       output logic [7:0] grown);
+              localparam W = 32;
+              logic [7:0] fill = 8'h5a;
+              initial begin
+                automatic logic [3:0] a[] = new[3]('{default: {W/8{1'b1}}});
+                automatic logic [7:0] b[];
+                automatic logic [3:0] c[] = new[0]('{default: 4'h1});
+                b = new[2]('{default: fill});
+                sizes = a.size() * 100 + b.size() * 10 + c.size();
+                strb = {a[0], a[1], a[2]};
+                data = {b[0], b[1]};
+                a = new[5](a);
+                grown = {a[2], a[4]};
+              end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("new_default.sv"))], "Top");
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("sizes")), BigUint::from(320u32));
+        assert_eq!(sim.get(sim.signal("strb")), BigUint::from(0xfffu32));
+        assert_eq!(sim.get(sim.signal("data")), BigUint::from(0x5a5au32));
+        assert_eq!(sim.get(sim.signal("grown")), BigUint::from(0xf0u32));
+    }
+}
