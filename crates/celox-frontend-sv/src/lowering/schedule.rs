@@ -317,7 +317,7 @@ fn schedule_sources_collecting(
             }
         };
     }
-    let analyzed = analyze_sources(sources, &[top], analysis_options.clone())?;
+    let mut analyzed = analyze_sources(sources, &[top], analysis_options.clone())?;
     checkpoint!("analyze_sources");
     package_warnings(&analyzed, warnings);
     // The specializations that the modules request of package class
@@ -763,6 +763,19 @@ fn schedule_sources_collecting(
             instance_values,
         };
         checkpoint!("packages");
+        drop(package_states);
+        // A combinational loop through level lists is scheduled again with
+        // them demoted, which lowers their modules again. Without a list left
+        // to demote, a loop is final and nothing above runs again: release
+        // the lowering and the analyses before scheduling builds the program,
+        // the frontend's largest.
+        if !can_demote_level_lists(&lowered_modules, &demoted) {
+            drop(std::mem::take(&mut lowered_modules));
+            drop(std::mem::take(&mut analyses));
+            drop(std::mem::take(&mut discovery_analyses));
+            drop(std::mem::take(&mut design));
+            drop(std::mem::take(&mut analyzed));
+        }
         let mut loop_members = Vec::new();
         let scheduled =
             celox_frontend_core::symbolic::assembly::schedule_symbolic_rtl_reporting_loops(
@@ -789,6 +802,22 @@ fn schedule_sources_collecting(
             lowered_modules.remove(&module_id);
         }
     }
+}
+
+/// Whether a module has an `always @*` or equivalent explicit-list process
+/// that [`demote_level_lists`] could still demote.
+fn can_demote_level_lists(
+    lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
+    demoted: &HashMap<ModuleId, HashSet<usize>>,
+) -> bool {
+    lowered_modules.iter().any(|(module_id, lowered)| {
+        lowered.source.comb_processes().iter().any(|process| {
+            process.kind() == sv::ir::CombProcessKind::AlwaysStar
+                && !demoted
+                    .get(module_id)
+                    .is_some_and(|demoted| demoted.contains(&process.creation_order()))
+        })
+    })
 }
 
 /// Demote `always @*` and equivalent explicit-list processes which drive
