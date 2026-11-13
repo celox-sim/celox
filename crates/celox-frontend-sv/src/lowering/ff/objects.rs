@@ -120,6 +120,7 @@ impl Ff<'_, '_> {
                         | ObjectOp::ModeSet(_)
                         | ObjectOp::ModeSelect(..) => (1, false),
                         ObjectOp::Seed => (32, false),
+                        ObjectOp::SetRandstate => (celox_design::HANDLE_WIDTH, false),
                         _ => (64, false),
                     }
                 };
@@ -371,6 +372,15 @@ impl Ff<'_, '_> {
                 let seed = self.integer_of_width(&args[1], 32, false)?;
                 self.heap_call(ops::OBJECT_SEED, &[object, seed])
             }
+            ObjectOp::GetRandstate => {
+                let object = self.handle(&args[0])?;
+                self.heap_call(ops::OBJECT_GET_RANDSTATE, &[object])
+            }
+            ObjectOp::SetRandstate => {
+                let object = self.handle(&args[0])?;
+                let state = self.handle(&args[1])?;
+                self.heap_call(ops::OBJECT_SET_RANDSTATE, &[object, state])
+            }
             ObjectOp::ClassOf => {
                 let object = self.handle(&args[0])?;
                 self.heap_call(ops::OBJECT_CLASS, &[object])
@@ -422,6 +432,7 @@ impl Ff<'_, '_> {
                 HandleProperty::String => celox_design::ValueKind::StrRef,
                 HandleProperty::Object => celox_design::ValueKind::ObjRef,
             }),
+            ObjectOp::GetRandstate => Some(celox_design::ValueKind::StrRef),
             ObjectOp::Randomize(_)
             | ObjectOp::RegisterProgram(..)
             | ObjectOp::ProgramRegistered(_)
@@ -436,6 +447,7 @@ impl Ff<'_, '_> {
             | ObjectOp::Random
             | ObjectOp::RandomCyclic { .. }
             | ObjectOp::Seed
+            | ObjectOp::SetRandstate
             | ObjectOp::Check(_)
             | ObjectOp::ModeGet(..)
             | ObjectOp::ModePush
