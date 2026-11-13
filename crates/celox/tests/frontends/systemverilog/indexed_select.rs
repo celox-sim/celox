@@ -215,3 +215,45 @@ fn unpacked_elements_whose_width_calls_clog2_take_run_time_indices() {
         );
     }
 }
+
+// A select whose index reads an element of an unpacked array, such as
+// OpenTitan's Keccak `state[PiRotate[x][y]][x]` with a localparam array,
+// or a variable array a process computes (IEEE 1800-2023 7.4.6, 11.5.1).
+// Verilator 5.054 gives the same values.
+sv_backends! {
+    fn selects_index_by_unpacked_array_elements(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [1:0] rot, output logic [2:0][2:0][3:0] r, p);
+                    localparam int W = 4;
+                    typedef logic [2:0][2:0][W-1:0] box_t;
+                    localparam int PiRotate [9] = '{0, 2, 1, 1, 0, 2, 2, 1, 0};
+                    function automatic box_t pi(box_t state);
+                        box_t result;
+                        for (int x = 0; x < 3; x++)
+                            for (int y = 0; y < 3; y++)
+                                result[x][y][W-1:0] = state[PiRotate[3*x+y]][x][W-1:0];
+                        return result;
+                    endfunction
+                    box_t s;
+                    int idx [3][3];
+                    assign s = 36'h876543210;
+                    always_comb
+                        for (int x = 0; x < 3; x++)
+                            for (int y = 0; y < 3; y++) idx[x][y] = (x + y + rot) % 3;
+                    always_comb
+                        for (int x = 0; x < 3; x++)
+                            for (int y = 0; y < 3; y++) r[x][y] = s[idx[x][y]][x];
+                    assign p = pi(s);
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("element_index.sv"))], "Top");
+        let (rot, r, p) = (sim.signal("rot"), sim.signal("r"), sim.signal("p"));
+        for (value, expected) in [(0u8, 0x5_2817_4630u64), (1, 0x8_5241_7063), (2, 0x2_8574_1306)] {
+            sim.modify(|io| io.set(rot, value)).unwrap();
+            assert_eq!(sim.get(r), expected.into(), "rot={value}");
+            assert_eq!(sim.get(p), 0x2_5871_4360u64.into(), "rot={value}");
+        }
+    }
+}

@@ -535,17 +535,105 @@ pub(super) fn runtime_select_width(
     if msb == lsb {
         return Some(1);
     }
-    // The width is the same for every value of the runtime operands.
+    // The width is the same for every value of the runtime operands: sample
+    // them at zero, also the elements and bits selected from variables,
+    // such as `idx[x][y]` of an unpacked array in `v[idx[x][y]*4 +: 4]`,
+    // whose whole value may be wider than the evaluator's 128 bits.
     let mut sample = constants.clone();
     for name in name_to_id.keys() {
         sample.entry(name.clone()).or_insert(0);
     }
     let sampled = |bound: &sv::ir::ConstExpr| {
-        sv::typecheck::eval_const_expr_with_types(bound, &sample, parameter_types)
+        sv::typecheck::eval_const_expr_with_types(
+            &zero_variable_selects(bound, name_to_id, constants),
+            &sample,
+            parameter_types,
+        )
     };
     usize::try_from(sampled(msb)?.abs_diff(sampled(lsb)?))
         .ok()?
         .checked_add(1)
+}
+
+/// `bound` with each select from a variable, a run-time operand, replaced by
+/// zero.
+fn zero_variable_selects(
+    bound: &sv::ir::ConstExpr,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+) -> sv::ir::ConstExpr {
+    use sv::ir::ConstExpr;
+    let variable = |expr: &ConstExpr| {
+        let mut base = expr;
+        loop {
+            match base {
+                ConstExpr::Select { expr, .. } | ConstExpr::SelectRange { expr, .. } => {
+                    base = expr;
+                }
+                ConstExpr::Ident(name) => {
+                    return name_to_id.contains_key(name) && !constants.contains_key(name);
+                }
+                _ => return false,
+            }
+        }
+    };
+    let zero = |expr: &ConstExpr| Box::new(zero_variable_selects(expr, name_to_id, constants));
+    match bound {
+        ConstExpr::Select { expr, .. } | ConstExpr::SelectRange { expr, .. } if variable(expr) => {
+            ConstExpr::Literal("0".to_string())
+        }
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => bound.clone(),
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: zero(expr),
+            bit: zero(bit),
+        },
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: zero(expr),
+            msb: zero(msb),
+            lsb: zero(lsb),
+            signed: *signed,
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: zero(expr),
+            width: *width,
+            signed: *signed,
+        },
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee: callee.clone(),
+            args: args
+                .iter()
+                .map(|arg| zero_variable_selects(arg, name_to_id, constants))
+                .collect(),
+            site: *site,
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op: *op,
+            expr: zero(expr),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: zero(left),
+            op: *op,
+            right: zero(right),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: zero(condition),
+            then_expr: zero(then_expr),
+            else_expr: zero(else_expr),
+        },
+    }
 }
 
 /// How far a runtime-positioned select sits from bit 0 of its vector.
