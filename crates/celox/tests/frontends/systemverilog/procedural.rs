@@ -613,3 +613,92 @@ sv_backends! {
         }
     }
 }
+
+// A concatenation is the target of an assignment operator as of `=`:
+// `{a, b} op= v` is `{a, b} = {a, b} op v` (IEEE 1800-2023 11.4.1, 11.4.12),
+// the concatenation unsigned, as OpenTitan's debug module masks its hart
+// selection with `{hartselhi, hartsello} &= (2**$clog2(NrHarts))-1`.
+#[test]
+fn assignment_operators_assign_concatenations() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+          typedef struct packed { logic [3:0] hi; logic [5:0] lo; logic x; } ctl_t;
+          ctl_t d;
+          logic [3:0] a; logic [3:0] b; logic [7:0] arr [2]; logic [1:0] i;
+          int unsigned n;
+          initial begin
+            d = '{hi: 4'hf, lo: 6'h3f, x: 1'b1};
+            {d.hi, d.lo} &= (2**$clog2(5))-1;
+            a = 4'h1; b = 4'hf;
+            {a, b} += 8'h01;
+            arr[0] = 8'h80; arr[1] = 8'h01; i = 1;
+            {arr[i], arr[0]} >>= 4;
+            n = 3;
+            {a, b} <<= n;
+            $display("d=%h a=%h b=%h arr=%h %h", d, a, b, arr[1], arr[0]);
+          end
+          logic clk = 0; logic [3:0] p, q;
+          always_ff @(posedge clk) {p, q} |= 8'h81;
+          initial begin
+            p = 0; q = 0; #2 clk = 1; #1 clk = 0; #1 clk = 1;
+            #1 $display("p=%h q=%h", p, q);
+          end
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("concat_ops.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(20).unwrap();
+        assert_eq!(
+            display_lines(&mut sim),
+            ["d=00f a=0 b=0 arr=00 18", "p=8 q=1"],
+            "four-state {four_state}"
+        );
+    }
+}
+
+/// An assignment operator updates each part of a concatenation as a target
+/// of its own (IEEE 1800-2023 11.4.1): an enumerated part is updated as a
+/// direct one is (6.19.3), and a part whose select has an effectful call, a subroutine or a random
+/// function, which the read and the write of the part would each call, is
+/// not taken.
+#[test]
+fn assignment_operators_check_each_part_of_a_concatenation() {
+    for (body, expected) in [
+        (
+            "typedef enum logic [1:0] { A, B, C } e_t; e_t state; logic [1:0] bits;
+             initial begin state = A; bits = 0; {state, bits} += 1; end",
+            "not assignment compatible",
+        ),
+        (
+            "logic [7:0] arr [4]; logic [3:0] b; int k = 0;
+             function automatic int next(); k = k + 1; return k; endfunction
+             initial begin {arr[next()], b} += 1; end",
+            "select has an effectful call",
+        ),
+        (
+            "logic [7:0] arr [4]; logic [3:0] b;
+             initial begin {arr[$urandom % 4], b} += 1; end",
+            "select has an effectful call",
+        ),
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("concat_parts.sv"))],
+            "Top",
+        )
+        .build()
+        .map(|_| ())
+        .expect_err("the assignment is rejected")
+        .to_string()
+        .replace(['\n', '│'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+        assert!(error.contains(expected), "{body}: {error}");
+    }
+}
