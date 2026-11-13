@@ -9148,3 +9148,40 @@ fn complements_of_parameters_keep_the_parameter_width() {
     // complemented (11.6.1).
     assert_eq!(sim.get(sim.signal("wide")), 0x10fu16.into());
 }
+
+// `$clog2` of a constant wider than 128 bits, such as a field of a wide
+// address mask, is a constant (IEEE 1800-2023 20.8.1), also as the value
+// of a module or interface parameter override.
+#[test]
+fn clog2_of_wide_constants_in_parameter_overrides() {
+    let source = r#"
+        `define MASK {32'h0000_FFFF, 32'h0001_FFFF, 32'h0000_00FF, 32'h0000_0001, 32'h0000_0000, 32'h0000_000F, 32'h0000_FFFF, 32'hFFFF_FFFF}
+        `define WIDTH(n) $clog2((`MASK >> (32 * n)) & {32{1'b1}})
+        interface bus_if #(parameter integer AW = 1) ();
+          logic [AW-1:0] addr;
+        endinterface
+        module Leaf #(parameter integer AW = 1) (output logic [31:0] aw);
+          assign aw = AW;
+        endmodule
+        module Top(output logic [31:0] six, five, bits, zero, all);
+          bus_if #(.AW(`WIDTH(6))) bus();
+          Leaf #(.AW(`WIDTH(5))) leaf(.aw(five));
+          Leaf #(.AW(`WIDTH(3))) low(.aw(zero));
+          Leaf #(.AW($clog2(256'h1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000))) wide(.aw(all));
+          assign six = $bits(bus.addr);
+          assign bits = `WIDTH(5);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("clog2.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    for (name, value) in [
+        ("six", 17u32),
+        ("five", 8),
+        ("bits", 8),
+        ("zero", 0),
+        ("all", 160),
+    ] {
+        assert_eq!(sim.get(sim.signal(name)), value.into(), "{name}");
+    }
+}
