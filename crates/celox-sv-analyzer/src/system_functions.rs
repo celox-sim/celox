@@ -1207,7 +1207,9 @@ pub enum ContainerOp {
     CaseEqual,
     New,
     Literal,
-    /// Empty associative array with the supplied default element.
+    /// Empty container with the supplied default element: an associative
+    /// array's default, or the element a dynamic array's `New` takes for
+    /// the elements past the ones it copies (`new[n]('{default: v})`).
     WithDefault,
     /// An associative array of the pattern `'{k0: v0, ..., default: d}`
     /// (IEEE 1800-2023 10.9.1): with `default`, the first argument is the
