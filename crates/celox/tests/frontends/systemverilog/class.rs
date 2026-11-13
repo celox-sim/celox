@@ -3798,3 +3798,391 @@ fn modules_create_classes_they_only_reach_through_a_package_factory() {
     sim.run_until(1).unwrap();
     assert_eq!(sim.get(sim.signal("y")), 3u32.into());
 }
+
+#[test]
+fn fixed_size_array_properties_hold_their_elements() {
+    // A fixed-size array property (IEEE 1800-2023 7.4, 8.4): initialized,
+    // indexed by its range, compared and formatted as an array, iterated
+    // from left to right, reordered, and copied by a shallow copy and by an
+    // assignment, after which the copies are independent (8.12, 7.6).
+    let source = "typedef struct { int a; byte b; } pair_t;
+    class C;
+        int tab[5] = '{1, 2, 3, 4, 5};
+        int down[4:1] = '{40, 30, 20, 10};
+        int from[2:6] = '{1, 2, 3, 4, 5};
+        pair_t pairs[2];
+    endclass
+    module Top;
+        C c, d;
+        int s;
+        pair_t p;
+        initial begin
+            c = new;
+            $display(\"%0d %0d %0d %0d\", c.tab[0], c.tab[4], c.down[4], c.down[1]);
+            c.tab[2] = 33;
+            $display(\"%p\", c.tab);
+            d = new c;
+            d.tab[0] = 100;
+            $display(\"%0d %0d %0d %0d\", c.tab[0], d.tab[0], c.tab == d.tab, c.tab != d.tab);
+            d.tab = c.tab;
+            d.tab[1] = 7;
+            $display(\"%0d %0d %0d\", c.tab[1], d.tab[1], c.tab == d.tab);
+            s = 0;
+            foreach (c.down[i]) s += i * c.down[i];
+            $display(\"%0d\", s);
+            s = 0;
+            foreach (c.from[i]) s += i * c.from[i];
+            $display(\"%0d\", s);
+            c.tab.sort();
+            $display(\"%p %0d\", c.tab, c.tab.sum());
+            c.tab.shuffle();
+            $display(\"%0d %0d\", c.tab.sum(), c.tab.max()[0]);
+            p.a = 7; p.b = 8;
+            c.pairs[1] = p;
+            d = new c;
+            p.a = 9;
+            d.pairs[1] = p;
+            $display(\"%0d %0d %0d %0d\", c.pairs[1].a, c.pairs[1].b, c.pairs[0].a, d.pairs[1].a);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        [
+            "1 5 40 10",
+            "'{1, 2, 33, 4, 5}",
+            "1 100 0 1",
+            "2 7 0",
+            "300",
+            "70",
+            "'{1, 2, 4, 5, 33} 45",
+            "45 33",
+            "7 8 0 9",
+        ]
+    );
+}
+
+#[test]
+fn queries_of_fixed_size_array_properties_are_constants() {
+    // However an object holds them, the properties are of fixed-size array
+    // types (IEEE 1800-2023 20.7): their queries are constants, and size
+    // a declaration.
+    let source = "class C;
+        int tab[5];
+        bit [3:0] nib[4:1];
+    endclass
+    module Top;
+        C c;
+        bit [$bits(c.tab)-1:0] wide;
+        bit [$size(c.tab)-1:0] each;
+        initial begin
+            c = new;
+            $display(\"%0d %0d %0d %0d %0d %0d\", $left(c.tab), $right(c.tab), $size(c.tab),
+                $bits(c.tab), $dimensions(c.tab), $bits(wide) + $bits(each));
+            $display(\"%0d %0d %0d %0d %0d %0d\", $left(c.nib), $right(c.nib), $low(c.nib),
+                $high(c.nib), $increment(c.nib), $bits(c.nib));
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["0 4 5 160 2 165", "4 1 1 4 1 16"]
+    );
+}
+
+#[test]
+fn locators_of_fixed_size_array_properties_take_their_indices() {
+    // The index methods and `item.index` give the indices of the array's
+    // range, from its left bound to its right one (IEEE 1800-2023 7.4.6,
+    // 7.12.1, 7.12.4).
+    let source = "class C;
+        int from[2:5] = '{5, 7, 5, 9};
+        int down[4:1] = '{1, 2, 3, 2};
+        int tab[4] = '{5, 7, 5, 9};
+    endclass
+    module Top;
+        C c;
+        initial begin
+            c = new;
+            $display(\"%p %p %p\", c.from.find_index with (item == 5),
+                c.from.find_first_index with (item.index > 2 && item == 5),
+                c.from.unique_index);
+            $display(\"%p %p %p\", c.down.find_index with (item == 2),
+                c.down.find_last_index with (item == 2), c.down.find with (item.index == 3));
+            $display(\"%p %p\", c.tab.find_index with (item == 5), c.from.find with (item.index == 3));
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        [
+            "'{2, 4} '{4} '{2, 3, 5}",
+            "'{3, 1} '{1} '{2}",
+            "'{0, 2} '{7}",
+        ]
+    );
+}
+
+#[test]
+fn fixed_size_array_properties_take_dimension_queries_and_class_parameters() {
+    // A query names the array's own dimension as 1 (IEEE 1800-2023 20.7),
+    // and an element type sized by a class parameter keeps its size outside
+    // the class (8.25).
+    let source = "package p;
+        class C #(int W = 4);
+            bit [W-1:0] tab[3];
+            bit [3:0] nib[4:1];
+        endclass
+    endpackage
+    module Top;
+        p::C#(8) c;
+        initial begin
+            c = new;
+            $display(\"%0d %0d %0d %0d %0d %0d\", $size(c.tab, 1), $left(c.nib, 1), $bits(c.tab),
+                $bits(c.tab[0]), $size(c.nib, 2), $left(c.tab, 2));
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["3 4 24 8 4 7"]
+    );
+}
+
+#[test]
+fn const_fixed_size_array_properties_are_written_by_their_constructor_only() {
+    // Every write of an element of a const property, and every method that
+    // changes it, writes the property (IEEE 1800-2023 8.19): the
+    // constructor of its class writes one without an initializer, and
+    // nothing else writes either.
+    let source = "class C;
+        const int k[2] = '{1, 2};
+        const int m[2];
+        function new(); m[0] = 4; m[1] = 3; endfunction
+    endclass
+    module Top;
+        C c;
+        initial begin
+            c = new;
+            $display(\"%p %p\", c.k, c.m);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["'{1, 2} '{4, 3}"]
+    );
+    for statement in [
+        "c.k[0] = 3;",
+        "c.k[1] += 1;",
+        "c.m[0]++;",
+        "c.k.sort();",
+        "c.m.shuffle();",
+        "c.k.rsort with (item);",
+    ] {
+        let source = format!(
+            "class C;
+                const int k[2] = '{{1, 2}};
+                const int m[2];
+                function new(); m[0] = 4; endfunction
+            endclass
+            module Top;
+                C c;
+                initial begin c = new; {statement} end
+            endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        .expect_err(statement);
+        assert!(
+            error
+                .to_string()
+                .contains("assignment to const class property"),
+            "{statement}: {error}"
+        );
+    }
+}
+
+#[test]
+fn fixed_size_array_properties_take_wide_bounds() {
+    // A bound wider than 32 bits keeps its value when an index is taken
+    // from it (IEEE 1800-2023 7.4.6), ascending or descending.
+    let source = "class C;
+        int w[64'd4294967296:64'd4294967297];
+        int d[64'd4294967297:64'd4294967296];
+    endclass
+    module Top;
+        C c;
+        initial begin
+            c = new;
+            c.w[64'd4294967296] = 5;
+            c.w[64'd4294967297] = 6;
+            c.d[64'd4294967296] = 7;
+            $display(\"%0d %0d %p %p\", c.w[64'd4294967296], c.w[64'd4294967297], c.w, c.d);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["5 6 '{5, 6} '{0, 7}"]
+    );
+}
+
+#[test]
+fn fixed_size_array_properties_meet_ordinary_arrays() {
+    // An ordinary array of as many elements of an equivalent type is
+    // compared with and assigned to the property element by element, from
+    // left to right (IEEE 1800-2023 7.6, 11.4.5), and `$bits` counts the
+    // members of structure elements (20.6.2).
+    let source = "typedef struct { int a; byte b; } pair_t;
+    class C;
+        int tab[2] = '{1, 2};
+        pair_t pairs[2];
+    endclass
+    module Top;
+        C c;
+        int m[1:2] = '{1, 2};
+        int d[2:1] = '{5, 6};
+        initial begin
+            c = new;
+            $display(\"%0d %0d %0d %0d\", c.tab == m, m == c.tab, c.tab != m, c.tab == d);
+            c.tab = d;
+            $display(\"%p %0d %0d\", c.tab, c.tab[0], $bits(c.pairs));
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1 1 0 0", "'{5, 6} 5 80"]
+    );
+    for (statement, message) in [
+        (
+            "m = c.tab[1:0];",
+            "slice of a fixed-size array class property",
+        ),
+        (
+            "t(c.tab);",
+            "fixed-size array class property as a ref or const ref argument",
+        ),
+    ] {
+        let source = format!(
+            "class C; int tab[2]; endclass
+            module Top;
+                C c;
+                int m[2];
+                task automatic t(ref int a[2]); endtask
+                initial begin c = new; {statement} end
+            endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        .expect_err(statement);
+        assert!(error.to_string().contains(message), "{statement}: {error}");
+    }
+}
+
+#[test]
+fn fixed_size_array_properties_take_ordinary_array_checks() {
+    // `foreach` takes each index of a range outside `int`, of a property as
+    // of an ordinary array (IEEE 1800-2023 12.7.3).
+    let source = "class C;
+        int w[64'd4294967296:64'd4294967298] = '{1, 2, 3};
+    endclass
+    module Top;
+        C c;
+        int m[64'd4294967297:64'd4294967296] = '{4, 5};
+        longint s, n, t;
+        initial begin
+            c = new;
+            foreach (c.w[i]) begin s += (i - 64'd4294967296) * c.w[i]; n++; end
+            foreach (m[i]) t += (i - 64'd4294967296) * m[i];
+            $display(\"%0d %0d %0d\", s, n, t);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["8 3 4"]);
+    // A count a container cannot hold, and elements whose members have
+    // initial values, which a container does not give them, are rejected.
+    for (property, message) in [
+        (
+            "int a[128'd0:128'd18446744073709551616];",
+            "fixed-size array class property of more than 16777216 elements",
+        ),
+        (
+            "row_t rows[1];",
+            "fixed-size array class property of an unpacked structure with member initial values",
+        ),
+    ] {
+        let source = format!(
+            "typedef struct {{ bit a = 1; }} row_t;
+            class C; {property} endclass
+            module Top; C c; initial c = new; endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        .expect_err(property);
+        assert!(error.to_string().contains(message), "{property}: {error}");
+    }
+}
+
+#[test]
+fn fixed_size_array_properties_keep_their_size_and_element_type() {
+    // `delete` is no method of a fixed-size array (IEEE 1800-2023 7.5.3),
+    // and arrays of unrelated enums are not of equivalent types, so neither
+    // is assigned or compared to the other (6.22.2, 7.6).
+    for (statement, message) in [
+        ("c.x.delete();", "delete"),
+        ("c.x = c.y;", "fixed-size array class property"),
+        (
+            "b = c.x == c.y;",
+            "comparison of a fixed-size array class property",
+        ),
+    ] {
+        let source = format!(
+            "typedef enum {{A, B}} e1;
+            typedef enum {{P, Q}} e2;
+            class C;
+                e1 x[2];
+                e2 y[2];
+            endclass
+            module Top;
+                C c;
+                bit b;
+                initial begin c = new; {statement} end
+            endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        .expect_err(statement);
+        assert!(error.to_string().contains(message), "{statement}: {error}");
+    }
+}
+
+#[test]
+fn constraints_read_fixed_size_array_properties() {
+    // A constraint iterates the elements of a state array (IEEE 1800-2023
+    // 18.5.8.1); only `x = 0` avoids them all.
+    let source = "class C;
+        rand int x;
+        int tab[3] = '{1, 2, 3};
+        constraint c { foreach (tab[i]) x != tab[i]; x inside {[0:3]}; }
+    endclass
+    module Top;
+        C c;
+        initial begin
+            c = new;
+            repeat (4) begin
+                void'(c.randomize());
+                $display(\"%0d\", c.x);
+            end
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["0", "0", "0", "0"]
+    );
+}

@@ -195,6 +195,7 @@ impl Type {
                 layout: container.layout,
                 element: container.element.with_resolved_container_bounds(eval)?,
                 record: container.record.clone(),
+                fixed: container.fixed,
             }));
         }
         Some(resolved)
