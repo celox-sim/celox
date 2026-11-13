@@ -574,10 +574,11 @@ pub(in crate::ast) fn bind_native(
                 }
                 // A typed pattern of a member must name the member's
                 // structure type (6.22.3).
-                if pattern && shape.unpacked.is_empty() && shape.unpacked_struct.is_some() {
-                    let structure = shape
-                        .type_id(&mut session.types, &tree.functions, &dims.const_env)
-                        .ok_or_else(|| unsupported("unpacked structure member type"))?;
+                if pattern
+                    && shape.unpacked.is_empty()
+                    && let Some(structure) =
+                        unpacked_structs::shape_struct(&shape, tree, session, dims)
+                {
                     unpacked_structs::check_value(structure, id, native, tree, session, dims)?;
                 }
                 if let Some(aggregate) = shape.unpacked_struct.clone()

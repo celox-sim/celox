@@ -281,7 +281,10 @@ pub(super) fn native_value_type_plan(
                             shape
                                 .filter(|shape| {
                                     !shape.members.is_empty()
-                                        || shape.unpacked_struct.is_some()
+                                        || unpacked_structs::shape_struct(
+                                            shape, tree, session, dims,
+                                        )
+                                        .is_some()
                                         || !shape.unpacked.is_empty()
                                         || shape.packed.len() > 1
                                 })
