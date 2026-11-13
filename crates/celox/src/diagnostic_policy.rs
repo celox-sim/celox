@@ -85,6 +85,7 @@ impl DiagnosticPolicy {
             if matches!(
                 code,
                 "mixed_timescale"
+                    | "duplicate_module"
                     | "shared_always_temporary"
                     | "interface_array_query"
                     | "interface_array_parameter"
@@ -106,6 +107,7 @@ impl DiagnosticPolicy {
     ) -> celox_frontend_sv::AnalysisOptions {
         celox_frontend_sv::AnalysisOptions {
             allow_mixed_timescales: self.level("mixed_timescale") != DiagnosticLevel::Error,
+            first_duplicate_module: self.level("duplicate_module") != DiagnosticLevel::Error,
             shared_always_temporaries: self.level("shared_always_temporary")
                 != DiagnosticLevel::Error,
             default_timescale: timescale.map(|scale| (scale.unit, scale.precision)),

@@ -183,6 +183,12 @@ interface_array_query = "warn"
 
 The CLI uses the same policy: `celox run top.sv --top Top --diagnostic interface_array_query=warn`.
 
+`duplicate_module` defaults to `error`: a design declares each module once. With
+`warn` or `allow`, the first declaration of a module in source order is the
+module and the later declarations of the same name are left out, as tools that
+only warn about them do. Interfaces, programs and packages declared twice
+remain errors.
+
 `interface_array_parameter` also defaults to `error`. Set it to `warn` or `allow`
 for the compatibility shorthand `bus.WIDTH` when `bus` is an interface array.
 It reads the value parameter from the first element in declaration order,

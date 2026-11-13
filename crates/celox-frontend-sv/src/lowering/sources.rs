@@ -27,8 +27,13 @@ pub(super) fn analyze_sources_with_requests(
     analysis_options: sv::AnalysisOptions,
 ) -> Result<(HashMap<String, AnalyzedSvModule>, HashMap<String, String>), sv::AnalyzerError> {
     if !declarations.is_empty() {
+        let mut declared_modules = HashSet::default();
         for (code, path) in sources {
-            let parsed = sv::ParsedSource::parse(code, path)?;
+            let parsed = if analysis_options.first_duplicate_module {
+                sv::ParsedSource::parse_with_first_modules(code, path, &mut declared_modules)?
+            } else {
+                sv::ParsedSource::parse(code, path)?
+            };
             if let Some(name) = parsed
                 .module_names()
                 .iter()
@@ -87,19 +92,24 @@ pub(super) fn analyze_sources_with_requests(
         tracing::debug!("[analysis] {label}: {:?}", checkpoint.elapsed());
         checkpoint = std::time::Instant::now();
     };
-    let (elaboration, interface_member_paths) =
-        sv::plan_interfaces_with_member_paths(sources, &bindings)?;
+    let (elaboration, interface_member_paths) = sv::plan_interfaces_of_first_modules(
+        sources,
+        &bindings,
+        analysis_options.first_duplicate_module,
+    )?;
     step("plan_interfaces");
     let root_names = elaboration.root_names.clone();
     let mut modules = HashMap::default();
+    let mut declared_modules = HashSet::default();
     let sources: Vec<_> = sources
         .iter()
         .map(|(code, path)| {
-            Ok((
-                std::rc::Rc::new(sv::ParsedSource::parse(code, path)?),
-                *code,
-                *path,
-            ))
+            let parsed = if analysis_options.first_duplicate_module {
+                sv::ParsedSource::parse_with_first_modules(code, path, &mut declared_modules)?
+            } else {
+                sv::ParsedSource::parse(code, path)?
+            };
+            Ok((std::rc::Rc::new(parsed), *code, *path))
         })
         .collect::<Result<_, sv::AnalyzerError>>()?;
     let mut interfaces = sv::ModuleInterfaces::default();
@@ -131,6 +141,7 @@ pub(super) fn analyze_sources_with_requests(
     let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
     // The interfaces that virtual interface types name, before their
     // instances are known (see `virtual_interfaces`).
+    let first_duplicate_module = analysis_options.first_duplicate_module;
     let analysis_options = if analysis_options.virtual_interfaces.is_none() {
         let texts = sources
             .iter()
@@ -184,11 +195,18 @@ pub(super) fn analyze_sources_with_requests(
     }
     packages.set_interface_plan(elaboration.clone());
     let packages = std::rc::Rc::new(packages);
+    let mut net_declared_modules = HashSet::default();
     for (source, code, path) in &sources {
-        let implicit_net_permissions: HashMap<_, _> =
+        // The first declaration of a module name is the one analyzed.
+        let permissions = if first_duplicate_module {
+            sv::source_first_module_implicit_net_permissions(code, path, &mut net_declared_modules)?
+        } else {
             sv::source_module_implicit_net_permissions(code, path)?
-                .into_iter()
-                .collect();
+        };
+        let mut implicit_net_permissions = HashMap::default();
+        for (name, allowed) in permissions {
+            implicit_net_permissions.entry(name).or_insert(allowed);
+        }
         let mut module_names = source.module_names().to_vec();
         module_names.extend(
             elaboration

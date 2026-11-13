@@ -18,12 +18,32 @@ pub use lowering::{ForeignModuleResolver, prepare_external_hierarchy_with_foreig
 pub use lowering::{SvModuleRequest, SvParameterValue};
 pub use warning::{FrontendWarning, FrontendWarningKind, WarningLocation};
 
+/// `sources` parsed, with only the first declaration of each module name
+/// when `first_modules` (a relaxed `duplicate_module` diagnostic, see
+/// [`celox_sv_analyzer::ParsedSource::parse_with_first_modules`]).
+fn parse_sources(
+    sources: &[(&str, &std::path::Path)],
+    first_modules: bool,
+) -> Result<Vec<celox_sv_analyzer::ParsedSource>, AnalyzerError> {
+    let mut declared = fxhash::FxHashSet::default();
+    sources
+        .iter()
+        .map(|(code, path)| {
+            if first_modules {
+                celox_sv_analyzer::ParsedSource::parse_with_first_modules(code, path, &mut declared)
+            } else {
+                celox_sv_analyzer::ParsedSource::parse(code, path)
+            }
+        })
+        .collect()
+}
+
 pub fn module_interfaces(
     sources: &[(&str, &std::path::Path)],
+    first_modules: bool,
 ) -> Result<ModuleInterfaces, AnalyzerError> {
     let mut interfaces = ModuleInterfaces::default();
-    for (code, path) in sources {
-        let parsed = celox_sv_analyzer::ParsedSource::parse(code, path)?;
+    for parsed in parse_sources(sources, first_modules)? {
         interfaces.extend(parsed.module_interfaces().clone());
     }
     Ok(interfaces)
@@ -31,20 +51,21 @@ pub fn module_interfaces(
 
 pub fn component_references(
     sources: &[(&str, &std::path::Path)],
+    first_modules: bool,
 ) -> Result<fxhash::FxHashSet<String>, AnalyzerError> {
     let mut references = fxhash::FxHashSet::default();
-    for (code, path) in sources {
-        references
-            .extend(celox_sv_analyzer::ParsedSource::parse(code, path)?.component_references());
+    for parsed in parse_sources(sources, first_modules)? {
+        references.extend(parsed.component_references());
     }
     Ok(references)
 }
 pub fn component_names(
     sources: &[(&str, &std::path::Path)],
+    first_modules: bool,
 ) -> Result<fxhash::FxHashSet<String>, AnalyzerError> {
     let mut names = fxhash::FxHashSet::default();
-    for (code, path) in sources {
-        names.extend(celox_sv_analyzer::ParsedSource::parse(code, path)?.component_names());
+    for parsed in parse_sources(sources, first_modules)? {
+        names.extend(parsed.component_names());
     }
     Ok(names)
 }

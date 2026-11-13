@@ -168,6 +168,8 @@ interface_array_query = "warn"
 
 CLI でも同じ設定を使います: `celox run top.sv --top Top --diagnostic interface_array_query=warn`。
 
+`duplicate_module` の既定値は `error` です。デザインは各モジュールを 1 回だけ宣言します。`warn` または `allow` を選ぶと、ソース順で最初の宣言をそのモジュールとして使い、同名の後続の宣言は取り除きます（警告だけを出すツールと同じ扱いです）。interface・program・package の重複宣言は引き続きエラーになります。
+
 `multiple_always_ff_drivers` は、`always_ff` と別のエッジプロセスが同じメモリへ書く場合に既定で `error` になります（IEEE 1800-2023 §9.2.2.4）。`warn` または `allow` では、非ブロッキング代入の変更範囲を次状態領域に保持してコミットします。通常の `always` 同士による共有にはこの診断は出ません。異なるプロセスが同時に同じビットへ書く順序は、移植可能な動作として保証されません。
 
 プロジェクトのシミュレータ生成時は `Veryl.toml` と同じ場所の設定を読み込みます。CLI は単独の SystemVerilog プロジェクトにも対応します。
