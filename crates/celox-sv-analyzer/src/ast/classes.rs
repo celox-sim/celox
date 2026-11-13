@@ -233,6 +233,8 @@ fn reads_input(expr: &celox_heap::randomization::Expr) -> bool {
         | Expr::Resize { value, .. }
         | Expr::Unary { value, .. } => reads_input(value),
         Expr::Foreach { body, .. } => reads_input(body),
+        Expr::Call { args, body } => args.iter().any(reads_input) || reads_input(body),
+        Expr::Argument(_) => false,
         Expr::Binary { left, right, .. } => reads_input(left) || reads_input(right),
         Expr::Literal(..)
         | Expr::Field(_)
@@ -1532,6 +1534,7 @@ pub(super) fn shared_class(
     let scope = (name.to_owned(), base.as_ref().map(|base| base.name.clone()));
     session.constraint_owners.push(scope.clone());
     session.constraint_scopes.push(scope);
+    session.constraint_methods.push(methods.clone());
     // The classes above this one, whose constraints are below its own
     // (IEEE 1800-2023 18.5.13.1).
     let depth = {
@@ -1620,6 +1623,7 @@ pub(super) fn shared_class(
     }
     session.constraint_owners.pop();
     session.constraint_scopes.pop();
+    session.constraint_methods.pop();
     statics.extend(constraint_modes);
     let mut class = Class {
         name: name.to_owned(),

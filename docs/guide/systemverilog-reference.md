@@ -291,8 +291,11 @@ blocks in programs. Two region deviations are listed under
   sets, and `randc` domains beyond 1–8-bit integers and scalar enums with
   up to 256 members. Named constraint blocks cover only 1–64-bit two-state
   scalar integer properties with comparisons, logical and bitwise
-  operations, addition, subtraction, and multiplication, and class handle
-  properties compared with each other or `null` by `==` and `!=`.
+  operations, addition, subtraction, and multiplication, class handle
+  properties compared with each other or `null` by `==` and `!=`, and
+  calls of a function of the class with scalar input arguments whose body
+  is one `return` of its value (18.5.11); a longer function is
+  unsupported.
 - Inline `with` constraints: four-state and aggregate caller-scope inputs,
   typed parameter inputs, qualified `this` / `super` references, restricted
   `with (names)` lookup, and scope `std::randomize(…) with`.
@@ -557,6 +560,9 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
   kept before it allow it, and is otherwise discarded; a `disable soft`
   discards the lower soft constraints that name its variable (18.5.13.2).
   The search for each keeps the seed, so the choice is reproducible.
+- The random variables in the arguments of a function a constraint calls
+  are solved first, by the constraints that name only them, and are state
+  to the others (18.5.11), so a later constraint can make the call fail.
 - Array `shuffle` draws from the calling process's random stream.
 
 ### Host-dependent results

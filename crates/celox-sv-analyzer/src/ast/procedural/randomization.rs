@@ -897,6 +897,13 @@ fn shift_inputs(expr: &mut celox_heap::randomization::Expr, first: usize, by: us
         | Expr::Resize { value, .. }
         | Expr::Unary { value, .. } => shift_inputs(value, first, by),
         Expr::Foreach { body, .. } => shift_inputs(body, first, by),
+        Expr::Call { args, body } => {
+            for arg in args {
+                shift_inputs(arg, first, by);
+            }
+            shift_inputs(body, first, by);
+        }
+        Expr::Argument(_) => {}
         Expr::Binary { left, right, .. } => {
             shift_inputs(left, first, by);
             shift_inputs(right, first, by);

@@ -348,14 +348,206 @@ pub(in crate::ast) fn resolve_statics(expr: &mut ConstraintExpr, first: usize) {
             resolve_statics(left, first);
             resolve_statics(right, first);
         }
+        ConstraintExpr::Call { args, body } => {
+            for arg in args {
+                resolve_statics(arg, first);
+            }
+            resolve_statics(body, first);
+        }
         ConstraintExpr::Literal(..)
         | ConstraintExpr::Field(_)
         | ConstraintExpr::Handle(_)
+        | ConstraintExpr::Argument(_)
         | ConstraintExpr::Input { .. }
         | ConstraintExpr::Size(_)
         | ConstraintExpr::Index { .. }
         | ConstraintExpr::Solved(_)
         | ConstraintExpr::Element { .. } => {}
+    }
+}
+
+/// A function a constraint calls, inlined (IEEE 1800-2023 18.5.11): the
+/// arguments of the call, the width and signedness of each formal, the
+/// function's body with [`ConstraintExpr::Argument`] `i` for formal `i`,
+/// and the width and signedness of its value.
+struct FunctionCall {
+    arguments: Vec<ExprId>,
+    formals: Vec<(u32, bool)>,
+    body: ConstraintExpr,
+    width: u32,
+    signed: bool,
+}
+
+/// The first input index that stands for a formal of a function a
+/// constraint calls while its body is bound (see [`function_call`]).
+const FORMAL_INPUTS: usize = 1 << 30;
+
+/// The call `callee(arguments)` of a method of the class whose constraints
+/// are being bound: a function of input arguments only whose body is one
+/// `return` or assignment of its value, inlined. A function that preserves
+/// no state and has no side effects is what a constraint may call (18.5.11);
+/// a longer one stays unsupported.
+#[allow(clippy::too_many_arguments)]
+fn function_call(
+    callee: ExprId,
+    arguments: &[celox_sv_syntax::Argument],
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    properties: &[Property],
+    names: &Names<'_>,
+    env: &ConstEnv,
+    inputs: &HashMap<String, (usize, u32, bool)>,
+) -> Result<FunctionCall, String> {
+    use celox_sv_syntax::{Direction, StatementKind};
+    let native = tree.declarations();
+    let ExprKind::Name(name) = &native
+        .expression(crate::ast::expression_binding::ungroup(callee, native))
+        .kind
+    else {
+        return Err("a call in a constraint other than of a function of the class".into());
+    };
+    let name = instances::normalize_identifier(&name.spelling);
+    let method = session
+        .constraint_methods
+        .last()
+        .and_then(|methods| methods.iter().find(|method| method.name == name))
+        .cloned()
+        .ok_or_else(|| format!("a call of `{name}` in a constraint"))?;
+    let unsupported = |what: &str| format!("function `{name}` in a constraint {what}");
+    if !method.is_function || method.is_pure() {
+        return Err(unsupported("that is not a function with a body"));
+    }
+    let Some(Some(result)) = &method.result else {
+        return Err(unsupported("without a value"));
+    };
+    let shape = |ty: &Type| {
+        casts::expr_type_from_type(&tree.functions, ty, env)
+            .filter(|shape| (1..=64).contains(&shape.width))
+            .map(|shape| (shape.width as u32, shape.signed))
+    };
+    let (width, signed) =
+        shape(result).ok_or_else(|| unsupported("of a value wider than 64 bits"))?;
+    let subroutine = native.subroutine(method.native).clone();
+    let ports = match &subroutine.ports {
+        Some(ports) => ports.clone(),
+        None => subroutine
+            .port_declarations
+            .iter()
+            .flat_map(|declaration| declaration.ports.iter().cloned())
+            .collect(),
+    };
+    let mut formals = Vec::new();
+    let mut body_inputs = inputs.clone();
+    for (index, port) in ports.iter().enumerate() {
+        if !matches!(port.direction, None | Some(Direction::Input)) || !port.dimensions.is_empty() {
+            return Err(unsupported("with an argument other than a scalar input"));
+        }
+        let Some(port_name) = &port.name else {
+            return Err(unsupported("with an unnamed argument"));
+        };
+        let port_name = instances::normalize_identifier(&port_name.spelling);
+        if properties.iter().any(|property| property.name == port_name) {
+            return Err(unsupported("with an argument named as a property"));
+        }
+        let ty = type_binding::procedural_type(
+            port.data_type,
+            native,
+            tree,
+            session,
+            env,
+            &TypeAliases::default(),
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| unsupported("with an argument of an unknown type"))?;
+        let (width, signed) =
+            shape(&ty).ok_or_else(|| unsupported("with an argument wider than 64 bits"))?;
+        body_inputs.insert(port_name, (FORMAL_INPUTS + index, width, signed));
+        formals.push((width, signed));
+    }
+    if arguments.len() != formals.len()
+        || arguments
+            .iter()
+            .any(|argument| argument.name.is_some() || argument.value.is_none())
+    {
+        return Err(unsupported(
+            "called without one positional argument for each formal",
+        ));
+    }
+    // One statement gives the value: `return value;` or `name = value;`.
+    let value = match subroutine.items.as_slice() {
+        [statement] => match &native.statement(*statement).kind {
+            StatementKind::Return(Some(value)) => *value,
+            StatementKind::Assignment {
+                left,
+                operator,
+                right,
+                nonblocking: false,
+                timing: None,
+                ..
+            } if operator == "="
+                && matches!(&native.expression(*left).kind,
+                    ExprKind::Name(target) if instances::normalize_identifier(&target.spelling) == name) =>
+            {
+                *right
+            }
+            _ => return Err(unsupported("whose body is not one return of its value")),
+        },
+        _ => return Err(unsupported("whose body is not one return of its value")),
+    };
+    let body = bind_inputs(value, tree, session, properties, names, env, &body_inputs)?;
+    if body.calls() {
+        return Err(unsupported("that calls a function"));
+    }
+    let body = ConstraintExpr::Resize {
+        value: Box::new(formal_arguments(body)),
+        width,
+        signed,
+    };
+    Ok(FunctionCall {
+        arguments: arguments
+            .iter()
+            .filter_map(|argument| argument.value)
+            .collect(),
+        formals,
+        body,
+        width,
+        signed,
+    })
+}
+
+/// `expr` with each input that stands for a formal (see [`FORMAL_INPUTS`])
+/// the argument of the formal.
+fn formal_arguments(expr: ConstraintExpr) -> ConstraintExpr {
+    let boxed = |value: ConstraintExpr| Box::new(formal_arguments(value));
+    match expr {
+        ConstraintExpr::Input { index, .. } if index >= FORMAL_INPUTS => {
+            ConstraintExpr::Argument((index - FORMAL_INPUTS) as u32)
+        }
+        ConstraintExpr::Resize {
+            value,
+            width,
+            signed,
+        } => ConstraintExpr::Resize {
+            value: boxed(*value),
+            width,
+            signed,
+        },
+        ConstraintExpr::Unary { op, value } => ConstraintExpr::Unary {
+            op,
+            value: boxed(*value),
+        },
+        ConstraintExpr::Binary {
+            op,
+            left,
+            right,
+            signed,
+        } => ConstraintExpr::Binary {
+            op,
+            left: boxed(*left),
+            right: boxed(*right),
+            signed,
+        },
+        expr => expr,
     }
 }
 
@@ -412,9 +604,16 @@ pub(in crate::ast) fn looped_arrays(expr: &ConstraintExpr, found: &mut Vec<usize
             looped_arrays(left, found);
             looped_arrays(right, found);
         }
+        ConstraintExpr::Call { args, body } => {
+            for arg in args {
+                looped_arrays(arg, found);
+            }
+            looped_arrays(body, found);
+        }
         ConstraintExpr::Literal(..)
         | ConstraintExpr::Field(_)
         | ConstraintExpr::Handle(_)
+        | ConstraintExpr::Argument(_)
         | ConstraintExpr::Input { .. }
         | ConstraintExpr::Size(_)
         | ConstraintExpr::Index { .. }
@@ -925,10 +1124,31 @@ pub(in crate::ast) fn bind_inputs(
                     kind: Kind::Binary(operator.clone(), Box::new(a), Box::new(b)),
                 }
             }
+            ExprKind::Call {
+                expression: callee,
+                arguments,
+            } => {
+                let call = function_call(
+                    *callee, arguments, tree, session, properties, names, env, inputs,
+                )?;
+                // Its arguments, bound where the call is.
+                let mut args = Vec::with_capacity(call.formals.len());
+                for (argument, &(width, signed)) in call.arguments.iter().zip(&call.formals) {
+                    let value = recurse(session, budget, *argument)?;
+                    args.push(emit(sized(value, width, signed), None));
+                }
+                Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Call {
+                        args,
+                        body: Box::new(call.body),
+                    }),
+                    width: call.width,
+                    signed: call.signed,
+                }
+            }
             // Every node kind is listed, so that a new one has to say how a
             // constraint takes it.
             ExprKind::Member { .. }
-            | ExprKind::Call { .. }
             | ExprKind::Unary { .. }
             | ExprKind::Binary { .. }
             | ExprKind::MinTypMax { .. }

@@ -5408,3 +5408,41 @@ module Top(output int checks);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq checks 63))
+
+; A constraint calls a function of its class (IEEE 1800-2023 18.5.11): the
+; random variables of the arguments are solved first, by the constraints
+; that name only them, and the function's value is state to the others, so
+; a later constraint cannot change them.
+(case constraint_functions
+  (source "functions.sv" #"
+module Top(output int checks);
+    class A;
+        rand int b1, b2, b3;
+        function int F(input int d);
+            F = d;
+        endfunction
+        function int twice(int v);
+            return 2 * v + 1;
+        endfunction
+        constraint c1 { b1 == 5; }
+        constraint c2 { b2 == F(b1); }
+        constraint c3 { b3 == twice(b1 + 1); }
+    endclass
+    class Ordered;
+        rand int x, y;
+        function int same(int v); return v; endfunction
+        constraint d { y inside {[1:10]}; soft y == 2; }
+        constraint c { x == same(y); x > 5; }
+    endclass
+    initial begin
+        A a = new;
+        Ordered o = new;
+        checks = 0;
+        checks += (a.randomize() && a.b1 == 5 && a.b2 == 5 && a.b3 == 13) * 1;
+        // y is solved first, to 2, which leaves x no value.
+        checks += (!o.randomize()) * 2;
+        checks += (o.randomize() with { y > 6; } && o.y > 6 && o.x == o.y) * 4;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 7))

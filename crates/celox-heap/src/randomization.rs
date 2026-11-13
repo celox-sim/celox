@@ -44,6 +44,17 @@ pub enum Expr {
         priority: u64,
         variable: Box<Expr>,
     },
+    /// A call of a function in a constraint, inlined (IEEE 1800-2023
+    /// 18.5.11): `body`, in which [`Expr::Argument`] `i` is the value of
+    /// `args[i]`. The random variables of its arguments are solved before
+    /// the constraints that call it, which read them, and the function's
+    /// value, as state.
+    Call {
+        args: Vec<Expr>,
+        body: Box<Expr>,
+    },
+    /// Argument `0` of the function of the enclosing [`Expr::Call`].
+    Argument(u32),
     Literal(u32, u64),
     Field(usize),
     /// The class handle at this byte offset of the object, which no
@@ -295,13 +306,127 @@ impl Expr {
                 right.variables(base, size_base, names);
             }
             Self::Foreach { body, .. } => body.variables(base, size_base, names),
+            Self::Call { args, body } => {
+                for arg in args {
+                    arg.variables(base, size_base, names);
+                }
+                body.variables(base, size_base, names);
+            }
             Self::Literal(..)
             | Self::Static(_)
+            | Self::Argument(_)
             | Self::Handle(_)
             | Self::Input { .. }
             | Self::Index { .. }
             | Self::Element { .. } => {}
         }
+    }
+
+    /// Whether the expression calls a function (see [`Expr::Call`]).
+    pub fn calls(&self) -> bool {
+        self.call_arguments(0, 0, &mut Vec::new())
+    }
+
+    /// Whether the expression calls a function, with the solver variables
+    /// in the arguments of its calls added to `names` (see
+    /// [`Expr::variables`]).
+    fn call_arguments(&self, base: usize, size_base: usize, names: &mut Vec<String>) -> bool {
+        match self {
+            Self::Call { args, body } => {
+                for arg in args {
+                    arg.variables(base, size_base, names);
+                    arg.call_arguments(base, size_base, names);
+                }
+                body.call_arguments(base, size_base, names);
+                true
+            }
+            Self::Enabled { value, .. }
+            | Self::Soft { value, .. }
+            | Self::Resize { value, .. }
+            | Self::Unary { value, .. } => value.call_arguments(base, size_base, names),
+            Self::Binary { left, right, .. } => {
+                let left = left.call_arguments(base, size_base, names);
+                right.call_arguments(base, size_base, names) || left
+            }
+            Self::Foreach { body, .. } => body.call_arguments(base, size_base, names),
+            Self::DisableSoft { .. }
+            | Self::Literal(..)
+            | Self::Field(_)
+            | Self::Static(_)
+            | Self::Handle(_)
+            | Self::Argument(_)
+            | Self::Size(_)
+            | Self::Input { .. }
+            | Self::Index { .. }
+            | Self::Solved(_)
+            | Self::Element { .. } => false,
+        }
+    }
+
+    /// The expression with each [`Expr::Argument`] `i` replaced by
+    /// `args[i]`.
+    fn substitute(&self, args: &[Expr]) -> Result<Expr, String> {
+        let boxed = |value: Expr| Box::new(value);
+        Ok(match self {
+            Self::Argument(index) => args
+                .get(*index as usize)
+                .ok_or("a function argument it was not called with")?
+                .clone(),
+            Self::Enabled { index, value } => Self::Enabled {
+                index: *index,
+                value: boxed(value.substitute(args)?),
+            },
+            Self::Soft { priority, value } => Self::Soft {
+                priority: *priority,
+                value: boxed(value.substitute(args)?),
+            },
+            Self::Resize {
+                value,
+                width,
+                signed,
+            } => Self::Resize {
+                value: boxed(value.substitute(args)?),
+                width: *width,
+                signed: *signed,
+            },
+            Self::Unary { op, value } => Self::Unary {
+                op: op.clone(),
+                value: boxed(value.substitute(args)?),
+            },
+            Self::Binary {
+                op,
+                left,
+                right,
+                signed,
+            } => Self::Binary {
+                op: op.clone(),
+                left: boxed(left.substitute(args)?),
+                right: boxed(right.substitute(args)?),
+                signed: *signed,
+            },
+            Self::Foreach { array, body } => Self::Foreach {
+                array: *array,
+                body: boxed(body.substitute(args)?),
+            },
+            // A nested call has arguments of its own.
+            Self::Call { args: inner, body } => Self::Call {
+                args: inner
+                    .iter()
+                    .map(|arg| arg.substitute(args))
+                    .collect::<Result<_, _>>()?,
+                body: body.clone(),
+            },
+            Self::DisableSoft { .. }
+            | Self::Literal(..)
+            | Self::Field(_)
+            | Self::Static(_)
+            | Self::Handle(_)
+            | Self::Size(_)
+            | Self::Input { .. }
+            | Self::Index { .. }
+            | Self::Solved(_)
+            | Self::Element { .. } => self.clone(),
+        })
     }
 
     /// Whether the expression names the size of array `index`.
@@ -317,9 +442,13 @@ impl Expr {
             | Self::Unary { value, .. } => value.names_size(index),
             Self::Binary { left, right, .. } => left.names_size(index) || right.names_size(index),
             Self::Foreach { body, .. } => body.names_size(index),
+            Self::Call { args, body } => {
+                args.iter().any(|arg| arg.names_size(index)) || body.names_size(index)
+            }
             Self::Literal(..)
             | Self::Field(_)
             | Self::Handle(_)
+            | Self::Argument(_)
             | Self::Input { .. }
             | Self::Index { .. }
             | Self::Static(_)
@@ -363,6 +492,9 @@ impl Expr {
                 return Err("constraint loop outside its array".into());
             }
             Self::Handle(_) => return Err("a handle the call did not read".into()),
+            Self::Call { .. } | Self::Argument(_) => {
+                return Err("a function the call did not inline".into());
+            }
             Self::Resize {
                 value,
                 width,
@@ -559,6 +691,15 @@ impl Heap {
                 value: boxed(self.unroll(object, program, value, loops, solved, check_only)?),
             },
             Expr::DisableSoft { .. } => constraint.clone(),
+            Expr::Call { args, body } => {
+                let args = args
+                    .iter()
+                    .map(|arg| self.unroll(object, program, arg, loops, solved, check_only))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let body = body.substitute(&args)?;
+                self.unroll(object, program, &body, loops, solved, check_only)?
+            }
+            Expr::Argument(_) => return Err("a function argument outside its call".into()),
             Expr::Handle(offset) => Expr::Literal(
                 8 * crate::HANDLE_BYTES as u32,
                 self.load(object, *offset as usize, crate::HANDLE_BYTES),
@@ -786,7 +927,12 @@ impl Heap {
             // The soft constraints, with their ranks and the variables
             // that appear in them, and the variables `disable soft` names,
             // with its ranks (18.5.13).
-            let mut soft: Vec<((u64, u64), Term, Vec<String>)> = Vec::new();
+            let mut soft: Vec<((u64, u64), Term, Vec<String>, bool)> = Vec::new();
+            // The hard constraints, with the variables that appear in them
+            // and whether they call a function, and the variables in the
+            // arguments of the calls, which are solved first (18.5.11).
+            let mut hard: Vec<(Term, Vec<String>, bool)> = Vec::new();
+            let mut ordered: Vec<String> = Vec::new();
             let mut disabled: Vec<((u64, u64), String)> = Vec::new();
             let mut limited = boolv(true);
             let mut bounded = false;
@@ -917,6 +1063,8 @@ impl Heap {
                 .zip(&bases)
                 .map(|((object, current), &base)| (*object, (base, current.as_ref())))
                 .collect();
+            // The variables and the state, before any constraint.
+            let unconstrained = formula.clone();
             for ((((object, current), &base), &size_base), enabled) in members
                 .iter()
                 .zip(&bases)
@@ -936,6 +1084,7 @@ impl Heap {
                         };
                         (object, priority)
                     };
+                    let calls = constraint.call_arguments(base, size_base, &mut ordered);
                     match constraint {
                         Expr::Soft { priority, value } => {
                             let value = self.unroll(
@@ -952,6 +1101,7 @@ impl Heap {
                                 rank(*priority),
                                 truth(value.term(&terms, base, sizes, inputs)?),
                                 names,
+                                calls,
                             ));
                         }
                         Expr::DisableSoft { priority, variable } => {
@@ -968,10 +1118,11 @@ impl Heap {
                                 &solved,
                                 check_only,
                             )?;
-                            formula = and(
-                                formula,
-                                truth(constraint.term(&terms, base, sizes, inputs)?),
-                            );
+                            let term = truth(constraint.term(&terms, base, sizes, inputs)?);
+                            let mut names = Vec::new();
+                            constraint.variables(base, size_base, &mut names);
+                            formula = and(formula, term.clone());
+                            hard.push((term, names, calls));
                         }
                     }
                 }
@@ -985,26 +1136,84 @@ impl Heap {
             // not discard (18.5.13.2), from the highest priority down, each
             // kept when the constraints kept so far allow it, and otherwise
             // treated as true (18.5.13, 18.5.13.1).
-            soft.retain(|(rank, _, names)| {
+            soft.retain(|(rank, _, names, _)| {
                 !disabled
                     .iter()
                     .any(|(disable, name)| disable > rank && names.contains(name))
             });
             soft.sort_by_key(|(rank, ..)| std::cmp::Reverse(*rank));
-            for (_, constraint, _) in soft {
-                let attempt = and(formula.clone(), constraint);
-                let bound = if bounded {
-                    and(attempt.clone(), limited.clone())
-                } else {
-                    attempt.clone()
+            let keep_soft = |mut formula: Term, soft: &[&((u64, u64), Term, Vec<String>, bool)]| {
+                for (_, constraint, _, _) in soft {
+                    let attempt = and(formula.clone(), constraint.clone());
+                    let bound = if bounded {
+                        and(attempt.clone(), limited.clone())
+                    } else {
+                        attempt.clone()
+                    };
+                    if matches!(
+                        solve_seeded(&bound, &projection, limits.clone(), seed).verdict,
+                        Verdict::Sat
+                    ) {
+                        formula = attempt;
+                    }
+                }
+                formula
+            };
+            // The variables in the arguments of the functions the
+            // constraints call are solved first, by the constraints that
+            // name only them and call none, and are state to the others
+            // (IEEE 1800-2023 18.5.11).
+            if !ordered.is_empty() {
+                let first = |names: &[String], calls: bool| {
+                    !calls && names.iter().all(|name| ordered.contains(name))
                 };
-                if matches!(
-                    solve_seeded(&bound, &projection, limits.clone(), seed).verdict,
-                    Verdict::Sat
-                ) {
-                    formula = attempt;
+                let mut early = unconstrained.clone();
+                for (term, names, calls) in &hard {
+                    if first(names, *calls) {
+                        early = and(early, term.clone());
+                    }
+                }
+                let early_soft = soft
+                    .iter()
+                    .filter(|(_, _, names, calls)| first(names, *calls))
+                    .collect::<Vec<_>>();
+                let early = keep_soft(early, &early_soft);
+                let early = if bounded {
+                    and(early, limited.clone())
+                } else {
+                    early
+                };
+                let outcome = solve_seeded(&early, &projection, limits.clone(), seed);
+                match outcome.verdict {
+                    Verdict::Unsat => return Ok(false),
+                    Verdict::Unknown => {
+                        return Err(outcome
+                            .reason
+                            .unwrap_or_else(|| "constraint solving incomplete".into()));
+                    }
+                    Verdict::Sat => {}
+                }
+                for name in &ordered {
+                    let (Some(Scalar::Bv { value, .. }), Some(term)) = (
+                        outcome.context_values.get(name),
+                        match name.strip_prefix('s') {
+                            Some(index) => {
+                                index.parse::<usize>().ok().and_then(|i| size_terms.get(i))
+                            }
+                            None => name.parse::<usize>().ok().and_then(|i| terms.get(i)),
+                        },
+                    ) else {
+                        // State, which keeps its value.
+                        continue;
+                    };
+                    let Sort::Bv(width) = term.0.sort else {
+                        continue;
+                    };
+                    formula = and(formula, eq(term.clone(), bv(width, *value)));
                 }
             }
+            let all_soft = soft.iter().collect::<Vec<_>>();
+            formula = keep_soft(formula, &all_soft);
             // Initial integration uses seeded SAT search, not hash-cell acceptance.
             // It finds a valid model without claiming uniform sampling (#2187).
             // A randc property takes a value its cycle has not produced yet
