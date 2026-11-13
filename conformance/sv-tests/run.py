@@ -291,9 +291,13 @@ def main(argv=None):
                              "case's own :timeout: (default: the case's)")
     parser.add_argument("--shard", type=shard,
                         help="INDEX/COUNT: run and compare only that shard of the tests and expectations")
-    parser.add_argument("--exclude-library-cases", action="store_true",
-                        help="leave out the tests compiled with a libs.json library (UVM); "
-                             "their expectations are neither compared nor replaced")
+    libraries = parser.add_mutually_exclusive_group()
+    libraries.add_argument("--exclude-library-cases", action="store_true",
+                           help="leave out the tests compiled with a libs.json library (UVM); "
+                                "their expectations are neither compared nor replaced")
+    libraries.add_argument("--only-library-cases", action="store_true",
+                           help="run only the tests compiled with a libs.json library (UVM); "
+                                "the expectations of the others are neither compared nor replaced")
     options = parser.parse_args(argv)
     if options.group and options.expected:
         parser.error("--group cannot be combined with --expected")
@@ -320,10 +324,17 @@ def main(argv=None):
             tests = [test for test in tests if case_group(root / "tests" / test) == options.group]
         if not tests:
             raise ValueError("sv-tests checkout contains no .sv tests")
-        excluded = library_cases(root, tests) if options.exclude_library_cases else set()
         # Expected tests that the corpus lost belong to a shard too, so that
-        # exactly one shard reports them missing.
-        members = shard_members((set(tests) | {test for test, _ in expected}) - excluded, options.shard)
+        # exactly one shard reports them missing; a run of only the library
+        # cases leaves them to the others, as it cannot read their tags.
+        known = set(tests) | {test for test, _ in expected}
+        if options.exclude_library_cases:
+            excluded = library_cases(root, tests)
+        elif options.only_library_cases:
+            excluded = known - library_cases(root, tests)
+        else:
+            excluded = set()
+        members = shard_members(known - excluded, options.shard)
         tests = [test for test in tests if test in members]
         expected = {key: value for key, value in expected.items() if key[0] in members}
         requested = len(tests) * len(modes)

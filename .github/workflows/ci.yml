@@ -543,7 +543,7 @@ jobs:
   # The driver is built once; the shards run the conformance cases with it.
   # Pull requests run every case except the UVM ones in one job; the UVM
   # cases are nearly all of the corpus' time, and full runs (daily, release,
-  # `ci:full`) cover them across the shards.
+  # `ci:full`) cover them in shards of their own.
   sv-tests:
     name: sv-tests driver
     needs: changes
@@ -572,8 +572,14 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # The cases compiled with the UVM library (libs.json) take up to about
+  # 175 s and typically peak at 5.5-9 GB each (uvm_test_init at 12.8 GB) with
+  # the release driver, so they run one at a time in twelve shards of their
+  # own, under a longer case timeout;
+  # the others run four at a time. Full validation runs both sets, a pull
+  # request the main set.
   sv-tests-shard:
-    name: sv-tests conformance (${{ matrix.shard }}/${{ strategy.job-total }})
+    name: sv-tests conformance${{ matrix.set == 'library' && ' UVM' || '' }} (${{ matrix.shard }}/${{ matrix.of }})
     needs: [changes, sv-tests]
     if: ${{ !cancelled() && needs.sv-tests.result == 'success' }}
     runs-on: ubuntu-latest
@@ -581,7 +587,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(needs.changes.outputs.full_validation == 'false' && '[1]' || '[1, 2, 3, 4, 5]') }}
+        include: ${{ fromJSON(needs.changes.outputs.full_validation == 'false' && '[{"set":"main","shard":1,"of":1}]' || '[{"set":"main","shard":1,"of":5},{"set":"main","shard":2,"of":5},{"set":"main","shard":3,"of":5},{"set":"main","shard":4,"of":5},{"set":"main","shard":5,"of":5},{"set":"library","shard":1,"of":12},{"set":"library","shard":2,"of":12},{"set":"library","shard":3,"of":12},{"set":"library","shard":4,"of":12},{"set":"library","shard":5,"of":12},{"set":"library","shard":6,"of":12},{"set":"library","shard":7,"of":12},{"set":"library","shard":8,"of":12},{"set":"library","shard":9,"of":12},{"set":"library","shard":10,"of":12},{"set":"library","shard":11,"of":12},{"set":"library","shard":12,"of":12}]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -609,7 +615,7 @@ jobs:
         run: python conformance/sv-tests/prepare.py "$RUNNER_TEMP/sv-tests"
 
       - name: Validate the adapter against the official runner
-        if: matrix.shard == 1
+        if: matrix.set == 'main' && matrix.shard == 1
         env:
           SV_TESTS_ROOT: ${{ runner.temp }}/sv-tests
           PYTHONDONTWRITEBYTECODE: "1"
@@ -623,6 +629,10 @@ jobs:
 
       # The unmodified upstream tools/runner owns test selection and judgement.
       # Improvements also require review before changing the retained results.
+      # The UVM shards' 480-second case timeout absorbs runner variance at
+      # their memory peak (uvm_test_init, 12.8 GB, once took over 300 seconds);
+      # it comes back down to 300 once the memory stack (#3881-#3883, #3886)
+      # lands.
       - name: Compare official runner verdicts with the retained expectations
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -631,11 +641,11 @@ jobs:
           python conformance/sv-tests/run.py "$RUNNER_TEMP/sv-tests"
           --driver "$RUNNER_TEMP/driver/sv_tests"
           --out-dir "$RUNNER_TEMP/sv-tests-results"
-          --jobs 4
-          --case-timeout 78
+          --jobs ${{ matrix.set == 'library' && 1 || 4 }}
+          --case-timeout ${{ matrix.set == 'library' && 480 || 78 }}
           --state-mode both
-          --shard ${{ matrix.shard }}/${{ strategy.job-total }}
-          ${{ needs.changes.outputs.full_validation == 'false' && '--exclude-library-cases' || '' }}
+          --shard ${{ matrix.shard }}/${{ matrix.of }}
+          ${{ matrix.set == 'library' && '--only-library-cases' || '--exclude-library-cases' }}
           --expected conformance/sv-tests/expected.tsv
           --report "$RUNNER_TEMP/sv-tests-report.tsv"
 
@@ -652,7 +662,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: sv-tests-report-${{ matrix.shard }}
+          name: sv-tests-report-${{ matrix.set == 'library' && 'uvm-' || '' }}${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/sv-tests-report.tsv
             ${{ runner.temp }}/sv-tests-report.summary.json

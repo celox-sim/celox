@@ -419,9 +419,16 @@ git -C ../sv-tests submodule update --init --depth 1 \
     third_party/tests/easyUVM third_party/tests/uvm-examples
 work/sv-tests-venv/bin/python conformance/sv-tests/prepare.py ../sv-tests
 CARGO_PROFILE_RELEASE_LTO=off cargo build --locked --release -p celox --example sv_tests
+# The cases other than the UVM ones, four at a time.
 PYTHONDONTWRITEBYTECODE=1 work/sv-tests-venv/bin/python conformance/sv-tests/run.py ../sv-tests \
     --driver target/release/examples/sv_tests --out-dir work/sv-tests --jobs 4 \
+    --case-timeout 78 --exclude-library-cases \
     --expected conformance/sv-tests/expected.tsv --report work/sv-tests-report.tsv
+# The UVM cases one at a time: each may take 9 GB or more (see below).
+PYTHONDONTWRITEBYTECODE=1 work/sv-tests-venv/bin/python conformance/sv-tests/run.py ../sv-tests \
+    --driver target/release/examples/sv_tests --out-dir work/sv-tests-uvm --jobs 1 \
+    --case-timeout 480 --only-library-cases \
+    --expected conformance/sv-tests/expected.tsv --report work/sv-tests-uvm-report.tsv
 ```
 
 Use the release driver with LTO disabled to reproduce CI. LTO is unnecessary
@@ -454,18 +461,27 @@ neighbouring tests, such as the UVM testbenches, spread over the shards; a test
 that `expected.tsv` lists but the corpus lost belongs to one shard, which
 reports it missing. With `--update`, a shard replaces only its own rows. CI
 builds the driver once; full runs (daily, release qualification and `ci:full`)
-run five shards (`sv-tests conformance (N/5)`), each with 4 jobs, and retain
-one report per shard.
+run five shards of the cases other than the UVM ones (`sv-tests conformance
+(N/5)`), each with 4 jobs, and twelve shards of the UVM cases (`sv-tests
+conformance UVM (N/12)`), each with 1 job, and retain one report per shard.
 
 `--exclude-library-cases` leaves out the tests that the official runner
 compiles with a `conf/runners/libs.json` library, which it attaches when the
 library's name (`uvm`, `uvm-1.2`) is one of the case's tags: the 172 UVM
 cases. Their `expected.tsv` rows are neither compared nor replaced by
-`--update`. These cases take nearly all of the corpus' CI time, most of them
-at the case timeout, while no other case takes more than a few seconds. Pull
-requests therefore run the other
-1,478 cases in a single job (`sv-tests conformance (1/1)`) and the full runs
-above check the UVM cases. A change that moves a UVM case across the timeout
+`--update`. `--only-library-cases` runs only those cases, leaving the rows
+of the others alone. The UVM cases take nearly all of the corpus' CI time,
+while no other case takes more than a few seconds: each one that analyzes
+`uvm_pkg` takes 40-175 seconds with the release driver and typically peaks at
+5.5-9 GB, `uvm-examples/uvm_test_init` at 12.8 GB, so four at once do not fit
+a 16 GB runner or a local run of that size. Pull requests therefore run the
+other 1,478 cases in a single job (`sv-tests conformance (1/1)`), and the full
+runs above run the UVM cases one at a time with a case timeout of 480 seconds,
+the main shards keeping 78: the slowest passing UVM case usually takes about
+175 seconds on the CI runner (`testbenches/uvm_agent_active.sv`, 4-state), but
+`uvm-examples/uvm_test_init` (4-state, at its 12.8 GB peak) once took over 300.
+The timeout comes back down to 300 once the memory stack (#3881-#3883, #3886)
+lowers that peak. A change that moves a UVM case across the timeout
 shows up in the next daily full CI, whose failures open the Full CI issue.
 
 Both state modes run by default. Use `--state-mode 2state` or
