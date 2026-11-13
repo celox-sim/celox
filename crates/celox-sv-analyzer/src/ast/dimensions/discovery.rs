@@ -28,6 +28,19 @@ pub(in crate::ast) struct State {
     /// that depend on its operand, while the query's input and the set of
     /// specializations stay the same.
     settled: std::rc::Rc<HashMap<Key, Vec<std::rc::Rc<Settled>>>>,
+    /// The last query context [`overlaid`] made, which the next query with
+    /// the same base and input takes as it is: the queries of one
+    /// declaration, such as the items of a parameter's assignment pattern,
+    /// share both.
+    overlaid: Option<std::rc::Rc<Overlaid>>,
+}
+
+/// A query context of [`State::overlaid`]. `base` and `input` are held so
+/// that the identities of their tables stay unique.
+struct Overlaid {
+    base: PackedDimensions,
+    input: PackedDimensions,
+    context: PackedDimensions,
 }
 
 /// The most settled discoveries [`State::settled`] holds for one key: the
@@ -46,6 +59,7 @@ impl State {
             partial: self.partial.clone(),
             class_signatures: self.class_signatures.clone(),
             settled: self.settled.clone(),
+            overlaid: None,
         }
     }
 }
@@ -1639,6 +1653,43 @@ fn statement_scope(
     Ok(())
 }
 
+/// `base` with the declarations of `input` overlaid (see [`overlay`]),
+/// the context of the last query if it had the same base and input.
+fn overlaid(
+    state: &mut State,
+    mut base: PackedDimensions,
+    input: &PackedDimensions,
+) -> PackedDimensions {
+    if let Some(last) = &state.overlaid
+        && same_overlay_input(&last.input, input)
+        && last.base == base
+    {
+        return last.context.clone();
+    }
+    let unchanged = base.clone();
+    overlay(&mut base, input);
+    state.overlaid = Some(std::rc::Rc::new(Overlaid {
+        base: unchanged,
+        input: input.clone(),
+        context: base.clone(),
+    }));
+    base
+}
+
+/// Whether [`overlay`] reads the same tables of `a` and `b`: each table is
+/// the same snapshot.
+fn same_overlay_input(a: &PackedDimensions, b: &PackedDimensions) -> bool {
+    a.variables.identity() == b.variables.identity()
+        && a.const_env.identity() == b.const_env.identity()
+        && a.type_aliases.identity() == b.type_aliases.identity()
+        && a.function_return_types.identity() == b.function_return_types.identity()
+        && a.parameter_values.identity() == b.parameter_values.identity()
+        && Arc::ptr_eq(&a.constant_types, &b.constant_types)
+        && a.class_base == b.class_base
+        && a.class_scope == b.class_scope
+        && a.constructor == b.constructor
+}
+
 fn overlay(context: &mut PackedDimensions, input: &PackedDimensions) {
     context.extend(
         input
@@ -1783,9 +1834,8 @@ pub(in crate::ast) fn query_operand_dimensions_id(
         path: owners.path.clone(),
         block: None,
     };
-    if let Some(mut partial) = session.dimensions.partial.get(&key).cloned() {
-        overlay(&mut partial, input);
-        return Ok(finish(partial));
+    if let Some(partial) = session.dimensions.partial.get(&key).cloned() {
+        return Ok(finish(overlaid(&mut session.dimensions, partial, input)));
     }
     // The scope's declarations are discovered from the scope's own inputs,
     // without the locals the query's scope adds and the operand values of
@@ -1894,7 +1944,7 @@ fn query_published(
 ) -> Converted<PackedDimensions> {
     let native = tree.declarations();
     let target = native.expression(root).tokens;
-    overlay(&mut context, input);
+    context = overlaid(&mut session.dimensions, context, input);
     if let Some(id) = owners.subroutine {
         let subroutine = native.subroutine(id);
         for (argument, ty) in formal_types(subroutine, tree, session, &context)? {
