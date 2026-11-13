@@ -278,6 +278,99 @@ module top;
   end
 endmodule"#;
 
+/// A released target of an `always_comb`, `always_latch` or `always @*`
+/// procedure keeps the forced value until the procedure executes again
+/// (9.2.2.2), also when its input changes in the time step of the release,
+/// and when it changes twice.
+const HOLD: &str = r#"`timescale 1ns/1ns
+module top;
+  logic a = 0, b = 0, en = 0, c = 0;
+  logic v, l, s;
+  always_comb v = a & b;
+  always_latch if (en) l = a;
+  always @* s = a | b;
+  initial begin
+    #1 $display("A %b", v);
+    force v = 1'b1; force l = 1'b1; force s = 1'b0;
+    #1 $display("B %b %b %b", v, l, s);
+    release v; release l; release s;
+    #1 $display("C %b %b %b", v, l, s);
+    c = 1;
+    #1 $display("D %b %b %b", v, l, s);
+    b = 1;
+    #1 $display("E %b %b %b", v, l, s);
+    en = 1;
+    #1 $display("F %b %b %b", v, l, s);
+    force v = 1'b0;
+    #1 release v; a = 1;
+    #1 $display("G %b %b %b", v, l, s);
+    force v = 1'b0;
+    #1 release v;
+    #1 $display("H %b %b %b", v, l, s);
+    release v;
+    b = 0; b = 1;
+    #1 $display("I %b %b %b", v, l, s);
+    $finish;
+  end
+endmodule"#;
+
+/// The hold of a target an `always_comb` with a loop over the members of a
+/// packed array assigns.
+const HOLD_LOOP: &str = r#"`timescale 1ns/1ns
+module top;
+  typedef struct packed { logic en; logic [1:0] e; } w_t;
+  w_t [1:0] w;
+  logic [3:0] q;
+  logic [3:0] tmp;
+  always_comb begin
+    tmp = '0;
+    for (int i = 0; i < 2; i++)
+      tmp |= w[i].en ? 4'(w[i].e) << i : '0;
+    q = tmp;
+  end
+  initial begin
+    w = '0;
+    #1 $display("A %0d", q);
+    force q = 4'd9;
+    #1 $display("B %0d", q);
+    release q;
+    #1 $display("C %0d", q);
+    w[1] = '{en: 1, e: 2};
+    #1 $display("D %0d", q);
+    $finish;
+  end
+endmodule"#;
+
+/// [`CLOCKS`] with the derived clock an `always_comb` assigns, which holds
+/// the forced value after the release until the clock changes.
+const COMB_CLOCKS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic clk = 0;
+  int n = 0, m = 0;
+  logic gclk;
+  always_comb gclk = clk;
+  always @(posedge clk) n++;
+  always @(posedge gclk) m++;
+  initial begin
+    #1 clk = 1; #1 clk = 0;
+    #1 $display("A %0d %0d", n, m);
+    force clk = 1'b1;
+    #1 $display("B %0d %0d", n, m);
+    clk = 0; #1 clk = 1;
+    #1 $display("C %0d %0d", n, m);
+    release clk;
+    #1 $display("D %0d %0d %b", n, m, clk);
+    clk = 0; #1 clk = 1;
+    #1 $display("E %0d %0d", n, m);
+    force gclk = 1'b0;
+    clk = 0; #1 clk = 1;
+    #1 $display("F %0d %0d", n, m);
+    release gclk;
+    #1 $display("G %0d %0d %b", n, m, gclk);
+    $finish;
+  end
+endmodule"#;
+
 sv_backends! {
     fn delayed_drivers_drive_again_after_the_release(sim) {
         @setup {}
@@ -302,6 +395,42 @@ sv_backends! {
         @build simulation(TIME_ZERO, true);
         sim.run_until(100).unwrap();
         assert_eq!(display_lines(&mut sim), ["A 1 1 3 0", "B 1 1 6 0"]);
+    }
+    fn procedures_hold_released_targets(sim) {
+        @setup {}
+        @build simulation(HOLD, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1 1 0", "C 1 1 0", "D 1 1 0", "E 0 1 1", "F 0 0 1", "G 1 1 1", "H 0 1 1", "I 1 1 1"]);
+    }
+    fn procedures_hold_released_targets_four_state(sim) {
+        @setup {}
+        @build simulation(HOLD, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1 1 0", "C 1 1 0", "D 1 1 0", "E 0 1 1", "F 0 0 1", "G 1 1 1", "H 0 1 1", "I 1 1 1"]);
+    }
+    fn procedures_with_loops_hold_released_targets(sim) {
+        @setup {}
+        @build simulation(HOLD_LOOP, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 9", "C 9", "D 4"]);
+    }
+    fn procedures_with_loops_hold_released_targets_four_state(sim) {
+        @setup {}
+        @build simulation(HOLD_LOOP, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 9", "C 9", "D 4"]);
+    }
+    fn forced_procedure_clocks_give_edges(sim) {
+        @setup {}
+        @build simulation(COMB_CLOCKS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 1", "B 2 2", "C 2 2", "D 2 2 1", "E 3 3", "F 4 3", "G 4 3 0"]);
+    }
+    fn forced_procedure_clocks_give_edges_four_state(sim) {
+        @setup {}
+        @build simulation(COMB_CLOCKS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 1", "B 2 2", "C 2 2", "D 2 2 1", "E 3 3", "F 4 3", "G 4 3 0"]);
     }
     fn lrm_example_forces_and_releases(sim) {
         @setup {}
@@ -401,8 +530,9 @@ sv_backends! {
     }
 }
 
-/// [`CLOCKS`] on the interpreter and on the tiered backend, whose derived
-/// clocks follow the forced net as the native image's do (see #3755).
+/// [`CLOCKS`] and [`COMB_CLOCKS`] on the interpreter and on the tiered
+/// backend, whose derived clocks follow the forced net or variable as the
+/// native image's do (see #3755).
 #[test]
 fn forced_clocks_give_edges_on_interpreter_and_tiered() {
     let expected = [
@@ -440,14 +570,6 @@ fn rejected_forces_name_their_reason() {
         (
             "typedef struct packed { logic a; logic b; } s_t; s_t s; initial force s.a = 1'b1;",
             "of a member or an element",
-        ),
-        (
-            "logic v, a; always_comb v = a; initial force v = 1'b1;",
-            "which an `always_comb` procedure assigns",
-        ),
-        (
-            "logic v, a; always @* v = a; initial release v;",
-            "which an `always @*` procedure assigns",
         ),
         (
             "logic q, d, c; always @(posedge c) q <= #1 d; initial force q = 1'b1;",

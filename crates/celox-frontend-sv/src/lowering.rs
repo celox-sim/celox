@@ -169,14 +169,23 @@ struct SvVariable {
     activation_scratch: bool,
 }
 
-/// A force control: the enable or the forced value of `target`. A host
+/// What a force control holds (see `sv::ir::ForceRole`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForceSlotRole {
+    Enable,
+    Value,
+    Hold,
+}
+
+/// A force control: the enable or the forced value of `target`, or the
+/// hold of a procedural force. A host
 /// force (`Simulator::force`) controls reads and writes of the target; a
 /// procedural one (IEEE 1800-2023 10.6.2) its writes only, as the force
 /// stores the value in the target itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ForceSlot {
     pub(crate) target: SourceVarId,
-    pub(crate) enable: bool,
+    pub(crate) role: ForceSlotRole,
     pub(crate) procedural: bool,
     /// Whether a procedural force stores its value into the target (see
     /// `sv::ir::ForceControl::stored`).
