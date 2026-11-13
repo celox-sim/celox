@@ -440,3 +440,52 @@ sv_backends! {
         assert_eq!(u64::try_from(sim.get(sim.signal("same"))).unwrap(), 0);
     }
 }
+
+/// The bounds of a select of a member of a packed structure are expressions
+/// of the scope: they may query the variable that holds the member, also
+/// through the same path, as BaseJump's
+/// `bsg_manycore_ruche_x_link_fwd_inject_src_y` does with
+/// `link[0][E].fwd[$bits(link[0][E].fwd)-1:...]` (IEEE 1800-2023 7.2.1,
+/// 20.6.2). Verilator 5.054 prints the same line.
+#[test]
+fn bounds_of_member_selects_query_the_holding_variable() {
+    let source = r#"`timescale 1ns/1ns
+package noc_pkg;
+  typedef enum logic [2:0] {P = 3'd0, W, E, N, S} Dirs;
+endpackage
+module top;
+  import noc_pkg::*;
+  typedef struct packed { logic [5:0] fwd; logic [2:0] rev; } link_s;
+  localparam int R = 3;
+  link_s [R-1:0][E:W] l;
+  logic [2:0] hi;
+  assign hi = l[0][E].fwd[$bits(l[0][E].fwd)-1:3];
+  initial begin
+    l = '0;
+    l[0][E].fwd = 6'h2a;
+    l[1][W].fwd[$bits(l[1][W].fwd)-1:$bits(l[1][W].rev)] = 3'h6;
+    #1 $display("%0d %0d %h %h %h", $bits(l[0][E].fwd), $bits(l[0]), hi, l[1][W].fwd, l[0][E].fwd[$bits(l[0])-13:3]);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("member_select_bounds.sv"))],
+            "top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["6 18 5 30 5"], "four_state={four_state}");
+    }
+}
