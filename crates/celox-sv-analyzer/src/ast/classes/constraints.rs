@@ -492,6 +492,65 @@ pub(in crate::ast) fn resolve_statics(expr: &mut ConstraintExpr, first: usize) {
     }
 }
 
+/// The first input index that stands for variable `i` of a scope randomize
+/// call while its constraints are bound (see [`scope_fields`]).
+pub(in crate::ast) const SCOPE_FIELDS: usize = 1 << 29;
+
+/// `expr` with each input that stands for a variable of a scope randomize
+/// call (see [`SCOPE_FIELDS`]) the field of the variable.
+pub(in crate::ast) fn scope_fields(expr: ConstraintExpr) -> ConstraintExpr {
+    remap_inputs(expr, &|index| {
+        (index >= SCOPE_FIELDS).then(|| ConstraintExpr::Field(index - SCOPE_FIELDS))
+    })
+}
+
+/// `expr` with each input `i` for which `remap` gives an expression that
+/// expression.
+fn remap_inputs(
+    expr: ConstraintExpr,
+    remap: &dyn Fn(usize) -> Option<ConstraintExpr>,
+) -> ConstraintExpr {
+    let boxed = |value: ConstraintExpr| Box::new(remap_inputs(value, remap));
+    match expr {
+        ConstraintExpr::Input { index, width } => {
+            remap(index).unwrap_or(ConstraintExpr::Input { index, width })
+        }
+        ConstraintExpr::Soft { priority, value } => ConstraintExpr::Soft {
+            priority,
+            value: boxed(*value),
+        },
+        ConstraintExpr::Foreach { array, body } => ConstraintExpr::Foreach {
+            array,
+            body: boxed(*body),
+        },
+        ConstraintExpr::Resize {
+            value,
+            width,
+            signed,
+        } => ConstraintExpr::Resize {
+            value: boxed(*value),
+            width,
+            signed,
+        },
+        ConstraintExpr::Unary { op, value } => ConstraintExpr::Unary {
+            op,
+            value: boxed(*value),
+        },
+        ConstraintExpr::Binary {
+            op,
+            left,
+            right,
+            signed,
+        } => ConstraintExpr::Binary {
+            op,
+            left: boxed(*left),
+            right: boxed(*right),
+            signed,
+        },
+        expr => expr,
+    }
+}
+
 /// The class handle `id` names in a constraint, `null` or a handle
 /// property, as an unsigned integer; `None` for another expression.
 fn handle_operand(

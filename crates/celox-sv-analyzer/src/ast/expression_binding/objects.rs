@@ -1821,32 +1821,187 @@ fn check_random_access(
     )
 }
 
-pub(super) fn randomize_with(
+/// `std::randomize(v...) with { ... }` (IEEE 1800-2023 18.12.1), or
+/// `randomize(v...) with` outside a class: the variables are the fields of
+/// a constraint program solved in a new object and written back (see
+/// [`ObjectOp::ScopeRandomize`]); `None` for a class randomize call.
+#[allow(clippy::too_many_arguments)]
+fn scope_randomize_with(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     expression: ExprId,
+    arguments: &[celox_sv_syntax::Argument],
     constraints: Option<&[ExprId]>,
     native: &Declarations,
     dimensions: &PackedDimensions,
-) -> Converted<Expr> {
-    let arguments = match &native.expression(ungroup(expression, native)).kind {
-        ExprKind::Call { arguments, .. } => arguments.as_slice(),
-        _ => &[][..],
+) -> Converted<Option<Expr>> {
+    let callee = match &native.expression(ungroup(expression, native)).kind {
+        ExprKind::Call { expression, .. } => *expression,
+        _ => return Ok(None),
     };
-    let (method_name, _, receiver) = call_method(tree, session, expression, native, dimensions)?
-        .filter(|(name, _, _)| name.ends_with("::randomize"))
-        .ok_or_else(|| unsupported("inline constraints require class randomize"))?;
-    let owner = method_name.strip_suffix("::randomize").unwrap();
-    let class = class(tree, session, dimensions, owner)?;
-    // Inline constraints need the solver even on otherwise unconstrained classes.
-    class.check_constraint_program()?;
+    let scope = match &native.expression(ungroup(callee, native)).kind {
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } => {
+            separator == "::"
+                && name.spelling == "randomize"
+                && matches!(&native.expression(ungroup(*expression, native)).kind,
+                    ExprKind::Name(root) if root.spelling == "std")
+        }
+        ExprKind::Name(name) => {
+            name.spelling == "randomize"
+                && scope_class(dimensions).is_none()
+                && dimensions.get("randomize").is_none()
+        }
+        _ => false,
+    };
+    if !scope {
+        return Ok(None);
+    }
     let constraint_ids = constraints.ok_or_else(|| unsupported("inline constraint form"))?;
-    // The static properties the constraints read are the first inputs of
-    // the program; the caller's variables follow.
+    // Each variable is a field of the program, read through a marked input
+    // while the constraints are bound.
+    let mut fields = Vec::new();
+    let mut variables = Vec::new();
     let mut inputs = HashMap::default();
-    let first_input = class.static_inputs.len();
+    for argument in arguments {
+        let Some(id) = argument.value.filter(|_| argument.name.is_none()) else {
+            return Err(unsupported(
+                "scope randomize with a named or empty argument",
+            ));
+        };
+        let ExprKind::Name(name) = &native.expression(ungroup(id, native)).kind else {
+            return Err(unsupported("scope randomize of other than a variable"));
+        };
+        let name = instances::normalize_identifier(&name.spelling);
+        let variable = dimensions
+            .get(&name)
+            .ok_or_else(|| unsupported(format!("scope randomize variable `{name}`")))?;
+        if variable.real
+            || variable.string
+            || variable.chandle
+            || !variable.randomizable
+            || variable.class.is_some()
+            || variable.container.is_some()
+            || !variable.unpacked.is_empty()
+            || variable.enum_domain.is_some()
+        {
+            return Err(unsupported(
+                "scope randomize with constraints of other than an integral variable",
+            ));
+        }
+        if !crate::ast::expressions::query_actual_is_writable(
+            &Expr::Ident(name.clone()),
+            dimensions,
+        ) {
+            return Err(unsupported("scope randomize argument is not writable"));
+        }
+        let width = expr_static_width(tree, &Expr::Ident(name.clone()), dimensions)
+            .filter(|width| (1..=64).contains(width))
+            .ok_or_else(|| unsupported("scope randomize variable wider than 64 bits"))?;
+        inputs.insert(
+            name.clone(),
+            (
+                classes::constraints::SCOPE_FIELDS + fields.len(),
+                width as u32,
+                variable.signed,
+            ),
+        );
+        fields.push(celox_heap::randomization::Field {
+            offset: 8 * fields.len() as u32,
+            width: width as u32,
+            random: true,
+            domain: Vec::new(),
+            cyclic: false,
+        });
+        variables.push(bind_value(id, native, tree, session, dimensions, None)?);
+    }
+    if fields.is_empty() {
+        return Err(unsupported(
+            "scope randomize with constraints and no variable",
+        ));
+    }
     let mut input_types = Vec::new();
     let mut input_values = Vec::new();
+    caller_inputs(
+        tree,
+        session,
+        native,
+        dimensions,
+        constraint_ids,
+        &|_| false,
+        &mut inputs,
+        0,
+        &mut input_types,
+        &mut input_values,
+    )?;
+    let scope = scope_class(dimensions);
+    session
+        .constraint_scopes
+        .push((scope.clone().unwrap_or_default(), scope));
+    let constraints = constraint_ids
+        .iter()
+        .enumerate()
+        .map(|(index, &id)| {
+            classes::constraints::bind_inputs(
+                id,
+                tree,
+                session,
+                &[],
+                &classes::constraints::Names {
+                    lineage: &[],
+                    aggregates: &[],
+                    statics: &[],
+                    inputs: &[],
+                    slots: &[],
+                },
+                &dimensions.const_env,
+                &inputs,
+            )
+            .map(|constraint| {
+                classes::constraints::scope_fields(classes::constraints::prioritize(
+                    constraint,
+                    classes::constraints::inline_priority(index),
+                ))
+            })
+            .map_err(|reason| unsupported(format!("inline constraints: {reason}")))
+        })
+        .collect::<Converted<Vec<_>>>();
+    session.constraint_scopes.pop();
+    let program = celox_heap::randomization::Program {
+        fields,
+        constraints: constraints?,
+        ..Default::default()
+    };
+    Ok(Some(Expr::Call {
+        callee: Callee::Object(Box::new(ObjectOp::ScopeRandomize(program))),
+        args: variables
+            .into_iter()
+            .map(Some)
+            .chain(input_values)
+            .collect(),
+        arg_order: Vec::new(),
+    }))
+}
+
+/// The caller's variables that inline constraints `constraint_ids` name,
+/// other than those `owned` names, added to `inputs` from index
+/// `first_input` on with their types and values (IEEE 1800-2023 18.7).
+#[allow(clippy::too_many_arguments)]
+fn caller_inputs(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+    constraint_ids: &[ExprId],
+    owned: &dyn Fn(&str) -> bool,
+    inputs: &mut HashMap<String, (usize, u32, bool)>,
+    first_input: usize,
+    input_types: &mut Vec<Type>,
+    input_values: &mut Vec<Option<Expr>>,
+) -> Converted<()> {
     // The caller's variables the constraints name, each with the variables
     // of the constraint loops around it, which are not the caller's. Every
     // node kind is listed, so that a new one has to say what it holds.
@@ -1858,10 +2013,7 @@ pub(super) fn randomize_with(
             ExprKind::Name(name) if name.spelling == "$" => None,
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
-                // A member of the class, also a static property: an input
-                // or a solver variable of the program (see
-                // `classes::StaticInput`).
-                if loops.contains(&name) || class.member(&name).is_some() {
+                if loops.contains(&name) || owned(&name) {
                     None
                 } else {
                     Some((name.clone(), name))
@@ -2020,6 +2172,60 @@ pub(super) fn randomize_with(
         input_types.push(ty);
         input_values.push(Some(value));
     }
+    Ok(())
+}
+
+pub(super) fn randomize_with(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    expression: ExprId,
+    constraints: Option<&[ExprId]>,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Expr> {
+    let arguments = match &native.expression(ungroup(expression, native)).kind {
+        ExprKind::Call { arguments, .. } => arguments.as_slice(),
+        _ => &[][..],
+    };
+    if let Some(call) = scope_randomize_with(
+        tree,
+        session,
+        expression,
+        arguments,
+        constraints,
+        native,
+        dimensions,
+    )? {
+        return Ok(call);
+    }
+    let (method_name, _, receiver) = call_method(tree, session, expression, native, dimensions)?
+        .filter(|(name, _, _)| name.ends_with("::randomize"))
+        .ok_or_else(|| unsupported("inline constraints require class randomize"))?;
+    let owner = method_name.strip_suffix("::randomize").unwrap();
+    let class = class(tree, session, dimensions, owner)?;
+    // Inline constraints need the solver even on otherwise unconstrained classes.
+    class.check_constraint_program()?;
+    let constraint_ids = constraints.ok_or_else(|| unsupported("inline constraint form"))?;
+    // The static properties the constraints read are the first inputs of
+    // the program; the caller's variables follow.
+    let mut inputs = HashMap::default();
+    let first_input = class.static_inputs.len();
+    let mut input_types = Vec::new();
+    let mut input_values = Vec::new();
+    caller_inputs(
+        tree,
+        session,
+        native,
+        dimensions,
+        constraint_ids,
+        // A member of the class, also a static property: an input or a
+        // solver variable of the program (see `classes::StaticInput`).
+        &|name| class.member(name).is_some(),
+        &mut inputs,
+        first_input,
+        &mut input_types,
+        &mut input_values,
+    )?;
     // Inline constraints access members as the caller's class does (18.7).
     let scope = scope_class(dimensions);
     session

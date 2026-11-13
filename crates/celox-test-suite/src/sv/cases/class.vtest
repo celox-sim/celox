@@ -5530,3 +5530,34 @@ module Top(output int checks);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq checks 1023))
+
+; `std::randomize(v...) with { ... }` solves the variables with the
+; constraints, which also read other variables of the scope, and writes them
+; only when it succeeds (IEEE 1800-2023 18.12.1).
+(case scope_randomize_with
+  (source "scope_with.sv" #"
+module Top(output int checks);
+    class A;
+        function int pick(int y, output int got);
+            int x, success;
+            success = std::randomize(x) with { x > 0; x < y; };
+            got = x;
+            return success;
+        endfunction
+    endclass
+    int a, b, limit = 10;
+    bit [3:0] nibble;
+    initial begin
+        A obj = new;
+        int got;
+        checks = 0;
+        checks += (obj.pick(3, got) == 1 && got > 0 && got < 3) * 1;
+        checks += (std::randomize(a, b) with { a + b == limit; a > 3; b > 3; }
+                   && a + b == 10 && a > 3 && b > 3) * 2;
+        a = 77;
+        checks += (std::randomize(a) with { a > 5; a < 5; } == 0 && a == 77) * 4;
+        checks += (std::randomize(nibble) with { nibble == 4'hf; soft nibble == 1; } && nibble == 15) * 8;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 15))
