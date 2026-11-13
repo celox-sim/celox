@@ -243,8 +243,12 @@ impl Comb<'_, '_> {
                         element_count,
                         access,
                     } => {
-                        let offset_expr = expr_from_const_expr(&offset)
-                            .ok_or_else(|| unsupported("dynamic assignment index"))?;
+                        let offset_expr = expr_from_select_position(
+                            &offset,
+                            self.m.constants,
+                            self.m.parameter_types,
+                        )
+                        .ok_or_else(|| unsupported("dynamic assignment index"))?;
                         let (bit_offset, offset_sources) =
                             self.eval(store, frames, &offset_expr, None)?;
                         sources.extend(offset_sources);
