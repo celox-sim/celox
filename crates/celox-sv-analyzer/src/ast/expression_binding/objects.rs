@@ -1684,7 +1684,7 @@ pub(super) fn randomize_with(
         if variable.real
             || variable.string
             || shape_class(variable, tree, session, dimensions).is_some()
-            || variable.container.is_some()
+            || containers::holds_container(variable, tree, session, dimensions)
             || !variable.unpacked.is_empty()
             || !variable.is_2state
         {

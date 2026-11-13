@@ -1231,7 +1231,7 @@ impl BodyBuilder<'_, '_, '_> {
         let shape = dimensions::operand_shape(left, self.tree, self.session, &self.dims)?;
         if shape.as_ref().is_some_and(|shape| {
             !shape.unpacked.is_empty()
-                || shape.container.is_some()
+                || containers::holds_container(shape, self.tree, self.session, &self.dims)
                 || unpacked_structs::shape_struct(shape, self.tree, self.session, &self.dims)
                     .is_some()
         }) {

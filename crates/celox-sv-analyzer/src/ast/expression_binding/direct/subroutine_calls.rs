@@ -74,7 +74,7 @@ pub(super) fn enter_method_call(
             .filter(|shape| {
                 unpacked_structs::shape_struct(shape, tree, session, dimensions).is_some()
                     || chandles::receives_chandle(shape)
-                    || (shape.container.is_some()
+                    || (containers::holds_container(shape, tree, session, dimensions)
                         || virtual_interfaces::holds_virtual_interface(
                             shape, tree, session, dimensions,
                         ))
@@ -578,7 +578,8 @@ fn enter_subroutine_call(
                         .get(&name)
                         .and_then(|shapes| shapes.get(position))
                         .filter(|shape| {
-                            shape.container.is_none() || copied_in(dimensions, &name, position)
+                            !containers::holds_container(shape, tree, session, dimensions)
+                                || copied_in(dimensions, &name, position)
                         })
                         .cloned()
                         // An output actual is not a value

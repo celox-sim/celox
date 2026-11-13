@@ -95,7 +95,7 @@ pub(super) fn bind(
     let Some(shape) = dims.get(&receiver) else {
         return Ok(None);
     };
-    if shape.container.is_none() && shape.unpacked.is_empty() {
+    if !containers::holds_container(shape, tree, session, dims) && shape.unpacked.is_empty() {
         return Ok(None);
     }
     if let ExprKind::Call { arguments, .. } = &native.expression(id).kind
