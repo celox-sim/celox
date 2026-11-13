@@ -278,8 +278,11 @@ blocks in programs. Two region deviations are listed under
 - Scope `randomize()` / `std::randomize()` (18.12): `with` constraints,
   enums with unsupported or unresolved domains, unpacked arrays, nets,
   constants, selects, and concatenation arguments.
-- Class `randomize()`: 4-state and aggregate properties, static random
-  properties, random array, object, and string properties, constrained
+- Class `randomize()`: 4-state and aggregate properties, static or not,
+  `randc` static properties, constraints that name static properties in an
+  object that a rand handle reaches (its randomization fails), random
+  array, object, and
+  string properties, constrained
   enums and `randc`, `foreach` and `soft` constraints, `dist`,
   `solve before`, external and static constraint blocks, typed parameters
   in constraints, array sets, X/Z wildcard items and `$` bounds in `inside`

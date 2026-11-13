@@ -1212,10 +1212,20 @@ pub(super) fn random_selection(
             ExprKind::Literal(value) if value == "null" && arguments.len() == 1 => {}
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
+                // A static rand property is solved in the field of the
+                // object that names it (see `classes::StaticProperty::rand`).
+                let solved = class
+                    .static_property(&name)
+                    .filter(|property| property.rand)
+                    .map(|property| (property.owner.clone(), property.name.clone()));
                 let index = class
                     .properties
                     .iter()
-                    .rposition(|p| p.name == name)
+                    .rposition(|p| match (&solved, &p.static_of) {
+                        (Some((owner, name)), Some(of)) => p.owner == *owner && of.name == *name,
+                        (Some(_), None) => false,
+                        (None, _) => p.name == name,
+                    })
                     .ok_or_else(|| {
                         unsupported(format!(
                             "randomize argument `{name}` is not an instance property"
@@ -1421,6 +1431,62 @@ pub(in crate::ast) fn constraint_mode_call(
 
 /// Bind rand_mode's void setter and integer getter separately (18.8).
 /// A getter requires one random property; only the setter accepts an object.
+/// `h.p.rand_mode()` or `h.p.rand_mode(on_off)` of a static rand property
+/// `p`: the variable of the bit that turns it off for every object (see
+/// `classes::StaticProperty::rand`), and the argument of the setter.
+pub(in crate::ast) fn static_rand_mode(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(String, Option<ExprId>)>> {
+    let (callee, args) = match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Call {
+            expression,
+            arguments,
+        } => (*expression, arguments.as_slice()),
+        _ => (id, &[][..]),
+    };
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(ungroup(callee, native)).kind
+    else {
+        return Ok(None);
+    };
+    if separator != "." || name.spelling != "rand_mode" {
+        return Ok(None);
+    }
+    // `p.rand_mode()` in a method of the class names its static property
+    // `p` as `this.p` would (8.9, 18.8).
+    let unqualified = match &native.expression(ungroup(*expression, native)).kind {
+        ExprKind::Name(name) => match scope_class(dimensions) {
+            Some(scope) => class(tree, session, dimensions, &scope)?
+                .static_property(&instances::normalize_identifier(&name.spelling))
+                .cloned(),
+            None => None,
+        },
+        _ => None,
+    };
+    let property = match unqualified {
+        Some(property) => Some(property),
+        None => static_property_declaration(tree, session, *expression, native, dimensions)?,
+    };
+    let Some(property) = property.filter(|property| property.rand) else {
+        return Ok(None);
+    };
+    let off = classes::static_rand_mode_variable(&property.owner, &property.name);
+    match args {
+        [] => Ok(Some((off, None))),
+        [argument] if argument.name.is_none() && argument.value.is_some() => {
+            Ok(Some((off, argument.value)))
+        }
+        _ => Err(unsupported("rand_mode setter requires one on_off argument")),
+    }
+}
+
 pub(in crate::ast) fn rand_mode_call(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -1442,6 +1508,19 @@ pub(in crate::ast) fn rand_mode_call(
             separator,
             name,
         } if separator == "." && name.spelling == "rand_mode" => {
+            // That of a static rand property is shared by every object.
+            if let Some((off, argument)) = static_rand_mode(tree, session, id, native, dimensions)?
+            {
+                if argument.is_some() {
+                    return Err(unsupported(
+                        "rand_mode setter is void and cannot be used as a value",
+                    ));
+                }
+                return Ok(Some(Expr::Unary {
+                    op: UnaryOp::LogicNot,
+                    expr: Box::new(Expr::Ident(off)),
+                }));
+            }
             let property_target = property(tree, session, *expression, native, dimensions)?;
             if let Some((property, object)) = property_target.filter(|(property, _)| {
                 property.rand || property.randc || property.r#type.class().is_none()
@@ -1555,7 +1634,10 @@ pub(super) fn randomize_with(
     // Inline constraints need the solver even on otherwise unconstrained classes.
     class.check_constraint_program()?;
     let constraint_ids = constraints.ok_or_else(|| unsupported("inline constraint form"))?;
-    let mut inputs = HashMap::default();
+    // The static properties the constraints read are the first inputs of
+    // the program; the caller's variables follow.
+    let mut inputs = class.input_bindings(tree, session, &dimensions.const_env);
+    let first_input = class.static_inputs.len();
     let mut input_types = Vec::new();
     let mut input_values = Vec::new();
     // The caller's variables the constraints name, each with the variables
@@ -1567,10 +1649,13 @@ pub(super) fn randomize_with(
         let candidate = match &native.expression(id).kind {
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
-                if loops.contains(&name) || class.properties.iter().any(|p| p.name == name) {
+                // A static property is the class's: an input or a solver
+                // variable of the program (see `classes::StaticInput`).
+                if loops.contains(&name)
+                    || class.properties.iter().any(|p| p.name == name)
+                    || class.statics.iter().any(|p| p.name == name)
+                {
                     None
-                } else if class.statics.iter().any(|p| p.name == name) {
-                    return Err(unsupported("static properties in inline constraints"));
                 } else {
                     Some((name.clone(), name))
                 }
@@ -1678,7 +1763,14 @@ pub(super) fn randomize_with(
             .ok_or_else(|| unsupported("inline input width"))?;
         let mut ty = classes::unsigned_type(width);
         ty.is_signed = variable.signed;
-        inputs.insert(key, (input_types.len(), width as u32, variable.signed));
+        inputs.insert(
+            key,
+            Ok((
+                first_input + input_types.len(),
+                width as u32,
+                variable.signed,
+            )),
+        );
         input_types.push(ty);
         input_values.push(Some(value));
     }
@@ -1694,7 +1786,7 @@ pub(super) fn randomize_with(
                 id,
                 tree,
                 session,
-                &class.properties,
+                &class.constraint_view(),
                 &dimensions.const_env,
                 &inputs,
             )

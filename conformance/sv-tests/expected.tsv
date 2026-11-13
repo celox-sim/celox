@@ -623,8 +623,8 @@ chapter-18/18.6.2--pre-randomize-method_0.sv	2state	pass
 chapter-18/18.6.2--pre-randomize-method_0.sv	4state	pass
 chapter-18/18.6.2--pre-randomize-method_1.sv	2state	fail
 chapter-18/18.6.2--pre-randomize-method_1.sv	4state	fail
-chapter-18/18.6.3--behavior-of-randomization-methods_0.sv	2state	fail
-chapter-18/18.6.3--behavior-of-randomization-methods_0.sv	4state	fail
+chapter-18/18.6.3--behavior-of-randomization-methods_0.sv	2state	pass
+chapter-18/18.6.3--behavior-of-randomization-methods_0.sv	4state	pass
 chapter-18/18.6.3--behavior-of-randomization-methods_1.sv	2state	fail
 chapter-18/18.6.3--behavior-of-randomization-methods_1.sv	4state	fail
 chapter-18/18.6.3--behavior-of-randomization-methods_2.sv	2state	fail

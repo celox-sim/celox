@@ -365,7 +365,7 @@ pub(in crate::ast) fn solver_holds(
 /// Whether the solver holds a value of type `ty`, by its semantic type: a
 /// 2-state integral one of at most 64 bits. Every other kind of type is
 /// named here, so that a new one has to say whether the solver holds it.
-fn solver_type(
+pub(in crate::ast) fn solver_type(
     ty: &Type,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -409,23 +409,13 @@ fn solver_element(
         && solver_type(&container.element, tree, session, env).is_ok()
 }
 
-pub(in crate::ast) fn bind(
-    id: ExprId,
-    tree: &AnalysisContext<'_>,
-    session: &mut Session,
-    properties: &[Property],
-    env: &ConstEnv,
-) -> Result<ConstraintExpr, String> {
-    bind_inputs(id, tree, session, properties, env, &HashMap::default())
-}
-
 pub(in crate::ast) fn bind_inputs(
     id: ExprId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     properties: &[Property],
     env: &ConstEnv,
-    inputs: &HashMap<String, (usize, u32, bool)>,
+    inputs: &HashMap<String, Result<(usize, u32, bool), String>>,
 ) -> Result<ConstraintExpr, String> {
     #[allow(clippy::too_many_arguments)]
     fn expression(
@@ -434,7 +424,7 @@ pub(in crate::ast) fn bind_inputs(
         session: &mut Session,
         properties: &[Property],
         env: &ConstEnv,
-        inputs: &HashMap<String, (usize, u32, bool)>,
+        inputs: &HashMap<String, Result<(usize, u32, bool), String>>,
         loops: &[Loop],
         depth: usize,
         budget: &mut usize,
@@ -559,7 +549,8 @@ pub(in crate::ast) fn bind_inputs(
                         width: property.field.width,
                         signed: property.field.signed,
                     }
-                } else if let Some(&(index, width, signed)) = inputs.get(&name) {
+                } else if let Some(input) = inputs.get(&name) {
+                    let &(index, width, signed) = input.as_ref().map_err(Clone::clone)?;
                     Typed {
                         kind: Kind::Leaf(ConstraintExpr::Input { index, width }),
                         width,
@@ -610,7 +601,11 @@ pub(in crate::ast) fn bind_inputs(
                 && matches!(&native.expression(*expression).kind, ExprKind::Name(root) if root.spelling == "local") =>
             {
                 let key = format!("local::{}", instances::normalize_identifier(&name.spelling));
-                let &(index, width, signed) = inputs.get(&key).ok_or("inline local variable")?;
+                let &(index, width, signed) = inputs
+                    .get(&key)
+                    .ok_or("inline local variable")?
+                    .as_ref()
+                    .map_err(Clone::clone)?;
                 Typed {
                     kind: Kind::Leaf(ConstraintExpr::Input { index, width }),
                     width,
