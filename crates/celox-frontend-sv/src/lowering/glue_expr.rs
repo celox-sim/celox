@@ -798,7 +798,7 @@ fn lower_dynamic_array_element_index_glue(
     arena: &mut SLTNodeArena<GlueAddr>,
     element_width: usize,
 ) -> Option<(NodeId, HashSet<VarAtomBase<GlueAddr>>, Vec<SourceVarId>)> {
-    let offset_expr = expr_from_const_expr(offset)?;
+    let offset_expr = expr_from_select_position(offset, constants, parameter_types)?;
     let (offset, sources, source_ids) = lower_glue_parent_expr(
         &offset_expr,
         variables,
