@@ -601,12 +601,12 @@ chapter-18/18.5.7--if-else-constraints_3.sv	2state	pass
 chapter-18/18.5.7--if-else-constraints_3.sv	4state	pass
 chapter-18/18.5.7--if-else-constraints_4.sv	2state	fail
 chapter-18/18.5.7--if-else-constraints_4.sv	4state	fail
-chapter-18/18.5.8.1--foreach-iterative-constraints_0.sv	2state	fail
-chapter-18/18.5.8.1--foreach-iterative-constraints_0.sv	4state	fail
+chapter-18/18.5.8.1--foreach-iterative-constraints_0.sv	2state	pass
+chapter-18/18.5.8.1--foreach-iterative-constraints_0.sv	4state	pass
 chapter-18/18.5.8.1--foreach-iterative-constraints_1.sv	2state	fail
 chapter-18/18.5.8.1--foreach-iterative-constraints_1.sv	4state	fail
-chapter-18/18.5.8.2--array-reduction-iterative-constraints_0.sv	2state	fail
-chapter-18/18.5.8.2--array-reduction-iterative-constraints_0.sv	4state	fail
+chapter-18/18.5.8.2--array-reduction-iterative-constraints_0.sv	2state	pass
+chapter-18/18.5.8.2--array-reduction-iterative-constraints_0.sv	4state	pass
 chapter-18/18.5.8.2--array-reduction-iterative-constraints_1.sv	2state	fail
 chapter-18/18.5.8.2--array-reduction-iterative-constraints_1.sv	4state	fail
 chapter-18/18.5.9--global-constraints_0.sv	2state	pass
