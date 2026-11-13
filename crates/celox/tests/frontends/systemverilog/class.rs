@@ -2240,6 +2240,63 @@ fn package_classes_name_the_compilation_unit_classes_of_other_files() {
 }
 
 #[test]
+fn uniqueness_constraints_keep_their_members_apart() {
+    // `unique` gives its members pairwise different values, with other
+    // constraints; a group of fewer than two members has no effect, and a
+    // group with no different values left fails the call (IEEE 1800-2023
+    // 18.5.4).
+    let source = "class C;
+        rand bit [1:0] a, b, c;
+        rand int x;
+        constraint k { unique {a, b, c}; a != 3; b != 3; c != 3; unique {x}; }
+    endclass
+    module Top;
+        C o;
+        int ok, failed;
+        initial begin
+            o = new;
+            ok = 1;
+            repeat (50) ok &= o.randomize() && o.a != o.b && o.b != o.c && o.a != o.c;
+            failed = o.randomize() with { a == b; };
+            $display(\"%0d %0d\", ok, failed);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 0"]);
+    for (members, constraint, message) in [
+        (
+            "randc bit [1:0] a; rand bit [1:0] b;",
+            "unique {a, b};",
+            "a randc variable in a uniqueness constraint",
+        ),
+        (
+            "rand bit [1:0] a; rand int b;",
+            "unique {a, b};",
+            "members of types that are not equivalent",
+        ),
+        (
+            "rand int a; rand int q[];",
+            "unique {a, q};",
+            "an array in a uniqueness constraint",
+        ),
+    ] {
+        let source = format!(
+            "class C; {members} constraint k {{ {constraint} }} endclass
+            module Top; C c; initial begin c = new; void'(c.randomize()); end endmodule"
+        );
+        let error = match celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        {
+            Err(error) => error.to_string(),
+            Ok(mut sim) => sim.run_until(1).expect_err(constraint).to_string(),
+        };
+        assert!(error.contains(message), "{constraint}: {error}");
+    }
+}
+
+#[test]
 fn distributions_constrain_values_and_weigh_their_items() {
     // `dist` allows the values of its items of nonzero total weight, weighs
     // a range by its values with `:=` and as a whole with `:/`, and its

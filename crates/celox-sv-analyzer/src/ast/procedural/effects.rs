@@ -123,6 +123,11 @@ fn operands(kind: &ExprKind) -> Vec<ExprId> {
                 dimension_operands(&dimension.kind, &mut operands);
             }
         }
+        ExprKind::Unique(items) => {
+            for item in items {
+                dimension_operands(&item.kind, &mut operands);
+            }
+        }
         ExprKind::Dist { expression, items } => {
             operands.push(*expression);
             for item in items {

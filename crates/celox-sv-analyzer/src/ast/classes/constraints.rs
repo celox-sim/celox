@@ -858,6 +858,68 @@ pub(in crate::ast) fn bind_inputs(
                 }
                 alternatives.pop().ok_or("empty constraint inside set")?
             }
+            // A uniqueness constraint (IEEE 1800-2023 18.5.4): its members,
+            // singular variables of equivalent types, take pairwise
+            // different values; fewer than two have no effect.
+            ExprKind::Unique(items) => {
+                let mut members = Vec::new();
+                for item in items {
+                    let celox_sv_syntax::DimensionKind::Index(id) = item.kind else {
+                        return Err(
+                            "a value range in a uniqueness constraint, whose members are variables (IEEE 1800-2023 18.5.4)"
+                                .into(),
+                        );
+                    };
+                    if let ExprKind::Name(name) = &native
+                        .expression(expression_binding::ungroup(id, native))
+                        .kind
+                        && let Some(property) = properties.iter().rev().find(|property| {
+                            property.name == instances::normalize_identifier(&name.spelling)
+                        })
+                    {
+                        if property.randc {
+                            return Err(
+                                "a randc variable in a uniqueness constraint (IEEE 1800-2023 18.5.4)"
+                                    .into(),
+                            );
+                        }
+                        if property.r#type.container.is_some()
+                            || !property.r#type.unpacked_ranges.is_empty()
+                        {
+                            return Err("an array in a uniqueness constraint".into());
+                        }
+                    }
+                    members.push(recurse(session, budget, id)?);
+                }
+                if members
+                    .windows(2)
+                    .any(|pair| pair[0].width != pair[1].width || pair[0].signed != pair[1].signed)
+                {
+                    return Err(
+                        "a uniqueness constraint over members of types that are not equivalent (IEEE 1800-2023 18.5.4)"
+                            .into(),
+                    );
+                }
+                let mut different = Vec::new();
+                for (index, left) in members.iter().enumerate() {
+                    for right in &members[index + 1..] {
+                        charge(budget)?;
+                        different.push(relation(
+                            "!=",
+                            bounded_clone(left, budget)?,
+                            bounded_clone(right, budget)?,
+                        ));
+                    }
+                }
+                different
+                    .into_iter()
+                    .reduce(|left, right| relation("&&", left, right))
+                    .unwrap_or(Typed {
+                        kind: Kind::Leaf(ConstraintExpr::Literal(1, 1)),
+                        width: 1,
+                        signed: false,
+                    })
+            }
             // A distribution (IEEE 1800-2023 18.5.3): the value is one of an
             // item of nonzero weight, and the solver tries the items by their
             // weights, `:=` counting each value of a range, `:/` the range.

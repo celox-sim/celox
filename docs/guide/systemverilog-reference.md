@@ -317,7 +317,9 @@ blocks in programs. Two region deviations are listed under
   expression; the solver first tries one item of each `dist`, picked by its
   weight (one under `if` or `->` where its condition holds, one in a
   `foreach` for each element), and then any allowed value, so the weights
-  bias the values without sampling them exactly.
+  bias the values without sampling them exactly. A `unique` constraint
+  takes singular variables of equivalent types; arrays and slices in it are
+  unsupported.
 - Inline `with` constraints: four-state and aggregate caller-scope inputs,
   typed parameter inputs, qualified `this` / `super` references, restricted
   `with (names)` lookup, and scope `std::randomize(…) with`.
