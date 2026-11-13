@@ -58,6 +58,9 @@ pub(crate) struct Session {
     /// The types found during the outermost type query that runs, see
     /// [`expression_types::Query`].
     pub(super) type_query: Option<expression_types::Query>,
+    /// Whether the assertions of the design check its assertion control
+    /// state (see [`assertion_control`]).
+    pub(super) controls_assertions: bool,
 }
 
 impl Session {
@@ -73,6 +76,7 @@ impl Session {
             foreign: std::mem::take(&mut design.foreign),
             virtual_interfaces: packages.virtual_interfaces.clone(),
             types: std::mem::take(&mut design.types),
+            controls_assertions: packages.controls_assertions(),
             ..Self::default()
         }
     }

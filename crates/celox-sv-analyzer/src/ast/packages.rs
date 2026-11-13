@@ -42,6 +42,10 @@ pub struct Packages {
     /// The virtual interfaces of the design, which the modules that use the
     /// packages are analyzed with.
     pub(crate) virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
+    /// The assertion control state of the design, when a source calls
+    /// `$asserton` or `$assertoff` (IEEE 1800-2023 20.11): the state module
+    /// of a package no source declares, whose variable every module shares.
+    assertion_control: Option<crate::ir::Module>,
 }
 
 /// What the analyses of the modules of a design add to the packages they
@@ -230,6 +234,13 @@ impl Packages {
                     .filter_map(|unit| unit.scope.as_ref().ok()),
             )
             .filter_map(|package| package.state_module.as_ref())
+            .chain(&self.assertion_control)
+    }
+
+    /// Whether a source of the design calls an assertion control task, so
+    /// that its assertions check the assertion control state.
+    pub(crate) fn controls_assertions(&self) -> bool {
+        self.assertion_control.is_some()
     }
 
     /// Package state after specialization requests made by importing scopes.
@@ -329,6 +340,12 @@ impl Packages {
         };
         let mut packages = Self::analyze_packages(trees, timescales, session)?;
         packages.virtual_interfaces = options.virtual_interfaces;
+        if trees
+            .iter()
+            .any(|(tree, _)| assertion_control::called(tree.declarations()))
+        {
+            packages.assertion_control = Some(assertion_control::state());
+        }
         if mixed_timescales {
             packages
                 .warnings
