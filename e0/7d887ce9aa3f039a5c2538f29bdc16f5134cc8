@@ -1,1 +1,6 @@
-Review fixes: soft Unknown/handle ranks/class depth/guarded disable (#3825); one constraint_mode path with per-class static modes in the heap (#3827); functions in constraints dropped for a redesign
+Revision history for #3829:
+
+rev 2 (content) 2026-11-13 12:27 UTC — Review fixes: soft Unknown/handle ranks/class depth/guarded disable (#3825); one constraint_mode path with per-class static modes in the heap (#3827); functions in constraints dropped for a redesign
+rev 1 (initial) 2026-11-13 12:27 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3829,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"6ac45be9dcdf4e6cc5cd976c1ead4218ba03cfb0","timestamp_iso":"2026-11-13T12:27:58Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"6ac45be9dcdf4e6cc5cd976c1ead4218ba03cfb0","new_sha":"e07d887ce9aa3f039a5c2538f29bdc16f5134cc8","timestamp_iso":"2026-11-13T12:27:58Z","reason":"Review fixes: soft Unknown/handle ranks/class depth/guarded disable (#3825); one constraint_mode path with per-class static modes in the heap (#3827); functions in constraints dropped for a redesign","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/6ac45be9dcdf4e6cc5cd976c1ead4218ba03cfb0...e07d887ce9aa3f039a5c2538f29bdc16f5134cc8"}]} -->
