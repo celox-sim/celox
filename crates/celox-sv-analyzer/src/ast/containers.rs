@@ -438,6 +438,18 @@ pub(super) fn assignment(
         };
         let size = expression_binding::value(size, native, tree, session, dims)?;
         let init = match initializer {
+            // `'{default: v}` gives each of the `size` elements the value
+            // `v` (10.9.1: every element is covered): an empty array whose
+            // default element is `v`, which `New` takes for the elements
+            // past the ones it copies.
+            Some(id)
+                if let Some(value) = default_only_pattern(id, native)
+                    && target.element.container.is_none()
+                    && target.element.unpacked_struct().is_none() =>
+            {
+                let value = element_value(value, tree, session, dims, target)?;
+                call(ContainerOp::WithDefault, target.layout, vec![value])
+            }
             // An assignment pattern is an array of the target's type, as
             // when it is assigned to the array (10.9.1).
             Some(id)
@@ -674,6 +686,28 @@ pub(super) fn check_written_actual(
         }
         outer = false;
     }
+}
+
+/// The value of assignment pattern `id` when it is `'{default: value}`.
+fn default_only_pattern(id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<ExprId> {
+    let ExprKind::Pattern {
+        target: None,
+        items,
+    } = &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    else {
+        return None;
+    };
+    let [item] = items.as_slice() else {
+        return None;
+    };
+    let key = item.key?;
+    matches!(
+        &native.expression(expression_binding::ungroup(key, native)).kind,
+        ExprKind::Literal(text) if text == "default"
+    )
+    .then_some(item.value)
 }
 
 fn check_compatible(
