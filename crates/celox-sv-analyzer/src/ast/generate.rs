@@ -1359,6 +1359,50 @@ impl<'a> Elaborator<'a, '_> {
                 .then_some(ty)
             })
             .collect::<Vec<_>>();
+        let mut deferred = Vec::new();
+        // The parameters of the block, and the typedefs whose bounds name
+        // one: such a bound has the block's value, which an enclosing
+        // constant of the name hides from the first resolution below.
+        let native = self.tree.declarations();
+        let block_parameters: HashSet<String> = children
+            .iter()
+            .filter_map(|id| match native.body_item(*id).kind {
+                celox_sv_syntax::BodyItemKind::Parameter(declaration) => Some(declaration),
+                _ => None,
+            })
+            .flat_map(|declaration| native.parameter_declaration(declaration).parameters.iter())
+            .map(|parameter| instances::normalize_identifier(&parameter.name.spelling))
+            .collect();
+        // A typedef that names such a parameter, directly or through
+        // another such typedef, until no more are found.
+        let block_aliases: Vec<(String, HashSet<String>)> = children
+            .iter()
+            .filter_map(|id| match native.body_item(*id).kind {
+                celox_sv_syntax::BodyItemKind::TypeAlias(alias) => Some(native.type_alias(alias)),
+                _ => None,
+            })
+            .filter_map(|alias| match alias.target {
+                celox_sv_syntax::TypeAliasTarget::DataType(ty) => Some((
+                    instances::normalize_identifier(&alias.name.spelling),
+                    native_type_dependencies(ty, native),
+                )),
+                _ => None,
+            })
+            .collect();
+        let mut shadowed_bounds: HashSet<String> = HashSet::default();
+        loop {
+            let before = shadowed_bounds.len();
+            for (name, dependencies) in &block_aliases {
+                if dependencies.iter().any(|dependency| {
+                    block_parameters.contains(dependency) || shadowed_bounds.contains(dependency)
+                }) {
+                    shadowed_bounds.insert(name.clone());
+                }
+            }
+            if shadowed_bounds.len() == before {
+                break;
+            }
+        }
         if !type_names.is_empty() || !enum_types.is_empty() {
             let mut enum_names = HashSet::default();
             for ty in &enum_types {
@@ -1407,14 +1451,11 @@ impl<'a> Elaborator<'a, '_> {
                 // Freeze definition-site dimensions before a nested block or
                 // another loop iteration shadows the names in their bounds.
                 let ty = procedural::scoped_type(ty, &scope.env);
-                if ty.packed_ranges().iter().any(|range| {
-                    eval_ast_const_expr(&self.tree.functions, range.left(), &scope.env).is_none()
-                        || eval_ast_const_expr(&self.tree.functions, range.right(), &scope.env)
-                            .is_none()
-                }) {
-                    return Err(unsupported(format!(
-                        "unresolved generate-local typedef bounds `{name}`"
-                    )));
+                if !bounds_known(&self.tree, &ty, &scope.env) || shadowed_bounds.contains(&name) {
+                    // The bounds may name a parameter of this block, which
+                    // is bound below (IEEE 1800-2023 27.2): resolve the
+                    // typedef again then.
+                    deferred.push(name.clone());
                 }
                 let qualified = format!("{}.{}", scope.path, scope_component(&name));
                 scope.qualified_types.insert(qualified.clone(), ty.clone());
@@ -1452,7 +1493,46 @@ impl<'a> Elaborator<'a, '_> {
             }
             self.aliases = Cow::Owned(aliases);
         }
+        let declared_before = declared.clone();
         self.constants_and_signal_types(children, &mut scope, &mut declared)?;
+        if !deferred.is_empty() {
+            let aliases = types::type_aliases_of_generate_scope(
+                &self.tree,
+                self.session,
+                children,
+                &scope.env,
+                &self.aliases,
+                &scope.path,
+            )?;
+            let mut resolved = self.aliases.clone().into_owned();
+            for name in deferred {
+                let ty = procedural::scoped_type(
+                    aliases
+                        .get(&name)
+                        .ok_or_else(|| {
+                            unsupported(format!("unresolved generate-local typedef `{name}`"))
+                        })?
+                        .clone(),
+                    &scope.env,
+                );
+                if !bounds_known(&self.tree, &ty, &scope.env) {
+                    return Err(unsupported(format!(
+                        "unresolved generate-local typedef bounds `{name}`"
+                    )));
+                }
+                let qualified = format!("{}.{}", scope.path, scope_component(&name));
+                scope.qualified_types.insert(qualified.clone(), ty.clone());
+                resolved.insert(qualified, ty.clone());
+                resolved.insert(name, ty);
+            }
+            self.aliases = Cow::Owned(resolved);
+            // The parameters and variables of the block that the deferred
+            // typedefs type were bound with their first resolution: bind
+            // them again with the block's.
+            let mut again = declared_before;
+            self.constants_and_signal_types(children, &mut scope, &mut again)?;
+            declared = again;
+        }
         for id in children {
             if let celox_sv_syntax::BodyItemKind::Subroutine(subroutine) =
                 self.tree.declarations().body_item(*id).kind
@@ -1851,3 +1931,11 @@ fn native_type_dependencies(
 
 #[cfg(test)]
 mod tests;
+
+/// Whether the packed bounds of `ty` have values in `env`.
+fn bounds_known(tree: &AnalysisContext<'_>, ty: &Type, env: &SharedEnv) -> bool {
+    ty.packed_ranges().iter().all(|range| {
+        eval_ast_const_expr(&tree.functions, range.left(), env).is_some()
+            && eval_ast_const_expr(&tree.functions, range.right(), env).is_some()
+    })
+}

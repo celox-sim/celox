@@ -676,3 +676,118 @@ endmodule"#;
         );
     }
 }
+
+// A typedef of a generate block may be sized by a parameter of the same
+// block (IEEE 1800-2023 27.2, 6.18): variables, functions and their locals
+// of the type take its bounds, as OpenTitan's LFSR permutes the columns of
+// a matrix sized by the block's `NumSboxes`.
+#[test]
+fn generate_local_typedefs_take_the_parameters_of_their_block() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Lfsr #(parameter int LfsrDw = 16) (output logic [15:0] out);
+            localparam int LfsrIdxDw = $clog2(LfsrDw);
+            if (1) begin : gen_out
+                localparam int NumSboxes = LfsrDw / 4;
+                logic [3:0][NumSboxes-1:0][LfsrIdxDw-1:0] indices, rotrev;
+                for (genvar j = 0; j < LfsrDw; j++) begin : gen_idx
+                    assign indices[j / NumSboxes][j % NumSboxes] = LfsrIdxDw'(j);
+                end
+                typedef logic [NumSboxes-1:0][LfsrIdxDw-1:0] col_t;
+                col_t first;
+                function automatic col_t lrotcol(col_t col, integer shift);
+                    col_t rotated;
+                    for (int k = 0; k < NumSboxes; k++) begin
+                        rotated[(k + shift) % NumSboxes] = col[k];
+                    end
+                    return rotated;
+                endfunction
+                function automatic col_t revcol(col_t col);
+                    return {<<LfsrIdxDw{col}};
+                endfunction
+                always_comb begin
+                    rotrev[0] = indices[0];
+                    rotrev[1] = lrotcol(indices[1], NumSboxes / 2);
+                    rotrev[2] = revcol(indices[2]);
+                    rotrev[3] = revcol(lrotcol(indices[3], 1));
+                end
+                assign first = rotrev[0];
+                assign out = {rotrev[3][0], rotrev[2][0], rotrev[1][0], rotrev[0][0]};
+            end
+        endmodule
+        module Top;
+            logic [15:0] out;
+            Lfsr u(.out(out));
+            initial #1 $display("out=%h rows=%h first=%0d", out, u.gen_out.rotrev,
+                                $bits(u.gen_out.first));
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("lfsr.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            ["out=eb60 rows=fcde89ab54763210 first=16"],
+            "four-state {four_state}"
+        );
+    }
+}
+
+// A typedef of a generate block takes the block's parameter of a name an
+// enclosing scope also declares (IEEE 1800-2023 27.2, 23.9): `N` of the
+// block, not of the module, also through another typedef and for a
+// parameter of the typedef's type.
+#[test]
+fn generate_local_typedefs_take_the_block_parameter_they_name() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+            localparam int N = 2;
+            if (1) begin : gen_b
+                localparam int N = 4;
+                typedef logic [N-1:0][1:0] col_t;
+                typedef col_t alias_t;
+                col_t v;
+                alias_t w;
+                localparam col_t P = '1;
+                function automatic col_t ones(); return '1; endfunction
+                assign v = ones();
+                assign w = P;
+            end
+            initial #1 $display("%0d %h %0d %h", $bits(gen_b.v), gen_b.v, $bits(gen_b.w), gen_b.w);
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("shadow.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["8 ff 8 ff"], "four-state {four_state}");
+    }
+}
