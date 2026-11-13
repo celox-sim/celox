@@ -294,7 +294,8 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
 - 明示クロック付きの Boolean な `assert property`・`assume property`・
   `cover property`（モジュール・generate 項目）。固定クロック数だけ離れた
   ステップ列（`a ##1 b`、最大1024ティック）を `|->` または `|=>` で連結したもの。
-- 上限のあるサイクル遅延範囲（`a ##[1:3] b`、先頭にも書けます）と sequence の `or`。
+- 上限のあるサイクル遅延範囲（`a ##[1:3] b`、先頭にも書けます）と、被演算子に match 項目を持たない
+  sequence の `or`・`and`・`intersect`。
   試行は一致の仕方のいずれかが一致した最初のティックで成功し、どれも一致し得なく
   なった最初のティックで失敗します。一致の仕方は最大1024通りで、property 全体が
   その sequence である場合だけです（含意、`expect` 文、ローカル変数や match 項目を
@@ -311,7 +312,8 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
 
 特に未対応: 手続き的並行アサーション、暗黙・既定クロック、仮引数付きや
 他スコープの名前付き property・sequence、上限の無いサイクル遅延範囲（`##[1:$]`）、
-繰り返し、`or` 以外の sequence 演算子（`and`、`intersect`、`throughout`、`within`）、複数サイクル
+繰り返し、sequence 演算子 `throughout`・`within`、同じティックで一致し得ない sequence の
+`intersect`、複数サイクル
 sequence 内のインスタンス、複数サイクル sequence への `disable iff`、
 複数サイクルや名前付きの被演算子を持つ `iff`、
 述語や match 項目値中のユーザー関数呼び出し、時間付き・ノンブロッキングなアクション文。

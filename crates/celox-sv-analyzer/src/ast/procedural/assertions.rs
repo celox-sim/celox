@@ -428,9 +428,11 @@ const MAX_MONITOR_TERMS: u64 = 1 << 20;
 /// The most ways to match that a monitor decides of one sequence.
 pub(super) const MAX_SEQUENCE_PATHS: usize = 1024;
 
-/// The ways sequence `expr` matches (IEEE 1800-2023 16.7, 16.9.7), each a
-/// linear sequence of steps a fixed number of ticks apart: a delay range
-/// is one way per delay, and `or` the ways of either operand.
+/// The ways sequence `expr` matches (IEEE 1800-2023 16.7, 16.9.5 to
+/// 16.9.7), each a linear sequence of steps a fixed number of ticks apart:
+/// a delay range is one way per delay, `or` the ways of either operand,
+/// `and` a way of each, matching at the later of their matches, and
+/// `intersect` a way of each matching at one tick.
 pub(super) fn sequence_paths(
     expr: &celox_sv_syntax::SequenceExpr,
 ) -> Result<Vec<Vec<celox_sv_syntax::SequenceStep>>, AnalyzerError> {
@@ -467,6 +469,42 @@ fn expand_paths(
             }
             paths
         }
+        SequenceExpr::And(left, right) | SequenceExpr::Intersect(left, right) => {
+            let intersect = matches!(expr, SequenceExpr::Intersect(..));
+            let lefts = expand_paths(left)?;
+            let rights = expand_paths(right)?;
+            if lefts.len().saturating_mul(rights.len()) > MAX_SEQUENCE_PATHS {
+                return Err(too_many());
+            }
+            if lefts
+                .iter()
+                .chain(&rights)
+                .flatten()
+                .any(|step| !step.items.is_empty())
+            {
+                return Err(unsupported(if intersect {
+                    "match item in an operand of intersect"
+                } else {
+                    "match item in an operand of and"
+                }));
+            }
+            let mut paths = Vec::new();
+            for left in &lefts {
+                for right in &rights {
+                    if intersect && path_length(left) != path_length(right) {
+                        continue;
+                    }
+                    paths.push(merged_path(left, right));
+                }
+            }
+            // Ways of different lengths never intersect.
+            if paths.is_empty() {
+                return Err(unsupported(
+                    "intersect of sequences without ways to match of one length",
+                ));
+            }
+            paths
+        }
         SequenceExpr::Concat { left, delay, right } => {
             let lefts = match left {
                 Some(left) => expand_paths(left)?,
@@ -500,6 +538,42 @@ fn expand_paths(
             paths
         }
     })
+}
+
+/// The ticks way `path` spans after its start.
+fn path_length(path: &[celox_sv_syntax::SequenceStep]) -> u64 {
+    path.iter().map(|step| u64::from(step.delay)).sum()
+}
+
+/// Ways `left` and `right` started at one tick as one way: the steps of
+/// both at their ticks, so it matches when the later one matches.
+fn merged_path(
+    left: &[celox_sv_syntax::SequenceStep],
+    right: &[celox_sv_syntax::SequenceStep],
+) -> Vec<celox_sv_syntax::SequenceStep> {
+    let absolute = |path: &[celox_sv_syntax::SequenceStep]| {
+        let mut at = 0u64;
+        path.iter()
+            .map(|step| {
+                at += u64::from(step.delay);
+                (at, step.clone())
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut steps = absolute(left);
+    steps.extend(absolute(right));
+    // A stable sort keeps the left operand's steps of a tick first.
+    steps.sort_by_key(|(at, _)| *at);
+    let mut previous = 0u64;
+    steps
+        .into_iter()
+        .map(|(at, mut step)| {
+            // Too long a way is rejected by its length later.
+            step.delay = u32::try_from(at - previous).unwrap_or(u32::MAX);
+            previous = at;
+            step
+        })
+        .collect()
 }
 
 /// A Boolean conjunction of `terms`, true without any.
