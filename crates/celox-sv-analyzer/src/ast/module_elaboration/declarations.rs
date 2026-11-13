@@ -312,7 +312,13 @@ impl ScopeElaboration<'_> {
                 if shape.unpacked.is_empty()
                     && !shape.real
                     && !shape.string
-                    && shape.class.is_none()
+                    && expression_binding::objects::shape_class(
+                        shape,
+                        syntax_tree,
+                        session,
+                        &self.packed_dimensions,
+                    )
+                    .is_none()
                 {
                     // An integral value parameter is self-determined before
                     // conversion at a receiving declaration (6.20.2). The

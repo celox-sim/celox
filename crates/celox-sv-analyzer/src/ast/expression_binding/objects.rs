@@ -41,6 +41,25 @@ pub(in crate::ast) fn native_class(
     expression_types::class_name(&session.types, ty)
 }
 
+/// The class of the handles declared shape `shape` holds: of a handle, or of
+/// the elements of a fixed-size array of handles (8.4), as its type tells.
+pub(in crate::ast) fn shape_class(
+    shape: &VariableDimensions,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    let mut ty = shape.type_id(&mut session.types, &tree.functions, &dimensions.const_env)?;
+    while let semantic_types::TyData::Array {
+        kind: semantic_types::ArrayKind::Fixed(_),
+        element,
+    } = session.types.data(ty)
+    {
+        ty = *element;
+    }
+    expression_types::class_name(&session.types, ty)
+}
+
 /// Access depends on the lexical class, not the class of the receiver (8.18).
 pub(in crate::ast) fn check_access(
     tree: &AnalysisContext<'_>,
@@ -1663,7 +1682,7 @@ pub(super) fn randomize_with(
         }
         if variable.real
             || variable.string
-            || variable.class.is_some()
+            || shape_class(variable, tree, session, dimensions).is_some()
             || variable.container.is_some()
             || !variable.unpacked.is_empty()
             || !variable.is_2state

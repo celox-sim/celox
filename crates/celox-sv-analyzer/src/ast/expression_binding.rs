@@ -152,7 +152,9 @@ pub(super) fn expression(
     // element of an array of handles (IEEE 1800-2023 8.7).
     let class = match lhs {
         LValue::Object { .. } => None,
-        LValue::Ident(_) => shape.and_then(|shape| shape.class.as_deref()),
+        LValue::Ident(_) => {
+            shape.and_then(|shape| objects::shape_class(shape, tree, session, dimensions))
+        }
         LValue::Select {
             name,
             array_slice_width: None,
@@ -160,10 +162,10 @@ pub(super) fn expression(
         } => dimensions
             .get(name)
             .filter(|shape| !shape.unpacked.is_empty())
-            .and_then(|shape| shape.class.as_deref()),
+            .and_then(|shape| objects::shape_class(shape, tree, session, dimensions)),
         LValue::Select { .. } => None,
     };
-    if let Some(class) = class {
+    if let Some(class) = class.as_deref() {
         if let Some(call) = objects::constructor(tree, session, root, native, dimensions, class)? {
             return Ok(call);
         }
