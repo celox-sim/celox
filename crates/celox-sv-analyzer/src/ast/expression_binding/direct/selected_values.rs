@@ -101,8 +101,33 @@ pub(in crate::ast::expression_binding) fn path(
                     unreachable!()
                 };
                 let value = index_value(index, native, tree, session, dimensions)?;
-                let value = eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env)
-                    .ok_or_else(|| unsupported("hierarchical index"))?;
+                let Some(value) =
+                    eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env)
+                else {
+                    // A run-time index of an array that a hierarchical name
+                    // of another instance's variable denotes, or a member of
+                    // it: the caller resolves the name, whose elements are
+                    // then selected as those of a variable (23.6, 7.4.5).
+                    // Its components may select elements of instance arrays
+                    // by constant indices, as `key_vault[1].hwif_out`.
+                    return Err(match path(*expression, native, tree, session, dimensions) {
+                        Ok((name, None))
+                            if name.len() > 1
+                                && dimensions.get(&name[0]).is_none()
+                                && !packed_structs::bind_interface_path(
+                                    tree,
+                                    &mut name.clone(),
+                                    dimensions,
+                                ) =>
+                        {
+                            AnalyzerError::HierarchicalReference {
+                                path: name.join("."),
+                            }
+                        }
+                        Err(error @ AnalyzerError::HierarchicalReference { .. }) => error,
+                        _ => unsupported("hierarchical index"),
+                    });
+                };
                 let (mut prefix, base) = path(*expression, native, tree, session, dimensions)?;
                 let last = prefix.last_mut().ok_or_else(disagreement)?;
                 last.push_str(&format!("[{value}]"));
