@@ -173,23 +173,69 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(stmts);
         }
         if let Some(parts) = self.concat_lvalue(left)? {
-            if op != "=" {
+            let places = parts
+                .iter()
+                .any(|(_, part)| matches!(part, LValue::Object { .. }));
+            if op != "=" && places {
                 return Err(unsupported("compound assignment to a concatenation"));
             }
-            if parts
-                .iter()
-                .any(|(_, part)| matches!(part, LValue::Object { .. }))
-            {
+            if places {
                 let targets = parts.into_iter().map(|(id, _)| id).collect();
                 return self.concat_place_assignment(left, targets, right, nonblocking);
+            }
+            if op != "=" {
+                for (id, part) in &parts {
+                    // Each part is updated as a target of its own (IEEE
+                    // 1800-2023 11.4.1), an enumerated one as one too
+                    // (6.19.3, 6.19.4).
+                    assignments::check_enum_update(
+                        self.tree,
+                        self.session,
+                        *id,
+                        self.tree.declarations(),
+                        &self.dims,
+                        op,
+                    )?;
+                    // The parts are read and then written: a select with an
+                    // effectful call, a subroutine or a random function,
+                    // would choose them twice.
+                    if let LValue::Select { msb, lsb, .. } = part
+                        && (has_effectful_call(msb) || has_effectful_call(lsb))
+                    {
+                        return Err(unsupported(
+                            "compound assignment to a concatenation whose select has an effectful call",
+                        ));
+                    }
+                }
             }
             let mut parts = parts.into_iter().map(|(_, part)| part).collect::<Vec<_>>();
             for part in &mut parts {
                 self.rename_lvalue(part);
             }
+            let value = self.native_value(right)?;
+            // `{a, b} op= v` is `{a, b} = {a, b} op v` (IEEE 1800-2023
+            // 11.4.1): the concatenation reads its parts (11.4.12).
+            let rhs = if op == "=" {
+                value
+            } else {
+                let read = Expr::Concat(
+                    parts
+                        .iter()
+                        .map(|part| statements::expr_from_lvalue(self.tree, part, &self.dims))
+                        .collect(),
+                );
+                statements::assignment_op_value(
+                    self.tree,
+                    self.session,
+                    read,
+                    op,
+                    value,
+                    &self.dims,
+                )?
+            };
             return Ok(vec![Stmt::AssignConcat {
                 parts,
-                rhs: self.native_value(right)?,
+                rhs,
                 nonblocking,
             }]);
         }
@@ -861,5 +907,33 @@ impl BodyBuilder<'_, '_, '_> {
         );
         self.rename_expr(&mut store);
         Ok(Stmt::Eval(store))
+    }
+}
+
+/// Whether `expr` calls a subroutine or another function whose calls have
+/// effects, such as `$urandom` (see [`Callee::is_effectful`]).
+fn has_effectful_call(expr: &ConstExpr) -> bool {
+    match expr {
+        ConstExpr::Function { callee, args, .. } => {
+            callee.is_effectful() || args.iter().any(has_effectful_call)
+        }
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => false,
+        ConstExpr::Select { expr, bit } => has_effectful_call(expr) || has_effectful_call(bit),
+        ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            has_effectful_call(expr) || has_effectful_call(msb) || has_effectful_call(lsb)
+        }
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => has_effectful_call(expr),
+        ConstExpr::Binary { left, right, .. } => {
+            has_effectful_call(left) || has_effectful_call(right)
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            has_effectful_call(condition)
+                || has_effectful_call(then_expr)
+                || has_effectful_call(else_expr)
+        }
     }
 }
