@@ -326,8 +326,15 @@ impl Parser<'_> {
                             jobs.push(Job::Set);
                         } else {
                             if self.eat("dist") {
-                                supported = false;
-                                self.constraint_ranges(true)?;
+                                let items = self.dist_items()?;
+                                // A soft constraint keeps no expression: its
+                                // block stays unsupported.
+                                if !soft {
+                                    let expression = expressions.pop().expect("condition retained");
+                                    expressions.push(
+                                        self.node(start, ExprKind::Dist { expression, items })?,
+                                    );
+                                }
                             }
                             self.expect(";")?;
                         }
@@ -348,6 +355,58 @@ impl Parser<'_> {
             self.expression(2)?;
         }
         Ok((expression, simple))
+    }
+
+    /// The items of a distribution `{ item [weight] {, item [weight]} }`
+    /// (IEEE 1800-2023 18.5.3).
+    fn dist_items(&mut self) -> Result<Vec<DistItem>> {
+        self.expect("{")?;
+        let mut items = Vec::new();
+        loop {
+            if self.peek() == "default" {
+                return Err(self.unsupported("default distribution weight `default :/`"));
+            }
+            let item_start = self.at;
+            // A range `[low:high]`, either bound `$` (11.4.13).
+            let value = if self.eat("[") {
+                let left = self.expression(0)?;
+                if !self.eat(":") {
+                    return Err(
+                        self.unsupported("distribution value range other than `[low:high]`")
+                    );
+                }
+                let right = self.expression(0)?;
+                self.expect("]")?;
+                Dimension {
+                    kind: DimensionKind::Range { left, right },
+                    tokens: self.range(item_start),
+                }
+            } else {
+                let value = self.expression(0)?;
+                Dimension {
+                    kind: DimensionKind::Index(value),
+                    tokens: self.range(item_start),
+                }
+            };
+            let weight = if self.eat(":=") {
+                Some(DistWeight {
+                    per_range: false,
+                    value: self.expression(0)?,
+                })
+            } else if self.eat(":/") {
+                Some(DistWeight {
+                    per_range: true,
+                    value: self.expression(0)?,
+                })
+            } else {
+                None
+            };
+            items.push(DistItem { value, weight });
+            if self.eat("}") {
+                return Ok(items);
+            }
+            self.expect(",")?;
+        }
     }
 
     fn constraint_ranges(&mut self, distribution: bool) -> Result<()> {

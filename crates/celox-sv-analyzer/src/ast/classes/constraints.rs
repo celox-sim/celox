@@ -54,6 +54,82 @@ fn sized(value: Typed, width: u32, signed: bool) -> Typed {
     }
 }
 
+/// The value of constant expression `id`, if it is one.
+fn constant(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &Session,
+    env: &ConstEnv,
+) -> Option<i128> {
+    let mut constants = expression_types::constant_session(session);
+    let dimensions = PackedDimensions::new(HashMap::default(), env, &TypeAliases::default());
+    let value =
+        constant_binding::bind_in(id, tree.declarations(), tree, &mut constants, &dimensions)
+            .ok()??;
+    constants::eval_ast_const_expr(&tree.functions, &value, env)
+}
+
+/// The value of integral constant expression `id` read as unsigned at the
+/// width of its type, a constant function's result at that of the type
+/// the function declares (13.4.3): its bits, of any width, as a weight
+/// takes them (18.5.3).
+fn constant_unsigned(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &Session,
+    env: &ConstEnv,
+) -> Option<num_bigint::BigUint> {
+    let mut constants = expression_types::constant_session(session);
+    let dimensions = PackedDimensions::new(HashMap::default(), env, &TypeAliases::default());
+    let bound =
+        constant_binding::bind_in(id, tree.declarations(), tree, &mut constants, &dimensions)
+            .ok()??;
+    let literal = if let ConstExpr::Function {
+        callee: crate::system_functions::Callee::Subroutine(name),
+        args,
+        ..
+    } = bound
+    {
+        let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+        const_functions::eval_call_literal(&tree.functions, &name, &args, env)?
+    } else {
+        let bound =
+            parameters::substitute_typed_parameter_literals_with_lookup(bound, env, &|name| {
+                dimensions::parameter_type_from_const_env(env, name)
+            });
+        typecheck::eval_const_integral_literal_in_env(
+            &bound.into(),
+            &const_functions::Environment {
+                constants: env,
+                functions: &tree.functions,
+            },
+            &|_| None,
+        )?
+    };
+    Some(literal.value)
+}
+
+/// A bound of a range of a distribution: an expression, or the value `$`
+/// stands for.
+#[derive(Clone, Copy)]
+enum Bound {
+    Expr(ExprId),
+    Value(i128),
+}
+
+/// `value` as a value of a `width`-bit integral type of signedness `signed`.
+fn in_type(value: i128, width: u32, signed: bool) -> i128 {
+    if width == 0 || width >= 128 {
+        return value;
+    }
+    let value = value & ((1i128 << width) - 1);
+    if signed && value >> (width - 1) & 1 == 1 {
+        value - (1i128 << width)
+    } else {
+        value
+    }
+}
+
 fn shift(op: &str) -> bool {
     matches!(op, "<<" | ">>" | "<<<" | ">>>")
 }
@@ -781,6 +857,187 @@ pub(in crate::ast) fn bind_inputs(
                     alternatives = next;
                 }
                 alternatives.pop().ok_or("empty constraint inside set")?
+            }
+            // A distribution (IEEE 1800-2023 18.5.3): the value is one of an
+            // item of nonzero weight, and the solver tries the items by their
+            // weights, `:=` counting each value of a range, `:/` the range.
+            ExprKind::Dist { expression, items } => {
+                let value = recurse(session, budget, *expression)?;
+                // A distribution shall not apply to a randc variable
+                // (18.5.3): the property the operand resolves to, however
+                // it is named (`b`, `this.b`).
+                if let Kind::Leaf(ConstraintExpr::Field(field)) = &value.kind
+                    && properties
+                        .iter()
+                        .filter(|property| constrainable(property))
+                        .nth(*field)
+                        .is_some_and(|property| property.randc)
+                {
+                    return Err("a distribution of a randc variable (IEEE 1800-2023 18.5.3)".into());
+                }
+                let mut members = Vec::new();
+                let mut width = value.width;
+                let mut signed = value.signed;
+                // `$` as a bound of a range is the lowest or highest value
+                // of the type of the expression (11.4.13).
+                let extreme = |high: bool| -> Result<(Typed, Bound), String> {
+                    let width = value.width;
+                    if !(1..=64).contains(&width) {
+                        return Err("`$` bound of a distribution over more than 64 bits".into());
+                    }
+                    let bound = match (value.signed, high) {
+                        (true, false) => -(1i128 << (width - 1)),
+                        (true, true) => (1i128 << (width - 1)) - 1,
+                        (false, false) => 0,
+                        (false, true) => (1i128 << width) - 1,
+                    };
+                    Ok((
+                        Typed {
+                            kind: Kind::Leaf(ConstraintExpr::Literal(
+                                width,
+                                bound as u64 & (u64::MAX >> (64 - width)),
+                            )),
+                            width,
+                            signed: value.signed,
+                        },
+                        Bound::Value(bound),
+                    ))
+                };
+                let unbounded = |id: ExprId| matches!(&native.expression(id).kind, ExprKind::Name(name) if name.spelling == "$");
+                for item in items {
+                    use celox_sv_syntax::DimensionKind;
+                    let (bounds, low, high) = match item.value.kind {
+                        DimensionKind::Index(id) => {
+                            ((Bound::Expr(id), None), recurse(session, budget, id)?, None)
+                        }
+                        DimensionKind::Range { left, right } => {
+                            let (low, low_bound) = if unbounded(left) {
+                                extreme(false)?
+                            } else {
+                                (recurse(session, budget, left)?, Bound::Expr(left))
+                            };
+                            let (high, high_bound) = if unbounded(right) {
+                                extreme(true)?
+                            } else {
+                                (recurse(session, budget, right)?, Bound::Expr(right))
+                            };
+                            ((low_bound, Some(high_bound)), low, Some(high))
+                        }
+                        _ => return Err("distribution range".into()),
+                    };
+                    for operand in std::iter::once(&low).chain(high.iter()) {
+                        width = width.max(operand.width);
+                        signed &= operand.signed;
+                    }
+                    members.push((low, high, bounds, item.weight));
+                }
+                // The weights, and the bounds of ranges weighted per value,
+                // are constant expressions; a weight is unsigned (18.5.3),
+                // a bound of the type the items compare in.
+                let mut weighted = Vec::new();
+                for (low, high, (low_id, high_id), weight) in members {
+                    let weight = match weight {
+                        None => (num_bigint::BigUint::from(1u8), false),
+                        Some(weight) => {
+                            // A weight is read as unsigned (18.5.3), every
+                            // bit of its type kept.
+                            let value = constant_unsigned(weight.value, tree, session, env)
+                                .or_else(|| {
+                                    // The numeric value of a form the typed
+                                    // evaluation does not take, which is
+                                    // its bits when it is not negative.
+                                    constant(weight.value, tree, session, env)
+                                        .and_then(|value| u128::try_from(value).ok())
+                                        .map(num_bigint::BigUint::from)
+                                })
+                                .ok_or("distribution weight other than a constant")?;
+                            (value, weight.per_range)
+                        }
+                    };
+                    let weight = match (high_id, weight) {
+                        (Some(high_id), (weight, false)) => {
+                            let bound = |session: &mut Session, bound| {
+                                match bound {
+                                Bound::Value(value) => Ok(in_type(value, width, signed)),
+                                Bound::Expr(id) => constant(id, tree, session, env)
+                                    .map(|value| in_type(value, width, signed))
+                                    .ok_or(
+                                        "distribution range with nonconstant bounds weighted per value",
+                                    ),
+                            }
+                            };
+                            let low = bound(session, low_id)?;
+                            let high = bound(session, high_id)?;
+                            // A range whose low bound is above its high one
+                            // is empty (11.4.13).
+                            let count = if high >= low {
+                                num_bigint::BigUint::from(high.abs_diff(low)) + 1u8
+                            } else {
+                                num_bigint::BigUint::ZERO
+                            };
+                            weight * count
+                        }
+                        (_, (weight, _)) => weight,
+                    };
+                    weighted.push((low, high, weight));
+                }
+                let members = weighted;
+                let value = sized(value, width, signed);
+                let mut alternatives = Vec::new();
+                let mut choices = Vec::new();
+                for (low, high, weight) in members {
+                    // A value of total weight zero is excluded (18.5.3).
+                    if weight == num_bigint::BigUint::ZERO {
+                        continue;
+                    }
+                    charge(budget)?;
+                    let left = bounded_clone(&value, budget)?;
+                    let low = sized(low, width, signed);
+                    let predicate = if let Some(high) = high {
+                        relation(
+                            "&&",
+                            relation(">=", left, low),
+                            relation(
+                                "<=",
+                                bounded_clone(&value, budget)?,
+                                sized(high, width, signed),
+                            ),
+                        )
+                    } else {
+                        relation("==", left, low)
+                    };
+                    choices.push(celox_heap::randomization::DistChoice {
+                        predicate: emit(bounded_clone(&predicate, budget)?, None),
+                        weight,
+                    });
+                    alternatives.push(predicate);
+                }
+                // A balanced OR tree bounds recursion for large distributions.
+                while alternatives.len() > 1 {
+                    let mut next = Vec::new();
+                    let mut items = alternatives.into_iter();
+                    while let Some(a) = items.next() {
+                        next.push(match items.next() {
+                            Some(b) => relation("||", a, b),
+                            None => a,
+                        });
+                    }
+                    alternatives = next;
+                }
+                // Every item of weight zero: no value is allowed.
+                let membership = alternatives.pop().unwrap_or(Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Literal(1, 0)),
+                    width: 1,
+                    signed: false,
+                });
+                Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Dist {
+                        membership: Box::new(emit(membership, None)),
+                        choices,
+                    }),
+                    width: 1,
+                    signed: false,
+                }
             }
             // A shift has the type of its left operand; the right operand
             // is self-determined, of its own type, and its value is read as

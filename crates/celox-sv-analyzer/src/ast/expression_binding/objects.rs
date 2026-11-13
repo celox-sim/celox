@@ -1585,6 +1585,8 @@ pub(super) fn randomize_with(
         constraint_ids.iter().map(|&id| (id, Vec::new())).collect();
     while let Some((id, loops)) = pending.pop() {
         let candidate = match &native.expression(id).kind {
+            // `$`, an open bound of a range (11.4.13), names no variable.
+            ExprKind::Name(name) if name.spelling == "$" => None,
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
                 if loops.contains(&name) || class.properties.iter().any(|p| p.name == name) {
@@ -1611,6 +1613,25 @@ pub(super) fn randomize_with(
             }
             ExprKind::Binary { left, right, .. } => {
                 pending.extend([(*right, loops.clone()), (*left, loops)]);
+                None
+            }
+            ExprKind::Dist { expression, items } => {
+                pending.push((*expression, loops.clone()));
+                for item in items {
+                    pending.extend(item.weight.map(|weight| (weight.value, loops.clone())));
+                    match item.value.kind {
+                        celox_sv_syntax::DimensionKind::Index(id) => {
+                            pending.push((id, loops.clone()))
+                        }
+                        celox_sv_syntax::DimensionKind::Range { left, right } => {
+                            pending.extend([(right, loops.clone()), (left, loops.clone())])
+                        }
+                        celox_sv_syntax::DimensionKind::Unsized
+                        | celox_sv_syntax::DimensionKind::Indexed { .. }
+                        | celox_sv_syntax::DimensionKind::Queue(_)
+                        | celox_sv_syntax::DimensionKind::Wildcard => {}
+                    }
+                }
                 None
             }
             ExprKind::Set(items) => {
