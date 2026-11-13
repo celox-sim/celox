@@ -31,7 +31,7 @@ pub mod typecheck;
 pub use ast::const_functions::{RuntimeConstantFunctions, RuntimeConstantTable};
 pub use ast::interfaces::{
     InterfaceMemberPath, InterfaceMemberPaths, NativeInterfacePlan, plan_interfaces,
-    plan_interfaces_with_member_paths,
+    plan_interfaces_of_first_modules, plan_interfaces_with_member_paths,
 };
 pub use ast::interfaces::{
     InterfacePrototype, interface_prototypes, interface_prototypes_for,
@@ -54,6 +54,10 @@ pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
 #[derive(Debug, Clone, Default)]
 pub struct AnalysisOptions {
     pub allow_mixed_timescales: bool,
+    /// Use the first of several declarations of a module of one name and
+    /// ignore the others, instead of rejecting the design. Off by default;
+    /// see the `duplicate_module` diagnostic.
+    pub first_duplicate_module: bool,
     /// Compatibility mode: return zero for every empty array reduction,
     /// rather than the product/bitwise-AND identity. Disabled by default.
     pub legacy_empty_reductions: bool,
@@ -573,6 +577,16 @@ pub fn source_module_implicit_net_permissions(
     path: &Path,
 ) -> Result<Vec<(String, bool)>, AnalyzerError> {
     syntax::source_module_implicit_net_permissions(code, path)
+}
+
+/// [`source_module_implicit_net_permissions`] of the modules a source
+/// declares first; see [`syntax::source_first_module_implicit_net_permissions`].
+pub fn source_first_module_implicit_net_permissions(
+    code: &str,
+    path: &Path,
+    declared: &mut fxhash::FxHashSet<String>,
+) -> Result<Vec<(String, bool)>, AnalyzerError> {
+    syntax::source_first_module_implicit_net_permissions(code, path, declared)
 }
 
 /// Analyze only one module from a source file, applying its parameter

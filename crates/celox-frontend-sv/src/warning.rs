@@ -40,6 +40,9 @@ pub enum FrontendWarningKind {
     /// IEEE 1800-2023 3.14.2.3 requires consistent explicit timing declarations.
     #[error("mixed explicit and default time units or precisions across design elements")]
     MixedTimescale,
+    /// A design declares a module more than once and uses the first.
+    #[error("module `{name}` is declared more than once; the first declaration is used")]
+    DuplicateModule { name: String },
     #[error("`$size` on an interface array is a language extension")]
     InterfaceArrayQuery,
     #[error(
@@ -131,6 +134,10 @@ pub(crate) fn analyzer_warnings(
         celox_sv_analyzer::ir::AnalyzerWarning::MixedTimescale => {
             (FrontendWarningKind::MixedTimescale, None)
         }
+        celox_sv_analyzer::ir::AnalyzerWarning::DuplicateModule { name } => (
+            FrontendWarningKind::DuplicateModule { name: name.clone() },
+            None,
+        ),
         celox_sv_analyzer::ir::AnalyzerWarning::ExitOutsideProgram { site } => {
             (FrontendWarningKind::ExitOutsideProgram, site.clone())
         }
@@ -181,6 +188,7 @@ impl miette::Diagnostic for FrontendWarning {
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self.kind {
             FrontendWarningKind::MixedTimescale => "mixed_timescale",
+            FrontendWarningKind::DuplicateModule { .. } => "duplicate_module",
             FrontendWarningKind::InterfaceArrayQuery => "interface_array_query",
             FrontendWarningKind::InterfaceArrayParameter { .. } => "interface_array_parameter",
             FrontendWarningKind::MultipleAlwaysFfDrivers { .. } => "multiple_always_ff_drivers",
@@ -209,6 +217,9 @@ impl miette::Diagnostic for FrontendWarning {
             }
             FrontendWarningKind::MixedTimescale => {
                 "declare timeunit/timeprecision consistently; undeclared scopes use 1ns/1ps when this check is relaxed"
+            }
+            FrontendWarningKind::DuplicateModule { .. } => {
+                "a language deviation enabled by duplicate_module=warn or allow; remove the other declarations to keep IEEE 1800-2023 semantics"
             }
             FrontendWarningKind::MultipleAlwaysFfDrivers { .. } => {
                 "IEEE 1800-2023 9.2.2.4 prohibits overlapping writers; use ordinary always procedures, or multiple_always_ff_drivers=warn or allow for compatibility"

@@ -20,6 +20,9 @@ pub struct ParsedSource {
     index: ast::module_index::ModuleIndex,
     /// Immutable declaration diagnostics, indexed once alongside module syntax.
     warnings: HashMap<String, Vec<ir::AnalyzerWarning>>,
+    /// The modules whose later declarations were left out
+    /// ([`Self::parse_with_first_modules`]).
+    duplicate_modules: Vec<String>,
 }
 
 /// What a module analysis lowers.
@@ -32,7 +35,35 @@ enum ModuleAnalysis<'a> {
 
 impl ParsedSource {
     pub fn parse(code: &str, path: &Path) -> Result<Self, AnalyzerError> {
-        let tree = source_tree::parse_source(code, path)?;
+        Self::index(
+            source_tree::parse_source(code, path)?,
+            Vec::new(),
+            code,
+            path,
+        )
+    }
+
+    /// [`Self::parse`] for a design that may declare a module more than
+    /// once: the first declaration is the module and the others are left out
+    /// ([`crate::AnalysisOptions::first_duplicate_module`]). `declared`
+    /// holds the modules of the sources parsed before this one, in source
+    /// order, and receives the modules of this one.
+    pub fn parse_with_first_modules(
+        code: &str,
+        path: &Path,
+        declared: &mut fxhash::FxHashSet<String>,
+    ) -> Result<Self, AnalyzerError> {
+        let (tree, duplicate_modules) =
+            source_tree::parse_source_with_first_modules(code, path, declared)?;
+        Self::index(tree, duplicate_modules, code, path)
+    }
+
+    fn index(
+        tree: source_tree::SourceTree,
+        duplicate_modules: Vec<String>,
+        code: &str,
+        path: &Path,
+    ) -> Result<Self, AnalyzerError> {
         let index = ast::module_index::ModuleIndex::from_declarations(&tree, tree.declarations())?;
         let warnings = ast::warnings::components(&tree);
         Ok(Self {
@@ -41,6 +72,7 @@ impl ParsedSource {
             tree: std::rc::Rc::new(tree),
             index,
             warnings,
+            duplicate_modules,
         })
     }
 
@@ -122,6 +154,7 @@ impl ParsedSource {
         roots: Option<&[&str]>,
         options: crate::AnalysisOptions,
     ) -> Result<Packages, AnalyzerError> {
+        let first_duplicate_module = options.first_duplicate_module;
         let trees: Vec<_> = sources
             .iter()
             .map(|source| (source.tree.as_ref(), source.path.as_path()))
@@ -129,6 +162,13 @@ impl ParsedSource {
         let mut warnings = Vec::new();
         for source in sources {
             ast::warnings::append(&mut warnings, ast::warnings::packages(&source.tree));
+            ast::warnings::append(
+                &mut warnings,
+                source
+                    .duplicate_modules
+                    .iter()
+                    .map(|name| ir::AnalyzerWarning::DuplicateModule { name: name.clone() }),
+            );
         }
         let packages = (|| {
             // Module and interface names share a namespace regardless of
@@ -202,8 +242,14 @@ impl ParsedSource {
                     .iter()
                     .map(|source| (source.code.as_ref(), source.path.as_path()))
                     .collect::<Vec<_>>();
-                packages.interface_plan =
-                    std::sync::Arc::new(ast::interfaces::plan_interfaces(&sources, &[])?);
+                packages.interface_plan = std::sync::Arc::new(
+                    ast::interfaces::plan_interfaces_of_first_modules(
+                        &sources,
+                        &[],
+                        first_duplicate_module,
+                    )?
+                    .0,
+                );
             }
             Ok(packages)
         })();

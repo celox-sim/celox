@@ -8,6 +8,8 @@ use crate::procedural::SourceSpan;
 pub enum AnalyzerWarning {
     /// Explicit and implementation-default time scales occur in one design.
     MixedTimescale,
+    /// A later declaration of module `name` was ignored for the first one.
+    DuplicateModule { name: String },
     /// `$size` on an interface array is a compatibility extension to 20.7.
     InterfaceArrayQuery { site: Option<SourceSpan> },
     /// Omitted interface array selections are an extension to 23.6.

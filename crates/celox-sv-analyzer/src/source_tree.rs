@@ -171,15 +171,24 @@ impl SourceTree {
 }
 
 pub(crate) fn parse_source(code: &str, path: &Path) -> Result<SourceTree, AnalyzerError> {
-    let declarations =
-        celox_sv_syntax::Declarations::parse(code, path).map_err(|error| match error.kind {
-            celox_sv_syntax::ParseErrorKind::MalformedHeader => {
-                AnalyzerError::Parse(error.to_string())
-            }
-            celox_sv_syntax::ParseErrorKind::UnsupportedSyntax => {
-                AnalyzerError::Unsupported(error.to_string())
-            }
-        })?;
+    source_tree(celox_sv_syntax::Declarations::parse(code, path), path)
+}
+
+/// The validated tree of a parsed source.
+fn parse_error(error: celox_sv_syntax::ParseError) -> AnalyzerError {
+    match error.kind {
+        celox_sv_syntax::ParseErrorKind::MalformedHeader => AnalyzerError::Parse(error.to_string()),
+        celox_sv_syntax::ParseErrorKind::UnsupportedSyntax => {
+            AnalyzerError::Unsupported(error.to_string())
+        }
+    }
+}
+
+fn source_tree(
+    declarations: Result<celox_sv_syntax::Declarations, celox_sv_syntax::ParseError>,
+    path: &Path,
+) -> Result<SourceTree, AnalyzerError> {
+    let declarations = declarations.map_err(parse_error)?;
     let tree = SourceTree {
         declarations: declarations.into(),
         scope: scopes::View::default(),
@@ -187,6 +196,128 @@ pub(crate) fn parse_source(code: &str, path: &Path) -> Result<SourceTree, Analyz
     };
     scopes::validate_source(&tree)?;
     Ok(tree)
+}
+
+/// [`parse_source`] with only the first of several declarations of a module
+/// of one name, and the names of the modules whose later declarations it
+/// left out. `declared` holds the modules of the sources before this one and
+/// receives the modules of this one. The tokens of the declarations left out
+/// are removed before the source is parsed again, so no consumer of the tree
+/// sees them.
+pub(crate) fn parse_source_with_first_modules(
+    code: &str,
+    path: &Path,
+    declared: &mut fxhash::FxHashSet<String>,
+) -> Result<(SourceTree, Vec<String>), AnalyzerError> {
+    let mut preprocessor = celox_sv_syntax::Preprocessor::new(celox_sv_syntax::Options {
+        includes: celox_sv_syntax::IncludePolicy::Ignore,
+        ..celox_sv_syntax::Options::default()
+    });
+    let source = preprocessor.preprocess(code, path).map_err(|diagnostic| {
+        parse_error(celox_sv_syntax::ParseError {
+            kind: celox_sv_syntax::ParseErrorKind::MalformedHeader,
+            diagnostic,
+        })
+    })?;
+    // The declarations are found on the tokens, before anything is parsed,
+    // so a declaration left out is not checked either, such as for the
+    // implicit nets of its `default_nettype`.
+    let (dropped, mut names) = later_module_declarations(&source.tokens, declared);
+    names.sort();
+    names.dedup();
+    let tokens = if dropped.is_empty() {
+        source.tokens
+    } else {
+        let mut tokens = Vec::with_capacity(source.tokens.len());
+        let mut kept = 0;
+        for range in dropped {
+            tokens.extend_from_slice(&source.tokens[kept..range.start]);
+            kept = range.end;
+        }
+        tokens.extend_from_slice(&source.tokens[kept..]);
+        tokens
+    };
+    let declarations = celox_sv_syntax::Declarations::from_tokens(preprocessor.sources, tokens);
+    Ok((source_tree(declarations, path)?, names))
+}
+
+/// The token ranges of the declarations of modules that `declared` or an
+/// earlier declaration in `tokens` already declares, in order, and their
+/// names; `declared` receives the names of the others. A declaration runs
+/// from `module` to its `endmodule` and label; module prototypes
+/// (`extern module`) declare nothing.
+fn later_module_declarations(
+    tokens: &[celox_sv_syntax::Token],
+    declared: &mut fxhash::FxHashSet<String>,
+) -> (Vec<std::ops::Range<usize>>, Vec<String>) {
+    let significant: Vec<usize> = tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| !token.is_trivia())
+        .map(|(index, _)| index)
+        .collect();
+    let text = |position: usize| {
+        significant
+            .get(position)
+            .map(|&index| tokens[index].text.as_str())
+    };
+    let mut dropped = Vec::new();
+    let mut names = Vec::new();
+    let mut position = 0;
+    while position < significant.len() {
+        let keyword = matches!(text(position), Some("module" | "macromodule"));
+        if !keyword || (position > 0 && text(position - 1) == Some("extern")) {
+            position += 1;
+            continue;
+        }
+        let mut name_at = position + 1;
+        if matches!(text(name_at), Some("static" | "automatic")) {
+            name_at += 1;
+        }
+        let Some(name) = text(name_at).map(str::to_owned) else {
+            break;
+        };
+        // The matching `endmodule`, past nested module declarations.
+        let mut depth = 0usize;
+        let mut end = position;
+        while end < significant.len() {
+            match text(end) {
+                Some("module" | "macromodule") => depth += 1,
+                Some("endmodule") => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            end += 1;
+        }
+        if end >= significant.len() {
+            break;
+        }
+        // An end label, `endmodule : name`.
+        if text(end + 1) == Some(":") {
+            end += 2;
+        }
+        // `\M ` and `M` name the same module (IEEE 1800-2023 5.6.1).
+        if !declared.insert(crate::ast::instances::normalize_identifier(&name)) {
+            // The attribute instances in front of the declaration belong to
+            // it (A.1.2, 5.12) and go with it.
+            let mut start = position;
+            while start > 0 && text(start - 1) == Some("*)") {
+                let Some(open) = (0..start - 1).rev().find(|&at| text(at) == Some("(*")) else {
+                    break;
+                };
+                start = open;
+            }
+            let last = significant[end.min(significant.len() - 1)];
+            dropped.push(significant[start]..last + 1);
+            names.push(name);
+        }
+        position = end + 1;
+    }
+    (dropped, names)
 }
 
 /// Test fixtures calling private scope kernels must issue a native handle too.
