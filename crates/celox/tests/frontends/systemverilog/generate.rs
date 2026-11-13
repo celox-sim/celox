@@ -201,6 +201,65 @@ fn generate_function_call_preserves_definition_site_bindings() {
     }
 }
 
+// Members of an anonymous enum declared in a generate block are constants of
+// that block (IEEE 1800-2023 6.19, 27.5) also when the block declares no
+// typedef, read by always_ff, always_comb and continuous assignments; a
+// sibling block's members of the same names keep their own values.
+// BlackParrot's bp_me_stream_pump_control declares its state this way.
+#[test]
+fn anonymous_enum_members_are_constants_of_their_generate_block() {
+    let source = r#"
+        module Top #(parameter W = 2)(input logic clk, rst, go,
+            output logic ready, output logic [1:0] code, other);
+            if (W == 1) begin : z
+                assign ready = 1'b1;
+                assign code = 2'd0;
+                assign other = 2'd0;
+            end else begin : nz
+                enum logic [1:0] {e_ready, e_primary = 2'd2, e_stream} state_n, state_r;
+                assign ready = (state_r == e_ready);
+                assign code = state_r;
+                always_comb begin
+                    state_n = state_r;
+                    case (state_r)
+                        e_ready: if (go) state_n = e_primary;
+                        e_primary: state_n = e_stream;
+                        default: state_n = e_ready;
+                    endcase
+                end
+                always_ff @(posedge clk)
+                    if (rst) state_r <= e_ready;
+                    else state_r <= state_n;
+            end
+            if (W != 1) begin : sibling
+                enum logic [1:0] {e_ready = 2'd3, e_stream = 2'd1} s;
+                assign other = e_ready;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("generate_anonymous_enum.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let clk = sim.event("clk");
+    let (rst, go) = (sim.signal("rst"), sim.signal("go"));
+    sim.modify(|io| {
+        io.set(rst, 1u8);
+        io.set(go, 1u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    for (ready, code) in [(1u8, 0u8), (0, 2), (0, 3), (1, 0)] {
+        assert_eq!(sim.get(sim.signal("ready")), ready.into());
+        assert_eq!(sim.get(sim.signal("code")), code.into());
+        assert_eq!(sim.get(sim.signal("other")), 3u8.into());
+        sim.tick(clk).unwrap();
+    }
+}
+
 #[test]
 fn rejects_unqualified_generate_function_calls_outside_their_scope() {
     for call in [
