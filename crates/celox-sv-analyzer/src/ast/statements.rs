@@ -302,18 +302,33 @@ pub(in crate::ast) fn expr_from_selection(
                 // member's value, at positions counted from its lowest bit:
                 // the bits it selects outside the member read X, as those
                 // outside any vector do (IEEE 1800-2023 11.5.1).
+                // A window at a run-time position, of a member of an array
+                // element at a run-time index, is the element's member read
+                // as such a member is.
                 Some(window) => {
-                    let literal = |value: u32| ConstExpr::Literal(value.to_string());
+                    // Both bounds are the element's position plus a constant,
+                    // the form of an element read.
+                    let bound = |value: u32| {
+                        let literal = ConstExpr::Literal(value.to_string());
+                        match &window.at {
+                            Some(at) => ConstExpr::Binary {
+                                left: at.clone(),
+                                op: BinaryOp::Add,
+                                right: Box::new(literal),
+                            },
+                            None => literal,
+                        }
+                    };
                     let within = |position: &ConstExpr| ConstExpr::Binary {
                         left: Box::new(position.clone()),
                         op: BinaryOp::Sub,
-                        right: Box::new(literal(window.lsb)),
+                        right: Box::new(bound(window.lsb)),
                     };
                     Expr::Select {
                         expr: Box::new(Expr::Select {
                             expr: Box::new(variable),
-                            msb: literal(window.msb),
-                            lsb: literal(window.lsb),
+                            msb: bound(window.msb),
+                            lsb: bound(window.lsb),
                             signed: false,
                         }),
                         msb: within(msb),

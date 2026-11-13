@@ -396,8 +396,29 @@ impl Ff<'_, '_> {
         // The select's bit 0 sits at `up - down`, which may be below the
         // bottom of the window; the comparisons are signed.
         let at = binary(&mut arena, up, BinaryOp::Sub, down)?;
-        let bottom = constant(&mut arena, window.lsb)?;
-        let top = constant(&mut arena, window.msb + 1)?;
+        // A window at a run-time position spans `width` bits above its
+        // bottom there.
+        let moving = match &write.moving {
+            Some(moving) => Some((shift(&moving.at, &mut arena)?, moving.lsb, moving.width)),
+            None => None,
+        };
+        let (bottom, top) = match moving {
+            Some((element, lsb, width)) => {
+                let lsb = constant(&mut arena, lsb)?;
+                let bottom = binary(&mut arena, element, BinaryOp::Add, lsb)?;
+                let width = constant(&mut arena, width)?;
+                let top = binary(&mut arena, bottom, BinaryOp::Add, width)?;
+                // An element past the array has its window past the variable,
+                // where nothing is written.
+                let limit = constant(&mut arena, var_width)?;
+                let past = binary(&mut arena, top, BinaryOp::GtS, limit)?;
+                (bottom, mux(&mut arena, past, limit, top)?)
+            }
+            None => (
+                constant(&mut arena, window.lsb)?,
+                constant(&mut arena, window.msb + 1)?,
+            ),
+        };
         let select_width = constant(&mut arena, write.select_width)?;
         let below = binary(&mut arena, at, BinaryOp::LtS, bottom)?;
         let start = mux(&mut arena, below, bottom, at)?;
@@ -406,7 +427,10 @@ impl Ff<'_, '_> {
         let end = mux(&mut arena, above, top, reach)?;
         let mut valid = binary(&mut arena, start, BinaryOp::LtS, end)?;
         if self.m.four_state {
-            for position in [up, down] {
+            for position in [up, down]
+                .into_iter()
+                .chain(moving.map(|(element, _, _)| element))
+            {
                 let two_state = arena
                     .alloc(SLTNode::Unary(UnaryOp::ToTwoState, position))
                     .map_err(slt_error)?;

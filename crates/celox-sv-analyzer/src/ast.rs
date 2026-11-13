@@ -546,6 +546,23 @@ pub struct Assignment {
     rhs: Expr,
 }
 
+/// The window of a select of an analyzed lvalue, see
+/// [`crate::ir::SelectWindow`], whose run-time position is a constant
+/// expression of the analysis.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SelectWindow {
+    pub lsb: u32,
+    pub msb: u32,
+    pub at: Option<Box<ConstExpr>>,
+}
+
+impl SelectWindow {
+    /// The constant window of bits `lsb..=msb` of the variable.
+    pub fn bits(lsb: u32, msb: u32) -> Self {
+        Self { lsb, msb, at: None }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LValue {
     Ident(String),
@@ -558,8 +575,8 @@ pub enum LValue {
         array_slice_reversed: bool,
         /// The bits of the variable a run-time select stays within: those of
         /// the structure member it is written on (see
-        /// [`crate::ir::SelectWindow`]).
-        window: Option<crate::ir::SelectWindow>,
+        /// [`SelectWindow`]).
+        window: Option<SelectWindow>,
         /// Whether this selection names a two-state packed struct member.
         is_2state: bool,
     },

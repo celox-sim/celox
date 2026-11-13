@@ -211,9 +211,20 @@ pub(super) fn substitute_lvalue_constants(
             signed,
             array_slice_width,
             array_slice_reversed,
-            window,
+            mut window,
             is_2state,
         } => LValue::Select {
+            window: {
+                // The position of a run-time element names the index.
+                if let Some(at) = window.as_mut().and_then(|window| window.at.as_mut()) {
+                    **at = substitute_const_expr_constants_with_literals(
+                        (**at).clone(),
+                        const_env,
+                        parameter_literals,
+                    );
+                }
+                window
+            },
             name,
             msb: substitute_const_expr_constants_with_literals(msb, const_env, parameter_literals),
             lsb: substitute_const_expr_constants_with_literals(lsb, const_env, parameter_literals),
@@ -222,7 +233,6 @@ pub(super) fn substitute_lvalue_constants(
                 substitute_const_expr_constants_with_literals(width, const_env, parameter_literals)
             }),
             array_slice_reversed,
-            window,
             is_2state,
         },
     }

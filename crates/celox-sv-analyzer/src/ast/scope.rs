@@ -965,7 +965,11 @@ impl Renamer<'_> {
                 signed,
                 array_slice_width: array_slice_width.map(|width| self.const_expr(width)),
                 array_slice_reversed,
-                window,
+                // The position of a run-time element names the index.
+                window: window.map(|window| crate::ast::SelectWindow {
+                    at: window.at.map(|at| Box::new(self.const_expr(*at))),
+                    ..window
+                }),
                 is_2state,
             },
         }

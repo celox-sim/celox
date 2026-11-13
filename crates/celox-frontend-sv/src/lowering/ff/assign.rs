@@ -325,6 +325,17 @@ impl Ff<'_, '_> {
                     self.m.name_to_id,
                     constants,
                     parameter_types,
+                ) && let Some(moving) = &write.moving
+                    && !self.m.var(id).array_dims.is_empty()
+                {
+                    return self.write_in_moving_element(id, &write, moving, width, arena, node);
+                }
+                if let Some(write) = dynamic_packed_write(
+                    lhs,
+                    self.m.variables,
+                    self.m.name_to_id,
+                    constants,
+                    parameter_types,
                 ) {
                     let (up, _) = lower_expr_with_context(
                         &self.propagate(&write.up),
@@ -348,6 +359,27 @@ impl Ff<'_, '_> {
                         Some(false),
                     )
                     .ok_or_else(|| unsupported("dynamic assignment position"))?;
+                    // A window at a run-time position, which only its bits
+                    // are written in.
+                    let moving = match &write.moving {
+                        Some(moving) => Some((
+                            lower_expr_with_context(
+                                &self.propagate(&moving.at),
+                                self.m.variables,
+                                self.m.name_to_id,
+                                constants,
+                                parameter_types,
+                                arena,
+                                None,
+                                Some(false),
+                            )
+                            .ok_or_else(|| unsupported("dynamic assignment position"))?
+                            .0,
+                            moving.lsb,
+                            moving.width,
+                        )),
+                        None => None,
+                    };
                     // A select within one array element reads and writes only
                     // that element, which is all its process commits.
                     let window = write
@@ -365,6 +397,8 @@ impl Ff<'_, '_> {
                     let wide = var_width
                         .max(celox_slt::get_width(up, arena))
                         .max(celox_slt::get_width(down, arena));
+                    let wide =
+                        moving.map_or(wide, |(at, _, _)| wide.max(celox_slt::get_width(at, arena)));
                     let mask = slt_constant(
                         arena,
                         (BigUint::from(1u8) << width) - BigUint::from(1u8),
@@ -396,7 +430,24 @@ impl Ff<'_, '_> {
                             .alloc(SLTNode::Binary(raised, BinaryOp::Shr, down))
                             .map_err(slt_error)
                     };
-                    let placed_mask = place(arena, mask)?;
+                    let mut placed_mask = place(arena, mask)?;
+                    // Only the bits of a window at a run-time position are
+                    // written.
+                    if let Some((at, lsb, window_width)) = moving {
+                        let at = coerce(arena, at)?;
+                        let window_bits = slt_constant(
+                            arena,
+                            ((BigUint::from(1u8) << window_width) - BigUint::from(1u8)) << lsb,
+                            wide,
+                            false,
+                        )?;
+                        let window_mask = arena
+                            .alloc(SLTNode::Binary(window_bits, BinaryOp::Shl, at))
+                            .map_err(slt_error)?;
+                        placed_mask = arena
+                            .alloc(SLTNode::Binary(placed_mask, BinaryOp::And, window_mask))
+                            .map_err(slt_error)?;
+                    }
                     let mut updated = if self.m.four_state && self.m.var(id).is_4state {
                         masked::dynamic_four_state(arena, current, value, placed_mask, up, down)?
                     } else {
@@ -417,7 +468,7 @@ impl Ff<'_, '_> {
                     if self.m.four_state {
                         // A write at an unknown position is ignored (IEEE 1800-2023 11.5.1).
                         let mut known = None;
-                        for position in [up, down] {
+                        for position in [up, down].into_iter().chain(moving.map(|(at, _, _)| at)) {
                             let two_state = arena
                                 .alloc(SLTNode::Unary(UnaryOp::ToTwoState, position))
                                 .map_err(slt_error)?;
@@ -460,6 +511,146 @@ impl Ff<'_, '_> {
                 Err(unsupported(format!("assignment target `{}`", lhs.name())))
             }
         }
+    }
+
+    /// Write the bits of a run-time select confined to `moving`, a window in
+    /// the element of unpacked array `id` at a run-time index: merge them
+    /// into the element's value and write the element, which an element
+    /// outside the array does not change (see [`Self::write_element`]).
+    #[allow(clippy::too_many_arguments)]
+    fn write_in_moving_element(
+        &mut self,
+        id: SourceVarId,
+        write: &DynamicPackedWrite,
+        moving: &MovingWindow,
+        width: usize,
+        arena: &mut SLTNodeArena<SourceVarId>,
+        node: NodeId,
+    ) -> Result<(), sv::AnalyzerError> {
+        let element_width = unpacked_element_width(self.m.var(id))
+            .ok_or_else(|| unsupported("dynamic assignment"))?;
+        let lower = |this: &Self, expr: &sv::ir::Expr, arena: &mut SLTNodeArena<SourceVarId>| {
+            lower_expr_with_context(
+                &this.propagate(expr),
+                this.m.variables,
+                this.m.name_to_id,
+                this.m.constants,
+                this.m.parameter_types,
+                arena,
+                None,
+                Some(false),
+            )
+            .map(|(node, _)| node)
+            .ok_or_else(|| unsupported("dynamic assignment position"))
+        };
+        let up = lower(self, &write.up, arena)?;
+        let down = lower(self, &write.down, arena)?;
+        let at = lower(self, &moving.at, arena)?;
+        let wide = 64.max(element_width);
+        let coerce = |arena: &mut SLTNodeArena<SourceVarId>, node| {
+            coerce_node_width(arena, node, Some(wide), false).map_err(slt_error)
+        };
+        let binary = |arena: &mut SLTNodeArena<SourceVarId>, left, op, right| {
+            arena
+                .alloc(SLTNode::Binary(left, op, right))
+                .map_err(slt_error)
+        };
+        // The element's current value in this process, at an index that
+        // stays in the array (an element outside it is not written).
+        let element_at = coerce_node_width(arena, at, Some(64), false).map_err(slt_error)?;
+        let stride = slt_constant(arena, BigUint::from(element_width), 64, false)?;
+        let index = binary(arena, element_at, BinaryOp::DivU, stride)?;
+        let var_width = self.m.var(id).width;
+        let (index, _) =
+            dynamic_array_index_guard_slt(arena, index, var_width / element_width.max(1))
+                .ok_or_else(|| unsupported("dynamic assignment index"))?;
+        let alias = self.alias(id);
+        let current = dynamic_array_input_slt(
+            arena,
+            alias,
+            false,
+            SLTIndex {
+                node: index,
+                stride: element_width,
+                kind: SLTIndexKind::Unpacked { element_width },
+            },
+            BitAccess::new(0, element_width - 1),
+            var_width,
+        )
+        .ok_or_else(|| unsupported("dynamic assignment index"))?;
+        let current = coerce(arena, current)?;
+        let value = coerce(arena, node)?;
+        let (up, down, at) = (coerce(arena, up)?, coerce(arena, down)?, coerce(arena, at)?);
+        // The select's bit 0 sits at `up - down` in the array, which is
+        // `relative` bits above the element's bit 0, or below it.
+        let position = binary(arena, up, BinaryOp::Sub, down)?;
+        let relative = binary(arena, position, BinaryOp::Sub, at)?;
+        let zero = slt_constant(arena, BigUint::from(0u8), wide, false)?;
+        let below = binary(arena, relative, BinaryOp::LtS, zero)?;
+        let negated = binary(arena, zero, BinaryOp::Sub, relative)?;
+        let mux = |arena: &mut SLTNodeArena<SourceVarId>, cond, then_expr, else_expr| {
+            arena
+                .alloc(SLTNode::Mux {
+                    cond,
+                    then_expr,
+                    else_expr,
+                })
+                .map_err(slt_error)
+        };
+        let raise = mux(arena, below, zero, relative)?;
+        let lower_by = mux(arena, below, negated, zero)?;
+        let place = |arena: &mut SLTNodeArena<SourceVarId>, value| {
+            let raised = binary(arena, value, BinaryOp::Shl, raise)?;
+            binary(arena, raised, BinaryOp::Shr, lower_by)
+        };
+        let ones = |width: usize| (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        let mask = slt_constant(arena, ones(width), wide, false)?;
+        let placed_mask = place(arena, mask)?;
+        // Only the window's bits of the element are written.
+        let window = slt_constant(arena, ones(moving.width) << moving.lsb, wide, false)?;
+        let placed_mask = binary(arena, placed_mask, BinaryOp::And, window)?;
+        let mut updated = if self.m.four_state && self.m.var(id).is_4state {
+            masked::dynamic_four_state(arena, current, value, placed_mask, raise, lower_by)?
+        } else {
+            let placed_value = place(arena, value)?;
+            let placed_value = binary(arena, placed_value, BinaryOp::And, placed_mask)?;
+            let keep = arena
+                .alloc(SLTNode::Unary(UnaryOp::BitNot, placed_mask))
+                .map_err(slt_error)?;
+            let kept = binary(arena, current, BinaryOp::And, keep)?;
+            binary(arena, kept, BinaryOp::Or, placed_value)?
+        };
+        if self.m.four_state {
+            // A write at an unknown position is ignored (IEEE 1800-2023 11.5.1).
+            let mut known = None;
+            for position in [up, down, at] {
+                let two_state = arena
+                    .alloc(SLTNode::Unary(UnaryOp::ToTwoState, position))
+                    .map_err(slt_error)?;
+                let same = binary(arena, position, BinaryOp::EqCase, two_state)?;
+                known = Some(match known {
+                    None => same,
+                    Some(other) => slt_and(arena, &mut ConstCache::default(), other, same)?,
+                });
+            }
+            if let Some(known) = known {
+                updated = mux(arena, known, updated, current)?;
+            }
+        }
+        let updated = arena
+            .alloc(SLTNode::Slice {
+                expr: updated,
+                access: BitAccess::new(0, element_width - 1),
+            })
+            .map_err(slt_error)?;
+        self.write_element(
+            id,
+            element_width,
+            &moving.element,
+            BitAccess::new(0, element_width - 1),
+            arena,
+            updated,
+        )
     }
 
     /// Write one element (or a part of it) of an unpacked array at a run-time

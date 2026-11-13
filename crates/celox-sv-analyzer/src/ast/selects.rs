@@ -265,6 +265,11 @@ pub(super) fn lvalue_from_range(
     let (array_slice_width, array_slice_reversed) =
         unpacked_select_range_metadata(tree, &name, &indices, &msb, &lsb, packed_dimensions)
             .map_or((None, false), |(width, reversed)| (Some(width), reversed));
+    let window = if array_slice_width.is_none() {
+        element_window(tree, &name, &indices, &msb, &lsb, packed_dimensions)
+    } else {
+        None
+    };
     (msb, lsb) = flatten_select_range(
         tree,
         &name,
@@ -289,9 +294,68 @@ pub(super) fn lvalue_from_range(
         signed: false,
         array_slice_width,
         array_slice_reversed,
-        window: None,
+        window,
         is_2state: false,
     })
+}
+
+/// The window of a run-time select `[msb:lsb]` within the element of array
+/// variable `name` that `indices` select: the element's bits, which the
+/// select stays within (IEEE 1800-2023 7.4.5, 11.5.1). At a run-time
+/// position for a run-time element; none for a constant element of an
+/// unpacked array, which the lowering keeps the select within itself, and
+/// none for a constant select.
+fn element_window(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    indices: &[ConstExpr],
+    msb: &ConstExpr,
+    lsb: &ConstExpr,
+    packed_dimensions: &PackedDimensions,
+) -> Option<crate::ast::SelectWindow> {
+    let functions = &tree.functions;
+    let constant =
+        |expr: &ConstExpr| eval_ast_const_expr(functions, expr, &packed_dimensions.const_env);
+    if indices.is_empty() || (constant(msb).is_some() && constant(lsb).is_some()) {
+        return None;
+    }
+    let dimensions = packed_dimensions.get(name)?;
+    let unpacked = dimensions.unpacked.len();
+    if indices.len() < unpacked {
+        return None;
+    }
+    let packed_indices = indices.len() - unpacked;
+    let dimension = dimensions.packed.get(packed_indices)?;
+    let constant_element = indices.iter().all(|index| constant(index).is_some());
+    if unpacked > 0 && constant_element {
+        return None;
+    }
+    // The bits of the element: those of the dimension the select is in and
+    // of the ones below it.
+    let width = dimensions.packed[packed_indices..]
+        .iter()
+        .try_fold(1usize, |width, dimension| {
+            width.checked_mul(usize::try_from(constant(&dimension.width)?).ok()?)
+        })?;
+    let (_, bottom) = flatten_select_range(
+        tree,
+        name,
+        indices,
+        dimension.left.clone(),
+        dimension.right.clone(),
+        packed_dimensions,
+    )?;
+    let msb = u32::try_from(width.checked_sub(1)?).ok()?;
+    Some(
+        match constant(&bottom).and_then(|bottom| u32::try_from(bottom).ok()) {
+            Some(bottom) => crate::ast::SelectWindow::bits(bottom, bottom.checked_add(msb)?),
+            None => crate::ast::SelectWindow {
+                lsb: 0,
+                msb,
+                at: Some(Box::new(bottom)),
+            },
+        },
+    )
 }
 
 /// Whether selecting `count` packed dimensions of `name` yields an element of

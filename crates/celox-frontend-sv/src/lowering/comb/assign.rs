@@ -92,6 +92,7 @@ impl Comb<'_, '_> {
                             up: Box::new(write.up),
                             down: Box::new(write.down),
                             window: write.window,
+                            moving: write.moving.map(Box::new),
                         },
                         width: write.select_width,
                     });
@@ -235,6 +236,7 @@ impl Comb<'_, '_> {
                 // self-dependency of the variable.
                 sources.extend(current_sources.into_iter().filter(|source| source.id != id));
                 let mut window = None;
+                let mut moving = None;
                 let (up, down) = match offset {
                     Offset::Nothing => return Ok(()),
                     Offset::Element {
@@ -282,16 +284,24 @@ impl Comb<'_, '_> {
                         up,
                         down,
                         window: packed_window,
+                        moving: packed_moving,
                     } => {
                         window = packed_window;
                         let (up, up_sources) = self.eval(store, frames, &up, None)?;
                         let (down, down_sources) = self.eval(store, frames, &down, None)?;
                         sources.extend(up_sources);
                         sources.extend(down_sources);
+                        if let Some(packed_moving) = packed_moving {
+                            let (at, at_sources) =
+                                self.eval(store, frames, &packed_moving.at, None)?;
+                            sources.extend(at_sources);
+                            moving = Some((at, packed_moving.lsb, packed_moving.width));
+                        }
                         (up, down)
                     }
                 };
                 let wide = var_width.max(self.width(up)).max(self.width(down));
+                let wide = moving.map_or(wide, |(at, _, _)| wide.max(self.width(at)));
                 let mask_value = (BigUint::from(1u8) << width) - BigUint::from(1u8);
                 let mask = slt_constant(self.arena, mask_value, wide, false)?;
                 let value =
@@ -305,7 +315,22 @@ impl Comb<'_, '_> {
                     let raised = this.alloc(SLTNode::Binary(value, BinaryOp::Shl, up))?;
                     this.alloc(SLTNode::Binary(raised, BinaryOp::Shr, down))
                 };
-                let placed_mask = place(self, mask)?;
+                let mut placed_mask = place(self, mask)?;
+                // Only the bits of a window at a run-time position are written.
+                if let Some((at, lsb, window_width)) = moving {
+                    let at =
+                        coerce_node_width(self.arena, at, Some(wide), false).map_err(slt_error)?;
+                    let window_bits = slt_constant(
+                        self.arena,
+                        ((BigUint::from(1u8) << window_width) - BigUint::from(1u8)) << lsb,
+                        wide,
+                        false,
+                    )?;
+                    let window_mask =
+                        self.alloc(SLTNode::Binary(window_bits, BinaryOp::Shl, at))?;
+                    placed_mask =
+                        self.alloc(SLTNode::Binary(placed_mask, BinaryOp::And, window_mask))?;
+                }
                 let mut updated = if self.m.four_state && self.m.var(id).is_4state {
                     masked::dynamic_four_state(self.arena, current, value, placed_mask, up, down)?
                 } else {
@@ -319,7 +344,7 @@ impl Comb<'_, '_> {
                 if self.m.four_state {
                     // A write at an unknown position is ignored (IEEE 1800-2023 11.5.1).
                     let mut known = None;
-                    for position in [up, down] {
+                    for position in [up, down].into_iter().chain(moving.map(|(at, _, _)| at)) {
                         let two_state =
                             self.alloc(SLTNode::Unary(UnaryOp::ToTwoState, position))?;
                         let same =
@@ -457,5 +482,7 @@ pub(super) enum Offset {
         up: Box<sv::ir::Expr>,
         down: Box<sv::ir::Expr>,
         window: Option<BitAccess>,
+        /// Only these bits, above a run-time position, are written.
+        moving: Option<Box<MovingWindow>>,
     },
 }
