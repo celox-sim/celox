@@ -25,6 +25,9 @@ pub(super) struct PackedMember {
     offset: usize,
     tag: Option<TaggedMember>,
     is_void: bool,
+    /// The member belongs to a packed union and shares its bits with the
+    /// other members (IEEE 1800-2023 7.3.1).
+    in_union: bool,
     r#type: Type,
 }
 
@@ -36,6 +39,7 @@ impl generate::CallSites for PackedMember {
             offset: _,
             tag: _,
             is_void: _,
+            in_union: _,
             r#type,
         } = self;
         r#type.call_sites(visit);
@@ -57,11 +61,16 @@ impl PackedMember {
             r#type,
             tag: None,
             is_void: false,
+            in_union: false,
         }
     }
 
     pub(in crate::ast) fn is_tagged(&self) -> bool {
         self.tag.is_some()
+    }
+    /// The member belongs to a packed union, tagged or not.
+    pub(in crate::ast) fn in_union(&self) -> bool {
+        self.in_union
     }
     /// The declaration of the aggregate that has the member.
     pub(in crate::ast) fn owner(&self) -> &Arc<str> {
