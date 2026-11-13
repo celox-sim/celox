@@ -121,6 +121,30 @@ impl Module {
             let revision = session.foreign.revision();
             let mut symbols = (*imported).clone();
             session.foreign.extend(syntax_tree, &mut symbols);
+            // A specialization of a package class that names a class of the
+            // compilation unit, such as `uvm_component_registry #(C)` for a
+            // test that UVM creates by name, runs the class's methods and
+            // static initializers: the scope uses the unit, as one naming
+            // the class does (IEEE 1800-2023 3.12.1, 8.25).
+            // Only the unit of this scope's source is taken, for an item
+            // declared before the scope: another is not visible here
+            // (3.12.1).
+            if let Some(unit) = symbols.unit.take()
+                && let Some(unit_symbols) = unit.taken(
+                    symbols
+                        .classes
+                        .iter()
+                        .map(|class| class.name.as_str())
+                        .chain(
+                            symbols
+                                .subroutines
+                                .iter()
+                                .map(|subroutine| subroutine.name.as_str()),
+                        ),
+                )?
+            {
+                symbols.extend(unit_symbols);
+            }
             let declarations_only = symbols.declarations_only;
             let export_symbols = export_symbols || session.foreign.has_templates();
             let result = Self::from_selected_scope_once(
