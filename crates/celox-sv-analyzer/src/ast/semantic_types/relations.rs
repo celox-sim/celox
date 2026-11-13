@@ -68,6 +68,51 @@ impl TyTable {
         matches!(self.data(id), TyData::Packed(_))
     }
 
+    /// The members of the enumeration `id` is, or is a packed array of
+    /// (6.19).
+    pub fn enum_domain(&self, id: TyId) -> Option<&Arc<super::super::enums::EnumDomain>> {
+        let TyData::Packed(
+            packed @ Packed {
+                element: PackedElement::Enum { decl, .. },
+                ..
+            },
+        ) = self.data(id)
+        else {
+            return None;
+        };
+        match decl {
+            Decl::AnonymousEnum(domain) => Some(domain),
+            // The base type's range is the last packed dimension, also of a
+            // packed array of the enumeration; a base type without one has
+            // none (6.19).
+            Decl::Named(name) => {
+                let base = |range| {
+                    self.enum_domains
+                        .get(&(name.clone(), range, packed.four_state))
+                };
+                base(packed.dims.last().copied()).or_else(|| base(None))
+            }
+            _ => None,
+        }
+    }
+
+    /// Record the members of the named enumeration `key` declares (6.19).
+    pub(in crate::ast) fn record_enum_domain(
+        &mut self,
+        key: super::EnumKey,
+        domain: &Arc<super::super::enums::EnumDomain>,
+    ) {
+        let name = key.0.clone();
+        let recorded = self
+            .enum_domains
+            .entry(key)
+            .or_insert_with(|| domain.clone());
+        debug_assert!(
+            recorded == domain,
+            "enumeration `{name}` of one base type recorded with two sets of members"
+        );
+    }
+
     /// Whether `id` is an enumerated type, not a packed array of one (6.19).
     pub fn is_enum(&self, id: TyId) -> bool {
         matches!(self.data(id), TyData::Packed(packed) if scalar_enum(packed))

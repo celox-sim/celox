@@ -79,10 +79,9 @@ pub(super) fn method(
         .map(|domain| (method, *expression, domain)))
 }
 
-/// The enumerated type of native expression `id`, judged before it is
-/// bound: a variable, an element of an array, a class property, a call of
-/// a function, method or enumerated type method, a cast, or the status of a
-/// process.
+/// The enumerated type of native expression `id`: of the value its type
+/// tells, of `process::state` (9.7), or of the receiver of an enumerated
+/// type method that returns a member (6.19.5).
 pub(in crate::ast) fn domain(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -90,115 +89,35 @@ pub(in crate::ast) fn domain(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Arc<EnumDomain>>> {
-    // `process::state` (9.7).
+    // `process::state`, which no declaration names (9.7).
     if let Some(domain) = processes::state(tree, session, id, native, dimensions) {
         return Ok(Some(domain));
     }
-    Ok(match &native.expression(ungroup(id, native)).kind {
-        ExprKind::Name(name) => {
-            let name = instances::normalize_identifier(&name.spelling);
-            match dimensions.get(&name) {
-                Some(shape) => variable(shape),
-                None => match objects::property(tree, session, id, native, dimensions)? {
-                    Some((property, _)) => scalar(&property.r#type),
-                    None => constant(tree, session, id, native, dimensions),
-                },
-            }
-        }
-        ExprKind::Member { .. } => match method(tree, session, id, native, dimensions)? {
-            // A method called without parentheses (6.19.5.7).
-            Some((method, _, domain)) => method.returns_member().then_some(domain),
-            // A class method called without parentheses (13.5.5).
-            None if let Some((name, ..)) =
-                objects::method(tree, session, id, native, dimensions)? =>
-            {
-                returned_domain(&name, dimensions)
-            }
-            None => match objects::static_property(tree, session, id, native, dimensions)?
-                .or_else(|| call_name(tree, id, native))
-                .and_then(|name| dimensions.get(&name))
-            {
-                // A static property or a package variable.
-                Some(shape) => variable(shape),
-                // A package-qualified enum constant.
-                None if let Some(domain) = constant(tree, session, id, native, dimensions) => {
-                    Some(domain)
-                }
-                None => match objects::property(tree, session, id, native, dimensions)? {
-                    Some((property, _)) => scalar(&property.r#type),
-                    // A member of a container element of unpacked structure
-                    // type.
-                    None if let Some((ty, _)) = containers::element_member(
-                        ungroup(id, native),
-                        native,
-                        tree,
-                        session,
-                        dimensions,
-                    )? =>
-                    {
-                        scalar(&ty)
-                    }
-                    // A member of a packed struct.
-                    None => dimensions::operand_shape(id, tree, session, dimensions)
-                        .ok()
-                        .flatten()
-                        .and_then(|shape| variable(&shape)),
-                },
-            },
-        },
-        ExprKind::Select { .. } => element(tree, session, id, native, dimensions)?,
-        ExprKind::Call { expression, .. } => {
-            if let Some((method, _, domain)) =
-                method(tree, session, *expression, native, dimensions)?
-            {
-                method.returns_member().then_some(domain)
-            } else if let ExprKind::Member {
-                expression: base,
-                name,
-                ..
-            } = &native.expression(ungroup(*expression, native)).kind
-                && matches!(name.spelling.as_str(), "pop_front" | "pop_back")
-                && let Some(container) =
-                    containers::native_type(*base, native, tree, session, dimensions)?
-            {
-                // An element popped from a queue (7.10.2.4, 7.10.2.5).
-                scalar(&container.element)
-            } else {
-                let name = match objects::call_method(tree, session, id, native, dimensions)? {
-                    Some((name, _, _)) => Some(name),
-                    None => call_name(tree, *expression, native),
-                };
-                name.and_then(|name| returned_domain(&name, dimensions))
-            }
-        }
-        ExprKind::Cast { target, .. } => cast_type(tree, session, *target, native, dimensions)?
-            .as_ref()
-            .and_then(scalar),
-        ExprKind::Conditional {
-            then_expression,
-            else_expression,
-            ..
-        } => {
-            let then_domain = domain(tree, session, *then_expression, native, dimensions)?;
-            let else_domain = domain(tree, session, *else_expression, native, dimensions)?;
-            then_domain.filter(|domain| else_domain.as_ref() == Some(domain))
-        }
-        _ => None,
-    })
-}
-
-/// The enumerated type that function or method `name` returns.
-fn returned_domain(name: &str, dimensions: &PackedDimensions) -> Option<Arc<EnumDomain>> {
-    dimensions
-        .function_return_types
-        .get(name)
-        .and_then(|metadata| metadata.enum_domain.clone())
-        .or_else(|| {
-            dimensions
-                .functions
-                .get(name)
-                .and_then(|function| function.return_enum_domain.clone())
-        })
+    let id = ungroup(id, native);
+    if selects_packed_enum_element(tree, session, id, native, dimensions)? {
+        return Err(unsupported(
+            "method of an element of a packed array of enums",
+        ));
+    }
+    // `first`, `last`, `next` and `prev` return a member of the type of the
+    // value they are called on, `process::state` included.
+    let callee = match &native.expression(id).kind {
+        ExprKind::Call { expression, .. } => *expression,
+        _ => id,
+    };
+    if let Some((method, _, domain)) = method(tree, session, callee, native, dimensions)?
+        && method.returns_member()
+    {
+        return Ok(Some(domain));
+    }
+    let Ok(ty) = expression_types::type_of(tree, session, id, native, dimensions) else {
+        return Ok(None);
+    };
+    Ok(session
+        .types
+        .is_enum(ty)
+        .then(|| session.types.enum_domain(ty).cloned())
+        .flatten())
 }
 
 /// The type a cast to native `target` converts to, when `target` names a
@@ -220,42 +139,16 @@ pub(super) fn cast_type(
     })
 }
 
-/// The enumerated type of a value of type `ty`.
-fn scalar(ty: &Type) -> Option<Arc<EnumDomain>> {
-    (ty.unpacked_ranges.is_empty() && ty.container.is_none())
-        .then(|| ty.enum_domain.clone())
-        .flatten()
-}
-
-/// The enumerated type of a value of a variable of shape `shape`.
-fn variable(shape: &VariableDimensions) -> Option<Arc<EnumDomain>> {
-    (shape.unpacked.is_empty() && shape.container.is_none())
-        .then(|| shape.enum_domain.clone())
-        .flatten()
-}
-
-/// The enum method domain retained by the constant's resolved declaration.
-fn constant(
+/// Whether native expression `id` selects an element of a packed array of
+/// enums, whose methods are not supported: such an element is selected by
+/// more indices than the array it is in has unpacked dimensions.
+fn selects_packed_enum_element(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
-) -> Option<Arc<EnumDomain>> {
-    crate::ast::expression_types::constant_binding(tree, session, id, native, dimensions)
-        .ok()??
-        .domain()
-}
-
-/// The enumerated type of an element select `id` of an unpacked array or
-/// container whose elements are of one.
-fn element(
-    tree: &AnalysisContext<'_>,
-    session: &mut Session,
-    id: ExprId,
-    native: &Declarations,
-    dimensions: &PackedDimensions,
-) -> Converted<Option<Arc<EnumDomain>>> {
+) -> Converted<bool> {
     let mut root = ungroup(id, native);
     let mut selects = 0;
     while let ExprKind::Select {
@@ -263,30 +156,27 @@ fn element(
         dimension,
     } = &native.expression(root).kind
     {
-        if !matches!(dimension.kind, DimensionKind::Index(_)) {
-            return Ok(None);
-        }
-        if selects == 0
-            && let Some(container) =
-                containers::native_type(*expression, native, tree, session, dimensions)?
+        if !matches!(dimension.kind, DimensionKind::Index(_))
+            || (selects == 0
+                && containers::native_type(*expression, native, tree, session, dimensions)?
+                    .is_some())
         {
-            return Ok(scalar(&container.element));
+            return Ok(false);
         }
         selects += 1;
         root = ungroup(*expression, native);
     }
-    let (unpacked, domain, packed_enum) = match &native.expression(root).kind {
+    if selects == 0 {
+        return Ok(false);
+    }
+    let (unpacked, packed_enum) = match &native.expression(root).kind {
         ExprKind::Name(name)
             if let Some(shape) =
                 dimensions.get(&instances::normalize_identifier(&name.spelling)) =>
         {
-            if shape.container.is_some() {
-                return Ok(None);
-            }
             (
                 shape.unpacked.len(),
-                shape.enum_domain.clone(),
-                shape.packed_enum,
+                shape.container.is_none() && shape.packed_enum,
             )
         }
         // A static property or a package variable.
@@ -296,33 +186,23 @@ fn element(
                     .or_else(|| call_name(tree, root, native))
                     .and_then(|name| dimensions.get(&name)) =>
         {
-            if shape.container.is_some() {
-                return Ok(None);
-            }
             (
                 shape.unpacked.len(),
-                shape.enum_domain.clone(),
-                shape.packed_enum,
+                shape.container.is_none() && shape.packed_enum,
             )
         }
         ExprKind::Name(_) | ExprKind::Member { .. } => {
             match objects::property(tree, session, root, native, dimensions)? {
-                Some((property, _)) if property.r#type.container.is_none() => (
+                Some((property, _)) => (
                     property.r#type.unpacked_ranges.len(),
-                    property.r#type.enum_domain.clone(),
-                    property.r#type.packed_enum,
+                    property.r#type.container.is_none() && property.r#type.packed_enum,
                 ),
-                _ => return Ok(None),
+                None => return Ok(false),
             }
         }
-        _ => return Ok(None),
+        _ => return Ok(false),
     };
-    if packed_enum && selects > unpacked {
-        return Err(unsupported(
-            "method of an element of a packed array of enums",
-        ));
-    }
-    Ok(domain.filter(|_| unpacked == selects))
+    Ok(packed_enum && selects > unpacked)
 }
 
 /// The value of `method` of `domain` called on `receiver` with `count`.

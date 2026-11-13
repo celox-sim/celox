@@ -207,11 +207,10 @@ impl Parts<'_> {
         let anonymous = self
             .enum_domain
             .map(|domain| Decl::AnonymousEnum(domain.clone()));
+        let named = self.declaration.map(Arc::<str>::from);
+        let recorded = named.clone();
         let element = if self.enumeration
-            && let Some(decl) = self
-                .declaration
-                .map(|declaration| Decl::Named(declaration.into()))
-                .or(anonymous)
+            && let Some(decl) = named.map(Decl::Named).or(anonymous)
         {
             PackedElement::Enum {
                 decl,
@@ -242,6 +241,15 @@ impl Parts<'_> {
             .iter()
             .map(|&(left, right)| range(left, right))
             .collect::<Option<Box<[_]>>>()?;
+        // An enumeration's own packed dimension is its base type's, so its
+        // specialization is told by it (a packed array of one is not
+        // recorded: its last dimension may be the array's).
+        if self.enumeration
+            && !self.packed_enum
+            && let (Some(name), Some(domain)) = (recorded, self.enum_domain)
+        {
+            table.record_enum_domain((name, dims.last().copied(), four_state), domain);
+        }
         let keyword = self
             .keyword
             .filter(|keyword| keyword_matches(keyword, self.kind, &dims));
