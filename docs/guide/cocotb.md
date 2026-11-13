@@ -13,9 +13,11 @@ Install the `celox` command from crates.io:
 cargo install celox
 ```
 
-The command supports x86-64 and AArch64 hosts. To use the CLI of a Celox
-source tree instead, build it with
-`cargo build --release -p celox --bin celox`, which creates
+`cargo binstall celox` downloads prebuilt binaries instead of compiling them.
+Each [GitHub Release](https://github.com/celox-sim/celox/releases) has them as
+`celox-<target>` archives for Linux, macOS and Windows. The command supports
+x86-64 and AArch64 hosts. To use the CLI of a Celox source tree instead, build
+it with `cargo build --release -p celox --bin celox`, which creates
 `target/release/celox`.
 
 The installation also provides `veryl-celox`, so that Veryl 0.20.3 or later
