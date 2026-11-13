@@ -121,10 +121,16 @@ pub(in crate::ast) fn initial_processes_from_scope(
                     // Each declaration of an event creates a synchronization
                     // object (IEEE 1800-2023 15.5).
                     if owner.is_none() {
-                        let Some(shape) = item_dimensions
-                            .get(&name)
-                            .filter(|shape| shape.class.as_deref() == Some(events::CLASS))
-                        else {
+                        let Some(shape) = item_dimensions.get(&name).filter(|shape| {
+                            expression_binding::objects::shape_class(
+                                shape,
+                                tree,
+                                session,
+                                item_dimensions,
+                            )
+                            .as_deref()
+                                == Some(events::CLASS)
+                        }) else {
                             continue;
                         };
                         if !shape.unpacked.is_empty() || shape.container.is_some() {
