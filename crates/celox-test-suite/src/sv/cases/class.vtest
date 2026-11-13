@@ -5341,3 +5341,31 @@ module Top(output int checks);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq checks 1023))
+
+; A guard compares class handles, such as with `null`, by their values when
+; the call starts (IEEE 1800-2023 18.5.13); a rand handle is not changed.
+(case constraint_handle_guards
+  (source "guards.sv" #"
+module Top(output int checks);
+    class Node;
+        int d;
+    endclass
+    class A;
+        rand int b;
+        Node next, other;
+        constraint c1 { if (next == null) b == 5; else b == 6; }
+        constraint c2 { (next != other) -> b > 0; }
+    endclass
+    initial begin
+        A a = new;
+        checks = 0;
+        checks += (a.randomize() && a.b == 5) * 1;
+        a.next = new;
+        checks += (a.randomize() && a.b == 6) * 2;
+        a.other = a.next;
+        checks += (a.randomize() && a.b == 6 && a.next != null) * 4;
+        checks += (a.randomize() with { null === next -> b == 7; } && a.b == 6) * 8;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 15))

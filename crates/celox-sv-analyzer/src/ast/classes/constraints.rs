@@ -350,12 +350,50 @@ pub(in crate::ast) fn resolve_statics(expr: &mut ConstraintExpr, first: usize) {
         }
         ConstraintExpr::Literal(..)
         | ConstraintExpr::Field(_)
+        | ConstraintExpr::Handle(_)
         | ConstraintExpr::Input { .. }
         | ConstraintExpr::Size(_)
         | ConstraintExpr::Index { .. }
         | ConstraintExpr::Solved(_)
         | ConstraintExpr::Element { .. } => {}
     }
+}
+
+/// The class handle `id` names in a constraint, `null` or a handle
+/// property, as an unsigned integer; `None` for another expression.
+fn handle_operand(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    properties: &[Property],
+    names: &Names<'_>,
+    env: &ConstEnv,
+) -> Result<Option<Typed>, String> {
+    let native = tree.declarations();
+    let id = crate::ast::expression_binding::ungroup(id, native);
+    let width = 8 * celox_heap::HANDLE_BYTES as u32;
+    let leaf = |expr| Typed {
+        kind: Kind::Leaf(expr),
+        width,
+        signed: false,
+    };
+    Ok(match &native.expression(id).kind {
+        ExprKind::Literal(text) if text == "null" => Some(leaf(ConstraintExpr::Literal(
+            width,
+            celox_heap::NULL as u64,
+        ))),
+        ExprKind::Name(name) => {
+            let name = instances::normalize_identifier(&name.spelling);
+            match instance(&name, properties, names) {
+                Some((_, property)) if property.r#type.class().is_some() => {
+                    visible(property, tree, session, env)?;
+                    Some(leaf(ConstraintExpr::Handle(property.field.offset)))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    })
 }
 
 /// The arrays of the program, by index, that constraint `expr` loops over.
@@ -376,6 +414,7 @@ pub(in crate::ast) fn looped_arrays(expr: &ConstraintExpr, found: &mut Vec<usize
         }
         ConstraintExpr::Literal(..)
         | ConstraintExpr::Field(_)
+        | ConstraintExpr::Handle(_)
         | ConstraintExpr::Input { .. }
         | ConstraintExpr::Size(_)
         | ConstraintExpr::Index { .. }
@@ -525,6 +564,25 @@ pub(in crate::ast) fn bind_inputs(
         let native = tree.declarations();
         if let Some(element) = element(id, tree, session, properties, env, loops)? {
             return Ok(element);
+        }
+        // A guard compares class handles, such as with `null`: their values
+        // when the call starts, which no randomization changes (IEEE
+        // 1800-2023 18.5.13).
+        if let ExprKind::Binary {
+            left,
+            operator,
+            right,
+        } = &native.expression(id).kind
+            && matches!(operator.as_str(), "==" | "!=" | "===" | "!==")
+            && let Some(a) = handle_operand(*left, tree, session, properties, names, env)?
+            && let Some(b) = handle_operand(*right, tree, session, properties, names, env)?
+        {
+            let operator = if operator.starts_with('=') {
+                "=="
+            } else {
+                "!="
+            };
+            return Ok(relation(operator, a, b));
         }
         Ok(match &native.expression(id).kind {
             ExprKind::Group(id) => return recurse(session, budget, *id),

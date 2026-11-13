@@ -234,6 +234,7 @@ fn reads_input(expr: &celox_heap::randomization::Expr) -> bool {
         Expr::Binary { left, right, .. } => reads_input(left) || reads_input(right),
         Expr::Literal(..)
         | Expr::Field(_)
+        | Expr::Handle(_)
         | Expr::Size(_)
         | Expr::Index { .. }
         | Expr::Static(_)
