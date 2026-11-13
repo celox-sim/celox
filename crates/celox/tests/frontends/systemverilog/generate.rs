@@ -613,3 +613,66 @@ fn generate_conditions_take_negated_reductions() {
         );
     }
 }
+
+/// A parameter override may call a constant function of the instantiating
+/// module, also one declared in the Verilog-1995 style, whose arguments name
+/// its parameters and generate variables (IEEE 1800-2023 13.4.3, 23.10).
+/// Verilator 5.054 prints the same lines.
+#[test]
+fn parameter_overrides_call_constant_functions_of_the_instantiating_module() {
+    let source = r#"`timescale 1ns/1ns
+module child #(parameter inWidth = 1, parameter topBound = 1, parameter bottomBound = 0) ();
+  logic [inWidth-1:0] w;
+  initial #1 $display("%m %0d %0d %0d %0d", inWidth, topBound, bottomBound, $bits(w));
+endmodule
+module top #(parameter sigWidth = 24) ();
+  function integer clog2;
+    input integer fa;
+    begin
+      fa = fa - 1;
+      for (clog2 = 0; fa > 0; clog2 = clog2 + 1) fa = fa >> 1;
+    end
+  endfunction
+  function automatic integer scaled(input integer a);
+    return a * sigWidth;
+  endfunction
+  localparam sigSumWidth = sigWidth * 3 + 2;
+  child #(clog2(sigSumWidth) - 2, scaled(2), 1) positional ();
+  child #(.inWidth(clog2(sigWidth + 1) - 2), .topBound(0), .bottomBound(sigWidth / 4)) named ();
+  for (genvar i = 1; i < 3; i++) begin : g
+    child #(.inWidth(clog2(i * 8)), .topBound(scaled(i))) each ();
+  end
+  initial #2 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("override_calls.sv"))],
+            "top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let mut lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                "top.g[1].each 3 24 0 3",
+                "top.g[2].each 4 48 0 4",
+                "top.named 3 0 6 3",
+                "top.positional 5 48 1 5",
+            ],
+            "four_state={four_state}"
+        );
+    }
+}

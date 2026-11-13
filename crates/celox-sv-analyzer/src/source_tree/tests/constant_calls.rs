@@ -148,16 +148,15 @@ fn native_constant_call_actuals_drive_instance_parameter_values() {
     let value = module.instances()[0].parameter_overrides()[0]
         .value()
         .unwrap();
-    let crate::ast::ConstExpr::Function { args, .. } = value else {
+    // The instantiating module evaluates the call of its function, with the
+    // native operator: `subtract` turned `8+2` into `8-2`.
+    let crate::ast::ConstExpr::Literal(text) = value else {
         panic!("{value:?}")
     };
-    assert!(matches!(
-        &args[0],
-        crate::ast::ConstExpr::Binary {
-            op: crate::ast::BinaryOp::Sub,
-            ..
-        }
-    ));
+    assert_eq!(
+        crate::typecheck::parse_integral_literal(text).map(|literal| literal.value),
+        Some(6u8.into())
+    );
     crate::analyze::analyze_source(source).unwrap();
 }
 #[test]
