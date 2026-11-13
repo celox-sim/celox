@@ -319,3 +319,40 @@ fn local_interface_scopes_block_upward_fallback_even_when_empty() {
         "{error}"
     );
 }
+
+// Each instance of a module declares its own types (IEEE 1800-2023 6.22),
+// so an enum variable of one instance takes the value of another's only by
+// a cast (6.19.3). Instances of one module with the same parameters share
+// one analysis and so, here, one type: the assignment is accepted. This is
+// a known deviation, which the test pins until types tell instances apart.
+#[test]
+fn enum_assignments_between_instances_of_one_module_are_accepted() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Leaf(input logic set);
+            typedef enum logic [1:0] {X, Y, Z} e_t;
+            typedef struct packed { logic [3:0] a; e_t e; } p_t;
+            e_t v;
+            p_t p;
+            initial begin
+                #1;
+                if (set) begin
+                    v = Y;
+                    p = '{a: 4'd5, e: Z};
+                end
+            end
+        endmodule
+        module Top;
+            Leaf a(1'b1);
+            Leaf b(1'b0);
+            initial begin
+                #2;
+                b.v = a.v;
+                b.p = a.p;
+                #1;
+                $display("v=%0d p.a=%0d p.e=%0d", b.v, b.p.a, b.p.e);
+            end
+        endmodule
+    "#;
+    assert_eq!(displayed(source), ["v=1 p.a=5 p.e=2"]);
+}
