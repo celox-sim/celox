@@ -455,6 +455,11 @@ struct ContainerType {
     /// The record that holds an element of unpacked structure type which is
     /// not kept as a flat value.
     record: Option<system_functions::Record>,
+    /// The declared range, left then right, of a fixed-size unpacked array
+    /// class property, which an object holds in a container of that many
+    /// elements: its type stays the fixed-size array (see
+    /// `classes::Property::storage`).
+    fixed: Option<(i128, i128)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

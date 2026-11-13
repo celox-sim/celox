@@ -43,6 +43,27 @@ impl BodyBuilder<'_, '_, '_> {
                 _ => return Err(unsupported("foreach array")),
             }
         };
+        // A fixed-size array property iterates the indices of its range
+        // from left to right (IEEE 1800-2023 12.7.3), each element at its
+        // position in the container that holds it.
+        if let Some((left, right)) = container.as_ref().and_then(|container| container.fixed) {
+            let variables = match &header.variables[..] {
+                [variable] => variable.as_ref(),
+                _ => {
+                    return Err(unsupported(
+                        "foreach over a fixed-size array class property with more than one index",
+                    ));
+                }
+            };
+            let Some(variable) = variables else {
+                return Ok(Vec::new());
+            };
+            let name = self.declare(
+                &instances::normalize_identifier(&variable.spelling),
+                super::loops::foreach_index_type(left, right),
+            );
+            return Ok(vec![ForeachLoop::Static(name, left, right)]);
+        }
         if let Some(container) = container {
             // Each loop variable iterates one dimension, the first the
             // outermost; the element at the outer indices is the container

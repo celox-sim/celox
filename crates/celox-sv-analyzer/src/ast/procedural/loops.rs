@@ -200,7 +200,7 @@ impl BodyBuilder<'_, '_, '_> {
                 .ok_or_else(|| unsupported("foreach bound"))?;
             let right = eval_ast_const_expr(&self.tree.functions, right, &self.dims.const_env)
                 .ok_or_else(|| unsupported("foreach bound"))?;
-            let name = self.declare(&variable, int_type());
+            let name = self.declare(&variable, foreach_index_type(left, right));
             loops.push(ForeachLoop::Static(name, left, right));
         }
         Ok(loops)
@@ -323,6 +323,11 @@ impl BodyBuilder<'_, '_, '_> {
                 }
             };
             let index = Expr::Ident(name.clone());
+            // A bound outside `int` keeps its value (see `foreach_index_type`).
+            let bound = |value: i128| match i32::try_from(value) {
+                Ok(value) => Expr::Literal(value.to_string()),
+                Err(_) => Expr::Literal(format!("128'sh{:x}", value as u128)),
+            };
             let (compare, step) = if left <= right {
                 (BinaryOp::Le, BinaryOp::Add)
             } else {
@@ -332,12 +337,12 @@ impl BodyBuilder<'_, '_, '_> {
                 kind: LoopKind::For,
                 init: vec![Stmt::Local {
                     name: name.clone(),
-                    init: Some(Expr::Literal(left.to_string())),
+                    init: Some(bound(left)),
                 }],
                 condition: Some(Expr::Binary {
                     left: Box::new(index.clone()),
                     op: compare,
-                    right: Box::new(Expr::Literal(right.to_string())),
+                    right: Box::new(bound(right)),
                 }),
                 step: vec![Stmt::Assign {
                     lhs: LValue::Ident(name),
@@ -363,4 +368,19 @@ impl BodyBuilder<'_, '_, '_> {
             None => body,
         }
     }
+}
+
+/// The type of the index of a foreach over a fixed range from `left` to
+/// `right`: an `int` (IEEE 1800-2023 12.7.3), or a signed vector as wide as
+/// bounds outside its range need, so the index takes each of them.
+pub(super) fn foreach_index_type(left: i128, right: i128) -> Type {
+    if i32::try_from(left).is_ok() && i32::try_from(right).is_ok() {
+        return int_type();
+    }
+    // The bits of the bound farthest from zero, and a sign bit.
+    let magnitude = |value: i128| 128 - value.unsigned_abs().leading_zeros() + 1;
+    let width = magnitude(left).max(magnitude(right)).clamp(33, 128);
+    let mut ty = classes::unsigned_type(width as usize);
+    ty.is_signed = true;
+    ty
 }
