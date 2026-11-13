@@ -184,6 +184,18 @@ fn member_in<'a>(root: &'a VariableDimensions, path: &[String]) -> Option<(usize
     Some((offset, selected?))
 }
 
+/// `dimensions` with the variable that `path` starts at described as the
+/// member of it that `path` selects: the layout in which a select within
+/// that member is laid out, as [`select_member`] gives it to its selection.
+pub(in crate::ast) fn member_view(
+    tree: &AnalysisContext<'_>,
+    path: &[String],
+    dimensions: &PackedDimensions,
+) -> Option<PackedDimensions> {
+    let (_, r#type) = selected_member(tree, path, dimensions)?;
+    Some(member_dimensions(&path[0], &r#type, dimensions))
+}
+
 fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -> PackedDimensions {
     let mut result = dimensions.clone();
     result.insert(
@@ -368,6 +380,88 @@ pub(in crate::ast) fn select_element_member(
         *selected_2state = is_2state;
     }
     Ok(lvalue)
+}
+
+/// Select member path `members` of the element that `indices` select of
+/// the packed array that member path `path` of a structure variable is,
+/// such as `s.regs[i].q` (IEEE 1800-2023 7.2.1, 7.4.5). The element is
+/// selected in the layout of the member, as [`select_element_member`]
+/// selects one of a variable, and placed at the member's offset. A
+/// selection outside the member, of an index outside the array, is placed
+/// past the whole variable, where it reads X and writes nothing, rather
+/// than reach the member next to it.
+pub(in crate::ast) fn select_member_element_member(
+    tree: &AnalysisContext<'_>,
+    path: Vec<String>,
+    members: &[String],
+    indices: Vec<ConstExpr>,
+    dimensions: &PackedDimensions,
+    select: impl FnOnce(String, &PackedDimensions, bool) -> Converted<LValue>,
+) -> Converted<LValue> {
+    let outside = || {
+        unsupported(format!(
+            "select of structure member `{}` outside the member",
+            path.join(".")
+        ))
+    };
+    let (offset, ty) = selected_member(tree, &path, dimensions)
+        .ok_or_else(|| unknown_member(&path, false, dimensions))?;
+    let context = member_dimensions(&path[0], &ty, dimensions);
+    let relative =
+        select_element_member(tree, path[0].clone(), members, indices, &context, select)?;
+    let LValue::Select {
+        msb,
+        lsb,
+        signed,
+        array_slice_width: None,
+        is_2state,
+        ..
+    } = relative
+    else {
+        return Err(outside());
+    };
+    let width = expr_type_from_type(&tree.functions, &ty, &dimensions.const_env)
+        .ok_or_else(outside)?
+        .width;
+    let whole = dimensions
+        .get(&path[0])
+        .and_then(|shape| patterns::shape_width(&tree.functions, shape, dimensions))
+        .ok_or_else(outside)?;
+    let literal = |value: usize| ConstExpr::Literal(value.to_string());
+    let compare = |left: &ConstExpr, op, right: ConstExpr| ConstExpr::Binary {
+        left: Box::new(left.clone()),
+        op,
+        right: Box::new(right),
+    };
+    let inside = ConstExpr::Binary {
+        left: Box::new(compare(&lsb, BinaryOp::Ge, literal(0))),
+        op: BinaryOp::LogicAnd,
+        right: Box::new(compare(&msb, BinaryOp::Le, literal(width - 1))),
+    };
+    // A constant width keeps the select's width static, as checks of the
+    // tags the path crosses need it.
+    let span = match crate::typecheck::select_range_width(
+        &msb.clone().into(),
+        &lsb.clone().into(),
+        &dimensions.const_env,
+    ) {
+        Some(width) => literal(width - 1),
+        None => compare(&msb, BinaryOp::Sub, lsb.clone()),
+    };
+    let placed = ConstExpr::Mux {
+        condition: Box::new(inside),
+        then_expr: Box::new(add_expr(literal(offset), lsb)),
+        else_expr: Box::new(literal(whole)),
+    };
+    Ok(LValue::Select {
+        name: path[0].clone(),
+        msb: add_expr(placed.clone(), span),
+        lsb: placed,
+        signed,
+        array_slice_width: None,
+        array_slice_reversed: false,
+        is_2state,
+    })
 }
 
 /// Flatten an integral array member into the cell that holds its structure.

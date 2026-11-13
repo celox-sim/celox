@@ -484,6 +484,8 @@ pub(in crate::ast) fn native_struct(
         return Ok(shape.unpacked_struct.clone());
     }
     if let Some(element) = expression_binding::fixed_array_member(id, native, tree, session, dims)
+        // An array that is a member of a packed structure has packed elements.
+        && element.prefix.is_empty()
         && let Ok((_, ty)) = packed_structs::element_member(&element.name, &element.members, dims)
     {
         return Ok(ty.unpacked_struct().cloned());
