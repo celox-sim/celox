@@ -16,6 +16,9 @@ cargo install celox
 対応するホストはx86-64とAArch64です。Celoxのソースツリーにあるコマンドを使う場合は、
 `cargo build --release -p celox --bin celox`でビルドすると`target/release/celox`ができます。
 
+インストールすると`veryl-celox`も入るため、Veryl 0.20.3以降ではVerylのサブコマンドとして
+実行できます。`veryl celox run ...`は`celox run ...`と同じで、`veryl --list`にも`celox`が表示されます。
+
 後述の`run`コマンドにはPythonは不要です。VPIテストを使う場合は、利用するPython環境へcocotbをインストールします。
 
 ```sh

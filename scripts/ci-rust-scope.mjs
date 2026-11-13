@@ -407,7 +407,7 @@ export function readWorkspace(root) {
     // The integration tests that run the `celox` command or its VPI host.
     celoxPackage.cliTests = metadata.packages.find((pkg) => pkg.name === "celox").targets
       .filter((target) => target.kind.includes("test")
-        && rustTestSources(target.src_path).some((text) => /CARGO_BIN_EXE_celox\b|celox::vpi\b/.test(text)))
+        && rustTestSources(target.src_path).some((text) => /CARGO_BIN_EXE_(?:veryl-)?celox\b|celox::vpi\b/.test(text)))
       .map((target) => target.name)
       .sort();
   }
