@@ -158,6 +158,12 @@ impl Parser<'_> {
                 }
                 "|->" | "|=>" if depth == 1 && !implication => implication = true,
                 "|->" | "|=>" => return false,
+                // The event expression of the clock of a subsequence
+                // (16.13) may use `or` and `iff` too.
+                "@" => {
+                    offset = self.past_clocking_event(offset);
+                    continue;
+                }
                 // A top-level `iff` between Booleans (16.12.8).
                 "iff" if depth == 1 => {}
                 word if self.temporal(word, offset) => return false,

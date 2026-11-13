@@ -387,6 +387,15 @@ concurrent assertions is unsupported:
   neither passes nor fails, when the condition is true at any time from
   its start to its end, also between the ticks of the clock, over the
   current values of its variables (16.12).
+- Multiclocked sequences (16.13.1) that are the whole property: singly
+  clocked subsequences, each with one way to match, joined by `##1` or `##0`
+  at a change of clock (`@(posedge c0) a ##1 @(posedge c1) b`), each clock an
+  event control over values, which ticks as it would wake a process (4-state
+  edges, `iff` judged when the event occurs), not a named event. After `##1` the next subsequence starts at the nearest tick
+  of its clock strictly after the end of the one before, after `##0` also at
+  it. Not with `disable iff`, in an implication, or with local variables or
+  match items; other operators across a clock change are rejected. A
+  sequence nests at most 64 groups and clocked subsequences.
 - `p iff q` of two Boolean expressions, also as the consequent of `|->`
   (`a |-> b iff c` is `a |-> (b iff c)`).
 - `expect (property_spec) action_block` (16.17) in a process or task, with an

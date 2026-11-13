@@ -49,6 +49,9 @@ const TEMPORAL: &[&str] = &[
 /// The most Boolean operands of one property specification.
 const MAX_SEQUENCE_OPERANDS: usize = 1024;
 
+/// The most groups and clocked subsequences one sequence nests.
+const MAX_SEQUENCE_DEPTH: usize = 64;
+
 impl Parser<'_> {
     /// The offset after the clocking event `@(...)` or `@name` that starts at
     /// `offset`, whose event expression may use `or`, `,` and `iff` (IEEE
@@ -99,8 +102,9 @@ impl Parser<'_> {
                         && self.nth(offset + 2).starts_with(|c: char| c.is_ascii_digit()))))
             && word != "|=>"
             // The sequence operators `or`, `and`, `intersect` and
-            // `throughout` (16.9.5 to 16.9.7, 16.9.9).
-            && !matches!(word, "or" | "and" | "intersect" | "throughout")
+            // `throughout` (16.9.5 to 16.9.7, 16.9.9), and the clocking
+            // event of a subsequence (16.13).
+            && !matches!(word, "or" | "and" | "intersect" | "throughout" | "@")
     }
 
     /// `[clocking_event] [disable iff (expression)] sequence [|-> sequence]`
@@ -113,6 +117,7 @@ impl Parser<'_> {
         locals: Vec<SequenceLocal>,
     ) -> Result<PropertySpec> {
         self.sequence_operands = 0;
+        self.sequence_depth = 0;
         let clock = if self.peek() == "@" {
             Some(self.typed_timing_control()?)
         } else {
@@ -273,18 +278,44 @@ impl Parser<'_> {
 
     /// A parenthesized sequence `(s)`, a Boolean expression, or a Boolean
     /// expression with match items `(b, item {, item})` (16.7, 16.10).
+    /// Nest a group or a clocked subsequence in the sequence being parsed,
+    /// whose parse recurses as deep.
+    fn enter_sequence(&mut self) -> Result<()> {
+        self.sequence_depth += 1;
+        if self.sequence_depth > MAX_SEQUENCE_DEPTH {
+            return Err(self.unsupported(format!(
+                "sequence with groups or clocked subsequences nested more than {MAX_SEQUENCE_DEPTH} deep"
+            )));
+        }
+        Ok(())
+    }
+
     fn sequence_operand(&mut self) -> Result<SequenceExpr> {
         // The tree of a longer one would nest as deep.
         self.sequence_operands += 1;
         if self.sequence_operands > MAX_SEQUENCE_OPERANDS {
             return Err(self.unsupported(format!(
-                "property with more than {MAX_SEQUENCE_OPERANDS} Boolean operands"
+                "property with more than {MAX_SEQUENCE_OPERANDS} Boolean operands and clocking events"
             )));
         }
+        // `@(event) s` clocks the rest of the sequence (16.13), which nests
+        // in it as in a group.
+        if self.peek() == "@" {
+            self.enter_sequence()?;
+            let clock = self.typed_timing_control()?;
+            let sequence = self.sequence_expr()?;
+            self.sequence_depth -= 1;
+            return Ok(SequenceExpr::Clocked {
+                clock,
+                sequence: Box::new(sequence),
+            });
+        }
         if self.peek() == "(" && self.group_holds_sequence() {
+            self.enter_sequence()?;
             self.at += 1;
             let group = self.sequence_expr()?;
             self.expect(")")?;
+            self.sequence_depth -= 1;
             return Ok(group);
         }
         let start = self.at;
@@ -469,6 +500,9 @@ impl Parser<'_> {
                 }
                 // A property's top-level `iff` between Booleans (16.12.8).
                 "iff" if depth == 0 && end == "endproperty" => offset += 1,
+                // The event expression of the clock of a subsequence (16.13)
+                // may use `or` and `iff`.
+                "@" => offset = self.past_clocking_event(offset),
                 word if self.temporal(word, offset) => return Ok(None),
                 _ => offset += 1,
             }
@@ -684,6 +718,15 @@ impl Parser<'_> {
                 }
                 return self
                     .substitute_sequence_instances(sequence, leading, names, resolved, clock);
+            }
+            // The instances of a clocked subsequence are clocked as it is.
+            SequenceExpr::Clocked {
+                clock: inner,
+                sequence,
+            } => {
+                let mut inner = Some(*inner);
+                return self
+                    .substitute_sequence_instances(sequence, true, names, resolved, &mut inner);
             }
         };
         let Some(id) = self.instance(boolean.expression, names) else {
@@ -937,6 +980,86 @@ impl Parser<'_> {
         Ok(result)
     }
 
+    /// Whether a module assertion over `sequence`, led by clock `leading`,
+    /// has subsequences clocked differently (16.13). A subsequence clocked as
+    /// the sequence around it is that sequence (16.13.1).
+    fn multiclocked(
+        &mut self,
+        assertion: StatementId,
+        sequence: SequenceId,
+        leading: TimingControlId,
+    ) -> bool {
+        let mut body = self.sequences[sequence.0].clone();
+        let mut clocks = Vec::new();
+        let mut changed = false;
+        if let Some(antecedent) = &mut body.antecedent {
+            changed |= self.same_clocks(antecedent, leading, &mut clocks);
+        }
+        changed |= self.same_clocks(&mut body.consequent, leading, &mut clocks);
+        if changed {
+            let id = SequenceId(self.sequences.len());
+            self.sequences.push(body);
+            if let StatementKind::Assertion {
+                header: AssertionHeader::Concurrent { property, .. },
+                ..
+            } = &mut self.statements[assertion.0].kind
+            {
+                property.sequence = Some(id);
+            }
+        }
+        !clocks.is_empty()
+    }
+
+    /// `tree` with each subsequence clocked as `clock`, the clock around it,
+    /// replaced by its sequence; the other clocks into `clocks`, each once.
+    /// Whether it replaced any.
+    fn same_clocks(
+        &self,
+        tree: &mut SequenceExpr,
+        clock: TimingControlId,
+        clocks: &mut Vec<TimingControlId>,
+    ) -> bool {
+        match tree {
+            SequenceExpr::Boolean(_) => false,
+            SequenceExpr::Concat { left, right, .. } => {
+                let left = left
+                    .as_deref_mut()
+                    .is_some_and(|left| self.same_clocks(left, clock, clocks));
+                self.same_clocks(right, clock, clocks) || left
+            }
+            SequenceExpr::Or(left, right)
+            | SequenceExpr::And(left, right)
+            | SequenceExpr::Intersect(left, right) => {
+                let left = self.same_clocks(left, clock, clocks);
+                self.same_clocks(right, clock, clocks) || left
+            }
+            SequenceExpr::Throughout { sequence, .. } => self.same_clocks(sequence, clock, clocks),
+            SequenceExpr::Clocked {
+                clock: inner,
+                sequence,
+            } => {
+                let inner = *inner;
+                if self.same_clock(inner, clock) {
+                    let mut sequence = std::mem::replace(
+                        sequence.as_mut(),
+                        SequenceExpr::Boolean(SequenceBoolean {
+                            expression: ExprId(0),
+                            items: Vec::new(),
+                            tokens: TokenRange::default(),
+                        }),
+                    );
+                    self.same_clocks(&mut sequence, clock, clocks);
+                    *tree = sequence;
+                    return true;
+                }
+                if !clocks.iter().any(|&known| self.same_clock(known, inner)) {
+                    clocks.push(inner);
+                }
+                self.same_clocks(sequence, inner, clocks)
+            }
+        }
+    }
+
     /// Clocking events written alike, `@(posedge clk)` twice.
     fn same_clock(&self, left: TimingControlId, right: TimingControlId) -> bool {
         let words = |id: TimingControlId| {
@@ -957,7 +1080,8 @@ impl Parser<'_> {
                 AssertionHeader::Concurrent {
                     property:
                         PropertySpec {
-                            clock: Some(control),
+                            clock: Some(leading),
+                            sequence,
                             ..
                         },
                     ..
@@ -967,6 +1091,11 @@ impl Parser<'_> {
         else {
             return;
         };
+        // A multiclocked one waits for each of its clocks itself.
+        if sequence.is_some_and(|sequence| self.multiclocked(assertion, sequence, leading)) {
+            return;
+        }
+        let control = leading;
         let mut wrapper = self.statements[assertion.0].clone();
         wrapper.kind = StatementKind::Timing {
             control,
