@@ -57,7 +57,7 @@ fn lower_methods(
     let convert_type =
         |session: &mut Session, ty| crate::ast::ir_type(session, &tree.functions, ty, env);
     let mut result = Vec::new();
-    for method in ["randomize", "srandom", "rand_mode"] {
+    for method in RANDOMIZATION_METHODS {
         if inline.is_some() && method != "randomize" {
             continue;
         }
@@ -75,30 +75,30 @@ fn lower_methods(
         builder.set_owner(method_name(&class.name, method));
         let first_local = builder.state.locals.len();
         let this = builder.declare(classes::THIS, handle.clone());
-        let (argument, argument_type) = match method {
-            "randomize" => ("$selection", class.selection_type()),
-            "srandom" => ("seed", int_type()),
-            _ => ("on_off", classes::unsigned_type(1)),
+        let mut params = vec![SubroutineParam {
+            name: this.clone(),
+            source_name: classes::THIS.into(),
+            direction: ParamDirection::Input,
+            r#type: convert_type(builder.session, handle.clone()),
+            default: None,
+            leaves: Vec::new(),
+        }];
+        // `get_randstate` has no argument but the object.
+        let argument = match randomization_method_argument(method, || class.selection_type()) {
+            Some((argument, argument_type)) => {
+                let argument = builder.declare(argument, argument_type.clone());
+                params.push(SubroutineParam {
+                    name: argument.clone(),
+                    source_name: argument.clone(),
+                    direction: ParamDirection::Input,
+                    r#type: convert_type(builder.session, argument_type),
+                    default: None,
+                    leaves: Vec::new(),
+                });
+                argument
+            }
+            None => String::new(),
         };
-        let argument = builder.declare(argument, argument_type.clone());
-        let mut params = vec![
-            SubroutineParam {
-                name: this.clone(),
-                source_name: classes::THIS.into(),
-                direction: ParamDirection::Input,
-                r#type: convert_type(builder.session, handle.clone()),
-                default: None,
-                leaves: Vec::new(),
-            },
-            SubroutineParam {
-                name: argument.clone(),
-                source_name: argument.clone(),
-                direction: ParamDirection::Input,
-                r#type: convert_type(builder.session, argument_type),
-                default: None,
-                leaves: Vec::new(),
-            },
-        ];
         let mut input_values = Vec::new();
         if let Some(inline) = inline.filter(|_| !prepare) {
             for (index, ty) in inline.inputs.iter().enumerate() {
@@ -118,7 +118,11 @@ fn lower_methods(
         // on rejection, before hooks, draws or property/mode updates.
         let mut body = vec![Stmt::If {
             condition: classes::object_call(
-                ObjectOp::Check(if method == "srandom" { 0 } else { class.id }),
+                ObjectOp::Check(if matches!(method, "randomize" | "rand_mode") {
+                    class.id
+                } else {
+                    0
+                }),
                 vec![Expr::Ident(this.clone())],
             ),
             then_body: Vec::new(),
@@ -127,6 +131,26 @@ fn lower_methods(
             )],
         }];
         let return_var = match method {
+            // The state of the object's RNG (IEEE 1800-2023 18.13.4, 18.13.5).
+            "get_randstate" => {
+                let state = builder.declare("get_randstate", string_type());
+                body.push(Stmt::Assign {
+                    lhs: LValue::Ident(state.clone()),
+                    rhs: classes::object_call(
+                        ObjectOp::GetRandstate,
+                        vec![Expr::Ident(this.clone())],
+                    ),
+                    nonblocking: false,
+                });
+                Some(state)
+            }
+            "set_randstate" => {
+                body.push(Stmt::Eval(classes::object_call(
+                    ObjectOp::SetRandstate,
+                    vec![Expr::Ident(this.clone()), Expr::Ident(argument.clone())],
+                )));
+                None
+            }
             "srandom" => {
                 body.push(Stmt::Eval(classes::object_call(
                     ObjectOp::Seed,
@@ -442,7 +466,7 @@ fn lower_methods(
                 }
             }
         };
-        if method != "srandom" {
+        if matches!(method, "randomize" | "rand_mode") {
             // randomize is virtual, while its pre/post hooks are not (18.6.2).
             // Object-wide rand_mode also covers the dynamic object's members.
             let mut items = Vec::new();
@@ -523,7 +547,13 @@ fn lower_methods(
             return_type: return_var.as_ref().map(|_| {
                 convert_type(
                     builder.session,
-                    if prepare { handle.clone() } else { int_type() },
+                    if prepare {
+                        handle.clone()
+                    } else if method == "get_randstate" {
+                        string_type()
+                    } else {
+                        int_type()
+                    },
                 )
             }),
             params,
@@ -533,6 +563,37 @@ fn lower_methods(
         });
     }
     Ok(result)
+}
+
+/// The built-in methods of every class that randomizes its objects or
+/// controls their RNG (IEEE 1800-2023 18.6, 18.8, 18.13), which each class
+/// is given as subroutines.
+pub(in crate::ast) const RANDOMIZATION_METHODS: [&str; 5] = [
+    "randomize",
+    "srandom",
+    "rand_mode",
+    "get_randstate",
+    "set_randstate",
+];
+
+/// The argument of built-in method `method` besides the object, with its
+/// type; `selection` is the type of the selection of `randomize`.
+pub(in crate::ast) fn randomization_method_argument(
+    method: &str,
+    selection: impl FnOnce() -> Type,
+) -> Option<(&'static str, Type)> {
+    match method {
+        "randomize" => Some(("$selection", selection())),
+        "srandom" => Some(("seed", int_type())),
+        "set_randstate" => Some(("state", string_type())),
+        "get_randstate" => None,
+        _ => Some(("on_off", classes::unsigned_type(1))),
+    }
+}
+
+/// The `string` type (IEEE 1800-2023 6.16).
+pub(in crate::ast) fn string_type() -> Type {
+    crate::ast::type_binding::builtin_type("string", None).expect("string is a built-in type")
 }
 
 /// Select a declared enum value with rejection sampling, so non-power-of-two

@@ -1364,6 +1364,11 @@ pub enum ObjectOp {
     },
     /// Seed the object's RNG from the second argument.
     Seed,
+    /// The state of the object's RNG, as a string (IEEE 1800-2023 18.13.4).
+    GetRandstate,
+    /// Restore the object's RNG from the string in the second argument
+    /// (18.13.5).
+    SetRandstate,
     /// Validate a receiver; a nonzero class also rejects unsupported dynamic
     /// dispatch through a base handle before randomizing its properties.
     Check(u32),
@@ -1554,6 +1559,8 @@ impl ObjectOp {
             | Self::Visit
             | Self::VisitEnd
             | Self::Seed
+            | Self::GetRandstate
+            | Self::SetRandstate
             | Self::Check(_)
             | Self::ConstraintModeSet(_)
             | Self::ModeSet(_)
@@ -1601,6 +1608,8 @@ impl fmt::Display for ObjectOp {
             Self::VisitEnd => "end randomization visits",
             Self::RandomCyclic { .. } => "object random cyclic index",
             Self::Seed => "object random seed",
+            Self::GetRandstate => "object random state",
+            Self::SetRandstate => "object random state update",
             Self::Check(_) => "object receiver check",
             Self::ModeGet(..) => "random mode query",
             Self::ConstraintModeGet(_) => "constraint mode query",
