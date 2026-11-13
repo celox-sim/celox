@@ -164,7 +164,7 @@ impl ScopeElaboration<'_> {
         for (name, shapes) in &self.imported.subroutine_shapes {
             self.subroutine_shapes
                 .entry(name.clone())
-                .or_insert_with(|| shapes.clone());
+                .or_insert_with(|| (**shapes).clone());
         }
         // The subroutines of the packages the module uses, by their qualified
         // names and by the names its imports give them.
