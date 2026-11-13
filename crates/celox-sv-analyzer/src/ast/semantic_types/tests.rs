@@ -113,6 +113,26 @@ fn named_aggregates_and_enumerations_match_only_their_own_declaration() {
 }
 
 #[test]
+fn enumerations_keep_their_members_named_or_anonymous() {
+    // IEEE 1800-2023 6.19: the members are part of the type, which a named
+    // enumeration's declaration names.
+    let (table, ids) =
+        typedefs("typedef enum {X, Y} e_t; typedef e_t e2_t; typedef e_t [1:0] ea_t;");
+    for name in ["e_t", "e2_t"] {
+        let domain = table
+            .enum_domain(ids[name])
+            .unwrap_or_else(|| panic!("{name}"));
+        let members = domain
+            .members
+            .iter()
+            .map(|member| member.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(members, ["X", "Y"], "{name}");
+    }
+    assert!(table.enum_domain(ids["ea_t"]).is_some());
+}
+
+#[test]
 fn interning_a_type_again_returns_its_id() {
     let mut table = TyTable::default();
     let packed = |keyword| {

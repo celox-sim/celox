@@ -613,3 +613,34 @@ fn constant_functions_pass_enum_constants_to_enum_formals() {
         "{error}"
     );
 }
+
+// An enumeration declared in a parameterized module is a type of each
+// instance's specialization (IEEE 1800-2023 6.19, 23.10): its methods take
+// the members of the instance's own type, whose base width and values the
+// parameter sets.
+sv_backends! {
+    fn enum_methods_of_module_specializations(sim) {
+        @setup {
+            let source = r#"
+    module Leaf #(parameter int W = 2)(output logic [7:0] last);
+      typedef enum logic [W-1:0] {A, B = W - 1} e_t;
+      e_t v;
+      always_comb begin
+        v = A;
+        last = 8'(v.last());
+      end
+    endmodule
+    module Top(output logic [7:0] narrow, output logic [7:0] wide);
+      Leaf #(2) n(.last(narrow));
+      Leaf #(5) w(.last(wide));
+    endmodule
+  "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("enum_specializations.sv"))], "Top");
+        let narrow = sim.signal("narrow");
+        let wide = sim.signal("wide");
+        sim.eval_comb().unwrap();
+        assert_eq!(u64::try_from(sim.get(narrow)).unwrap(), 1);
+        assert_eq!(u64::try_from(sim.get(wide)).unwrap(), 4);
+    }
+}
