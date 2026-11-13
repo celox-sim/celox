@@ -479,6 +479,7 @@ fn prepare_external_hierarchy_collecting(
     resolve_inout_drivers(&module_ids, &mut lowered_modules);
     validate_specialized_instance_net_drivers(&module_ids, &lowered_modules, four_state)?;
     let mut modules = HashMap::default();
+    let design_waits = DesignWaits::of(&lowered_modules);
     for (key, &module_id) in &module_ids {
         let lowered = &lowered_modules[&module_id];
         let mut sim_module = lowered.sim_module.clone();
@@ -500,6 +501,7 @@ fn prepare_external_hierarchy_collecting(
             key,
             &module_ids,
             &lowered_modules,
+            &design_waits,
             four_state,
             allow_inferred_latches,
             true,
