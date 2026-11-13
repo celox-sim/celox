@@ -1232,7 +1232,8 @@ impl BodyBuilder<'_, '_, '_> {
         if shape.as_ref().is_some_and(|shape| {
             !shape.unpacked.is_empty()
                 || shape.container.is_some()
-                || shape.unpacked_struct.is_some()
+                || unpacked_structs::shape_struct(shape, self.tree, self.session, &self.dims)
+                    .is_some()
         }) {
             return Err(unsupported(
                 "assignment expression to an unpacked aggregate",

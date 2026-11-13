@@ -72,7 +72,7 @@ pub(super) fn enter_method_call(
         }
         let shape = shape
             .filter(|shape| {
-                shape.unpacked_struct.is_some()
+                unpacked_structs::shape_struct(shape, tree, session, dimensions).is_some()
                     || chandles::receives_chandle(shape)
                     || (shape.container.is_some()
                         || virtual_interfaces::holds_virtual_interface(

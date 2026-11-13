@@ -767,7 +767,7 @@ pub(in crate::ast) fn fixed_from_container(
     if target.string
         || target.real
         || objects::shape_class(target, tree, session, dims).is_some()
-        || target.unpacked_struct.is_some()
+        || unpacked_structs::shape_struct(target, tree, session, dims).is_some()
         || virtual_interfaces::holds_virtual_interface(target, tree, session, dims)
         || chandles::holds_chandle(target)
     {
@@ -1102,7 +1102,7 @@ pub(in crate::ast) fn unpack(
             }
             continue;
         }
-        if shape.unpacked_struct.is_some() {
+        if unpacked_structs::shape_struct(&shape, tree, session, dims).is_some() {
             return Err(unsupported(
                 "streaming concatenation into an unpacked structure member",
             ));
