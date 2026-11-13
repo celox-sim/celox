@@ -86,6 +86,18 @@ fn memory_file_words(width: usize, outcome: MemoryLoad) -> MemoryFileWords {
     if width == 0 {
         return words;
     }
+    // A word of an associative array is placed by its index.
+    for word in outcome.keyed {
+        words.positions.push(word.address);
+        for (plane, out) in [
+            (&word.value, &mut words.values),
+            (&word.mask, &mut words.masks),
+        ] {
+            let mut digits = plane.to_u64_digits();
+            digits.resize(chunks, 0);
+            out.extend(digits);
+        }
+    }
     let word_mask = (BigUint::from(1u8) << width) - 1u8;
     for run in outcome.runs {
         let value = BigUint::from_bytes_le(&run.value_bytes);

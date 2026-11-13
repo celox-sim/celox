@@ -635,6 +635,15 @@ which designs need the timed `Simulation` API and what the host can observe.
   loaded before it, and the simulation continues. An `initial` block that
   reads loaded words afterwards runs as a process. For the inferred-latch
   check of `always_comb`, a load assigns all the words it may load.
+  An associative array is loaded when its indices are integral values of
+  at most 64 bits and its elements packed values of at most 64 bits (21.4.1),
+  always at its statement: each word creates or replaces the element of
+  its address, which is the index's bit pattern (`@fffffffe` is the `int`
+  index -2, as in Verilator). Without addresses in the call, a file address
+  may name any index; an address or word that is no member of an
+  enumerated index or element type is an error. An index that selects the
+  array, as in `banks[i++]`, must have no effect. Dynamic arrays and queues
+  are not loaded.
 
 ## Mixing Veryl and SystemVerilog {#mixed-language}
 

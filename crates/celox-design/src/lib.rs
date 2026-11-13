@@ -434,6 +434,15 @@ pub struct MemoryFileLoad {
     pub addressing: MemoryFileAddressing,
     /// The call, for the messages of the load.
     pub location: Option<ReportLocation>,
+    /// For an associative array whose index is of an enumerated type, the
+    /// bit patterns of its members: the only addresses the file may give
+    /// (IEEE 1800-2023 6.19, 21.4.1).
+    #[serde(default)]
+    pub index_members: Option<Vec<u128>>,
+    /// For an associative array whose element is of an enumerated type, the
+    /// bit patterns of its members: the only words the file may give.
+    #[serde(default)]
+    pub word_members: Option<Vec<u128>>,
 }
 
 impl MemoryFileLoad {
@@ -455,6 +464,8 @@ impl MemoryFileLoad {
                 )
             }
             MemoryFileAddressing::Offset { start, depth } => (start, depth.checked_sub(1)?),
+            // An associative array is written by stores of its elements.
+            MemoryFileAddressing::Associative { .. } => return None,
         };
         if width == 0 || first > last {
             return None;
@@ -507,6 +518,17 @@ pub enum MemoryFileAddressing {
     /// The words from position `start` of a `depth`-word array; an address
     /// in the file counts from `start` (Veryl).
     Offset { start: usize, depth: usize },
+    /// The elements of an associative array whose index has `address_bits`
+    /// bits, signed when `signed` (IEEE 1800-2023 21.4.1): an address of
+    /// the file is an index. Loading starts at `start`, or at address 0,
+    /// and ends at `finish`, or at the end of the index type; the run-time
+    /// addresses of the call replace those given.
+    Associative {
+        address_bits: u32,
+        signed: bool,
+        start: Option<i128>,
+        finish: Option<i128>,
+    },
 }
 
 impl InitialStateData {

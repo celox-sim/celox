@@ -465,7 +465,7 @@ impl Ff<'_, '_> {
                 callee: sv::ir::Callee::String(op),
                 args,
                 ..
-            } => self.string_call(*op, args)?,
+            } => self.string_call(op.clone(), args)?,
             Expr::Call {
                 callee: sv::ir::Callee::Object(op),
                 args,

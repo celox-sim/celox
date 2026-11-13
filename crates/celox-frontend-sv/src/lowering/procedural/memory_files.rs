@@ -18,17 +18,7 @@ impl ProcModule<'_> {
         site: Option<&sv::ir::SourceSpan>,
     ) -> Result<(SourceVarId, celox_design::MemoryFileLoad), sv::AnalyzerError> {
         let name = sv::ir::SystemTask::Readmem(format).name();
-        let filename = match args.first() {
-            Some(sv::ir::SystemTaskArg::Str(filename)) => String::from_utf8(unescape(filename)?)
-                .map_err(|_| unsupported(format!("`{name}` with a file name that is not UTF-8")))?,
-            Some(sv::ir::SystemTaskArg::Expr(sv::ir::Expr::Literal(value)))
-                if let Some(filename) = literal_characters(value) =>
-            {
-                filename
-            }
-            // A name the task evaluates when it executes.
-            _ => String::new(),
-        };
+        let filename = memory_file_name(name, args)?;
         // Veryl also emits a constant element select, which loads from that
         // element on.
         let (destination, select_lsb) = match args.get(1) {
@@ -96,8 +86,64 @@ impl ProcModule<'_> {
                 finish: finish.unwrap_or(high),
             },
             location: report_location(site),
+            index_members: None,
+            word_members: None,
         };
         Ok((id, load))
+    }
+
+    /// The load of `$readmemh`/`$readmemb` into an associative array whose
+    /// elements `layout` describes (IEEE 1800-2023 21.4.1): each address of
+    /// the file is the index of the element its word creates or replaces.
+    /// The start and finish addresses the call gives are those of the run.
+    pub fn readmem_associative_load(
+        &self,
+        format: sv::ir::MemoryFormat,
+        args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+        layout: sv::ir::ContainerLayout,
+        site: Option<&sv::ir::SourceSpan>,
+    ) -> Result<celox_design::MemoryFileLoad, sv::AnalyzerError> {
+        let name = sv::ir::SystemTask::Readmem(format).name();
+        let sv::ir::ContainerKind::Associative {
+            key_width,
+            signed,
+            string: false,
+            object: false,
+            ..
+        } = layout.kind
+        else {
+            return Err(unsupported(format!(
+                "`{name}` destination that is not an array"
+            )));
+        };
+        // A word's position, which the reader gives in 64 bits, is the
+        // index's bit pattern.
+        if key_width > 64 {
+            return Err(unsupported(format!(
+                "`{name}` into an associative array whose index is wider than 64 bits"
+            )));
+        }
+        let given = |index: usize| {
+            matches!(args.get(index), Some(sv::ir::SystemTaskArg::Expr(_))).then_some(0)
+        };
+        Ok(celox_design::MemoryFileLoad {
+            radix: format.base(),
+            file: memory_file_name(name, args)?,
+            base: None,
+            base_key: None,
+            element_width: layout.width as usize,
+            addressing: celox_design::MemoryFileAddressing::Associative {
+                address_bits: key_width,
+                signed,
+                start: given(2),
+                finish: given(3),
+            },
+            location: report_location(site),
+            index_members: layout
+                .key_enum_values
+                .map(|values| values.values().to_vec()),
+            word_members: layout.enum_values.map(|values| values.values().to_vec()),
+        })
     }
 
     pub fn file_memory_shape(
@@ -136,6 +182,56 @@ pub(in crate::lowering) fn range_addresses(
             let last = depth as i128 - 1;
             (0, last, start as i128, last)
         }
+        // An associative array has no bounds; its addresses are indices.
+        celox_design::MemoryFileAddressing::Associative { start, finish, .. } => {
+            let (start, finish) = (start.unwrap_or(0), finish.unwrap_or(0));
+            (start, finish, start, finish)
+        }
+    }
+}
+
+/// The file name of a `$readmemh`/`$readmemb` call when it is a constant
+/// string, or the empty string for a name the task evaluates when it
+/// executes.
+fn memory_file_name(
+    name: &str,
+    args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+) -> Result<String, sv::AnalyzerError> {
+    Ok(match args.first() {
+        Some(sv::ir::SystemTaskArg::Str(filename)) => String::from_utf8(unescape(filename)?)
+            .map_err(|_| unsupported(format!("`{name}` with a file name that is not UTF-8")))?,
+        Some(sv::ir::SystemTaskArg::Expr(sv::ir::Expr::Literal(value)))
+            if let Some(filename) = literal_characters(value) =>
+        {
+            filename
+        }
+        _ => String::new(),
+    })
+}
+
+/// The associative array store that the analyzer gives as the destination
+/// of a `$readmemh`/`$readmemb` call (see `containers::memory_load` there):
+/// its container argument and its layout.
+pub(in crate::lowering) fn associative_load(
+    args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+) -> Option<(&sv::ir::Expr, sv::ir::ContainerLayout)> {
+    let Some(sv::ir::SystemTaskArg::Expr(sv::ir::Expr::Call { callee, args, .. })) = args.get(1)
+    else {
+        return None;
+    };
+    let sv::ir::Callee::Object(op) = callee else {
+        return None;
+    };
+    let sv::ir::ObjectOp::Container {
+        op: sv::ir::ContainerOp::Set,
+        layout,
+    } = **op
+    else {
+        return None;
+    };
+    match args.as_slice() {
+        [Some(container)] => Some((container, layout)),
+        _ => None,
     }
 }
 

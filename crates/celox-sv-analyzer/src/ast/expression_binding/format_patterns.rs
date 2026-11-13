@@ -792,7 +792,10 @@ pub(in crate::ast) fn pattern_argument(
             ),
         ),
         Pattern::Enum(domain) => (b"%s", enums::pattern_text(&domain, value)),
-        Pattern::Handle(layout) => (b"%s", strings::call(StringOp::Pattern(layout), vec![value])),
+        Pattern::Handle(layout) => (
+            b"%s",
+            strings::call(StringOp::Pattern(layout.map(Box::new)), vec![value]),
+        ),
     }
 }
 

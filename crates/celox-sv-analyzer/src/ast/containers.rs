@@ -16,6 +16,7 @@ pub(super) fn with_dimensions(
         return Ok(base);
     };
     let mut index_type = None;
+    let mut key_enum_values = None;
     let kind = match first.kind {
         DimensionKind::Unsized => Some(ContainerKind::Dynamic),
         DimensionKind::Queue(bound) => {
@@ -61,6 +62,20 @@ pub(super) fn with_dimensions(
                     let shape =
                         casts::expr_type_from_type(&tree.functions, &ty, &context.const_env)
                             .ok_or_else(|| unsupported("associative index type"))?;
+                    // A member is compared with an index at the index's
+                    // width: a negative member of a signed type is not
+                    // extended past it.
+                    if ty.is_enum && !ty.packed_enum {
+                        key_enum_values = ty.enum_domain.as_ref().map(|domain| {
+                            crate::system_functions::intern_enum_values(
+                                domain
+                                    .values()
+                                    .iter()
+                                    .map(|value| value.bits() & width_mask(shape.width))
+                                    .collect(),
+                            )
+                        });
+                    }
                     // A process handle is an identity that the simulation
                     // keeps until it ends, so it serves as an integral key
                     // whose entry outlives the process (IEEE 1800-2023 7.8.5,
@@ -183,6 +198,20 @@ pub(super) fn with_dimensions(
             TypeKind::Bit | TypeKind::Chandle | TypeKind::Process | TypeKind::Event
         ) || handle.is_some(),
         handle,
+        key_enum_values,
+        enum_values: if base.is_enum && !base.packed_enum {
+            base.enum_domain.as_ref().map(|domain| {
+                crate::system_functions::intern_enum_values(
+                    domain
+                        .values()
+                        .iter()
+                        .map(|value| value.bits() & width_mask(shape.width))
+                        .collect(),
+                )
+            })
+        } else {
+            None
+        },
     };
     Ok(of(ContainerType {
         key: index_type,
@@ -190,6 +219,15 @@ pub(super) fn with_dimensions(
         element: base,
         record,
     }))
+}
+
+/// The bits of a value of `width` bits.
+fn width_mask(width: usize) -> u128 {
+    if width >= 128 {
+        u128::MAX
+    } else {
+        (1u128 << width) - 1
+    }
 }
 
 /// The type of a container of type `container`: a heap handle.
@@ -375,6 +413,75 @@ pub(super) fn conditional(
 
 pub(super) fn call(op: ContainerOp, layout: ContainerLayout, args: Vec<Expr>) -> Expr {
     classes::object_call(ObjectOp::Container { op, layout }, args)
+}
+
+/// The destination of `$readmemh` or `$readmemb` when native expression
+/// `id` is a container: the store of an element of the associative array,
+/// to which each word the file loads adds its index and its value (IEEE
+/// 1800-2023 21.4.1). The indices are of an integral type; a word is a
+/// packed value, here one that an element holds without a record.
+pub(super) fn memory_load(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<Expr>> {
+    let native = tree.declarations();
+    let Some(target) = native_type(id, native, tree, session, dims)? else {
+        return Ok(None);
+    };
+    if !matches!(
+        target.layout.kind,
+        ContainerKind::Associative {
+            string: false,
+            object: false,
+            ..
+        }
+    ) {
+        return Err(unsupported(
+            "memory load into a dynamic array, a queue or an associative array without integral indices",
+        ));
+    }
+    // A file address names an integral index (21.4.1): not a process or a
+    // chandle, which are identities (7.8.5, 9.7, 6.14). The memory-file
+    // reader gives addresses in 64 bits.
+    let integral = |r#type: &Type| {
+        matches!(
+            r#type.kind(),
+            TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+        ) && r#type.container.is_none()
+            && r#type.unpacked_ranges.is_empty()
+    };
+    if let Some(key) = &target.key
+        && (!integral(key)
+            || casts::expr_type_from_type(&tree.functions, key, &dims.const_env)
+                .is_none_or(|key| key.width > 64))
+    {
+        return Err(unsupported(
+            "memory load into an associative array whose index type is not integral of at most 64 bits",
+        ));
+    }
+    // A word is a packed value: not a process, an event or a chandle.
+    if target.record.is_some() || target.layout.handle.is_some() || !integral(&target.element) {
+        return Err(unsupported(
+            "memory load into an associative array whose elements are not integral values of at most 64 bits",
+        ));
+    }
+    // The file loads the array the argument names, not a copy that a call
+    // or an operator gives (21.4).
+    let ungrouped = expression_binding::ungroup(id, native);
+    if !matches!(
+        native.expression(ungrouped).kind,
+        ExprKind::Name(_) | ExprKind::Member { .. } | ExprKind::Select { .. }
+    ) || matches!(native.expression(ungrouped).kind, ExprKind::Member { .. })
+        && returned_container(ungrouped, false, native, tree, session, dims).is_some()
+    {
+        return Err(unsupported(
+            "memory load into an associative array that is not a variable",
+        ));
+    }
+    let container = expression_binding::value(id, native, tree, session, dims)?;
+    Ok(Some(call(ContainerOp::Set, target.layout, vec![container])))
 }
 
 /// `new[size]` or `new[size](init)`, which only an assignment or a

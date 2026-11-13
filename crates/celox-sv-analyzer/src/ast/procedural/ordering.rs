@@ -103,6 +103,8 @@ impl BodyBuilder<'_, '_, '_> {
             // (11.4.4).
             two_state: key_type.kind() == TypeKind::String,
             handle: (key_type.kind() == TypeKind::String).then_some(HandleProperty::String),
+            enum_values: None,
+            key_enum_values: None,
         };
         // A container is held by its handle (see `containers::with_dimensions`).
         let mut keys_type = Type::new(TypeKind::Object);

@@ -862,7 +862,7 @@ impl fmt::Display for SystemTask {
 /// The analyzer rewrites string operators, methods and conversions into
 /// calls of these, so the frontend dispatches on them instead of on the
 /// integral operators that a string handle would otherwise reach.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StringOp {
     /// A string holding the bytes of an integral operand, most significant
     /// first, without NUL bytes: a cast to `string` (6.24.1), or a string
@@ -903,7 +903,7 @@ pub enum StringOp {
     Format { ticks_per_unit: u64 },
     /// The text `%p` prints for a class handle, or with a layout for a
     /// container (21.2.1.6).
-    Pattern(Option<ContainerLayout>),
+    Pattern(Option<Box<ContainerLayout>>),
     /// Interpret the bits of a selected fixed string-array element as its
     /// existing heap handle, without converting or allocating string bytes.
     FromHandle,
@@ -911,7 +911,7 @@ pub enum StringOp {
 
 impl StringOp {
     /// Whether the result is a string rather than an integral value.
-    pub fn returns_string(self) -> bool {
+    pub fn returns_string(&self) -> bool {
         matches!(
             self,
             Self::FromBits
@@ -931,7 +931,7 @@ impl StringOp {
 
     /// The width and signedness of the result; a string is a 32-bit handle.
     /// A character is a `byte`, which is signed (6.16, 6.11).
-    pub fn result_type(self) -> (usize, bool) {
+    pub fn result_type(&self) -> (usize, bool) {
         match self {
             Self::Compare | Self::ICompare | Self::Len | Self::Atoi(_) => (32, true),
             Self::Getc => (8, true),
@@ -969,7 +969,7 @@ impl StringOp {
 
     /// Whether the method updates the string it is called on instead of
     /// returning a value (`putc` and the `itoa` family).
-    pub fn updates_receiver(self) -> bool {
+    pub fn updates_receiver(&self) -> bool {
         matches!(self, Self::Putc | Self::Itoa(_) | Self::Realtoa)
     }
 }
@@ -1090,6 +1090,43 @@ pub struct ContainerLayout {
     pub signed: bool,
     pub two_state: bool,
     pub handle: Option<HandleProperty>,
+    /// The bit patterns an element of enumerated type may hold (6.19),
+    /// when the element is of one.
+    pub enum_values: Option<EnumValues>,
+    /// The bit patterns an index of enumerated type may hold (6.19),
+    /// when the index is of one.
+    pub key_enum_values: Option<EnumValues>,
+}
+
+/// A set of enum element values, interned so that a layout stays `Copy`:
+/// the values themselves are held once per distinct set. The index is
+/// one-based, so an `Option` of one adds no size to its layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EnumValues(std::num::NonZeroU32);
+
+static ENUM_VALUES: std::sync::Mutex<Vec<std::sync::Arc<[u128]>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Intern `values` as an [`EnumValues`] set.
+pub fn intern_enum_values(values: Vec<u128>) -> EnumValues {
+    let mut sets = ENUM_VALUES.lock().unwrap();
+    let index = if let Some(index) = sets
+        .iter()
+        .position(|set| set.as_ref() == values.as_slice())
+    {
+        index
+    } else {
+        sets.push(values.into());
+        sets.len() - 1
+    };
+    EnumValues(std::num::NonZeroU32::new(index as u32 + 1).unwrap())
+}
+
+impl EnumValues {
+    /// The values of the set.
+    pub fn values(self) -> std::sync::Arc<[u128]> {
+        ENUM_VALUES.lock().unwrap()[(self.0.get() - 1) as usize].clone()
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContainerKind {
