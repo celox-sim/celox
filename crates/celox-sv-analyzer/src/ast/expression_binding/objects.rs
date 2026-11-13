@@ -1723,33 +1723,6 @@ pub(super) fn randomize_with(
         .collect::<Converted<Vec<_>>>();
     session.constraint_scopes.pop();
     let constraints = constraints?;
-    // An inline loop cannot be disabled (18.9), so one over an array the call
-    // selects, which is random for the call (18.11), would always constrain
-    // its elements; a loop of a class block is checked when the call runs,
-    // with its constraint mode.
-    let mut looped = Vec::new();
-    for constraint in &constraints {
-        classes::constraints::looped_arrays(constraint, &mut looped);
-    }
-    for argument in arguments {
-        if let Some(id) = argument.value
-            && let ExprKind::Name(name) = &native.expression(ungroup(id, native)).kind
-            && let Some(index) = class.properties.iter().rposition(|property| {
-                property.name == instances::normalize_identifier(&name.spelling)
-            })
-            && class.properties[index].sequence()
-            && looped.contains(
-                &class.properties[..index]
-                    .iter()
-                    .filter(|property| property.sequence())
-                    .count(),
-            )
-        {
-            return Err(unsupported(
-                "an inline constraint foreach over an array the call randomizes",
-            ));
-        }
-    }
     let selection = random_selection(
         tree,
         session,

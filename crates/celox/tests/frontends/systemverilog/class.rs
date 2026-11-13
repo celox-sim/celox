@@ -892,13 +892,6 @@ fn constraints_on_handle_and_string_properties_are_rejected() {
             "c.randomize()",
             "a randc dynamic array or queue",
         ),
-        // A loop over a rand array would constrain its elements, which the
-        // solver does not take yet.
-        (
-            "class C; rand int x; rand int a[]; constraint k { foreach (a[i]) x != a[i]; } endclass",
-            "c.randomize()",
-            "constraint foreach over a rand array",
-        ),
         (
             "class C; rand int x; int a[]; constraint k { foreach (a[i]) x != a[i + 1]; } endclass",
             "c.randomize()",
@@ -965,13 +958,6 @@ fn constraints_on_handle_and_string_properties_are_rejected() {
              class C; rand int x; R rs[$]; constraint k { foreach (rs[i]) x < rs[i].t; } endclass",
             "c.randomize()",
             "a real in a constraint",
-        ),
-        // An inline loop cannot be disabled: one over an array the call
-        // selects would constrain its elements.
-        (
-            "class C; rand int x; int a[]; endclass",
-            "c.randomize(a) with { foreach (a[i]) x != a[i]; }",
-            "an inline constraint foreach over an array the call randomizes",
         ),
         // The size and indices of an associative array are not random (18.4).
         (
@@ -1437,13 +1423,12 @@ endmodule
 }
 
 /// A call whose random set includes the array of an enabled constraint loop
-/// (IEEE 1800-2023 18.11), as `randomize(a)` directly or through a base
-/// handle to a derived class with the loop, would constrain its elements,
-/// which the solver does not take: the call faults. With the block disabled
-/// (18.9), the loop takes no part and the call randomizes the array.
+/// (IEEE 1800-2023 18.11), as `randomize(a)` directly, through a base
+/// handle to a derived class with the loop, or with an inline loop, solves
+/// the elements of the array with the loop (18.5.8.1).
 #[test]
-fn constraint_loops_over_selected_arrays_fault() {
-    let base = r#"module Top(output int done);
+fn constraint_loops_over_selected_arrays_solve_their_elements() {
+    let source = r#"module Top(output int ok);
     class B;
         rand bit [3:0] x;
         bit [3:0] a[];
@@ -1455,41 +1440,85 @@ fn constraint_loops_over_selected_arrays_fault() {
     C c;
     initial begin
         c = new;
-        c.a = new[2];
-        void'(c.randomize());
-        CALL;
-        done = 1;
+        c.a = new[4];
+        c.x = 5;
+        ok = 1;
+        repeat (8) begin
+            ok &= c.randomize(a) && c.x == 5 && c.a.size() == 4;
+            foreach (c.a[i]) ok &= c.a[i] != 5;
+            b = c;
+            ok &= b.randomize(a);
+            foreach (c.a[i]) ok &= c.a[i] != 5;
+            ok &= c.randomize(a) with { foreach (a[i]) a[i] < 3; };
+            foreach (c.a[i]) ok &= c.a[i] < 3;
+        end
     end
 endmodule
 "#;
-    for call in [
-        "void'(c.randomize(a))",
-        "begin b = c; void'(b.randomize(a)); end",
-    ] {
-        let source = base.replace("CALL", call);
-        let mut sim = celox::Simulation::from_sv_sources(
-            vec![(source.as_str(), Path::new("select.sv"))],
-            "Top",
-        )
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("select.sv"))], "Top")
         .build()
         .unwrap();
-        let error = sim.run_until(0).unwrap_err().to_string();
-        assert!(
-            error.contains("a constraint loop over an array the call randomizes"),
-            "{call}: {error}"
-        );
-    }
-    let source = base.replace(
-        "CALL",
-        "begin c.k.constraint_mode(0); void'(c.randomize(a)); end",
-    );
-    let mut sim =
-        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("select.sv"))], "Top")
-            .build()
-            .unwrap();
-    let done = sim.signal("done");
     sim.run_until(0).unwrap();
-    assert_eq!(sim.get(done), BigUint::from(1u8));
+    assert_eq!(sim.get(sim.signal("ok")), BigUint::from(1u8));
+}
+
+#[test]
+fn rand_arrays_have_their_elements_constrained() {
+    // The elements of a rand array, fixed-size or dynamic, are solver
+    // variables of loops and sums over it (IEEE 1800-2023 18.4, 18.5.8.1,
+    // 18.5.8.2); a state array's sum is its elements' sum.
+    let source = r#"module Top(output int ok, output int fixed_sum, output int state_sum);
+    class C;
+        rand int f[5];
+        rand int s[4];
+        rand bit [7:0] d[];
+        int w[3] = '{1, 2, 3};
+        rand int t;
+        constraint cf { foreach (f[i]) f[i] == 5; }
+        constraint cs { s.sum() == 5; foreach (s[i]) s[i] inside {[0:5]}; }
+        constraint cd { foreach (d[i]) d[i] == i + 1; }
+        constraint ct { t == w.sum(); }
+    endclass
+    C c;
+    initial begin
+        c = new;
+        c.d = new[4];
+        ok = 1;
+        repeat (8) begin
+            ok &= c.randomize();
+            ok &= c.s.sum() == 5 && c.d.size() == 4 && c.t == 6;
+            foreach (c.d[i]) ok &= c.d[i] == i + 1;
+        end
+        fixed_sum = c.f.sum();
+        state_sum = c.w.sum();
+    end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("arrays.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("ok")), BigUint::from(1u8));
+    assert_eq!(sim.get(sim.signal("fixed_sum")), BigUint::from(25u8));
+    assert_eq!(sim.get(sim.signal("state_sum")), BigUint::from(6u8));
+    // A loop over a rand array whose size a constraint names would need
+    // its elements before its size: the call faults.
+    let source = r#"module Top;
+    class C; rand int a[]; constraint k { a.size() == 2; foreach (a[i]) a[i] == 1; } endclass
+    C c;
+    initial begin c = new; void'(c.randomize()); end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("sized.sv"))], "Top")
+        .build()
+        .unwrap();
+    let error = sim.run_until(0).unwrap_err().to_string();
+    assert!(
+        error.contains(
+            "a constraint on the elements of a random array whose size a constraint names"
+        ),
+        "{error}"
+    );
 }
 
 #[test]
