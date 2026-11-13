@@ -786,9 +786,11 @@ impl ProcModule<'_> {
                     }
                     sv::ir::Callee::Object(op) => match &*op {
                         // Construction seeds the object from the process
-                        // RNG (IEEE 1800-2023 18.14.3), and `shuffle` draws
-                        // on it.
+                        // RNG (IEEE 1800-2023 18.14.3), as scope
+                        // randomization does the object it solves in, and
+                        // `shuffle` draws on it.
                         sv::ir::ObjectOp::New { .. }
+                        | sv::ir::ObjectOp::ScopeRandomize(_)
                         | sv::ir::ObjectOp::Container {
                             op: sv::ir::ContainerOp::Shuffle,
                             ..

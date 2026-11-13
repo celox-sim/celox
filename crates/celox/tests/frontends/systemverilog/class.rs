@@ -5828,3 +5828,34 @@ fn local_classes_see_the_constants_their_module_imports() {
     endmodule";
     assert_eq!(super::hierarchical_references::displayed(source), ["4095"]);
 }
+
+sv_backends! {
+    // A scope randomize call seeds the object it solves in from the process
+    // RNG (IEEE 1800-2023 18.14.3), whose state a checkpoint keeps, so a
+    // restored run draws what the original did.
+    fn scope_randomize_checkpoint_replays_the_process_stream(sim) {
+        @setup {
+            let source = r#"module Top(output int value);
+                timeunit 1ps / 1ps;
+                int x;
+                initial begin
+                    #10; void'(std::randomize(x) with { x > 0; }); value = x;
+                    #10; void'(std::randomize(x) with { x > 0; }); value = x;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("scope_randomize_checkpoint.sv"))], "Top");
+        sim.run_until(15).unwrap();
+        let value = sim.signal("value");
+        let first = sim.get(value);
+        let bytes = sim.checkpoint().unwrap().to_bytes().unwrap();
+        // SAFETY: bytes were serialized by this simulation.
+        let saved = unsafe { sim.checkpoint_from_bytes(&bytes) }.unwrap();
+        sim.run_until(25).unwrap();
+        let expected = sim.get(value);
+        assert_ne!(expected, first);
+        sim.restore(&saved).unwrap();
+        sim.run_until(25).unwrap();
+        assert_eq!(sim.get(value), expected);
+    }
+}

@@ -1327,6 +1327,11 @@ impl ContainerOp {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ObjectOp {
     Randomize(celox_heap::randomization::Program),
+    /// `std::randomize(v...) with { ... }` (IEEE 1800-2023 18.12.1): the
+    /// variables in the first arguments, one field of the program each at
+    /// its offset, solved in a new object and written back on success; the
+    /// values the constraints read follow.
+    ScopeRandomize(celox_heap::randomization::Program),
     /// Register the constraint program of class `0` for the objects of it
     /// that rand handles reach (IEEE 1800-2023 18.4).
     RegisterProgram(u32, celox_heap::randomization::Registered),
@@ -1546,6 +1551,7 @@ impl ObjectOp {
     /// Memory arguments changed by a container operation, including traversal's ref index.
     pub fn writes_argument(&self, position: usize) -> bool {
         match self {
+            Self::ScopeRandomize(program) => position < program.fields.len(),
             Self::Container { op, .. } if op.mutates() => position == 0,
             Self::Container {
                 op: ContainerOp::First | ContainerOp::Last | ContainerOp::Next | ContainerOp::Prev,
@@ -1579,7 +1585,8 @@ impl ObjectOp {
             | Self::ModePop
             | Self::ModeSelect(..)
             | Self::ModeSelected(_) => (32, false),
-            Self::ModeGet(..) | Self::ConstraintModeGet(_) => (32, true),
+            // `std::randomize` returns an `int` (IEEE 1800-2023 18.12).
+            Self::ScopeRandomize(_) | Self::ModeGet(..) | Self::ConstraintModeGet(_) => (32, true),
             Self::Load(field) => (field.width as usize, field.signed),
             Self::Unbox(record) => (record.width(), false),
             Self::Stream(op) => op.result_type(),
@@ -1610,6 +1617,7 @@ impl fmt::Display for ObjectOp {
             Self::ClassOf => "class query",
             Self::Random => "object random bits",
             Self::Randomize(_) => "constrained object randomization",
+            Self::ScopeRandomize(_) => "constrained scope randomization",
             Self::RegisterProgram(..) => "constraint program registration",
             Self::RegisterStaticBlocks(..) => "static constraint block registration",
             Self::ProgramRegistered(_) => "constraint program query",

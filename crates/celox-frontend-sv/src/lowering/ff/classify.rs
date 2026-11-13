@@ -222,13 +222,15 @@ impl Ff<'_, '_> {
                     if matches!(
                         *op,
                         sv::ir::ObjectOp::New { .. }
+                            | sv::ir::ObjectOp::ScopeRandomize(_)
                             | sv::ir::ObjectOp::Container {
                                 op: sv::ir::ContainerOp::Shuffle,
                                 ..
                             }
                     ) =>
                 {
-                    // Construction and shuffling consume the process RNG. Register it
+                    // Construction, shuffling and scope randomization, which
+                    // constructs its object, consume the process RNG. Register it
                     // before lower_process freezes the persistent target ranges.
                     self.urandom_state();
                     continue;
