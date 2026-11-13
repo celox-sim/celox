@@ -580,6 +580,21 @@ pub(super) fn of_type(
     }))
 }
 
+/// Whether declared shape `shape` is a virtual interface or a fixed-size
+/// array of them (25.9), as its type tells.
+pub(super) fn holds_virtual_interface(
+    shape: &VariableDimensions,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> bool {
+    shape
+        .type_id(&mut session.types, &tree.functions, &dims.const_env)
+        .is_some_and(|ty| {
+            of_type(&session.types, ty).is_some() || element_of_array(&session.types, ty).is_some()
+        })
+}
+
 /// The virtual interface type of the elements of `ty`, if it is a fixed-size
 /// unpacked array, of one or more dimensions, of virtual interfaces.
 pub(super) fn element_of_array(

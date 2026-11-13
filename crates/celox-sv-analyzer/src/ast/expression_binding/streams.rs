@@ -748,7 +748,7 @@ pub(in crate::ast) fn assign_to_fixed(
     let container = containers::native_type(id, native, tree, session, dims)?
         .ok_or_else(|| unsupported("assignment of an array that is not dynamically sized"))?;
     let value = bind_value(id, native, tree, session, dims, None)?;
-    fixed_from_container(value, &container, target, tree, dims)
+    fixed_from_container(value, &container, target, tree, session, dims)
 }
 
 /// The value of fixed-size unpacked array `target` assigned `value`, a
@@ -758,6 +758,7 @@ pub(in crate::ast) fn fixed_from_container(
     container: &ContainerType,
     target: &VariableDimensions,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Expr> {
     let elements = || {
@@ -767,7 +768,7 @@ pub(in crate::ast) fn fixed_from_container(
         || target.real
         || target.class.is_some()
         || target.unpacked_struct.is_some()
-        || target.virtual_interface.is_some()
+        || virtual_interfaces::holds_virtual_interface(target, tree, session, dims)
         || chandles::holds_chandle(target)
     {
         return element_reads(value, container, target, tree, dims)?.ok_or_else(elements);
