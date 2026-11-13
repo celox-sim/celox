@@ -4,7 +4,7 @@ use super::*;
 
 impl Type {
     pub(super) fn implicit() -> Self {
-        Self {
+        Self::from(TypeShape {
             is_enum: false,
             enum_domain: None,
             packed_enum: false,
@@ -19,11 +19,11 @@ impl Type {
             container: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
-        }
+        })
     }
 
     pub(super) fn new(kind: TypeKind) -> Self {
-        Self {
+        Self::from(TypeShape {
             kind,
             is_enum: false,
             enum_domain: None,
@@ -38,7 +38,7 @@ impl Type {
             container: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
-        }
+        })
     }
 
     /// Name an enumeration, struct or union type after typedef `name`,
@@ -149,7 +149,7 @@ impl Type {
         unpacked: &[(i128, i128)],
     ) -> Self {
         let literal = |value: i128| ConstExpr::Literal(value.to_string());
-        Self {
+        Self::from(TypeShape {
             is_signed,
             signed_element_depth,
             packed_ranges: packed
@@ -160,8 +160,8 @@ impl Type {
                 .iter()
                 .map(|&(left, right)| UnpackedRange::new(literal(left), literal(right)))
                 .collect(),
-            ..Self::new(kind)
-        }
+            ..(*Self::new(kind).shape).clone()
+        })
     }
 
     /// Whether the type is a `chandle`.

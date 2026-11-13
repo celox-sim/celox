@@ -217,8 +217,7 @@ impl Type {
                 None => None,
             };
         }
-        ty.members = ty
-            .members
+        ty.members = std::mem::take(&mut ty.members)
             .into_iter()
             .map(|member| {
                 let ty = member.r#type().pattern_target(constants)?;

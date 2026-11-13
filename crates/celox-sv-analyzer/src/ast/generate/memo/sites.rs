@@ -148,7 +148,7 @@ impl CallSites for InsideItem {
 
 impl CallSites for Type {
     fn call_sites(&self, visit: &mut dyn FnMut(usize)) {
-        let Type {
+        let TypeShape {
             is_enum: _,
             enum_domain: _,
             packed_enum: _,
@@ -163,7 +163,7 @@ impl CallSites for Type {
             container: _,
             unpacked_struct: _,
             spelling: _,
-        } = self;
+        } = &**self;
         packed_ranges.call_sites(visit);
         unpacked_ranges.call_sites(visit);
         members.call_sites(visit);

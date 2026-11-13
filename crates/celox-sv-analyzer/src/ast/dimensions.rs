@@ -413,7 +413,7 @@ fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, con
             continue;
         }
         let packed_ranges = ranges.split_off(unpacked);
-        let ty = Type {
+        let ty = Type::from(TypeShape {
             container: None,
             is_enum: false,
             enum_domain: None,
@@ -431,7 +431,7 @@ fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, con
             virtual_interface: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
-        };
+        });
         let mut shape = procedural::dimensions_from_type(&ty);
         // The markers keep the shape, not the declared type.
         shape.declared = type_names::Declared::default();
