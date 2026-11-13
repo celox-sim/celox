@@ -88,7 +88,7 @@ pub struct CombAlternative {
     pub candidates: Vec<SourceVarId>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct SimModule {
     /// A frontend's global tick precision; absent for scale-free frontends.
     pub time_precision: Option<celox_design::TimePrecision>,
