@@ -1514,7 +1514,7 @@ pub(in crate::ast) fn bind_argument(
     check_argument(
         name, position, position, actual, native, tree, dimensions, session,
     )?;
-    let target = copied_in_target(dimensions, name, position);
+    let target = copied_in_target(tree, session, dimensions, name, position);
     bind_value_in(actual, native, tree, dimensions, target, false, session)
 }
 
@@ -1523,6 +1523,8 @@ pub(in crate::ast) fn bind_argument(
 /// only a virtual interface of its type (25.9) and a container input a
 /// container of an equivalent element type (7.6).
 pub(in crate::ast) fn copied_in_target<'a>(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &'a PackedDimensions,
     name: &str,
     position: usize,
@@ -1533,7 +1535,10 @@ pub(in crate::ast) fn copied_in_target<'a>(
         .and_then(|shapes| shapes.get(position))
         .filter(|shape| {
             chandles::receives_chandle(shape)
-                || (shape.virtual_interface.is_some() || shape.container.is_some())
+                || (shape.container.is_some()
+                    || virtual_interfaces::holds_virtual_interface(
+                        shape, tree, session, dimensions,
+                    ))
                     && copied_in(dimensions, name, position)
         })
 }
