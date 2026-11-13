@@ -434,6 +434,92 @@ module top;
   end
 endmodule"#;
 
+/// Forces in tasks: a task called in a forked process forces through a
+/// hierarchical name to its argument, which is read when the force
+/// executes, while the caller goes on; a task without delays forces to a
+/// varying expression, and another task releases it; a force in a forked
+/// branch. The lines are those of Verilator 5.054, as Icarus Verilog 13.0
+/// evaluates the forced expression only once (line W).
+const TASKS: &str = r#"`timescale 1ns/1ns
+module dut(input logic [7:0] addr_i, output logic [7:0] o);
+  assign o = addr_i;
+endmodule
+module top;
+  logic [7:0] a = 8'h11, b = 8'h20;
+  logic [7:0] x;
+  wire [7:0] o;
+  dut d(.addr_i(a), .o(o));
+  task drive(input logic [7:0] address);
+    force d.addr_i = address;
+    #2 release d.addr_i;
+  endtask
+  task follow;
+    force x = b + 8'h1;
+  endtask
+  task stop;
+    release x;
+  endtask
+  initial begin
+    fork drive(8'h5a); join_none
+    #1 $display("T %h", o);
+    #2 $display("U %h", o);
+    follow;
+    #1 $display("V %h", x);
+    b = 8'h30;
+    #1 $display("W %h", x);
+    stop;
+    b = 8'h40;
+    #1 $display("X %h", x);
+    fork
+      begin force a = 8'h33; #1 $display("Y %h", o); release a; end
+    join
+    #1 $display("Z %h", o);
+    a = 8'h44;
+    #1 $display("Q %h", o);
+    $finish;
+  end
+endmodule"#;
+
+/// Forces to random values with constant arguments, drawn when the force
+/// executes, and again when a variable of the expression changes. The
+/// lines are those of Verilator 5.054 (Icarus Verilog evaluates the
+/// expression only once, line S).
+const RANDOM_VALUES: &str = r#"`timescale 1ns/1ns
+module top;
+  logic [31:0] x, y, z;
+  logic [7:0] c = 8'h12;
+  initial begin
+    force x = $urandom();
+    force y = {16'h0, 16'($urandom_range(5, 9))};
+    force z = {24'h0, c} + $urandom_range(0, 0);
+    #1 $display("R %b %b %h", x != 0, y >= 5 && y <= 9, z);
+    c = 8'h34;
+    #1 $display("S %h", z);
+    $finish;
+  end
+endmodule"#;
+
+/// Forces of members of an interface instance, a variable and one a
+/// continuous assignment drives, which drives it again after the release.
+const INTERFACE_MEMBERS: &str = r#"`timescale 1ns/1ns
+interface bus_if;
+  logic ready;
+  logic [3:0] data;
+endinterface
+module top;
+  bus_if b();
+  logic clk = 0;
+  assign b.ready = clk;
+  initial begin
+    b.data = 4'd1;
+    #1 force b.ready = 1'b1; force b.data = 4'd7;
+    #1 $display("A %b %0d", b.ready, b.data);
+    release b.ready; release b.data;
+    #1 $display("B %b %0d", b.ready, b.data);
+    $finish;
+  end
+endmodule"#;
+
 /// Forces through hierarchical names of a flip-flop of a child, of a part
 /// of a variable an `always_comb` of another child assigns, held after the
 /// release, and of a varying expression. The lines are those of Icarus
@@ -592,6 +678,42 @@ sv_backends! {
         @build simulation(PACKED_ELEMENTS, true);
         sim.run_until(100).unwrap();
         assert_eq!(display_lines(&mut sim), ["A a4 0100", "B af 0100", "C 00 0000"]);
+    }
+    fn forces_in_tasks(sim) {
+        @setup {}
+        @build simulation(TASKS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["T 5a", "U 11", "V 21", "W 31", "X 31", "Y 33", "Z 33", "Q 44"]);
+    }
+    fn forces_in_tasks_four_state(sim) {
+        @setup {}
+        @build simulation(TASKS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["T 5a", "U 11", "V 21", "W 31", "X 31", "Y 33", "Z 33", "Q 44"]);
+    }
+    fn forces_to_random_values(sim) {
+        @setup {}
+        @build simulation(RANDOM_VALUES, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["R 1 1 00000012", "S 00000034"]);
+    }
+    fn forces_to_random_values_four_state(sim) {
+        @setup {}
+        @build simulation(RANDOM_VALUES, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["R 1 1 00000012", "S 00000034"]);
+    }
+    fn forces_of_interface_members(sim) {
+        @setup {}
+        @build simulation(INTERFACE_MEMBERS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 7", "B 0 7"]);
+    }
+    fn forces_of_interface_members_four_state(sim) {
+        @setup {}
+        @build simulation(INTERFACE_MEMBERS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 7", "B 0 7"]);
     }
     fn forces_through_hierarchical_names(sim) {
         @setup {}
@@ -765,12 +887,20 @@ fn rejected_forces_name_their_reason() {
             "intra-assignment delay",
         ),
         (
-            "logic v; task t; force v = 1'b1; endtask initial t;",
-            "force or release in a subroutine",
+            "logic v; function void f; force v = 1'b1; endfunction initial f;",
+            "force or release in a function",
         ),
         (
             "logic v, c; always_ff @(posedge c) force v = 1'b1;",
-            "force or release in a subroutine",
+            "force or release in a function",
+        ),
+        (
+            "logic v; task automatic t(logic x); force v = x; endtask initial t(1'b1);",
+            "reads a variable of a procedural block or of an automatic task",
+        ),
+        (
+            "logic [7:0] v, a; initial force v = a + $urandom_range(a, 2);",
+            "force of an expression that calls",
         ),
         (
             "real r; initial force r = 1.0;",
@@ -783,7 +913,7 @@ fn rejected_forces_name_their_reason() {
         ),
         (
             "logic v; initial begin logic l; force v = l; end",
-            "reads a variable of a procedural block",
+            "reads a variable of a procedural block or of an automatic task",
         ),
         (
             "logic v; initial force v = 1'b1, v = 1'b0;",

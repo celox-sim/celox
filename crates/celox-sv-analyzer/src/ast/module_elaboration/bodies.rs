@@ -122,6 +122,7 @@ impl ScopeElaboration<'_> {
             &self.comb_processes,
             &self.ff_processes,
             &mut self.initial_processes,
+            &mut self.subroutines,
             &self.imported.external_forces.clone(),
         )?;
         procedural_assigns::lower(

@@ -171,9 +171,10 @@ blocks in programs. Two region deviations are listed under
 
 - The `disable` statement, except `disable fork`.
 - Procedural `force` / `release` (IEEE 1800-2023 10.6.2) outside `initial`
-  and `always` procedures: in a subroutine, a `final` procedure, or an
-  `always_comb`, `always_latch` or `always_ff` procedure. An `always`
-  procedure with one runs as a process. The target is a packed integral
+  and `always` procedures and tasks: in a function, a `final` procedure, or
+  an `always_comb`, `always_latch` or `always_ff` procedure. An `always`
+  procedure with one runs as a process, and a force in a task executes in
+  the process that calls it. The target is a packed integral
   variable or net of the module or, through a hierarchical name, of another
   instance, or a constant bit-select, part-select or member of one: as an
   extension, a constant select or a member of a variable is a target too,
@@ -189,8 +190,12 @@ blocks in programs. Two region deviations are listed under
   an intra-assignment delay writes are rejected, as are overlapping parts
   of one target when a force of one of them has an expression that reads a
   variable. So are an expression with side effects or with a call of a
-  subroutine or a system function, and one that reads a variable of a
-  procedural block. A target that the host also forces
+  subroutine or a system function other than `$urandom` and
+  `$urandom_range` with constant arguments, which draw a value when the
+  force executes and again when a variable of the expression changes, and
+  one that reads a variable of a procedural block or of an automatic task.
+  A static variable of a task, such as its argument, is read when the force
+  executes. A target that the host also forces
   (`Simulator::force`) is rejected.
 - Procedural continuous assignments (`assign` / `deassign`, IEEE 1800-2023
   10.6.1) outside `initial` and `always` procedures: in a subroutine, a

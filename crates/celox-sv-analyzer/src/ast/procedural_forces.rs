@@ -124,8 +124,8 @@ struct Driver {
     lhs: LValue,
     number: usize,
     rhs: Expr,
-    /// The process the statement is in.
-    process: usize,
+    /// The process the statement is in, none for a task.
+    process: Option<usize>,
 }
 
 fn literal(value: &str) -> Expr {
@@ -160,17 +160,47 @@ fn any_change(expr: Expr) -> EventItemBase<Expr> {
     }
 }
 
-/// Whether the value of `expr` can change: it reads a variable.
-fn varies(expr: &Expr) -> bool {
-    let mut varies = false;
-    procedural_assigns::reads(expr, &mut |_| varies = true);
-    varies
+/// The events on which a driver evaluates `expr` again: a change of its
+/// value, or, for an expression that draws a random number, which no event
+/// expression may call, a change of each variable it reads.
+fn operand_changes(expr: Expr) -> Vec<EventItemBase<Expr>> {
+    let mut calls = false;
+    lifetimes::visit_calls(&expr, &mut |_, _| calls = true);
+    if !calls {
+        return vec![any_change(expr)];
+    }
+    let mut names: Vec<String> = Vec::new();
+    procedural_assigns::reads(&expr, &mut |name| {
+        if !names.iter().any(|known| known == name) {
+            names.push(name.to_string());
+        }
+    });
+    names
+        .into_iter()
+        .map(|name| any_change(Expr::Ident(name)))
+        .collect()
+}
+
+/// Whether a driver keeps the forced value on `expr`: it reads variables,
+/// all of the module (`module`). An expression that reads a static
+/// variable of a task, such as its argument, is evaluated when the force
+/// executes, as the variable is the task's.
+fn varies(expr: &Expr, module: &HashSet<String>) -> bool {
+    let mut reads = false;
+    let mut outside = false;
+    procedural_assigns::reads(expr, &mut |name| {
+        reads = true;
+        outside |= !module.contains(name);
+    });
+    reads && !outside
 }
 
 struct Lowering<'a> {
     controls: &'a mut HashMap<String, Controls>,
     drivers: Vec<Driver>,
-    process: usize,
+    process: Option<usize>,
+    /// The variables and nets of the module (see [`varies`]).
+    module: &'a HashSet<String>,
 }
 
 impl Lowering<'_> {
@@ -190,7 +220,7 @@ impl Lowering<'_> {
                         .iter_mut()
                         .find(|(selected, _, _)| *selected == bits)
                     {
-                        let number = if varies(&rhs) {
+                        let number = if varies(&rhs, self.module) {
                             *count += 1;
                             self.drivers.push(Driver {
                                 target: target.clone(),
@@ -539,8 +569,14 @@ pub(super) fn lower(
     comb: &[CombProcess],
     ff: &[FfProcess],
     initial: &mut Vec<InitialProcess>,
+    subroutines: &mut [Subroutine],
     external: &[String],
 ) -> Converted<HashMap<String, String>> {
+    let module: HashSet<String> = signals
+        .iter()
+        .map(|signal| signal.name().to_string())
+        .chain(ports.iter().map(|port| port.name().to_string()))
+        .collect();
     // The statements are in the processes only (see
     // `BodyBuilder::force_target`).
     let mut names: Vec<String> = Vec::new();
@@ -560,10 +596,14 @@ pub(super) fn lower(
             None => ranges.push((lhs.name().to_string(), bits, varying)),
         }
     };
-    for process in initial.iter() {
-        for stmt in &process.body {
+    let bodies = initial
+        .iter()
+        .map(|process| &process.body)
+        .chain(subroutines.iter().map(|subroutine| &subroutine.body));
+    for body in bodies {
+        for stmt in body {
             stmt.walk(&mut |stmt| match stmt {
-                Stmt::Force { lhs, rhs } => note(lhs, varies(rhs)),
+                Stmt::Force { lhs, rhs } => note(lhs, varies(rhs, &module)),
                 Stmt::Release { lhs } => note(lhs, false),
                 _ => {}
             });
@@ -696,10 +736,14 @@ pub(super) fn lower(
     let mut lowering = Lowering {
         controls: &mut controls,
         drivers: Vec::new(),
-        process: 0,
+        process: None,
+        module: &module,
     };
+    for subroutine in subroutines.iter_mut() {
+        lowering.block(&mut subroutine.body);
+    }
     for (index, process) in initial.iter_mut().enumerate() {
-        lowering.process = index;
+        lowering.process = Some(index);
         lowering.block(&mut process.body);
     }
     let drivers = std::mem::take(&mut lowering.drivers);
@@ -740,21 +784,23 @@ pub(super) fn lower(
                     lhs: driver.lhs.clone(),
                     rhs: read_part(&driver.lhs, &controls.value),
                 }))
-                .chain([Stmt::WaitEvent(vec![
-                    any_change(Expr::Ident(select.clone())),
-                    any_change(driver.rhs),
-                ])])
+                .chain([Stmt::WaitEvent(
+                    std::iter::once(any_change(Expr::Ident(select.clone())))
+                        .chain(operand_changes(driver.rhs))
+                        .collect(),
+                )])
                 .collect(),
                 else_body: body,
             }];
         }
-        let owner = &initial[owner];
-        let creation_order = owner.creation_order;
-        let site = owner.site.clone().map(|mut site| {
+        // The driver of a force in a task belongs to no procedure.
+        let owner = owner.map(|owner| &initial[owner]);
+        let creation_order = owner.map_or(0, |owner| owner.creation_order);
+        let site = owner.and_then(|owner| owner.site.clone()).map(|mut site| {
             site.construct = "force";
             site
         });
-        let condition = owner.condition.clone();
+        let condition = owner.and_then(|owner| owner.condition.clone());
         initial.push(InitialProcess {
             creation_order,
             site,
