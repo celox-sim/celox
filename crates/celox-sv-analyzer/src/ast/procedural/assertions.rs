@@ -425,14 +425,18 @@ const MAX_SEQUENCE_OPERANDS: usize = 1024;
 /// ways to match.
 const MAX_MONITOR_TERMS: u64 = 1 << 20;
 
+/// The longest way a monitor decides, in ticks.
+const MAX_THROUGHOUT_TICKS: u32 = 1024;
+
 /// The most ways to match that a monitor decides of one sequence.
 pub(super) const MAX_SEQUENCE_PATHS: usize = 1024;
 
 /// The ways sequence `expr` matches (IEEE 1800-2023 16.7, 16.9.5 to
 /// 16.9.7), each a linear sequence of steps a fixed number of ticks apart:
 /// a delay range is one way per delay, `or` the ways of either operand,
-/// `and` a way of each, matching at the later of their matches, and
-/// `intersect` a way of each matching at one tick.
+/// `and` a way of each, matching at the later of their matches,
+/// `intersect` a way of each matching at one tick, and `throughout` a way
+/// of its sequence with its condition at each of its ticks.
 pub(super) fn sequence_paths(
     expr: &celox_sv_syntax::SequenceExpr,
 ) -> Result<Vec<Vec<celox_sv_syntax::SequenceStep>>, AnalyzerError> {
@@ -515,6 +519,41 @@ fn expand_paths(
                 return Err(unsupported(
                     "intersect of sequences without ways to match of one length",
                 ));
+            }
+            paths
+        }
+        SequenceExpr::Throughout {
+            condition,
+            sequence,
+        } => {
+            if !condition.items.is_empty() {
+                return Err(unsupported("match item in the left operand of throughout"));
+            }
+            let mut paths = expand_paths(sequence)?;
+            // `condition` at each tick of each way, from its start to its
+            // match.
+            for path in &mut paths {
+                if path.iter().any(|step| !step.items.is_empty()) {
+                    return Err(unsupported("match item in the right operand of throughout"));
+                }
+                let length = path_length(path);
+                // Each tick takes a step; a monitor decides no longer way.
+                if length > u64::from(MAX_THROUGHOUT_TICKS) {
+                    return Err(unsupported(format!(
+                        "sequence longer than {MAX_THROUGHOUT_TICKS} ticks"
+                    )));
+                }
+                let ticks = (0..=length)
+                    .map(|_| SequenceStep {
+                        delay: 1,
+                        expression: condition.expression,
+                        items: Vec::new(),
+                        tokens: condition.tokens,
+                    })
+                    .collect::<Vec<_>>();
+                let mut ticks = ticks;
+                ticks[0].delay = 0;
+                *path = merged_path(path, &ticks);
             }
             paths
         }

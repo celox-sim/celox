@@ -3408,7 +3408,7 @@ fn named_assertion_declarations_outside_the_subset_keep_their_boundary() {
         "property p; a |-> b ##[0:$] c; endproperty",
         "sequence s; disable iff (r) a; endsequence",
         "sequence s; a |-> b; endsequence",
-        "property p; a throughout b; endproperty",
+        "property p; a until b; endproperty",
         "property p; @(posedge clk or negedge rst) a within b; endproperty",
         "property p; a; endproperty : q",
     ] {
@@ -3475,6 +3475,14 @@ fn sequences_keep_their_operators() {
             SequenceExpr::Intersect(left, right) => {
                 format!("({} intersect {})", show(syntax, left), show(syntax, right))
             }
+            SequenceExpr::Throughout {
+                condition,
+                sequence,
+            } => format!(
+                "({} throughout {})",
+                syntax.token_text(syntax.expression(condition.expression).tokens),
+                show(syntax, sequence)
+            ),
         }
     }
     let shown = |source: &str| {
@@ -3517,6 +3525,28 @@ fn sequences_keep_their_operators() {
         ),
         "((a or (b and ((c ##[1:1] d) intersect (e ##[0:2] f)))) or ((g and h) ##[0:0] i))"
     );
+    // `throughout` binds looser than `##` and tighter than `intersect`,
+    // to the right.
+    assert_eq!(
+        shown(
+            "module M; assert property (@(posedge clk) a throughout b throughout c ##1 d intersect e); endmodule"
+        ),
+        "((a throughout (b throughout (c ##[1:1] d))) intersect e)"
+    );
+    // A named sequence in a sequence is its body, clocked as the assertion
+    // or leading it with its clock (16.8, 16.16.1).
+    assert_eq!(
+        shown(
+            "module M; sequence s; @(posedge clk) a ##2 b; endsequence assert property (@(posedge clk) g throughout s); endmodule"
+        ),
+        "(g throughout (a ##[2:2] b))"
+    );
+    assert_eq!(
+        shown(
+            "module M; sequence s; @(posedge clk) a ##2 b; endsequence assert property (s or c ##1 d); endmodule"
+        ),
+        "((a ##[2:2] b) or (c ##[1:1] d))"
+    );
 }
 
 /// A sequence over cycles keeps its steps, their delays and match items,
@@ -3550,9 +3580,10 @@ fn sequences_over_cycles_keep_steps_and_local_variables() {
                     steps.extend(right);
                     steps
                 }
-                SequenceExpr::Or(..) | SequenceExpr::And(..) | SequenceExpr::Intersect(..) => {
-                    panic!("a linear sequence")
-                }
+                SequenceExpr::Or(..)
+                | SequenceExpr::And(..)
+                | SequenceExpr::Intersect(..)
+                | SequenceExpr::Throughout { .. } => panic!("a linear sequence"),
             }
         }
         let steps = |expr: &SequenceExpr| {

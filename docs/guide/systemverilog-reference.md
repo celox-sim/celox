@@ -375,9 +375,10 @@ concurrent assertions is unsupported:
   `assume property`, and `cover property` with an explicit clock, and
   sequences of steps a fixed number of clock ticks apart (`a ##1 b`),
   spanning at most 1024 ticks, joined by `|->` or `|=>`.
-- Cycle-delay ranges with an upper bound (`a ##[1:3] b`, also leading), and
-  `or`, `and` and `intersect` of sequences without match items in their
-  operands: an attempt passes at the first tick one of its ways to
+- Cycle-delay ranges with an upper bound (`a ##[1:3] b`, also leading),
+  `or`, `and` and `intersect` of sequences, and `b throughout s`, without
+  match items in their operands: an attempt passes at the first tick one of
+  its ways to
   match matches, and fails at the first tick none can match any more. At
   most 1024 ways to match, and only in a sequence that is the whole
   property: not in an implication, an `expect` statement, or one with local
@@ -392,7 +393,9 @@ concurrent assertions is unsupported:
   also a named one, without `disable iff`, local variables or match items.
 - A named property or sequence without formal arguments, in the same module
   outside generate blocks, whose body stays within this subset; local
-  variables of built-in integral types and match items.
+  variables of built-in integral types and match items. A named sequence
+  without local variables may be an operand of another sequence, clocked as
+  it or leading it.
 - Untimed blocking actions, report/severity tasks, and subroutine calls
   that do not suspend, perform a nonblocking assignment, start or control a
   process, or trigger an event.
@@ -400,8 +403,9 @@ concurrent assertions is unsupported:
 Unsupported in particular: procedural concurrent assertions,
 implicit/default clocking, named properties and sequences with formal
 arguments or in other scopes, unbounded cycle-delay ranges (`##[1:$]`),
-repetition, the sequence operators `throughout` and `within`, `intersect`
-of sequences that never match at one tick, instances inside a
+repetition, the sequence operator `within`, `intersect` of sequences that
+never match at one tick, instances of named sequences clocked differently
+or with local variables inside a
 multi-cycle sequence, `disable iff` with a multi-cycle sequence, `iff`
 with an operand over cycles or a named operand, user
 function calls in predicates and match-item values, and timed or
