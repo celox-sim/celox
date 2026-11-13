@@ -18,6 +18,10 @@ source tree instead, build it with
 `cargo build --release -p celox --bin celox`, which creates
 `target/release/celox`.
 
+The installation also provides `veryl-celox`, so that Veryl 0.20.3 or later
+runs the command as a Veryl subcommand: `veryl celox run ...` is the same as
+`celox run ...`, and `veryl --list` shows `celox`.
+
 The `run` command below needs no Python installation. For VPI tests, install
 cocotb into the Python environment you want to use:
 

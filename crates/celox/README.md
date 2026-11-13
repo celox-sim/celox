@@ -11,6 +11,9 @@ SystemVerilog testbenches and builds executables for cocotb:
 cargo install celox
 ```
 
+It also installs `veryl-celox`, so Veryl 0.20.3 or later runs the command as
+`veryl celox`.
+
 See the [CLI and cocotb guide](https://celox-sim.github.io/celox/guide/cocotb).
 
 The default `host-runtime` feature provides native, interpreter and tiered
