@@ -560,15 +560,15 @@ test("scoped checks preserve full-run fallbacks and use their own package scopes
 });
 
 test("cocotb reuses the original scoped Cargo build", () => {
-  const builds = [{ packages: ["celox", "celox-vpi", "celox-test-suite"], targets: [],
+  const builds = [{ packages: ["celox", "celox-test-suite"], targets: [],
     features: ["celox-test-suite/icarus"] }];
   const args = cargoArguments("rust-tests", "Run cocotb VPI end-to-end test", {
     RUST_FULL: "false", BUILDS: JSON.stringify(builds),
   });
   assert.deepEqual(args, ["nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest",
-    "-p", "celox", "-p", "celox-vpi", "-p", "celox-test-suite", "--features",
+    "-p", "celox", "-p", "celox-test-suite", "--features",
     "celox-test-suite/icarus,celox-test-suite/runtime-cases",
-    "-E", 'binary_id(celox-vpi::cocotb_e2e) & test(/^cocotb_/)', "--run-ignored", "only"]);
+    "-E", 'binary_id(celox::cocotb_e2e) & test(/^cocotb_/)', "--run-ignored", "only"]);
 });
 
 test("full cocotb runs reuse the workspace build and report failures before upload", () => {
@@ -636,7 +636,7 @@ test("upstream SV TB runs on full CI and feeds failure reporting", () => {
   assert.match(upstream, /needs.changes.outputs.full_validation == 'true'/);
   assert.doesNotMatch(upstream, /continue-on-error/);
   assert.match(upstream, /conformance\/common-cells\/revision/);
-  assert.match(upstream, /cargo build --locked -p celox-vpi --bin celox/);
+  assert.match(upstream, /cargo build --locked -p celox --bin celox/);
   assert.match(upstream, /node scripts\/run-common-cells.mjs/);
   assert.match(upstream, /if: always\(\)/);
   assert.match(upstream, /retention-days: 14/);
@@ -647,7 +647,7 @@ test("rtlmeter qualification runs all pinned cases and verifies completion and c
   const rtlmeter = job("rtlmeter");
   assert.match(rtlmeter, /needs: changes/);
   assert.doesNotMatch(rtlmeter, /continue-on-error/);
-  assert.match(rtlmeter, /cargo build --locked --release -p celox-vpi --bin celox/);
+  assert.match(rtlmeter, /cargo build --locked --release -p celox --bin celox/);
   assert.match(rtlmeter, /python scripts\/run-rtlmeter-bench\.py prepare/);
   assert.match(rtlmeter, /python scripts\/run-rtlmeter-bench\.py check\s+all/);
   assert.match(rtlmeter, /--states two-state,four-state/);

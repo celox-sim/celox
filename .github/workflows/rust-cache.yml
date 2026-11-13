@@ -70,7 +70,7 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: >-
           cargo nextest list --locked --workspace --exclude 'lydite*' --cargo-profile vtest --message-format json
-          --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
+          --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
           > /dev/null
 
   rust-default-tests:
@@ -130,7 +130,7 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: >-
           cargo clippy --locked --workspace --exclude lydite-celox --all-targets
-          --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim
+          --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim
           --no-deps
       - name: Build documentation dependencies with the CI command
         if: steps.cache.outputs.cache-hit != 'true'
@@ -166,7 +166,7 @@ jobs:
         id: cache
       - name: Build the SystemVerilog CLI with the CI command
         if: steps.cache.outputs.cache-hit != 'true'
-        run: cargo build --locked -p celox-vpi --bin celox
+        run: cargo build --locked -p celox --bin celox
 
   rtlmeter:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
@@ -182,7 +182,7 @@ jobs:
         id: cache
       - name: Build the SystemVerilog CLI with the CI command
         if: steps.cache.outputs.cache-hit != 'true'
-        run: cargo build --locked --release -p celox-vpi --bin celox
+        run: cargo build --locked --release -p celox --bin celox
 
   napi-linux:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)

@@ -118,6 +118,16 @@ names, signal values, and visible hierarchy are checked by TypeScript. See the
 [Getting Started guide](https://celox-sim.github.io/celox/guide/getting-started)
 for the required `Veryl.toml` and `tsconfig.json` setup.
 
+To run Veryl or SystemVerilog testbenches, or cocotb tests, from the command
+line, install the `celox` command:
+
+```bash
+cargo install celox
+celox run test/Top.veryl --top Top
+```
+
+See [Celox CLI and cocotb](https://celox-sim.github.io/celox/guide/cocotb).
+
 ## Two simulation styles
 
 `Simulator` gives a test direct control over events. It is a good fit for

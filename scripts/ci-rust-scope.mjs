@@ -10,8 +10,6 @@ export const CI_FEATURES = Object.freeze([
   "celox/cranelift",
   "celox/wasm-runtime",
   "celox/wasm-component",
-  "celox-vpi/cranelift",
-  "celox-vpi/wasm-runtime",
   "celox-bench/cranelift",
   "celox-test-suite/verilator",
   "celox-test-suite/icarus",
@@ -64,6 +62,13 @@ export const VARIANT_CRATES = new Map([
   ["celox-frontend-sv", SV],
   ["celox-sv-analyzer", SV],
 ]);
+
+// The unit tests of the `celox` command and of its VPI host, as build targets
+// of the celox package: the Cargo target flags and nextest selector of each.
+export const CELOX_CLI_UNIT_TARGETS = Object.freeze({
+  "bin/celox": { cargo: ["--bin", "celox"], selector: "binary_id(celox::bin/celox)" },
+  "lib/vpi": { cargo: ["--lib"], selector: "(binary_id(celox) & test(/^vpi::/))" },
+});
 
 /**
  * The workspace packages as `rustTestScope` reads them, from
@@ -207,6 +212,15 @@ export function rustTestScope(files, packages) {
       vtestSelect.push({ groups: ["sv"] });
       continue;
     }
+    // The `celox` command and its VPI host (the `cli` feature): no dependent
+    // uses them, so only the tests that run the command or the host can
+    // observe a change.
+    const cli = owner.name === "celox" && /^src\/(bin|vpi)\//.exec(inner);
+    if (cli && owner.cliTests) {
+      for (const target of owner.cliTests) addBinary(owner.name, target);
+      addBinary(owner.name, cli[1] === "bin" ? "bin/celox" : "lib/vpi");
+      continue;
+    }
     const test = /^tests\/([^/]+)\.rs$/.exec(inner);
     // Insta prefixes snapshots with their integration-test binary name.
     const snapshot = /^tests\/snapshots\/([^/]+?)__[^/]+\.snap(?:\.new)?$/.exec(inner);
@@ -305,7 +319,9 @@ export function rustTestScope(files, packages) {
     selected.add(name);
     for (const binary of [...names].sort()) {
       const modules = moduleFilters.get(name);
-      const selector = `binary_id(${name}::${binary})`;
+      const selector = name === "celox" && CELOX_CLI_UNIT_TARGETS[binary]
+        ? CELOX_CLI_UNIT_TARGETS[binary].selector
+        : `binary_id(${name}::${binary})`;
       // A direct edit to systemverilog.rs already selects the entire binary.
       const wholeBinary = files.some((file) => file.replace(/^\.\//, "") === `${byName.get(name).dir}/tests/${binary}.rs`);
       terms.push(binary === "systemverilog" && modules?.size && !wholeBinary
@@ -386,6 +402,15 @@ export function readWorkspace(root) {
     ),
   );
   const packages = workspacePackages(metadata, root);
+  const celoxPackage = packages.find((pkg) => pkg.name === "celox");
+  if (celoxPackage) {
+    // The integration tests that run the `celox` command or its VPI host.
+    celoxPackage.cliTests = metadata.packages.find((pkg) => pkg.name === "celox").targets
+      .filter((target) => target.kind.includes("test")
+        && rustTestSources(target.src_path).some((text) => /CARGO_BIN_EXE_celox\b|celox::vpi\b/.test(text)))
+      .map((target) => target.name)
+      .sort();
+  }
   const suite = packages.find((pkg) => pkg.name === "celox-test-suite");
   const celox = metadata.packages.find((pkg) => pkg.name === "celox");
   if (suite && celox && !packages.find((pkg) => pkg.name === "celox").libraryDependencies.includes(suite.name)) {

@@ -4,10 +4,10 @@ import { clearCurrentReport, saveCurrentReport } from "./ci-rust-reports.mjs";
 import { cargoCommands } from "./run-ci-rust-scope.mjs";
 import { testProfile, workspaceFeatures } from "./rust-test-build.mjs";
 
-export const cocotbFilter = 'binary_id(celox-vpi::cocotb_e2e) & test(/^cocotb_/)';
+export const cocotbFilter = 'binary_id(celox::cocotb_e2e) & test(/^cocotb_/)';
 
 // Keep exactly the original packages, features, targets and Cargo profile.
-// Narrowing -p to celox-vpi would resolve a different dependency feature graph.
+// Narrowing -p to celox would resolve a different dependency feature graph.
 export function cocotbCommands(full, builds) {
   if (full !== "false") return [[
     "nextest", "run", "--locked", "--workspace", "--exclude", "lydite*",
@@ -17,7 +17,7 @@ export function cocotbCommands(full, builds) {
   ]];
   // Validate all plans first, including ones we do not need to execute.
   const commands = cargoCommands("test", builds, cocotbFilter);
-  const selected = commands.filter((_, i) => builds[i].packages.includes("celox-vpi")
+  const selected = commands.filter((_, i) => builds[i].packages.includes("celox")
     && (!builds[i].targets.length || builds[i].targets.includes("cocotb_e2e")));
   if (!selected.length) throw new Error("Cocotb CI requires a VPI test build");
   return selected.map(args => [

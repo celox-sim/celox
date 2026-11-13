@@ -91,7 +91,7 @@ The **RTLMeter Steady-State Benchmark** workflow runs daily at 05:17 UTC.
 Build the CLI in the repository development shell and use the xezim shell:
 
 ```sh
-cargo build --locked --release -p celox-vpi --bin celox
+cargo build --locked --release -p celox --bin celox
 mkdir -p work/rtlmeter-bin
 cp target/release/celox work/rtlmeter-bin/celox
 python -m venv work/rtlmeter-python

@@ -79,7 +79,7 @@ performance conclusions.
 ```bash
 python3.13 -m venv work/taxi-venv
 work/taxi-venv/bin/pip install -r benchmarks/taxi/requirements.txt
-cargo build --locked --release -p celox-vpi --bin celox
+cargo build --locked --release -p celox --bin celox
 work/taxi-venv/bin/python scripts/run-taxi-bench.py prepare work/taxi-source
 work/taxi-venv/bin/python scripts/run-taxi-bench.py run phy64 work/taxi-source target/release/celox work/taxi-phy64
 ```

@@ -47,7 +47,6 @@ const RUST_ONLY_CRATES = new Set([
   "celox-test-suite",
   "celox-bench",
   "celox-bench-sv",
-  "celox-vpi",
   "celox-wasm",
   "lydite",
   "lydite-celox",
@@ -60,6 +59,9 @@ const RUST_ONLY_CRATES = new Set([
 function isRustOnlyPath(path) {
   if (/(?:^|\/)Cargo\.(?:toml|lock)$/.test(path)) return false;
   if (startsWithAny(path, ["lydite/", "conformance/"])) return true;
+  // The `celox` command and its VPI host: celox-napi disables the `cli`
+  // feature that builds them.
+  if (/^crates\/celox\/src\/(?:bin|vpi)\//.test(path)) return true;
   const crate = /^crates\/([^/]+)\/(.+)$/.exec(path);
   if (!crate) return false;
   return (
@@ -85,12 +87,12 @@ export function affectsHeliodorArm64(files) {
           "crates/celox-backend-arm64/",
           "crates/celox-backend-common/",
           "crates/celox/src/backend/native/",
-          "crates/celox-vpi/src/bin/celox/",
+          "crates/celox/src/bin/celox/",
           "scripts/ci-changes.",
         ]) ||
         [
           "crates/celox/src/backend.rs",
-          "crates/celox-vpi/src/bin/celox.rs",
+          "crates/celox/src/bin/celox.rs",
           "scripts/run-heliodor-bench.sh",
           "scripts/heliodor-revision",
           "scripts/setup-arm64-backend-dev.sh",
@@ -360,7 +362,7 @@ export function rustScopeOutputs(files) {
   }
   return {
     rust_full: false,
-    rust_vpi_e2e: scope.builds.some((build) => build.packages.includes("celox-vpi") &&
+    rust_vpi_e2e: scope.builds.some((build) => build.packages.includes("celox") &&
       (build.targets.length === 0 || build.targets.includes("cocotb_e2e"))),
     rust_packages: scope.packages.join(" "),
     rust_targets: scope.targets.join(" "),
