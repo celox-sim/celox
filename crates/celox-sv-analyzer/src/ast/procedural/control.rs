@@ -1035,8 +1035,16 @@ impl BodyBuilder<'_, '_, '_> {
                         .as_mut()
                         .and_then(|monitor| monitor.multiclock.take())
                     {
-                        // The decisions, then the actions of the attempts that
-                        // passed and failed, each once an attempt.
+                        // The wait for a tick of a clock, then in the
+                        // Observed region the decisions, then the actions of
+                        // the attempts that passed and failed, each once an
+                        // attempt. The process repeats them.
+                        debug_assert!(matches!(
+                            output.last(),
+                            Some(Stmt::AssertionRegion { reactive: false })
+                        ));
+                        let region = output.len() - 1;
+                        output.splice(region..region, multiclock.wake);
                         output.extend(multiclock.observed);
                         output.push(Stmt::AssertionRegion { reactive: true });
                         for (count, body) in [

@@ -2,9 +2,10 @@
 //! subsequences, each a linear sequence of steps, joined by `##1` or `##0`
 //! at a change of clock.
 //!
-//! One process waits for any clock of the sequence. In the Observed region
-//! it tells which clocks ticked from the values their events last had, then
-//! decides each subsequence whose clock ticked, in order: the attempts that
+//! A process for each clock counts the ticks of its clocking event, and the
+//! monitor waits for any of them. In the Observed region it tells which
+//! clocks ticked from the counts it has not handled yet, then decides each
+//! subsequence whose clock ticked, in order: the attempts that
 //! reached each tick of a subsequence are counted by age, all those of one
 //! age being in step. An attempt that ends a subsequence goes on to the next
 //! one at the nearest tick of its clock strictly after (`##1`) or possibly at
@@ -12,10 +13,12 @@
 //! start in the same time slot, and the time of a `##1` one keeps it from
 //! that slot.
 use super::*;
-use celox_sv_syntax::{EventControl, SequenceExpr, TimingControlId, TimingControlKind, TimingEdge};
+use celox_sv_syntax::{SequenceExpr, TimingControlId};
 
 /// The decisions of a multiclocked sequence at an activation of its process.
 pub(super) struct Multiclock {
+    /// The statements that wait for a clock of the sequence to tick.
+    pub wake: Vec<Stmt>,
     /// The statements of the Observed region that decide the subsequences.
     pub observed: Vec<Stmt>,
     /// The local that counts the attempts that pass at this activation.
@@ -145,7 +148,6 @@ impl BodyBuilder<'_, '_, '_> {
         if !sequence.locals.is_empty() {
             return Err(unsupported("local variable of a multiclocked sequence"));
         }
-        let native = self.tree.declarations();
         let segments = segments(&sequence.consequent, leading)?;
         // Each subsequence a linear sequence of steps at their offsets.
         let mut linear = Vec::new();
@@ -173,81 +175,61 @@ impl BodyBuilder<'_, '_, '_> {
             }
             linear.push(steps);
         }
-        // Whether each distinct clock ticked: an event of it from the value
-        // its expression last had to the one it has now.
+        // A process for each distinct clock counts the occurrences of its
+        // clocking event, waiting for it as an event control does: the
+        // edges of 4-state values and an `iff` judged when the event occurs
+        // (IEEE 1800-2023 9.4.2). In the Observed region the monitor tells
+        // which clocks ticked from the counts it has not handled yet.
         let mut observed = Vec::new();
         let mut clocks: Vec<(TimingControlId, String)> = Vec::new();
-        let mut updates = Vec::new();
+        let mut wakes = Vec::new();
+        let mut pending: Option<Expr> = None;
         let mut bit = Type::new(TypeKind::Bit);
         bit.is_signed = false;
         for segment in &segments {
             if clocks.iter().any(|(clock, _)| *clock == segment.clock) {
                 continue;
             }
-            let TimingControlKind::Event(EventControl::Items(items)) =
-                &native.timing_control(segment.clock).kind
-            else {
+            let wait = self.native_timing_control(segment.clock)?;
+            let Stmt::WaitEvent(items) = &wait else {
                 return Err(unsupported(
-                    "multiclocked sequence with a clocking event other than a list of edges",
+                    "multiclocked sequence with a clocking event other than value changes",
                 ));
             };
-            let mut fired = Vec::new();
-            for item in items {
-                let value = procedural_truth_condition(Expr::Binary {
-                    left: Box::new(self.native_value(item.expression)?),
-                    op: BinaryOp::BitAnd,
-                    right: Box::new(Expr::Literal("1".into())),
-                });
-                let previous = self.declare("previous@clock", bit.clone());
-                let now = Expr::Ident(previous.clone());
-                let edge = match item.edge {
-                    TimingEdge::Pos => Expr::Binary {
-                        left: Box::new(Expr::Unary {
-                            op: UnaryOp::LogicNot,
-                            expr: Box::new(now),
-                        }),
-                        op: BinaryOp::LogicAnd,
-                        right: Box::new(value.clone()),
-                    },
-                    TimingEdge::Neg => Expr::Binary {
-                        left: Box::new(now),
-                        op: BinaryOp::LogicAnd,
-                        right: Box::new(Expr::Unary {
-                            op: UnaryOp::LogicNot,
-                            expr: Box::new(value.clone()),
-                        }),
-                    },
-                    TimingEdge::Both => not_equal(now, value.clone()),
-                    TimingEdge::Any => {
-                        return Err(unsupported(
-                            "multiclocked sequence with a clocking event without an edge",
-                        ));
-                    }
-                };
-                let edge = match item.iff {
-                    Some(iff) => Expr::Binary {
-                        left: Box::new(edge),
-                        op: BinaryOp::LogicAnd,
-                        right: Box::new(procedural_truth_condition(self.native_value(iff)?)),
-                    },
-                    None => edge,
-                };
-                fired.push(edge);
-                updates.push(assign(&previous, value));
-            }
-            let ticked = self.declare("ticked@clock", bit.clone());
-            let any = fired
-                .into_iter()
-                .reduce(|left, right| Expr::Binary {
-                    left: Box::new(left),
+            wakes.extend(items.iter().cloned());
+            let tick = self.declare("tick@multiclock", int_type());
+            let handled = self.declare("handled@multiclock", int_type());
+            let ticked = self.declare("ticked@multiclock", bit.clone());
+            self.disable_watchers.push(vec![Stmt::Loop {
+                kind: crate::procedural::LoopKind::Forever,
+                init: Vec::new(),
+                condition: None,
+                step: Vec::new(),
+                body: vec![wait, assign(&tick, add(Expr::Ident(tick.clone()), int(1)))],
+            }]);
+            let unhandled = not_equal(Expr::Ident(tick.clone()), Expr::Ident(handled.clone()));
+            observed.push(assign(&ticked, unhandled.clone()));
+            observed.push(assign(&handled, Expr::Ident(tick.clone())));
+            pending = Some(match pending {
+                None => unhandled,
+                Some(pending) => Expr::Binary {
+                    left: Box::new(pending),
                     op: BinaryOp::LogicOr,
-                    right: Box::new(right),
-                })
-                .expect("an event has an item");
-            observed.push(assign(&ticked, any));
+                    right: Box::new(unhandled),
+                },
+            });
             clocks.push((segment.clock, ticked));
         }
-        observed.extend(updates);
+        // The monitor waits for a clock to tick, unless one ticked since it
+        // last decided.
+        let wake = vec![Stmt::If {
+            condition: Expr::Unary {
+                op: UnaryOp::LogicNot,
+                expr: Box::new(pending.expect("a sequence has a clock")),
+            },
+            then_body: vec![Stmt::WaitEvent(wakes)],
+            else_body: Vec::new(),
+        }];
         let passes = self.declare("passes@multiclock", int_type());
         let fails = self.declare("fails@multiclock", int_type());
         observed.push(assign(&passes, int(0)));
@@ -375,6 +357,7 @@ impl BodyBuilder<'_, '_, '_> {
             });
         }
         Ok(Multiclock {
+            wake,
             observed,
             passes,
             fails,

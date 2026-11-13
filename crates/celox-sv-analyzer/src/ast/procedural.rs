@@ -307,10 +307,11 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     reference_formals: HashSet<String>,
     /// Whether the function's result is a chandle, `None` without a result.
     return_chandle: Option<bool>,
-    /// The bodies of the processes that record a disable condition of a
-    /// concurrent assertion over cycles becoming true between the ticks of
-    /// its clock (see `assertions::DisableHistory`), which the process the
-    /// builder lowers needs beside it.
+    /// The bodies of the processes that a concurrent assertion needs beside
+    /// the process the builder lowers: those that record a disable condition
+    /// becoming true between the ticks of its clock (see
+    /// `assertions::DisableHistory`), and those that count the ticks of each
+    /// clock of a multiclocked sequence (see `multiclock`).
     pub(super) disable_watchers: Vec<Vec<Stmt>>,
     pub(super) sensitivity_body: Vec<Stmt>,
     /// The name of the subroutine whose body this is, which the names of

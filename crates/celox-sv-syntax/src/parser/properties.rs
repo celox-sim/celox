@@ -479,6 +479,9 @@ impl Parser<'_> {
                 }
                 // A property's top-level `iff` between Booleans (16.12.8).
                 "iff" if depth == 0 && end == "endproperty" => offset += 1,
+                // The event expression of the clock of a subsequence (16.13)
+                // may use `or` and `iff`.
+                "@" => offset = self.past_clocking_event(offset),
                 word if self.temporal(word, offset) => return Ok(None),
                 _ => offset += 1,
             }
@@ -956,16 +959,15 @@ impl Parser<'_> {
         Ok(result)
     }
 
-    /// The clocking event a module assertion over `sequence` waits for: its
-    /// leading one, or with subsequences clocked differently (16.13), one
-    /// of the events of each of its clocks. A subsequence clocked as the
-    /// sequence around it is that sequence (16.13.1).
-    fn multiclock_control(
+    /// Whether a module assertion over `sequence`, led by clock `leading`,
+    /// has subsequences clocked differently (16.13). A subsequence clocked as
+    /// the sequence around it is that sequence (16.13.1).
+    fn multiclocked(
         &mut self,
         assertion: StatementId,
         sequence: SequenceId,
         leading: TimingControlId,
-    ) -> TimingControlId {
+    ) -> bool {
         let mut body = self.sequences[sequence.0].clone();
         let mut clocks = Vec::new();
         let mut changed = false;
@@ -984,33 +986,7 @@ impl Parser<'_> {
                 property.sequence = Some(id);
             }
         }
-        if clocks.is_empty() {
-            return leading;
-        }
-        // Any change of each clock expression wakes the monitor, so that it
-        // sees every value its edge detection compares against; the edges and
-        // `iff` conditions are applied by the monitor. A clock of another
-        // form is left to the analyzer to reject.
-        let mut items = Vec::new();
-        for clock in std::iter::once(leading).chain(clocks) {
-            match &self.timing_controls[clock.0].kind {
-                TimingControlKind::Event(EventControl::Items(each)) => {
-                    items.extend(each.iter().map(|item| EventItem {
-                        edge: TimingEdge::Any,
-                        iff: None,
-                        ..item.clone()
-                    }))
-                }
-                _ => return leading,
-            }
-        }
-        let id = TimingControlId(self.timing_controls.len());
-        let tokens = self.timing_controls[leading.0].tokens;
-        self.timing_controls.push(TimingControl {
-            kind: TimingControlKind::Event(EventControl::Items(items)),
-            tokens,
-        });
-        id
+        !clocks.is_empty()
     }
 
     /// `tree` with each subsequence clocked as `clock`, the clock around it,
@@ -1094,10 +1070,11 @@ impl Parser<'_> {
         else {
             return;
         };
-        let control = match sequence {
-            Some(sequence) => self.multiclock_control(assertion, sequence, leading),
-            None => leading,
-        };
+        // A multiclocked one waits for each of its clocks itself.
+        if sequence.is_some_and(|sequence| self.multiclocked(assertion, sequence, leading)) {
+            return;
+        }
+        let control = leading;
         let mut wrapper = self.statements[assertion.0].clone();
         wrapper.kind = StatementKind::Timing {
             control,

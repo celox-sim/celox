@@ -711,6 +711,66 @@ endmodule"#;
     }
 }
 
+/// The clock of each subsequence of a multiclocked sequence ticks as its
+/// event control would wake a process, by the edges of 4-state values
+/// (IEEE 1800-2023 9.4.2, Table 9-2): `posedge` on 0 to X, `negedge` on X
+/// to 0.
+#[test]
+fn multiclocked_sequences_tick_on_four_state_edges() {
+    // c0 rises at 10, so each attempt starts then and checks `a`, 0, at the
+    // next tick of the other clock, at 30: each fails once.
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit c0, a;
+ logic up = 0, down;
+ int x_rise, x_fall;
+ assert property (@(posedge c0) 1 ##1 @(posedge up) a) else x_rise++;
+ assert property (@(posedge c0) 1 ##1 @(negedge down) a) else x_fall++;
+ initial begin
+  #10 c0 = 1;
+  #20 up = 1'bx; down = 0;
+ end
+endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("multiclock.sv"))], "Top")
+            .four_state(true)
+            .build()
+            .unwrap();
+    sim.run_until(50).unwrap();
+    for name in ["x_rise", "x_fall"] {
+        assert_eq!(sim.get(sim.signal(name)), 1u32.into(), "{name}");
+    }
+}
+
+/// The `iff` of the clock of a subsequence is judged when its event occurs
+/// (IEEE 1800-2023 9.4.2.3), not when the sequence decides in the Observed
+/// region.
+#[test]
+fn multiclocked_sequences_judge_iff_when_the_clock_event_occurs() {
+    // `en` is 1 when `gated` rises at 30 and 0 by the Observed region: the
+    // event occurs, and the attempt of 10 checks `a`, 0, then and fails.
+    // `off` is 0 when `blocked` rises and 1 after: no event, no decision.
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit c0, a, en = 1, off, gated, blocked;
+ int at_event, without_event;
+ assert property (@(posedge c0) 1 ##1 @(posedge gated iff en) a) else at_event++;
+ assert property (@(posedge c0) 1 ##1 @(posedge blocked iff off) a) else without_event++;
+ initial begin
+  #10 c0 = 1;
+  #20 gated = 1; en = 0; blocked = 1; off = 1;
+ end
+endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("multiclock.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(50).unwrap();
+    for (name, expected) in [("at_event", 1u32), ("without_event", 0)] {
+        assert_eq!(sim.get(sim.signal(name)), expected.into(), "{name}");
+    }
+}
+
 #[test]
 fn multiclocked_sequences_name_what_they_do_not_support() {
     for (property, message) in [
