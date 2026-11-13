@@ -54,6 +54,10 @@ pub(crate) struct Session {
     pub(super) virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
     /// The semantic types of the design.
     pub(super) types: semantic_types::TyTable,
+    /// The elaborated scope the session analyzes: a module, interface or
+    /// program with its parameter values, which declares types of its own
+    /// (see [`types::unit_scope`]). `None` for packages.
+    pub(super) scope: Option<Arc<str>>,
     pub(super) expression_types: expression_types::Memo,
     /// The types found during the outermost type query that runs, see
     /// [`expression_types::Query`].

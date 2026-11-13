@@ -34,6 +34,12 @@ struct SpellingParts {
     aggregate: Option<&'static str>,
     /// The name of the typedef of an enumeration, struct or union.
     name: Option<TypedefName>,
+    /// The elaborated scope that declares the enumeration, struct or union
+    /// type: an analysis of a module, interface or program, which each
+    /// instance with other parameter values has (6.22). `None` for a
+    /// package, a compilation unit or a class specialization, whose
+    /// declarations are named apart already.
+    scope: Option<Arc<str>>,
 }
 
 impl Spelling {
@@ -52,17 +58,36 @@ impl Spelling {
     }
 
     /// Name the type after the typedef whose identity is `declaration` and
-    /// whose `$typename` name is `name`.
-    pub(super) fn name(&mut self, declaration: Arc<str>, name: TypedefName) {
+    /// whose `$typename` name is `name`, declared in elaborated scope
+    /// `scope`.
+    pub(super) fn name(
+        &mut self,
+        declaration: Arc<str>,
+        name: TypedefName,
+        scope: Option<Arc<str>>,
+    ) {
         let mut parts = self.0.as_deref().cloned().unwrap_or_default();
         parts.declaration = Some(declaration);
         parts.name = Some(name);
+        parts.scope = scope;
+        self.0 = Some(Arc::new(parts));
+    }
+
+    /// Record that elaborated scope `scope` declares the anonymous type.
+    pub(super) fn declared_in(&mut self, scope: Arc<str>) {
+        let mut parts = self.0.as_deref().cloned().unwrap_or_default();
+        parts.scope = Some(scope);
         self.0 = Some(Arc::new(parts));
     }
 
     /// The identity of the typedef that names the type.
     pub(super) fn declaration(&self) -> Option<&str> {
         self.parts()?.declaration.as_deref()
+    }
+
+    /// The elaborated scope that declares the type.
+    pub(super) fn scope(&self) -> Option<&str> {
+        self.parts()?.scope.as_deref()
     }
 
     fn parts(&self) -> Option<&SpellingParts> {

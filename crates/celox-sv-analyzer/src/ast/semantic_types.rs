@@ -74,11 +74,27 @@ impl Range {
     }
 }
 
+/// A declaration of a named enumeration, structure or union type, as the
+/// table interns it ([`TyTable::declare`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) struct DeclId(u32);
+
+/// What tells a declaration apart: its typedef or its source position, and
+/// the elaborated scope that declares it. Each instance of a module,
+/// interface or program declares types of its own (IEEE 1800-2023 6.22);
+/// instances with the same parameter values share one analysis and so one
+/// scope here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct DeclData {
+    pub name: Arc<str>,
+    pub scope: Option<Arc<str>>,
+}
+
 /// The identity of the declaration of a named type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum Decl {
-    /// A declaration identified by its typedef or its source position.
-    Named(Arc<str>),
+    /// An enumeration declared by a typedef.
+    Named(DeclId),
     /// An enumeration whose declaration is not recorded, identified by its
     /// members.
     AnonymousEnum(Arc<super::enums::EnumDomain>),
@@ -87,7 +103,7 @@ pub(super) enum Decl {
     /// gives them (7.2, 7.3): each specialization of a parameterized scope
     /// declares a type of its own.
     Aggregate {
-        name: Arc<str>,
+        decl: DeclId,
         members: Arc<[(Arc<str>, TyId)]>,
     },
     /// A class, or a specialization of a parameterized class.
@@ -191,6 +207,12 @@ pub(super) struct TyTable {
     /// The members of each named enumeration a type of the table is of
     /// (6.19), which its `Decl::Named` does not hold.
     enum_domains: HashMap<EnumKey, Arc<super::enums::EnumDomain>>,
+    /// The declarations the types of the table name.
+    decls: Vec<DeclData>,
+    /// The declarations by name, then by scope (`""` for none, which no
+    /// elaborated scope is called): a lookup allocates nothing, as types
+    /// are converted at every reference.
+    decl_ids: HashMap<Arc<str>, HashMap<Arc<str>, DeclId>>,
 }
 
 /// A named enumeration as its specialization declares it: its declaration,
@@ -322,6 +344,34 @@ impl TyTable {
         id: TyId,
     ) {
         self.closed_shapes.entry(key).or_default().push((shape, id));
+    }
+
+    /// The declaration `name` of elaborated scope `scope`, or of a package or
+    /// compilation unit when `scope` is `None`.
+    pub fn declare(&mut self, name: &str, scope: Option<&str>) -> DeclId {
+        if let Some(&id) = self
+            .decl_ids
+            .get(name)
+            .and_then(|scopes| scopes.get(scope.unwrap_or("")))
+        {
+            return id;
+        }
+        let id = DeclId(self.decls.len() as u32);
+        let data = DeclData {
+            name: name.into(),
+            scope: scope.map(Into::into),
+        };
+        self.decl_ids
+            .entry(data.name.clone())
+            .or_default()
+            .insert(data.scope.clone().unwrap_or_else(|| "".into()), id);
+        self.decls.push(data);
+        id
+    }
+
+    /// Declaration `id`.
+    pub fn decl(&self, id: DeclId) -> &DeclData {
+        &self.decls[id.0 as usize]
     }
 
     /// The id of type `data`.

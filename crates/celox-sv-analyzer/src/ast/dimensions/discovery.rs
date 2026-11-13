@@ -461,7 +461,13 @@ fn declaration(
                 // are bound; that of a generate block is named by the path
                 // of its elaborated scope.
                 if top {
-                    ty.name_declaration(|| types::declaration_name(tree, alias, None));
+                    ty.name_declaration(
+                        types::unit_scope(
+                            classes::enclosing_unit(tree.declarations(), alias.tokens),
+                            session,
+                        ),
+                        || types::declaration_name(tree, alias, None),
+                    );
                 }
                 if context.constant_types.contains_key(&name(&alias.name)) {
                     Arc::make_mut(&mut context.constant_types).remove(&name(&alias.name));

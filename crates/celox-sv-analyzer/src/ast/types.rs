@@ -516,7 +516,13 @@ pub(super) fn bind_alias(
     // The base type's bounds are those of `const_env`, and the declared
     // type is named before container dimensions hold it as their element.
     freeze_bounds(&mut base, &syntax_tree.functions, const_env);
-    base.name_declaration(name);
+    base.name_declaration(
+        unit_scope(
+            classes::enclosing_unit(syntax_tree.declarations(), alias.tokens),
+            session,
+        ),
+        name,
+    );
     let context = PackedDimensions::new(HashMap::default(), dimension_env, aliases);
     containers::with_dimensions(base, &alias.dimensions, syntax_tree, session, &context).map(Some)
 }
@@ -556,6 +562,18 @@ pub(super) fn freeze_bounds(
 /// The name of typedef `alias`, qualified by the module, interface, program
 /// or package that declares it and by its generate scope, and that name as
 /// `$typename` writes it.
+/// The elaborated scope that declares a type in `unit`: the analysis of
+/// the module, interface or program, each instance of which declares types
+/// of its own (IEEE 1800-2023 6.22); `None` in a package or a compilation
+/// unit, which the design has once.
+pub(super) fn unit_scope(
+    unit: Option<&celox_sv_syntax::Unit>,
+    session: &Session,
+) -> Option<Arc<str>> {
+    unit.filter(|unit| !matches!(unit.kind, celox_sv_syntax::UnitKind::Package))
+        .and(session.scope.clone())
+}
+
 pub(super) fn declaration_name(
     tree: &AnalysisContext<'_>,
     alias: &celox_sv_syntax::TypeAlias,

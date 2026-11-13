@@ -128,6 +128,7 @@ fn bind_in_mode(
         Enum(TypeId, Vec<PackedRange>),
         Aggregate {
             owner: Arc<str>,
+            scope: Option<Arc<str>>,
             union: bool,
             soft: bool,
             tagged: bool,
@@ -394,6 +395,10 @@ fn bind_in_mode(
                         ));
                         jobs.push(Job::Aggregate {
                             owner,
+                            scope: types::unit_scope(
+                                classes::enclosing_unit(native, data.tokens),
+                                session,
+                            ),
                             union: *union,
                             soft: *soft,
                             tagged: *tagged,
@@ -488,6 +493,7 @@ fn bind_in_mode(
             }
             Job::Aggregate {
                 owner,
+                scope,
                 union,
                 soft,
                 tagged,
@@ -517,7 +523,7 @@ fn bind_in_mode(
                     else {
                         return Ok(None);
                     };
-                    let Some(ty) = unpacked_structs::native_type(
+                    let Some(mut ty) = unpacked_structs::native_type(
                         &tree.functions,
                         owner,
                         fields,
@@ -525,6 +531,9 @@ fn bind_in_mode(
                     ) else {
                         return Ok(None);
                     };
+                    if let Some(scope) = scope {
+                        ty.spelling.declared_in(scope);
+                    }
                     values.push(ty);
                     continue;
                 }
@@ -556,6 +565,9 @@ fn bind_in_mode(
                 if !soft && !tagged {
                     ty.spelling =
                         type_names::Spelling::aggregate(if union { "union" } else { "struct" });
+                }
+                if let Some(scope) = scope {
+                    ty.spelling.declared_in(scope);
                 }
                 values.push(ty);
             }
