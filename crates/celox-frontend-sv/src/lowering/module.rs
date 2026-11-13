@@ -462,6 +462,11 @@ fn lower_module_with_overrides(
         let Some(control) = signal.force_control() else {
             continue;
         };
+        // The hold of a target of another instance holds the writes of its
+        // own module; a write of the forcing module ends it there.
+        if signal.hierarchical().is_some() && control.role == sv::ir::ForceRole::Hold {
+            continue;
+        }
         let (Some(&id), Some(&target)) = (
             name_to_id.get(signal.name()),
             name_to_id.get(&control.target),

@@ -609,6 +609,18 @@ pub enum ForceRole {
     Hold,
 }
 
+/// The name of the force control `role` of target `target`: one name for
+/// each target, which no declaration can have, so that a module forcing
+/// the target through a hierarchical name can name the control too.
+pub fn force_control_name(role: &ForceRole, target: &str) -> String {
+    let role = match role {
+        ForceRole::Enable => "enable",
+        ForceRole::Value => "value",
+        ForceRole::Hold => "hold",
+    };
+    format!("%force_{role}:{target}")
+}
+
 /// The force control a hidden variable is (see [`ForceRole`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForceControl {

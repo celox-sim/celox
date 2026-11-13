@@ -61,6 +61,7 @@ impl ScopeElaboration<'_> {
             aliases: self.imported.aliases.clone(),
             interface_members: self.imported.interface_members.clone(),
             local_aliases: self.imported.local_aliases.clone(),
+            external_forces: Vec::new(),
             interface_types: self.imported.interface_types.clone(),
             interface_modports: self.imported.interface_modports.clone(),
             interface_arrays: self.imported.interface_arrays.clone(),

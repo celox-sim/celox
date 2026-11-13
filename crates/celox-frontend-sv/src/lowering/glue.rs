@@ -382,7 +382,7 @@ pub(crate) fn attach_instance_glue(
                 arena: glue.2,
             });
     }
-    add_forced_net_drivers(module, &parent_variables)?;
+    add_forced_net_drivers(module, &parent_variables, &lowered.source)?;
     if waits {
         candidates.extend(lowered.repeated_ff_writes.iter().map(|&(signal, _)| signal));
         for alternative in &comb_alternatives {
@@ -1050,12 +1050,21 @@ fn build_instance_glue(
 fn add_forced_net_drivers(
     module: &mut SimModule,
     variables: &HashMap<SourceVarId, SvVariable>,
+    source: &sv::ir::Module,
 ) -> Result<(), ParserError> {
+    // A name of another instance's net denotes the net there, which its own
+    // module drives.
+    let hierarchical = |target: SourceVarId| {
+        source.signals().iter().any(|signal| {
+            signal.hierarchical().is_some() && signal.name() == variables[&target].path[0]
+        })
+    };
     let mut targets: Vec<_> = variables
         .values()
         .filter_map(|variable| variable.force_control)
         .filter(|slot| slot.procedural && slot.role == ForceSlotRole::Enable && !slot.stored)
         .map(|slot| slot.target)
+        .filter(|&target| !hierarchical(target))
         .collect();
     targets.sort_by_key(|target| target.0);
     for target in targets {

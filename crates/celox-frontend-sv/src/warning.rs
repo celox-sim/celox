@@ -64,6 +64,17 @@ pub enum FrontendWarningKind {
         file: String,
         detail: String,
     },
+    /// A specialization whose variables or nets `force` statements force
+    /// through hierarchical names: every instance of it carries the force
+    /// controls (IEEE 1800-2023 10.6.2).
+    #[error(
+        "the force of {forced} in an instance of `{module}` gives all {instances} instances of the specialization force controls"
+    )]
+    ForcedSpecialization {
+        module: String,
+        forced: String,
+        instances: usize,
+    },
     /// `$exit` outside a thread of a program's `initial` procedure, which
     /// IEEE 1800-2023 24.7 ignores.
     #[error("`$exit` outside a program block is ignored")]
@@ -197,6 +208,7 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::MemoryFileWordCount { .. } => "memory_file_word_count",
             FrontendWarningKind::ExitOutsideProgram => "exit_outside_program",
             FrontendWarningKind::SharedAlwaysTemporary { .. } => "shared_always_temporary",
+            FrontendWarningKind::ForcedSpecialization { .. } => "forced_specialization",
         }))
     }
 
@@ -232,6 +244,9 @@ impl miette::Diagnostic for FrontendWarning {
             }
             FrontendWarningKind::ExitOutsideProgram => {
                 "end the simulation with `$finish`, or remove the call"
+            }
+            FrontendWarningKind::ForcedSpecialization { .. } => {
+                "the instances no force names never set the controls; their writes only check them"
             }
             FrontendWarningKind::SharedAlwaysTemporary { .. } => {
                 "a language deviation enabled by shared_always_temporary=warn or allow; declare the variable inside each block to keep IEEE 1800-2023 semantics"

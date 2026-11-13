@@ -417,6 +417,7 @@ fn prepare_external_hierarchy_collecting(
             warnings,
             LevelLists::Processes,
             HierarchicalNames {
+                forced: &[],
                 discovery: true,
                 ..HierarchicalNames::default()
             },
@@ -467,6 +468,7 @@ fn prepare_external_hierarchy_collecting(
                     warnings,
                     LevelLists::Processes,
                     HierarchicalNames {
+                        forced: &[],
                         properties: &properties,
                         time_format,
                         ..HierarchicalNames::default()

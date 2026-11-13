@@ -374,8 +374,8 @@ fn schedule_sources_collecting(
         // Discovery needs only instance bindings and reflected declarations.
         // Executable lowering is deferred until hierarchy and foreign writers
         // are known, rather than constructing and discarding a full SimModule.
-        let discovery =
-            analyze_specialization(base, &mut design, &key, &[], warnings).and_then(|ir| {
+        let discovery = analyze_specialization(base, &mut design, &key, &[], &[], warnings)
+            .and_then(|ir| {
                 let source = ir
                     .modules()
                     .iter()
@@ -480,6 +480,7 @@ fn schedule_sources_collecting(
                 &mut design,
                 key,
                 &signals,
+                &[],
                 &mut Vec::new(),
             ) {
                 Ok(ir) => break ir,
@@ -511,6 +512,64 @@ fn schedule_sources_collecting(
             }
         }
         references.insert(module_id, resolved);
+        analyses.insert(module_id, ir);
+    }
+    // The variables and nets that `force` statements force through
+    // hierarchical names (IEEE 1800-2023 10.6.2), by specialization: the
+    // forcing module's companion controls denote their controls, which
+    // their own module declares, and whose writes of them depend on. Every
+    // instance of a forced specialization carries the controls, each with
+    // its own storage; an instance no force names never sets them.
+    let mut forced: HashMap<ModuleId, Vec<String>> = HashMap::default();
+    for (module_id, ir) in &analyses {
+        let key = keys[module_id];
+        let Some(module) = ir.modules().iter().find(|module| module.name() == key.name) else {
+            continue;
+        };
+        for signal in module.signals() {
+            let Some(control) = signal.force_control() else {
+                continue;
+            };
+            if signal.hierarchical().is_none() || control.role != sv::ir::ForceRole::Enable {
+                continue;
+            }
+            let Some(reference) = references[module_id].iter().find(
+                |reference: &&hierarchy::HierarchicalReference| {
+                    reference.signal.name == control.target
+                },
+            ) else {
+                continue;
+            };
+            for (target_module, target) in &reference.targets {
+                let names = forced.entry(*target_module).or_default();
+                if !names.contains(target) {
+                    names.push(target.clone());
+                }
+            }
+        }
+    }
+    // A forced specialization is analyzed again with its forced names, also
+    // when its own hierarchical names were analyzed above.
+    for (&module_id, names) in &mut forced {
+        names.sort();
+        discovery_analyses.remove(&module_id);
+        if analyses.remove(&module_id).is_none() {
+            continue;
+        }
+        let key = keys[&module_id];
+        let signals: Vec<_> = references[&module_id]
+            .iter()
+            .map(|reference| reference.signal.clone())
+            .collect();
+        let mut ir = analyze_specialization(
+            &analyzed[&key.name],
+            &mut design,
+            key,
+            &signals,
+            names,
+            &mut Vec::new(),
+        )?;
+        ir.expand_virtual_interface_instances(&virtual_ids);
         analyses.insert(module_id, ir);
     }
     // The elaboration only served to resolve the hierarchical names.
@@ -579,6 +638,7 @@ fn schedule_sources_collecting(
     // reported by `demote_level_lists`; retain every other lowered module.
     let mut lowered_modules = HashMap::default();
     let no_foreign_references = HashSet::default();
+    let mut reported_forces = false;
     loop {
         let mut specialize = |key: &LoweredSvModuleKey,
                               module_id: ModuleId|
@@ -609,6 +669,7 @@ fn schedule_sources_collecting(
                 HierarchicalNames {
                     signals: &signals,
                     foreign_writes: foreign_writes.get(&module_id).unwrap_or(&no_foreign_writes),
+                    forced: forced.get(&module_id).map_or(&[], Vec::as_slice),
                     analyzed: analyses.get(&module_id),
                     recursion_report: analysis_options.recursion_report.as_deref(),
                     force_out_of_line: analysis_options.force_out_of_line_calls,
@@ -631,6 +692,43 @@ fn schedule_sources_collecting(
                 lowered_modules.entry(module_id)
             {
                 entry.insert(specialize(key, module_id)?);
+            }
+        }
+        // Every instance of a forced specialization carries its force
+        // controls; report the specializations that more than one instance
+        // shares, once.
+        if !reported_forces && !forced.is_empty() {
+            reported_forces = true;
+            let mut counts: HashMap<ModuleId, usize> = HashMap::default();
+            let mut pending = vec![(root_id, 1usize)];
+            while let Some((module_id, count)) = pending.pop() {
+                *counts.entry(module_id).or_default() += count;
+                for instance in &lowered_modules[&module_id].instances {
+                    if let Some(&child) =
+                        module_ids.get(&LoweredSvModuleKey::instance_key(instance))
+                    {
+                        pending.push((child, count));
+                    }
+                }
+            }
+            let mut forced_modules: Vec<_> = forced.iter().collect();
+            forced_modules.sort_by_key(|(module_id, _)| keys[*module_id].name.clone());
+            for (module_id, names) in forced_modules {
+                let instances = counts.get(module_id).copied().unwrap_or(0);
+                if instances > 1 {
+                    warnings.push((
+                        crate::FrontendWarningKind::ForcedSpecialization {
+                            module: keys[module_id].name.clone(),
+                            forced: names
+                                .iter()
+                                .map(|name| format!("`{name}`"))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            instances,
+                        },
+                        None,
+                    ));
+                }
             }
         }
         checkpoint!("specialize_modules");
