@@ -627,32 +627,72 @@ pub(in crate::ast) fn check_assignment(
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<()> {
-    let target = dims
+    let shape = dims
         .get(name)
         .filter(|shape| shape.unpacked.is_empty())
-        .and_then(|shape| shape_struct(shape, tree, session, dims))
+        .ok_or_else(|| unsupported("unpacked structure target"))?;
+    let target = shape_struct(shape, tree, session, dims)?
         .ok_or_else(|| unsupported("unpacked structure target"))?;
     check_value(target, right, tree.declarations(), tree, session, dims)
 }
 
 /// The unpacked structure type declared shape `shape` holds: its own type,
 /// or the element type of a fixed-size array of structures (7.2, 7.4), as
-/// the shape's type tells.
+/// the shape's type tells. A structure whose type cannot be formed with the
+/// constants of `dims` is unsupported here.
 pub(in crate::ast) fn shape_struct(
     shape: &VariableDimensions,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     dims: &PackedDimensions,
-) -> Option<semantic_types::TyId> {
-    let mut ty = shape.type_id(&mut session.types, &tree.functions, &dims.const_env)?;
+) -> Converted<Option<semantic_types::TyId>> {
+    struct_of(shape, &mut session.types, &tree.functions, &dims.const_env)
+}
+
+/// [`shape_struct`] with the constants of `env`.
+fn struct_of(
+    shape: &VariableDimensions,
+    table: &mut semantic_types::TyTable,
+    functions: &const_functions::ConstantFunctions,
+    env: &ConstEnv,
+) -> Converted<Option<semantic_types::TyId>> {
+    // Every shape keeps its structure metadata until declarations bind
+    // their types.
+    let metadata = shape.unpacked_struct.is_some() && shape.container.is_none();
+    let Some(mut ty) = shape.type_id(table, functions, env) else {
+        return match metadata {
+            true => Err(unsupported(
+                "unpacked structure whose type is not formed in this scope",
+            )),
+            false => Ok(None),
+        };
+    };
     while let semantic_types::TyData::Array {
         kind: semantic_types::ArrayKind::Fixed(_),
         element,
-    } = session.types.data(ty)
+    } = table.data(ty)
     {
         ty = *element;
     }
-    session.types.is_unpacked_struct(ty).then_some(ty)
+    let found = table.is_unpacked_struct(ty).then_some(ty);
+    debug_assert_eq!(
+        found.is_some(),
+        metadata,
+        "the type and the structure metadata of a shape disagree"
+    );
+    Ok(found)
+}
+
+/// Whether declared shape `shape` holds unpacked structures, as
+/// [`shape_struct`] tells, or, when their type cannot be formed, as its
+/// metadata does.
+pub(in crate::ast) fn holds_struct(
+    shape: &VariableDimensions,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> bool {
+    !matches!(shape_struct(shape, tree, session, dims), Ok(None))
 }
 
 /// The semantic type of a place of unpacked structure type `ty`.
@@ -853,4 +893,65 @@ pub(in crate::ast) fn member_leaves(
         .filter(|leaf| leaf.path.starts_with(path))
         .collect();
     Some((ty, leaves))
+}
+
+#[cfg(test)]
+mod shape_struct_tests {
+    use super::*;
+
+    /// `[N-1:0]`, a range that names `N`.
+    fn symbolic_range() -> UnpackedRange {
+        UnpackedRange::new(
+            ConstExpr::Binary {
+                left: Box::new(ConstExpr::Ident("N".into())),
+                op: BinaryOp::Sub,
+                right: Box::new(ConstExpr::Literal("1".into())),
+            },
+            ConstExpr::Literal("0".into()),
+        )
+    }
+
+    #[test]
+    fn structures_whose_type_is_not_formed_are_unsupported() {
+        // `S items[N]` where the scope has no `N`: a structure, but no
+        // type to check a value against.
+        let mut ty = Type::new(TypeKind::Bit);
+        ty.unpacked_struct = Some(Arc::new(UnpackedStruct {
+            owner: "S".into(),
+            members: vec![Member {
+                name: "a".into(),
+                r#type: Type::new(TypeKind::Bit),
+                default: None,
+                width: 1,
+            }],
+        }));
+        ty.unpacked_ranges.push(symbolic_range());
+        let shape = procedural::dimensions_from_type(&ty);
+        let functions = const_functions::ConstantFunctions::default();
+        let mut table = semantic_types::TyTable::default();
+        assert!(
+            shape
+                .type_id(&mut table, &functions, &ConstEnv::default())
+                .is_none()
+        );
+        let error = struct_of(&shape, &mut table, &functions, &ConstEnv::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not formed in this scope"), "{error}");
+        let env = ConstEnv::from_iter([("N".into(), 2)]);
+        assert!(
+            struct_of(&shape, &mut table, &functions, &env)
+                .unwrap()
+                .is_some()
+        );
+        // A vector is no structure, formed or not.
+        let mut vector = Type::new(TypeKind::Bit);
+        vector.unpacked_ranges.push(symbolic_range());
+        let vector = procedural::dimensions_from_type(&vector);
+        assert!(
+            struct_of(&vector, &mut table, &functions, &ConstEnv::default())
+                .unwrap()
+                .is_none()
+        );
+    }
 }
