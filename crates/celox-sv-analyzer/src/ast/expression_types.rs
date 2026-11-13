@@ -365,6 +365,7 @@ fn resolve(
         // specialization names a scope.
         ExprKind::Type(_)
         | ExprKind::Set(_)
+        | ExprKind::Dist { .. }
         | ExprKind::Tagged { .. }
         | ExprKind::Pattern { target: None, .. }
         | ExprKind::Streaming { .. }
@@ -629,7 +630,7 @@ fn decimal_literal(id: ExprId, native: &Declarations) -> Option<i128> {
 /// session. Only its evaluated integer escapes; runtime call identities and
 /// temporary declaration/type caches never enter the caller's session. It
 /// reads the scopes the caller has settled instead of settling them again.
-fn constant_session(session: &Session) -> Session {
+pub(super) fn constant_session(session: &Session) -> Session {
     Session {
         foreign: session.foreign.clone(),
         classes: session.classes.clone(),

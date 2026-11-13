@@ -128,6 +128,11 @@ pub enum ExprKind {
         items: Vec<PatternItem>,
     },
     Set(Vec<Dimension>),
+    /// `expression dist { items }` of a constraint (IEEE 1800-2023 18.5.3).
+    Dist {
+        expression: ExprId,
+        items: Vec<DistItem>,
+    },
     Streaming {
         operator: String,
         slice: Option<ExprId>,
@@ -148,6 +153,22 @@ pub struct Argument {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PatternItem {
     pub key: Option<ExprId>,
+    pub value: ExprId,
+}
+
+/// An item of a distribution (IEEE 1800-2023 18.5.3): a value or a range,
+/// and its weight, `:= 1` without one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DistItem {
+    pub value: Dimension,
+    pub weight: Option<DistWeight>,
+}
+
+/// The weight of a distribution item: `:= value` for each value of a range,
+/// or `:/ value` for the range as a whole.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DistWeight {
+    pub per_range: bool,
     pub value: ExprId,
 }
 
@@ -1676,6 +1697,19 @@ impl ExprKind {
                     .map(|selected| map_dimension(selected, map))
                     .collect(),
             ),
+            ExprKind::Dist { expression, items } => ExprKind::Dist {
+                expression: map(*expression),
+                items: items
+                    .iter()
+                    .map(|item| DistItem {
+                        value: map_dimension(&item.value, map),
+                        weight: item.weight.map(|weight| DistWeight {
+                            per_range: weight.per_range,
+                            value: map(weight.value),
+                        }),
+                    })
+                    .collect(),
+            },
             ExprKind::Streaming {
                 operator,
                 slice,
