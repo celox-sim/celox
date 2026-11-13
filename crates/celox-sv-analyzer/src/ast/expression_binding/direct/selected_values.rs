@@ -587,7 +587,9 @@ pub(in crate::ast) fn selected_lvalue(
         return packed_structs::whole_member(tree, parts, qualified, dimensions);
     }
     let mut finish = |name: String, context: &PackedDimensions, strict: bool| {
-        select_suffix(name, &suffix, native, tree, session, context, strict, net)
+        select_suffix(
+            name, &suffix, native, tree, session, context, dimensions, strict, net,
+        )
     };
     let lvalue = if let Some((element, indices)) = element {
         packed_structs::select_element_member(
@@ -612,7 +614,9 @@ pub(in crate::ast) fn selected_lvalue(
 
 /// The selection that `suffix`, the selects of a native expression, make of
 /// variable `name`, whose layout `context` holds; `strict` rejects constant
-/// indices outside it, and `net` selects of a net.
+/// indices outside it, and `net` selects of a net. The indices and bounds
+/// are expressions of the scope `scope`, where a member's `context` does not
+/// stand for the variable that holds the member.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::ast::expression_binding) fn select_suffix(
     name: String,
@@ -621,6 +625,7 @@ pub(in crate::ast::expression_binding) fn select_suffix(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     context: &PackedDimensions,
+    scope: &PackedDimensions,
     strict: bool,
     net: bool,
 ) -> Converted<LValue> {
@@ -654,13 +659,13 @@ pub(in crate::ast::expression_binding) fn select_suffix(
         ranged = !matches!(dimension, DimensionKind::Index(_));
         match dimension {
             DimensionKind::Index(id) => {
-                let index = index_value(*id, native, tree, session, context)?;
-                indices.push(selects::self_determined_index(tree, index, context))
+                let index = index_value(*id, native, tree, session, scope)?;
+                indices.push(selects::self_determined_index(tree, index, scope))
             }
             DimensionKind::Range { left, right } => {
                 range = Some((
-                    index_value(*left, native, tree, session, context)?,
-                    index_value(*right, native, tree, session, context)?,
+                    index_value(*left, native, tree, session, scope)?,
+                    index_value(*right, native, tree, session, scope)?,
                     false,
                 ))
             }
@@ -669,8 +674,8 @@ pub(in crate::ast::expression_binding) fn select_suffix(
                 operator,
                 width,
             } => {
-                let start = index_value(*base, native, tree, session, context)?;
-                let width = index_value(*width, native, tree, session, context)?;
+                let start = index_value(*base, native, tree, session, scope)?;
+                let width = index_value(*width, native, tree, session, scope)?;
                 let ((msb, lsb), dynamic) = if net {
                     let width = eval_ast_const_expr(&tree.functions, &width, &context.const_env)
                         .ok_or_else(|| {
