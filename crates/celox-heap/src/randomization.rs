@@ -27,6 +27,26 @@ pub enum Expr {
         index: u32,
         value: Box<Expr>,
     },
+    /// A soft constraint (IEEE 1800-2023 18.5.13), at the top of a
+    /// program's constraint or of an [`Expr::Enabled`] one: the solver keeps
+    /// it only when the hard constraints and the soft ones it kept of
+    /// higher `priority` allow it, and otherwise treats it as true. The
+    /// priorities of a program order its own soft constraints; those of an
+    /// object the call solves through a rand handle are below them.
+    Soft {
+        priority: u64,
+        value: Box<Expr>,
+    },
+    /// `disable soft` of random variable `variable`, an [`Expr::Field`] or
+    /// [`Expr::Size`] (18.5.13.2): the soft constraints of lower `priority`
+    /// in which the variable appears are discarded, or under a guard, while
+    /// `condition` holds.
+    DisableSoft {
+        priority: u64,
+        variable: Box<Expr>,
+        #[serde(default)]
+        condition: Option<Box<Expr>>,
+    },
     Literal(u32, u64),
     Field(usize),
     /// The size of array `0` of the program, a 32-bit `int` (IEEE 1800-2023
@@ -113,6 +133,11 @@ pub struct DistChoice {
     pub predicate: Expr,
     pub weight: num_bigint::BigUint,
 }
+
+/// The priority of a soft constraint among those of a randomize call: the
+/// rank of its object (see `Heap::handle_ranks`), then its priority in its
+/// program (IEEE 1800-2023 18.5.13.1).
+type Rank = (Vec<u32>, u64);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Program {
@@ -350,9 +375,20 @@ impl Expr {
             Self::Solved(_) => true,
             Self::Foreach { body, .. } => body.mentions_solved(),
             Self::Enabled { value, .. }
+            | Self::Soft { value, .. }
             | Self::Resize { value, .. }
             | Self::Unary { value, .. } => value.mentions_solved(),
             Self::Binary { left, right, .. } => left.mentions_solved() || right.mentions_solved(),
+            Self::DisableSoft {
+                variable,
+                condition,
+                ..
+            } => {
+                variable.mentions_solved()
+                    || condition
+                        .as_ref()
+                        .is_some_and(|condition| condition.mentions_solved())
+            }
             Self::Dist {
                 membership,
                 choices,
@@ -381,8 +417,19 @@ impl Expr {
             Self::Sum(array) => *array == index,
             Self::Foreach { array, body } => *array == index || body.names_elements(index),
             Self::Enabled { value, .. }
+            | Self::Soft { value, .. }
             | Self::Resize { value, .. }
             | Self::Unary { value, .. } => value.names_elements(index),
+            Self::DisableSoft {
+                variable,
+                condition,
+                ..
+            } => {
+                variable.names_elements(index)
+                    || condition
+                        .as_ref()
+                        .is_some_and(|condition| condition.names_elements(index))
+            }
             Self::Binary { left, right, .. } => {
                 left.names_elements(index) || right.names_elements(index)
             }
@@ -407,13 +454,56 @@ impl Expr {
         }
     }
 
+    /// The solver variables that appear in the unrolled expression of the
+    /// object whose fields are the variables from `base` on and whose array
+    /// sizes are those from `size_base` on, by name.
+    fn variables(&self, base: usize, size_base: usize, names: &mut Vec<String>) {
+        match self {
+            Self::Field(index) => names.push((base + index).to_string()),
+            Self::Solved(index) => names.push(index.to_string()),
+            Self::Size(index) => names.push(format!("s{}", size_base + index)),
+            Self::Enabled { value, .. }
+            | Self::Soft { value, .. }
+            | Self::DisableSoft {
+                variable: value, ..
+            }
+            | Self::Resize { value, .. }
+            | Self::Unary { value, .. } => value.variables(base, size_base, names),
+            Self::Binary { left, right, .. } => {
+                left.variables(base, size_base, names);
+                right.variables(base, size_base, names);
+            }
+            Self::Foreach { body, .. } => body.variables(base, size_base, names),
+            Self::Dist { membership, .. } => membership.variables(base, size_base, names),
+            Self::Literal(..)
+            | Self::Sum(_)
+            | Self::Static(_)
+            | Self::Input { .. }
+            | Self::Index { .. }
+            | Self::Member { .. }
+            | Self::Element { .. } => {}
+        }
+    }
+
     /// Whether the expression names the size of array `index`.
     fn names_size(&self, index: usize) -> bool {
         match self {
             Self::Size(array) => *array == index,
             Self::Enabled { value, .. }
+            | Self::Soft { value, .. }
             | Self::Resize { value, .. }
             | Self::Unary { value, .. } => value.names_size(index),
+            // A guard of `disable soft` names what it reads, as any guard.
+            Self::DisableSoft {
+                variable,
+                condition,
+                ..
+            } => {
+                variable.names_size(index)
+                    || condition
+                        .as_ref()
+                        .is_some_and(|condition| condition.names_size(index))
+            }
             Self::Binary { left, right, .. } => left.names_size(index) || right.names_size(index),
             Self::Foreach { body, .. } => body.names_size(index),
             Self::Sum(_) => false,
@@ -449,6 +539,9 @@ impl Expr {
         Ok(match self {
             Self::Enabled { .. } => return Err("nested constraint mode predicate".into()),
             Self::Dist { membership, .. } => membership.term(terms, base, sizes, inputs)?,
+            Self::Soft { .. } | Self::DisableSoft { .. } => {
+                return Err("nested soft constraint".into());
+            }
             Self::Literal(width, value) => bv(*width, *value),
             Self::Input { index, width } => {
                 if !(1..=64).contains(width) {
@@ -865,6 +958,13 @@ impl Heap {
                     object, program, value, loops, solved, elements, check_only, inputs,
                 )?),
             },
+            Expr::Soft { priority, value } => Expr::Soft {
+                priority: *priority,
+                value: boxed(self.unroll(
+                    object, program, value, loops, solved, elements, check_only, inputs,
+                )?),
+            },
+            Expr::DisableSoft { .. } => constraint.clone(),
             Expr::Resize {
                 value,
                 width,
@@ -1045,6 +1145,47 @@ impl Heap {
         }
     }
 
+    /// The rank of each object a randomize call of `object` reaches through
+    /// its enabled rand object handles at `handles`, for the priorities of
+    /// their soft constraints (IEEE 1800-2023 18.5.13.1): the indices of the
+    /// handles on the path from `object`, ended by `u32::MAX`, so that a
+    /// container is above the objects it contains and an object a later
+    /// handle refers to is above one an earlier handle does; an object
+    /// several handles reach takes the highest. `object` is `[u32::MAX]`.
+    fn handle_ranks(
+        &mut self,
+        object: Handle,
+        handles: &[u32],
+    ) -> fxhash::FxHashMap<Handle, Vec<u32>> {
+        let mut ranks = fxhash::FxHashMap::default();
+        ranks.insert(object, vec![u32::MAX]);
+        let mut pending = vec![(object, handles.to_vec(), Vec::new())];
+        while let Some((current, handles, path)) = pending.pop() {
+            for (index, &offset) in handles.iter().enumerate() {
+                if !self.random_mode(current, offset, true) {
+                    continue;
+                }
+                let child = self.load(current, offset as usize, crate::HANDLE_BYTES) as Handle;
+                if child == crate::objects::NULL {
+                    continue;
+                }
+                let mut rank: Vec<u32> = path.clone();
+                rank.push(index as u32);
+                let prefix = rank.clone();
+                rank.push(u32::MAX);
+                // An object takes its best route, and so do the objects it
+                // reaches: a better one revisits its handles. A route
+                // through a cycle ranks below the route it leaves, so this
+                // ends.
+                if ranks.get(&child).is_none_or(|best| rank > *best) {
+                    ranks.insert(child, rank);
+                    pending.push((child, self.registered_handles(child), prefix));
+                }
+            }
+        }
+        ranks
+    }
+
     /// The objects the enabled rand object handles at `handles` of `object`
     /// reach, each once and without `object`, breadth first, by the handles
     /// their classes registered.
@@ -1139,6 +1280,12 @@ impl Heap {
             let mut element_bases: fxhash::FxHashMap<(Handle, usize), usize> =
                 fxhash::FxHashMap::default();
             let mut preferred = boolv(true);
+            // The soft constraints, with their ranks and the variables
+            // that appear in them, and the variables `disable soft` names,
+            // with its ranks (18.5.13).
+            let mut soft: Vec<(Rank, Term, Vec<String>)> = Vec::new();
+            let mut disabled: Vec<(Rank, String, Option<Term>)> = Vec::new();
+            let ranks = self.handle_ranks(handle, &program.handles);
             let mut limited = boolv(true);
             let mut bounded = false;
             // The constraints of each object that take part, by their
@@ -1311,44 +1458,116 @@ impl Heap {
             {
                 let sizes = &size_terms[size_base..size_base + current.arrays.len()];
                 for constraint in enabled {
-                    let constraint = self.unroll(
-                        *object,
-                        current,
-                        constraint,
-                        &mut Vec::new(),
-                        &solved,
-                        &element_bases,
-                        check_only,
-                        inputs,
-                    )?;
-                    formula = and(
-                        formula,
-                        truth(constraint.term(&terms, base, sizes, inputs)?),
-                    );
-                    // Each distribution, also one under `if` or `->`, whose
-                    // item is tried only where its guards let it apply, or
-                    // in a `foreach`, one for each element.
-                    let mut found = Vec::new();
-                    distributions_of(&constraint, &mut Vec::new(), &mut found);
-                    for (guards, choices) in found {
-                        // The distribution applies unless a guard holds.
-                        let mut skipped = boolv(false);
-                        for guard in guards {
-                            let guard = truth(guard.term(&terms, base, sizes, inputs)?);
-                            skipped = not(and(not(skipped), not(guard)));
-                        }
-                        let mut weighted = Vec::new();
-                        for choice in choices
-                            .iter()
-                            .filter(|choice| choice.weight != num_bigint::BigUint::ZERO)
-                        {
-                            let item = truth(choice.predicate.term(&terms, base, sizes, inputs)?);
-                            weighted.push((
-                                not(and(not(skipped.clone()), not(item))),
-                                choice.weight.clone(),
+                    // The object's rank among those the call solves: the
+                    // object of the call above those of its rand handles,
+                    // a later one above an earlier one (18.5.13.1).
+                    let rank = |priority: u64| {
+                        let path = ranks.get(object).cloned().unwrap_or_else(|| vec![u32::MAX]);
+                        (path, priority)
+                    };
+                    match constraint {
+                        Expr::Soft { priority, value } => {
+                            let value = self.unroll(
+                                *object,
+                                current,
+                                value,
+                                &mut Vec::new(),
+                                &solved,
+                                &element_bases,
+                                check_only,
+                                inputs,
+                            )?;
+                            let mut names = Vec::new();
+                            value.variables(base, size_base, &mut names);
+                            soft.push((
+                                rank(*priority),
+                                truth(value.term(&terms, base, sizes, inputs)?),
+                                names,
                             ));
                         }
-                        distributions.push(weighted);
+                        Expr::DisableSoft {
+                            priority,
+                            variable,
+                            condition,
+                        } => {
+                            // A member of an object the call solves through
+                            // a rand handle is its solver variable.
+                            let variable = self.unroll(
+                                *object,
+                                current,
+                                variable,
+                                &mut Vec::new(),
+                                &solved,
+                                &element_bases,
+                                check_only,
+                                inputs,
+                            )?;
+                            let mut names = Vec::new();
+                            variable.variables(base, size_base, &mut names);
+                            let condition = match condition {
+                                Some(condition) => {
+                                    let condition = self.unroll(
+                                        *object,
+                                        current,
+                                        condition,
+                                        &mut Vec::new(),
+                                        &solved,
+                                        &element_bases,
+                                        check_only,
+                                        inputs,
+                                    )?;
+                                    Some(truth(condition.term(&terms, base, sizes, inputs)?))
+                                }
+                                None => None,
+                            };
+                            disabled.extend(
+                                names
+                                    .into_iter()
+                                    .map(|name| (rank(*priority), name, condition.clone())),
+                            );
+                        }
+                        constraint => {
+                            let constraint = self.unroll(
+                                *object,
+                                current,
+                                constraint,
+                                &mut Vec::new(),
+                                &solved,
+                                &element_bases,
+                                check_only,
+                                inputs,
+                            )?;
+                            formula = and(
+                                formula,
+                                truth(constraint.term(&terms, base, sizes, inputs)?),
+                            );
+                            // Each distribution, also one under `if` or `->`, whose
+                            // item is tried only where its guards let it apply, or
+                            // in a `foreach`, one for each element.
+                            let mut found = Vec::new();
+                            distributions_of(&constraint, &mut Vec::new(), &mut found);
+                            for (guards, choices) in found {
+                                // The distribution applies unless a guard holds.
+                                let mut skipped = boolv(false);
+                                for guard in guards {
+                                    let guard = truth(guard.term(&terms, base, sizes, inputs)?);
+                                    skipped = not(and(not(skipped), not(guard)));
+                                }
+                                let mut weighted = Vec::new();
+                                for choice in choices
+                                    .iter()
+                                    .filter(|choice| choice.weight != num_bigint::BigUint::ZERO)
+                                {
+                                    let item =
+                                        truth(choice.predicate.term(&terms, base, sizes, inputs)?);
+                                    weighted.push((
+                                        not(and(not(skipped.clone()), not(item))),
+                                        choice.weight.clone(),
+                                    ));
+                                }
+                                distributions.push(weighted);
+                            }
+                        }
                     }
                 }
             }
@@ -1357,6 +1576,49 @@ impl Heap {
             } else {
                 self.random_object(handle)
             };
+            // The soft constraints a `disable soft` of higher priority does
+            // not discard (18.5.13.2), from the highest priority down, each
+            // kept when the constraints kept so far allow it, and otherwise
+            // treated as true (18.5.13, 18.5.13.1).
+            // A guarded `disable soft` discards them while its condition
+            // holds: the soft constraint is then `condition || constraint`.
+            let mut kept = Vec::new();
+            'soft: for (rank, mut constraint, names) in soft {
+                for (disable, name, condition) in &disabled {
+                    if disable > &rank && names.contains(name) {
+                        match condition {
+                            None => continue 'soft,
+                            Some(condition) => {
+                                constraint =
+                                    node(Sort::Bool, "or", vec![condition.clone(), constraint]);
+                            }
+                        }
+                    }
+                }
+                kept.push((rank, constraint));
+            }
+            kept.sort_by(|a, b| b.0.cmp(&a.0));
+            for (_, constraint) in kept {
+                let attempt = and(formula.clone(), constraint);
+                let bound = if bounded {
+                    and(attempt.clone(), limited.clone())
+                } else {
+                    attempt.clone()
+                };
+                // A trial the solver cannot decide drops no preference: the
+                // call fails with the reason, as a solve that cannot be
+                // decided does.
+                let outcome = solve_seeded(&bound, &projection, limits.clone(), seed);
+                match outcome.verdict {
+                    Verdict::Sat => formula = attempt,
+                    Verdict::Unsat => {}
+                    Verdict::Unknown => {
+                        return Err(outcome
+                            .reason
+                            .unwrap_or_else(|| "soft constraint solving incomplete".into()));
+                    }
+                }
+            }
             // Initial integration uses seeded SAT search, not hash-cell acceptance.
             // It finds a valid model without claiming uniform sampling (#2187).
             // A randc property takes a value its cycle has not produced yet
@@ -1662,6 +1924,201 @@ mod tests {
     /// The random 4-bit field at 0 of [`program`].
     fn program_fields() -> Vec<Field> {
         program().fields
+    }
+
+    /// Soft constraints are kept from the highest priority down while the
+    /// hard constraints and those kept allow them, and are otherwise true;
+    /// a `disable soft` discards the lower ones that name its variable
+    /// (IEEE 1800-2023 18.5.13); a call with only soft constraints succeeds.
+    #[test]
+    fn soft_constraints_keep_the_highest_priorities_they_can() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 8);
+        let field = |op: &str, value| Expr::Binary {
+            op: op.into(),
+            left: Box::new(Expr::Field(0)),
+            right: Box::new(Expr::Literal(4, value)),
+            signed: false,
+        };
+        let soft = |priority, value| Expr::Soft {
+            priority,
+            value: Box::new(value),
+        };
+        let mut program = Program {
+            fields: program_fields(),
+            constraints: vec![
+                soft(1, field("==", 3)),
+                soft(2, field("==", 5)),
+                soft(3, field(">", 4)),
+                field("<", 8),
+            ],
+            ..Program::default()
+        };
+        let value = |heap: &mut Heap, program: &Program| {
+            assert!(heap.randomize_object(object, program, false));
+            heap.load(object, 0, 1)
+        };
+        assert_eq!(value(&mut heap, &program), 5);
+        // A hard constraint against every soft one discards them all.
+        program.constraints.push(field("==", 0));
+        assert_eq!(value(&mut heap, &program), 0);
+        program.constraints.pop();
+        // `disable soft` above priority 2 leaves only `x > 4`.
+        program.constraints.push(Expr::DisableSoft {
+            priority: 3,
+            variable: Box::new(Expr::Field(0)),
+            condition: None,
+        });
+        for _ in 0..8 {
+            assert!((5..8).contains(&value(&mut heap, &program)));
+        }
+        // Soft constraints that contradict each other never fail a call.
+        program.constraints = vec![soft(1, field("==", 3)), soft(2, field("==", 4))];
+        assert_eq!(value(&mut heap, &program), 4);
+        assert_eq!(heap.take_fault(), None);
+    }
+
+    /// A soft constraint whose trial the solver cannot decide fails the
+    /// call with the reason, rather than being dropped (18.5.13).
+    #[test]
+    fn undecided_soft_constraints_fail_the_call() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 8);
+        let mut value = Expr::Literal(1, 0);
+        for constant in 0..200 {
+            value = Expr::Binary {
+                op: "||".into(),
+                left: Box::new(value),
+                right: Box::new(Expr::Binary {
+                    op: "==".into(),
+                    left: Box::new(Expr::Field(0)),
+                    right: Box::new(Expr::Literal(4, constant % 16)),
+                    signed: false,
+                }),
+                signed: false,
+            };
+        }
+        let program = Program {
+            fields: program_fields(),
+            constraints: vec![Expr::Soft {
+                priority: 1,
+                value: Box::new(value),
+            }],
+            ..Program::default()
+        };
+        let limits = Limits {
+            max_terms: 64,
+            ..Limits::default()
+        };
+        assert!(!heap.randomize_object_with_limits(object, &program, false, &[], limits));
+        assert!(matches!(
+            heap.take_fault(),
+            Some(Fault::ConstraintRandomization(_))
+        ));
+    }
+
+    /// A size that only the guard of a `disable soft` reads is a solver
+    /// variable, as one any guard reads (IEEE 1800-2023 18.4, 18.5.13.2):
+    /// the soft constraint holds wherever the guard does not.
+    #[test]
+    fn disable_soft_guards_name_array_sizes() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 16);
+        let layout = crate::containers::parameter(8, true, 0, 0, 0, false, false, false);
+        let program = Program {
+            fields: program_fields(),
+            arrays: vec![Array {
+                offset: 8,
+                layout,
+                width: 8,
+                random: true,
+                domain: Vec::new(),
+            }],
+            constraints: vec![
+                Expr::Soft {
+                    priority: 1,
+                    value: Box::new(Expr::Binary {
+                        op: "==".into(),
+                        left: Box::new(Expr::Field(0)),
+                        right: Box::new(Expr::Literal(4, 3)),
+                        signed: false,
+                    }),
+                },
+                Expr::DisableSoft {
+                    priority: 2,
+                    variable: Box::new(Expr::Field(0)),
+                    condition: Some(Box::new(Expr::Binary {
+                        op: ">".into(),
+                        left: Box::new(Expr::Size(0)),
+                        right: Box::new(Expr::Literal(32, 2)),
+                        signed: true,
+                    })),
+                },
+            ],
+            ..Program::default()
+        };
+        let mut resized = false;
+        for _ in 0..20 {
+            assert!(heap.randomize_object(object, &program, false));
+            let contents = heap.load(object, 8, crate::HANDLE_BYTES) as Handle;
+            let length = heap.sequence_len(contents);
+            resized |= length != 0;
+            if length <= 2 {
+                assert_eq!(heap.load(object, 0, 1), 3);
+            }
+        }
+        assert!(resized);
+        assert_eq!(heap.take_fault(), None);
+    }
+
+    /// The objects rand handles reach rank below their container, those of
+    /// a later handle above those of an earlier one, and an object several
+    /// handles reach, with the objects it reaches, as the last of them
+    /// (18.5.13.1).
+    #[test]
+    fn rand_handles_rank_the_objects_they_reach() {
+        let mut heap = Heap::new();
+        let parent = heap.new_object(1, 12);
+        let shared = heap.new_object(2, 4);
+        let last = heap.new_object(3, 4);
+        let nested = heap.new_object(2, 4);
+        let inner = heap.new_object(4, 4);
+        heap.store(parent, 0, crate::HANDLE_BYTES, shared.into());
+        heap.store(parent, 4, crate::HANDLE_BYTES, shared.into());
+        heap.store(parent, 8, crate::HANDLE_BYTES, last.into());
+        heap.store(last, 0, crate::HANDLE_BYTES, nested.into());
+        heap.store(shared, 0, crate::HANDLE_BYTES, inner.into());
+        // The objects of class 2 refer to others too: what `shared` reaches
+        // takes its best route, the second handle (18.5.13.1).
+        heap.register_program(
+            2,
+            Registered::Program(
+                Program {
+                    handles: vec![0],
+                    ..Program::default()
+                }
+                .into(),
+            ),
+        );
+        heap.register_program(
+            3,
+            Registered::Program(
+                Program {
+                    handles: vec![0],
+                    ..Program::default()
+                }
+                .into(),
+            ),
+        );
+        let ranks = heap.handle_ranks(parent, &[0, 4, 8]);
+        assert_eq!(ranks[&parent], vec![u32::MAX]);
+        assert_eq!(ranks[&shared], vec![1, u32::MAX]);
+        assert_eq!(ranks[&last], vec![2, u32::MAX]);
+        assert_eq!(ranks[&nested], vec![2, 0, u32::MAX]);
+        assert!(ranks[&parent] > ranks[&last]);
+        assert!(ranks[&last] > ranks[&nested]);
+        assert!(ranks[&nested] > ranks[&shared]);
+        assert_eq!(ranks[&inner], vec![1, 0, u32::MAX]);
     }
 
     /// A random array whose size a constraint names is resized to a size

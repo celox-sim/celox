@@ -186,7 +186,7 @@ impl Parser<'_> {
     }
 
     pub(super) fn constraint_block(&mut self) -> Result<Option<Vec<ExprId>>> {
-        let mut expressions = Vec::new();
+        let mut expressions: Vec<ExprId> = Vec::new();
         let mut supported = true;
         self.expect("{")?;
         let mut jobs = vec![Job::Block(true)];
@@ -236,14 +236,65 @@ impl Parser<'_> {
                     };
                     let body: Vec<_> = expressions.drain(first..).collect();
                     for expression in body {
-                        expressions.push(self.node(
+                        // A guarded `disable soft` discards while the guard
+                        // does not hold the body true, that is while its
+                        // condition holds (18.5.13.2).
+                        if let ExprKind::DisableSoft {
+                            variable,
+                            condition,
+                        } = self.expressions[expression.0].kind
+                        {
+                            let mut applies = self.node(
+                                start,
+                                ExprKind::Unary {
+                                    operator: "!".into(),
+                                    expression: guard,
+                                    postfix: false,
+                                },
+                            )?;
+                            if let Some(condition) = condition {
+                                applies = self.node(
+                                    start,
+                                    ExprKind::Binary {
+                                        left: applies,
+                                        operator: "&&".into(),
+                                        right: condition,
+                                    },
+                                )?;
+                            }
+                            expressions.push(self.node(
+                                start,
+                                ExprKind::DisableSoft {
+                                    variable,
+                                    condition: Some(applies),
+                                },
+                            )?);
+                            continue;
+                        }
+                        // A guarded soft constraint is a soft constraint of
+                        // the guarded expression: discarded, both are true
+                        // (18.5.13).
+                        let soft = match &self.expressions[expression.0].kind {
+                            ExprKind::SoftConstraint { expression } => Some(*expression),
+                            _ => None,
+                        };
+                        let guarded = self.node(
                             start,
                             ExprKind::Binary {
                                 left: guard,
                                 operator: "||".into(),
-                                right: expression,
+                                right: soft.unwrap_or(expression),
                             },
-                        )?);
+                        )?;
+                        expressions.push(match soft {
+                            Some(_) => self.node(
+                                start,
+                                ExprKind::SoftConstraint {
+                                    expression: guarded,
+                                },
+                            )?,
+                            None => guarded,
+                        });
                     }
                     if has_else && self.eat("else") {
                         jobs.push(Job::Guard {
@@ -296,9 +347,15 @@ impl Parser<'_> {
                         });
                         jobs.push(Job::Set);
                     } else if self.eat("disable") {
-                        supported = false;
                         self.expect("soft")?;
-                        self.constraint_primary()?;
+                        let variable = self.constraint_primary()?;
+                        expressions.push(self.node(
+                            start,
+                            ExprKind::DisableSoft {
+                                variable,
+                                condition: None,
+                            },
+                        )?);
                         self.expect(";")?;
                     } else if self.eat("unique") {
                         let items = self.unique_items()?;
@@ -307,8 +364,46 @@ impl Parser<'_> {
                     } else {
                         let soft = self.eat("soft");
                         if soft {
-                            supported = false;
-                            self.expression(0)?;
+                            // `soft` takes an expression or a
+                            // distribution, not a constraint set (Syntax
+                            // 18-2).
+                            // `soft a -> b` is the soft expression
+                            // `!a || b`, as a guard is (18.5.6).
+                            let (first, simple) = self.constraint_condition()?;
+                            supported &= simple;
+                            let mut chain = vec![first];
+                            while self.eat("->") {
+                                let (next, simple) = self.constraint_condition()?;
+                                supported &= simple;
+                                chain.push(next);
+                            }
+                            let mut expression = chain.pop().expect("a soft expression");
+                            // `soft expression_or_dist` (Syntax 18-2).
+                            if self.eat("dist") {
+                                let items = self.dist_items()?;
+                                expression =
+                                    self.node(start, ExprKind::Dist { expression, items })?;
+                            }
+                            while let Some(condition) = chain.pop() {
+                                let negated = self.node(
+                                    start,
+                                    ExprKind::Unary {
+                                        operator: "!".into(),
+                                        expression: condition,
+                                        postfix: false,
+                                    },
+                                )?;
+                                expression = self.node(
+                                    start,
+                                    ExprKind::Binary {
+                                        left: negated,
+                                        operator: "||".into(),
+                                        right: expression,
+                                    },
+                                )?;
+                            }
+                            expressions
+                                .push(self.node(start, ExprKind::SoftConstraint { expression })?);
                         } else {
                             let (expression, simple) = self.constraint_condition()?;
                             expressions.push(expression);
@@ -325,16 +420,11 @@ impl Parser<'_> {
                             });
                             jobs.push(Job::Set);
                         } else {
-                            if self.eat("dist") {
+                            if !soft && self.eat("dist") {
                                 let items = self.dist_items()?;
-                                // A soft constraint keeps no expression: its
-                                // block stays unsupported.
-                                if !soft {
-                                    let expression = expressions.pop().expect("condition retained");
-                                    expressions.push(
-                                        self.node(start, ExprKind::Dist { expression, items })?,
-                                    );
-                                }
+                                let expression = expressions.pop().expect("condition retained");
+                                expressions
+                                    .push(self.node(start, ExprKind::Dist { expression, items })?);
                             }
                             self.expect(";")?;
                         }
@@ -446,8 +536,9 @@ impl Parser<'_> {
         Ok(())
     }
 
-    fn constraint_primary(&mut self) -> Result<()> {
-        let mut id = self.expression(14)?;
+    fn constraint_primary(&mut self) -> Result<ExprId> {
+        let primary = self.expression(14)?;
+        let mut id = primary;
         let mut receiver = false;
         loop {
             match &self.expressions[id.0].kind {
@@ -461,7 +552,7 @@ impl Parser<'_> {
                     if !self.reserved_word(&name.spelling)
                         || receiver && matches!(name.spelling.as_str(), "this" | "super") =>
                 {
-                    return Ok(());
+                    return Ok(primary);
                 }
                 _ => return Err(self.error("expected a constraint variable reference")),
             }
