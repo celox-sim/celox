@@ -287,30 +287,6 @@ fn visible(
     }
 }
 
-/// The arrays of the program, by index, that constraint `expr` loops over.
-pub(in crate::ast) fn looped_arrays(expr: &ConstraintExpr, found: &mut Vec<usize>) {
-    match expr {
-        ConstraintExpr::Foreach { array, body } => {
-            found.push(*array);
-            looped_arrays(body, found);
-        }
-        ConstraintExpr::Enabled { value, .. }
-        | ConstraintExpr::Resize { value, .. }
-        | ConstraintExpr::Unary { value, .. } => looped_arrays(value, found),
-        ConstraintExpr::Binary { left, right, .. } => {
-            looped_arrays(left, found);
-            looped_arrays(right, found);
-        }
-        ConstraintExpr::Literal(..)
-        | ConstraintExpr::Field(_)
-        | ConstraintExpr::Input { .. }
-        | ConstraintExpr::Size(_)
-        | ConstraintExpr::Index { .. }
-        | ConstraintExpr::Solved(_)
-        | ConstraintExpr::Element { .. } => {}
-    }
-}
-
 /// The array whose size member `id` is, as `a.size`.
 fn array_size(id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<String> {
     let ExprKind::Member {
@@ -326,6 +302,59 @@ fn array_size(id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<Stri
     };
     (separator == "." && name.spelling == "size")
         .then(|| instances::normalize_identifier(&array.spelling))
+}
+
+/// The array property that `a.sum` names, with or without parentheses.
+fn array_sum(id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<String> {
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(id).kind
+    else {
+        return None;
+    };
+    let ExprKind::Name(array) = &native.expression(*expression).kind else {
+        return None;
+    };
+    (separator == "." && name.spelling == "sum")
+        .then(|| instances::normalize_identifier(&array.spelling))
+}
+
+/// The sum of the elements of array property `name` among those of the
+/// program, of the elements' type (IEEE 1800-2023 7.12.3): of a rand array,
+/// a sum of solver variables; of another, a value.
+fn sum(
+    name: String,
+    properties: &[Property],
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Result<Typed, String> {
+    let (index, property) = properties
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, property)| property.name == name)
+        .filter(|(_, property)| property.constraint_array())
+        .ok_or_else(|| format!("constraint variable `{name}.sum`"))?;
+    let element = property.array_storage().expect("an array property");
+    if !solver_element(element, tree, session, env) {
+        return Err(
+            "sum of an array of elements other than 2-state integral ones of at most 64 bits"
+                .into(),
+        );
+    }
+    visible(property, tree, session, env)?;
+    let array = properties[..index]
+        .iter()
+        .filter(|property| property.constraint_array())
+        .count();
+    Ok(Typed {
+        kind: Kind::Leaf(ConstraintExpr::Sum(array)),
+        width: element.layout.width,
+        signed: element.layout.signed,
+    })
 }
 
 /// The size of array property `name` among those of the program.
@@ -483,8 +512,14 @@ pub(in crate::ast) fn bind_inputs(
                     .find(|(_, property)| property.name == name)
                     .filter(|(_, property)| property.constraint_array())
                     .ok_or_else(|| format!("constraint foreach over `{name}`"))?;
-                if property.rand || property.randc {
-                    return Err("constraint foreach over a rand array".into());
+                // The elements of a rand array are solver variables
+                // (18.5.8.1), which the solver holds as its scalars.
+                if (property.rand || property.randc) && !random_array(property, tree, session, env)
+                {
+                    return Err(
+                        "constraint foreach over a rand array of elements other than 2-state integral ones of at most 64 bits"
+                            .into(),
+                    );
                 }
                 // The solver iterates positions: those of a fixed-size array
                 // are its indices only from 0 (IEEE 1800-2023 18.5.8.1).
@@ -611,6 +646,29 @@ pub(in crate::ast) fn bind_inputs(
             }
             ExprKind::Member { .. } if array_size(id, native).is_some() => {
                 return size(array_size(id, native).unwrap(), properties);
+            }
+            // The sum of the elements of an array property, of their type
+            // (IEEE 1800-2023 7.12.3, 18.5.8.2).
+            ExprKind::Call {
+                expression,
+                arguments,
+            } if arguments.is_empty() && array_sum(*expression, native).is_some() => {
+                return sum(
+                    array_sum(*expression, native).unwrap(),
+                    properties,
+                    tree,
+                    session,
+                    env,
+                );
+            }
+            ExprKind::Member { .. } if array_sum(id, native).is_some() => {
+                return sum(
+                    array_sum(id, native).unwrap(),
+                    properties,
+                    tree,
+                    session,
+                    env,
+                );
             }
             ExprKind::Member {
                 expression,
@@ -913,20 +971,18 @@ impl Class {
     }
 }
 
-/// Whether the solver can randomize dynamic array or queue property
-/// `property`: one of 2-state integral elements of at most 64 bits.
+/// Whether the solver can randomize array property `property`, a dynamic
+/// array or queue or a fixed-size array: one of 2-state integral elements
+/// of at most 64 bits.
 pub(in crate::ast) fn random_array(
     property: &Property,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
 ) -> bool {
-    property.sequence()
-        && property
-            .r#type
-            .container
-            .as_ref()
-            .is_some_and(|container| solver_element(container, tree, session, env))
+    property
+        .array_storage()
+        .is_some_and(|container| solver_element(container, tree, session, env))
 }
 
 /// Dynamic array or queue property `property` of a constraint program: a

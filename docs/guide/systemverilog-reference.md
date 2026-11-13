@@ -275,7 +275,7 @@ blocks in programs. Two region deviations are listed under
 - Module-local classes as type arguments to package-class specializations,
   and anonymous enumeration, struct, or union types as type arguments.
 - Properties that are `real`; fixed-size array properties that are
-  `static`, `rand` or `randc`, have more than one unpacked dimension or a
+  `static` or `randc`, have more than one unpacked dimension or a
   negative bound or one outside `int`, have members of their unpacked
   structure elements written, are assigned or compared with an array other
   than another such property or an array variable named by itself (or, for
@@ -298,14 +298,19 @@ blocks in programs. Two region deviations are listed under
   enums with unsupported or unresolved domains, unpacked arrays, nets,
   constants, selects, and concatenation arguments.
 - Class `randomize()`: 4-state and aggregate properties, static random
-  properties, random array, object, and string properties, constrained
-  enums and `randc`, `foreach` and `soft` constraints, `dist`,
+  properties, random arrays of elements other than 2-state integral ones
+  of at most 64 bits, `randc` arrays, random object and string properties,
+  constrained enums and `randc`, a `foreach` or `sum()` over a random array
+  whose size a constraint names, `sum() with`, `soft` constraints, `dist`,
   `solve before`, external and static constraint blocks, typed parameters
   in constraints, array sets, X/Z wildcard items and `$` bounds in `inside`
   sets, and `randc` domains beyond 1–8-bit integers and scalar enums with
   up to 256 members. Named constraint blocks cover only 1–64-bit two-state
   scalar integer properties with comparisons, logical and bitwise
-  operations, addition, subtraction, and multiplication.
+  operations, addition, subtraction, and multiplication. The elements of a
+  random array, fixed-size or dynamic, that a `foreach` or a `sum()` of a
+  constraint names are solver variables (18.5.8); the others are drawn at
+  random.
 - Inline `with` constraints: four-state and aggregate caller-scope inputs,
   typed parameter inputs, qualified `this` / `super` references, restricted
   `with (names)` lookup, and scope `std::randomize(…) with`.
