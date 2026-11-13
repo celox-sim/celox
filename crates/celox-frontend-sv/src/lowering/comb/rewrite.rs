@@ -8,6 +8,25 @@ pub(super) fn substitute_literals(
     expr: &sv::ir::Expr,
     literals: &HashMap<String, (String, i128)>,
 ) -> sv::ir::Expr {
+    substitute(expr, literals, true)
+}
+
+/// `expr` with the known values `literals` substituted into the positions
+/// of its selects only, its operands kept as the variables they name.
+pub(super) fn substitute_select_bounds(
+    expr: &sv::ir::Expr,
+    literals: &HashMap<String, (String, i128)>,
+) -> sv::ir::Expr {
+    substitute(expr, literals, false)
+}
+
+/// `expr` with the known values `literals` substituted, into its operands
+/// too where `operands`.
+fn substitute(
+    expr: &sv::ir::Expr,
+    literals: &HashMap<String, (String, i128)>,
+    operands: bool,
+) -> sv::ir::Expr {
     fn constant(
         expr: &sv::ir::ConstExpr,
         literals: &HashMap<String, (String, i128)>,
@@ -36,8 +55,15 @@ pub(super) fn substitute_literals(
                 lsb: Box::new(constant(lsb, literals)),
                 signed: *signed,
             },
+            // Likewise for a bit select, such as a known vector's bit
+            // inside a run-time index: its base stays the variable, whose
+            // bits past it read X (IEEE 1800-2023 11.5.1).
             ConstExpr::Select { expr, bit } => ConstExpr::Select {
-                expr: Box::new(constant(expr, literals)),
+                expr: Box::new(if matches!(&**expr, ConstExpr::Ident(_)) {
+                    (**expr).clone()
+                } else {
+                    constant(expr, literals)
+                }),
                 bit: Box::new(constant(bit, literals)),
             },
             ConstExpr::Function { callee, args, site } => ConstExpr::Function {
@@ -75,9 +101,9 @@ pub(super) fn substitute_literals(
         }
     }
     use sv::ir::Expr;
-    let go = |expr: &Expr| substitute_literals(expr, literals);
+    let go = |expr: &Expr| substitute(expr, literals, operands);
     match expr {
-        Expr::Ident(name) => match literals.get(name) {
+        Expr::Ident(name) => match literals.get(name).filter(|_| operands) {
             Some((literal, _)) => Expr::Literal(literal.clone()),
             None => expr.clone(),
         },
