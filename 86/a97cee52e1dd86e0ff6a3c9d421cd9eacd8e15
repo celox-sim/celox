@@ -1,1 +1,6 @@
-Review fixes: calls follow their blocks, guarded disables, randc and array sizes in the argument solve, static rand arguments
+Revision history for #3835:
+
+rev 2 (content) 2026-11-13 13:17 UTC — Review fixes: calls follow their blocks, guarded disables, randc and array sizes in the argument solve, static rand arguments
+rev 1 (initial) 2026-11-13 13:17 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3835,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"1c84c9d7d417647dd459eb7efe2c7dd811a149b9","timestamp_iso":"2026-11-13T13:17:32Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"1c84c9d7d417647dd459eb7efe2c7dd811a149b9","new_sha":"86a97cee52e1dd86e0ff6a3c9d421cd9eacd8e15","timestamp_iso":"2026-11-13T13:17:32Z","reason":"Review fixes: calls follow their blocks, guarded disables, randc and array sizes in the argument solve, static rand arguments","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/1c84c9d7d417647dd459eb7efe2c7dd811a149b9...86a97cee52e1dd86e0ff6a3c9d421cd9eacd8e15"}]} -->
