@@ -3809,3 +3809,42 @@ fn defparam_keeps_each_hierarchical_name_and_value() {
     assert!(nested[0].rooted);
     assert_eq!(names(&nested[0]).len(), 3);
 }
+
+#[test]
+fn procedural_continuous_assignments_keep_their_target_and_value() {
+    // 10.6.1: `assign variable_assignment;` and `deassign variable_lvalue;`.
+    let syntax = parse("module M; initial begin assign q = d; deassign q; end endmodule");
+    let kinds: Vec<_> = syntax
+        .statements
+        .iter()
+        .filter_map(|statement| match statement.kind {
+            StatementKind::ProceduralAssign(id) => {
+                let [assignment] = syntax.assign_statement(id).assignments.as_slice() else {
+                    panic!("one assignment");
+                };
+                Some((assignment.left, Some(assignment.right)))
+            }
+            StatementKind::ProceduralDeassign(target) => Some((target, None)),
+            _ => None,
+        })
+        .collect();
+    let name = |id: ExprId| match &syntax.expression(id).kind {
+        ExprKind::Name(name) => name.spelling.clone(),
+        kind => panic!("{kind:?}"),
+    };
+    let [(assigned, Some(value)), (deassigned, None)] = kinds.as_slice() else {
+        panic!("{kinds:?}");
+    };
+    assert_eq!(
+        [name(*assigned), name(*value), name(*deassigned)],
+        ["q", "d", "q"]
+    );
+    // The target of a `deassign` is a variable lvalue.
+    assert!(
+        Declarations::parse(
+            "module M; initial deassign 1 + q; endmodule",
+            Path::new("deassign.sv")
+        )
+        .is_err()
+    );
+}

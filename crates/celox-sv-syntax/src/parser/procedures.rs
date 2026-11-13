@@ -1316,7 +1316,21 @@ impl Parser<'_> {
                                 },
                             )?);
                         }
-                        "disable" | "force" | "release" | "deassign" | "##" => {
+                        "deassign" => {
+                            // procedural_continuous_assignment (IEEE
+                            // 1800-2023 A.6.2): `deassign variable_lvalue ;`
+                            self.at += 1;
+                            let target = self.expression(0)?;
+                            if !self.variable_lvalue(target) {
+                                return Err(self.error("expected deassign lvalue"));
+                            }
+                            self.expect(";")?;
+                            values.push(self.statement_node(
+                                header,
+                                StatementKind::ProceduralDeassign(target),
+                            )?);
+                        }
+                        "disable" | "force" | "release" | "##" => {
                             let tokens = self.semicolon_range()?;
                             let kind = match word.as_str() {
                                 "disable" => StatementKind::Disable(tokens),

@@ -285,6 +285,9 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     type_aliases: TypeAliases,
     /// The kind of body, for the system tasks it may call.
     body: system_functions::Body,
+    /// Whether the body is a subroutine's, whatever `body` a detached
+    /// fork has made of it while its branches are converted.
+    subroutine: bool,
     /// Whether the body's variables are automatic by default.
     automatic: bool,
     task_timing: bool,
@@ -623,6 +626,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         dims.locator_locals = Some(locators::LocalSink::new(*state.counter));
         Self {
             automatic,
+            subroutine: body == system_functions::Body::Subroutine,
             task_timing: false,
             delayed_nonblocking: false,
             return_shape: None,

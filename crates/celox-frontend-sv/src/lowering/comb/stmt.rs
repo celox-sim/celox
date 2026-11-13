@@ -94,6 +94,9 @@ impl Comb<'_, '_> {
         stmt: &sv::ir::Stmt,
     ) -> Result<Store, sv::AnalyzerError> {
         match stmt {
+            sv::ir::Stmt::ProceduralAssign { .. } | sv::ir::Stmt::Deassign { .. } => {
+                unreachable!("the analyzer lowers procedural continuous assignments")
+            }
             sv::ir::Stmt::DisableFork => Ok(store),
             sv::ir::Stmt::Fork { .. }
             | sv::ir::Stmt::WaitFork

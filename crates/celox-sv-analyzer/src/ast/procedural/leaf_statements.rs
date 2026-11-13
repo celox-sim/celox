@@ -41,6 +41,125 @@ impl BodyBuilder<'_, '_, '_> {
         Ok(Some(stmts))
     }
 
+    /// `assign target = value;` in a procedure (IEEE 1800-2023 10.6.1), kept
+    /// as one statement for `procedural_assigns::lower`.
+    pub(super) fn procedural_assign(
+        &mut self,
+        id: celox_sv_syntax::AssignId,
+    ) -> Converted<Vec<Stmt>> {
+        let assign = self.tree.declarations().assign_statement(id);
+        // A procedural continuous assignment is one `variable_assignment`
+        // without a strength or a delay (A.6.2).
+        let [assignment] = assign.assignments.as_slice() else {
+            return Err(AnalyzerError::Parse(
+                "a procedural continuous assignment assigns one variable".into(),
+            ));
+        };
+        if assign.strength.is_some() || assign.delay.is_some() {
+            return Err(AnalyzerError::Parse(
+                "a procedural continuous assignment has no drive strength or delay".into(),
+            ));
+        }
+        let (left, right) = (assignment.left, assignment.right);
+        self.procedural_assign_target(left)?;
+        if !self.effects(&[left, right])?.is_empty() {
+            return Err(unsupported(
+                "procedural continuous assignment of an expression with side effects",
+            ));
+        }
+        let stmts = self.assignment_value("=", false, (left, right))?;
+        let [
+            Stmt::Assign {
+                lhs: lhs @ LValue::Ident(_),
+                rhs,
+                nonblocking: false,
+            },
+        ] = stmts.as_slice()
+        else {
+            return Err(unsupported(
+                "procedural continuous assignment to a variable that is not a packed integral variable",
+            ));
+        };
+        // The driver waits on the expression, which no call may be part of
+        // but one that only reads a string, an object or a container.
+        if inlining::effectful(rhs) {
+            return Err(unsupported(
+                "procedural continuous assignment of an expression that calls a subroutine or a system function",
+            ));
+        }
+        // The value follows the variables of the expression after the
+        // statement has executed, which a variable of a block or of a
+        // subroutine call does not outlive; an automatic one is illegal
+        // here (6.21).
+        let mut local = false;
+        procedural_assigns::reads(rhs, &mut |name| local |= self.is_local(name));
+        if local {
+            return Err(unsupported(
+                "procedural continuous assignment that reads a variable of a procedural block",
+            ));
+        }
+        Ok(vec![Stmt::ProceduralAssign {
+            lhs: lhs.clone(),
+            rhs: rhs.clone(),
+        }])
+    }
+
+    /// The variable `assign` or `deassign` names: a whole variable of the
+    /// module (IEEE 1800-2023 10.6.1).
+    pub(super) fn procedural_assign_target(
+        &mut self,
+        target: celox_sv_syntax::ExprId,
+    ) -> Converted<LValue> {
+        // An `always` procedure with one runs as a process (see
+        // `validation::always_kind`), whose body is a process body. A
+        // detached fork converts its branches as initial bodies, also in a
+        // subroutine, whose assigns stay unsupported there.
+        if !matches!(
+            self.body,
+            system_functions::Body::Initial | system_functions::Body::Process
+        ) || self.subroutine
+        {
+            return Err(unsupported(
+                "procedural continuous assignment in a subroutine, a final procedure, or an `always_comb`, `always_latch` or `always_ff` procedure",
+            ));
+        }
+        let native = self.tree.declarations();
+        let id = expression_binding::ungroup(target, native);
+        match &native.expression(id).kind {
+            // A bit-select or part-select of a variable is not a target (10.6.1).
+            celox_sv_syntax::ExprKind::Select { .. } => {
+                return Err(AnalyzerError::Parse(
+                    "a procedural continuous assignment assigns a whole variable, not a bit-select or part-select".into(),
+                ));
+            }
+            celox_sv_syntax::ExprKind::Concatenation(_) => {
+                return Err(unsupported(
+                    "procedural continuous assignment to a concatenation",
+                ));
+            }
+            _ => {}
+        }
+        let (_, renamed) = self.native_lvalue(target, true)?;
+        let LValue::Ident(name) = &renamed else {
+            return Err(unsupported(
+                "procedural continuous assignment to a member or an element of a variable",
+            ));
+        };
+        if self.is_local(name) {
+            return Err(unsupported(
+                "procedural continuous assignment to a variable of a procedural block",
+            ));
+        }
+        Ok(renamed)
+    }
+
+    /// Whether `name` is a variable a procedural block or a subroutine
+    /// declares, by its module-unique name.
+    pub(super) fn is_local(&self, name: &str) -> bool {
+        self.state.locals.iter().any(|local| local.name == name)
+            || self.state.statics.iter().any(|(local, _)| local == name)
+    }
+
     pub(super) fn native_statement_leaf(
         &mut self,
         statement: &celox_sv_syntax::StatementKind,
@@ -140,8 +259,13 @@ impl BodyBuilder<'_, '_, '_> {
                 };
                 Ok(vec![Stmt::Eval(events::call(op, vec![event]))])
             }
-            StatementKind::ProceduralAssign(_) | StatementKind::ProceduralRelease(_) => {
-                Err(unsupported("procedural continuous assignment"))
+            StatementKind::ProceduralAssign(id) => self.procedural_assign(*id),
+            StatementKind::ProceduralDeassign(target) => {
+                let target = self.procedural_assign_target(*target)?;
+                Ok(vec![Stmt::Deassign { lhs: target }])
+            }
+            StatementKind::ProceduralRelease(_) => {
+                Err(unsupported("procedural `force` or `release` statement"))
             }
             StatementKind::Disable(tokens) => {
                 let mut words = self
