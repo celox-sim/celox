@@ -81,13 +81,13 @@ impl BodyBuilder<'_, '_, '_> {
     ) -> Result<Vec<Stmt>, AnalyzerError> {
         let (left, right) = native;
         if op != "="
-            && unpacked_structs::native_struct(
+            && unpacked_structs::value_struct(
                 left,
                 self.tree.declarations(),
                 self.tree,
                 self.session,
                 &self.dims,
-            )?
+            )
             .is_some()
         {
             return Err(unsupported(format!(

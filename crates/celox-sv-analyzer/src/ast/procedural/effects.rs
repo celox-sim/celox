@@ -1446,7 +1446,7 @@ impl BodyBuilder<'_, '_, '_> {
     ) -> Converted<()> {
         let native = self.tree.declarations();
         self.reject_tagged_integral_target(operand)?;
-        if unpacked_structs::native_struct(operand, native, self.tree, self.session, &self.dims)?
+        if unpacked_structs::value_struct(operand, native, self.tree, self.session, &self.dims)
             .is_some()
         {
             return Err(unsupported(

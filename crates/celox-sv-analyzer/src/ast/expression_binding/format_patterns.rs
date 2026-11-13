@@ -282,7 +282,7 @@ pub(in crate::ast) fn pattern(
     };
     // A value of unpacked structure type: a variable, member or property.
     if aggregate_value
-        || unpacked_structs::native_struct(id, native, tree, session, dimensions)?.is_some()
+        || unpacked_structs::value_struct(id, native, tree, session, dimensions).is_some()
         || objects::aggregate_property(tree, session, id, native, dimensions)?.is_some()
     {
         return Err(unsupported("%p of a structure or unpacked array"));
