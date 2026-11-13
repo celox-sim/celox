@@ -285,7 +285,8 @@ blocks in programs. Two region deviations are listed under
   string properties, constrained
   enums and `randc`, `foreach` over a random array, `soft` constraints in
   a `foreach` or with `dist`, `dist`,
-  `solve before`, external and static constraint blocks, typed parameters
+  `solve before`, `constraint_mode(on_off)` of every block of an object
+  with a static constraint block, typed parameters
   in constraints, array sets, X/Z wildcard items and `$` bounds in `inside`
   sets, and `randc` domains beyond 1–8-bit integers and scalar enums with
   up to 256 members. Named constraint blocks cover only 1–64-bit two-state

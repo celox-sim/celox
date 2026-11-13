@@ -525,8 +525,8 @@ chapter-18/18.5.10--variable-ordering_1.sv	2state	pass
 chapter-18/18.5.10--variable-ordering_1.sv	4state	pass
 chapter-18/18.5.11--static-constraint-blocks_0.sv	2state	pass
 chapter-18/18.5.11--static-constraint-blocks_0.sv	4state	pass
-chapter-18/18.5.11--static-constraint-blocks_1.sv	2state	fail
-chapter-18/18.5.11--static-constraint-blocks_1.sv	4state	fail
+chapter-18/18.5.11--static-constraint-blocks_1.sv	2state	pass
+chapter-18/18.5.11--static-constraint-blocks_1.sv	4state	pass
 chapter-18/18.5.12--functions-in-constraint_0.sv	2state	pass
 chapter-18/18.5.12--functions-in-constraint_0.sv	4state	pass
 chapter-18/18.5.12--functions-in-constraint_1.sv	2state	fail

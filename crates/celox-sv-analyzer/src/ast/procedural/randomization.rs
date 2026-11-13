@@ -397,6 +397,20 @@ fn lower_methods(
                             else_body: Vec::new(),
                         });
                     }
+                    // A static constraint block is on or off for every
+                    // object at once (IEEE 1800-2023 18.5.11).
+                    for (index, off) in &class.static_constraints {
+                        body.push(Stmt::Eval(classes::object_call(
+                            ObjectOp::ConstraintModeSet(Some(*index)),
+                            vec![
+                                Expr::Ident(this.clone()),
+                                Expr::Unary {
+                                    op: UnaryOp::LogicNot,
+                                    expr: Box::new(Expr::Ident(off.clone())),
+                                },
+                            ],
+                        )));
+                    }
                     // The static properties the constraints read, then the
                     // values of the call (see `classes::StaticInput`).
                     let solve_inputs = class

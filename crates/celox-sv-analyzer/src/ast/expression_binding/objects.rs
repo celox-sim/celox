@@ -1417,13 +1417,39 @@ pub(in crate::ast) fn constraint_mode_call(
                 .ok_or_else(|| unsupported(format!("unknown constraint block {name}")))
         })
         .transpose()?;
+    // A static block's mode is a bit of its class every object shares
+    // (IEEE 1800-2023 18.5.11): the statement that sets it assigns the bit
+    // (see `static_constraint_mode`).
+    let shared = index.and_then(|index| {
+        class
+            .static_constraints
+            .iter()
+            .find(|(known, _)| *known == index)
+            .map(|(_, off)| off.clone())
+    });
     if args.is_empty() {
         let index = index
             .ok_or_else(|| unsupported("constraint_mode getter requires one named constraint"))?;
+        if let Some(off) = shared {
+            return Ok(Some(Expr::Unary {
+                op: UnaryOp::LogicNot,
+                expr: Box::new(Expr::Ident(off)),
+            }));
+        }
         return Ok(Some(classes::object_call(
             ObjectOp::ConstraintModeGet(index),
             vec![handle],
         )));
+    }
+    if shared.is_some() {
+        return Err(unsupported(
+            "constraint_mode setter is void and cannot be used as a value",
+        ));
+    }
+    if index.is_none() && !class.static_constraints.is_empty() {
+        return Err(unsupported(
+            "constraint_mode of every block of an object with static constraint blocks",
+        ));
     }
     if !allow_set {
         return Err(unsupported(
@@ -1447,6 +1473,77 @@ pub(in crate::ast) fn constraint_mode_call(
         ObjectOp::ConstraintModeSet(index),
         vec![handle, enabled],
     )))
+}
+
+/// `h.c.constraint_mode(on_off)` of a static constraint block `c`: the
+/// variable of the bit that turns it off for every object (see
+/// `classes::Class::static_constraints`), and the argument.
+pub(in crate::ast) fn static_constraint_mode(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(String, ExprId)>> {
+    let ExprKind::Call {
+        expression: callee,
+        arguments,
+    } = &native.expression(ungroup(id, native)).kind
+    else {
+        return Ok(None);
+    };
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(ungroup(*callee, native)).kind
+    else {
+        return Ok(None);
+    };
+    if separator != "." || name.spelling != "constraint_mode" {
+        return Ok(None);
+    }
+    let (owner, block) = match &native.expression(ungroup(*expression, native)).kind {
+        ExprKind::Member {
+            expression: object,
+            separator,
+            name,
+        } if separator == "." => match native_class(tree, session, *object, native, dimensions) {
+            Some(owner) => (owner, name.spelling.clone()),
+            None => return Ok(None),
+        },
+        ExprKind::Name(name)
+            if scope_class(dimensions).is_some()
+                && dimensions.get(THIS).is_some()
+                && dimensions.get(&name.spelling).is_none() =>
+        {
+            (scope_class(dimensions).unwrap(), name.spelling.clone())
+        }
+        _ => return Ok(None),
+    };
+    let class = class(tree, session, dimensions, &owner)?;
+    let Some(index) = class
+        .constraints
+        .iter()
+        .position(|(known, _)| *known == block)
+    else {
+        return Ok(None);
+    };
+    let Some((_, off)) = class
+        .static_constraints
+        .iter()
+        .find(|(known, _)| *known == index as u32)
+    else {
+        return Ok(None);
+    };
+    match arguments.as_slice() {
+        [argument] if argument.name.is_none() && argument.value.is_some() => {
+            Ok(Some((off.clone(), argument.value.unwrap())))
+        }
+        _ => Err(unsupported(
+            "constraint_mode setter requires one on_off argument",
+        )),
+    }
 }
 
 /// Bind rand_mode's void setter and integer getter separately (18.8).

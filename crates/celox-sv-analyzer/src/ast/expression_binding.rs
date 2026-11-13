@@ -46,6 +46,7 @@ pub(super) use objects::{
     method as object_method, method_result as object_method_result, named_class,
     native_class as object_native_class, property as object_property,
     rand_mode_call as object_rand_mode_call, receiver as object_receiver,
+    static_constraint_mode as object_static_constraint_mode,
     static_property as object_static_property,
     static_property_declaration as object_static_property_declaration,
     static_rand_mode as object_static_rand_mode, this as object_this,

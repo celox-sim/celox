@@ -72,7 +72,7 @@ impl Parser<'_> {
         if let Some(class) = self.class_stack.last_mut() {
             class.constraints.push(ClassConstraint {
                 name,
-                expressions: if is_static { None } else { expressions },
+                expressions,
                 defined: true,
                 is_static,
             });
@@ -178,10 +178,8 @@ impl Parser<'_> {
             return Err(self.error("duplicate external constraint block"));
         }
         block.defined = true;
-        // A static prototype completed externally stays static, which the
-        // analyzer treats as unsupported as it does an in-class static
-        // block (18.5.10).
-        block.expressions = if block.is_static { None } else { expressions };
+        // A static prototype completed externally stays static (18.5.10).
+        block.expressions = expressions;
         Ok(())
     }
 

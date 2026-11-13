@@ -180,7 +180,9 @@ pub(super) struct StaticProperty {
     /// share (18.8).
     pub rand: bool,
     /// For the bit that turns static rand property `name` off, `name`: a
-    /// variable of the class no source names (see [`static_rand_mode`]).
+    /// variable of the class no source names (see [`static_rand_mode`]);
+    /// for that of static constraint block `name`, `name` too (see
+    /// [`Class::static_constraints`]).
     pub mode_of: Option<String>,
 }
 
@@ -255,6 +257,13 @@ fn static_rand_mode(name: &str) -> String {
 /// [`static_rand_mode`]).
 fn static_rand_slot(name: &str) -> String {
     format!("$slot${name}")
+}
+
+/// The name of the static bit that turns static constraint block `name` off,
+/// for every object, which no identifier of a source is either (see
+/// [`static_rand_mode`]).
+fn static_constraint_mode(name: &str) -> String {
+    format!("$constraint_mode${name}")
 }
 
 /// The variable of the bit that turns static rand property `name` of class
@@ -338,6 +347,11 @@ pub(super) struct Class {
     pub static_slots: Vec<StaticSlot>,
     /// The class and its bases, from the class to its root.
     pub lineage: Vec<String>,
+    /// The static constraint blocks of the class, by index among
+    /// [`Class::constraints`], each with the variable of the bit that turns
+    /// it off for every object (IEEE 1800-2023 18.5.11): a randomize call
+    /// takes it as the object's constraint mode of the block.
+    pub static_constraints: Vec<(u32, String)>,
     /// Methods visible in the class, overrides replacing inherited ones.
     pub methods: Vec<Method>,
     /// The parameters and typedefs of an interface class, its own and
@@ -1535,6 +1549,13 @@ pub(super) fn shared_class(
         }
         depth
     };
+    let mut static_constraints = base
+        .as_ref()
+        .map(|base| base.static_constraints.clone())
+        .unwrap_or_default();
+    // The bits of the static blocks the class declares, its static
+    // variables once its constraints are bound.
+    let mut constraint_modes = Vec::new();
     for (position, block) in declaration.constraints.iter().enumerate() {
         let block_name = block.name.spelling.clone();
 
@@ -1566,14 +1587,40 @@ pub(super) fn shared_class(
                     .collect()
             });
         // Constraint indices survive overrides, including calls via base handles.
-        if let Some((_, inherited)) = constraints.iter_mut().find(|(name, _)| *name == block_name) {
-            *inherited = expressions;
-        } else {
-            constraints.push((block_name, expressions));
+        let index = match constraints.iter().position(|(name, _)| *name == block_name) {
+            Some(index) => {
+                constraints[index].1 = expressions;
+                index
+            }
+            None => {
+                constraints.push((block_name.clone(), expressions));
+                constraints.len() - 1
+            }
+        } as u32;
+        // A static block has one constraint mode, a bit of the class that
+        // turns it off for every object (IEEE 1800-2023 18.5.11); a block
+        // that overrides it has its own.
+        static_constraints.retain(|(known, _)| *known != index);
+        if block.is_static {
+            let mode = static_constraint_mode(&block_name);
+            let variable = Class::subroutine_name(name, &mode);
+            constraint_modes.push(StaticProperty {
+                local: true,
+                protected: false,
+                variable: variable.clone(),
+                name: mode,
+                owner: name.to_owned(),
+                r#type: unsigned_type(1),
+                initializer: None,
+                rand: false,
+                mode_of: Some(block_name),
+            });
+            static_constraints.push((index, variable));
         }
     }
     session.constraint_owners.pop();
     session.constraint_scopes.pop();
+    statics.extend(constraint_modes);
     let mut class = Class {
         name: name.to_owned(),
         id: class_id(name),
@@ -1592,6 +1639,7 @@ pub(super) fn shared_class(
         static_inputs,
         static_slots,
         lineage,
+        static_constraints,
         methods,
         declarations: Vec::new(),
         size: size.max(1),
@@ -1715,6 +1763,7 @@ fn interface_class(
         static_inputs: Vec::new(),
         static_slots: Vec::new(),
         lineage: vec![name.to_owned()],
+        static_constraints: Vec::new(),
         methods,
         declarations,
         size: 1,

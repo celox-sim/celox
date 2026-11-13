@@ -36,6 +36,28 @@ impl BodyBuilder<'_, '_, '_> {
             }
             return Ok(Some(stmt));
         }
+        // The constraint mode of a static constraint block is one bit every
+        // object shares (IEEE 1800-2023 18.5.11).
+        if let Some((off, argument)) = expression_binding::object_static_constraint_mode(
+            self.tree,
+            self.session,
+            root,
+            native,
+            &self.dims,
+        )? {
+            let mut enabled = self.native_value(argument)?;
+            self.rename_expr(&mut enabled);
+            let mut lhs = LValue::Ident(off);
+            self.rename_lvalue(&mut lhs);
+            return Ok(Some(Stmt::Assign {
+                lhs,
+                rhs: Expr::Unary {
+                    op: UnaryOp::LogicNot,
+                    expr: Box::new(enabled),
+                },
+                nonblocking: false,
+            }));
+        }
         // The rand_mode of a static rand property is one bit every object
         // shares (IEEE 1800-2023 18.8).
         if let Some((off, Some(argument))) = expression_binding::object_static_rand_mode(

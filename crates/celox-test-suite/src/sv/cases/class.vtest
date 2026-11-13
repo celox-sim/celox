@@ -5369,3 +5369,42 @@ module Top(output int checks);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq checks 15))
+
+; A static constraint block has one constraint mode for every object of its
+; class, which constraint_mode through any of them sets and reads (IEEE
+; 1800-2023 18.5.11); a block a derived class overrides has its own.
+(case static_constraint_blocks
+  (source "static_blocks.sv" #"
+module Top(output int checks);
+    class A;
+        rand int b;
+        static constraint c1 { b == 5; }
+        static constraint c2 { b >= 2; b <= 3; }
+        constraint c3 { b != 3; }
+    endclass
+    class B extends A;
+        constraint c1 { b > 0; }
+    endclass
+    class C;
+        rand int x;
+        extern static constraint c;
+    endclass
+    constraint C::c { x == 7; }
+    initial begin
+        A a1 = new, a2 = new;
+        B b = new;
+        C c = new;
+        checks = 0;
+        checks += (!a1.randomize() && !a2.randomize()) * 1;
+        a1.c1.constraint_mode(0);
+        checks += (a1.c1.constraint_mode() == 0 && a2.c1.constraint_mode() == 0) * 2;
+        checks += (a2.randomize() && a2.b == 2 && a1.randomize() && a1.b == 2) * 4;
+        checks += (b.randomize() && b.b == 2 && b.c1.constraint_mode() == 1) * 8;
+        a2.c2.constraint_mode(0);
+        a2.c1.constraint_mode(1);
+        checks += (a1.randomize() && a1.b == 5) * 16;
+        checks += (c.randomize() && c.x == 7) * 32;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 63))
