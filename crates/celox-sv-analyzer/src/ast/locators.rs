@@ -326,14 +326,10 @@ fn array(
                     "array locator method on a fixed-size array class property of unpacked structures whose range does not run from 0 up",
                 ));
             }
-            let bound = |value: i128| {
-                i32::try_from(value)
-                    .map(i64::from)
-                    .map_err(|_| unsupported("array locator method bound outside int"))
-            };
+            // Its bounds are within `int` (see `containers::fixed_storage`).
             return Ok(Some(Array::Fixed {
-                left: bound(left)?,
-                right: bound(right)?,
+                left: left as i64,
+                right: right as i64,
                 element: container.element.clone(),
                 layout: ContainerLayout {
                     kind: ContainerKind::Queue { capacity: 0 },

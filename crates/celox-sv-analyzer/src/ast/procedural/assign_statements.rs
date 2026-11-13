@@ -104,7 +104,7 @@ impl BodyBuilder<'_, '_, '_> {
         .is_some()
         {
             return Err(unsupported(
-                "assignment to a member of a dynamic container element",
+                "assignment to a member of an element of a dynamic container or a fixed-size array class property",
             ));
         }
         let declarations = self.tree.declarations();

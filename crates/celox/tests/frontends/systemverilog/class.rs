@@ -4002,26 +4002,114 @@ fn const_fixed_size_array_properties_are_written_by_their_constructor_only() {
 }
 
 #[test]
-fn fixed_size_array_properties_take_wide_bounds() {
-    // A bound wider than 32 bits keeps its value when an index is taken
-    // from it (IEEE 1800-2023 7.4.6), ascending or descending.
-    let source = "class C;
-        int w[64'd4294967296:64'd4294967297];
-        int d[64'd4294967297:64'd4294967296];
-    endclass
-    module Top;
-        C c;
-        initial begin
-            c = new;
-            c.w[64'd4294967296] = 5;
-            c.w[64'd4294967297] = 6;
-            c.d[64'd4294967296] = 7;
-            $display(\"%0d %0d %p %p\", c.w[64'd4294967296], c.w[64'd4294967297], c.w, c.d);
-        end
-    endmodule";
+fn fixed_size_array_property_bounds_outside_int_are_rejected() {
+    // An index of a property is an `int`, as is a foreach index over it and
+    // one a locator method returns (IEEE 1800-2023 12.7.3, 7.12.1), so a
+    // bound outside `int` is rejected at the declaration.
+    for property in [
+        "int a[64'd4294967296:64'd4294967297];",
+        "int a[64'd4294967297:64'd4294967296];",
+        "int a[0:64'd2147483648];",
+    ] {
+        let source = format!(
+            "class C; {property} endclass
+            module Top;
+                C c;
+                initial begin c = new; $display(\"%p\", c.a.find with (item == 1)); end
+            endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        .expect_err(property);
+        assert!(
+            error
+                .to_string()
+                .contains("fixed-size array class property with a bound outside int"),
+            "{property}: {error}"
+        );
+    }
+}
+
+#[test]
+fn fixed_size_array_properties_are_not_written_through_other_places() {
+    // An assignment to a member of a structure element, and the formal of
+    // an output or inout argument, would write the container that holds
+    // the property through a place that does not reach it (see
+    // `Property::storage`): each is rejected, never accepted and dropped.
+    for (statement, message) in [
+        (
+            "c.pairs[0].a = 1;",
+            "assignment to a member of an element of a dynamic container or a fixed-size array class property",
+        ),
+        (
+            "c.pairs[1].a++;",
+            "assignment to a member of an element of a dynamic container or a fixed-size array class property",
+        ),
+        (
+            "c.pairs[0].b += 1;",
+            "assignment to a member of an element of a dynamic container or a fixed-size array class property",
+        ),
+        (
+            "out(c.tab);",
+            "fixed-size array class property as an output or inout argument",
+        ),
+        (
+            "both(c.tab);",
+            "fixed-size array class property as an output or inout argument",
+        ),
+        (
+            "both((c.tab));",
+            "fixed-size array class property as an output or inout argument",
+        ),
+        (
+            "x = get(c.tab);",
+            "fixed-size array class property as an output or inout argument",
+        ),
+        (
+            "c.fill(c.tab);",
+            "fixed-size array class property as an output or inout argument",
+        ),
+    ] {
+        let source = format!(
+            "typedef struct {{ int a; byte b; }} pair_t;
+            class C;
+                int tab[2];
+                pair_t pairs[2];
+                function void fill(output int a[2]); a = '{{1, 2}}; endfunction
+            endclass
+            task automatic out(output int a[2]); a = '{{3, 4}}; endtask
+            task automatic both(inout int a[2]); a[0] = 5; endtask
+            task automatic scalar(output int a); a = 6; endtask
+            function automatic int get(output int a[2]); a = '{{7, 8}}; return 1; endfunction
+            module Top;
+                C c;
+                int x;
+                initial begin c = new; {statement} end
+            endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        .expect_err(statement);
+        assert!(error.to_string().contains(message), "{statement}: {error}");
+    }
+    // The member of an element as the actual of an output argument is
+    // written, as an element of a dynamic container is (13.5.1).
+    let source = "typedef struct { int a; byte b; } pair_t;
+        class C; pair_t pairs[2]; endclass
+        task automatic scalar(output int a); a = 6; endtask
+        module Top;
+            C c;
+            initial begin c = new; scalar(c.pairs[1].a); $display(\"%p\", c.pairs); end
+        endmodule";
     assert_eq!(
         super::hierarchical_references::displayed(source),
-        ["5 6 '{5, 6} '{0, 7}"]
+        ["'{'{a:0, b:0}, '{a:6, b:0}}"]
     );
 }
 
@@ -4082,28 +4170,39 @@ fn fixed_size_array_properties_meet_ordinary_arrays() {
 
 #[test]
 fn fixed_size_array_properties_take_ordinary_array_checks() {
-    // `foreach` takes each index of a range outside `int`, of a property as
-    // of an ordinary array (IEEE 1800-2023 12.7.3).
+    // `foreach` takes each index of a range up to a bound of `int`, of a
+    // property as of an ordinary array (IEEE 1800-2023 12.7.3), and of a
+    // range outside `int` of an ordinary array; stepping past the last
+    // index does not wrap into another iteration.
     let source = "class C;
-        int w[64'd4294967296:64'd4294967298] = '{1, 2, 3};
+        int w[2147483645:2147483647] = '{1, 2, 3};
+        int e[2147483647:2147483647] = '{9};
     endclass
     module Top;
         C c;
         int m[64'd4294967297:64'd4294967296] = '{4, 5};
-        longint s, n, t;
+        int x[2147483647:2147483647] = '{7};
+        int y[-2147483647:-2147483648] = '{2, 3};
+        longint s, n, t, u;
         initial begin
             c = new;
-            foreach (c.w[i]) begin s += (i - 64'd4294967296) * c.w[i]; n++; end
+            foreach (c.w[i]) begin s += (i - 2147483645) * c.w[i]; n++; end
+            foreach (c.e[i]) begin s += c.e[i]; n++; end
             foreach (m[i]) t += (i - 64'd4294967296) * m[i];
-            $display(\"%0d %0d %0d\", s, n, t);
+            foreach (x[i]) u += x[i];
+            foreach (y[i]) u += y[i] * (i + 2147483647 + 2);
+            $display(\"%0d %0d %0d %0d\", s, n, t, u);
         end
     endmodule";
-    assert_eq!(super::hierarchical_references::displayed(source), ["8 3 4"]);
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["17 4 4 14"]
+    );
     // A count a container cannot hold, and elements whose members have
     // initial values, which a container does not give them, are rejected.
     for (property, message) in [
         (
-            "int a[128'd0:128'd18446744073709551616];",
+            "int a[0:16777216];",
             "fixed-size array class property of more than 16777216 elements",
         ),
         (

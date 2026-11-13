@@ -324,8 +324,11 @@ impl BodyBuilder<'_, '_, '_> {
             };
             let index = Expr::Ident(name.clone());
             // A bound outside `int` keeps its value (see `foreach_index_type`).
+            // A bound below 0 or outside `int` is a signed literal, which
+            // keeps its value in the index (see `foreach_index_type`).
             let bound = |value: i128| match i32::try_from(value) {
-                Ok(value) => Expr::Literal(value.to_string()),
+                Ok(value) if value >= 0 => Expr::Literal(value.to_string()),
+                Ok(value) => Expr::Literal(format!("32'sh{:x}", value as u32)),
                 Err(_) => Expr::Literal(format!("128'sh{:x}", value as u128)),
             };
             let (compare, step) = if left <= right {
@@ -372,14 +375,29 @@ impl BodyBuilder<'_, '_, '_> {
 
 /// The type of the index of a foreach over a fixed range from `left` to
 /// `right`: an `int` (IEEE 1800-2023 12.7.3), or a signed vector as wide as
-/// bounds outside its range need, so the index takes each of them.
+/// bounds outside its range need, so the index takes each of them. The
+/// loop steps the index once past `right` to end, so a range that ends at
+/// the last value of `int` the way it runs, such as
+/// `[2147483647:2147483647]`, takes a wider index, which does not wrap
+/// into another iteration.
 pub(super) fn foreach_index_type(left: i128, right: i128) -> Type {
-    if i32::try_from(left).is_ok() && i32::try_from(right).is_ok() {
+    let past = if left <= right {
+        right.saturating_add(1)
+    } else {
+        right.saturating_sub(1)
+    };
+    if [left, right, past]
+        .into_iter()
+        .all(|value| i32::try_from(value).is_ok())
+    {
         return int_type();
     }
-    // The bits of the bound farthest from zero, and a sign bit.
+    // The bits of the value farthest from zero, and a sign bit.
     let magnitude = |value: i128| 128 - value.unsigned_abs().leading_zeros() + 1;
-    let width = magnitude(left).max(magnitude(right)).clamp(33, 128);
+    let width = magnitude(left)
+        .max(magnitude(right))
+        .max(magnitude(past))
+        .clamp(33, 128);
     let mut ty = classes::unsigned_type(width as usize);
     ty.is_signed = true;
     ty

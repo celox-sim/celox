@@ -237,6 +237,13 @@ pub(super) fn fixed_storage(
         &context.const_env,
     )?;
     let fixed = (bound(range.left())?, bound(range.right())?);
+    // An index of the property is an `int`, as is a foreach index over it
+    // and one a locator method returns (IEEE 1800-2023 12.7.3, 7.12.1).
+    if i32::try_from(fixed.0).is_err() || i32::try_from(fixed.1).is_err() {
+        return Err(unsupported(
+            "fixed-size array class property with a bound outside int",
+        ));
+    }
     if fixed
         .0
         .abs_diff(fixed.1)
