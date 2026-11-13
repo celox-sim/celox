@@ -385,3 +385,91 @@ fn variables_of_generate_blocks_by_their_scope_names() {
         assert_eq!(lines, ["111111 011111"], "four-state {four_state}");
     }
 }
+
+// A constant function that divides by one of its arguments is a constant
+// function (IEEE 1800-2023 13.4.3): its result sizes declarations and bounds
+// a loop generate construct, as fpnew's lane count does.
+#[test]
+fn constant_functions_divide_by_their_arguments() {
+    let source = r#"
+        `timescale 1ns/1ns
+        package fp;
+            function automatic int unsigned fp_width(int unsigned fmt);
+                return fmt == 2 ? 16 : 32;
+            endfunction
+            function automatic int unsigned num_lanes(int unsigned width, int unsigned fmt, logic vec);
+                return vec ? width / fp_width(fmt) : 1;
+            endfunction
+        endpackage
+        module Slice #(parameter int unsigned Width = 64, parameter int unsigned Fmt = 2) ();
+            localparam int unsigned NUM_LANES = fp::num_lanes(Width, Fmt, 1'b1);
+            for (genvar lane = 0; lane < int'(NUM_LANES); lane++) begin : gen_lanes
+                initial #1 $display("lane %0d of %0d", lane, NUM_LANES);
+            end
+        endmodule
+        module Top;
+            function automatic int unsigned quotient(int unsigned w, int unsigned x);
+                return w / x;
+            endfunction
+            function automatic int unsigned remainder(int unsigned w, int unsigned x);
+                return w % x;
+            endfunction
+            localparam int unsigned N = quotient(64, 2);
+            localparam int unsigned M = remainder(64, 5);
+            logic [N-1:0] wide;
+            logic [M-1:0] narrow;
+            Slice s();
+            initial #2 $display("%0d %0d", $bits(wide), $bits(narrow));
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("divisions.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let mut displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    displayed.sort();
+    assert_eq!(
+        displayed,
+        [
+            "32 4",
+            "lane 0 of 4",
+            "lane 1 of 4",
+            "lane 2 of 4",
+            "lane 3 of 4"
+        ]
+    );
+    // A zero divisor gives unknown bits (11.4.2) at the width the context
+    // gives the division (11.8.2), as the same call at run time does.
+    let zero = r#"
+        module Top;
+            function automatic logic [31:0] quotient(logic [7:0] w, logic [7:0] x);
+                return w / x;
+            endfunction
+            localparam logic [31:0] N = quotient(8'd4, 8'd0);
+            initial $display("%b %b", N, quotient(8'd4, 8'd0));
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(zero, Path::new("zero.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    let unknown = "x".repeat(32);
+    assert_eq!(displayed, [format!("{unknown} {unknown}")]);
+}
