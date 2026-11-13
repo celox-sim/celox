@@ -79,6 +79,9 @@ pub(super) struct SequenceMonitor {
     /// The statements that end each tick: they keep the values that later
     /// ticks read.
     pub updates: Vec<Stmt>,
+    /// The statements that start each tick in the Observed region, before
+    /// any action runs: they read whether assertions are on (20.11).
+    pub start: Vec<Stmt>,
 }
 
 /// A value of an attempt that a later tick reads, a step's match or a
@@ -544,6 +547,15 @@ impl BodyBuilder<'_, '_, '_> {
         paths: Vec<Vec<celox_sv_syntax::SequenceStep>>,
         max_ticks: u32,
     ) -> Converted<SequenceMonitor> {
+        // The assertion control tasks stop new attempts while assertions are
+        // off and let started ones finish (20.11). This monitor decides each
+        // age from history registers alone and keeps no per-attempt state
+        // to tell the two apart.
+        if self.controls_assertions() {
+            return Err(unsupported(
+                "sequence with more than one way to match in a design that calls $assertoff or $asserton",
+            ));
+        }
         // Each way as the offsets of its Boolean expressions from the start.
         let mut offsets: Vec<Vec<(u32, celox_sv_syntax::ExprId)>> = Vec::new();
         for path in &paths {
@@ -690,6 +702,7 @@ impl BodyBuilder<'_, '_, '_> {
             stages,
             ticks: ticks.map(|ticks| (ticks, length)),
             updates,
+            start: Vec::new(),
         })
     }
 }

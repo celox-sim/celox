@@ -106,9 +106,12 @@ impl Comb<'_, '_> {
             for path in &paths {
                 sensitivity.extend(path.sources.iter().copied());
             }
+            // The assertion control state guards the reports but is not
+            // read by the source, so `$asserton` does not rerun the process
+            // (IEEE 1800-2023 9.2.2.2.1, 20.11).
             let sensitivity: Vec<_> = subtract_written_sensitivity(sensitivity, &written_atoms)
                 .into_iter()
-                .filter(|atom| !self.m.is_hidden(atom.id))
+                .filter(|atom| !self.m.is_hidden(atom.id) && !self.m.is_assertion_control(atom.id))
                 .collect();
             for observer in &mut self.events.observers {
                 observer.sensitivity = sensitivity.clone();
