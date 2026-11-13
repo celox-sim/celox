@@ -1451,6 +1451,24 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
                 literal.signed = *function == SystemFunction::Signed;
                 return Some(literal);
             }
+            // The ceiling of the base-2 logarithm of an operand of any width,
+            // as an unsigned value (20.8.1).
+            if *function == SystemFunction::Clog2
+                && let [arg] = args.as_slice()
+                && let Some(operand) = self_determined_integral_literal(arg)
+                && operand.mask == BigUint::default()
+                && operand.width > 128
+            {
+                let value = &operand.value;
+                let result = if *value <= BigUint::from(1u8) {
+                    0
+                } else {
+                    (value - BigUint::from(1u8)).bits()
+                };
+                let (width, signed) = function.result_type()?;
+                let signing = if signed { "s" } else { "" };
+                return parse_integral_literal(&format!("{width}'{signing}d{result}"));
+            }
             let (width, signed) = function.result_type()?;
             let value =
                 eval_system_function(*function, args, &HashMap::default(), &mut Budget::default())?;

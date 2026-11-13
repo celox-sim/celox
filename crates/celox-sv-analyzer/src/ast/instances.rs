@@ -726,8 +726,20 @@ fn parameter_override(
             session,
             packed_dimensions,
         )?;
-        expr_to_const(session, value)
-            .ok_or_else(|| unsupported("constant interface parameter override"))?
+        match expr_to_const(session, value) {
+            Some(value) => value,
+            // A value the binder gives as a concatenation or resize, such as
+            // one that selects a field of a wide constant, is bound as a
+            // constant expression, as a module parameter override is.
+            None => constant_binding::value_expression(
+                native,
+                declarations,
+                syntax_tree,
+                session,
+                packed_dimensions,
+            )?
+            .ok_or_else(|| unsupported("constant interface parameter override"))?,
+        }
     } else {
         constant_binding::value_expression(
             native,
