@@ -151,6 +151,25 @@ impl Declared {
         Self(Some(Arc::new(r#type.clone())))
     }
 
+    /// The declared type of `shape`, whatever its dimensions.
+    pub(super) fn of_shape(
+        shape: &crate::ast::variable_dimensions::VariableShape,
+    ) -> Option<&Type> {
+        shape.declared.0.as_deref()
+    }
+
+    /// Whether `other` declares the same type, which shape equality does
+    /// not compare.
+    pub(super) fn same(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+
+    /// Feed the declared type to `state`, which the `Hash` of a shape does
+    /// not.
+    pub(super) fn hash_type<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.0, state);
+    }
+
     /// The declared type, if the shape still has its declared dimensions.
     fn of(shape: &VariableDimensions) -> Option<&Type> {
         let r#type = shape.declared.0.as_deref()?;

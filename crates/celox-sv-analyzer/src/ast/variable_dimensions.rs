@@ -74,7 +74,19 @@ impl VariableDimensions {
         {
             return Some(id);
         }
-        semantic_types::of_shape(table, functions, self, env)
+        // A shape whose bounds are all literals has the same type in every
+        // context: a parameter of a structure type is typed once, not at
+        // each access of one of its members.
+        if !self.shape.is_closed() {
+            return semantic_types::of_shape(table, functions, self, env);
+        }
+        let key = self.shape.closed_hash();
+        if let Some(id) = table.closed_shape(key, &self.shape) {
+            return Some(id);
+        }
+        let id = semantic_types::of_shape(table, functions, self, env)?;
+        table.insert_closed_shape(key, self.shape.clone(), id);
+        Some(id)
     }
 
     /// Signature publication must observe a newly resolved type even when
@@ -171,4 +183,90 @@ pub(super) struct VariableShape {
     pub(super) declared: type_names::Declared,
     /// A `chandle` variable (see [`Type::chandle`]).
     pub(super) chandle: bool,
+}
+
+impl VariableShape {
+    /// Whether every bound of the shape, and of the types of its members, is
+    /// a literal, so that no constant of a context changes its type.
+    pub(super) fn is_closed(&self) -> bool {
+        // An enumeration is named by its declaration, which a shape of a
+        // class specialization shares with the other specializations.
+        self.enum_domain.is_none()
+            && !self.packed_enum
+            && type_names::Declared::of_shape(self).is_none_or(|ty| !ty.is_enum)
+            && self.container.is_none()
+            && self.class.is_none()
+            && self.virtual_interface.is_none()
+            && self.unpacked_struct.is_none()
+            // The width of a dimension is computed from its bounds.
+            && self
+                .packed
+                .iter()
+                .all(|dimension| literal(&dimension.left) && literal(&dimension.right))
+            && self
+                .unpacked
+                .iter()
+                .all(|dimension| literal(&dimension.left) && literal(&dimension.right))
+            && self
+                .members
+                .iter()
+                .all(|member| type_is_closed(member.r#type()))
+    }
+
+    /// The hash of the parts of a closed shape that its type depends on.
+    pub(super) fn closed_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut state = fxhash::FxHasher::default();
+        for dimension in &self.packed {
+            (&dimension.left, &dimension.right).hash(&mut state);
+        }
+        for dimension in &self.unpacked {
+            (&dimension.left, &dimension.right).hash(&mut state);
+        }
+        self.members.hash(&mut state);
+        self.enum_domain.hash(&mut state);
+        (
+            self.packed_enum,
+            self.real,
+            self.string,
+            self.signed,
+            self.is_2state,
+            self.signed_element_depth,
+            self.chandle,
+        )
+            .hash(&mut state);
+        self.declared.hash_type(&mut state);
+        state.finish()
+    }
+
+    /// Whether `other` is the same closed shape, its declared type included.
+    pub(super) fn same_closed(&self, other: &Self) -> bool {
+        self == other && self.declared.same(&other.declared)
+    }
+}
+
+/// Whether every bound of `ty`, and of the types of its members, is a
+/// literal (see [`VariableShape::is_closed`]).
+fn type_is_closed(ty: &Type) -> bool {
+    !ty.is_enum
+        && ty.enum_domain.is_none()
+        && !ty.packed_enum
+        && ty.container.is_none()
+        && ty.class.is_none()
+        && ty.unpacked_struct.is_none()
+        && ty
+            .packed_ranges
+            .iter()
+            .all(|range| literal(&range.left) && literal(&range.right))
+        && ty.unpacked_ranges.iter().all(|range| {
+            literal(&range.left) && literal(&range.right) && range.size.as_ref().is_none_or(literal)
+        })
+        && ty
+            .members
+            .iter()
+            .all(|member| type_is_closed(member.r#type()))
+}
+
+fn literal(expr: &ConstExpr) -> bool {
+    matches!(expr, ConstExpr::Literal(_))
 }
