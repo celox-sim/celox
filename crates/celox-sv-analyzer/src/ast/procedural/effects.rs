@@ -1241,7 +1241,13 @@ impl BodyBuilder<'_, '_, '_> {
         if !matches!(current, Expr::Ident(_))
             && shape.as_ref().is_some_and(|shape| {
                 shape.enum_domain.is_some()
-                    || shape.class.is_some()
+                    || expression_binding::objects::shape_class(
+                        shape,
+                        self.tree,
+                        self.session,
+                        &self.dims,
+                    )
+                    .is_some()
                     || virtual_interfaces::holds_virtual_interface(
                         shape,
                         self.tree,
