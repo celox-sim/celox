@@ -268,6 +268,12 @@ fn finish_lvalue(
 /// width when the index is outside its range; such a select is moved above
 /// the whole structure, where a read gives X and a write is ignored.
 ///
+/// A select of the elements of a member of several packed dimensions
+/// arrives in positions of the member's bits too, those of an index outside
+/// its range at the member's width. It becomes a select at those positions
+/// in the structure, confined to the member's bits by a
+/// [`crate::ir::SelectWindow`].
+///
 /// An indexed part-select arrives in the index coordinates of the member's
 /// declared range, its width a constant. It becomes a select at the
 /// positions of those indices in the structure, confined to the member's
@@ -311,6 +317,17 @@ fn dynamic_member_select(
             else_expr: Box::new(literal(structure)),
         };
         return Some(select(position.clone(), position, None));
+    }
+    let window = Some(crate::ir::SelectWindow {
+        lsb: u32::try_from(offset).ok()?,
+        msb: u32::try_from(offset.checked_add(width.checked_sub(1)?)?).ok()?,
+    });
+    if r#type.packed_ranges.len() > 1 {
+        return Some(select(
+            add_expr(literal(offset), msb),
+            add_expr(literal(offset), lsb),
+            window,
+        ));
     }
     let [range] = r#type.packed_ranges.as_slice() else {
         return None;
@@ -364,15 +381,7 @@ fn dynamic_member_select(
         op: BinaryOp::Add,
         right: Box::new(const_expr_from_i128(constant)),
     };
-    let offset = u32::try_from(offset).ok()?;
-    Some(select(
-        at(msb),
-        at(lsb),
-        Some(crate::ir::SelectWindow {
-            lsb: offset,
-            msb: offset.checked_add(u32::try_from(width.checked_sub(1)?).ok()?)?,
-        }),
-    ))
+    Some(select(at(msb), at(lsb), window))
 }
 
 /// A whole native member path uses the same interface shadowing, type/offset
