@@ -1580,7 +1580,7 @@ pub(super) fn read_handles(expr: &Expr, handles: &mut Vec<Expr>) {
 }
 
 /// The operands of `expr` (not those of its constant selects).
-fn children(expr: &Expr) -> Vec<&Expr> {
+pub(super) fn children(expr: &Expr) -> Vec<&Expr> {
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => Vec::new(),
         Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {

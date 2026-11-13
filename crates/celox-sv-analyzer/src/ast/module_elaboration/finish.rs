@@ -192,6 +192,132 @@ impl ScopeElaboration<'_> {
         }
     }
 
+    /// A port actual that calls a subroutine, such as OpenTitan's
+    /// `.mubi_i(mubi8_and_lo(init_locked, access_i.write_lock))`, is the value
+    /// of the call in the instantiating module (IEEE 1800-2023 23.3.2.2): a
+    /// variable of the function's result type that a continuous assignment
+    /// of the module computes, under the instance's condition, which the
+    /// port then takes. A connection reads no subroutine itself.
+    ///
+    /// It runs before the bodies are validated, which checks the calls of
+    /// the continuous assignments as those of any other (13.4.1).
+    pub(super) fn hoist_call_actuals(&mut self) {
+        let mut taken = self
+            .ports
+            .iter()
+            .map(|port| port.name.clone())
+            .chain(self.signals.iter().map(|signal| signal.name.clone()))
+            .chain(self.instances.iter().map(|instance| instance.name.clone()))
+            .chain(
+                self.parameters
+                    .iter()
+                    .chain(&self.imported.parameters)
+                    .map(|parameter| parameter.name().to_string()),
+            )
+            .collect::<HashSet<_>>();
+        // The result type of each function: as declared, for an aggregate
+        // such as an unpacked array or a tagged union, whose declaration the
+        // scope keeps; otherwise a vector of the result's width and kind.
+        let result_types: HashMap<String, Type> = self
+            .subroutines
+            .iter()
+            .chain(
+                self.imported
+                    .subroutines
+                    .iter()
+                    .map(|subroutine| &**subroutine),
+            )
+            .filter(|subroutine| !subroutine.is_task)
+            .filter_map(|subroutine| {
+                let declared = self
+                    .functions
+                    .get(&subroutine.name)
+                    .or_else(|| self.imported.functions.get(&subroutine.name))
+                    .and_then(|function| function.return_type.clone());
+                let r#type =
+                    declared.or_else(|| subroutine.return_type.as_ref().and_then(ast_type_of))?;
+                Some((subroutine.name.clone(), r#type))
+            })
+            .collect();
+        let component = |text: &str| {
+            text.chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect::<String>()
+        };
+        let mut hoisted = 0usize;
+        let mut signals = Vec::new();
+        let mut processes = Vec::new();
+        // An actual of an instance array is connected to each instance, or
+        // each takes a part-select of it (IEEE 1800-2023 23.3.3.5, 28.3.6):
+        // it names no element, so the elements share the one value of the
+        // call, which the frontend distributes as any other expression.
+        for instance in &mut self.instances {
+            for connection in &mut instance.port_connections {
+                let Some(actual) = connection.actual_expr.take() else {
+                    continue;
+                };
+                let original = actual.clone();
+                let (signals_before, processes_before) = (signals.len(), processes.len());
+                let prefix = format!(
+                    "{}_{}",
+                    component(&instance.name),
+                    component(&connection.formal)
+                );
+                // Each call in the actual, also inside an operator such as
+                // `f(a) + 1`, is replaced by a variable holding its value.
+                let mut hoist = |call: &Expr| -> Option<String> {
+                    let Expr::Call {
+                        callee: Callee::Subroutine(name),
+                        ..
+                    } = call
+                    else {
+                        return None;
+                    };
+                    let r#type = result_types.get(name)?;
+                    // A name the module does not declare otherwise.
+                    let hidden = loop {
+                        let hidden = format!("__port_call{hoisted}_{prefix}");
+                        hoisted += 1;
+                        if taken.insert(hidden.clone()) {
+                            break hidden;
+                        }
+                    };
+                    signals.push(Signal::new(hidden.clone(), r#type.clone()));
+                    processes.push(CombProcess::new(
+                        CombProcessKind::ContinuousAssign,
+                        instance.condition.clone(),
+                        vec![Assignment::new(LValue::Ident(hidden.clone()), call.clone())],
+                    ));
+                    Some(hidden)
+                };
+                let rewritten = hoist_calls(actual, &mut hoist);
+                // The actual reevaluates when any operand changes, calling
+                // the function again (IEEE 1800-2023 10.3.2, 23.3.3): a call
+                // inside an operator is hoisted only when it is the only one
+                // and the rest of the actual reads no variable, so that only
+                // the call's own operands trigger it. Otherwise the actual
+                // stays.
+                let hidden: HashSet<&str> = signals[signals_before..]
+                    .iter()
+                    .map(|signal: &Signal| signal.name.as_str())
+                    .collect();
+                // Two calls would also each reevaluate the other: one call
+                // only, whose operands are all the actual's.
+                if matches!(&rewritten, Expr::Ident(_))
+                    || hidden.len() == 1 && reads_no_variable(&rewritten, &hidden)
+                {
+                    connection.actual_expr = Some(rewritten);
+                } else {
+                    signals.truncate(signals_before);
+                    processes.truncate(processes_before);
+                    connection.actual_expr = Some(original);
+                }
+            }
+        }
+        self.signals.extend(signals);
+        self.comb_processes.extend(processes);
+    }
+
     /// The module the scope elaborated to.
     pub(super) fn finish(
         self,
@@ -235,4 +361,100 @@ impl ScopeElaboration<'_> {
             symbols,
         }
     }
+}
+
+/// `expr` with each outermost subexpression that `hoist` takes replaced by
+/// the variable it names. A call that the expression evaluates only under a
+/// condition, in a branch of a conditional operator or the right operand of
+/// a short-circuit operator (IEEE 1800-2023 11.4.7, 11.4.11), stays: its
+/// variable would evaluate it unconditionally.
+fn hoist_calls(expr: Expr, hoist: &mut dyn FnMut(&Expr) -> Option<String>) -> Expr {
+    if let Some(hidden) = hoist(&expr) {
+        return Expr::Ident(hidden);
+    }
+    match expr {
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expr::Mux {
+            condition: Box::new(hoist_calls(*condition, hoist)),
+            then_expr,
+            else_expr,
+        },
+        Expr::Binary {
+            left,
+            op: op @ (BinaryOp::LogicAnd | BinaryOp::LogicOr),
+            right,
+        } => Expr::Binary {
+            left: Box::new(hoist_calls(*left, hoist)),
+            op,
+            right,
+        },
+        expr => virtual_interfaces::map_children(expr, &mut |child| hoist_calls(child, hoist)),
+    }
+}
+
+/// Whether `expr` reads no variable but those `hidden` names, and calls
+/// nothing: its value changes only with theirs.
+fn reads_no_variable(expr: &Expr, hidden: &HashSet<&str>) -> bool {
+    match expr {
+        Expr::Ident(name) => hidden.contains(name.as_str()),
+        Expr::Call { .. } => false,
+        Expr::Select { expr, msb, lsb, .. } => {
+            constant_bound(msb) && constant_bound(lsb) && reads_no_variable(expr, hidden)
+        }
+        _ => virtual_interfaces::children(expr)
+            .into_iter()
+            .all(|child| reads_no_variable(child, hidden)),
+    }
+}
+
+/// Whether select bound `bound` names nothing: no variable, no call.
+fn constant_bound(bound: &ConstExpr) -> bool {
+    match bound {
+        ConstExpr::Literal(_) => true,
+        ConstExpr::Ident(_) | ConstExpr::Function { .. } => false,
+        ConstExpr::Select { expr, bit } => constant_bound(expr) && constant_bound(bit),
+        ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            constant_bound(expr) && constant_bound(msb) && constant_bound(lsb)
+        }
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => constant_bound(expr),
+        ConstExpr::Binary { left, right, .. } => constant_bound(left) && constant_bound(right),
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => constant_bound(condition) && constant_bound(then_expr) && constant_bound(else_expr),
+    }
+}
+
+/// The declared type of a result of IR type `r#type`: its declaration's,
+/// or a vector of its width, kind and sign.
+fn ast_type_of(r#type: &crate::ir::Type) -> Option<Type> {
+    if let Some(container) = r#type.container() {
+        return Some(container.clone());
+    }
+    if !r#type.unpacked_ranges().is_empty() || r#type.class().is_some() {
+        return None;
+    }
+    let kind = match r#type.kind() {
+        crate::ir::TypeKind::Real => return type_binding::builtin_type("real", None),
+        crate::ir::TypeKind::Shortreal => return type_binding::builtin_type("shortreal", None),
+        crate::ir::TypeKind::String => return type_binding::builtin_type("string", None),
+        crate::ir::TypeKind::Bit => TypeKind::Bit,
+        crate::ir::TypeKind::Logic | crate::ir::TypeKind::Implicit => TypeKind::Logic,
+        crate::ir::TypeKind::Reg => TypeKind::Reg,
+        _ => return None,
+    };
+    let width = r#type.resolved_width()?;
+    let mut ast = Type::new(kind);
+    ast.is_signed = r#type.is_signed();
+    if width > 1 || !r#type.packed_ranges().is_empty() {
+        ast.packed_ranges = vec![PackedRange::new(
+            ConstExpr::Literal((width - 1).to_string()),
+            ConstExpr::Literal("0".to_string()),
+        )];
+    }
+    Some(ast)
 }

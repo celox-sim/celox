@@ -257,6 +257,7 @@ impl Module {
             let inline_randomizations =
                 scope.bodies(syntax_tree, session, array_initial_processes)?;
             scope.rename_imported_calls();
+            scope.hoist_call_actuals();
             scope.validate_bodies()?;
             let assignments = scope.assignments();
             let symbols = scope.symbols(syntax_tree, session, inline_randomizations);
