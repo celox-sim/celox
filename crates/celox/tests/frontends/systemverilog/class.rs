@@ -4032,6 +4032,118 @@ fn static_inputs_are_those_of_the_class_that_declares_them() {
     assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
 }
 
+/// The error of building and running `source` for one time unit.
+fn class_error(source: &str, what: &str) -> String {
+    match celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top").build() {
+        Err(error) => error.to_string(),
+        Ok(mut sim) => sim.run_until(1).expect_err(what).to_string(),
+    }
+}
+
+#[test]
+fn rand_mode_of_a_base_local_static_rand_property_is_not_visible() {
+    // A `local` member of a base class is not visible in a derived class
+    // (IEEE 1800-2023 8.18), its static rand property's shared mode
+    // included (18.8).
+    for use_ in [
+        "function void f(); p.rand_mode(0); endfunction",
+        "function int f(); return p.rand_mode(); endfunction",
+    ] {
+        let source = format!(
+            "class Base; local static rand int p; endclass
+            class Derived extends Base; {use_} endclass
+            module Top; Derived d; initial begin d = new; void'(d.f()); end endmodule"
+        );
+        let error = class_error(&source, use_);
+        assert!(
+            error.contains("local class member") && error.contains("::p` is not"),
+            "{use_}: {error}"
+        );
+    }
+}
+
+#[test]
+fn randomize_arguments_name_the_member_of_the_most_derived_class() {
+    // An instance property of a derived class hides a static rand property
+    // of its base of the name (IEEE 1800-2023 8.14): `randomize(p)` makes
+    // the instance property random, and leaves the static one alone (18.11).
+    let source = "class Base; static rand int p; endclass
+    class Derived extends Base;
+        rand int p;
+        constraint c { p inside {[5:7]}; }
+    endclass
+    module Top;
+        Derived d;
+        int ok;
+        initial begin
+            d = new;
+            Base::p = 100;
+            ok = d.randomize(p) && d.p >= 5 && d.p <= 7 && Base::p == 100;
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn constraints_name_the_static_property_that_hides_an_instance_one() {
+    // A static property of a derived class hides a rand instance property
+    // of its base of the name (IEEE 1800-2023 8.14): its constraint reads
+    // the static value (18.5).
+    let source = "class Base; rand int p; endclass
+    class Derived extends Base;
+        static int p = 4;
+        rand int x;
+        constraint c { x == p; }
+    endclass
+    module Top;
+        Derived d;
+        int ok;
+        initial begin
+            d = new;
+            ok = 1;
+            repeat (5) ok &= d.randomize() && d.x == 4;
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn rand_object_members_with_hidden_static_rand_properties_stay_rejected() {
+    // A static rand property a derived class hides by a static one of the
+    // name is still the base's, which the derived class's randomize calls
+    // solve: an object a rand handle reaches does not solve it, as one of a
+    // class with a visible static rand property does not (IEEE 1800-2023
+    // 18.4).
+    let source = "class Base; static rand int p; endclass
+    class Derived extends Base; static int p; endclass
+    class Holder;
+        rand Derived h;
+        function new(); h = new; endfunction
+    endclass
+    module Top; Holder o; initial begin o = new; void'(o.randomize()); end endmodule";
+    let error = class_error(source, "a hidden static rand property of a rand member");
+    assert!(
+        error.contains("a rand object member whose constraints name static properties"),
+        "{error}"
+    );
+}
+
+#[test]
+fn constraints_do_not_see_a_base_local_static_rand_property() {
+    // A `local` static rand property of a base class is not visible in the
+    // constraints of a derived class (IEEE 1800-2023 8.18).
+    let source = "class Base; local static rand int p; endclass
+    class Derived extends Base;
+        rand int x;
+        constraint c { x == p; }
+    endclass
+    module Top; Derived d; initial begin d = new; void'(d.randomize()); end endmodule";
+    let error = class_error(source, "a base's local static rand property");
+    assert!(error.contains("local member `p`"), "{error}");
+}
+
 #[test]
 fn static_properties_are_admitted_as_instance_properties_are() {
     // The solver takes the static properties a constraint names, and the

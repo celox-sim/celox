@@ -46,6 +46,12 @@ pub enum Expr {
     Index {
         level: u32,
     },
+    /// Static rand property `0` of the class whose constraint names it (IEEE
+    /// 1800-2023 18.4), its static rand properties numbered from those of
+    /// its bases. Building a program solves each in a field after those of
+    /// the class's properties, which the program names instead: a program
+    /// never holds it.
+    Static(usize),
     /// Solver variable `0` of the call, among those of every object it
     /// solves: a member of a loop element that is one of them. Only the
     /// unrolling of a loop makes it; a program never holds it.
@@ -261,6 +267,7 @@ impl Expr {
             | Self::Field(_)
             | Self::Input { .. }
             | Self::Index { .. }
+            | Self::Static(_)
             | Self::Solved(_)
             | Self::Element { .. } => false,
         }
@@ -292,6 +299,7 @@ impl Expr {
                 .ok_or("invalid constraint field")?
                 .clone(),
             Self::Solved(index) => terms.get(*index).ok_or("invalid solver variable")?.clone(),
+            Self::Static(_) => return Err("a static rand property outside a program".into()),
             Self::Size(index) => sizes.get(*index).ok_or("invalid constraint array")?.clone(),
             Self::Foreach { .. } | Self::Index { .. } | Self::Element { .. } => {
                 return Err("constraint loop outside its array".into());
@@ -515,6 +523,7 @@ impl Heap {
             | Expr::Field(_)
             | Expr::Input { .. }
             | Expr::Size(_)
+            | Expr::Static(_)
             | Expr::Solved(_) => constraint.clone(),
         })
     }

@@ -262,15 +262,37 @@ fn visible(
     session: &mut Session,
     env: &ConstEnv,
 ) -> Result<(), String> {
-    if !property.local && !property.protected {
+    accessible(
+        &property.owner,
+        &property.name,
+        property.local,
+        property.protected,
+        tree,
+        session,
+        env,
+    )
+}
+
+/// Whether the constraint being bound may access member `name` of class
+/// `owner`, `local` or `protected` (see [`visible`]).
+fn accessible(
+    owner: &str,
+    name: &str,
+    local: bool,
+    protected: bool,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Result<(), String> {
+    if !local && !protected {
         return Ok(());
     }
     let scope = session.constraint_scopes.last().cloned();
     let visible = match &scope {
-        Some((scope, _)) if *scope == property.owner => true,
-        Some((_, Some(base))) if !property.local => {
+        Some((scope, _)) if scope == owner => true,
+        Some((_, Some(base))) if !local => {
             super::class(tree, session, base, env, &TypeAliases::default()).is_ok_and(|base| {
-                base.derives_from(tree, session, &property.owner, env, &TypeAliases::default())
+                base.derives_from(tree, session, owner, env, &TypeAliases::default())
             })
         }
         _ => false,
@@ -279,11 +301,56 @@ fn visible(
         Ok(())
     } else {
         Err(format!(
-            "{} member `{}` of class `{}`",
-            if property.local { "local" } else { "protected" },
-            property.name,
-            property.owner
+            "{} member `{name}` of class `{owner}`",
+            if local { "local" } else { "protected" },
         ))
+    }
+}
+
+/// The names a constraint of a class may name besides its properties: its
+/// static properties, those the solver reads as inputs of the program and
+/// the rand ones it solves in the object's slots, and the class's lineage,
+/// which tells which of them a name denotes (see `classes::member`).
+pub(in crate::ast) struct Names<'a> {
+    pub lineage: &'a [String],
+    pub statics: &'a [super::StaticProperty],
+    pub inputs: &'a [super::StaticInput],
+    pub slots: &'a [super::StaticSlot],
+}
+
+/// The instance property that `name` denotes, by its index, if a member of
+/// the class.
+fn instance<'p>(
+    name: &str,
+    properties: &'p [Property],
+    names: &Names<'_>,
+) -> Option<(usize, &'p Property)> {
+    match super::member(name, names.lineage, properties, names.statics)? {
+        super::Member::Instance(index) => Some((index, &properties[index])),
+        super::Member::Static(_) => None,
+    }
+}
+
+/// Name static rand property `n` of constraint `expr` as field `first + n`
+/// of its program (see `ConstraintExpr::Static`).
+pub(in crate::ast) fn resolve_statics(expr: &mut ConstraintExpr, first: usize) {
+    match expr {
+        ConstraintExpr::Static(slot) => *expr = ConstraintExpr::Field(first + *slot),
+        ConstraintExpr::Enabled { value, .. }
+        | ConstraintExpr::Resize { value, .. }
+        | ConstraintExpr::Unary { value, .. } => resolve_statics(value, first),
+        ConstraintExpr::Foreach { body, .. } => resolve_statics(body, first),
+        ConstraintExpr::Binary { left, right, .. } => {
+            resolve_statics(left, first);
+            resolve_statics(right, first);
+        }
+        ConstraintExpr::Literal(..)
+        | ConstraintExpr::Field(_)
+        | ConstraintExpr::Input { .. }
+        | ConstraintExpr::Size(_)
+        | ConstraintExpr::Index { .. }
+        | ConstraintExpr::Solved(_)
+        | ConstraintExpr::Element { .. } => {}
     }
 }
 
@@ -306,6 +373,7 @@ pub(in crate::ast) fn looped_arrays(expr: &ConstraintExpr, found: &mut Vec<usize
         | ConstraintExpr::Input { .. }
         | ConstraintExpr::Size(_)
         | ConstraintExpr::Index { .. }
+        | ConstraintExpr::Static(_)
         | ConstraintExpr::Solved(_)
         | ConstraintExpr::Element { .. } => {}
     }
@@ -329,12 +397,8 @@ fn array_size(id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<Stri
 }
 
 /// The size of array property `name` among those of the program.
-fn size(name: String, properties: &[Property]) -> Result<Typed, String> {
-    let (index, _) = properties
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, property)| property.name == name)
+fn size(name: String, properties: &[Property], names: &Names<'_>) -> Result<Typed, String> {
+    let (index, _) = instance(&name, properties, names)
         .filter(|(_, property)| property.sequence())
         .ok_or_else(|| format!("constraint variable `{name}.size`"))?;
     let array = properties[..index]
@@ -409,13 +473,17 @@ fn solver_element(
         && solver_type(&container.element, tree, session, env).is_ok()
 }
 
+/// Constraint `id` of a class with `properties` and `names`, whose other
+/// names are the variables of a randomize call, input `index` of the
+/// program, of `width` bits and `signed`, by `inputs`.
 pub(in crate::ast) fn bind_inputs(
     id: ExprId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     properties: &[Property],
+    names: &Names<'_>,
     env: &ConstEnv,
-    inputs: &HashMap<String, Result<(usize, u32, bool), String>>,
+    inputs: &HashMap<String, (usize, u32, bool)>,
 ) -> Result<ConstraintExpr, String> {
     #[allow(clippy::too_many_arguments)]
     fn expression(
@@ -423,8 +491,9 @@ pub(in crate::ast) fn bind_inputs(
         tree: &AnalysisContext<'_>,
         session: &mut Session,
         properties: &[Property],
+        names: &Names<'_>,
         env: &ConstEnv,
-        inputs: &HashMap<String, Result<(usize, u32, bool), String>>,
+        inputs: &HashMap<String, (usize, u32, bool)>,
         loops: &[Loop],
         depth: usize,
         budget: &mut usize,
@@ -439,6 +508,7 @@ pub(in crate::ast) fn bind_inputs(
                 tree,
                 session,
                 properties,
+                names,
                 env,
                 inputs,
                 loops,
@@ -466,11 +536,7 @@ pub(in crate::ast) fn bind_inputs(
                 let [Some(variable)] = variables.as_slice() else {
                     return Err("constraint foreach over more than one dimension".into());
                 };
-                let (index, property) = properties
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find(|(_, property)| property.name == name)
+                let (index, property) = instance(&name, properties, names)
                     .filter(|(_, property)| property.sequence())
                     .ok_or_else(|| format!("constraint foreach over `{name}`"))?;
                 if property.rand || property.randc {
@@ -497,6 +563,7 @@ pub(in crate::ast) fn bind_inputs(
                     tree,
                     session,
                     properties,
+                    names,
                     env,
                     inputs,
                     &inner,
@@ -532,12 +599,52 @@ pub(in crate::ast) fn bind_inputs(
             }
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
-                if let Some((index, property)) = properties
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find(|(_, p)| p.name == name)
-                {
+                let member = super::member(&name, names.lineage, properties, names.statics);
+                if let Some(super::Member::Static(index)) = member {
+                    // A static property of the class (18.5): the variable
+                    // of the rand one the call solves, the value of another.
+                    let property = &names.statics[index];
+                    accessible(
+                        &property.owner,
+                        &property.name,
+                        property.local,
+                        property.protected,
+                        tree,
+                        session,
+                        env,
+                    )?;
+                    solver_type(&property.r#type, tree, session, env)?;
+                    return Ok(if property.rand {
+                        let slot = names
+                            .slots
+                            .iter()
+                            .position(|slot| slot.variable == property.variable)
+                            .ok_or("a static rand property without its slot")?;
+                        Typed {
+                            kind: Kind::Leaf(ConstraintExpr::Static(slot)),
+                            width: names.slots[slot].field.width,
+                            signed: names.slots[slot].field.signed,
+                        }
+                    } else {
+                        let index = names
+                            .inputs
+                            .iter()
+                            .position(|input| input.variable == property.variable)
+                            .ok_or("a static property wider than 64 bits in a constraint")?;
+                        let input = &names.inputs[index];
+                        Typed {
+                            kind: Kind::Leaf(ConstraintExpr::Input {
+                                index,
+                                width: input.width,
+                            }),
+                            width: input.width,
+                            signed: input.signed,
+                        }
+                    });
+                }
+                if let Some(super::Member::Instance(index)) = member {
+                    let property = &properties[index];
+                    visible(property, tree, session, env)?;
                     solver_holds(property, tree, session, env)?;
                     // The field of the property among those of the program.
                     let field = properties[..index]
@@ -549,8 +656,7 @@ pub(in crate::ast) fn bind_inputs(
                         width: property.field.width,
                         signed: property.field.signed,
                     }
-                } else if let Some(input) = inputs.get(&name) {
-                    let &(index, width, signed) = input.as_ref().map_err(Clone::clone)?;
+                } else if let Some(&(index, width, signed)) = inputs.get(&name) {
                     Typed {
                         kind: Kind::Leaf(ConstraintExpr::Input { index, width }),
                         width,
@@ -588,10 +694,10 @@ pub(in crate::ast) fn bind_inputs(
                 expression,
                 arguments,
             } if arguments.is_empty() && array_size(*expression, native).is_some() => {
-                return size(array_size(*expression, native).unwrap(), properties);
+                return size(array_size(*expression, native).unwrap(), properties, names);
             }
             ExprKind::Member { .. } if array_size(id, native).is_some() => {
-                return size(array_size(id, native).unwrap(), properties);
+                return size(array_size(id, native).unwrap(), properties, names);
             }
             ExprKind::Member {
                 expression,
@@ -601,11 +707,7 @@ pub(in crate::ast) fn bind_inputs(
                 && matches!(&native.expression(*expression).kind, ExprKind::Name(root) if root.spelling == "local") =>
             {
                 let key = format!("local::{}", instances::normalize_identifier(&name.spelling));
-                let &(index, width, signed) = inputs
-                    .get(&key)
-                    .ok_or("inline local variable")?
-                    .as_ref()
-                    .map_err(Clone::clone)?;
+                let &(index, width, signed) = inputs.get(&key).ok_or("inline local variable")?;
                 Typed {
                     kind: Kind::Leaf(ConstraintExpr::Input { index, width }),
                     width,
@@ -791,6 +893,7 @@ pub(in crate::ast) fn bind_inputs(
         tree,
         session,
         properties,
+        names,
         env,
         inputs,
         &[],
@@ -875,6 +978,31 @@ impl Class {
                 cyclic: property.randc,
             });
         }
+        // The slots of the static rand properties follow (see
+        // `ConstraintExpr::Static`).
+        let first = fields.len();
+        for slot in &self.static_slots {
+            solver_type(&slot.r#type, tree, session, env).map_err(unsupported)?;
+            let mask = u64::MAX >> (64 - slot.field.width);
+            fields.push(Field {
+                offset: slot.field.offset,
+                width: slot.field.width,
+                random: true,
+                domain: slot
+                    .r#type
+                    .enum_domain
+                    .as_ref()
+                    .map(|domain| {
+                        domain
+                            .values()
+                            .into_iter()
+                            .map(|value| value.bits() as u64 & mask)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                cyclic: false,
+            });
+        }
         let mut constraints = Vec::new();
         for (index, (_, block)) in self.constraints.iter().enumerate() {
             constraints.extend(
@@ -883,9 +1011,12 @@ impl Class {
                     .map_err(|reason| unsupported(format!("constraints: {reason}")))?
                     .iter()
                     .cloned()
-                    .map(|value| ConstraintExpr::Enabled {
-                        index: index as u32,
-                        value: Box::new(value),
+                    .map(|mut value| {
+                        resolve_statics(&mut value, first);
+                        ConstraintExpr::Enabled {
+                            index: index as u32,
+                            value: Box::new(value),
+                        }
                     }),
             );
         }
