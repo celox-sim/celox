@@ -208,6 +208,46 @@ pub(super) fn shape(container: &ContainerType) -> VariableDimensions {
     procedural::dimensions_from_type(&of(container.clone()))
 }
 
+/// Whether declared shape `shape` holds dynamically sized arrays: it is a
+/// dynamic array, queue or associative array, or a fixed-size array of
+/// them (7.5, 7.8, 7.10), as its type tells.
+pub(super) fn holds_container(
+    shape: &VariableDimensions,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> bool {
+    shape_holds_container(shape, &mut session.types, &tree.functions, &dims.const_env)
+}
+
+/// [`holds_container`] with the constants of `env`. A shape whose type
+/// cannot be formed in `env` is told by its container metadata, which every
+/// shape keeps until declarations bind their types.
+fn shape_holds_container(
+    shape: &VariableDimensions,
+    table: &mut semantic_types::TyTable,
+    functions: &const_functions::ConstantFunctions,
+    env: &ConstEnv,
+) -> bool {
+    let metadata = shape.container.is_some();
+    let Some(mut ty) = shape.type_id(table, functions, env) else {
+        return metadata;
+    };
+    while let semantic_types::TyData::Array {
+        kind: semantic_types::ArrayKind::Fixed(_),
+        element,
+    } = table.data(ty)
+    {
+        ty = *element;
+    }
+    let found = matches!(table.data(ty), semantic_types::TyData::Array { .. });
+    debug_assert_eq!(
+        found, metadata,
+        "the type and the container metadata of a shape disagree"
+    );
+    found
+}
+
 pub(super) fn native_type(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
@@ -1232,7 +1272,7 @@ pub(super) fn value(
                     }
                     if let ContainerKind::Associative { string, object, .. } = target.layout.kind
                         && (shape.string != string
-                            || shape.container.is_some()
+                            || holds_container(shape, tree, session, dims)
                             || !shape.unpacked.is_empty()
                             || object
                                 && expression_binding::objects::shape_class(
@@ -1596,6 +1636,77 @@ fn compound_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `logic [N-1:0] q[$]`, a queue whose element width names `N`.
+    fn symbolic_queue() -> VariableDimensions {
+        let mut element = Type::new(TypeKind::Logic);
+        element.packed_ranges.push(PackedRange::new(
+            ConstExpr::Binary {
+                left: Box::new(ConstExpr::Ident("N".into())),
+                op: BinaryOp::Sub,
+                right: Box::new(ConstExpr::Literal("1".into())),
+            },
+            ConstExpr::Literal("0".into()),
+        ));
+        // A container is held by its handle (see `with_dimensions`).
+        let mut queue = Type::new(TypeKind::Object);
+        queue.packed_ranges.push(PackedRange::new(
+            ConstExpr::Literal("31".into()),
+            ConstExpr::Literal("0".into()),
+        ));
+        queue.container = Some(Arc::new(ContainerType {
+            key: None,
+            layout: ContainerLayout {
+                kind: ContainerKind::Queue { capacity: 0 },
+                width: 4,
+                signed: false,
+                two_state: false,
+                handle: None,
+            },
+            element,
+            record: None,
+        }));
+        procedural::dimensions_from_type(&queue)
+    }
+
+    #[test]
+    fn shapes_whose_type_is_not_formed_keep_their_container_metadata() {
+        // An output-only queue formal whose element width names a constant
+        // that the caller's scope lacks is still a queue: the guards that
+        // ask leave it out of the values a call passes in (13.5.1).
+        let queue = symbolic_queue();
+        assert!(queue.container.is_some());
+        let functions = const_functions::ConstantFunctions::default();
+        let mut table = semantic_types::TyTable::default();
+        assert!(
+            queue
+                .type_id(&mut table, &functions, &ConstEnv::default())
+                .is_none()
+        );
+        assert!(shape_holds_container(
+            &queue,
+            &mut table,
+            &functions,
+            &ConstEnv::default()
+        ));
+        let env = ConstEnv::from_iter([("N".into(), 4)]);
+        assert!(shape_holds_container(&queue, &mut table, &functions, &env));
+        // A vector of that width is no container, formed or not.
+        let mut vector = Type::new(TypeKind::Logic);
+        vector
+            .packed_ranges
+            .push(queue.container.as_ref().unwrap().element.packed_ranges[0].clone());
+        let vector = procedural::dimensions_from_type(&vector);
+        assert!(!shape_holds_container(
+            &vector,
+            &mut table,
+            &functions,
+            &ConstEnv::default()
+        ));
+        assert!(!shape_holds_container(
+            &vector, &mut table, &functions, &env
+        ));
+    }
     #[test]
     fn queue_slice_rejects_nonintegral_bounds() {
         for (declaration, bound) in [

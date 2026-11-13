@@ -1466,7 +1466,7 @@ pub(in crate::ast) fn check_argument(
         // copies the formal out to the actual, an inout does both; a `ref`
         // binds an equivalent variable (see `references::check_actual`).
         if shape.unpacked.is_empty()
-            && shape.container.is_none()
+            && !containers::holds_container(shape, tree, session, dimensions)
             && let Some(formal) =
                 shape.type_id(&mut session.types, &tree.functions, &dimensions.const_env)
             && (session.types.is_enum(formal)
@@ -1535,7 +1535,7 @@ pub(in crate::ast) fn copied_in_target<'a>(
         .and_then(|shapes| shapes.get(position))
         .filter(|shape| {
             chandles::receives_chandle(shape)
-                || (shape.container.is_some()
+                || (containers::holds_container(shape, tree, session, dimensions)
                     || virtual_interfaces::holds_virtual_interface(
                         shape, tree, session, dimensions,
                     ))
