@@ -171,3 +171,47 @@ fn sscanf_place_checks_read_the_captured_place() {
     assert_eq!(sim.get(full), BigUint::from(42u8));
     assert_eq!(sim.get(i), BigUint::from(1u8));
 }
+
+sv_backends! {
+    // A member of a two-state type of a four-state packed structure is a
+    // variable `$sscanf` may write (IEEE 1800-2023 21.3.4.3), although it is
+    // read through a two-state conversion; its unknown digits are written
+    // as 0, since a two-state type holds no unknown bits (6.11.2).
+    fn sscanf_writes_two_state_members_of_four_state_structures(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            module Top(output logic [63:0] x, output logic [7:0] tag, low, part);
+              typedef bit [0:1][31:0] operand_t;
+              typedef struct packed { operand_t x; logic [7:0] tag; bit [7:0] low, part; } vec_t;
+              vec_t v;
+              initial begin
+                string line;
+                line = "0123456789abcdef";
+                void'($sscanf(line, "%h", v.x));
+                line = "a5";
+                void'($sscanf(line, "%h", v.tag));
+                line = "x5";
+                void'($sscanf(line, "%h", v.low));
+                v.part = 8'hff;
+                line = "9";
+                void'($sscanf(line, "%h", v.part[3:0]));
+                line = "x";
+                void'($sscanf(line, "%h", v.part[6:3]));
+                x = v.x;
+                tag = v.tag;
+                low = v.low;
+                part = v.part;
+              end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("scan_members.sv"))], "Top").four_state(true);
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("x")), BigUint::from(0x0123_4567_89ab_cdefu64));
+        assert_eq!(sim.get(sim.signal("tag")), BigUint::from(0xa5u8));
+        let (low, unknown) = sim.get_four_state(sim.signal("low"));
+        assert_eq!((low, unknown), (BigUint::from(0x05u8), BigUint::from(0u8)));
+        // Selects of the member are written in place: bits 3:0, then 6:3.
+        let (part, unknown) = sim.get_four_state(sim.signal("part"));
+        assert_eq!((part, unknown), (BigUint::from(0x81u8), BigUint::from(0u8)));
+    }
+}

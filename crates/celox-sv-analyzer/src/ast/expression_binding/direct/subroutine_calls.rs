@@ -780,9 +780,26 @@ pub(super) fn finish_system_call(
                 places.push((position, place_output(place, tree, dimensions)?));
             }
             let place = place.is_some();
+            // A member, or a select of one, such as `v.low[3:0]`.
+            let member = args.get(position).copied().flatten().is_some_and(|id| {
+                let mut id = ungroup(id, native);
+                while let celox_sv_syntax::ExprKind::Select { expression, .. } =
+                    native.expression(id).kind
+                {
+                    id = ungroup(expression, native);
+                }
+                matches!(
+                    native.expression(id).kind,
+                    celox_sv_syntax::ExprKind::Member { .. }
+                )
+            });
             if function.writes_argument(position)
                 && !place
-                && !expressions::query_actual_is_writable(arg, dimensions)
+                && !(if member {
+                    expressions::member_actual_is_writable(arg, dimensions)
+                } else {
+                    expressions::query_actual_is_writable(arg, dimensions)
+                })
             {
                 return Err(AnalyzerError::InvalidSystemTfCall {
                     name: name.clone(),
