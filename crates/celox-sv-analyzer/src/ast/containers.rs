@@ -2084,6 +2084,7 @@ mod tests {
             },
             element,
             record: None,
+            fixed: None,
         }));
         procedural::dimensions_from_type(&queue)
     }
