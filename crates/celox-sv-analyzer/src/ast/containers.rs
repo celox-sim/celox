@@ -1234,7 +1234,12 @@ pub(super) fn value(
                         && (shape.string != string
                             || shape.container.is_some()
                             || !shape.unpacked.is_empty()
-                            || object && shape.class.as_deref() != key_class)
+                            || object
+                                && expression_binding::objects::shape_class(
+                                    shape, tree, session, dims,
+                                )
+                                .as_deref()
+                                    != key_class)
                     {
                         return Err(unsupported(
                             "incompatible associative traversal index variable",

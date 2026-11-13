@@ -855,7 +855,14 @@ impl BodyBuilder<'_, '_, '_> {
                                 .return_shape
                                 .as_ref()
                                 .filter(|shape| shape.unpacked.is_empty())
-                                .and_then(|shape| shape.class.clone())
+                                .and_then(|shape| {
+                                    expression_binding::objects::shape_class(
+                                        shape,
+                                        self.tree,
+                                        self.session,
+                                        &self.dims,
+                                    )
+                                })
                             {
                                 expression_binding::check_handle_assignment(
                                     self.tree,

@@ -169,7 +169,7 @@ pub(super) fn enter_call(
                 || !shape.randomizable
                 || shape.real
                 || shape.string
-                || shape.class.is_some()
+                || objects::shape_class(shape, tree, session, dimensions).is_some()
             {
                 return Err(unsupported(
                     "scope randomize requires a packed variable with a supported enum domain",
