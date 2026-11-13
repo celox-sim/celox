@@ -145,6 +145,10 @@ impl SourceTree {
     pub(crate) fn declarations(&self) -> &celox_sv_syntax::Declarations {
         &self.declarations
     }
+    /// The arena, to rewrite, which drops its span index.
+    pub(crate) fn declarations_mut(&mut self) -> &mut celox_sv_syntax::Declarations {
+        &mut self.declarations
+    }
     /// A handle that keeps the address of [`Self::declarations`] from being
     /// reused while it is held, so that the address identifies this arena.
     pub(crate) fn declarations_incarnation(
@@ -189,12 +193,13 @@ fn source_tree(
     path: &Path,
 ) -> Result<SourceTree, AnalyzerError> {
     let declarations = declarations.map_err(parse_error)?;
-    let tree = SourceTree {
+    let mut tree = SourceTree {
         declarations: declarations.into(),
         scope: scopes::View::default(),
         compilation_path: std::sync::Arc::new(path.to_owned()),
     };
     scopes::validate_source(&tree)?;
+    crate::ast::lets::expand(&mut tree)?;
     Ok(tree)
 }
 

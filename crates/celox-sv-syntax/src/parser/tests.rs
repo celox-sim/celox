@@ -3915,3 +3915,44 @@ fn procedural_continuous_assignments_keep_their_target_and_value() {
         .is_err()
     );
 }
+
+/// A `let` declaration is recorded with its formals, their types and
+/// defaults, and its body, from its attributes on; its calls stay call
+/// expressions (IEEE 1800-2023 11.12).
+#[test]
+fn let_declarations_are_recorded_and_calls_stay_calls() {
+    let tree = parse(
+        "module M; logic a; (* keep *) let f(bit [1:0] x, untyped y = 1) = x + y; \
+         initial a = f(.x(a)); endmodule",
+    );
+    let [declaration] = tree.lets.as_slice() else {
+        panic!("one `let`: {:?}", tree.lets);
+    };
+    assert_eq!(declaration.name.value(), "f");
+    let ports = declaration
+        .ports
+        .iter()
+        .map(|port| {
+            (
+                port.name.value(),
+                port.data_type.is_some(),
+                port.default.is_some(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ports, [("x", true, false), ("y", false, true)]);
+    assert!(matches!(
+        tree.expression(declaration.body).kind,
+        ExprKind::Binary { .. }
+    ));
+    let start = &tree.tokens[declaration.tokens.start..];
+    assert_eq!(
+        start.iter().find(|token| !token.is_trivia()).unwrap().text,
+        "(*"
+    );
+    assert!(tree.expression_nodes().any(|(_, node)| matches!(
+        &node.kind,
+        ExprKind::Call { expression, .. }
+            if matches!(&tree.expression(*expression).kind, ExprKind::Name(name) if name.value() == "f")
+    )));
+}

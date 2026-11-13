@@ -16,6 +16,7 @@ mod generate;
 mod implicit_nets;
 mod instances;
 mod keywords;
+mod lets;
 mod modports;
 mod nets;
 mod non_ansi;
@@ -75,6 +76,8 @@ pub struct Declarations {
     pub covergroups: Vec<CovergroupDeclaration>,
     /// Every user-defined nettype declaration, which stays unconverted.
     pub nettypes: Vec<NettypeDeclaration>,
+    /// Every `let` declaration, whose item stays unconverted.
+    pub lets: Vec<LetDeclaration>,
     pub sequences: Vec<Sequence>,
     pub type_aliases: Vec<TypeAlias>,
     pub time_declarations: Vec<TimeDeclaration>,
@@ -149,6 +152,7 @@ impl Declarations {
             class_stack: Vec::new(),
             classes: Vec::new(),
             class_scopes: Vec::new(),
+            lets: Vec::new(),
             default_nettype: Some("wire".to_string()),
         };
         let units = parser.units()?;
@@ -162,6 +166,7 @@ impl Declarations {
         let assertion_declarations = parser.assertion_declarations;
         let covergroups = parser.covergroups;
         let nettypes = parser.nettypes;
+        let lets = parser.lets;
         let sequences = parser.sequences;
         let type_aliases = parser.type_aliases;
         let time_declarations = parser.time_declarations;
@@ -189,6 +194,7 @@ impl Declarations {
             assertion_declarations,
             covergroups,
             nettypes,
+            lets,
             sequences,
             type_aliases,
             time_declarations,
@@ -217,6 +223,24 @@ impl Declarations {
             .iter()
             .enumerate()
             .map(|(index, node)| (ExprId(index), node))
+    }
+
+    /// Add an expression node, such as one of the analyzer's expansion of a
+    /// call, and return its handle.
+    pub fn push_expression(&mut self, expression: Expr) -> ExprId {
+        self.expressions.push(expression);
+        ExprId(self.expressions.len() - 1)
+    }
+
+    /// The node of `id`, to rewrite in place.
+    pub fn expression_mut(&mut self, id: ExprId) -> &mut Expr {
+        &mut self.expressions[id.0]
+    }
+
+    /// Add a type node and return its handle.
+    pub fn push_data_type(&mut self, data_type: DataType) -> TypeId {
+        self.types.push(data_type);
+        TypeId(self.types.len() - 1)
     }
 
     /// Resolve an expression handle without recursive tree traversal.
@@ -396,6 +420,7 @@ struct Parser<'a> {
     /// The net type of implicit nets (IEEE 1800-2023 22.8), `None` after
     /// `default_nettype none`.
     default_nettype: Option<String>,
+    lets: Vec<LetDeclaration>,
 }
 
 impl Parser<'_> {

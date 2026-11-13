@@ -65,6 +65,9 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 - package: package ネット（[#1146](https://github.com/celox-sim/celox/issues/1146)）。
   package 変数はクロックやリセットにできません。
 - コンパイル単位: `$unit` 変数を宣言できるソースファイルは1つだけです。
+- `let` 宣言（11.12）はモジュール・interface・program の項目としてのみ扱い、
+  呼び出しごとに展開します。package・generate ブロック・手続きブロック内の
+  ものは拒否します。本体の名前を宣言し直すスコープ内の呼び出しも拒否します。
 
 ### interface の制約 {#interface-restrictions}
 
