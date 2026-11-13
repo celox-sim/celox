@@ -46,6 +46,9 @@ const TEMPORAL: &[&str] = &[
     "var",
 ];
 
+/// The most Boolean operands of one property specification.
+const MAX_SEQUENCE_OPERANDS: usize = 1024;
+
 impl Parser<'_> {
     /// The offset after the clocking event `@(...)` or `@name` that starts at
     /// `offset`, whose event expression may use `or`, `,` and `iff` (IEEE
@@ -89,20 +92,26 @@ impl Parser<'_> {
         }
         TEMPORAL.contains(&word)
             && !(word == "iff" && self.nth(offset - 1) == "disable")
-            // A fixed cycle delay `##n` (16.7), and `|=>` (16.12.7).
-            && !(word == "##" && self.nth(offset + 1).starts_with(|c: char| c.is_ascii_digit()))
+            // A cycle delay `##n` or `##[m:n]` (16.7), and `|=>` (16.12.7).
+            && !(word == "##"
+                && (self.nth(offset + 1).starts_with(|c: char| c.is_ascii_digit())
+                    || (self.nth(offset + 1) == "["
+                        && self.nth(offset + 2).starts_with(|c: char| c.is_ascii_digit()))))
             && word != "|=>"
+            // A sequence disjunction (16.9.7).
+            && word != "or"
     }
 
-    /// `[clocking_event] [disable iff (expression)] sequence [|-> sequence]`,
-    /// where a sequence is steps a fixed number of ticks apart. A sequence
-    /// declaration has neither `disable iff` nor an implication. A Boolean
-    /// property of one step, also behind `|->`, has no `sequence`.
+    /// `[clocking_event] [disable iff (expression)] sequence [|-> sequence]`
+    /// (16.7, 16.12). A sequence declaration has neither `disable iff` nor an
+    /// implication. A Boolean property of one step, also behind `|->`, has no
+    /// `sequence`.
     pub(super) fn property_spec(
         &mut self,
         sequence: bool,
         locals: Vec<SequenceLocal>,
     ) -> Result<PropertySpec> {
+        self.sequence_operands = 0;
         let clock = if self.peek() == "@" {
             Some(self.typed_timing_control()?)
         } else {
@@ -114,50 +123,64 @@ impl Parser<'_> {
         } else {
             None
         };
-        let first = self.sequence_steps()?;
-        let (antecedent, mut consequent) = if !sequence && matches!(self.peek(), "|->" | "|=>") {
-            let delay = u32::from(self.peek() == "|=>");
+        let first = self.sequence_expr()?;
+        let (antecedent, consequent) = if !sequence && matches!(self.peek(), "|->" | "|=>") {
+            let next = self.peek() == "|=>";
             self.at += 1;
-            let mut consequent = self.sequence_steps()?;
-            consequent[0].delay = consequent[0]
-                .delay
-                .checked_add(delay)
-                .ok_or_else(|| self.unsupported("cycle delay longer than 2^32 - 1 ticks"))?;
+            let consequent = self.sequence_expr()?;
+            // `|=>` is `|-> ##1` (16.12.7).
+            let consequent = if next {
+                SequenceExpr::Concat {
+                    left: None,
+                    delay: CycleDelay { min: 1, max: 1 },
+                    right: Box::new(consequent),
+                }
+            } else {
+                consequent
+            };
             (Some(first), consequent)
         } else {
             (None, first)
         };
-        let boolean = |steps: &[SequenceStep]| matches!(steps, [step] if step.delay == 0 && step.items.is_empty());
         // `p iff q` binds tighter than an implication (Table 16-3), so it is
         // the consequent's: both of its operands are Boolean here.
         let equivalent = if !sequence && self.peek() == "iff" {
             self.at += 1;
-            let right = self.sequence_steps()?;
-            if !locals.is_empty()
-                || !boolean(&consequent)
-                || !boolean(&right)
-                || antecedent.as_deref().is_some_and(|steps| !boolean(steps))
-                || self.peek() == "iff"
-            {
-                return Err(self.unsupported("iff of properties over cycles"));
+            let right = self.sequence_expr()?;
+            match (consequent.boolean(), right.boolean()) {
+                (Some(_), Some(right))
+                    if locals.is_empty()
+                        && antecedent
+                            .as_ref()
+                            .is_none_or(|antecedent| antecedent.boolean().is_some())
+                        && self.peek() != "iff" =>
+                {
+                    Some(right)
+                }
+                _ => return Err(self.unsupported("iff of properties over cycles")),
             }
-            Some(right[0].expression)
         } else {
             None
         };
-        if locals.is_empty() && boolean(&consequent) && antecedent.as_deref().is_none_or(boolean) {
+        if locals.is_empty()
+            && let Some(condition) = consequent.boolean()
+            && antecedent
+                .as_ref()
+                .is_none_or(|antecedent| antecedent.boolean().is_some())
+        {
             return Ok(PropertySpec {
                 clock,
                 disable,
-                antecedent: antecedent.map(|steps| steps[0].expression),
-                condition: consequent[0].expression,
+                antecedent: antecedent.and_then(|antecedent| antecedent.boolean()),
+                condition,
                 equivalent,
                 sequence: None,
             });
         }
         let condition = consequent
-            .last_mut()
-            .expect("a sequence has a step")
+            .booleans()
+            .last()
+            .expect("a sequence has a Boolean expression")
             .expression;
         let id = SequenceId(self.sequences.len());
         self.sequences.push(Sequence {
@@ -175,54 +198,96 @@ impl Parser<'_> {
         })
     }
 
-    /// Steps `[##n] step {##n step}`, a step being a Boolean expression or
-    /// `(expression, match_item {, match_item})` (IEEE 1800-2023 16.7, 16.10).
-    fn sequence_steps(&mut self) -> Result<Vec<SequenceStep>> {
-        let mut steps = Vec::new();
-        loop {
-            let delay = if self.eat("##") {
-                self.cycle_delay()?
-            } else {
-                0
-            };
-            // A parenthesized sequence `(a ##1 b)` (16.7).
-            if self.peek() == "(" && self.group_holds_delay() {
-                self.at += 1;
-                let mut group = self.sequence_steps()?;
-                self.expect(")")?;
-                group[0].delay = group[0]
-                    .delay
-                    .checked_add(delay)
-                    .ok_or_else(|| self.unsupported("cycle delay longer than 2^32 - 1 ticks"))?;
-                steps.extend(group);
-                if self.peek() != "##" {
-                    return Ok(steps);
-                }
-                continue;
-            }
-            let start = self.at;
-            let (expression, items) = if self.peek() == "(" && self.match_items_follow() {
-                self.at += 1;
-                let expression = self.expression(0)?;
-                let mut items = Vec::new();
-                while self.eat(",") {
-                    items.push(self.match_item()?);
-                }
-                self.expect(")")?;
-                (expression, items)
-            } else {
-                (self.expression(0)?, Vec::new())
-            };
-            steps.push(SequenceStep {
-                delay,
-                expression,
-                items,
-                tokens: self.range(start),
-            });
-            if self.peek() != "##" {
-                return Ok(steps);
-            }
+    /// A sequence expression of the supported subset of Syntax 16-3:
+    /// `or` (16.9.7) of concatenations, which bind tighter (Table 16-1).
+    fn sequence_expr(&mut self) -> Result<SequenceExpr> {
+        let mut left = self.sequence_concat()?;
+        while self.eat("or") {
+            let right = self.sequence_concat()?;
+            left = SequenceExpr::Or(Box::new(left), Box::new(right));
         }
+        Ok(left)
+    }
+
+    /// `[##delay] operand {##delay operand}` (16.7), left to right.
+    fn sequence_concat(&mut self) -> Result<SequenceExpr> {
+        let mut left = if self.peek() == "##" {
+            None
+        } else {
+            Some(self.sequence_operand()?)
+        };
+        while self.eat("##") {
+            let delay = self.cycle_delay_range()?;
+            let right = self.sequence_operand()?;
+            left = Some(SequenceExpr::Concat {
+                left: left.map(Box::new),
+                delay,
+                right: Box::new(right),
+            });
+        }
+        left.ok_or_else(|| self.unsupported("empty sequence"))
+    }
+
+    /// A parenthesized sequence `(s)`, a Boolean expression, or a Boolean
+    /// expression with match items `(b, item {, item})` (16.7, 16.10).
+    fn sequence_operand(&mut self) -> Result<SequenceExpr> {
+        // The tree of a longer one would nest as deep.
+        self.sequence_operands += 1;
+        if self.sequence_operands > MAX_SEQUENCE_OPERANDS {
+            return Err(self.unsupported(format!(
+                "property with more than {MAX_SEQUENCE_OPERANDS} Boolean operands"
+            )));
+        }
+        if self.peek() == "(" && self.group_holds_sequence() {
+            self.at += 1;
+            let group = self.sequence_expr()?;
+            self.expect(")")?;
+            return Ok(group);
+        }
+        let start = self.at;
+        let (expression, items) = if self.peek() == "(" && self.match_items_follow() {
+            self.at += 1;
+            let expression = self.expression(0)?;
+            let mut items = Vec::new();
+            while self.eat(",") {
+                items.push(self.match_item()?);
+            }
+            self.expect(")")?;
+            (expression, items)
+        } else {
+            (self.expression(0)?, Vec::new())
+        };
+        Ok(SequenceExpr::Boolean(SequenceBoolean {
+            expression,
+            items,
+            tokens: self.range(start),
+        }))
+    }
+
+    /// The delay after `##`: `n` or `[min:max]`, decimal numbers (16.7).
+    fn cycle_delay_range(&mut self) -> Result<CycleDelay> {
+        let start = self.at;
+        if !self.eat("[") {
+            let ticks = self.cycle_delay()?;
+            return Ok(CycleDelay {
+                min: ticks,
+                max: ticks,
+            });
+        }
+        let min = self.cycle_delay()?;
+        self.expect(":")?;
+        if self.peek() == "$" {
+            return Err(self.unsupported("cycle delay range without an upper bound `##[m:$]`"));
+        }
+        let max = self.cycle_delay()?;
+        self.expect("]")?;
+        if max < min {
+            return Err(self.error_at(
+                self.range(start),
+                "cycle delay range whose upper bound is below its lower bound (IEEE 1800-2023 16.7)".to_string(),
+            ));
+        }
+        Ok(CycleDelay { min, max })
     }
 
     /// The number of ticks of `##n`, a decimal number.
@@ -236,9 +301,9 @@ impl Parser<'_> {
         Ok(value)
     }
 
-    /// Whether the parenthesis at the cursor holds a cycle delay `##n` at
-    /// its own level, as a parenthesized sequence does.
-    fn group_holds_delay(&self) -> bool {
+    /// Whether the parenthesis at the cursor holds a cycle delay or a
+    /// sequence operator at its own level, as a parenthesized sequence does.
+    fn group_holds_sequence(&self) -> bool {
         let mut depth = 0usize;
         let mut offset = 0;
         loop {
@@ -251,7 +316,9 @@ impl Parser<'_> {
                         return false;
                     }
                 }
-                "##" if depth == 1 => return true,
+                // At any depth: a Boolean expression has no sequence
+                // operator, also in its own parentheses, as `((a or b))`.
+                "##" | "or" if depth >= 1 => return true,
                 _ => {}
             }
             offset += 1;
@@ -566,8 +633,8 @@ impl Parser<'_> {
             if let Some(step) = sequence
                 .antecedent
                 .iter()
-                .flatten()
-                .chain(&sequence.consequent)
+                .chain([&sequence.consequent])
+                .flat_map(SequenceExpr::booleans)
                 .find(|step| self.instance(step.expression, names).is_some())
             {
                 return Err(self.unsupported_at(
@@ -623,12 +690,11 @@ impl Parser<'_> {
                 let id = SequenceId(self.sequences.len());
                 self.sequences.push(Sequence {
                     antecedent: Some(body.consequent),
-                    consequent: vec![SequenceStep {
-                        delay: 0,
+                    consequent: SequenceExpr::Boolean(SequenceBoolean {
                         expression: spec.condition,
                         items: Vec::new(),
                         tokens: self.expressions[spec.condition.0].tokens,
-                    }],
+                    }),
                     locals: body.locals,
                 });
                 result.antecedent = None;
