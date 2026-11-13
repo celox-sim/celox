@@ -57,7 +57,9 @@ pub const CONCAT: u64 = 102;
 /// `slice(a, b, c)`: a new queue with the inclusive, signed bounds b..c,
 /// clipped to the source queue (IEEE 1800-2023 7.10.1).
 pub const SLICE: u64 = 103;
-/// An empty associative array with default payload b and X/Z mask c.
+/// An empty container with default payload b and X/Z mask c: an
+/// associative array's default element, or, of a sequence, the element
+/// [`NEW`] fills past the ones it copies from it.
 pub const WITH_DEFAULT: u64 = 104;
 /// Shuffle sequence a with seed b, moving complete payload/mask pairs.
 pub const SHUFFLE: u64 = 105;
@@ -809,15 +811,26 @@ impl Heap {
                 let Contents::Sequence(v) = &mut result.contents else {
                     return 0;
                 };
+                let source = match self.containers.get(&(b as Handle)).map(AsRef::as_ref) {
+                    Some(Container {
+                        contents: Contents::Sequence(source),
+                        default,
+                        ..
+                    }) => Some((source, *default)),
+                    _ => None,
+                };
+                // The elements past the source take its default element: a
+                // sequence [`WITH_DEFAULT`] makes `new[n]('{default: v}`)
+                // (IEEE 1800-2023 7.5.1, 10.9.1); other elements take the
+                // default of their type (Table 7-1).
+                let fill = source
+                    .and_then(|(_, default)| default)
+                    .unwrap_or_else(|| layout.default());
                 v.extend(std::iter::repeat_n(
-                    layout.default(),
+                    fill,
                     (a as usize).min(layout.capacity()),
                 ));
-                if let Some(Container {
-                    contents: Contents::Sequence(source),
-                    ..
-                }) = self.containers.get(&(b as Handle)).map(AsRef::as_ref)
-                {
+                if let Some((source, _)) = source {
                     for (dst, src) in v.iter_mut().zip(source) {
                         *dst = *src;
                     }
@@ -962,6 +975,33 @@ mod tests {
         let rebound = call(&mut heap, BOUND, bounded, with_default, 1, 0);
         let default = call(&mut heap, GET, map, rebound, 7, 0);
         assert_eq!(call(&mut heap, LEN, bounded, default, 0, 0), 2);
+    }
+
+    #[test]
+    fn new_fills_the_elements_past_a_sequence_source_with_its_default() {
+        let mut heap = Heap::new();
+        let dynamic = parameter(8, false, 0, 0, 0, false, false, false);
+        let filler = call(&mut heap, WITH_DEFAULT, dynamic, 0, 0x5a, 0b0011);
+        let filled = call(&mut heap, NEW, dynamic, 3, filler, 0);
+        assert_eq!(call(&mut heap, LEN, dynamic, filled, 0, 0), 3);
+        for index in 0..3 {
+            assert_eq!(call(&mut heap, GET, dynamic, filled, index, 0), 0x5a);
+            assert_eq!(call(&mut heap, GET_MASK, dynamic, filled, index, 0), 0b0011);
+        }
+        // A source without a default fills with the type's default.
+        let plain = call(&mut heap, NEW, dynamic, 1, 0, 0);
+        let plain = call(&mut heap, SET, dynamic, plain, 0, 7);
+        let grown = call(&mut heap, NEW, dynamic, 2, plain, 0);
+        assert_eq!(call(&mut heap, GET, dynamic, grown, 0, 0), 7);
+        let fresh = call(&mut heap, NEW, dynamic, 1, 0, 0);
+        for op in [GET, GET_MASK] {
+            assert_eq!(
+                call(&mut heap, op, dynamic, grown, 1, 0),
+                call(&mut heap, op, dynamic, fresh, 0, 0)
+            );
+        }
+        let empty = call(&mut heap, NEW, dynamic, 0, filler, 0);
+        assert_eq!(call(&mut heap, LEN, dynamic, empty, 0, 0), 0);
     }
 
     #[test]
