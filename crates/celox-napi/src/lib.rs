@@ -35,6 +35,9 @@ pub use test_runner::*;
 #[cfg(target_arch = "wasm32")]
 pub use wasm_handle::*;
 
+// The memory image of the WASM bridge; also built in host tests.
+#[cfg(any(test, target_arch = "wasm32"))]
+mod initial_memory;
 mod layout;
 
 use fxhash::FxHashMap as HashMap;

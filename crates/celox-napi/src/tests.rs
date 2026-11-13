@@ -870,3 +870,77 @@ fn no_metadata_vs_metadata_differs() {
         build_cache_key(&src, "Top", &opts, Some(&m)),
     );
 }
+
+#[test]
+fn initial_memory_image_reads_readmem_x_and_z_as_zero_in_two_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let mem_path = dir.path().join("xz.mem");
+    std::fs::write(&mem_path, "aa\n@2\nx5\nz3\n").unwrap();
+    let source = format!(
+        r#"
+        module Top (
+            out2: output logic<8>,
+        ) {{
+            #[allow(initial_assign)]
+            var mem: logic<8>[4];
+            initial {{
+                $readmemh("{}", mem);
+            }}
+            assign out2 = mem[2];
+        }}
+        "#,
+        mem_path.to_string_lossy().replace('\\', "\\\\")
+    );
+    // (four_state, value bytes of mem[0], mem[2], mem[3], mask byte of mem[2])
+    for (four_state, values, mask2) in [
+        // Two-state storage holds no X or Z: their bits are zero
+        // (IEEE 1800-2023 6.11.2, 21.4.2).
+        (false, [0xaau8, 0x05, 0x03], None),
+        // X is `(1, 1)` and Z is `(0, 1)`.
+        (true, [0xaau8, 0xf5, 0x03], Some(0xf0u8)),
+    ] {
+        let (sir, _) = celox::compile_to_sir(
+            &[(source.as_str(), std::path::Path::new("top.veryl"))],
+            "Top",
+            &[],
+            &[],
+            four_state,
+            &celox::TraceOptions::default(),
+            None,
+            None,
+            None,
+            None,
+            &[],
+            &celox::OptimizeOptions::all(),
+        )
+        .unwrap();
+        // The layout mode of the WASM handle.
+        let program =
+            sir.into_laid_out_with_mode(four_state, celox::MemoryLayoutMode::ElementStrided);
+        let layout = program.layout();
+        let memory = crate::initial_memory::initial_memory_bytes(&program, layout, four_state);
+        let initial = program
+            .design
+            .initial_state
+            .iter()
+            .find(|initial| matches!(initial.data, celox_design::InitialStateData::Writes(_)))
+            .expect("$readmemh initializes mem");
+        let offset = layout.offsets[&initial.address];
+        let element_byte = |element: usize| {
+            let (byte, intra) = layout.map_static_bit_offset(&initial.address, element * 8);
+            assert_eq!(intra, 0);
+            offset + byte
+        };
+        for (element, value) in [0usize, 2, 3].into_iter().zip(values) {
+            assert_eq!(
+                memory[element_byte(element)],
+                value,
+                "four_state={four_state} mem[{element}]"
+            );
+        }
+        if let Some(mask2) = mask2 {
+            let plane_size = layout.plane_size(&initial.address);
+            assert_eq!(memory[element_byte(2) + plane_size], mask2);
+        }
+    }
+}
