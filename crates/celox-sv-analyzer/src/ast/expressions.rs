@@ -326,6 +326,24 @@ pub(super) fn validate_call_argument(
     Ok(())
 }
 
+/// [`query_actual_is_writable`] for the bound value of a member select or a
+/// select of one: a member of a two-state type of a four-state structure is
+/// read through a conversion of its bits (and a resize to the member's
+/// width), which a write passes through.
+pub(super) fn member_actual_is_writable(expression: &Expr, dimensions: &PackedDimensions) -> bool {
+    match expression {
+        Expr::Unary {
+            op: UnaryOp::ToTwoState,
+            expr,
+        }
+        | Expr::Resize { expr, .. } => member_actual_is_writable(expr, dimensions),
+        Expr::Select { expr, .. } if !matches!(**expr, Expr::Ident(_)) => {
+            member_actual_is_writable(expr, dimensions)
+        }
+        expression => query_actual_is_writable(expression, dimensions),
+    }
+}
+
 pub(super) fn query_actual_is_writable(expression: &Expr, dimensions: &PackedDimensions) -> bool {
     match expression {
         Expr::Ident(name) => {
