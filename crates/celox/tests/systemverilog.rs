@@ -107,6 +107,8 @@ mod out_of_line_calls;
 mod packed_structs;
 #[path = "frontends/systemverilog/procedural.rs"]
 mod procedural;
+#[path = "frontends/systemverilog/procedural_assigns.rs"]
+mod procedural_assigns;
 #[path = "frontends/systemverilog/realtime.rs"]
 mod realtime;
 #[path = "frontends/systemverilog/review_regressions.rs"]

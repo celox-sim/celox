@@ -43,7 +43,7 @@ pub(super) fn always_kind(
             let TimingControlKind::Event(event) = &native.timing_control(control).kind else {
                 return Ok(AlwaysKind::Process);
             };
-            if has_timing_control(body, native) {
+            if has_timing_control(body, native, true) {
                 return Ok(AlwaysKind::Process);
             }
             match event {
@@ -87,14 +87,17 @@ fn level_sensitive(
         && items
             .iter()
             .all(|item| item.edge == TimingEdge::Any && item.iff.is_none())
-        && !has_timing_control(body, native)
+        && !has_timing_control(body, native, true)
 }
 
 /// Timing controls, including delayed assignments, require process kernels.
-/// Typed leaf restrictions remain in their semantic binders.
+/// With `procedural_assigns`, so does a procedural continuous assignment,
+/// which starts or ends a driver that outlives the statement (IEEE 1800-2023
+/// 10.6.1). Typed leaf restrictions remain in their semantic binders.
 fn has_timing_control(
     root: celox_sv_syntax::StatementId,
     native: &celox_sv_syntax::Declarations,
+    procedural_assigns: bool,
 ) -> bool {
     use celox_sv_syntax::StatementKind;
     let mut pending = vec![root];
@@ -140,7 +143,12 @@ fn has_timing_control(
                 | StatementKind::Wait { .. }
                 | StatementKind::WaitFork
                 | StatementKind::WaitOrder { .. }
-        ) {
+        ) || procedural_assigns
+            && matches!(
+                statement.kind,
+                StatementKind::ProceduralAssign(_) | StatementKind::ProceduralDeassign(_)
+            )
+        {
             return true;
         }
         if !matches!(

@@ -38,6 +38,7 @@ mod events;
 mod mailboxes;
 mod net_delays;
 mod net_drives;
+mod procedural_assigns;
 mod processes;
 mod semaphores;
 pub use bound_patterns::BoundPattern;
