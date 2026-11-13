@@ -181,3 +181,61 @@ fn constant_functions_select_declared_indices() {
         .collect();
     assert_eq!(displayed, ["12 3 1 3 2 9 9 64"; 2]);
 }
+
+// A generate construct's condition, case selector or loop bound selects a
+// parameter by the indices of its declared range (IEEE 1800-2023 7.4.1,
+// 11.5.1, 27.5), ascending, as fpnew's format masks `logic [0:N-1]`
+// (`FpFmtConfig[1:NUM_FORMATS-1] == '0`), or not ending at zero.
+#[test]
+fn generate_conditions_select_parameters_by_their_declared_indices() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+            localparam int N = 5;
+            localparam logic [0:N-1] Cfg = 5'b10000;
+            localparam logic [7:4] Shifted = 4'b0110;
+            if ((Cfg[0] == 1) && (Cfg[1:N-1] == '0)) begin : only_first
+                initial #1 $display("only first");
+            end
+            if (Shifted[6:5] == 2'b11) begin : shifted
+                initial #1 $display("shifted");
+            end
+            case (Cfg[0:1])
+                2'b10: begin : first
+                    initial #1 $display("case first");
+                end
+                default: begin : other
+                    initial #1 $display("case other");
+                end
+            endcase
+            for (genvar i = 0; i < Shifted[5:4] + 1; i++) begin : count
+                initial #2 $display("loop %0d", i);
+            end
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("conditions.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(5).unwrap();
+    let mut displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    displayed.sort();
+    assert_eq!(
+        displayed,
+        [
+            "case first",
+            "loop 0",
+            "loop 1",
+            "loop 2",
+            "only first",
+            "shifted"
+        ]
+    );
+}
