@@ -37,9 +37,9 @@ pub(super) struct ScopeSymbols {
     pub function_return_types: HashMap<String, FunctionReturnMetadata>,
     pub constant_functions: const_functions::ConstantFunctions,
     pub subroutine_params: HashMap<String, Vec<String>>,
-    pub subroutine_shapes: HashMap<String, Vec<VariableDimensions>>,
+    pub subroutine_shapes: HashMap<String, Arc<Vec<VariableDimensions>>>,
     pub subroutines: Vec<Arc<Subroutine>>,
-    pub locals: Vec<LocalVariable>,
+    pub locals: Vec<Arc<LocalVariable>>,
     pub dpi_imports: Vec<crate::ir::DpiImport>,
     /// Array parameters and constant variables, which are constant signals
     /// copied into each scope, and their initializers.
@@ -71,7 +71,7 @@ pub(super) struct ScopeSymbols {
     /// The classes the scope declares, laid out, by their qualified names
     /// (IEEE 1800-2023 26.3): a scope that uses them may be analyzed from
     /// another source, without their declarations.
-    pub classes: Vec<classes::Class>,
+    pub classes: Vec<Arc<classes::Class>>,
     /// Class-declared types, frozen in each specialization's declaration
     /// environment before another source imports them (8.23, 8.25).
     pub class_member_types: HashMap<String, HashMap<String, Type>>,
@@ -547,10 +547,12 @@ impl ScopeSymbols {
                 .map(|(name, shapes)| {
                     (
                         key(name),
-                        shapes
-                            .iter()
-                            .map(|shape| rename.dimensions(shape.clone()))
-                            .collect(),
+                        Arc::new(
+                            shapes
+                                .iter()
+                                .map(|shape| rename.dimensions(shape.clone()))
+                                .collect(),
+                        ),
                     )
                 })
                 .collect(),
@@ -562,9 +564,11 @@ impl ScopeSymbols {
             locals: self
                 .locals
                 .iter()
-                .map(|local| LocalVariable {
-                    name: rename.name(&local.name),
-                    ..local.clone()
+                .map(|local| {
+                    Arc::new(LocalVariable {
+                        name: rename.name(&local.name),
+                        ..(**local).clone()
+                    })
                 })
                 .collect(),
             dpi_imports: self
