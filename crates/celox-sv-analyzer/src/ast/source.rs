@@ -141,6 +141,17 @@ impl Source {
         design: &mut packages::Design,
     ) -> Result<Self, AnalyzerError> {
         let mut session = Session::with_packages(packages, design);
+        // A type argument of the module is a type of the analysis, whether
+        // or not a source names it: interning it interns the types it is
+        // made of, a chandle element of a container included.
+        for (_, ty) in bindings.types {
+            semantic_types::of_type(
+                &mut session.types,
+                &const_functions::ConstantFunctions::default(),
+                ty,
+                &ConstEnv::default(),
+            );
+        }
         let source = Self::from_indexed_syntax_module_in(
             syntax_tree,
             path,

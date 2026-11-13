@@ -204,6 +204,7 @@ impl ScopeElaboration<'_> {
                                 type_binding::builtin_type("string", None)
                             }
                             crate::ir::DpiType::Chandle => {
+                                session.types.declare_chandle();
                                 type_binding::builtin_type("chandle", None)
                             }
                             crate::ir::DpiType::BitVector { width, signed }
