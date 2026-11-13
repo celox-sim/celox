@@ -5,5 +5,5 @@
 export const runtimeCasesFeature = "celox-test-suite/runtime-cases";
 // CI's full Rust test build: workspace members and features of the
 // "Run workspace tests with CI features" step and its cocotb rerun.
-export const workspaceFeatures = "celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases";
+export const workspaceFeatures = "celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases";
 export const testProfile = "vtest";

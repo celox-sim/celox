@@ -363,7 +363,6 @@ grep -qx -- '--locked' "$TMP/cargo-args" || fail "Celox build omitted --locked"
 if grep -qx -- '--features' "$TMP/cargo-args"; then
     fail "default Celox build unexpectedly passed --features"
 fi
-grep -qx -- 'celox-vpi' "$TMP/cargo-args" || fail "Celox build did not select celox-vpi"
 grep -qx -- 'celox' "$TMP/cargo-args" || fail "Celox build did not select celox"
 assert_eq "$(sed -n '1p' "$TMP/cargo-env")" unset "CARGO_TARGET_DIR neutralization"
 assert_eq "$(sed -n '2p' "$TMP/cargo-env")" unset "CARGO_BUILD_TARGET neutralization"

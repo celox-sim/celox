@@ -204,11 +204,11 @@ fn registration_ids_for_host(host: &super::VpiHost, reason: i32) -> Vec<u64> {
 pub(super) enum ValueSnapshot {
     Word(u64, u64),
     String(Vec<u8>),
-    Wide(celox::BigUint, celox::BigUint),
+    Wide(crate::BigUint, crate::BigUint),
 }
 
 impl ValueSnapshot {
-    pub(super) fn new(value: celox::BigUint, mask: celox::BigUint) -> Self {
+    pub(super) fn new(value: crate::BigUint, mask: crate::BigUint) -> Self {
         if value.bits() <= 64 && mask.bits() <= 64 {
             Self::Word(
                 value.iter_u64_digits().next().unwrap_or(0),
@@ -561,7 +561,7 @@ fn run_with_host(host: &super::VpiHost) -> bool {
 
 /// The signals of the value-change callbacks: those whose edges a timed
 /// simulation shows before its domains commit.
-fn watched_signals() -> Vec<celox::SignalRef> {
+fn watched_signals() -> Vec<crate::SignalRef> {
     let selections = with_host(|host| {
         borrow_cell(&host.callbacks, |state| {
             state
@@ -720,14 +720,14 @@ fn settled_regions() -> Regions {
 /// triggers commit, and the regions of each settled slot.
 struct TimedObserver;
 
-impl celox::SlotObserver<celox::NativeBackend> for TimedObserver {
-    fn before_domains(&mut self, io: &mut celox::SlotIo<'_, celox::NativeBackend>, time: u64) {
+impl crate::SlotObserver<crate::NativeBackend> for TimedObserver {
+    fn before_domains(&mut self, io: &mut crate::SlotIo<'_, crate::NativeBackend>, time: u64) {
         in_slot(io, time, || {
             dispatch_value_changes();
         });
     }
 
-    fn end_of_slot(&mut self, io: &mut celox::SlotIo<'_, celox::NativeBackend>, time: u64) {
+    fn end_of_slot(&mut self, io: &mut crate::SlotIo<'_, crate::NativeBackend>, time: u64) {
         in_slot(io, time, || {
             settled_regions();
         });
@@ -739,7 +739,7 @@ impl celox::SlotObserver<celox::NativeBackend> for TimedObserver {
 
     /// A value change callback runs after each update that may change its
     /// object (IEEE 1800-2023 38.36.1).
-    fn after_update(&mut self, io: &mut celox::SlotIo<'_, celox::NativeBackend>, time: u64) {
+    fn after_update(&mut self, io: &mut crate::SlotIo<'_, crate::NativeBackend>, time: u64) {
         in_slot(io, time, || {
             dispatch_value_changes();
         });
@@ -747,7 +747,7 @@ impl celox::SlotObserver<celox::NativeBackend> for TimedObserver {
 }
 
 /// Run `regions` with the VPI entry points reaching the state through `io`.
-fn in_slot(io: &mut celox::SlotIo<'_, celox::NativeBackend>, time: u64, regions: impl FnOnce()) {
+fn in_slot(io: &mut crate::SlotIo<'_, crate::NativeBackend>, time: u64, regions: impl FnOnce()) {
     set_time(time);
     // Safety: `io` outlives the dispatch below and nothing else uses it until
     // `leave_slot`.
@@ -765,8 +765,8 @@ fn in_slot(io: &mut celox::SlotIo<'_, celox::NativeBackend>, time: u64, regions:
 /// that its observer's callbacks can reach the VPI entry points.
 fn timed_step(
     step: impl FnOnce(
-        &mut celox::Simulation<celox::NativeBackend>,
-    ) -> Result<(), celox::RuntimeErrorCode>,
+        &mut crate::Simulation<crate::NativeBackend>,
+    ) -> Result<(), crate::RuntimeErrorCode>,
 ) {
     let watched = watched_signals();
     let Some(mut simulation) = super::with_timed_mut(|timed| timed.simulation.take()).flatten()
@@ -787,7 +787,7 @@ fn timed_step(
 }
 
 fn with_simulation<R>(
-    operation: impl FnOnce(&mut celox::Simulation<celox::NativeBackend>) -> R,
+    operation: impl FnOnce(&mut crate::Simulation<crate::NativeBackend>) -> R,
 ) -> Option<R> {
     super::with_timed_mut(|timed| timed.simulation.as_mut().map(operation)).flatten()
 }
@@ -1162,7 +1162,7 @@ pub extern "C" fn celox_vpi_runtime_cookie() -> *mut c_void {
 #[cfg(test)]
 mod snapshot_tests {
     use super::ValueSnapshot;
-    use celox::BigUint;
+    use crate::BigUint;
 
     #[test]
     fn canonical_snapshots_compare_growing_values_and_mask_only_changes() {

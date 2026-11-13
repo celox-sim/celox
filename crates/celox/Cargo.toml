@@ -11,7 +11,7 @@ edition.workspace     = true
 rust-version.workspace = true
 
 [features]
-default = ["host-runtime"]
+default = ["host-runtime", "cli"]
 host-runtime = [
     "dep:celox-backend-x86",
     "dep:celox-macros",
@@ -19,6 +19,16 @@ host-runtime = [
     "dep:libloading",
     "rand/thread_rng",
     "celox-sir-opt/timing",
+]
+# The `celox` command and its VPI host (`cargo install celox`).
+cli = [
+    "host-runtime",
+    "dep:blake3",
+    "dep:celox-sv-analyzer",
+    "dep:mimalloc",
+    "dep:pathdiff",
+    "dep:tempfile",
+    "dep:tracing-subscriber",
 ]
 cranelift = ["host-runtime", "dep:celox-backend-cranelift"]
 wasm-runtime = ["host-runtime", "dep:wasmtime"]
@@ -73,6 +83,13 @@ celox-macros          = { workspace = true, optional = true }
 celox-backend-cranelift = { workspace = true, optional = true }
 celox-backend-arm64   = { workspace = true, optional = true }
 wasmtime              = { workspace = true, optional = true }
+blake3                = { version = "1.8", optional = true }
+celox-sv-analyzer     = { workspace = true, optional = true }
+libc.workspace        = true
+mimalloc              = { version = "0.1.52", optional = true }
+pathdiff              = { version = "0.2", optional = true }
+tempfile              = { workspace = true, optional = true }
+tracing-subscriber    = { version = "0.3", default-features = false, features = ["fmt", "env-filter"], optional = true }
 
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
 celox-backend-x86     = { workspace = true, optional = true }
@@ -82,9 +99,6 @@ celox-sir-opt         = { workspace = true, default-features = false, features =
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 celox-backend-arm64   = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-libc.workspace = true
 
 [dev-dependencies]
 mimalloc = "0.1.52"
@@ -101,6 +115,13 @@ veryl-std = { workspace = true }
 veryl-emitter = { workspace = true }
 vcd = "0.7"
 wellen = "0.25"
+
+[[bin]]
+# The library also renders to target/doc/celox; do not overwrite it.
+doc = false
+name = "celox"
+path = "src/bin/celox.rs"
+required-features = ["cli"]
 
 [[bench]]
 name = "vcd"

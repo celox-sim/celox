@@ -2,7 +2,7 @@
 //! instance, whose regions the VPI host schedules itself, or a timed
 //! simulation, which runs the design's processes and schedules its regions.
 
-use celox::{
+use crate::{
     BigUint, DesignReflection, NativeBackend, NativeProgramImage, NativeProgramInstance,
     NativeSignalIdentity, ReflectionSignalId, RuntimeEvent, RuntimeFormatContext, SignalRef,
     SimBackend, Simulation, SlotIo,
@@ -55,7 +55,7 @@ pub(crate) trait VpiState {
         self.image().signal_identity(id)
     }
 
-    fn save_state(&self) -> Result<celox::StateFile, String>;
+    fn save_state(&self) -> Result<crate::StateFile, String>;
 
     /// The stored value, without settling the design.
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint);
@@ -81,7 +81,7 @@ pub(crate) trait VpiState {
 }
 
 impl VpiState for NativeProgramInstance {
-    fn save_state(&self) -> Result<celox::StateFile, String> {
+    fn save_state(&self) -> Result<crate::StateFile, String> {
         NativeProgramInstance::save_state(self).map_err(|error| error.to_string())
     }
 
@@ -179,7 +179,7 @@ impl VpiState for NativeProgramInstance {
 /// entry points that its slot observer's callbacks call reach the state
 /// through `slot`, which the observer sets for the duration of a dispatch.
 pub(crate) struct TimedRuntime {
-    schema: std::sync::Arc<celox::StateSchema>,
+    schema: std::sync::Arc<crate::StateSchema>,
     image: NativeProgramImage,
     pub(crate) simulation: Option<Simulation<NativeBackend>>,
     slot: Option<*mut SlotIo<'static, NativeBackend>>,
@@ -245,7 +245,7 @@ impl TimedRuntime {
 }
 
 impl VpiState for TimedRuntime {
-    fn save_state(&self) -> Result<celox::StateFile, String> {
+    fn save_state(&self) -> Result<crate::StateFile, String> {
         if let Some(slot) = self.slot() {
             slot.capture_state(&self.schema)
                 .map_err(|error| error.to_string())
@@ -337,7 +337,7 @@ pub(crate) enum Runtime {
 }
 
 impl Runtime {
-    pub(crate) fn save_state(&self) -> Result<celox::StateFile, String> {
+    pub(crate) fn save_state(&self) -> Result<crate::StateFile, String> {
         self.state().save_state()
     }
 
@@ -394,12 +394,12 @@ mod tests {
             .collect::<String>();
         let source = format!("module Top({ports}); {assignments} endmodule");
         for four_state in [false, true] {
-            let simulator = celox::Simulator::from_sv_sources(
+            let simulator = crate::Simulator::from_sv_sources(
                 vec![(source.as_str(), std::path::Path::new("packed_reads.sv"))],
                 "Top",
             )
             .four_state(four_state)
-            .opt_level(celox::OptLevel::O1)
+            .opt_level(crate::OptLevel::O1)
             .build()
             .unwrap();
             // Safety: this test executes only an image produced in-process.
@@ -481,12 +481,12 @@ mod tests {
             .chain(["Top.b".into()])
             .collect::<Vec<_>>();
         for four_state in [false, true] {
-            let simulator = celox::Simulator::from_sv_sources(
+            let simulator = crate::Simulator::from_sv_sources(
                 vec![(source.as_str(), std::path::Path::new("packed_writes.sv"))],
                 "Top",
             )
             .four_state(four_state)
-            .opt_level(celox::OptLevel::O1)
+            .opt_level(crate::OptLevel::O1)
             .build()
             .unwrap();
             let image = simulator.shared_code().program_image().clone();

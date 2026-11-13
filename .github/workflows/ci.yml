@@ -175,7 +175,7 @@ jobs:
 
       - name: cargo clippy
         if: needs.changes.outputs.fast_queue != 'true' && ((needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') && needs.changes.outputs.rust_full != 'false')
-        run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim --no-deps
+        run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim --no-deps
 
       - name: Lint the crates this pull request can affect
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_lint_packages != '')
@@ -300,7 +300,7 @@ jobs:
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false')
         run: >-
           cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci --cargo-profile vtest -E "$CELOX_BACKEND_FILTER"
-          --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
+          --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the tests this pull request can affect
         id: scoped-tests
@@ -382,7 +382,7 @@ jobs:
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false')
         run: >-
           cargo test --locked --workspace --exclude 'lydite*' --doc --profile vtest
-          --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
+          --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the documentation tests of the changed libraries
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_libraries != '')
@@ -443,7 +443,7 @@ jobs:
           git -C "$RUNNER_TEMP/common-cells" checkout -q FETCH_HEAD
 
       - name: Build the SystemVerilog CLI
-        run: cargo build --locked -p celox-vpi --bin celox
+        run: cargo build --locked -p celox --bin celox
 
       - name: Run upstream TB and assertion negative control
         run: >-
@@ -486,7 +486,7 @@ jobs:
           python scripts/run-rtlmeter-bench.py prepare "$RUNNER_TEMP/rtlmeter"
 
       - name: Build the SystemVerilog CLI
-        run: cargo build --locked --release -p celox-vpi --bin celox
+        run: cargo build --locked --release -p celox --bin celox
 
       - name: Verify RTLMeter completion and cycle counts
         run: >-

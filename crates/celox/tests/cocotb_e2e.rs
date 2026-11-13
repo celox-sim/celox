@@ -358,7 +358,7 @@ fn check_cocotb_native_design_with_environment(
 }
 
 #[test]
-fn compile_uses_the_source_projects_clock_and_reset_metadata() {
+fn vpi_build_uses_the_source_projects_clock_and_reset_metadata() {
     let temporary = tempfile::tempdir().unwrap();
     let source_dir = temporary.path().join("src");
     fs::create_dir(&source_dir).unwrap();
@@ -398,11 +398,10 @@ module Top (
     )
     .unwrap();
     let executable = temporary.path().join("metadata-sim");
-    let compile = Command::new(env!("CARGO_BIN_EXE_celox-vpi-compile"))
+    let compile = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .args(["vpi", "build"])
         .arg(&source)
-        .args(["--top", "Top", "--runtime"])
-        .arg(env!("CARGO_BIN_EXE_celox-vpi-runtime"))
-        .arg("--output")
+        .args(["--top", "Top", "--output"])
         .arg(&executable)
         .output()
         .unwrap();
@@ -425,7 +424,7 @@ module Top (
 }
 
 #[test]
-fn compile_resolves_standalone_readmem_relative_to_the_source() {
+fn vpi_build_resolves_standalone_readmem_relative_to_the_source() {
     let temporary = tempfile::tempdir().unwrap();
     let source_dir = temporary.path().join("standalone");
     fs::create_dir(&source_dir).unwrap();
@@ -449,11 +448,10 @@ module Top (
     .unwrap();
 
     let executable = temporary.path().join("standalone-sim");
-    let compile = Command::new(env!("CARGO_BIN_EXE_celox-vpi-compile"))
+    let compile = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .args(["vpi", "build"])
         .arg(&source)
-        .args(["--top", "Top", "--runtime"])
-        .arg(env!("CARGO_BIN_EXE_celox-vpi-runtime"))
-        .arg("--output")
+        .args(["--top", "Top", "--output"])
         .arg(&executable)
         .current_dir(temporary.path())
         .output()
@@ -472,7 +470,7 @@ module Top (
 }
 
 #[test]
-fn compile_includes_project_dependency_sources() {
+fn vpi_build_includes_project_dependency_sources() {
     let temporary = tempfile::tempdir().unwrap();
     let dependency = temporary.path().join("dependency");
     let dependency_src = dependency.join("src");
@@ -534,11 +532,10 @@ module Top (
     .unwrap();
 
     let executable = temporary.path().join("dependency-sim");
-    let compile = Command::new(env!("CARGO_BIN_EXE_celox-vpi-compile"))
+    let compile = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .args(["vpi", "build"])
         .arg(&source)
-        .args(["--top", "Top", "--runtime"])
-        .arg(env!("CARGO_BIN_EXE_celox-vpi-runtime"))
-        .arg("--output")
+        .args(["--top", "Top", "--output"])
         .arg(&executable)
         .output()
         .unwrap();
@@ -558,7 +555,7 @@ module Top (
 }
 
 #[test]
-fn compile_includes_the_explicit_project_example_source() {
+fn vpi_build_includes_the_explicit_project_example_source() {
     let temporary = tempfile::tempdir().unwrap();
     let source_dir = temporary.path().join("src");
     let example_dir = temporary.path().join("examples");
@@ -591,11 +588,10 @@ module Top (
     .unwrap();
 
     let executable = temporary.path().join("example-sim");
-    let compile = Command::new(env!("CARGO_BIN_EXE_celox-vpi-compile"))
+    let compile = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .args(["vpi", "build"])
         .arg(&source)
-        .args(["--top", "Top", "--runtime"])
-        .arg(env!("CARGO_BIN_EXE_celox-vpi-runtime"))
-        .arg("--output")
+        .args(["--top", "Top", "--output"])
         .arg(&executable)
         .output()
         .unwrap();
@@ -609,68 +605,6 @@ module Top (
     let runtime = trusted_attached_instance(&bytes);
     let output = runtime.signal_ref("Top.y").unwrap();
     assert_eq!(runtime.backend().get_as::<u8>(output), 42);
-}
-
-#[test]
-fn legacy_compiler_accepts_split_systemverilog_sources() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cocotb/split");
-    let temporary = tempfile::tempdir().unwrap();
-    let executable = temporary.path().join("split-sim");
-    let compile = Command::new(env!("CARGO_BIN_EXE_celox-vpi-compile"))
-        .args(["types.sv", "child.sv", "top.sv"].map(|file| fixture.join(file)))
-        .args(["--top", "Top", "--runtime"])
-        .arg(env!("CARGO_BIN_EXE_celox-vpi-runtime"))
-        .arg("--output")
-        .arg(&executable)
-        .output()
-        .unwrap();
-    assert!(
-        compile.status.success(),
-        "{}",
-        String::from_utf8_lossy(&compile.stderr)
-    );
-    let bytes = fs::read(executable).unwrap();
-    let runtime = trusted_attached_instance(&bytes);
-    assert_eq!(runtime.signal("Top.child.q").unwrap().signal.width, 8);
-    assert_eq!(
-        runtime.signal("Top.i_clk").unwrap().domain_kind,
-        DomainKind::ClockPosedge
-    );
-}
-
-#[test]
-fn compile_rejects_empty_or_mixed_source_lists() {
-    let error = celox_vpi::driver::compile_native_sources(&[], "Top")
-        .err()
-        .unwrap();
-    assert!(error.contains("missing source path"), "{error}");
-    for paths in [
-        [Path::new("top.sv"), Path::new("child.veryl")],
-        [Path::new("top.veryl"), Path::new("child.sv")],
-        [Path::new("top.veryl"), Path::new("child.veryl")],
-    ] {
-        let error = celox_vpi::driver::compile_native_sources(&paths, "Top")
-            .err()
-            .unwrap();
-        assert!(
-            error.contains("multiple source paths require only .sv files"),
-            "{error}"
-        );
-    }
-}
-
-#[test]
-fn compile_reports_a_missing_additional_source() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cocotb/counter.sv");
-    let temporary = tempfile::tempdir().unwrap();
-    let missing = temporary.path().join("missing.sv");
-    let error = celox_vpi::driver::compile_native_sources(&[&fixture, &missing], "Top")
-        .err()
-        .unwrap();
-    assert!(
-        error.contains(&format!("failed to read {}:", missing.display())),
-        "{error}"
-    );
 }
 
 #[test]
@@ -735,7 +669,7 @@ fn cocotb_configuration_discovery_preserves_fallbacks_and_overrides() {
     let script = format!(
         "import sys; sys.path.insert(0, {}); exec({})",
         serde_json::to_string(&temporary.path().to_string_lossy()).unwrap(),
-        serde_json::to_string(include_str!("../src/cocotb_config.py")).unwrap()
+        serde_json::to_string(include_str!("../src/vpi/cocotb_config.py")).unwrap()
     );
     let run = |flags: [&str; 3]| {
         let output = Command::new(&python)

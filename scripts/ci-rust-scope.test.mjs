@@ -5,12 +5,14 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  CELOX_CLI_UNIT_TARGETS,
   readWorkspace,
   rustTestScope,
   VARIANT_CRATES,
   VARIANTS,
   VTEST_UNNARROWED,
 } from "./ci-rust-scope.mjs";
+import { cargoCommands } from "./run-ci-rust-scope.mjs";
 
 // A small workspace in the shape of the real one: celox over a backend, a
 // frontend and a shared library, with a consumer above it.
@@ -237,7 +239,7 @@ test("shared case data selects its group's cases instead of every library consum
   assert.deepEqual(scope.vtest, { select: [{ groups: ["veryl/param_override"] }] });
   assert.ok(!scope.builds.some((build) => build.packages.includes("celox")));
   assert.ok(scope.builds.some((build) => build.packages.includes("celox-test-suite")));
-  for (const unrelated of ["celox-vpi", "celox-napi", "celox-bench"])
+  for (const unrelated of ["celox-napi", "celox-bench"])
     assert.ok(!scope.packages.includes(unrelated), unrelated);
 
   // An accompanying runtime change must retain every affected consumer.
@@ -246,7 +248,7 @@ test("shared case data selects its group's cases instead of every library consum
     "crates/celox/src/lib.rs",
   ], packages);
   assert.ok(mixed.filter.includes("package(celox)"));
-  assert.ok(mixed.packages.includes("celox-vpi"));
+  assert.ok(mixed.packages.includes("celox-bench"));
   assert.deepEqual(mixed.builds.find((build) => build.packages.includes("celox")).targets, []);
   assert.deepEqual(mixed.vtest, {});
   // A new group's cases run without a Celox test registering them.
@@ -274,6 +276,28 @@ test("Celox changes run the suite cases; Rust test edits do not", () => {
   assert.deepEqual(vtest("crates/celox-backend-x86/src/lib.rs"), {
     select: [{ backends: ["native", "native-parallel", ...VTEST_UNNARROWED] }],
   });
+});
+
+test("celox command edits select only the command's tests", () => {
+  const packages = readWorkspace(root);
+  const cliTests = packages.find((pkg) => pkg.name === "celox").cliTests;
+  for (const name of ["basic_vpi", "cocotb_e2e", "run_cli"]) assert.ok(cliTests.includes(name), name);
+  assert.ok(!cliTests.includes("flip_flop"));
+  for (const [path, unit, selector] of [
+    ["crates/celox/src/bin/celox/runner.rs", "bin/celox", "binary_id(celox::bin/celox)"],
+    ["crates/celox/src/vpi/callbacks.rs", "lib/vpi", "(binary_id(celox) & test(/^vpi::/))"],
+  ]) {
+    const scope = rustTestScope([path], packages);
+    assert.deepEqual(scope.packages, ["celox"], path);
+    assert.deepEqual(scope.libraries, [], path);
+    assert.equal(scope.vtest, null, path);
+    assert.deepEqual(scope.builds, [{ packages: ["celox"], targets: [...cliTests, unit].sort(), features: scope.features }]);
+    assert.ok(scope.filter.split(" | ").includes(selector), scope.filter);
+    assert.ok(!scope.filter.includes("package(celox)"), scope.filter);
+    const args = cargoCommands("test", scope.builds, scope.filter)[0].join(" ");
+    assert.ok(args.includes(CELOX_CLI_UNIT_TARGETS[unit].cargo.join(" ")), args);
+    assert.ok(!args.includes(`--test ${unit}`), args);
+  }
 });
 
 test("SV module and case edits select the referenced module; adapters retain the binary", () => {

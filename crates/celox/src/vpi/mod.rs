@@ -5,17 +5,10 @@
 //! Callback scheduling is
 //! kept separate because it must share the runtime's simulation-region loop.
 
-#![cfg_attr(
-    not(any(target_arch = "x86_64", target_arch = "aarch64")),
-    allow(dead_code)
-)]
 #![allow(
     clippy::disallowed_types,
     reason = "VPI callbacks re-enter the layer from C while it holds the simulation, so its state is shared behind the C boundary"
 )]
-
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-compile_error!("celox-vpi currently supports only x86-64 and AArch64");
 
 use std::{
     cell::{Cell, RefCell},
@@ -24,7 +17,7 @@ use std::{
     ptr,
 };
 
-use celox::{
+use crate::{
     BigUint, DomainKind, NativeProgramInstance, NativeSignalIdentity, ReflectionScopeId,
     ReflectionSignalId, RuntimeEvent, RuntimeFormatContext, Severity, SignalDirection,
 };
@@ -155,7 +148,7 @@ impl SignalSelection {
     }
 
     /// Resolve storage without cloning hierarchy names or dimension metadata.
-    fn signal(self, runtime: &dyn VpiState) -> Option<celox::SignalRef> {
+    fn signal(self, runtime: &dyn VpiState) -> Option<crate::SignalRef> {
         let root = runtime.reflection().signal(self.root)?;
         let mut signal = root.signal;
         if self.depth == 0 {
@@ -190,7 +183,7 @@ impl SignalSelection {
         })
     }
 
-    fn resolve(self, runtime: &dyn VpiState) -> Option<celox::ReflectionSignal> {
+    fn resolve(self, runtime: &dyn VpiState) -> Option<crate::ReflectionSignal> {
         let mut signal = runtime.reflection().signal(self.root)?.clone();
         signal.signal = self.signal(runtime)?;
         if self.depth == 0 && self.bit.is_none() {
@@ -236,9 +229,9 @@ impl SignalSelection {
         let Some(&(left, right)) = root.unpacked_ranges.get(self.depth) else {
             if matches!(
                 root.type_kind,
-                celox::PortTypeKind::Real
-                    | celox::PortTypeKind::ShortReal
-                    | celox::PortTypeKind::String
+                crate::PortTypeKind::Real
+                    | crate::PortTypeKind::ShortReal
+                    | crate::PortTypeKind::String
             ) {
                 return None;
             }
@@ -374,10 +367,10 @@ impl SignalSelection {
 
 /// Small byte-aligned window around a logical bit slice. Preserve the boundary
 /// bits on writes; even a huge bit-packed RAM needs only the selected bytes.
-fn bit_window(signal: celox::SignalRef, offset: usize, width: usize) -> (celox::SignalRef, usize) {
+fn bit_window(signal: crate::SignalRef, offset: usize, width: usize) -> (crate::SignalRef, usize) {
     let shift = offset % 8;
     (
-        celox::SignalRef {
+        crate::SignalRef {
             offset: signal.offset + offset / 8,
             width: (shift + width).div_ceil(8) * 8,
             is_4state: false,
@@ -482,7 +475,7 @@ impl VpiSession {
     /// it cannot resume a VPI session. Call between dispatch runs or from a
     /// read-only synchronization callback for settled values. Other callback
     /// phases capture exactly the values currently visible to VPI reads.
-    pub fn save_state(&self) -> Result<celox::StateFile, String> {
+    pub fn save_state(&self) -> Result<crate::StateFile, String> {
         capture_host_state(&self.host)
     }
 
@@ -744,8 +737,8 @@ pub fn install_runtime(instance: NativeProgramInstance) -> Result<VpiSession, St
 /// in step with the VPI time callbacks. Retain the returned guard as for
 /// [`install_runtime`].
 pub fn install_timed_runtime(
-    image: celox::NativeProgramImage,
-    simulation: celox::Simulation<celox::NativeBackend>,
+    image: crate::NativeProgramImage,
+    simulation: crate::Simulation<crate::NativeBackend>,
 ) -> Result<VpiSession, String> {
     install(Runtime::Timed(TimedRuntime::new(image, simulation)))
 }
@@ -774,7 +767,7 @@ fn install(runtime: Runtime) -> Result<VpiSession, String> {
     })
 }
 
-fn capture_host_state(host: &VpiHost) -> Result<celox::StateFile, String> {
+fn capture_host_state(host: &VpiHost) -> Result<crate::StateFile, String> {
     let runtime = host
         .runtime
         .try_borrow()
@@ -1296,9 +1289,9 @@ fn object_type(object: ObjectRef) -> i32 {
                 VPI_PARAMETER
             } else {
                 match signal.type_kind {
-                    celox::PortTypeKind::Real => VPI_REAL_VAR,
-                    celox::PortTypeKind::ShortReal => VPI_SHORT_REAL_VAR,
-                    celox::PortTypeKind::String => VPI_STRING_VAR,
+                    crate::PortTypeKind::Real => VPI_REAL_VAR,
+                    crate::PortTypeKind::ShortReal => VPI_SHORT_REAL_VAR,
+                    crate::PortTypeKind::String => VPI_STRING_VAR,
                     _ => VPI_REG,
                 }
             }
@@ -1366,8 +1359,8 @@ pub unsafe extern "C" fn vpi_get(property: i32, reference: VpiHandle) -> i32 {
                 return 0;
             }
             match signal.type_kind {
-                celox::PortTypeKind::Real | celox::PortTypeKind::ShortReal => 2,
-                celox::PortTypeKind::String => 6,
+                crate::PortTypeKind::Real | crate::PortTypeKind::ShortReal => 2,
+                crate::PortTypeKind::String => 6,
                 _ => VPI_BINARY_CONST,
             }
         })
@@ -1381,7 +1374,7 @@ pub unsafe extern "C" fn vpi_get(property: i32, reference: VpiHandle) -> i32 {
                 let Some(signal) = id.resolve(runtime) else {
                     return 0;
                 };
-                if signal.type_kind == celox::PortTypeKind::String
+                if signal.type_kind == crate::PortTypeKind::String
                     && signal.unpacked_dims.is_empty()
                     && property == VPI_SIZE
                 {
@@ -1493,7 +1486,7 @@ fn value_snapshot_at(
         if id.depth != signal.unpacked_dims.len() {
             return None;
         }
-        if signal.type_kind == celox::PortTypeKind::String {
+        if signal.type_kind == crate::PortTypeKind::String {
             return Some((
                 callbacks::ValueSnapshot::String(runtime.get_string(id.signal(runtime)?)),
                 id.width(runtime)?,
@@ -1775,7 +1768,7 @@ unsafe fn write_snapshot_value(
     };
     if matches!(
         kind,
-        celox::PortTypeKind::Real | celox::PortTypeKind::ShortReal
+        crate::PortTypeKind::Real | crate::PortTypeKind::ShortReal
     ) {
         encode_real_snapshot(handle, value, snapshot, width);
     } else {
@@ -1885,7 +1878,7 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
             .is_some_and(|signal| {
                 matches!(
                     signal.type_kind,
-                    celox::PortTypeKind::Real | celox::PortTypeKind::ShortReal
+                    crate::PortTypeKind::Real | crate::PortTypeKind::ShortReal
                 )
             })
     });
@@ -2089,7 +2082,7 @@ pub unsafe extern "C" fn vpi_put_value(
     let Some((identity, width, is_4state, type_kind)) = signal_info else {
         return ptr::null_mut();
     };
-    if type_kind == celox::PortTypeKind::String {
+    if type_kind == crate::PortTypeKind::String {
         // String payloads own bytes until the update is applied, so queued
         // writes and edge snapshots never hold unrooted simulator heap IDs.
         if !matches!(flags, VPI_NO_DELAY | VPI_INERTIAL_DELAY)
@@ -2177,7 +2170,7 @@ pub unsafe extern "C" fn vpi_put_value(
     // Safety: value follows the VPI value contract.
     let decoded = if matches!(
         type_kind,
-        celox::PortTypeKind::Real | celox::PortTypeKind::ShortReal
+        crate::PortTypeKind::Real | crate::PortTypeKind::ShortReal
     ) {
         let number = match unsafe { (*value).format } {
             VPI_REAL_VAL => unsafe { (*value).value.real },
@@ -2443,7 +2436,7 @@ fn flush_pending_writes_for_host(host: &VpiHost) -> bool {
         }
         let overridden = replay_overrides.keys().copied().collect::<HashSet<_>>();
         let running = callbacks::is_running_for_host(host);
-        let result: Result<Vec<celox_design::StateAddr>, celox::RuntimeErrorCode> =
+        let result: Result<Vec<celox_design::StateAddr>, crate::RuntimeErrorCode> =
             with_instance_mut(host, |runtime| {
                 let active_edges = batch
                     .active_signals
@@ -2552,7 +2545,7 @@ fn flush_pending_writes_for_host(host: &VpiHost) -> bool {
             }
         }
     }
-    let result: Result<(), celox::RuntimeErrorCode> = with_instance_mut(host, |runtime| {
+    let result: Result<(), crate::RuntimeErrorCode> = with_instance_mut(host, |runtime| {
         apply_pending_deposits(runtime, &final_deposits);
         runtime.settle_active_edges_with_context(
             &[],

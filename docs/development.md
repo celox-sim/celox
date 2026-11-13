@@ -24,7 +24,7 @@ For scripts, use `nix develop --command <command>`, for example:
 
 ```bash
 nix develop --command pnpm run build:napi
-nix develop --command cargo test --locked -p celox-vpi --test cocotb_e2e \
+nix develop --command cargo test --locked -p celox --test cocotb_e2e \
   cocotb_drives_an_attached_native_flip_flop -- --exact --ignored
 ```
 

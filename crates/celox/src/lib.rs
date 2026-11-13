@@ -49,6 +49,11 @@ mod testbench_compile;
 pub(crate) mod timing;
 #[cfg(feature = "host-runtime")]
 mod value_change;
+/// The IEEE VPI host of the `celox` command. It is public for the command and
+/// its tests, not a stable API.
+#[cfg(all(feature = "cli", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[doc(hidden)]
+pub mod vpi;
 pub use backend::SimulatorErrorCode as RuntimeErrorCode;
 pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,
