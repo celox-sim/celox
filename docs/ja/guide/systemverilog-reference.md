@@ -278,6 +278,11 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
 - 明示クロック付きの Boolean な `assert property`・`assume property`・
   `cover property`（モジュール・generate 項目）。固定クロック数だけ離れた
   ステップ列（`a ##1 b`、最大1024ティック）を `|->` または `|=>` で連結したもの。
+- 上限のあるサイクル遅延範囲（`a ##[1:3] b`、先頭にも書けます）と sequence の `or`。
+  試行は一致の仕方のいずれかが一致した最初のティックで成功し、どれも一致し得なく
+  なった最初のティックで失敗します。一致の仕方は最大1024通りで、property 全体が
+  その sequence である場合だけです（含意、`expect` 文、ローカル変数や match 項目を
+  持つものは未対応）。
 - 2 つの Boolean 式の `p iff q`。`|->` の後件にも書けます（`a |-> b iff c` は `a |-> (b iff c)`）。
 - プロセスや task 内の明示クロック付き `expect (property_spec) action_block`（16.17）。
   次のクロックイベントから 1 回だけ評価し、各ステップをサンプル値で判定した後、Reactive
@@ -289,8 +294,8 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
   代入・プロセス開始や制御・イベント発行をしないサブルーチン呼び出し。
 
 特に未対応: 手続き的並行アサーション、暗黙・既定クロック、仮引数付きや
-他スコープの名前付き property・sequence、サイクル遅延範囲、繰り返し、
-sequence 演算子（`and`、`or`、`intersect`、`throughout`）、複数サイクル
+他スコープの名前付き property・sequence、上限の無いサイクル遅延範囲（`##[1:$]`）、
+繰り返し、`or` 以外の sequence 演算子（`and`、`intersect`、`throughout`、`within`）、複数サイクル
 sequence 内のインスタンス、複数サイクル sequence への `disable iff`、
 複数サイクルや名前付きの被演算子を持つ `iff`、
 述語や match 項目値中のユーザー関数呼び出し、時間付き・ノンブロッキングなアクション文。

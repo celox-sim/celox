@@ -353,6 +353,12 @@ concurrent assertions is unsupported:
   `assume property`, and `cover property` with an explicit clock, and
   sequences of steps a fixed number of clock ticks apart (`a ##1 b`),
   spanning at most 1024 ticks, joined by `|->` or `|=>`.
+- Cycle-delay ranges with an upper bound (`a ##[1:3] b`, also leading) and
+  `or` of sequences: an attempt passes at the first tick one of its ways to
+  match matches, and fails at the first tick none can match any more. At
+  most 1024 ways to match, and only in a sequence that is the whole
+  property: not in an implication, an `expect` statement, or one with local
+  variables or match items.
 - `p iff q` of two Boolean expressions, also as the consequent of `|->`
   (`a |-> b iff c` is `a |-> (b iff c)`).
 - `expect (property_spec) action_block` (16.17) in a process or task, with an
@@ -370,8 +376,9 @@ concurrent assertions is unsupported:
 
 Unsupported in particular: procedural concurrent assertions,
 implicit/default clocking, named properties and sequences with formal
-arguments or in other scopes, cycle-delay ranges, repetition, sequence
-operators (`and`, `or`, `intersect`, `throughout`), instances inside a
+arguments or in other scopes, unbounded cycle-delay ranges (`##[1:$]`),
+repetition, sequence operators other than `or` (`and`, `intersect`,
+`throughout`, `within`), instances inside a
 multi-cycle sequence, `disable iff` with a multi-cycle sequence, `iff`
 with an operand over cycles or a named operand, user
 function calls in predicates and match-item values, and timed or
