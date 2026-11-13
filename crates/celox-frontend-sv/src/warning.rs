@@ -75,6 +75,16 @@ pub enum FrontendWarningKind {
         forced: String,
         instances: usize,
     },
+    /// An unpacked array that `force` statements force elements of: its
+    /// force controls are arrays of its shape (IEEE 1800-2023 10.6.2).
+    #[error(
+        "the force of elements of `{array}` in `{module}` gives it force controls of {bits} bits"
+    )]
+    ForcedArray {
+        module: String,
+        array: String,
+        bits: usize,
+    },
     /// `$exit` outside a thread of a program's `initial` procedure, which
     /// IEEE 1800-2023 24.7 ignores.
     #[error("`$exit` outside a program block is ignored")]
@@ -209,6 +219,7 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::ExitOutsideProgram => "exit_outside_program",
             FrontendWarningKind::SharedAlwaysTemporary { .. } => "shared_always_temporary",
             FrontendWarningKind::ForcedSpecialization { .. } => "forced_specialization",
+            FrontendWarningKind::ForcedArray { .. } => "forced_array",
         }))
     }
 
@@ -247,6 +258,9 @@ impl miette::Diagnostic for FrontendWarning {
             }
             FrontendWarningKind::ForcedSpecialization { .. } => {
                 "the instances no force names never set the controls; their writes only check them"
+            }
+            FrontendWarningKind::ForcedArray { .. } => {
+                "every element of the array has an enable, a value and possibly a hold control; every write of it checks them"
             }
             FrontendWarningKind::SharedAlwaysTemporary { .. } => {
                 "a language deviation enabled by shared_always_temporary=warn or allow; declare the variable inside each block to keep IEEE 1800-2023 semantics"

@@ -420,6 +420,8 @@ fn check_target(
             "force or release of `{name}`, which is not a variable or net of the module"
         )));
     };
+    // As an extension, a fixed-size unpacked array of a packed integral type
+    // is a target too: a force names an element of it, or a select of one.
     let integral = dimensions.get(name).is_some_and(|shape| {
         !(shape.string
             || shape.real
@@ -427,12 +429,11 @@ fn check_target(
             || shape.chandle
             || shape.container.is_some()
             || shape.virtual_interface.is_some()
-            || !shape.unpacked.is_empty()
             || shape.unpacked_struct.is_some())
     });
     if !integral {
         return Err(unsupported(format!(
-            "force or release of `{name}`, which is not of a packed integral type"
+            "force or release of `{name}`, which is not of a packed integral type or a fixed-size unpacked array of one"
         )));
     }
     // A target such a procedure writes keeps its forced value after the
@@ -536,15 +537,21 @@ fn fresh(prefix: &str, serial: usize, dimensions: &PackedDimensions, signals: &[
     }
 }
 
-/// The type of a mask of the bits of a target of type `target`, `width`
-/// bits wide: a select of the target selects the same bits of it, by the
-/// target's own packed ranges, or by offsets for a structure.
-fn mask_type(target: &Type, width: usize) -> Type {
-    if target.packed_ranges.is_empty() || !target.members.is_empty() {
-        return bit_type(width);
-    }
-    let mut mask = Type::new(TypeKind::Bit);
-    mask.packed_ranges = target.packed_ranges.clone();
+/// The type of a mask of the bits of a target of type `target`, whose
+/// elements are `element_width` bits wide: a select of the target selects
+/// the same bits of it, by the target's own packed ranges, or by offsets
+/// for a structure. The mask of an unpacked array is an array of the same
+/// shape, of masks of its elements, so that a write of an element at a
+/// run-time index takes the mask of the element at that index.
+fn mask_type(target: &Type, element_width: usize) -> Type {
+    let mut mask = if target.packed_ranges.is_empty() || !target.members.is_empty() {
+        bit_type(element_width)
+    } else {
+        let mut mask = Type::new(TypeKind::Bit);
+        mask.packed_ranges = target.packed_ranges.clone();
+        mask
+    };
+    mask.unpacked_ranges = target.unpacked_ranges.clone();
     mask
 }
 
@@ -655,14 +662,20 @@ pub(super) fn lower(
                     .map(|port| port.r#type().clone())
             })
             .expect("a checked target is a signal or a port");
-        let width = dimensions
-            .get(&name)
-            .and_then(|shape| patterns::shape_width(&tree.functions, shape, dimensions))
-            .ok_or_else(|| {
-                unsupported(format!(
-                    "force or release of `{name}`, whose width is not a constant"
-                ))
-            })?;
+        let constant_width = || {
+            unsupported(format!(
+                "force or release of `{name}`, whose width is not a constant"
+            ))
+        };
+        let shape = dimensions.get(&name).ok_or_else(constant_width)?;
+        let width =
+            patterns::shape_width(&tree.functions, shape, dimensions).ok_or_else(constant_width)?;
+        let element_width = {
+            let mut element = shape.clone();
+            element.unpacked.clear();
+            patterns::shape_width(&tree.functions, &element, dimensions)
+                .ok_or_else(constant_width)?
+        };
         // Two ranges of a target that overlap are forced by the forces of
         // each in turn, which only a constant expression keeps exact.
         let named: Vec<_> = ranges
@@ -685,7 +698,7 @@ pub(super) fn lower(
         let enable = crate::ir::force_control_name(&ForceRole::Enable, &name);
         signals.push(control(
             enable.clone(),
-            mask_type(&target_type, width),
+            mask_type(&target_type, element_width),
             ForceRole::Enable,
             &name,
         ));
@@ -710,7 +723,7 @@ pub(super) fn lower(
             let hold = crate::ir::force_control_name(&ForceRole::Hold, &name);
             signals.push(control(
                 hold.clone(),
-                mask_type(&target_type, width),
+                mask_type(&target_type, element_width),
                 ForceRole::Hold,
                 &name,
             ));

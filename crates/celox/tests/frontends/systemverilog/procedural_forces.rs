@@ -520,6 +520,109 @@ module top;
   end
 endmodule"#;
 
+/// Forces of elements of unpacked arrays at constant indices, of a select
+/// of one, through a hierarchical name and to a varying expression: a
+/// write of a memory at a run-time index keeps the forced bits of a forced
+/// element, writes its neighbours, and writes nothing at an index outside
+/// the array, nor at an index with unknown bits in four-state mode (IEEE
+/// 1800-2023 7.4.6); a read at a run-time index reads the forced value.
+/// Icarus Verilog 13.0 does not force elements of arrays; the lines are
+/// those of Verilator 5.054, which is two-state.
+const UNPACKED_ELEMENTS: &str = r#"`timescale 1ns/1ns
+module mem(input logic clk, input logic we, input logic [2:0] waddr, input logic [7:0] wdata,
+           input logic [1:0] raddr, output logic [7:0] rdata);
+  logic [1:0][3:0] ram [4];
+  always @(posedge clk) begin
+    if (we) ram[waddr] <= wdata;
+  end
+  assign rdata = ram[raddr];
+endmodule
+
+module top;
+  logic clk = 0;
+  logic we = 0;
+  logic [2:0] waddr = 0;
+  logic [1:0] raddr = 0;
+  logic [7:0] wdata = 0;
+  logic [7:0] rdata;
+  logic [3:0] src = 4'h5;
+  logic [7:0] loc [3];
+  int i;
+  mem u(.*);
+  task tick; clk = 1; #1 clk = 0; #1; endtask
+  initial begin
+    for (i = 0; i < 4; i++) u.ram[i] = 8'h10 * i;
+    for (i = 0; i < 3; i++) loc[i] = 8'h01 * i;
+    #1;
+    force u.ram[2][1] = src;
+    force u.ram[1] = 8'hab;
+    force loc[1][7:4] = 4'hc;
+    #1 $display("A %h %h %h %h", u.ram[0], u.ram[1], u.ram[2], u.ram[3]);
+    raddr = 2; #1 $display("B %h", rdata);
+    src = 4'h9; #1 $display("C %h", rdata);
+    we = 1; waddr = 2; wdata = 8'hee; tick;
+    $display("D %h %h %h %h", u.ram[0], u.ram[1], u.ram[2], u.ram[3]);
+    waddr = 3; wdata = 8'h77; tick;
+    waddr = 1; wdata = 8'h66; tick;
+    waddr = 5; wdata = 8'h55; tick;
+    $display("E %h %h %h %h", u.ram[0], u.ram[1], u.ram[2], u.ram[3]);
+    for (i = 0; i < 3; i++) loc[i] = 8'hf0 + i;
+    $display("F %h %h %h", loc[0], loc[1], loc[2]);
+    release u.ram[2][1];
+    release u.ram[1];
+    release loc[1][7:4];
+    #1 $display("G %h %h %h %h %h", u.ram[1], u.ram[2], loc[0], loc[1], loc[2]);
+    waddr = 2; wdata = 8'h33; tick;
+    i = 1; loc[i] = 8'h44;
+    raddr = 2; #1 $display("H %h %h %h", rdata, u.ram[1], loc[1]);
+    force u.ram[3] = 8'h5a;
+    waddr = 3'b0x1; wdata = 8'h11; tick;
+    waddr = 3'b01x; wdata = 8'h22; tick;
+    $display("I %h %h %h %h", u.ram[0], u.ram[1], u.ram[2], u.ram[3]);
+    $finish;
+  end
+endmodule"#;
+
+/// Forces of a member of a structure element of an unpacked array, and of
+/// a select of an element of an array an `always_comb` assigns at a
+/// run-time index, held after the release until the procedure executes
+/// again (IEEE 1800-2023 9.2.2.2). The lines are those of Verilator 5.054,
+/// which does not hold the released element (line G).
+const UNPACKED_MEMBERS: &str = r#"`timescale 1ns/1ns
+module top;
+  typedef struct packed { logic [3:0] a; logic [3:0] b; } s_t;
+  s_t arr [3];
+  logic [7:0] c [4];
+  logic [1:0] sel = 0;
+  logic [7:0] din = 0;
+  int i;
+  always_comb begin
+    for (int k = 0; k < 4; k++) c[k] = 8'h00;
+    c[sel] = din;
+  end
+  initial begin
+    for (i = 0; i < 3; i++) arr[i] = 8'h11 * i;
+    force arr[1].a = 4'h7;
+    #1 $display("A %h %h %h", arr[0], arr[1], arr[2]);
+    i = 1; arr[i] = 8'hff; arr[i].b = 4'h3;
+    #1 $display("B %h %h %h", arr[0], arr[1], arr[2]);
+    release arr[1].a;
+    i = 1; arr[i] = 8'h44;
+    #1 $display("C %h %h %h", arr[0], arr[1], arr[2]);
+    sel = 2; din = 8'h5c;
+    #1 $display("D %h %h %h %h", c[0], c[1], c[2], c[3]);
+    force c[2][3:0] = 4'h1;
+    #1 $display("E %h %h %h %h", c[0], c[1], c[2], c[3]);
+    din = 8'h6d;
+    #1 $display("F %h %h %h %h", c[0], c[1], c[2], c[3]);
+    release c[2][3:0];
+    #1 $display("G %h %h %h %h", c[0], c[1], c[2], c[3]);
+    din = 8'h7e;
+    #1 $display("H %h %h %h %h", c[0], c[1], c[2], c[3]);
+    $finish;
+  end
+endmodule"#;
+
 /// Forces through hierarchical names of a flip-flop of a child, of a part
 /// of a variable an `always_comb` of another child assigns, held after the
 /// release, and of a varying expression. The lines are those of Icarus
@@ -715,6 +818,30 @@ sv_backends! {
         sim.run_until(100).unwrap();
         assert_eq!(display_lines(&mut sim), ["A 1 7", "B 0 7"]);
     }
+    fn forces_of_unpacked_array_elements(sim) {
+        @setup {}
+        @build simulation(UNPACKED_ELEMENTS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 00 ab 50 30", "B 50", "C 90", "D 00 ab 9e 30", "E 00 ab 9e 77", "F f0 c1 f2", "G ab 9e f0 c1 f2", "H 33 ab 44", "I 00 11 22 5a"]);
+    }
+    fn forces_of_unpacked_array_elements_four_state(sim) {
+        @setup {}
+        @build simulation(UNPACKED_ELEMENTS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 00 ab 50 30", "B 50", "C 90", "D 00 ab 9e 30", "E 00 ab 9e 77", "F f0 c1 f2", "G ab 9e f0 c1 f2", "H 33 ab 44", "I 00 ab 33 5a"]);
+    }
+    fn forces_of_unpacked_array_members_and_held_elements(sim) {
+        @setup {}
+        @build simulation(UNPACKED_MEMBERS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 00 71 22", "B 00 73 22", "C 00 44 22", "D 00 00 5c 00", "E 00 00 51 00", "F 00 00 61 00", "G 00 00 61 00", "H 00 00 7e 00"]);
+    }
+    fn forces_of_unpacked_array_members_and_held_elements_four_state(sim) {
+        @setup {}
+        @build simulation(UNPACKED_MEMBERS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 00 71 22", "B 00 73 22", "C 00 44 22", "D 00 00 5c 00", "E 00 00 51 00", "F 00 00 61 00", "G 00 00 61 00", "H 00 00 7e 00"]);
+    }
     fn forces_through_hierarchical_names(sim) {
         @setup {}
         @build simulation(HIERARCHICAL, false);
@@ -879,8 +1006,12 @@ fn rejected_forces_name_their_reason() {
             "force or release of a concatenation",
         ),
         (
-            "logic [3:0] m [2]; initial force m[0] = 4'd1;",
-            "not of a packed integral type",
+            "logic [3:0] m [4]; initial force m[1:0] = '{4'd1, 4'd2};",
+            "slice of an unpacked array",
+        ),
+        (
+            "string m [2]; initial force m[0] = \"a\";",
+            "not of a packed integral type or a fixed-size unpacked array of one",
         ),
         (
             "logic q, d, c; always @(posedge c) q <= #1 d; initial force q = 1'b1;",
@@ -951,4 +1082,25 @@ fn forced_specializations_with_several_instances_are_reported() {
             .any(|warning| warning.contains("gives all 2 instances of the specialization")),
         "{warnings:?}"
     );
+}
+
+/// The force controls of a forced unpacked array have its shape, which a
+/// warning reports with their size.
+#[test]
+fn forced_arrays_report_the_size_of_their_controls() {
+    let sim = simulation(UNPACKED_ELEMENTS, false).build().unwrap();
+    let warnings = sim
+        .warnings()
+        .iter()
+        .map(|warning| warning.to_string())
+        .collect::<Vec<_>>();
+    for expected in [
+        "the force of elements of `ram` in `mem` gives it force controls of 64 bits",
+        "the force of elements of `loc` in `top` gives it force controls of 48 bits",
+    ] {
+        assert!(
+            warnings.iter().any(|warning| warning.contains(expected)),
+            "{expected}: {warnings:?}"
+        );
+    }
 }
