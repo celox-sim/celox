@@ -585,3 +585,31 @@ endmodule"#;
         );
     }
 }
+
+/// The negated reductions `~&`, `~|`, `~^` and `^~` are the complements of
+/// the reductions (IEEE 1800-2023 11.4.9) in generate conditions too, as
+/// BlackParrot's `if (~|fpu_support_p)` (Icarus: y=1110).
+#[test]
+fn generate_conditions_take_negated_reductions() {
+    let source = r#"
+        module Top(output logic [3:0] y);
+            localparam logic [3:0] P = 4'b0011;
+            localparam logic [3:0] F = 4'b1111;
+            if (~|P) begin : g0 assign y[0] = 1'b1; end else begin : h0 assign y[0] = 1'b0; end
+            if (~&P) begin : g1 assign y[1] = 1'b1; end else begin : h1 assign y[1] = 1'b0; end
+            if (~^P) begin : g2 assign y[2] = 1'b1; end else begin : h2 assign y[2] = 1'b0; end
+            if (^~F) begin : g3 assign y[3] = 1'b1; end else begin : h3 assign y[3] = 1'b0; end
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("negated.sv"))], "Top")
+            .four_state(four_state)
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            sim.get(sim.signal("y")),
+            BigUint::from(0b1110u8),
+            "four-state {four_state}"
+        );
+    }
+}
