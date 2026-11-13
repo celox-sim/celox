@@ -679,7 +679,7 @@ fn runtime_select_position_in_range(
     if whole_array && (width != 1 || msb != lsb) {
         return None;
     }
-    let index = expr_from_const_expr(lsb)?;
+    let index = expr_from_const_expr(&fold_constant_calls(lsb, constants, parameter_types))?;
     // An index such as `i - 1` wraps when it should be negative. Widen it with
     // its sign so that "hangs over the bottom" can be tested as a comparison.
     let index_is_wide =
@@ -844,6 +844,71 @@ pub(super) fn runtime_select_as_shift(
         lsb: sv::ir::ConstExpr::Literal("0".to_string()),
         signed,
     })
+}
+
+/// `expr` with each call of a system function that has a constant value,
+/// such as the `$clog2(N)` of an element width in a select position,
+/// replaced by that value: an `integer` (IEEE 1800-2023 20.8.1).
+fn fold_constant_calls(
+    expr: &sv::ir::ConstExpr,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> sv::ir::ConstExpr {
+    use sv::ir::ConstExpr;
+    let fold = |expr: &ConstExpr| Box::new(fold_constant_calls(expr, constants, parameter_types));
+    match expr {
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => expr.clone(),
+        ConstExpr::Function {
+            callee: sv::ir::Callee::System(sv::ir::SystemFunction::Clog2),
+            ..
+        } => match sv::typecheck::eval_const_expr_with_types(expr, constants, parameter_types) {
+            Some(value) => ConstExpr::Literal(value.to_string()),
+            None => expr.clone(),
+        },
+        ConstExpr::Function { .. } => expr.clone(),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: fold(expr),
+            msb: fold(msb),
+            lsb: fold(lsb),
+            signed: *signed,
+        },
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: fold(expr),
+            bit: fold(bit),
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: fold(expr),
+            width: *width,
+            signed: *signed,
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op: *op,
+            expr: fold(expr),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: fold(left),
+            op: *op,
+            right: fold(right),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: fold(condition),
+            then_expr: fold(then_expr),
+            else_expr: fold(else_expr),
+        },
+    }
 }
 
 pub(super) fn expr_from_const_expr(expr: &sv::ir::ConstExpr) -> Option<sv::ir::Expr> {
