@@ -109,6 +109,7 @@ mod packed_dimensions;
 mod process_nodes;
 mod session;
 mod source;
+pub(crate) use source::Publication;
 mod type_nodes;
 pub(crate) use context::*;
 pub(crate) use expression_nodes::*;
@@ -215,10 +216,13 @@ impl InterfaceLookup<'_> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Source {
     modules: Vec<Module>,
     diagnostics: Vec<warnings::AnalyzerWarning>,
+    /// The types the analysis interned, which its types are bound in: the
+    /// IR is published with them (see [`Publication`]).
+    types: semantic_types::TyTable,
 }
 
 /// The executable bodies of a module, moved out of it (see
