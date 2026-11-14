@@ -10,22 +10,30 @@
 //! the statements of their names around their productions. A `rand join`
 //! (18.17.5) interleaves its productions' items at random, a loop running
 //! the next item of a production it picks each time (see `join`). In a
-//! code
-//! block, `break` outside a loop leaves the statement and `return` the
+//! code block, `break` outside a loop leaves the statement and `return` the
 //! production whose rule the block is in (18.17.6). Each sets a hidden flag
 //! of the activation, of the statement or of that use of the rule, and
 //! the code after it up to the end of what it leaves runs only while the
 //! flag is clear: in the code block, the rest of each statement list and
 //! the loops it is in; around it, the items that follow in each rule and
-//! the repetitions of a `repeat` production. A production that refers to itself, directly or
-//! through others, has no expansion and is rejected; so are the forms not
-//! provided yet, each by its name.
+//! the repetitions of a `repeat` production. Each use of a production has
+//! variables of its own (18.17.7): its formals, assigned the item's
+//! arguments before it is expanded, its value, which a `return` with an
+//! expression assigns, and in each of its rules a variable for each
+//! production of the rule with a value, which the item of that production
+//! assigns after it. A code block, production control, weight or argument
+//! sees, by name, those of the rule it is in, bound while it is lowered
+//! only, so a production does not see the variables of the productions
+//! using it. A production that refers to itself, directly or through
+//! others, has no expansion and is rejected; so are the forms not provided
+//! yet, each by its name.
 
 use super::*;
 use celox_sv_syntax::{
-    ExprId, ExprKind, Randsequence, RsCaseItem, RsProd, RsProduction, RsRule, StatementId,
-    StatementKind,
+    Argument, ExprId, ExprKind, Randsequence, RsCaseItem, RsProd, RsProduction, RsRule,
+    StatementId, StatementKind,
 };
+use std::rc::Rc;
 
 /// How deep `randsequence` statements in code blocks may nest.
 const MAX_DEPTH: usize = 64;
@@ -36,6 +44,34 @@ const MAX_DEPTH: usize = 64;
 /// twice doubles at each step; a larger expansion is rejected.
 const MAX_EXPANDED: usize = 1 << 16;
 
+/// How a `break` or `return` of a code block leaves (see `randsequence`):
+/// by the `disable` of block `marker`, lowered as the setting of its flag,
+/// a `return` of a production with a value assigning it to `result` first.
+#[derive(Clone)]
+pub(in crate::ast) struct Exit {
+    marker: u64,
+    result: Option<(String, Type)>,
+}
+
+/// The formals of a production, `(name, type, default)`, and the type of
+/// its value, if it has one (18.17.7).
+struct Signature {
+    formals: Vec<(String, Type, Option<ExprId>)>,
+    result: Option<Type>,
+}
+
+/// The variables the code of one use of a production sees (18.17.7): its
+/// formals and, in a rule, the variable of each production of the rule
+/// with a value, by their names as `(name, local, type)`; the local the
+/// production's value is returned to; and, in a rule, the variable or
+/// element each production item with a value assigns its value to.
+#[derive(Clone, Default)]
+struct Locals {
+    names: Vec<(String, String, Type)>,
+    result: Option<(String, Type)>,
+    targets: HashMap<ExprId, LValue>,
+}
+
 /// A production being expanded, waiting for the expansion of one it uses.
 /// Expansion keeps these on a stack of its own, so a long chain of
 /// productions does not nest native calls.
@@ -45,7 +81,9 @@ enum Frame<'p> {
     /// once an item may have left it, `armed`, the items that follow run
     /// only while no flag is set.
     /// With `units`, a rule of a production a `rand join` interleaves:
-    /// each item's statements are a unit of their own instead.
+    /// each item's statements are a unit of their own instead. Its code
+    /// sees `locals`; `prelude` passes the production its arguments and
+    /// `epilogue` gives its value to the rule that uses it.
     Rule {
         rule: &'p RsRule,
         next: usize,
@@ -53,11 +91,16 @@ enum Frame<'p> {
         exit: Option<(u64, String)>,
         armed: bool,
         units: Option<Vec<Vec<Stmt>>>,
+        locals: Rc<Locals>,
+        prelude: Vec<Stmt>,
+        epilogue: Vec<Stmt>,
     },
     /// A `rand join` (18.17.5) of bias `bias` interleaving productions
     /// `sequences`: the units of the rules of those before `sequence`, and
     /// of the rules of that one before `rule`, expanded into `units`; a
     /// `return` in a production's code blocks sets its flag of `exits`.
+    /// The bias sees `rule_locals`, each production's code its `locals`,
+    /// and `prelude` passes the productions their arguments.
     Join {
         bias: Option<ExprId>,
         sequences: Vec<&'p RsProduction>,
@@ -65,10 +108,15 @@ enum Frame<'p> {
         rule: usize,
         units: Vec<Vec<Vec<Vec<Stmt>>>>,
         exits: Vec<(u64, String)>,
+        rule_locals: Rc<Locals>,
+        locals: Vec<Rc<Locals>>,
+        prelude: Vec<Stmt>,
     },
     /// The rules of a production one of which is picked by weights
-    /// `weights` of width `width`, evaluated by `prelude`: those before
-    /// `next` expanded into `items`.
+    /// `weights` of width `width`, evaluated by `prelude` after it passes
+    /// the production its arguments: those before `next` expanded into
+    /// `items`, each seeing `production`. `epilogue` gives the
+    /// production's value to the rule that uses it.
     Choice {
         rules: &'p [RsRule],
         next: usize,
@@ -76,6 +124,8 @@ enum Frame<'p> {
         weights: Vec<String>,
         width: usize,
         items: Vec<Vec<Stmt>>,
+        production: Rc<Locals>,
+        epilogue: Vec<Stmt>,
     },
     /// An `if` production control (18.17.2) on `condition`, its `then`
     /// production expanded into `then_body` once done, then its `otherwise`
@@ -93,8 +143,10 @@ enum Frame<'p> {
     /// A `case` production control (18.17.3), of kind `kind` on `selector`
     /// comparing chandles if `chandles`, as the case statement is: the
     /// productions of `items` before `next` expanded into `arms` and
-    /// `default`, after `prelude` evaluates the selector's effects.
+    /// `default`, after `prelude` evaluates the selector's effects. Its
+    /// labels see `locals`, those of its rule.
     Case {
+        locals: Rc<Locals>,
         prelude: Vec<Stmt>,
         kind: CaseKind,
         selector: Expr,
@@ -108,12 +160,12 @@ enum Frame<'p> {
 
 /// What the frame on top of the stack does next.
 enum Step<'p> {
-    /// Expand the production of this name.
-    Enter(String),
+    /// Expand the production of this production item.
+    Enter(ExprId),
     /// Push this frame.
     Push(Frame<'p>),
-    /// Push this frame and expand the production of this name for it.
-    Within(Frame<'p>, String),
+    /// Push this frame and expand the production of this item for it.
+    Within(Frame<'p>, ExprId),
     /// The frame is done, with these statements.
     Finish(Vec<Stmt>),
     /// The frame of a rule a `rand join` interleaves is done, with these
@@ -146,11 +198,132 @@ impl BodyBuilder<'_, '_, '_> {
                 .ok_or_else(|| unsupported("randsequence without productions"))?,
         };
         let native = self.tree.declarations();
-        check(native, &productions, &main)?;
+        let reached = check(native, &productions, &main)?;
+        let mut signatures = HashMap::default();
+        for name in reached {
+            let signature = self.signature(&name, productions[&name])?;
+            signatures.insert(name, signature);
+        }
         self.randsequence_depth += 1;
-        let expansion = self.expand(id, &productions, &main);
+        let expansion = self.expand(id, &productions, &signatures, &main);
         self.randsequence_depth -= 1;
         expansion
+    }
+
+    /// The signature of production `production` named `name`, its types
+    /// those of the scope of the statement.
+    fn signature(&mut self, name: &str, production: &RsProduction) -> Converted<Signature> {
+        let native = self.tree.declarations();
+        // A variable holds each formal and the value, as a whole.
+        let plain = |ty: &Type| {
+            ty.unpacked_ranges.is_empty()
+                && ty.container.is_none()
+                && ty.unpacked_struct().is_none()
+                && !events::is_event(ty)
+        };
+        let mut formals = Vec::new();
+        if let Some(ports) = &production.formals {
+            let declared = type_binding::port_formals(
+                ports,
+                "randsequence production",
+                self.tree,
+                self.session,
+                &self.dims,
+            )?;
+            for (formal, direction, ty, default) in declared {
+                if direction != ParamDirection::Input {
+                    return Err(unsupported(format!(
+                        "randsequence production `{name}` formal `{formal}` that is not an input"
+                    )));
+                }
+                if !plain(&ty) {
+                    return Err(unsupported(format!(
+                        "randsequence production `{name}` formal `{formal}` of an unpacked, \
+                         dynamically sized or event type"
+                    )));
+                }
+                if formals.iter().any(|(known, _, _)| *known == formal) {
+                    return Err(AnalyzerError::Parse(format!(
+                        "randsequence production `{name}` declares formal `{formal}` twice"
+                    )));
+                }
+                formals.push((formal, ty, default));
+            }
+        }
+        let result = match production.return_type {
+            Some(id) if is_void(native, id) => None,
+            Some(id) => {
+                let ty = type_binding::binding::bind(id, self.tree, self.session, &self.dims)?
+                    .ok_or_else(|| {
+                        unsupported(format!("randsequence production `{name}` value type"))
+                    })?;
+                if !plain(&ty) {
+                    return Err(unsupported(format!(
+                        "randsequence production `{name}` of an unpacked, dynamically sized or \
+                         event type"
+                    )));
+                }
+                Some(ty)
+            }
+            None => None,
+        };
+        Ok(Signature { formals, result })
+    }
+
+    /// `f` with the names of `locals` bound to their variables.
+    fn scoped<T>(&mut self, locals: &Locals, f: impl FnOnce(&mut Self) -> T) -> T {
+        if locals.names.is_empty() {
+            return f(self);
+        }
+        self.push_scope();
+        for (source, unique, ty) in &locals.names {
+            self.bind_as(source, ty, unique);
+        }
+        let result = f(self);
+        self.pop_scope();
+        result
+    }
+
+    /// The statements of the `break` or `return` of a code block that
+    /// leaves by `exit`, `return` of value `value` (18.17.6, 18.17.7).
+    pub(super) fn randsequence_exit(
+        &mut self,
+        value: Option<ExprId>,
+        exit: Exit,
+    ) -> Converted<Vec<Stmt>> {
+        let mut output = Vec::new();
+        if let (Some(value), Some((result, ty))) = (value, &exit.result) {
+            output.extend(self.assigned(value, result, ty)?);
+        }
+        output.push(Stmt::DisableBlock(exit.marker));
+        Ok(output)
+    }
+
+    /// The statements assigning native expression `id` to local `unique` of
+    /// type `ty`, as the initializer of a declaration of it would be.
+    fn assigned(&mut self, id: ExprId, unique: &str, ty: &Type) -> Converted<Vec<Stmt>> {
+        let native = self.tree.declarations();
+        let mut output = self.effects(&[id])?;
+        expression_binding::check_chandle_assignment(
+            ty.is_chandle(),
+            id,
+            self.tree,
+            native,
+            &self.dims,
+            self.session,
+        )?;
+        let target = LValue::Ident(unique.to_owned());
+        let mut scoped = self.dims.clone();
+        scoped.insert(unique.to_owned(), dimensions_from_type(ty));
+        let mut value =
+            expression_binding::expression(id, native, &target, self.tree, self.session, &scoped)?;
+        self.rename_expr(&mut value);
+        output.push(Stmt::Assign {
+            lhs: target,
+            rhs: value,
+            nonblocking: false,
+        });
+        Ok(output)
     }
 
     /// The statements of production `main` (see the module documentation).
@@ -158,6 +331,7 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         id: StatementId,
         productions: &HashMap<String, &'p RsProduction>,
+        signatures: &HashMap<String, Signature>,
         main: &str,
     ) -> Converted<Vec<Stmt>> {
         let start = self.tree.declarations().statement(id).tokens.start;
@@ -173,7 +347,8 @@ impl BodyBuilder<'_, '_, '_> {
         };
         // The flag of a `break`, which leaves the whole statement.
         let mut statement_exit: Option<(u64, String)> = None;
-        let mut frames = vec![self.enter(productions, main)?];
+        let mut frames =
+            vec![self.enter(productions, signatures, main, None, &Locals::default())?];
         // The statements of the frame last finished, for the one below.
         let mut finished: Option<Vec<Stmt>> = None;
         // The units of the rule frame last finished, for a `rand join`.
@@ -197,8 +372,12 @@ impl BodyBuilder<'_, '_, '_> {
                     exit,
                     armed,
                     units,
+                    locals,
+                    prelude,
+                    epilogue,
                 }) => {
                     let rule: &'p RsRule = rule;
+                    let locals = locals.clone();
                     // The flags an item before the next may have set.
                     let flags = statement_exit
                         .iter()
@@ -221,12 +400,19 @@ impl BodyBuilder<'_, '_, '_> {
                     {
                         *next = rule.items.len();
                         let mut sequences = Vec::new();
+                        let mut join_locals = Vec::new();
+                        let mut join_prelude = Vec::new();
                         for item in &rule.items {
                             let RsProd::Item(item) = item else {
                                 unreachable!("rejected by `check`")
                             };
                             self.count_expansion()?;
-                            sequences.push(productions[&item_name(native, *item)?]);
+                            let (name, arguments) = item_call(native, *item)?;
+                            let (prelude, production) =
+                                self.passed(&name, &signatures[&name], arguments, &locals)?;
+                            sequences.push(productions[&name]);
+                            join_locals.push(Rc::new(production));
+                            join_prelude.extend(prelude);
                         }
                         let mut exits = Vec::new();
                         for _ in &sequences {
@@ -239,6 +425,9 @@ impl BodyBuilder<'_, '_, '_> {
                             sequence: 0,
                             rule: 0,
                             exits,
+                            rule_locals: locals,
+                            locals: join_locals,
+                            prelude: join_prelude,
                         })
                     } else {
                         loop {
@@ -246,11 +435,13 @@ impl BodyBuilder<'_, '_, '_> {
                                 if let Some(units) = units {
                                     break Step::FinishUnits(std::mem::take(units));
                                 }
-                                let mut output = std::mem::take(output);
+                                let mut body = std::mem::take(prelude);
                                 if let Some((_, flag)) = exit {
-                                    output.insert(0, set(flag, false));
+                                    body.push(set(flag, false));
                                 }
-                                break Step::Finish(output);
+                                body.append(output);
+                                body.append(epilogue);
+                                break Step::Finish(body);
                             };
                             *next += 1;
                             match item {
@@ -262,22 +453,35 @@ impl BodyBuilder<'_, '_, '_> {
                                     if !returns.is_empty() && exit.is_none() {
                                         *exit = Some(exit_flag(self));
                                     }
-                                    let markers = breaks
-                                        .iter()
-                                        .map(|id| (*id, statement_exit.clone()))
-                                        .chain(returns.iter().map(|id| (*id, exit.clone())))
-                                        .map(|(id, exit)| (id, exit.expect("allocated above")))
-                                        .collect::<Vec<_>>();
-                                    self.randsequence_exits.extend(
-                                        markers.iter().map(|(id, (marker, _))| (*id, *marker)),
-                                    );
-                                    let body = self.native_body_machine(&[*block]);
-                                    for (id, _) in &markers {
+                                    let markers =
+                                        breaks
+                                            .iter()
+                                            .map(|id| (*id, statement_exit.clone(), None))
+                                            .chain(returns.iter().map(|id| {
+                                                (*id, exit.clone(), locals.result.clone())
+                                            }))
+                                            .map(|(id, exit, result)| {
+                                                (id, exit.expect("allocated above"), result)
+                                            })
+                                            .collect::<Vec<_>>();
+                                    self.randsequence_exits.extend(markers.iter().map(
+                                        |(id, (marker, _), result)| {
+                                            let exit = Exit {
+                                                marker: *marker,
+                                                result: result.clone(),
+                                            };
+                                            (*id, exit)
+                                        },
+                                    ));
+                                    let body = self.scoped(&locals, |this| {
+                                        this.native_body_machine(&[*block])
+                                    });
+                                    for (id, _, _) in &markers {
                                         self.randsequence_exits.remove(id);
                                     }
                                     let flags_of = markers
                                         .into_iter()
-                                        .map(|(_, exit)| exit)
+                                        .map(|(_, exit, _)| exit)
                                         .collect::<HashMap<_, _>>();
                                     let body = lower_exits(body?, &flags_of, false);
                                     if let Some(units) = units {
@@ -292,7 +496,7 @@ impl BodyBuilder<'_, '_, '_> {
                                     output.extend(guard(body, *armed, &flags));
                                     *armed |= !flags.is_empty();
                                 }
-                                RsProd::Item(item) => break Step::Enter(item_name(native, *item)?),
+                                RsProd::Item(item) => break Step::Enter(*item),
                                 // A production control (18.17.2-18.17.4) behaves
                                 // as the statement of its name around its
                                 // productions.
@@ -301,22 +505,31 @@ impl BodyBuilder<'_, '_, '_> {
                                     then,
                                     otherwise,
                                 } => {
-                                    let prelude = self.effects(&[*condition])?;
-                                    let condition = self.native_chandle_value(*condition)?;
+                                    let (prelude, condition) = self.scoped(&locals, |this| {
+                                        Ok::<_, AnalyzerError>((
+                                            this.effects(&[*condition])?,
+                                            this.native_chandle_value(*condition)?,
+                                        ))
+                                    })?;
                                     let frame = Frame::If {
                                         prelude,
                                         condition,
                                         then_body: None,
                                         otherwise: *otherwise,
                                     };
-                                    break Step::Within(frame, item_name(native, *then)?);
+                                    break Step::Within(frame, *then);
                                 }
                                 // Its count is evaluated once, before the first
                                 // repetition.
                                 RsProd::Repeat { count, item } => {
-                                    let mut prelude = self.effects(&[*count])?;
-                                    let value = self.native_value(*count)?;
-                                    let saved = self.hidden_of(*count)?.1;
+                                    let (mut prelude, value, saved) =
+                                        self.scoped(&locals, |this| {
+                                            Ok::<_, AnalyzerError>((
+                                                this.effects(&[*count])?,
+                                                this.native_value(*count)?,
+                                                this.hidden_of(*count)?.1,
+                                            ))
+                                        })?;
                                     prelude.push(Stmt::Assign {
                                         lhs: LValue::Ident(saved.clone()),
                                         rhs: value,
@@ -326,7 +539,7 @@ impl BodyBuilder<'_, '_, '_> {
                                         prelude,
                                         count: Expr::Ident(saved),
                                     };
-                                    break Step::Within(frame, item_name(native, *item)?);
+                                    break Step::Within(frame, *item);
                                 }
                                 // As the case statement is (18.17.3, 12.5).
                                 RsProd::Case { selector, items } => {
@@ -334,9 +547,12 @@ impl BodyBuilder<'_, '_, '_> {
                                         .iter()
                                         .flat_map(|item| item.labels.iter().copied())
                                         .collect::<Vec<_>>();
-                                    let (prelude, kind, selector, chandles) =
-                                        self.case_header("case", None, *selector, &labels)?;
+                                    let (prelude, kind, selector, chandles) = self
+                                        .scoped(&locals, |this| {
+                                            this.case_header("case", None, *selector, &labels)
+                                        })?;
                                     break Step::Push(Frame::Case {
+                                        locals: locals.clone(),
                                         prelude,
                                         kind,
                                         selector,
@@ -358,6 +574,9 @@ impl BodyBuilder<'_, '_, '_> {
                     rule,
                     units,
                     exits,
+                    rule_locals,
+                    locals,
+                    prelude,
                 }) => {
                     if let Some(done) = finished_units.take() {
                         units[*sequence].push(done);
@@ -370,22 +589,37 @@ impl BodyBuilder<'_, '_, '_> {
                     match sequences.get(*sequence) {
                         Some(production) => {
                             let production: &'p RsProduction = production;
-                            Step::Push(Frame::Rule {
-                                rule: &production.rules[*rule],
-                                next: 0,
-                                output: Vec::new(),
-                                exit: Some(exits[*sequence].clone()),
-                                armed: false,
-                                units: Some(Vec::new()),
-                            })
+                            let mut frame = self.rule_frame(
+                                &production.rules[*rule],
+                                &locals[*sequence],
+                                signatures,
+                                Vec::new(),
+                                Vec::new(),
+                            )?;
+                            if let Frame::Rule {
+                                exit,
+                                units: rule_units,
+                                ..
+                            } = &mut frame
+                            {
+                                *exit = Some(exits[*sequence].clone());
+                                *rule_units = Some(Vec::new());
+                            }
+                            Step::Push(frame)
                         }
-                        None => Step::Finish(self.join(
-                            *bias,
-                            sequences,
-                            std::mem::take(units),
-                            exits,
-                            statement_exit.as_ref().map(|(_, flag)| flag.as_str()),
-                        )?),
+                        None => {
+                            let mut output = std::mem::take(prelude);
+                            output.extend(self.join(
+                                *bias,
+                                rule_locals,
+                                sequences,
+                                locals,
+                                std::mem::take(units),
+                                exits,
+                                statement_exit.as_ref().map(|(_, flag)| flag.as_str()),
+                            )?);
+                            Step::Finish(output)
+                        }
                     }
                 }
                 Some(Frame::Choice {
@@ -395,19 +629,21 @@ impl BodyBuilder<'_, '_, '_> {
                     weights,
                     width,
                     items,
+                    production,
+                    epilogue,
                 }) => {
                     items.extend(finished.take());
                     match (*rules).get(*next) {
                         Some(rule) => {
                             *next += 1;
-                            Step::Push(Frame::Rule {
+                            let production = production.clone();
+                            Step::Push(self.rule_frame(
                                 rule,
-                                next: 0,
-                                output: Vec::new(),
-                                exit: None,
-                                armed: false,
-                                units: None,
-                            })
+                                &production,
+                                signatures,
+                                Vec::new(),
+                                Vec::new(),
+                            )?)
                         }
                         None => {
                             let mut output = std::mem::take(prelude);
@@ -416,6 +652,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 *width,
                                 std::mem::take(items),
                             ));
+                            output.append(epilogue);
                             Step::Finish(output)
                         }
                     }
@@ -430,7 +667,7 @@ impl BodyBuilder<'_, '_, '_> {
                     let (then_body, else_body) = match (then_body.is_none(), otherwise.take()) {
                         (true, Some(item)) => {
                             *then_body = Some(body);
-                            frames_step = Some(Step::Enter(item_name(native, item)?));
+                            frames_step = Some(Step::Enter(item));
                             (Vec::new(), Vec::new())
                         }
                         (true, None) => (body, Vec::new()),
@@ -470,6 +707,7 @@ impl BodyBuilder<'_, '_, '_> {
                     Step::Finish(output)
                 }
                 Some(Frame::Case {
+                    locals,
                     prelude,
                     kind,
                     selector,
@@ -489,14 +727,17 @@ impl BodyBuilder<'_, '_, '_> {
                                 .iter()
                                 .map(|label| celox_sv_syntax::CaseMatch::Expression(*label))
                                 .collect::<Vec<_>>();
-                            let labels = self.native_case_labels(&matches, false, *chandles)?;
+                            let chandles = *chandles;
+                            let labels = self.scoped(&locals.clone(), |this| {
+                                this.native_case_labels(&matches, false, chandles)
+                            })?;
                             arms.push(CaseItemBase { labels, body });
                         }
                     }
                     match (*items).get(*next) {
                         Some(item) => {
                             *next += 1;
-                            Step::Enter(item_name(native, item.item)?)
+                            Step::Enter(item.item)
                         }
                         None => {
                             let mut output = std::mem::take(prelude);
@@ -512,11 +753,23 @@ impl BodyBuilder<'_, '_, '_> {
                 }
             };
             match step {
-                Step::Enter(name) => frames.push(self.enter(productions, &name)?),
                 Step::Push(frame) => frames.push(frame),
-                Step::Within(frame, name) => {
-                    frames.push(frame);
-                    frames.push(self.enter(productions, &name)?);
+                Step::Enter(item) | Step::Within(_, item) => {
+                    if let Step::Within(frame, _) = step {
+                        frames.push(frame);
+                    }
+                    // The arguments and the value belong to the rule the
+                    // item is in.
+                    let caller = frames
+                        .iter()
+                        .rev()
+                        .find_map(|frame| match frame {
+                            Frame::Rule { locals, .. } => Some(locals.clone()),
+                            _ => None,
+                        })
+                        .expect("an item is in a rule");
+                    let name = item_call(self.tree.declarations(), item)?.0;
+                    frames.push(self.enter(productions, signatures, &name, Some(item), &caller)?);
                 }
                 Step::Finish(output) => {
                     frames.pop();
@@ -541,11 +794,15 @@ impl BodyBuilder<'_, '_, '_> {
     /// when it is above, and otherwise among all with units left, each as
     /// likely. A bias of 0.5, the default, so prefers no length, and 0.0
     /// and 1.0 always the shortest and the longest (18.17.5 gives no
-    /// formula). The bias is taken to 1/1024.
+    /// formula). The bias is taken to 1/1024. The bias sees `rule_locals`
+    /// and each production's weights its `locals`.
+    #[allow(clippy::too_many_arguments)]
     fn join(
         &mut self,
         bias: Option<ExprId>,
+        rule_locals: &Locals,
         sequences: &[&RsProduction],
+        locals: &[Rc<Locals>],
         units: Vec<Vec<Vec<Vec<Stmt>>>>,
         exits: &[(u64, String)],
         statement_exit: Option<&str>,
@@ -576,8 +833,10 @@ impl BodyBuilder<'_, '_, '_> {
         let bias_1024 = self.hidden(super::int_type()).1;
         match bias {
             Some(bias) => {
-                output.extend(self.effects(&[bias])?);
-                let value = self.native_value(bias)?;
+                let (effects, value) = self.scoped(rule_locals, |this| {
+                    Ok::<_, AnalyzerError>((this.effects(&[bias])?, this.native_value(bias)?))
+                })?;
+                output.extend(effects);
                 output.push(assign(
                     &bias_1024,
                     Expr::Call {
@@ -613,8 +872,9 @@ impl BodyBuilder<'_, '_, '_> {
                     .map(|rule| rule.weight)
                     .collect::<Vec<_>>();
                 let headroom = (usize::BITS - (weights.len() - 1).leading_zeros()) as usize;
-                let (prelude, weights, width) =
-                    self.randcase_weights(&weights, 32, headroom, "randsequence production")?;
+                let (prelude, weights, width) = self.scoped(&locals[index], |this| {
+                    this.randcase_weights(&weights, 32, headroom, "randsequence production")
+                })?;
                 output.extend(prelude);
                 let bodies = lengths
                     .iter()
@@ -821,26 +1081,40 @@ impl BodyBuilder<'_, '_, '_> {
         Ok(())
     }
 
-    /// The frame expanding production `name`: its rule, or its rules one of
-    /// which is picked by their weights, evaluated first.
+    /// The frame expanding production `name` for production item `item` of
+    /// a rule whose code sees `caller`, or as the main production: its
+    /// rule, or its rules one of which is picked by their weights,
+    /// evaluated first, after its arguments are passed.
     fn enter<'p>(
         &mut self,
         productions: &HashMap<String, &'p RsProduction>,
+        signatures: &HashMap<String, Signature>,
         name: &str,
+        item: Option<ExprId>,
+        caller: &Locals,
     ) -> Converted<Frame<'p>> {
         self.count_expansion()?;
         let production = productions[name];
+        let arguments = match item {
+            Some(item) => item_call(self.tree.declarations(), item)?.1,
+            None => &[],
+        };
+        let (mut prelude, locals) = self.passed(name, &signatures[name], arguments, caller)?;
+        // Its value, read by the code of the rule that uses it.
+        let epilogue = item
+            .and_then(|item| caller.targets.get(&item))
+            .zip(locals.result.as_ref())
+            .map(|(target, (result, _))| Stmt::Assign {
+                lhs: target.clone(),
+                rhs: Expr::Ident(result.clone()),
+                nonblocking: false,
+            })
+            .into_iter()
+            .collect();
         if let [rule] = production.rules.as_slice()
             && rule.weight.is_none()
         {
-            return Ok(Frame::Rule {
-                rule,
-                next: 0,
-                output: Vec::new(),
-                exit: None,
-                armed: false,
-                units: None,
-            });
+            return self.rule_frame(rule, &Rc::new(locals), signatures, prelude, epilogue);
         }
         let weights = production
             .rules
@@ -852,8 +1126,10 @@ impl BodyBuilder<'_, '_, '_> {
         // precision: it is taken wide enough not to wrap, one bit wider
         // than the widest weight per doubling of the rules.
         let headroom = (usize::BITS - (weights.len() - 1).leading_zeros()) as usize;
-        let (prelude, weights, width) =
-            self.randcase_weights(&weights, 32, headroom, "randsequence production")?;
+        let (weighing, weights, width) = self.scoped(&locals, |this| {
+            this.randcase_weights(&weights, 32, headroom, "randsequence production")
+        })?;
+        prelude.extend(weighing);
         Ok(Frame::Choice {
             rules: &production.rules,
             next: 0,
@@ -861,8 +1137,159 @@ impl BodyBuilder<'_, '_, '_> {
             weights,
             width,
             items: Vec::new(),
+            production: Rc::new(locals),
+            epilogue,
         })
     }
+
+    /// The variables of a use of production `name` of signature
+    /// `signature`, given arguments `arguments` by a rule whose code sees
+    /// `caller`, and the statements passing them (18.17.7): bound as a task
+    /// call binds its arguments (13.5.4), by position or by name, and
+    /// evaluated in the same order, the actuals as written and then the
+    /// defaults of the formals given none, in the scope of the statement
+    /// (13.5.3).
+    fn passed(
+        &mut self,
+        name: &str,
+        signature: &Signature,
+        arguments: &[Argument],
+        caller: &Locals,
+    ) -> Converted<(Vec<Stmt>, Locals)> {
+        let formals = &signature.formals;
+        let names = formals
+            .iter()
+            .map(|(formal, _, _)| Some(formal.clone()))
+            .collect::<Vec<_>>();
+        let (actuals, order) = expression_binding::formal_arguments(name, arguments, &names)?;
+        let mut locals = Locals::default();
+        for (formal, ty, _) in formals {
+            let unique = self.hidden(ty.clone()).1;
+            locals.names.push((formal.clone(), unique, ty.clone()));
+        }
+        let mut prelude = Vec::new();
+        for position in order {
+            let (formal, ty, default) = &formals[position];
+            let unique = locals.names[position].1.clone();
+            match (actuals[position], default) {
+                (Some(value), _) => {
+                    let assigned = self.scoped(caller, |this| this.assigned(value, &unique, ty))?;
+                    prelude.extend(assigned);
+                }
+                (None, Some(default)) => prelude.extend(self.assigned(*default, &unique, ty)?),
+                (None, None) => {
+                    return Err(AnalyzerError::InvalidCallArguments {
+                        subroutine: name.to_owned(),
+                        detail: format!(
+                            "formal `{formal}` has no default and is not given an actual (IEEE \
+                             1800-2023 13.5.3)"
+                        ),
+                    });
+                }
+            }
+        }
+        locals.result = signature
+            .result
+            .clone()
+            .map(|ty| (self.hidden(ty.clone()).1, ty));
+        Ok((prelude, locals))
+    }
+
+    /// The frame of rule `rule` of a production whose code sees
+    /// `production`, passed its arguments by `prelude` and giving its value
+    /// by `epilogue`. Its code sees a variable for each production of the
+    /// rule with a value (18.17.7): of the production's name and type, or,
+    /// for one the rule names several times, an array of those values from
+    /// 1, each item in order assigning its element.
+    fn rule_frame<'p>(
+        &mut self,
+        rule: &'p RsRule,
+        production: &Locals,
+        signatures: &HashMap<String, Signature>,
+        prelude: Vec<Stmt>,
+        epilogue: Vec<Stmt>,
+    ) -> Converted<Frame<'p>> {
+        let native = self.tree.declarations();
+        let mut locals = production.clone();
+        // The items of each production with a value, in order.
+        let mut uses: Vec<(String, Vec<ExprId>)> = Vec::new();
+        for item in rule_items(rule) {
+            let name = item_call(native, item)?.0;
+            if signatures[&name].result.is_none() {
+                continue;
+            }
+            match uses.iter_mut().find(|(known, _)| *known == name) {
+                Some((_, items)) => items.push(item),
+                None => uses.push((name, vec![item])),
+            }
+        }
+        for (name, items) in uses {
+            let ty = signatures[&name]
+                .result
+                .clone()
+                .expect("a production with a value");
+            if let [item] = items.as_slice() {
+                let unique = self.hidden(ty.clone()).1;
+                locals.targets.insert(*item, LValue::Ident(unique.clone()));
+                locals.names.push((name, unique, ty));
+                continue;
+            }
+            let literal = |value: usize| ConstExpr::Literal(value.to_string());
+            let array = types::type_with_unpacked_ranges(
+                ty,
+                vec![UnpackedRange::new(literal(1), literal(items.len()))],
+            )?;
+            let (source, unique) = self.hidden(array.clone());
+            for (index, item) in items.into_iter().enumerate() {
+                let mut target = selects::lvalue_from_indices(
+                    self.tree,
+                    source.clone(),
+                    vec![literal(index + 1)],
+                    &self.dims,
+                )?;
+                self.rename_lvalue(&mut target);
+                locals.targets.insert(item, target);
+            }
+            locals.names.push((name, unique, array));
+        }
+        Ok(Frame::Rule {
+            rule,
+            next: 0,
+            output: Vec::new(),
+            exit: None,
+            armed: false,
+            units: None,
+            locals: Rc::new(locals),
+            prelude,
+            epilogue,
+        })
+    }
+}
+
+/// The production items of rule `rule`, in order: those of its production
+/// controls too.
+fn rule_items(rule: &RsRule) -> Vec<ExprId> {
+    let mut items = Vec::new();
+    for item in &rule.items {
+        match item {
+            RsProd::Item(item) => items.push(*item),
+            RsProd::Code(_) => {}
+            RsProd::If {
+                then, otherwise, ..
+            } => items.extend(std::iter::once(*then).chain(*otherwise)),
+            RsProd::Repeat { item, .. } => items.push(*item),
+            RsProd::Case { items: cases, .. } => items.extend(cases.iter().map(|case| case.item)),
+        }
+    }
+    items
+}
+
+/// Whether type `id` is `void`.
+fn is_void(native: &celox_sv_syntax::Declarations, id: celox_sv_syntax::TypeId) -> bool {
+    matches!(
+        &native.data_type(id).kind,
+        celox_sv_syntax::DataTypeKind::Builtin(name) if name == "void"
+    )
 }
 
 /// The assignment of `value` to flag `flag`.
@@ -1026,26 +1453,36 @@ fn productions(randsequence: &Randsequence) -> Converted<HashMap<String, &RsProd
     Ok(productions)
 }
 
-/// The production a production item names, by itself (18.17.7 passes
-/// arguments).
-fn item_name(
+/// The production a production item names and the arguments it passes
+/// (18.17.7).
+fn item_call(
     native: &celox_sv_syntax::Declarations,
-    item: celox_sv_syntax::ExprId,
-) -> Converted<String> {
+    item: ExprId,
+) -> Converted<(String, &[Argument])> {
     match &native.expression(item).kind {
-        ExprKind::Name(name) => Ok(instances::normalize_identifier(&name.spelling)),
-        ExprKind::Call { .. } => Err(unsupported("randsequence production with arguments")),
+        ExprKind::Name(name) => Ok((instances::normalize_identifier(&name.spelling), &[])),
+        ExprKind::Call {
+            expression,
+            arguments,
+        } => match &native.expression(*expression).kind {
+            ExprKind::Name(name) => Ok((
+                instances::normalize_identifier(&name.spelling),
+                arguments.as_slice(),
+            )),
+            _ => Err(unsupported("randsequence production item")),
+        },
         _ => Err(unsupported("randsequence production item")),
     }
 }
 
-/// Check the productions that `main` reaches: each named one is declared,
-/// none reaches itself, and each uses only the forms expanded here.
+/// Check the productions that `main` reaches, and return their names: each
+/// named one is declared, none reaches itself, and each uses only the forms
+/// expanded here.
 fn check(
     native: &celox_sv_syntax::Declarations,
     productions: &HashMap<String, &RsProduction>,
     main: &str,
-) -> Converted<()> {
+) -> Converted<HashSet<String>> {
     // Depth-first, a production on the path when its items are entered.
     enum Visit {
         Enter(String),
@@ -1078,13 +1515,11 @@ fn check(
                     name: name.clone(),
                     context: "no randsequence production of this name".into(),
                 })?;
-        if production.return_type.is_some() || production.formals.is_some() {
-            return Err(unsupported(format!(
-                "randsequence production `{name}` with a result or formals"
-            )));
-        }
+        let valued = production
+            .return_type
+            .is_some_and(|id| !is_void(native, id));
         path.insert(name.clone());
-        jobs.push(Visit::Leave(name));
+        jobs.push(Visit::Leave(name.clone()));
         for rule in &production.rules {
             // `rand join` interleaves two or more production items
             // (A.6.12).
@@ -1104,17 +1539,17 @@ fn check(
             }
             for item in &rule.items {
                 match item {
-                    RsProd::Item(item) => jobs.push(Visit::Enter(item_name(native, *item)?)),
-                    RsProd::Code(block) => check_code(native, *block)?,
+                    RsProd::Item(item) => jobs.push(Visit::Enter(item_call(native, *item)?.0)),
+                    RsProd::Code(block) => check_code(native, *block, &name, valued)?,
                     RsProd::If {
                         then, otherwise, ..
                     } => {
                         for item in std::iter::once(then).chain(otherwise) {
-                            jobs.push(Visit::Enter(item_name(native, *item)?));
+                            jobs.push(Visit::Enter(item_call(native, *item)?.0));
                         }
                     }
                     RsProd::Repeat { item, .. } => {
-                        jobs.push(Visit::Enter(item_name(native, *item)?))
+                        jobs.push(Visit::Enter(item_call(native, *item)?.0))
                     }
                     RsProd::Case { items, .. } => {
                         // At most one default (18.17.3).
@@ -1124,20 +1559,27 @@ fn check(
                             ));
                         }
                         for item in items {
-                            jobs.push(Visit::Enter(item_name(native, item.item)?));
+                            jobs.push(Visit::Enter(item_call(native, item.item)?.0));
                         }
                     }
                 }
             }
         }
     }
-    Ok(())
+    Ok(done)
 }
 
-/// Reject in code block `block` a `continue` outside a loop, which has
-/// nothing to continue (12.8), and a `return` with a value, which gives a
-/// production its value (18.17.7).
-fn check_code(native: &celox_sv_syntax::Declarations, block: StatementId) -> Converted<()> {
+/// Reject in code block `block` of production `name` a `continue` outside a
+/// loop, which has nothing to continue (12.8), and a `return` with a value
+/// unless the production has one, `valued`, or without one if it does: as
+/// in a function, the value is returned with an expression of its type
+/// (18.17.7, 13.4.1).
+fn check_code(
+    native: &celox_sv_syntax::Declarations,
+    block: StatementId,
+    name: &str,
+    valued: bool,
+) -> Converted<()> {
     let mut pending = vec![(block, false)];
     while let Some((id, looping)) = pending.pop() {
         let kind = &native.statement(id).kind;
@@ -1147,8 +1589,15 @@ fn check_code(native: &celox_sv_syntax::Declarations, block: StatementId) -> Con
                     "continue outside a loop in a randsequence code block",
                 ));
             }
-            StatementKind::Return(Some(_)) => {
-                return Err(unsupported("randsequence production value returned"));
+            StatementKind::Return(Some(_)) if !valued => {
+                return Err(AnalyzerError::Parse(format!(
+                    "return with a value in void randsequence production `{name}`"
+                )));
+            }
+            StatementKind::Return(None) if valued => {
+                return Err(AnalyzerError::Parse(format!(
+                    "return without a value in randsequence production `{name}` with a value"
+                )));
             }
             // A nested randsequence is checked when it is expanded.
             StatementKind::Unconverted { category, .. } if category == "randsequence" => {}

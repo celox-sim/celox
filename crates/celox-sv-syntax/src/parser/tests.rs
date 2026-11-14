@@ -187,8 +187,15 @@ fn randsequence_productions_are_read_with_their_code_blocks() {
     assert_eq!(cases[0].labels.len(), 2);
     assert!(cases[1].labels.is_empty());
     let b = &randsequence.productions[2];
-    assert_eq!(syntax.token_text(b.return_type.unwrap()), "int");
-    assert_eq!(syntax.token_text(b.formals.unwrap()), "(int v)");
+    assert!(matches!(
+        &syntax.data_type(b.return_type.unwrap()).kind,
+        DataTypeKind::Builtin(name) if name == "int"
+    ));
+    let [formal] = b.formals.as_deref().unwrap() else {
+        panic!()
+    };
+    assert_eq!(formal.name.as_ref().unwrap().spelling, "v");
+    assert_eq!(syntax.token_text(formal.tokens), "int v");
     let [RsProd::Code(code), RsProd::Item(call)] = b.rules[0].items.as_slice() else {
         panic!()
     };

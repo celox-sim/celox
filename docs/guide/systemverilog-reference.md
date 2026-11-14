@@ -300,8 +300,9 @@ blocks in programs. Two region deviations are listed under
 - Scope `randomize()` / `std::randomize()` (18.12): `with` constraints,
   enums with unsupported or unresolved domains, unpacked arrays, nets,
   constants, selects, and concatenation arguments.
-- `randsequence` (18.17): recursive productions, productions with a result
-  or formals (and `return` with a value), and code blocks after a weight.
+- `randsequence` (18.17): recursive productions, code blocks after a
+  weight, and production formals and values of unpacked, dynamically sized
+  or event types or formals that are not inputs.
   A production of several rules picks one by their weights, 1 unless given,
   from the thread's random number generator (18.14.2). `rand join`
   interleaves its productions' items at random from the same generator.

@@ -1824,43 +1824,21 @@ impl Parser<'_> {
         let mut productions = Vec::new();
         while self.peek() != "endsequence" {
             let start = self.at;
-            // The header up to `:`: a type, the name, and formals.
-            let mut depth = 0usize;
-            let mut parentheses = None;
-            let mut name_at = None;
-            loop {
-                match self.peek() {
-                    "" | "endsequence" => return Ok(None),
-                    "(" => {
-                        if depth == 0 {
-                            parentheses = Some(self.at);
-                        }
-                        depth += 1;
-                    }
-                    ")" => depth = depth.saturating_sub(1),
-                    ":" if depth == 0 => break,
-                    _ if depth == 0 => {
-                        name_at = Some(self.at);
-                        parentheses = None;
-                    }
-                    _ => {}
-                }
-                self.at += 1;
-            }
-            let colon = self.at;
-            let Some(name_at) = name_at else {
-                return Ok(None);
+            // `[data_type_or_void] name [( tf_port_list )] :`: a type comes
+            // first unless the name is followed by its formals or the colon
+            // (18.17.7).
+            let return_type = if matches!(self.nth(1), ":" | "(") {
+                None
+            } else {
+                Some(self.data_type()?)
             };
-            self.at = name_at;
             let name = self.name()?;
-            // In tokens, as other ranges are.
-            let tokens = |start: usize, end: usize| TokenRange {
-                start: self.indices[start],
-                end: self.indices[end - 1] + 1,
+            let formals = if self.peek() == "(" {
+                Some(self.subroutine_ports(false)?)
+            } else {
+                None
             };
-            let return_type = (name_at > start).then(|| tokens(start, name_at));
-            let formals = parentheses.map(|open| tokens(open, colon));
-            self.at = colon + 1;
+            self.expect(":")?;
             let mut rules = Vec::new();
             loop {
                 let Some(rule) = self.randsequence_rule(&mut blocks)? else {
