@@ -753,7 +753,7 @@ fn random_field(
     builder: &mut BodyBuilder<'_, '_, '_>,
     field: system_functions::ObjectField,
     ty: &Type,
-    cycle: Option<u16>,
+    cycle: Option<u32>,
     this: &str,
 ) -> Vec<Stmt> {
     let randc = cycle.is_some();
@@ -807,19 +807,29 @@ fn random_field(
         let literal = |value: crate::ast::enums::MemberValue| {
             Expr::Literal(value.literal(field.width as usize, field.signed))
         };
-        let mut value = literal(*values.last().unwrap());
-        for (index, &member) in values.iter().enumerate().rev().skip(1) {
-            value = Expr::Mux {
+        // The member of index `draw`, by halves: a randc enumeration may
+        // have up to 65536 members, which a chain would nest as deep.
+        fn member(
+            draw: &str,
+            values: &[crate::ast::enums::MemberValue],
+            first: usize,
+            literal: &impl Fn(crate::ast::enums::MemberValue) -> Expr,
+        ) -> Expr {
+            if let [only] = values {
+                return literal(*only);
+            }
+            let half = values.len() / 2;
+            Expr::Mux {
                 condition: Box::new(Expr::Binary {
-                    left: Box::new(Expr::Ident(draw.clone())),
-                    op: BinaryOp::Eq,
-                    right: Box::new(Expr::Literal(format!("64'd{index}"))),
+                    left: Box::new(Expr::Ident(draw.to_owned())),
+                    op: BinaryOp::Lt,
+                    right: Box::new(Expr::Literal(format!("64'd{}", first + half))),
                 }),
-                then_expr: Box::new(literal(member)),
-                else_expr: Box::new(value),
-            };
+                then_expr: Box::new(member(draw, &values[..half], first, literal)),
+                else_expr: Box::new(member(draw, &values[half..], first + half, literal)),
+            }
         }
-        value
+        member(&draw, &values, 0, &literal)
     } else if field.width > 64 && !randc {
         // Each draw gives 64 random bits.
         Expr::Concat((0..field.width.div_ceil(64)).map(|_| random()).collect())
