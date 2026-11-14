@@ -32,6 +32,7 @@ mod case;
 mod casts;
 mod classes;
 pub(crate) use classes::ClassIndex;
+pub(crate) use procedural::static_references::Candidate as StaticReference;
 mod assertion_control;
 mod comb_process;
 mod continuous_delays;
