@@ -669,3 +669,28 @@ fn variables_keep_the_semantic_types_of_their_declarations() {
     let signal = signals.iter().find(|signal| signal.name() == "a").unwrap();
     assert!(signal.r#type().binding.get(&session.types).is_some());
 }
+
+#[test]
+fn types_keep_their_semantic_types_when_their_bounds_take_values() {
+    // IEEE 1800-2023 6.18: the names in a type resolve in the scope that
+    // declares it. Replacing its bounds by their values there, as freezing
+    // them or resolving a type argument does, leaves its semantic type as it
+    // was, so the type keeps its binding.
+    let session = &mut Session::default();
+    let source = "module M; typedef logic [W-1:0] t [W]; endmodule";
+    let tree =
+        crate::source_tree::parse_scope_fixture(source, Path::new("semantic_types.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let declaring = ConstEnv::from_iter([("W".into(), 4)]);
+    let aliases = types::type_aliases_from_scope_with_env(&tree, session, &declaring).unwrap();
+    let mut ty = aliases["t"].clone();
+    bind_declared(&mut session.types, &tree.functions, &mut ty, &declaring);
+    let declared = ty.binding.get(&session.types).unwrap();
+    let mut frozen = ty.clone();
+    types::freeze_bounds(&mut frozen, &tree.functions, &declaring);
+    let resolved =
+        crate::ast::type_parameters::resolve(&tree.functions, ty.clone(), &declaring).unwrap();
+    for ty in [frozen, resolved] {
+        assert_eq!(ty.binding.get(&session.types), Some(declared));
+    }
+}

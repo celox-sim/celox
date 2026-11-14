@@ -83,11 +83,14 @@ pub(super) fn resolve(
             ConstExpr::Literal(format_typed_parameter_literal(value, 128, true))
         })
     }
-    for range in &mut ty.packed_ranges {
+    // The bounds take their values in the scope whose names they are, so
+    // the type keeps its semantic type.
+    let shape = ty.shape_keeping_binding();
+    for range in &mut shape.packed_ranges {
         range.left = bound(functions, &range.left, env)?;
         range.right = bound(functions, &range.right, env)?;
     }
-    for range in &mut ty.unpacked_ranges {
+    for range in &mut shape.unpacked_ranges {
         range.left = bound(functions, &range.left, env)?;
         range.right = bound(functions, &range.right, env)?;
         if let Some(size) = &range.size {
@@ -95,11 +98,11 @@ pub(super) fn resolve(
         }
     }
     let mut members = Vec::new();
-    for member in std::mem::take(&mut ty.members) {
+    for member in std::mem::take(&mut ty.shape_keeping_binding().members) {
         let resolved = resolve(functions, member.r#type().clone(), env)?;
         members.push(member.with_type(|_| resolved));
     }
-    ty.members = members;
+    ty.shape_keeping_binding().members = members;
     Some(ty)
 }
 
