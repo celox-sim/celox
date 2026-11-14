@@ -333,6 +333,10 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// The productions the outermost `randsequence` statement being
     /// expanded has expanded so far (see `randsequence`).
     pub(super) randsequence_expanded: usize,
+    /// The `break` and `return` statements of the `randsequence` code
+    /// block being lowered that leave the statement or a production, and the
+    /// block each disables (see `randsequence`).
+    pub(super) randsequence_exits: HashMap<celox_sv_syntax::StatementId, u64>,
 }
 
 /// The names a body declares: its scopes of locals, innermost last, and
@@ -650,6 +654,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             fork_blocks: Vec::new(),
             randsequence_depth: 0,
             randsequence_expanded: 0,
+            randsequence_exits: HashMap::default(),
             tree,
             session,
             dims,

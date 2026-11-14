@@ -761,6 +761,14 @@ impl BodyBuilder<'_, '_, '_> {
                             jobs.push(Job::Enter(*success));
                         }
                     }
+                    // In a randsequence code block, `break` outside a loop
+                    // and `return` leave the statement or a production
+                    // (IEEE 1800-2023 18.17.6).
+                    StatementKind::Break | StatementKind::Return(None)
+                        if let Some(block) = self.randsequence_exits.get(&id) =>
+                    {
+                        output.push(Stmt::DisableBlock(*block));
+                    }
                     StatementKind::Break => output.push(Stmt::Break),
                     StatementKind::Continue => output.push(Stmt::Continue),
                     StatementKind::Return(value) => {
@@ -1403,7 +1411,7 @@ pub(super) fn mark_breaks(body: Vec<Stmt>, stop: &str) -> Vec<Stmt> {
 }
 
 /// An unsigned packed type of `width` bits, for hidden randcase values.
-fn unsigned_type(width: usize) -> Type {
+pub(super) fn unsigned_type(width: usize) -> Type {
     let mut ty = super::int_type();
     ty.is_signed = false;
     ty.packed_ranges = vec![PackedRange::new(
