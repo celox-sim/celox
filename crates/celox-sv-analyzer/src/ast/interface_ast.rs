@@ -105,7 +105,7 @@ pub(super) fn signature(
     name: String,
     members: &[String],
     names: &HashSet<String>,
-) -> Converted<crate::ir::Module> {
+) -> Converted<(crate::ir::Module, Vec<(String, Type)>)> {
     let session = &mut Session::default();
     let projected_tree = interface_binding::declaration_view(tree)?;
     let context = AnalysisContext::unspecialized(&projected_tree);
@@ -140,6 +140,25 @@ pub(super) fn signature(
     let declarations = declarations::signals_from_scope_with_declaration_ranges(
         tree, session, &env, &aliases, true,
     )?;
+    // The members of an enumeration type, header ports included, whose type
+    // the module's ports do not keep. An enumeration type is declared outside
+    // the interface (one inside it is rejected, see
+    // `interfaces::InterfaceDecl::collect`), whose bounds took their values
+    // where it was declared.
+    let enumerations = module
+        .ports
+        .iter()
+        .map(|port| (port.name.as_str(), &port.r#type))
+        .chain(
+            declarations
+                .iter()
+                .map(|signal| (signal.name(), signal.r#type())),
+        )
+        .filter(|(name, ty)| {
+            members.iter().any(|member| member == name) && ty.is_enum && ty.enum_domain.is_some()
+        })
+        .map(|(name, ty)| (name.to_owned(), ty.clone()))
+        .collect::<Vec<_>>();
     let names = names
         .iter()
         .map(|name| (name.clone(), format!("h${name}")))
@@ -236,8 +255,10 @@ pub(super) fn signature(
         modules: vec![module],
         diagnostics: Vec::new(),
     })?;
-    ir.modules()
+    let module = ir
+        .modules()
         .first()
         .cloned()
-        .ok_or_else(|| unsupported("interface signature"))
+        .ok_or_else(|| unsupported("interface signature"))?;
+    Ok((module, enumerations))
 }
