@@ -37,7 +37,7 @@ impl ScopeElaboration<'_> {
                 .type_aliases
                 .iter()
                 .map(|(name, ty)| (name.clone(), ty.clone()))
-                .chain(classes::scope_class_types(syntax_tree))
+                .chain(classes::scope_class_types(syntax_tree, &mut session.types))
                 .collect(),
             // The types the scope declares, also those that have no
             // binding, for its importers (IEEE 1800-2023 26.3). Those it

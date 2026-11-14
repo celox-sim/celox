@@ -434,8 +434,8 @@ fn check_forward_typedef(
                             DataTypeKind::Named(_),
                         ) => aliases
                             .get(&instances::normalize_identifier(name))
-                            .and_then(|ty| ty.class())
-                            .and_then(|class| super::classes::declaration(tree, session, class))
+                            .and_then(|ty| ty.class_in(&session.types))
+                            .and_then(|class| super::classes::declaration(tree, session, &class))
                             .is_some_and(|class| {
                                 class.interface == (forward == ForwardType::InterfaceClass)
                             }),

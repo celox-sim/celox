@@ -725,7 +725,7 @@ impl BodyBuilder<'_, '_, '_> {
                 containers::assignment(right, self.tree, self.session, &self.dims, container)?;
             return self.property_store(&property, handle, op, value).map(Some);
         }
-        let mut value = match property.r#type.class() {
+        let mut value = match property.r#type.class_in(&self.session.types) {
             Some(class) if op == "=" => {
                 match expression_binding::object_constructor(
                     self.tree,
@@ -733,7 +733,7 @@ impl BodyBuilder<'_, '_, '_> {
                     right,
                     native,
                     &self.dims,
-                    class,
+                    &class,
                 )? {
                     Some(call) => call,
                     None => {
@@ -743,7 +743,7 @@ impl BodyBuilder<'_, '_, '_> {
                             right,
                             native,
                             &self.dims,
-                            class,
+                            &class,
                             || format!("assignment to property `{}`", property.name),
                         )?;
                         bind(self.session, right)?

@@ -726,3 +726,40 @@ fn a_container_alone_has_the_type_of_its_declaration() {
     );
     assert_eq!(session.types.unbound_reads, unbound);
 }
+
+#[test]
+fn handles_and_fixed_size_arrays_of_them_name_their_class() {
+    // IEEE 1800-2023 8.4: a handle names its class; an element of an
+    // unpacked array of handles is one (7.4.2). A dynamic array is a
+    // container, whose elements its type does not name.
+    let mut table = TyTable::default();
+    let class = table.intern(TyData::Class(Decl::Class("C".into())));
+    let fixed = |element| TyData::Array {
+        kind: ArrayKind::Fixed(Range { left: 0, right: 1 }),
+        element,
+    };
+    let array = table.intern(fixed(class));
+    let nested = table.intern(fixed(array));
+    let dynamic = table.intern(TyData::Array {
+        kind: ArrayKind::Dynamic,
+        element: class,
+    });
+    let string = table.intern(TyData::String);
+    for (id, expected) in [
+        (class, Some("C")),
+        (array, Some("C")),
+        (nested, Some("C")),
+        (dynamic, None),
+        (string, None),
+    ] {
+        assert_eq!(table.handle_class(id).map(|class| &**class), expected);
+    }
+}
+
+#[test]
+fn class_handle_types_are_bound_where_they_are_made() {
+    let mut table = TyTable::default();
+    let handle = crate::ast::classes::handle(&mut table, "C");
+    assert_eq!(handle.class_in(&table).as_deref(), Some("C"));
+    assert_eq!(table.unbound_reads, 0);
+}

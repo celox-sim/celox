@@ -339,7 +339,7 @@ fn element(
         Some(member) => {
             let class = element
                 .element
-                .class()
+                .class_in(&session.types)
                 .ok_or("a member of a constraint array element other than an object")?
                 .to_owned();
             let property = object_member(&class, &member, tree, session, properties, env)?;
@@ -525,7 +525,7 @@ fn handle_operand(
                 names.statics,
             ) {
                 Some(super::Member::Instance(index))
-                    if properties[index].r#type.class().is_some() =>
+                    if properties[index].r#type.class_in(&session.types).is_some() =>
                 {
                     let property = &properties[index];
                     visible(property, tree, session, env)?;
@@ -534,7 +534,10 @@ fn handle_operand(
                 // A static handle is its value when the call starts, an
                 // input of the program (see `classes::StaticInput`).
                 Some(super::Member::Static(index))
-                    if names.statics[index].r#type.class().is_some() =>
+                    if names.statics[index]
+                        .r#type
+                        .class_in(&session.types)
+                        .is_some() =>
                 {
                     let property = &names.statics[index];
                     accessible(
@@ -1036,7 +1039,7 @@ pub(in crate::ast) fn bind_inputs(
                 visible(handle, tree, session, env)?;
                 let class = handle
                     .r#type
-                    .class()
+                    .class_in(&session.types)
                     .ok_or("a member of a constraint operand other than an object")?
                     .to_owned();
                 let member = instances::normalize_identifier(&name.spelling);
@@ -1603,11 +1606,11 @@ fn random_member(
     else {
         return Ok(false);
     };
-    let Some(class) = handle.r#type.class() else {
+    let Some(class) = handle.r#type.class_in(&session.types) else {
         return Ok(false);
     };
     let member = instances::normalize_identifier(&name.spelling);
-    let member = object_member(class, &member, tree, session, properties, env)?;
+    let member = object_member(&class, &member, tree, session, properties, env)?;
     Ok(member.rand && !member.randc)
 }
 
@@ -1666,7 +1669,7 @@ impl Class {
         let mut arrays = Vec::new();
         for property in &self.properties {
             // An object handle shall not be randc (18.4).
-            if property.randc && property.r#type.class().is_some() {
+            if property.randc && property.r#type.class_in(&session.types).is_some() {
                 return Err(unsupported("a randc object handle"));
             }
             if property.rand_object() {

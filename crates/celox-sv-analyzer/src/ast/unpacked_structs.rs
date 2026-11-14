@@ -144,7 +144,7 @@ pub(in crate::ast) fn member_default(
 ) -> Converted<Option<Expr>> {
     if ty.is_enum
         || ty.unpacked_struct().is_some()
-        || ty.class().is_some()
+        || ty.class_in(&session.types).is_some()
         || ty.is_chandle()
         || !matches!(
             ty.kind(),

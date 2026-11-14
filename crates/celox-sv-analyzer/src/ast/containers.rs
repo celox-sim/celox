@@ -307,6 +307,50 @@ pub(super) fn fixed_storage(
 }
 
 impl ContainerType {
+    /// The class of the elements of a container of handles (IEEE 1800-2023
+    /// 8.4): from the element's semantic type, or from the container's where
+    /// the element has no binding of its own.
+    pub(super) fn element_class(&self, table: &semantic_types::TyTable) -> Option<Arc<str>> {
+        let element = match self.binding.get(table).map(|id| table.data(id)) {
+            Some(semantic_types::TyData::Array { element, .. }) => Some(*element),
+            _ => None,
+        };
+        Self::part_class(&self.element, element, table)
+    }
+
+    /// The class of the index of an associative array with a class index
+    /// (7.8.5), as [`Self::element_class`] tells that of its elements.
+    pub(super) fn key_class(&self, table: &semantic_types::TyTable) -> Option<Arc<str>> {
+        let key = self.key.as_ref()?;
+        let id = match self.binding.get(table).map(|id| table.data(id)) {
+            Some(semantic_types::TyData::Array {
+                kind: semantic_types::ArrayKind::Associative { key },
+                ..
+            }) => Some(*key),
+            _ => None,
+        };
+        Self::part_class(key, id, table)
+    }
+
+    /// The class of `part`, the element or index type of the container,
+    /// whose semantic type in the container's is `id`.
+    fn part_class(
+        part: &Type,
+        id: Option<semantic_types::TyId>,
+        table: &semantic_types::TyTable,
+    ) -> Option<Arc<str>> {
+        if part.binding.get(table).is_some() {
+            return part.class_in(table);
+        }
+        let class = id.and_then(|id| table.handle_class(id)).cloned();
+        debug_assert_eq!(
+            class.as_deref(),
+            part.class(),
+            "the class of a container's elements or index is told by its semantic type"
+        );
+        class
+    }
+
     /// The number of elements of the fixed-size array the container holds.
     pub(super) fn fixed_size(&self) -> Option<u64> {
         self.fixed
@@ -1108,7 +1152,7 @@ fn element_value(
     if native_type(id, native, tree, session, dims)?.is_some() {
         return Err(unsupported("container used as an element"));
     }
-    if let Some(class) = target.element.class.as_deref() {
+    if let Some(class) = target.element_class(&session.types).as_deref() {
         if let Some(call) =
             expression_binding::object_constructor(tree, session, id, native, dims, class)?
         {
@@ -1259,7 +1303,7 @@ fn index_value_in(
 ) -> Converted<Expr> {
     let native = tree.declarations();
     // A class index takes handles of its class or a derived one.
-    if let Some(class) = target.key.as_ref().and_then(|key| key.class()).filter(|_| {
+    if let Some(class) = target.key_class(&session.types).filter(|_| {
         matches!(
             target.layout.kind,
             ContainerKind::Associative { object: true, .. }
@@ -1271,7 +1315,7 @@ fn index_value_in(
             id,
             native,
             dims,
-            class,
+            &class,
             || "associative array index".into(),
         )?;
     }
@@ -1297,8 +1341,8 @@ fn index_value_in(
                 .is_some_and(|ty| {
                     // A process handle is an integral identity, not
                     // an object key (7.8.5).
-                    (ty.class.is_some()
-                        && ty.class.as_deref() != Some(processes::CLASS))
+                    ty.class_in(&session.types)
+                        .is_some_and(|class| &*class != processes::CLASS)
                         || ty.container.is_some()
                 })))
     {
@@ -1706,7 +1750,7 @@ pub(super) fn value(
                     // The index variable of a class index is passed by
                     // reference, so it has the index's class (IEEE 1800-2023
                     // 7.9.4).
-                    let key_class = target.key.as_ref().and_then(|key| key.class());
+                    let key_class = target.key_class(&session.types);
                     // So is the variable of a chandle index, which is no
                     // integral variable (6.14).
                     if shape.chandle != target.key.as_ref().is_some_and(|key| key.is_chandle()) {
@@ -1724,7 +1768,7 @@ pub(super) fn value(
                                     shape, tree, session, dims,
                                 )
                                 .as_deref()
-                                    != key_class)
+                                    != key_class.as_deref())
                     {
                         return Err(unsupported(
                             "incompatible associative traversal index variable",
@@ -1917,7 +1961,7 @@ pub(super) fn selected_element(
             // A select of an element that is a container selects its
             // elements, see `set`; other elements have no bits to select.
             if ty.container.is_some()
-                || ty.class.is_some()
+                || target.element_class(&session.types).is_some()
                 || ty.is_chandle()
                 || ty.unpacked_struct().is_some()
                 || !ty.unpacked_ranges.is_empty()
@@ -2146,7 +2190,7 @@ fn compound_value(
     }
     let element = &target.element;
     if element.container.is_some()
-        || element.class.is_some()
+        || target.element_class(&session.types).is_some()
         || target.layout.handle.is_some()
         || target.record.is_some()
     {

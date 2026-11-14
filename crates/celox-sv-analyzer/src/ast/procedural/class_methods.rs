@@ -230,14 +230,14 @@ impl BodyBuilder<'_, '_, '_> {
                 )));
                 continue;
             }
-            let mut value = match property.r#type.class() {
+            let mut value = match property.r#type.class_in(&self.session.types) {
                 Some(class) => expression_binding::object_constructor(
                     self.tree,
                     self.session,
                     initializer,
                     native,
                     &self.dims,
-                    class,
+                    &class,
                 )?,
                 None => None,
             };

@@ -288,7 +288,7 @@ pub(in crate::ast) fn named_class(
                             &scope_class,
                             &instances::normalize_identifier(&name.spelling),
                         )
-                        .and_then(|ty| ty.class().map(str::to_owned)),
+                        .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string())),
                         None => None,
                     },
                 );
@@ -298,20 +298,20 @@ pub(in crate::ast) fn named_class(
             if let Some(scope_class) = dimensions
                 .type_aliases
                 .get(&scope_name)
-                .and_then(|ty| ty.class().map(str::to_owned))
+                .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
                 .or_else(|| classes::resolve(tree, session, &scope_name))
                 && let Some(ty) =
                     classes::specializations::member_type(tree, session, &scope_class, &member_name)
-                && let Some(class) = ty.class()
+                && let Some(class) = ty.class_in(&session.types)
             {
-                return Ok(Some(class.to_owned()));
+                return Ok(Some(class.to_string()));
             }
             let class = scope::qualified_name(tree, &scope_name, &member_name);
             // A typedef of the package may name a class or a specialization.
             if let Some(aliased) = dimensions
                 .type_aliases
                 .get(&class)
-                .and_then(|ty| ty.class().map(str::to_owned))
+                .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
             {
                 return Ok(Some(aliased));
             }
@@ -370,7 +370,7 @@ pub(in crate::ast) fn named_class(
                     .get(&classes::specializations::scope_key(&class))
             })
             .or_else(|| dimensions.type_aliases.get(&name))
-            .and_then(|ty| ty.class().map(str::to_owned))
+            .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
     {
         return Ok(Some(class));
     }
@@ -499,7 +499,7 @@ fn static_property_class(
     dimensions: &PackedDimensions,
 ) -> Converted<Option<String>> {
     Ok(static_property_type(tree, id, native, dimensions, session)?
-        .and_then(|ty| ty.class().map(str::to_owned)))
+        .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string())))
 }
 
 /// The type of the static property that native expression `id` names,
@@ -1730,7 +1730,9 @@ pub(in crate::ast) fn rand_mode_call(
             }
             let property_target = property(tree, session, *expression, native, dimensions)?;
             if let Some((property, object)) = property_target.filter(|(property, _)| {
-                property.rand || property.randc || property.r#type.class().is_none()
+                property.rand
+                    || property.randc
+                    || property.r#type.class_in(&session.types).is_none()
             }) {
                 check_random_access(tree, session, dimensions, &property)?;
                 if !property.rand && !property.randc {

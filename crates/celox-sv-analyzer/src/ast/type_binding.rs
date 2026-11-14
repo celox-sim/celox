@@ -408,7 +408,7 @@ pub(super) fn builtin_type(name: &str, signing: Option<bool>) -> Option<Type> {
         "time" => (TypeKind::Logic, Some(64), false),
         "chandle" => (TypeKind::Chandle, Some(64), false),
         // A named event is a handle (IEEE 1800-2023 15.5).
-        "event" => return Some(super::classes::handle(super::events::CLASS)),
+        "event" => return Some(super::classes::handle_shape(super::events::CLASS)),
         _ => return None,
     };
     let mut ty = Type::new(kind);

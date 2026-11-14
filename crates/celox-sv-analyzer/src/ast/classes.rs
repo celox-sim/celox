@@ -240,7 +240,7 @@ fn static_inputs(
             continue;
         }
         // A class handle, which a guard compares (18.5.13), by its handle.
-        if property.r#type.class().is_some() {
+        if property.r#type.class_in(&session.types).is_some() {
             inputs.push(StaticInput {
                 name: property.name.clone(),
                 variable: property.variable.clone(),
@@ -985,13 +985,16 @@ pub(super) fn scope_classes(
 /// The classes the current scope declares as types of the scope, by the
 /// names it declares them with. A parameterized class is a type only with
 /// a specialization.
-pub(super) fn scope_class_types(tree: &AnalysisContext<'_>) -> Vec<(String, Type)> {
+pub(super) fn scope_class_types(
+    tree: &AnalysisContext<'_>,
+    table: &mut semantic_types::TyTable,
+) -> Vec<(String, Type)> {
     scope_declarations(tree)
         .filter(|declaration| declaration.parameter_ports.is_none())
         .map(|declaration| {
             (
                 instances::normalize_identifier(&declaration.name.spelling),
-                handle(&declared_name(tree, declaration)),
+                handle(table, &declared_name(tree, declaration)),
             )
         })
         .collect()
@@ -1033,12 +1036,12 @@ pub(super) fn resolve(
         let class = imported
             .type_aliases
             .get(alias)
-            .and_then(Type::class)
-            .unwrap_or(alias);
+            .and_then(|ty| ty.class_in(&session.types))
+            .map_or_else(|| alias.clone(), |class| class.to_string());
         if imported.classes.iter().any(|known| known.name == class)
-            || session.foreign.contains(class)
+            || session.foreign.contains(&class)
         {
-            return Some(class.to_owned());
+            return Some(class);
         }
     }
     unit_class
@@ -1050,8 +1053,8 @@ pub(super) fn resolve(
             imported
                 .type_aliases
                 .get(&alias)
-                .and_then(Type::class)
-                .map(str::to_owned)
+                .and_then(|ty| ty.class_in(&session.types))
+                .map(|class| class.to_string())
         })
         .or_else(|| match name {
             "process" => Some(super::processes::CLASS.to_owned()),
@@ -1234,16 +1237,7 @@ pub(super) fn handle_type(
     name: &str,
 ) -> Option<Type> {
     (builtin(name) || declaration(tree, session, name).is_some() || imported(tree, name).is_some())
-        .then(|| {
-            let mut ty = handle(name);
-            semantic_types::bind_declared(
-                &mut session.types,
-                &tree.functions,
-                &mut ty,
-                &ConstEnv::default(),
-            );
-            ty
-        })
+        .then(|| handle(&mut session.types, name))
 }
 
 /// Class `name` as the scope that declares it laid it out, when the current
@@ -1270,8 +1264,18 @@ pub(super) fn visible_classes(tree: &AnalysisContext<'_>, session: &mut Session)
     names
 }
 
-/// The handle type of class `name`.
-pub(super) fn handle(name: &str) -> Type {
+/// The handle type of class `name`, bound to its semantic type in `table`:
+/// a handle names its class whatever scope reads it.
+pub(super) fn handle(table: &mut semantic_types::TyTable, name: &str) -> Type {
+    let mut ty = handle_shape(name);
+    let id = handle_type_id(table, name);
+    ty.binding.set(table, id);
+    ty
+}
+
+/// [`handle`] without its semantic type, for the built-in types of
+/// [`super::type_binding::builtin_type`], which their readers bind.
+pub(super) fn handle_shape(name: &str) -> Type {
     let mut ty = Type::new(
         // A semaphore is a heap object, which collection reclaims.
         if name == super::processes::CLASS {
@@ -1437,7 +1441,7 @@ pub(super) fn shared_class(
                 Some(ty) => ty,
                 None => {
                     type_binding::binding::bind_in(base.data_type, native, tree, session, &context)?
-                        .and_then(|ty| ty.class().map(str::to_owned))
+                        .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
                         .ok_or_else(|| unsupported("base class type"))?
                 }
             };
@@ -1879,7 +1883,7 @@ fn interface_name(
 ) -> Converted<String> {
     let native = tree.declarations();
     let name = type_binding::procedural_type(interface, native, tree, session, env, aliases)?
-        .and_then(|ty| ty.class().map(str::to_owned))
+        .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
         .ok_or_else(|| unsupported("implemented interface class type"))?;
     // An interface class of another scope is known by its layout.
     let interface = match imported(tree, &name) {
@@ -2260,15 +2264,20 @@ pub(super) fn rand_member_classes(
     env: &ConstEnv,
     aliases: &TypeAliases,
 ) -> Converted<Vec<Rc<Class>>> {
-    let handle_classes = |class: &Class| {
+    let handle_classes = |class: &Class, table: &semantic_types::TyTable| {
         class
             .properties
             .iter()
             .filter(|property| property.rand_object())
-            .filter_map(|property| property.r#type.class().map(str::to_owned))
+            .filter_map(|property| {
+                property
+                    .r#type
+                    .class_in(table)
+                    .map(|class| class.to_string())
+            })
             .collect::<Vec<_>>()
     };
-    let mut pending = handle_classes(class);
+    let mut pending = handle_classes(class, &session.types);
     let mut seen = HashSet::default();
     let mut ids = HashSet::default();
     let mut classes = Vec::new();
@@ -2278,7 +2287,7 @@ pub(super) fn rand_member_classes(
         }
         for member in object_classes(tree, session, &name, env, aliases)? {
             if ids.insert(member.id) {
-                pending.extend(handle_classes(&member));
+                pending.extend(handle_classes(&member, &session.types));
                 classes.push(member);
             }
         }

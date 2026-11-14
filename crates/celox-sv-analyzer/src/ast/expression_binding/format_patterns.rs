@@ -193,11 +193,7 @@ pub(in crate::ast) fn pattern(
         {
             return Err(unsupported("%p of an associative array with enum keys"));
         }
-        if container
-            .key
-            .as_ref()
-            .is_some_and(|key| key.class.is_some())
-        {
+        if container.key_class(&session.types).is_some() {
             return Err(unsupported(
                 "%p of an associative array with class handle keys",
             ));
@@ -233,7 +229,7 @@ pub(in crate::ast) fn pattern(
             if element.is_enum || element.enum_domain.is_some() || element.packed_enum {
                 return Err(unsupported("%p of an enum value"));
             }
-            if element.class.is_some() {
+            if container.element_class(&session.types).is_some() {
                 return Ok(Pattern::Handle(None));
             }
             if !element.members.is_empty()
@@ -348,7 +344,7 @@ pub(in crate::ast) fn aggregate_text(
             && element.members.is_empty()
             && element.unpacked_ranges.is_empty()
             && element.container.is_none()
-            && element.class.is_none()
+            && container.element_class(&session.types).is_none()
             && !element.packed_enum
             && matches!(
                 element.kind,
@@ -498,9 +494,9 @@ fn container_text(
         unsupported("%p of a container of structures or enum values outside a procedural body")
     })?;
     let key = container.key.as_ref();
-    if key.is_some_and(|key| {
-        (key.is_enum && key.enum_domain.is_none()) || key.packed_enum || key.class.is_some()
-    }) {
+    if key.is_some_and(|key| (key.is_enum && key.enum_domain.is_none()) || key.packed_enum)
+        || container.key_class(&session.types).is_some()
+    {
         return Err(unsupported(
             "%p of an associative array of structures or enum values with packed enum or class handle keys",
         ));
