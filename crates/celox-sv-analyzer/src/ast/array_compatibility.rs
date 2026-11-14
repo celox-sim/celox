@@ -80,7 +80,7 @@ pub(super) fn unpacked_array_type(
 /// spelled if the first may not be assigned to the second (IEEE 1800-2023
 /// 7.6): their elements are not equivalent types or they have another
 /// number of elements.
-fn incompatible_types(
+pub(super) fn incompatible_types(
     table: &semantic_types::TyTable,
     actual: semantic_types::TyId,
     target: semantic_types::TyId,
