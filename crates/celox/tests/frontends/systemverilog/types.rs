@@ -559,6 +559,54 @@ fn unused_unit_and_package_subroutines_reading_undeclared_names_are_errors() {
 }
 
 #[test]
+fn unreferenced_interfaces_reading_undeclared_names_are_errors() {
+    // No hierarchy elaborates an interface nothing instantiates (IEEE
+    // 1800-2023 3.12.1), but its body is compiled with its defaults: a value
+    // it reads that is not declared is an error (6.6, 6.10).
+    for interface in [
+        "interface Bus; logic x; assign x = missing; endinterface",
+        "interface Bus #(parameter int W = 4); logic [W-1:0] x; always_comb x = missing; endinterface",
+        "interface Bus; logic x; function automatic logic f(); return missing; endfunction endinterface",
+    ] {
+        let source = format!("{interface}\nmodule Top(output int y); assign y = 1; endmodule\n");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("bus.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("{interface} is accepted"))
+        .to_string();
+        assert!(
+            error.contains("`missing` is not declared"),
+            "{interface}: {error}"
+        );
+    }
+    // Every name its body declares or imports, and one only an instance
+    // can give the parameters of, are left as they are.
+    let source = "package p; localparam int P = 1; endpackage
+    interface Bus #(parameter int W = 4) (input logic clk);
+        import p::*;
+        typedef enum logic {IDLE, BUSY} state_t;
+        logic [W-1:0] data;
+        state_t state;
+        logic ready;
+        assign ready = state == IDLE && data != P;
+        always_ff @(posedge clk) data <= data + W;
+        function automatic logic [W-1:0] next(); return data + 1; endfunction
+        modport source(output data, input ready);
+    endinterface
+    interface Wide #(parameter int W); logic [W-1:0] x; endinterface
+    module Top(output int y); assign y = 1; endmodule
+    ";
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("bus.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(1).unwrap();
+}
+
+#[test]
 fn unused_compilation_unit_typedefs_of_undeclared_names_are_errors() {
     for typedef in [
         "typedef some_other_type myalias;",

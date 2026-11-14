@@ -37,6 +37,9 @@ pub struct Packages {
     /// The compilation unit of each source file that declares items outside
     /// its modules and packages.
     units: HashMap<PathBuf, Arc<Unit>>,
+    /// What analyzing each interface that no source references found wrong
+    /// with it, by its name (see [`Self::check_unreferenced_interfaces`]).
+    unreferenced_interfaces: Vec<(String, AnalyzerError)>,
     /// What analyzing the packages warned about.
     warnings: Vec<super::warnings::AnalyzerWarning>,
     /// The virtual interfaces of the design, which the modules that use the
@@ -192,6 +195,7 @@ impl Packages {
         paths
             .into_iter()
             .find_map(|path| self.units[path].scope.as_ref().err())
+            .or_else(|| self.unreferenced_interfaces.first().map(|(_, error)| error))
     }
 
     /// The first error analyzing a compilation unit found that makes the
@@ -202,13 +206,94 @@ impl Packages {
     pub fn compilation_unit_illegality(&self) -> Option<&AnalyzerError> {
         let mut paths = self.units.keys().collect::<Vec<_>>();
         paths.sort();
-        paths.into_iter().find_map(|path| {
-            self.units[path]
-                .scope
-                .as_ref()
-                .err()
-                .filter(|error| !error.is_unsupported())
-        })
+        paths
+            .into_iter()
+            .find_map(|path| {
+                self.units[path]
+                    .scope
+                    .as_ref()
+                    .err()
+                    .filter(|error| !error.is_unsupported())
+            })
+            .or_else(|| {
+                self.unreferenced_interfaces
+                    .iter()
+                    .map(|(_, error)| error)
+                    .find(|error| !error.is_unsupported())
+            })
+    }
+
+    /// Analyze each interface of `trees` that no source instantiates or
+    /// names, with the defaults of its parameters, for what is wrong with
+    /// it: no hierarchy elaborates one (IEEE 1800-2023 3.12.1), though its
+    /// body is compiled, and data are declared before they are used (6.6),
+    /// so a value its body reads that is not declared is reported (see
+    /// [`AnalysisContext::declared_values`]). One with a parameter without
+    /// a default, which only an instance can give, is left alone.
+    pub(crate) fn check_unreferenced_interfaces(
+        &mut self,
+        trees: &[(&SyntaxTree, &Path)],
+    ) -> Result<(), AnalyzerError> {
+        let referenced = trees
+            .iter()
+            .flat_map(|(tree, _)| {
+                let mut references = interfaces::body_component_references(tree);
+                for unit in tree.declarations().all_units() {
+                    references.extend(
+                        unit.interface_references(tree.declarations())
+                            .map(|name| name.spelling.clone()),
+                    );
+                }
+                references
+            })
+            .map(|name| normalize_identifier(&name))
+            .collect::<HashSet<_>>();
+        let mut found = Vec::new();
+        for (tree, path) in trees {
+            for handle in tree.root_scopes()? {
+                let scoped = tree.scoped(handle)?;
+                let unit = scoped.root_unit()?;
+                let defaulted = |parameter: &celox_sv_syntax::Parameter| match &parameter.kind {
+                    celox_sv_syntax::ParameterKind::Type { default } => default.is_some(),
+                    celox_sv_syntax::ParameterKind::Value { default, .. } => default.is_some(),
+                };
+                if unit.kind != celox_sv_syntax::UnitKind::Interface
+                    || unit.port_style != celox_sv_syntax::PortStyle::Ansi
+                    || !unit
+                        .parameters
+                        .iter()
+                        .flatten()
+                        .chain(&unit.body_parameters)
+                        .all(defaulted)
+                {
+                    continue;
+                }
+                let name = normalize_identifier(&scoped.root_name()?);
+                if referenced.contains(&name) {
+                    continue;
+                }
+                let overrides = HashMap::default();
+                let context = AnalysisContext {
+                    declared_values: true,
+                    ..AnalysisContext::unspecialized(&scoped)
+                };
+                let session = &mut Session::with_packages(self, &mut self.design());
+                if let Err(error) = interface_ast::analyze(
+                    &context.child(&scoped, &overrides),
+                    session,
+                    path,
+                    self,
+                    &overrides,
+                    &[],
+                    &ModuleInterfaces::default(),
+                    false,
+                ) {
+                    found.push((name, error));
+                }
+            }
+        }
+        self.unreferenced_interfaces = found;
+        Ok(())
     }
 
     pub fn is_empty(&self) -> bool {
