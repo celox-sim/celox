@@ -16,6 +16,41 @@
 use super::*;
 use crate::ir::{DpiArgument, DpiBuiltin, DpiDirection, DpiImport, DpiType};
 
+/// The SystemVerilog type of an argument or result of C type `r#type`.
+pub(super) fn argument_type(session: &mut Session, r#type: DpiType) -> Option<Type> {
+    match r#type {
+        DpiType::Bit => type_binding::builtin_type("bit", None),
+        DpiType::Logic => type_binding::builtin_type("logic", None),
+        DpiType::String => type_binding::builtin_type("string", None),
+        DpiType::Chandle => {
+            session.types.declare_chandle();
+            type_binding::builtin_type("chandle", None)
+        }
+        DpiType::BitVector { width, signed } | DpiType::LogicVector { width, signed } => {
+            Some(Type::resolved(
+                if r#type.is_4state() {
+                    TypeKind::Logic
+                } else {
+                    TypeKind::Bit
+                },
+                signed,
+                None,
+                &[(width as i128 - 1, 0)],
+                &[],
+            ))
+        }
+        DpiType::Integer { width, signed } => type_binding::builtin_type(
+            match width {
+                8 => "byte",
+                16 => "shortint",
+                32 => "int",
+                _ => "longint",
+            },
+            Some(signed),
+        ),
+    }
+}
+
 /// The largest number of arguments an imported function may take; the
 /// limit of `celox_sir::MAX_EXTERN_CALL_ARGUMENTS`.
 const MAX_DPI_ARGUMENTS: usize = 16;

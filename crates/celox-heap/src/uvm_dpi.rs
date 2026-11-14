@@ -33,7 +33,33 @@ pub(crate) struct UvmDpi {
     /// The tool's arguments, which `uvm_dpi_get_next_arg_c` returns in turn.
     arguments: Vec<String>,
     next_argument: usize,
+    /// The report the last function that reports recorded, not yet read.
+    #[serde(default)]
+    pending: Option<Report>,
+    /// The report being read.
+    #[serde(default)]
+    report: Option<Report>,
 }
+
+/// A report of UVM's C library, which it makes through `m_uvm_report_dpi`
+/// (`uvm_common.c`) and Celox passes to the UVM package's
+/// `m__uvm_report_dpi` (see the analyzer's `procedural::dpi_reports`).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct Report {
+    severity: u64,
+    id: Vec<u8>,
+    message: Vec<u8>,
+    verbosity: u64,
+    file: Vec<u8>,
+    line: u64,
+}
+
+/// `M_UVM_INFO` and `M_UVM_ERROR` of `uvm_dpi.h`.
+const M_UVM_INFO: u64 = 0;
+const M_UVM_ERROR: u64 = 2;
+/// `M_UVM_NONE` and `M_UVM_LOW`.
+const M_UVM_NONE: u64 = 0;
+const M_UVM_LOW: u64 = 100;
 
 /// Compiled expressions, rebuilt on demand; not part of the heap's state.
 #[derive(Clone, Debug, Default)]
@@ -385,8 +411,38 @@ impl Heap {
         self.uvm.compiled.0.remove(&rexp);
     }
 
+    /// Record a report of UVM's C library, as file `file` at `line` makes
+    /// it.
+    fn record(
+        &mut self,
+        severity: u64,
+        id: &str,
+        message: Vec<u8>,
+        verbosity: u64,
+        file: &str,
+        line: u64,
+    ) {
+        self.uvm.pending = Some(Report {
+            severity,
+            id: id.as_bytes().to_vec(),
+            message,
+            verbosity,
+            file: file.as_bytes().to_vec(),
+            line,
+        });
+    }
+
     /// Perform UVM DPI operation `op` on `a`, `b` and `c`.
     pub(crate) fn uvm_call(&mut self, op: u64, a: u64, b: u64, c: u64) -> u64 {
+        // A report belongs to the call that makes it: a function that may
+        // report starts without one, so a report a call left that nothing
+        // read never reaches a later call's reader.
+        if matches!(
+            op,
+            ops::UVM_RE_MATCH | ops::UVM_GLOB_TO_RE | ops::UVM_DPI_REGCOMP | ops::UVM_DUMP_RE_CACHE
+        ) {
+            self.uvm.pending = None;
+        }
         match op {
             ops::UVM_RE_COMP => self.re_comp(a as Handle, b & 1 != 0),
             ops::UVM_RE_EXEC => self.re_exec(a, b as Handle),
@@ -450,8 +506,48 @@ impl Heap {
             // matches `str` in one call; an expression it cannot compile
             // does not match (`regcomp`'s nonzero code).
             ops::UVM_RE_MATCH => {
+                let re = self.string(a as Handle).to_vec();
+                if re.len() > MAX_LENGTH {
+                    let mut message = format!(
+                        "uvm_re_match : regular expression greater than max {MAX_LENGTH}: |"
+                    )
+                    .into_bytes();
+                    message.extend_from_slice(&re);
+                    message.push(b'|');
+                    self.record(
+                        M_UVM_ERROR,
+                        "UVM/DPI/REGEX_MAX",
+                        message,
+                        M_UVM_NONE,
+                        "uvm_regex.cc",
+                        59,
+                    );
+                    return REG_NOMATCH;
+                }
                 let rexp = self.re_comp(a as Handle, false);
                 if rexp == 0 {
+                    let mut message =
+                        b"uvm_re_match : invalid glob or regular expression: |".to_vec();
+                    message.extend_from_slice(&re);
+                    message.extend_from_slice(b"||");
+                    // `regerror`'s one line: the last of the parser's
+                    // message, as `unclosed group`.
+                    let reason = String::from_utf8_lossy(&self.uvm.buffer).into_owned();
+                    let reason = reason
+                        .lines()
+                        .rfind(|line| !line.trim().is_empty())
+                        .unwrap_or("");
+                    message
+                        .extend_from_slice(reason.trim().trim_start_matches("error: ").as_bytes());
+                    message.push(b'|');
+                    self.record(
+                        M_UVM_ERROR,
+                        "UVM/DPI/REGEX_INV",
+                        message,
+                        M_UVM_NONE,
+                        "uvm_regex.cc",
+                        94,
+                    );
                     return REG_NOMATCH;
                 }
                 let matched = self.re_exec(rexp, b as Handle);
@@ -464,13 +560,68 @@ impl Heap {
             // `uvm_re_exec` and `uvm_re_free`.
             ops::UVM_DPI_REGCOMP => {
                 let regex = self.string(a as Handle).to_vec();
-                self.compile_handle(&regex)
+                let rexp = self.compile_handle(&regex);
+                if rexp == 0 {
+                    let mut message = b"uvm_dpi_regcomp : Unable to compile regex: |".to_vec();
+                    message.extend_from_slice(&regex);
+                    message.extend_from_slice(b"|, Element 0 is: ");
+                    message.extend(regex.first().copied());
+                    self.record(
+                        M_UVM_ERROR,
+                        "UVM/DPI/REGCOMP",
+                        message,
+                        M_UVM_NONE,
+                        "uvm_svcmd_dpi.c",
+                        107,
+                    );
+                }
+                rexp
+            }
+            ops::UVM_DUMP_RE_CACHE => {
+                self.record(
+                    M_UVM_INFO,
+                    "UVM/DPI/REGEX_MAX",
+                    b"uvm_dump_re_cache: cache not implemented".to_vec(),
+                    M_UVM_LOW,
+                    "uvm_regex.cc",
+                    249,
+                );
+                0
+            }
+            ops::UVM_REPORT_FIELD => {
+                if a == 0 {
+                    self.uvm.report = self.uvm.pending.take();
+                    return u64::from(self.uvm.report.is_some());
+                }
+                let Some(report) = self.uvm.report.clone() else {
+                    return 0;
+                };
+                match a {
+                    1 => report.severity,
+                    2 => self.uvm_string(&report.id),
+                    3 => self.uvm_string(&report.message),
+                    4 => report.verbosity,
+                    5 => self.uvm_string(&report.file),
+                    _ => report.line,
+                }
             }
             // UVM 1.2 returns a glob longer than it takes as it is, after
             // its error, and translates any other one in full.
             ops::UVM_GLOB_TO_RE => {
                 let glob = self.string(a as Handle).to_vec();
                 if glob.len() > UVM_12_GLOB_LENGTH {
+                    let mut message =
+                        b"uvm_re_match : glob expression greater than max 2040: |".to_vec();
+                    message.extend_from_slice(&glob);
+                    message.push(b'|');
+                    self.record(
+                        M_UVM_ERROR,
+                        "UVM/DPI/REGEX_MAX",
+                        message,
+                        M_UVM_NONE,
+                        "uvm_regex.cc",
+                        137,
+                    );
                     return a;
                 }
                 let regex = uvm_12_glob_to_re(&glob);
@@ -613,6 +764,76 @@ mod tests {
         assert_eq!(translate(&mut heap, &[b'a'; 2041]), vec![b'a'; 2041]);
         assert_eq!(translate(&mut heap, b""), b"");
         assert_eq!(translate(&mut heap, b"/"), b"");
+    }
+
+    #[test]
+    fn uvm_12_functions_record_their_reports() {
+        // What UVM 1.2's C functions report through `m_uvm_report_dpi`:
+        // severity, ID, message, verbosity, file and line, each read once.
+        let mut heap = Heap::new();
+        let string = |heap: &mut Heap, text: &[u8]| heap.intern(text) as u64;
+        let take = |heap: &mut Heap| -> Option<(u64, Vec<u8>, Vec<u8>, u64, u64)> {
+            if heap.call(ops::UVM_REPORT_FIELD, 0, 0, 0) == 0 {
+                return None;
+            }
+            let text = |heap: &mut Heap, field| {
+                let handle = heap.call(ops::UVM_REPORT_FIELD, field, 0, 0);
+                heap.string(handle as Handle).to_vec()
+            };
+            Some((
+                heap.call(ops::UVM_REPORT_FIELD, 1, 0, 0),
+                text(heap, 2),
+                text(heap, 3),
+                heap.call(ops::UVM_REPORT_FIELD, 4, 0, 0),
+                heap.call(ops::UVM_REPORT_FIELD, 6, 0, 0),
+            ))
+        };
+        let open = string(&mut heap, b"(");
+        let a = string(&mut heap, b"a");
+        assert_eq!(heap.call(ops::UVM_RE_MATCH, open, a, 0), REG_NOMATCH);
+        let (severity, id, message, verbosity, line) = take(&mut heap).unwrap();
+        assert_eq!((severity, verbosity, line), (M_UVM_ERROR, M_UVM_NONE, 94));
+        assert_eq!(id, b"UVM/DPI/REGEX_INV");
+        assert_eq!(
+            message,
+            b"uvm_re_match : invalid glob or regular expression: |(||unclosed group|"
+        );
+        // Read once; a match reports nothing.
+        assert_eq!(take(&mut heap), None);
+        let plain = string(&mut heap, b"^a$");
+        assert_eq!(heap.call(ops::UVM_RE_MATCH, plain, a, 0), 0);
+        assert_eq!(take(&mut heap), None);
+        // A report nothing read is not one of the next call: after a
+        // failing call, a match reports nothing.
+        assert_eq!(heap.call(ops::UVM_RE_MATCH, open, a, 0), REG_NOMATCH);
+        assert_eq!(heap.call(ops::UVM_RE_MATCH, plain, a, 0), 0);
+        assert_eq!(take(&mut heap), None);
+        let long = string(&mut heap, &[b'a'; MAX_LENGTH + 1]);
+        assert_eq!(heap.call(ops::UVM_RE_MATCH, long, a, 0), REG_NOMATCH);
+        let (_, id, message, _, line) = take(&mut heap).unwrap();
+        assert_eq!((id.as_slice(), line), (&b"UVM/DPI/REGEX_MAX"[..], 59));
+        assert!(
+            message.starts_with(b"uvm_re_match : regular expression greater than max 2048: |a")
+        );
+        let glob = string(&mut heap, &[b'a'; UVM_12_GLOB_LENGTH + 1]);
+        assert_eq!(heap.call(ops::UVM_GLOB_TO_RE, glob, 0, 0), glob);
+        let (_, id, _, _, line) = take(&mut heap).unwrap();
+        assert_eq!((id.as_slice(), line), (&b"UVM/DPI/REGEX_MAX"[..], 137));
+        assert_eq!(heap.call(ops::UVM_DPI_REGCOMP, open, 0, 0), 0);
+        let (severity, id, message, _, line) = take(&mut heap).unwrap();
+        assert_eq!(
+            (severity, id.as_slice(), line),
+            (M_UVM_ERROR, &b"UVM/DPI/REGCOMP"[..], 107)
+        );
+        assert_eq!(
+            message,
+            b"uvm_dpi_regcomp : Unable to compile regex: |(|, Element 0 is: ("
+        );
+        heap.call(ops::UVM_DUMP_RE_CACHE, 0, 0, 0);
+        let (severity, id, message, verbosity, line) = take(&mut heap).unwrap();
+        assert_eq!((severity, verbosity, line), (M_UVM_INFO, M_UVM_LOW, 249));
+        assert_eq!(id, b"UVM/DPI/REGEX_MAX");
+        assert_eq!(message, b"uvm_dump_re_cache: cache not implemented");
     }
 
     #[test]
