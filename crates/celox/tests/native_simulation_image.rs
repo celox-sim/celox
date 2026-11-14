@@ -822,3 +822,59 @@ endmodule
         }
     }
 }
+
+/// Simulations started from one native image share none of their state: a
+/// run that changed module and static class variables, made objects, drew
+/// random numbers, read its plusargs and finished leaves the next instance
+/// of the image to start as the first did, with its own plusargs (IEEE
+/// 1800-2023 21.6), as the sv-tests driver runs the simvariants of a case.
+#[test]
+fn simulations_from_one_image_start_afresh() {
+    const SOURCE: &str = r#"`timescale 1ns/1ns
+class C;
+    static int made;
+    int id;
+    function new(); made++; id = made; endfunction
+endclass
+module Top(output int counter, output int made, output int id, output int r, output int plus);
+    C c;
+    initial begin
+        counter++;
+        c = new;
+        id = c.id;
+        made = C::made;
+        r = $urandom;
+        plus = $test$plusargs("VARIANT_B");
+        #1 $finish;
+    end
+endmodule
+"#;
+    let image = builder(SOURCE)
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+    let run = |plusargs: &[&str]| {
+        let mut sim = Simulation::from_sv_sources(Vec::new(), "")
+            .plusargs(plusargs.iter().copied())
+            .build_native_from_image(image.clone())
+            .unwrap();
+        sim.run_until(10).unwrap();
+        assert!(sim.is_finished());
+        let get = |sim: &mut Simulation, name: &str| -> u64 {
+            sim.get(sim.signal(name)).try_into().unwrap()
+        };
+        (
+            get(&mut sim, "counter"),
+            get(&mut sim, "made"),
+            get(&mut sim, "id"),
+            get(&mut sim, "r"),
+            get(&mut sim, "plus"),
+        )
+    };
+    let first = run(&[]);
+    let second = run(&["+VARIANT_B"]);
+    let third = run(&[]);
+    assert_eq!((first.0, first.1, first.2, first.4), (1, 1, 1, 0));
+    assert_eq!(second, (1, 1, 1, first.3, 1));
+    assert_eq!(third, first);
+}
