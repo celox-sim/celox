@@ -2240,6 +2240,202 @@ fn package_classes_name_the_compilation_unit_classes_of_other_files() {
 }
 
 #[test]
+fn constraints_name_members_of_objects_their_handles_refer_to() {
+    // A constraint names a member of the object a handle property refers
+    // to (IEEE 1800-2023 18.5.9): through a rand handle, a variable solved
+    // with the object's; through another, a state value.
+    let source = "class A;
+        rand int v;
+        constraint r { v inside {[0:9]}; }
+    endclass
+    class B extends A;
+        rand A aObj;
+        A s;
+        rand int w;
+        constraint c { aObj.v < v; w == s.v + 1; }
+        function new(); aObj = new; s = new; endfunction
+    endclass
+    module Top;
+        B b;
+        int ok;
+        initial begin
+            b = new;
+            b.s.v = 41;
+            ok = 1;
+            repeat (20) ok &= b.randomize() && b.aObj.v < b.v && b.aObj.v >= 0 && b.w == 42 && b.s.v == 41;
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn constraints_name_a_member_size_of_the_object_a_handle_refers_to() {
+    // `h.size` is a member of the object handle `h` refers to, by the type
+    // of `h`, not the size of an array (IEEE 1800-2023 18.5.9).
+    let source = "class A; rand int size; endclass
+    class B;
+        rand A h;
+        constraint c { h.size == 3; }
+        function new(); h = new; endfunction
+    endclass
+    module Top;
+        B b;
+        int ok;
+        initial begin
+            b = new;
+            ok = b.randomize() && b.h.size == 3;
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn guards_keep_constraints_from_members_of_null_handles() {
+    // A guard of state variables is evaluated before the constraints are
+    // solved (IEEE 1800-2023 18.5.13): a constraint it leaves out does not
+    // read the member of a null handle, under `if` or `->`.
+    let source = "class A; int v; endclass
+    class B;
+        bit enabled;
+        A h;
+        rand int x, y;
+        constraint c { if (enabled) h.v == x; enabled -> h.v == y; }
+    endclass
+    module Top;
+        B b;
+        int ok, off, on;
+        initial begin
+            b = new;
+            off = b.randomize();
+            b.h = new;
+            b.h.v = 7;
+            b.enabled = 1;
+            on = b.randomize() && b.x == 7 && b.y == 7;
+            $display(\"%0d %0d\", off, on);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1"]);
+}
+
+#[test]
+fn guards_read_fixed_members_of_objects_the_call_solves() {
+    // A guard that reads a state member, or a rand member whose rand_mode is
+    // off, through a rand handle is evaluated before solving too (IEEE
+    // 1800-2023 18.5.13, 18.8): the call solves that object, but the member
+    // keeps its value, so a false guard leaves out the member of a null
+    // handle.
+    let source = "class H; bit enabled; rand int w; endclass
+    class G; rand int v; endclass
+    class B;
+        rand H h;
+        rand G g;
+        constraint c { if (h.enabled) g.v == 1; h.w > 0 -> g.v == 2; }
+        function new(); h = new; endfunction
+    endclass
+    module Top;
+        B b;
+        int off, on;
+        initial begin
+            b = new;
+            b.h.w = 0;
+            b.h.w.rand_mode(0);
+            off = b.randomize();
+            b.g = new;
+            b.h.enabled = 1;
+            on = b.randomize() && b.g.v == 1;
+            $display(\"%0d %0d\", off, on);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1"]);
+}
+
+#[test]
+fn guards_of_any_state_expression_are_known_before_solving() {
+    // A guard is known before solving whatever operators it applies to
+    // state values, a shift or a state array's size among them (IEEE
+    // 1800-2023 18.5.13): a false one leaves out the member of a null
+    // handle.
+    let source = "class A; int v; endclass
+    class B;
+        bit [3:0] bits;
+        int arr[];
+        A h;
+        rand int x;
+        constraint c {
+            if (bits << 1) h.v == x;
+            if ((bits >> 3) == 1) h.v == x + 1;
+            if (arr.size() == 0) h.v == x + 2;
+        }
+    endclass
+    module Top;
+        B b;
+        int off, on;
+        initial begin
+            b = new;
+            b.arr = new[2];
+            off = b.randomize();
+            b.h = new;
+            b.h.v = 9;
+            b.bits = 4'b0100;
+            on = b.randomize() && b.x == 9;
+            $display(\"%0d %0d\", off, on);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1"]);
+}
+
+#[test]
+fn handle_members_named_like_array_methods_are_members() {
+    // `h.sum` and `h.size` name the members of the object `h` refers to,
+    // as `h` is a class handle, not an array (IEEE 1800-2023 7.12, 18.5.9).
+    let source = "class A; rand int sum; rand int size; endclass
+    class B;
+        rand A h;
+        constraint c { h.sum == 3; h.size == h.sum + 1; }
+        function new(); h = new; endfunction
+    endclass
+    module Top;
+        B b;
+        initial begin
+            b = new;
+            $display(\"%0d %0d %0d\", b.randomize(), b.h.sum, b.h.size);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 3 4"]);
+}
+
+#[test]
+fn constraints_name_members_only_through_handles_they_may_access() {
+    // The handle of `h.m` is a member the constraint accesses: a `local`
+    // one of a base class is not visible in a derived class's constraint
+    // (IEEE 1800-2023 8.18, 18.5.9).
+    let source = "class A;
+        rand int v;
+    endclass
+    class Base;
+        local rand A h;
+        function new(); h = new; endfunction
+    endclass
+    class Derived extends Base;
+        constraint c { h.v == 1; }
+    endclass
+    module Top; Derived d; initial begin d = new; void'(d.randomize()); end endmodule";
+    let error =
+        match celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+            .build()
+        {
+            Err(error) => error.to_string(),
+            Ok(mut sim) => sim
+                .run_until(1)
+                .expect_err("a base class's local handle")
+                .to_string(),
+        };
+    assert!(error.contains("local member `h` of class"), "{error}");
+}
+
+#[test]
 fn uniqueness_constraints_keep_their_members_apart() {
     // `unique` gives its members pairwise different values, with other
     // constraints; a group of fewer than two members has no effect, and a

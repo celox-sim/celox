@@ -235,6 +235,44 @@ struct Loop {
     element: std::sync::Arc<ContainerType>,
 }
 
+/// Property `member` of an object of class `class`, which a constraint
+/// names through a handle, checked as a constraint variable: one of the
+/// class whose constraints are being bound is among `properties`.
+fn object_member(
+    class: &str,
+    member: &str,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    properties: &[Property],
+    env: &ConstEnv,
+) -> Result<Property, String> {
+    let owner = session.constraint_owners.last().cloned();
+    let found = if owner.as_ref().is_some_and(|(owner, _)| *owner == class) {
+        properties
+            .iter()
+            .rev()
+            .find(|property| property.name == member)
+            .cloned()
+    } else if session
+        .constraint_owners
+        .iter()
+        .any(|(owner, _)| *owner == class)
+    {
+        return Err(format!(
+            "a constraint on objects of class `{class}` while its constraints are bound"
+        ));
+    } else {
+        super::class(tree, session, class, env, &TypeAliases::default())
+            .map_err(|_| format!("class `{class}`"))?
+            .property(member)
+            .cloned()
+    };
+    let property = found.ok_or_else(|| format!("constraint variable `{member}`"))?;
+    visible(&property, tree, session, env)?;
+    solver_holds(&property, tree, session, env)?;
+    Ok(property)
+}
+
 /// The element `a[i]`, or the member `a[i].m` of the object it refers to,
 /// that `id` names, with `i` the variable of the loop over `a`.
 fn element(
@@ -304,30 +342,7 @@ fn element(
                 .class()
                 .ok_or("a member of a constraint array element other than an object")?
                 .to_owned();
-            let owner = session.constraint_owners.last().cloned();
-            let found = if owner.as_ref().is_some_and(|(owner, _)| *owner == class) {
-                properties
-                    .iter()
-                    .rev()
-                    .find(|property| property.name == member)
-                    .cloned()
-            } else if session
-                .constraint_owners
-                .iter()
-                .any(|(owner, _)| *owner == class)
-            {
-                return Err(format!(
-                    "a constraint on objects of class `{class}` while its constraints are bound"
-                ));
-            } else {
-                super::class(tree, session, &class, env, &TypeAliases::default())
-                    .map_err(|_| format!("class `{class}`"))?
-                    .property(&member)
-                    .cloned()
-            };
-            let property = found.ok_or_else(|| format!("constraint variable `{member}`"))?;
-            visible(&property, tree, session, env)?;
-            solver_holds(&property, tree, session, env)?;
+            let property = object_member(&class, &member, tree, session, properties, env)?;
             (
                 Some(property.field.offset),
                 property.field.width,
@@ -380,8 +395,16 @@ fn visible(
     }
 }
 
-/// The array whose size member `id` is, as `a.size`.
-fn array_size(id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<String> {
+/// The array property whose size member `id` is, as `a.size`, if `a` is
+/// The array property and method that `id`, `a.m` with or without
+/// parentheses, names (IEEE 1800-2023 7.5.2, 7.12): when `a` is an array
+/// property of the class, by its type. A member of the object a handle `a`
+/// refers to is no array method, though named alike (`h.size`, `h.sum`).
+fn array_method(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    properties: &[Property],
+) -> Option<(String, String)> {
     let ExprKind::Member {
         expression,
         separator,
@@ -393,25 +416,16 @@ fn array_size(id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<Stri
     let ExprKind::Name(array) = &native.expression(*expression).kind else {
         return None;
     };
-    (separator == "." && name.spelling == "size")
-        .then(|| instances::normalize_identifier(&array.spelling))
-}
-
-/// The array property that `a.sum` names, with or without parentheses.
-fn array_sum(id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<String> {
-    let ExprKind::Member {
-        expression,
-        separator,
-        name,
-    } = &native.expression(id).kind
-    else {
+    if separator != "." {
         return None;
-    };
-    let ExprKind::Name(array) = &native.expression(*expression).kind else {
-        return None;
-    };
-    (separator == "." && name.spelling == "sum")
-        .then(|| instances::normalize_identifier(&array.spelling))
+    }
+    let array = instances::normalize_identifier(&array.spelling);
+    properties
+        .iter()
+        .rev()
+        .find(|property| property.name == array)
+        .filter(|property| property.constraint_array())
+        .map(|_| (array, instances::normalize_identifier(&name.spelling)))
 }
 
 /// The sum of the elements of array property `name` among those of the
@@ -448,6 +462,22 @@ fn sum(
         width: element.layout.width,
         signed: element.layout.signed,
     })
+}
+
+/// Method `method` of array property `array` (see [`array_method`]).
+fn array_value(
+    array: String,
+    method: &str,
+    properties: &[Property],
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Result<Typed, String> {
+    match method {
+        "size" => size(array, properties),
+        "sum" => sum(array, properties, tree, session, env),
+        _ => Err(format!("constraint array method `{array}.{method}`")),
+    }
 }
 
 /// The size of array property `name` among those of the program.
@@ -729,39 +759,21 @@ pub(in crate::ast) fn bind_inputs(
                     return Err(format!("constraint variable `{name}`"));
                 }
             }
-            // The size of a dynamic array or queue (IEEE 1800-2023 7.5.2,
-            // 7.10.2.1, 18.4), with or without the parentheses.
+            // A method of an array property, with or without the
+            // parentheses: its size (IEEE 1800-2023 7.5.2, 7.10.2.1, 18.4) or
+            // the sum of its elements, of their type (7.12.3, 18.5.8.2).
             ExprKind::Call {
                 expression,
                 arguments,
-            } if arguments.is_empty() && array_size(*expression, native).is_some() => {
-                return size(array_size(*expression, native).unwrap(), properties);
+            } if arguments.is_empty()
+                && array_method(*expression, native, properties).is_some() =>
+            {
+                let (array, method) = array_method(*expression, native, properties).unwrap();
+                return array_value(array, &method, properties, tree, session, env);
             }
-            ExprKind::Member { .. } if array_size(id, native).is_some() => {
-                return size(array_size(id, native).unwrap(), properties);
-            }
-            // The sum of the elements of an array property, of their type
-            // (IEEE 1800-2023 7.12.3, 18.5.8.2).
-            ExprKind::Call {
-                expression,
-                arguments,
-            } if arguments.is_empty() && array_sum(*expression, native).is_some() => {
-                return sum(
-                    array_sum(*expression, native).unwrap(),
-                    properties,
-                    tree,
-                    session,
-                    env,
-                );
-            }
-            ExprKind::Member { .. } if array_sum(id, native).is_some() => {
-                return sum(
-                    array_sum(id, native).unwrap(),
-                    properties,
-                    tree,
-                    session,
-                    env,
-                );
+            ExprKind::Member { .. } if array_method(id, native, properties).is_some() => {
+                let (array, method) = array_method(id, native, properties).unwrap();
+                return array_value(array, &method, properties, tree, session, env);
             }
             ExprKind::Member {
                 expression,
@@ -776,6 +788,54 @@ pub(in crate::ast) fn bind_inputs(
                     kind: Kind::Leaf(ConstraintExpr::Input { index, width }),
                     width,
                     signed,
+                }
+            }
+            // A member of the object a handle property of the class refers
+            // to (IEEE 1800-2023 18.5.9): a variable of that object, solved
+            // with the class's when the handle is rand (18.4).
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "."
+                && matches!(
+                    &native
+                        .expression(expression_binding::ungroup(*expression, native))
+                        .kind,
+                    ExprKind::Name(_)
+                ) =>
+            {
+                let ExprKind::Name(handle) = &native
+                    .expression(expression_binding::ungroup(*expression, native))
+                    .kind
+                else {
+                    unreachable!("a name");
+                };
+                let handle = instances::normalize_identifier(&handle.spelling);
+                let handle = properties
+                    .iter()
+                    .rev()
+                    .find(|property| property.name == handle)
+                    .ok_or_else(|| format!("constraint variable `{handle}`"))?;
+                // The handle is a member the constraint accesses, as the
+                // member of its object is (8.18).
+                visible(handle, tree, session, env)?;
+                let class = handle
+                    .r#type
+                    .class()
+                    .ok_or("a member of a constraint operand other than an object")?
+                    .to_owned();
+                let member = instances::normalize_identifier(&name.spelling);
+                let offset = handle.field.offset;
+                let property = object_member(&class, &member, tree, session, properties, env)?;
+                Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Member {
+                        handle: offset,
+                        member: property.field.offset,
+                        width: property.field.width,
+                    }),
+                    width: property.field.width,
+                    signed: property.field.signed,
                 }
             }
             ExprKind::Literal(text) => {
