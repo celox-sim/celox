@@ -2764,6 +2764,12 @@ pub enum DpiBuiltin {
     /// written, or `null`. Its `uvm_dpi_regexec` and `uvm_dpi_regfree` are
     /// [`Self::ReExec`] and [`Self::ReFree`].
     RegComp,
+    /// The integer field of number `field` of the report a function above
+    /// recorded, or with field `0`, whether one was recorded, which then
+    /// is the one the other fields read (see `procedural::dpi_reports`).
+    ReportInt,
+    /// The string field of number `field` of that report.
+    ReportString,
     /// UVM 1.2's `uvm_dump_re_cache()`, which only reports that its cache
     /// is not implemented: it does nothing.
     DumpReCache,

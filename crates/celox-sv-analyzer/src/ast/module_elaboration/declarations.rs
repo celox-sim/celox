@@ -197,42 +197,7 @@ impl ScopeElaboration<'_> {
                     .arguments()
                     .iter()
                     .filter_map(|argument| {
-                        let r#type = match argument.r#type() {
-                            crate::ir::DpiType::Bit => type_binding::builtin_type("bit", None),
-                            crate::ir::DpiType::Logic => type_binding::builtin_type("logic", None),
-                            crate::ir::DpiType::String => {
-                                type_binding::builtin_type("string", None)
-                            }
-                            crate::ir::DpiType::Chandle => {
-                                session.types.declare_chandle();
-                                type_binding::builtin_type("chandle", None)
-                            }
-                            crate::ir::DpiType::BitVector { width, signed }
-                            | crate::ir::DpiType::LogicVector { width, signed } => {
-                                Some(Type::resolved(
-                                    if argument.r#type().is_4state() {
-                                        TypeKind::Logic
-                                    } else {
-                                        TypeKind::Bit
-                                    },
-                                    signed,
-                                    None,
-                                    &[(width as i128 - 1, 0)],
-                                    &[],
-                                ))
-                            }
-                            crate::ir::DpiType::Integer { width, signed } => {
-                                type_binding::builtin_type(
-                                    match width {
-                                        8 => "byte",
-                                        16 => "shortint",
-                                        32 => "int",
-                                        _ => "longint",
-                                    },
-                                    Some(signed),
-                                )
-                            }
-                        }?;
+                        let r#type = dpi::argument_type(session, argument.r#type())?;
                         Some(procedural::dimensions_from_type(&r#type))
                     })
                     .collect(),

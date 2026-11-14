@@ -611,11 +611,12 @@ let mut sim = unsafe {
   `celox` と plusargs を返し、`uvm_dpi_get_tool_name_c` は `Celox` を返します。
   `uvm_hdl_*` と `uvm_polling_*` は 0 または `null` を返すため、UVM は
   それらの機能を利用不可と報告します。UVM 1.2 の `uvm_re_match`・`uvm_glob_to_re`・
-  `uvm_dump_re_cache` も提供します。`uvm_re_match` がコンパイルできない式は一致せず、
-  UVM 1.2 の `UVM/DPI/REGEX_INV` エラーは出しません。`uvm_dump_re_cache` は何もしません。
-  UVM 1.2 の `uvm_dpi_regcomp`・`uvm_dpi_regexec`・`uvm_dpi_regfree` も提供します。
-  `uvm_dpi_regcomp` がコンパイルできない式は `null` になり、UVM 1.2 の
-  `UVM/DPI/REGCOMP` エラーは出しません。
+  `uvm_dump_re_cache`・`uvm_dpi_regcomp`・`uvm_dpi_regexec`・`uvm_dpi_regfree` も
+  提供します。これらのレポート（`UVM/DPI/REGEX_INV`・`UVM/DPI/REGEX_MAX`・
+  `UVM/DPI/REGCOMP` とキャッシュのメッセージ）は UVM の C ライブラリと同じく、
+  UVM パッケージがそのためにエクスポートする `m__uvm_report_dpi` を通して出すため、
+  UVM のレポートとして数えられます。`invalid glob or regular expression` の後の理由は
+  `regerror` ではなく `regex` クレートのものです。
 
 ## Veryl が出力する SystemVerilog {#systemverilog-emitted-by-veryl}
 

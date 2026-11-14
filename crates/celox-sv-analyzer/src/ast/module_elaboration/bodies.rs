@@ -132,6 +132,16 @@ impl ScopeElaboration<'_> {
                 &self.packed_dimensions,
             )?;
         self.subroutines.extend(inline_subroutines);
+        // The functions of UVM's C library that Celox provides report
+        // through the UVM package (see `procedural::dpi_reports`).
+        procedural::dpi_reports::report_through_uvm(
+            syntax_tree,
+            session,
+            &mut body_state,
+            &self.packed_dimensions,
+            &mut self.dpi_imports,
+            &mut self.subroutines,
+        )?;
         // Static locals of the processes that keep their value are variables
         // of the module, initialized once with the declaration initializers.
         let statics: HashMap<String, Type> = body_state.statics.drain(..).collect();
