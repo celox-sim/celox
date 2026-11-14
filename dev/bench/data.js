@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794629581912,
+  "lastUpdate": 1794630673492,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -452266,6 +452266,37 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-celox-tiered-aarch64/heliodor_suite_66_smp_linux_boot_2hart_end_to_end",
             "unit": "ms",
             "value": 2908028.979147
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "0948bf3d2bb9c70116f25f77fcceb6cb1320b867",
+          "message": "test(sv): run the always_ff event tests in every build (#3634)",
+          "timestamp": "2026-11-12T05:20:29Z",
+          "url": "https://github.com/celox-sim/celox/commit/0948bf3d2bb9c70116f25f77fcceb6cb1320b867"
+        },
+        "date": 1794630673492,
+        "cpu": "Neoverse-N2",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-native-parallel-aarch64/heliodor_suite_66_smp_linux_boot_2hart_compilation",
+            "unit": "ms",
+            "value": 136295.766086
+          },
+          {
+            "name": "heliodor-native-parallel-aarch64/heliodor_suite_66_smp_linux_boot_2hart_execution",
+            "unit": "ms",
+            "value": 2722853.798396
           }
         ]
       }
