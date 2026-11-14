@@ -296,10 +296,17 @@ blocks in programs. Two region deviations are listed under
 - Scope `randomize()` / `std::randomize()` (18.12): `with` constraints,
   enums with unsupported or unresolved domains, unpacked arrays, nets,
   constants, selects, and concatenation arguments.
-- `randsequence` (18.17): recursive productions, `rand join`, productions
-  with a result or formals (and `return` with a value), and code blocks
-  after a weight. A production of several rules picks one by their weights, 1
-  unless given, from the thread's random number generator (18.14.2).
+- `randsequence` (18.17): recursive productions, productions with a result
+  or formals (and `return` with a value), and code blocks after a weight.
+  A production of several rules picks one by their weights, 1 unless given,
+  from the thread's random number generator (18.14.2). `rand join`
+  interleaves its productions' items at random from the same generator.
+  18.17.5 gives the bias no formula. Celox evaluates it once and, at each
+  step, with probability |2 × bias − 1| advances a production with the
+  fewest items left (bias below 0.5) or the most (above 0.5), and
+  otherwise any production with items left, each as likely. So 0.5 (the
+  default) prefers no length, and 0.0 and 1.0 always prefer the shortest
+  and the longest.
 - Class `randomize()`: 4-state and aggregate properties, static or not,
   `randc` static properties, constraints that name static properties in an
   object that a rand handle reaches (its randomization fails), random arrays
