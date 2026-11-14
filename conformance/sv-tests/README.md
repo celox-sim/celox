@@ -175,6 +175,10 @@ It remains in the dashboard-compatible denominator, with an `input_issue` report
 column and `upstream_input_issues` summary count; this is not a language-support
 failure. No generated source or metadata is repaired, and negative tests cannot
 use this exception to gain a false pass.
+`biquad_example` lists only the example's agent interfaces and packages, not its
+testbench top, so its files declare no module; its entry is marked `no_module`,
+and its run is classified as an input issue only when the driver fails with its
+missing-module message.
 The UVM submodules named by upstream `conf/runners/libs.json` must be available
 before any test runs. For simulation cases, each `simvariants` entry is forwarded
 as one plusarg
