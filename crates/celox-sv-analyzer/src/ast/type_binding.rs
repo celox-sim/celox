@@ -135,6 +135,12 @@ pub(super) fn implicit_subroutine_type(
     let mut ty = Type::new(TypeKind::Logic);
     ty.is_signed = data.signed.unwrap_or(false);
     ty.packed_ranges = binding::packed_ranges(&data.packed_dimensions, tree, session, &context)?;
+    semantic_types::bind_declared(
+        &mut session.types,
+        &tree.functions,
+        &mut ty,
+        &context.const_env,
+    );
     Ok(ty)
 }
 /// The signals that `declaration` declares. A type operator applied to an
