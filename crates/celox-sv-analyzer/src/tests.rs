@@ -6799,7 +6799,7 @@ fn class_randomize_rejects_unsupported_semantics() {
             "constraints",
         ),
         ("rand const int x;", "c.randomize()", "const"),
-        ("static rand int x;", "c.randomize()", "static random"),
+        ("randc static bit [1:0] x;", "c.randomize()", "randc static"),
         ("rand int x;", "C::randomize()", "object receiver"),
         ("rand int x;", "C::srandom(1)", "object receiver"),
         (
@@ -7758,7 +7758,9 @@ fn class_inline_randomize_binds_local_inputs() {
 
 #[test]
 fn class_inline_randomize_static_names_do_not_capture_caller_locals() {
-    for (expression, supported) in [("x == limit", false), ("x == local::limit", true)] {
+    // A name of the class's scope is the class's (IEEE 1800-2023 18.7): the
+    // static property, not the caller's variable, either way.
+    for (expression, supported) in [("x == limit", true), ("x == local::limit", true)] {
         let source = format!(
             r#"module Top;
             class C; rand bit [7:0] x; static bit [7:0] limit = 5; endclass

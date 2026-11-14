@@ -330,10 +330,14 @@ pub(in crate::ast) fn static_property_declaration(
         return Ok(None);
     }
     let class = class(tree, session, dimensions, &class_name)?;
-    let Some(property) = class.static_property(&instances::normalize_identifier(&name.spelling))
+    // The member the name denotes, which an instance property of a derived
+    // class hides as a static one does (8.14).
+    let Some(classes::Member::Static(index)) =
+        class.member(&instances::normalize_identifier(&name.spelling))
     else {
         return Ok(None);
     };
+    let property = &class.statics[index];
     check_access(
         tree,
         session,
@@ -1219,7 +1223,7 @@ pub(super) fn random_selection(
     let class = class(tree, session, dimensions, owner)?;
     // A selected property the constraint program cannot hold.
     let mut unsolvable = false;
-    let mut bits = vec!['0'; class.properties.len() + 1];
+    let mut bits = vec!['0'; class.properties.len() + class.static_slots.len() + 1];
     if !arguments.is_empty() {
         bits[0] = '1';
     }
@@ -1232,15 +1236,41 @@ pub(super) fn random_selection(
             ExprKind::Literal(value) if value == "null" && arguments.len() == 1 => {}
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
-                let index = class
-                    .properties
-                    .iter()
-                    .rposition(|p| p.name == name)
-                    .ok_or_else(|| {
-                        unsupported(format!(
+                let index = match class.member(&name) {
+                    Some(classes::Member::Instance(index)) => index,
+                    // A static rand property is solved in the object's slot
+                    // for it (see `classes::StaticProperty::rand`).
+                    Some(classes::Member::Static(index)) => {
+                        let property = &class.statics[index];
+                        check_access(
+                            tree,
+                            session,
+                            dimensions,
+                            &property.owner,
+                            &property.name,
+                            property.local,
+                            property.protected,
+                        )?;
+                        let slot = class
+                            .static_slot(property)
+                            .filter(|_| property.rand)
+                            .ok_or_else(|| {
+                                unsupported(format!(
+                                    "randomize argument `{name}`, a static property that is not rand"
+                                ))
+                            })?;
+                        if class.static_slots[slot].field.four_state {
+                            return Err(unsupported("randomization of a 4-state class property"));
+                        }
+                        bits[class.slot_bits[slot]] = '1';
+                        continue;
+                    }
+                    Some(classes::Member::Aggregate(_)) | None => {
+                        return Err(unsupported(format!(
                             "randomize argument `{name}` is not an instance property"
-                        ))
-                    })?;
+                        )));
+                    }
+                };
                 let property = &class.properties[index];
                 check_random_access(tree, session, dimensions, property)?;
                 if property.constant {
@@ -1269,7 +1299,7 @@ pub(super) fn random_selection(
                     ));
                 }
                 unsolvable |= !classes::constraints::constrainable(property) && !array;
-                bits[index + 1] = '1';
+                bits[class.property_bits[index]] = '1';
             }
             _ => {
                 return Err(unsupported(
@@ -1441,6 +1471,87 @@ pub(in crate::ast) fn constraint_mode_call(
 
 /// Bind rand_mode's void setter and integer getter separately (18.8).
 /// A getter requires one random property; only the setter accepts an object.
+/// `h.p.rand_mode()` or `h.p.rand_mode(on_off)` of a static rand property
+/// `p`: the variable of the bit that turns it off for every object (see
+/// `classes::StaticProperty::rand`), and the argument of the setter.
+pub(in crate::ast) fn static_rand_mode(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(String, Option<ExprId>)>> {
+    let (callee, args) = match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Call {
+            expression,
+            arguments,
+        } => (*expression, arguments.as_slice()),
+        _ => (id, &[][..]),
+    };
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(ungroup(callee, native)).kind
+    else {
+        return Ok(None);
+    };
+    if separator != "." || name.spelling != "rand_mode" {
+        return Ok(None);
+    }
+    // `p.rand_mode()` in a method of the class names the member `p` as
+    // `this.p` would (8.9, 18.8): its static property, if that is it. A
+    // local or formal `p` of the method hides it (6.21): the call is then
+    // that variable's, an object's or an error.
+    let unqualified = match &native.expression(ungroup(*expression, native)).kind {
+        ExprKind::Name(name)
+            if !dimensions
+                .class_static_members
+                .contains(&instances::normalize_identifier(&name.spelling)) =>
+        {
+            None
+        }
+        ExprKind::Name(name) => match scope_class(dimensions) {
+            Some(scope) => {
+                let class = class(tree, session, dimensions, &scope)?;
+                match class.member(&instances::normalize_identifier(&name.spelling)) {
+                    Some(classes::Member::Static(index)) => {
+                        let property = &class.statics[index];
+                        check_access(
+                            tree,
+                            session,
+                            dimensions,
+                            &property.owner,
+                            &property.name,
+                            property.local,
+                            property.protected,
+                        )?;
+                        Some(property.clone())
+                    }
+                    _ => None,
+                }
+            }
+            None => None,
+        },
+        _ => None,
+    };
+    let property = match unqualified {
+        Some(property) => Some(property),
+        None => static_property_declaration(tree, session, *expression, native, dimensions)?,
+    };
+    let Some(property) = property.filter(|property| property.rand) else {
+        return Ok(None);
+    };
+    let off = classes::static_rand_mode_variable(&property.owner, &property.name);
+    match args {
+        [] => Ok(Some((off, None))),
+        [argument] if argument.name.is_none() && argument.value.is_some() => {
+            Ok(Some((off, argument.value)))
+        }
+        _ => Err(unsupported("rand_mode setter requires one on_off argument")),
+    }
+}
+
 pub(in crate::ast) fn rand_mode_call(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -1462,6 +1573,22 @@ pub(in crate::ast) fn rand_mode_call(
             separator,
             name,
         } if separator == "." && name.spelling == "rand_mode" => {
+            // That of a static rand property is shared by every object.
+            if let Some((off, argument)) = static_rand_mode(tree, session, id, native, dimensions)?
+            {
+                if argument.is_some() {
+                    return Err(unsupported(
+                        "rand_mode setter is void and cannot be used as a value",
+                    ));
+                }
+                // The getter's value is an `int` (IEEE 1800-2023 18.8), as
+                // that of an instance property's mode.
+                return Ok(Some(Expr::Mux {
+                    condition: Box::new(Expr::Ident(off)),
+                    then_expr: Box::new(Expr::Literal("32'sd0".into())),
+                    else_expr: Box::new(Expr::Literal("32'sd1".into())),
+                }));
+            }
             let property_target = property(tree, session, *expression, native, dimensions)?;
             if let Some((property, object)) = property_target.filter(|(property, _)| {
                 property.rand || property.randc || property.r#type.class().is_none()
@@ -1575,7 +1702,10 @@ pub(super) fn randomize_with(
     // Inline constraints need the solver even on otherwise unconstrained classes.
     class.check_constraint_program()?;
     let constraint_ids = constraints.ok_or_else(|| unsupported("inline constraint form"))?;
+    // The static properties the constraints read are the first inputs of
+    // the program; the caller's variables follow.
     let mut inputs = HashMap::default();
+    let first_input = class.static_inputs.len();
     let mut input_types = Vec::new();
     let mut input_values = Vec::new();
     // The caller's variables the constraints name, each with the variables
@@ -1589,10 +1719,11 @@ pub(super) fn randomize_with(
             ExprKind::Name(name) if name.spelling == "$" => None,
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
-                if loops.contains(&name) || class.properties.iter().any(|p| p.name == name) {
+                // A member of the class, also a static property: an input
+                // or a solver variable of the program (see
+                // `classes::StaticInput`).
+                if loops.contains(&name) || class.member(&name).is_some() {
                     None
-                } else if class.statics.iter().any(|p| p.name == name) {
-                    return Err(unsupported("static properties in inline constraints"));
                 } else {
                     Some((name.clone(), name))
                 }
@@ -1727,7 +1858,14 @@ pub(super) fn randomize_with(
             .ok_or_else(|| unsupported("inline input width"))?;
         let mut ty = classes::unsigned_type(width);
         ty.is_signed = variable.signed;
-        inputs.insert(key, (input_types.len(), width as u32, variable.signed));
+        inputs.insert(
+            key,
+            (
+                first_input + input_types.len(),
+                width as u32,
+                variable.signed,
+            ),
+        );
         input_types.push(ty);
         input_values.push(Some(value));
     }
@@ -1744,6 +1882,13 @@ pub(super) fn randomize_with(
                 tree,
                 session,
                 &class.properties,
+                &classes::constraints::Names {
+                    lineage: &class.lineage,
+                    aggregates: &class.aggregates,
+                    statics: &class.statics,
+                    inputs: &class.static_inputs,
+                    slots: &class.static_slots,
+                },
                 &dimensions.const_env,
                 &inputs,
             )
