@@ -2711,6 +2711,96 @@ endmodule
   (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
   (expect_output "0\n"))
 
+; `solve before` orders the choice of values (18.5.9): the solutions are
+; the ones the other constraints allow.
+(case constrained_randomize_solve_before
+  (source "solve_before.sv" #"
+module Top(output int bad, output bit done);
+    class Fill;
+        rand bit [31:0] start_addr;
+        rand int block_size;
+        rand byte q[$];
+        constraint block_sys_limit { block_size inside {16, 32, 64, 128, 512, 1024}; }
+        constraint within_range {
+            start_addr < (32'h0104_0000 - block_size * 4);
+            start_addr > 32'h0100_0000;
+            solve block_size before start_addr;
+            start_addr[1:0] == 0;
+        }
+        constraint sized { solve q.size() before block_size; q.size() < 4; }
+    endclass
+    // A member of the object a rand handle refers to orders too.
+    class Item; rand bit [7:0] m; endclass
+    class Outer;
+        rand Item h;
+        rand bit [7:0] y;
+        constraint c { solve h.m before y; y == h.m + 1; h.m < 8'hff; }
+        function new(); h = new; endfunction
+    endclass
+    // Properties qualified by `this` and `super` (8.11, 8.15), as other
+    // constraints name them, also inline (18.7).
+    class Base; rand bit [7:0] z; endclass
+    class Named extends Base;
+        rand bit [7:0] x, y;
+        constraint c {
+            solve this.x before y;
+            solve super.z before this.x;
+            y == this.x + 1;
+            super.z < 8'h10;
+            x > z;
+            x < 8'h80;
+        }
+    endclass
+    // A select of a rand variable (Syntax 18-8), as other constraints name
+    // it.
+    class Scoped;
+        rand bit [1:0] a;
+        rand bit b;
+        constraint c {
+            solve a[0] before b;
+            b == a[0];
+        }
+    endclass
+    Fill f;
+    Outer o;
+    Named m;
+    Scoped sc;
+    // The arguments of a scope randomize are random variables (18.12.1).
+    bit [7:0] a, b;
+    initial begin
+        f = new;
+        o = new;
+        m = new;
+        sc = new;
+        for (int n = 0; n < 20; n++) begin
+            if (f.randomize() == 0) bad++;
+            if (!(f.block_size inside {16, 32, 64, 128, 512, 1024}) || f.start_addr[1:0] != 0
+                || f.start_addr <= 32'h0100_0000 || f.start_addr >= 32'h0104_0000 - f.block_size * 4
+                || f.q.size() >= 4)
+                bad++;
+            if (f.randomize() with { solve start_addr before block_size; block_size == 64; } == 0
+                || f.block_size != 64)
+                bad++;
+            if (o.randomize() == 0 || o.y != o.h.m + 1) bad++;
+            if (m.randomize() == 0 || m.y != m.x + 1 || m.z >= 8'h10 || m.x <= m.z
+                || m.x >= 8'h80)
+                bad++;
+            if (m.randomize() with { solve this.y before x; this.y == 8'h20; } == 0
+                || m.y != 8'h20 || m.x != 8'h1f)
+                bad++;
+            if (std::randomize(a, b) with { solve a before b; b == a + 1; a < 8'h10; } == 0
+                || b != a + 1 || a >= 8'h10)
+                bad++;
+            if (sc.randomize() == 0 || sc.b != sc.a[0]) bad++;
+        end
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
 (case constrained_randomize_shifts
   (source "shifts.sv" #"
 module Top(output int bad, output bit done);
