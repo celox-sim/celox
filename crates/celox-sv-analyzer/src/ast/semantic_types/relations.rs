@@ -71,46 +71,35 @@ impl TyTable {
     /// The members of the enumeration `id` is, or is a packed array of
     /// (6.19).
     pub fn enum_domain(&self, id: TyId) -> Option<&Arc<super::super::enums::EnumDomain>> {
-        let TyData::Packed(
-            packed @ Packed {
-                element: PackedElement::Enum { decl, .. },
-                ..
-            },
-        ) = self.data(id)
+        let TyData::Packed(Packed {
+            element: PackedElement::Enum { decl, .. },
+            ..
+        }) = self.data(id)
         else {
             return None;
         };
         match decl {
             Decl::AnonymousEnum(domain) => Some(domain),
-            // The base type's range is the last packed dimension, also of a
-            // packed array of the enumeration; a base type without one has
-            // none (6.19).
-            Decl::Named(decl) => {
-                let name = &self.decl(*decl).name;
-                let base = |range| {
-                    self.enum_domains
-                        .get(&(name.clone(), range, packed.four_state))
-                };
-                base(packed.dims.last().copied()).or_else(|| base(None))
-            }
+            Decl::Named(decl) => self.decl(*decl).domain.as_ref(),
             _ => None,
         }
     }
 
-    /// Record the members of the named enumeration `key` declares (6.19).
+    /// Record the members of the enumeration declaration `decl` declares
+    /// (6.19). A declaration is one per elaborated scope, which its
+    /// parameters belong to, so it has one set of members.
     pub(in crate::ast) fn record_enum_domain(
         &mut self,
-        key: super::EnumKey,
+        decl: super::DeclId,
         domain: &Arc<super::super::enums::EnumDomain>,
     ) {
-        let name = key.0.clone();
-        let recorded = self
-            .enum_domains
-            .entry(key)
-            .or_insert_with(|| domain.clone());
+        let data = &mut self.decls[decl.0 as usize];
+        let recorded = data.domain.get_or_insert_with(|| domain.clone());
         debug_assert!(
             recorded == domain,
-            "enumeration `{name}` of one base type recorded with two sets of members"
+            "enumeration `{}` of scope {:?} recorded with two sets of members",
+            data.name,
+            data.scope
         );
     }
 
