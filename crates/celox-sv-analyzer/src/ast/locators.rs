@@ -470,6 +470,7 @@ pub(super) fn result_type(
         },
         record,
         fixed: None,
+        binding: Default::default(),
     })))
 }
 

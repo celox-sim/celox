@@ -25,6 +25,11 @@ pub(super) fn with_dimensions(
         &mut ty,
         &context.const_env,
     );
+    // A reader that has the container alone takes the binding from it.
+    let binding = ty.binding.clone();
+    if let Some(container) = &mut ty.shape_keeping_binding().container {
+        Arc::make_mut(container).binding = binding;
+    }
     Ok(ty)
 }
 
@@ -227,6 +232,7 @@ fn container_type(
         element: base,
         record,
         fixed,
+        binding: Default::default(),
     }))
 }
 
@@ -310,12 +316,15 @@ impl ContainerType {
 
 /// The type of a container of type `container`: a heap handle.
 pub(super) fn of(container: ContainerType) -> Type {
+    let binding = container.binding.clone();
     let mut ty = Type::new(TypeKind::Object);
     ty.packed_ranges.push(PackedRange::new(
         ConstExpr::Literal("31".into()),
         ConstExpr::Literal("0".into()),
     ));
     ty.container = Some(Arc::new(container));
+    // A container's type is the one it was bound to, if it was.
+    ty.binding = binding;
     ty
 }
 
@@ -2214,6 +2223,7 @@ mod tests {
             element,
             record: None,
             fixed: None,
+            binding: Default::default(),
         }));
         procedural::dimensions_from_type(&queue)
     }
