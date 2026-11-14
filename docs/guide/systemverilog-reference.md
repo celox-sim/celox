@@ -512,6 +512,9 @@ Code that must stay portable should avoid relying on them.
   `SimulatorBuilder::legacy_empty_reductions(true)` (or the frontend's
   `AnalysisOptions::legacy_empty_reductions`) instead returns zero for all
   empty reductions, for compatibility with tools that do so.
+- **`$psprintf` is `$sformatf`.** The vendor system function `$psprintf`,
+  which many simulators and older UVM code use, is accepted as `$sformatf`
+  (21.3.3); diagnostics name it `$sformatf`.
 - **UVM DPI functions are built in.** Imports with the C names of UVM's
   `src/dpi` functions bind to Celox's implementations instead of a user C
   function; see [DPI-C imports](#dpi-c-imports).
