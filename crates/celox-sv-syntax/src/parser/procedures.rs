@@ -79,13 +79,18 @@ enum Job {
         state: ActionState,
         success: Option<StatementId>,
     },
+    /// A `randsequence` statement read up to here, its code blocks `items`
+    /// and the positions of the compiler directives among its productions
+    /// `directives`.
     RandsequenceNext {
         header: Header,
         items: Vec<StatementId>,
+        directives: Vec<usize>,
     },
     RandsequenceBlock {
         header: Header,
         items: Vec<StatementId>,
+        directives: Vec<usize>,
     },
 }
 
@@ -1402,6 +1407,7 @@ impl Parser<'_> {
                             jobs.push(Job::RandsequenceNext {
                                 header,
                                 items: Vec::new(),
+                                directives: Vec::new(),
                             });
                         }
                         _ if self.declaration_start() => {
@@ -1471,23 +1477,50 @@ impl Parser<'_> {
                         }
                     }
                 }
-                Job::RandsequenceNext { header, items } => loop {
+                Job::RandsequenceNext {
+                    header,
+                    items,
+                    mut directives,
+                } => loop {
+                    let directive = self.at;
                     if self.directive()? {
+                        directives.extend(directive..self.at);
                         continue;
                     }
                     match self.peek() {
                         "" => return Err(self.error("unterminated randsequence")),
                         "endsequence" => {
                             self.at += 1;
+                            let end = self.at;
+                            let start = header.start;
                             let tokens = self.range(header.start);
-                            values.push(self.statement_node(
+                            let structure = items.clone();
+                            let id = self.statement_node(
                                 header,
                                 StatementKind::Unconverted {
                                     category: "randsequence".into(),
                                     tokens,
                                     items,
                                 },
-                            )?);
+                            )?;
+                            // The productions, read again with the code
+                            // blocks parsed already and without the
+                            // directives read among them; a form this does
+                            // not read leaves the statement opaque.
+                            let mut directives = directives.into_iter().peekable();
+                            let view = (start..end)
+                                .filter(|at| directives.next_if_eq(at).is_none())
+                                .map(|at| self.indices[at])
+                                .collect::<Vec<_>>();
+                            let indices = std::mem::replace(&mut self.indices, view);
+                            self.at = 0;
+                            let read = self.randsequence_structure(id, &structure);
+                            self.indices = indices;
+                            self.at = end;
+                            if let Some(randsequence) = read? {
+                                self.randsequences.push(randsequence);
+                            }
+                            values.push(id);
                             break;
                         }
                         "(" => {
@@ -1501,7 +1534,11 @@ impl Parser<'_> {
                                 qualifier: None,
                             };
                             self.at += 1;
-                            jobs.push(Job::RandsequenceBlock { header, items });
+                            jobs.push(Job::RandsequenceBlock {
+                                header,
+                                items,
+                                directives,
+                            });
                             jobs.push(Job::BlockNext {
                                 header: block,
                                 label: None,
@@ -1514,9 +1551,17 @@ impl Parser<'_> {
                         _ => self.at += 1,
                     }
                 },
-                Job::RandsequenceBlock { header, mut items } => {
+                Job::RandsequenceBlock {
+                    header,
+                    mut items,
+                    directives,
+                } => {
                     items.push(values.pop().unwrap());
-                    jobs.push(Job::RandsequenceNext { header, items });
+                    jobs.push(Job::RandsequenceNext {
+                        header,
+                        items,
+                        directives,
+                    });
                 }
                 Job::BlockNext {
                     header,
@@ -1755,5 +1800,248 @@ impl Parser<'_> {
         }
         debug_assert_eq!(values.len(), 1);
         Ok(values.pop().unwrap())
+    }
+}
+
+impl Parser<'_> {
+    /// The productions of `randsequence` statement `id` from its first
+    /// token, whose code blocks are `blocks` in order (IEEE 1800-2023
+    /// 18.17, A.6.12), or `None` for a form this does not read.
+    fn randsequence_structure(
+        &mut self,
+        id: StatementId,
+        blocks: &[StatementId],
+    ) -> Result<Option<Randsequence>> {
+        let mut blocks = blocks.iter().copied();
+        self.expect("randsequence")?;
+        self.expect("(")?;
+        let main = if self.peek() == ")" {
+            None
+        } else {
+            Some(self.name()?)
+        };
+        self.expect(")")?;
+        let mut productions = Vec::new();
+        while self.peek() != "endsequence" {
+            let start = self.at;
+            // The header up to `:`: a type, the name, and formals.
+            let mut depth = 0usize;
+            let mut parentheses = None;
+            let mut name_at = None;
+            loop {
+                match self.peek() {
+                    "" | "endsequence" => return Ok(None),
+                    "(" => {
+                        if depth == 0 {
+                            parentheses = Some(self.at);
+                        }
+                        depth += 1;
+                    }
+                    ")" => depth = depth.saturating_sub(1),
+                    ":" if depth == 0 => break,
+                    _ if depth == 0 => {
+                        name_at = Some(self.at);
+                        parentheses = None;
+                    }
+                    _ => {}
+                }
+                self.at += 1;
+            }
+            let colon = self.at;
+            let Some(name_at) = name_at else {
+                return Ok(None);
+            };
+            self.at = name_at;
+            let name = self.name()?;
+            // In tokens, as other ranges are.
+            let tokens = |start: usize, end: usize| TokenRange {
+                start: self.indices[start],
+                end: self.indices[end - 1] + 1,
+            };
+            let return_type = (name_at > start).then(|| tokens(start, name_at));
+            let formals = parentheses.map(|open| tokens(open, colon));
+            self.at = colon + 1;
+            let mut rules = Vec::new();
+            loop {
+                let Some(rule) = self.randsequence_rule(&mut blocks)? else {
+                    return Ok(None);
+                };
+                rules.push(rule);
+                if !self.eat("|") {
+                    break;
+                }
+            }
+            self.expect(";")?;
+            productions.push(RsProduction {
+                name,
+                return_type,
+                formals,
+                rules,
+                tokens: self.range(start),
+            });
+        }
+        Ok(Some(Randsequence {
+            statement: id,
+            main,
+            productions,
+        }))
+    }
+
+    /// One `rs_rule`, ending before `|` or `;`.
+    fn randsequence_rule(
+        &mut self,
+        blocks: &mut impl Iterator<Item = StatementId>,
+    ) -> Result<Option<RsRule>> {
+        let join = if self.peek() == "rand" && self.nth(1) == "join" {
+            self.at += 2;
+            Some(if self.eat("(") {
+                let expression = self.expression(0)?;
+                self.expect(")")?;
+                Some(expression)
+            } else {
+                None
+            })
+        } else {
+            None
+        };
+        let mut items = Vec::new();
+        loop {
+            match self.peek() {
+                "|" | ";" | ":=" => break,
+                "" | "endsequence" => return Ok(None),
+                "{" => {
+                    let Some(code) = self.randsequence_block(blocks) else {
+                        return Ok(None);
+                    };
+                    items.push(RsProd::Code(code));
+                }
+                "if" => {
+                    self.at += 1;
+                    self.expect("(")?;
+                    let condition = self.expression(0)?;
+                    self.expect(")")?;
+                    let then = self.expression(14)?;
+                    let otherwise = if self.eat("else") {
+                        Some(self.expression(14)?)
+                    } else {
+                        None
+                    };
+                    items.push(RsProd::If {
+                        condition,
+                        then,
+                        otherwise,
+                    });
+                }
+                "repeat" => {
+                    self.at += 1;
+                    self.expect("(")?;
+                    let count = self.expression(0)?;
+                    self.expect(")")?;
+                    let item = self.expression(14)?;
+                    items.push(RsProd::Repeat { count, item });
+                }
+                "case" => {
+                    self.at += 1;
+                    self.expect("(")?;
+                    let selector = self.expression(0)?;
+                    self.expect(")")?;
+                    let mut cases = Vec::new();
+                    while !self.eat("endcase") {
+                        let mut labels = Vec::new();
+                        if self.eat("default") {
+                            self.eat(":");
+                        } else {
+                            loop {
+                                labels.push(self.expression(0)?);
+                                if !self.eat(",") {
+                                    break;
+                                }
+                            }
+                            self.expect(":")?;
+                        }
+                        let item = self.expression(14)?;
+                        self.expect(";")?;
+                        cases.push(RsCaseItem { labels, item });
+                    }
+                    items.push(RsProd::Case {
+                        selector,
+                        items: cases,
+                    });
+                }
+                _ => items.push(RsProd::Item(self.expression(14)?)),
+            }
+        }
+        // An rs_production_list has at least one rs_prod (A.6.12).
+        if items.is_empty() {
+            return Err(self.error("a randsequence rule has at least one production"));
+        }
+        let (weight, weight_code) = if self.eat(":=") {
+            let weight = self.randsequence_weight()?;
+            let code = if self.peek() == "{" {
+                let Some(code) = self.randsequence_block(blocks) else {
+                    return Ok(None);
+                };
+                Some(code)
+            } else {
+                None
+            };
+            (Some(weight), code)
+        } else {
+            (None, None)
+        };
+        Ok(Some(RsRule {
+            join,
+            items,
+            weight,
+            weight_code,
+        }))
+    }
+
+    /// An `rs_weight_specification`: an integral number, a name with an
+    /// optional package scope, or a parenthesized expression (IEEE
+    /// 1800-2023 A.6.12).
+    fn randsequence_weight(&mut self) -> Result<ExprId> {
+        let weight = self.expression(14)?;
+        let valid = match &self.expressions[weight.0].kind {
+            ExprKind::Literal(value) => super::numbers::integral(value),
+            ExprKind::Name(_) | ExprKind::Group(_) => true,
+            ExprKind::Member {
+                expression,
+                separator,
+                ..
+            } => {
+                separator == "::"
+                    && matches!(self.expressions[expression.0].kind, ExprKind::Name(_))
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(self.error(
+                "a randsequence weight is an integral number, a name or a parenthesized expression",
+            ));
+        }
+        Ok(weight)
+    }
+
+    /// The code block at `{`, the next of `blocks`, past which it moves.
+    fn randsequence_block(
+        &mut self,
+        blocks: &mut impl Iterator<Item = StatementId>,
+    ) -> Option<StatementId> {
+        let block = blocks.next()?;
+        // A statement's range is in tokens, the parser's position in the
+        // tokens it reads.
+        let tokens = self.statements[block.0].tokens;
+        if self.indices.get(self.at) != Some(&tokens.start) {
+            return None;
+        }
+        while self
+            .indices
+            .get(self.at)
+            .is_some_and(|&token| token < tokens.end)
+        {
+            self.at += 1;
+        }
+        Some(block)
     }
 }
