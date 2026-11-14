@@ -39,6 +39,23 @@ fn bounded_clone(value: &Typed, budget: &mut usize) -> Result<Typed, String> {
     Ok(value.clone())
 }
 
+/// `items` joined by `op`, as a balanced tree, which bounds the depth of
+/// recursion over large sets; `None` without items.
+fn balanced(op: &str, mut items: Vec<Typed>) -> Option<Typed> {
+    while items.len() > 1 {
+        let mut next = Vec::with_capacity(items.len().div_ceil(2));
+        let mut pending = items.into_iter();
+        while let Some(a) = pending.next() {
+            next.push(match pending.next() {
+                Some(b) => relation(op, a, b),
+                None => a,
+            });
+        }
+        items = next;
+    }
+    items.pop()
+}
+
 fn charge(budget: &mut usize) -> Result<(), String> {
     *budget = budget
         .checked_sub(1)
@@ -844,19 +861,84 @@ pub(in crate::ast) fn bind_inputs(
                     };
                     alternatives.push(predicate);
                 }
-                // A balanced OR tree bounds recursion for large membership sets.
-                while alternatives.len() > 1 {
-                    let mut next = Vec::new();
-                    let mut items = alternatives.into_iter();
-                    while let Some(a) = items.next() {
-                        next.push(match items.next() {
-                            Some(b) => relation("||", a, b),
-                            None => a,
-                        });
+                balanced("||", alternatives).ok_or("empty constraint inside set")?
+            }
+            // A uniqueness constraint (IEEE 1800-2023 18.5.4): its members,
+            // singular variables of equivalent types, take pairwise
+            // different values; fewer than two have no effect.
+            ExprKind::Unique(items) => {
+                let mut members = Vec::new();
+                let mut types = Vec::new();
+                for item in items {
+                    let celox_sv_syntax::DimensionKind::Index(id) = item.kind else {
+                        return Err(
+                            "a value range in a uniqueness constraint, whose members are variables (IEEE 1800-2023 18.5.4)"
+                                .into(),
+                        );
+                    };
+                    let ExprKind::Name(name) = &native
+                        .expression(expression_binding::ungroup(id, native))
+                        .kind
+                    else {
+                        return Err(
+                            "a uniqueness constraint member that is not a variable (IEEE 1800-2023 18.5.4)"
+                                .into(),
+                        );
+                    };
+                    let Some(property) = properties.iter().rev().find(|property| {
+                        property.name == instances::normalize_identifier(&name.spelling)
+                    }) else {
+                        return Err(
+                            "a uniqueness constraint member other than a property of the class"
+                                .into(),
+                        );
+                    };
+                    if property.randc {
+                        return Err(
+                            "a randc variable in a uniqueness constraint (IEEE 1800-2023 18.5.4)"
+                                .into(),
+                        );
                     }
-                    alternatives = next;
+                    if property.r#type.container.is_some()
+                        || !property.r#type.unpacked_ranges.is_empty()
+                    {
+                        return Err("an array in a uniqueness constraint".into());
+                    }
+                    types.push(semantic_types::of_type(
+                        &mut session.types,
+                        &tree.functions,
+                        &property.r#type,
+                        env,
+                    ));
+                    members.push(recurse(session, budget, id)?);
                 }
-                alternatives.pop().ok_or("empty constraint inside set")?
+                // Members of equivalent types (6.22.2), as the type table
+                // tells them: two enumerations only if they are one.
+                if types.windows(2).any(|pair| match (pair[0], pair[1]) {
+                    (Some(left), Some(right)) => !session.types.equivalent(left, right),
+                    _ => true,
+                }) {
+                    return Err(
+                        "a uniqueness constraint over members of types that are not equivalent (IEEE 1800-2023 18.5.4)"
+                            .into(),
+                    );
+                }
+                let mut different = Vec::new();
+                for (index, left) in members.iter().enumerate() {
+                    for right in &members[index + 1..] {
+                        charge(budget)?;
+                        different.push(relation(
+                            "!=",
+                            bounded_clone(left, budget)?,
+                            bounded_clone(right, budget)?,
+                        ));
+                    }
+                }
+                balanced("&&", different).unwrap_or(Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Literal(1, 1)),
+                    width: 1,
+                    signed: false,
+                })
             }
             // A distribution (IEEE 1800-2023 18.5.3): the value is one of an
             // item of nonzero weight, and the solver tries the items by their
@@ -1012,20 +1094,8 @@ pub(in crate::ast) fn bind_inputs(
                     });
                     alternatives.push(predicate);
                 }
-                // A balanced OR tree bounds recursion for large distributions.
-                while alternatives.len() > 1 {
-                    let mut next = Vec::new();
-                    let mut items = alternatives.into_iter();
-                    while let Some(a) = items.next() {
-                        next.push(match items.next() {
-                            Some(b) => relation("||", a, b),
-                            None => a,
-                        });
-                    }
-                    alternatives = next;
-                }
                 // Every item of weight zero: no value is allowed.
-                let membership = alternatives.pop().unwrap_or(Typed {
+                let membership = balanced("||", alternatives).unwrap_or(Typed {
                     kind: Kind::Leaf(ConstraintExpr::Literal(1, 0)),
                     width: 1,
                     signed: false,

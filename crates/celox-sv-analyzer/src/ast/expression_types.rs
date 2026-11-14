@@ -366,6 +366,7 @@ fn resolve(
         ExprKind::Type(_)
         | ExprKind::Set(_)
         | ExprKind::Dist { .. }
+        | ExprKind::Unique(_)
         | ExprKind::Tagged { .. }
         | ExprKind::Pattern { target: None, .. }
         | ExprKind::Streaming { .. }
