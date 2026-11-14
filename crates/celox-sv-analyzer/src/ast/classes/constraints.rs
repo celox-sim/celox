@@ -36,23 +36,38 @@ fn reads(expr: &ConstraintExpr, variable: &mut impl FnMut(&ConstraintExpr) -> bo
     })
 }
 
-/// Whether the member at byte offset `member` of the object the handle
-/// property at byte offset `handle` refers to is randc (see
-/// `ConstraintExpr::Member`).
+/// Whether the member at byte offset `member` of the object a handle refers
+/// to is randc (see `ConstraintExpr::Member`): the handle the static
+/// property whose value is input `input` holds, else the handle property at
+/// byte offset `handle`.
+#[allow(clippy::too_many_arguments)]
 fn randc_member(
     handle: u32,
     member: u32,
+    input: Option<usize>,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     properties: &[Property],
+    names: &Names<'_>,
     env: &ConstEnv,
 ) -> Result<bool, String> {
-    let Some(class) = properties
-        .iter()
-        .rev()
-        .filter(|property| property.field.offset == handle)
-        .find_map(|property| property.r#type.class_in(&session.types))
-    else {
+    let class = match input {
+        // A static handle, by the static property that input reads (see
+        // `PathHandle::Static`).
+        Some(input) => names.inputs.get(input).and_then(|input| {
+            names
+                .statics
+                .iter()
+                .find(|property| property.variable == input.variable)
+                .and_then(|property| property.r#type.class_in(&session.types))
+        }),
+        None => properties
+            .iter()
+            .rev()
+            .filter(|property| property.field.offset == handle)
+            .find_map(|property| property.r#type.class_in(&session.types)),
+    };
+    let Some(class) = class else {
         return Ok(false);
     };
     let randc = |properties: &[Property]| {
@@ -332,38 +347,109 @@ fn object_member(
     Ok(property)
 }
 
-/// The element `a[i]`, or the member `a[i].m` of the object it refers to,
-/// that `id` names, with `i` the variable of the loop over `a`.
+/// The handle property a member path starts from (see [`handle_member`]).
+enum PathHandle<'p> {
+    /// An instance property of the class.
+    Instance(&'p Property),
+    /// A static property, a state value, by the input of the program that
+    /// holds it (see `classes::StaticInput`).
+    Static(usize),
+}
+
+/// The handle property and the member of the object it refers to that
+/// constraint operand `id`, `h.m`, names (IEEE 1800-2023 18.5.9): `h`
+/// resolves as every operand that names a property does (see
+/// [`member_name`]), an instance or a static property alike, so `this.h.m`,
+/// `super.h.m` and the receiver's `item.h.m` name one too.
 #[allow(clippy::too_many_arguments)]
-fn element(
+fn handle_member<'p>(
     id: ExprId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    properties: &[Property],
+    properties: &'p [Property],
     names: &Names<'_>,
     env: &ConstEnv,
     inputs: &HashMap<String, CallerInput>,
     loops: &[Loop],
-) -> Result<Option<Typed>, String> {
-    if loops.is_empty() {
+) -> Result<Option<(PathHandle<'p>, Property)>, String> {
+    let native = tree.declarations();
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    else {
+        return Ok(None);
+    };
+    if separator != "." {
         return Ok(None);
     }
-    let native = tree.declarations();
-    let (select, member) = match &native.expression(id).kind {
-        ExprKind::Member {
-            expression,
-            separator,
-            name,
-        } if separator == "." => (
-            *expression,
-            Some(instances::normalize_identifier(&name.spelling)),
-        ),
-        _ => (id, None),
+    let Some((handle, lineage)) = member_name(*expression, native, names, inputs, loops)? else {
+        return Ok(None);
     };
+    let other = || "a member of a constraint operand other than an object";
+    let (root, class) = match super::member(
+        &handle,
+        lineage,
+        properties,
+        names.aggregates,
+        names.statics,
+    ) {
+        Some(super::Member::Instance(index)) => {
+            let property = &properties[index];
+            let class = property
+                .r#type
+                .class_in(&session.types)
+                .ok_or_else(other)?
+                .to_owned();
+            (PathHandle::Instance(property), class)
+        }
+        Some(super::Member::Static(index)) => {
+            let property = &names.statics[index];
+            let class = property
+                .r#type
+                .class_in(&session.types)
+                .ok_or_else(other)?
+                .to_owned();
+            accessible(
+                &property.owner,
+                &property.name,
+                property.local,
+                property.protected,
+                tree,
+                session,
+                env,
+            )?;
+            let input = names
+                .inputs
+                .iter()
+                .position(|input| input.variable == property.variable)
+                .ok_or("a static class handle without its input")?;
+            (PathHandle::Static(input), class)
+        }
+        _ => return Err(format!("constraint variable `{handle}`")),
+    };
+    let member = instances::normalize_identifier(&name.spelling);
+    let property = object_member(&class, &member, tree, session, properties, env)?;
+    Ok(Some((root, property)))
+}
+
+/// The loop over the array whose element `id`, `a[i]`, names, by its
+/// level, with `i` the loop's variable.
+fn loop_element(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    properties: &[Property],
+    names: &Names<'_>,
+    inputs: &HashMap<String, CallerInput>,
+    loops: &[Loop],
+) -> Result<Option<usize>, String> {
     let ExprKind::Select {
         expression,
         dimension,
-    } = &native.expression(select).kind
+    } = &native.expression(id).kind
     else {
         return Ok(None);
     };
@@ -389,29 +475,86 @@ fn element(
         _ => None,
     }
     .ok_or("constraint array element other than its loop's")?;
-    let looped = &loops[level];
-    let element = &looped.element;
-    let (member, width, signed) = match member {
-        None => {
-            if !solver_element(element, tree, session, env) {
-                return Err("a constraint array element other than 2-state integral".into());
-            }
-            (None, element.layout.width, element.layout.signed)
-        }
-        Some(member) => {
-            let class = element
-                .element
-                .class_in(&session.types)
-                .ok_or("a member of a constraint array element other than an object")?
-                .to_owned();
-            let property = object_member(&class, &member, tree, session, properties, env)?;
-            (
+    Ok(Some(level))
+}
+
+/// The member `m` of the object loop element `a[i]` refers to that `id`,
+/// `a[i].m`, names, with the loop's level.
+#[allow(clippy::too_many_arguments)]
+fn element_member(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    properties: &[Property],
+    names: &Names<'_>,
+    env: &ConstEnv,
+    inputs: &HashMap<String, CallerInput>,
+    loops: &[Loop],
+) -> Result<Option<(usize, Property)>, String> {
+    let native = tree.declarations();
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(id).kind
+    else {
+        return Ok(None);
+    };
+    if separator != "." {
+        return Ok(None);
+    }
+    let receiver = expression_binding::ungroup(*expression, native);
+    let Some(level) = loop_element(receiver, native, properties, names, inputs, loops)? else {
+        return Ok(None);
+    };
+    let class = loops[level]
+        .element
+        .element
+        .class_in(&session.types)
+        .ok_or("a member of a constraint array element other than an object")?
+        .to_owned();
+    let member = instances::normalize_identifier(&name.spelling);
+    let property = object_member(&class, &member, tree, session, properties, env)?;
+    Ok(Some((level, property)))
+}
+
+/// The element `a[i]`, or the member `a[i].m` of the object it refers to,
+/// that `id` names, with `i` the variable of the loop over `a`.
+#[allow(clippy::too_many_arguments)]
+fn element(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    properties: &[Property],
+    names: &Names<'_>,
+    env: &ConstEnv,
+    inputs: &HashMap<String, CallerInput>,
+    loops: &[Loop],
+) -> Result<Option<Typed>, String> {
+    if loops.is_empty() {
+        return Ok(None);
+    }
+    let native = tree.declarations();
+    let (level, member, width, signed) =
+        match element_member(id, tree, session, properties, names, env, inputs, loops)? {
+            Some((level, property)) => (
+                level,
                 Some(property.field.offset),
                 property.field.width,
                 property.field.signed,
-            )
-        }
-    };
+            ),
+            None => {
+                let Some(level) = loop_element(id, native, properties, names, inputs, loops)?
+                else {
+                    return Ok(None);
+                };
+                let element = &loops[level].element;
+                if !solver_element(element, tree, session, env) {
+                    return Err("a constraint array element other than 2-state integral".into());
+                }
+                (level, None, element.layout.width, element.layout.signed)
+            }
+        };
     Ok(Some(Typed {
         kind: Kind::Leaf(ConstraintExpr::Element {
             level: level as u32,
@@ -538,6 +681,17 @@ fn select_operand_type(
         }
         let dimensions = PackedDimensions::new(HashMap::default(), env, &TypeAliases::default());
         return expression_types::select(tree, session, base, &dimension.kind, native, &dimensions);
+    }
+    // A member of the object a handle or a loop element refers to.
+    let member = match handle_member(id, tree, session, properties, names, env, inputs, loops) {
+        Ok(Some((_, member))) => Some(member),
+        _ => element_member(id, tree, session, properties, names, env, inputs, loops)
+            .ok()
+            .flatten()
+            .map(|(_, member)| member),
+    };
+    if let Some(member) = member {
+        return semantic_types::of_type(&mut session.types, &tree.functions, &member.r#type, env);
     }
     let (name, lineage) = member_name(id, native, names, inputs, loops).ok()??;
     let ty = match super::member(&name, lineage, properties, names.aggregates, names.statics)? {
@@ -1708,46 +1862,28 @@ pub(in crate::ast) fn bind_inputs(
             // A member of the object a handle property of the class refers
             // to (IEEE 1800-2023 18.5.9): a variable of that object, solved
             // with the class's when the handle is rand (18.4).
-            ExprKind::Member {
-                expression,
-                separator,
-                name,
-            } if separator == "."
-                && matches!(
-                    &native
-                        .expression(expression_binding::ungroup(*expression, native))
-                        .kind,
-                    ExprKind::Name(_)
-                ) =>
+            ExprKind::Member { .. }
+                if handle_member(id, tree, session, properties, names, env, inputs, loops)?
+                    .is_some() =>
             {
-                let ExprKind::Name(handle) = &native
-                    .expression(expression_binding::ungroup(*expression, native))
-                    .kind
-                else {
-                    unreachable!("a name");
-                };
-                let handle = instances::normalize_identifier(&handle.spelling);
-                let handle = properties
-                    .iter()
-                    .rev()
-                    .find(|property| property.name == handle)
-                    .ok_or_else(|| format!("constraint variable `{handle}`"))?;
+                let (root, property) =
+                    handle_member(id, tree, session, properties, names, env, inputs, loops)?
+                        .expect("a handle member");
                 // The handle is a member the constraint accesses, as the
                 // member of its object is (8.18).
-                visible(handle, tree, session, env)?;
-                let class = handle
-                    .r#type
-                    .class_in(&session.types)
-                    .ok_or("a member of a constraint operand other than an object")?
-                    .to_owned();
-                let member = instances::normalize_identifier(&name.spelling);
-                let offset = handle.field.offset;
-                let property = object_member(&class, &member, tree, session, properties, env)?;
+                let (handle, input) = match root {
+                    PathHandle::Instance(handle) => {
+                        visible(handle, tree, session, env)?;
+                        (handle.field.offset, None)
+                    }
+                    PathHandle::Static(input) => (0, Some(input)),
+                };
                 Typed {
                     kind: Kind::Leaf(ConstraintExpr::Member {
-                        handle: offset,
+                        handle,
                         member: property.field.offset,
                         width: property.field.width,
+                        input,
                     }),
                     width: property.field.width,
                     signed: property.field.signed,
@@ -1935,14 +2071,21 @@ pub(in crate::ast) fn bind_inputs(
                 // That of a member of another object (18.5.9) too.
                 let mut members = Vec::new();
                 typed_reads(&value, &mut |leaf| {
-                    if let ConstraintExpr::Member { handle, member, .. } = leaf {
-                        members.push((*handle, *member));
+                    if let ConstraintExpr::Member {
+                        handle,
+                        member,
+                        input,
+                        ..
+                    } = leaf
+                    {
+                        members.push((*handle, *member, *input));
                     }
                     false
                 });
                 let mut randc = false;
-                for (handle, member) in members {
-                    randc |= randc_member(handle, member, tree, session, properties, env)?;
+                for (handle, member, input) in members {
+                    randc |=
+                        randc_member(handle, member, input, tree, session, properties, names, env)?;
                 }
                 randc |= typed_reads(&value, &mut |leaf| {
                     matches!(leaf, ConstraintExpr::Field(field) if properties
@@ -2275,7 +2418,7 @@ pub(in crate::ast) fn bind_inputs(
     // handle refers to: whether it is a random variable (18.5.13.2).
     let random_member = match &tree.declarations().expression(id).kind {
         ExprKind::DisableSoft { variable, .. } => {
-            random_member(*variable, tree, session, properties, env)?
+            random_member(*variable, tree, session, properties, names, env, inputs)?
         }
         _ => false,
     };
@@ -2284,7 +2427,9 @@ pub(in crate::ast) fn bind_inputs(
         ExprKind::SolveBefore { before, after } => before
             .iter()
             .chain(after)
-            .map(|&variable| self::random_member(variable, tree, session, properties, env))
+            .map(|&variable| {
+                self::random_member(variable, tree, session, properties, names, env, inputs)
+            })
             .collect::<Result<Vec<_>, _>>()?,
         _ => Vec::new(),
     };
@@ -2321,7 +2466,7 @@ pub(in crate::ast) fn bind_inputs(
         ExprKind::DisableSoft {
             variable,
             condition,
-        } => match bound(variable)? {
+        } => match selected_variable(bound(variable)?) {
             variable @ (ConstraintExpr::Field(_)
             | ConstraintExpr::Static(_)
             | ConstraintExpr::Size(_)) => Ok(ConstraintExpr::DisableSoft {
@@ -2443,44 +2588,48 @@ fn names_randc(expr: &ConstraintExpr, properties: &[Property]) -> bool {
 }
 
 /// Whether `id` names a rand member, not randc, of the object a rand handle
-/// property of the class refers to, as `h.m` (IEEE 1800-2023 18.4, 18.5.9).
+/// property of the class refers to, as `h.m` or `this.h.m`, or bits of one,
+/// as `h.m[0]` (IEEE 1800-2023 18.4, 18.5.9; see [`handle_member`]).
+#[allow(clippy::too_many_arguments)]
 fn random_member(
     id: ExprId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     properties: &[Property],
+    names: &Names<'_>,
     env: &ConstEnv,
+    inputs: &HashMap<String, CallerInput>,
 ) -> Result<bool, String> {
     let native = tree.declarations();
-    let ExprKind::Member {
-        expression,
-        separator,
-        name,
-    } = &native.expression(id).kind
-    else {
-        return Ok(false);
-    };
-    let ExprKind::Name(handle) = &native
-        .expression(expression_binding::ungroup(*expression, native))
-        .kind
-    else {
-        return Ok(false);
-    };
-    let handle = instances::normalize_identifier(&handle.spelling);
-    let Some(handle) = properties
-        .iter()
-        .rev()
-        .find(|property| property.name == handle)
-        .filter(|property| separator == "." && property.rand_object(&session.types))
-    else {
-        return Ok(false);
-    };
-    let Some(class) = handle.r#type.class_in(&session.types) else {
-        return Ok(false);
-    };
-    let member = instances::normalize_identifier(&name.spelling);
-    let member = object_member(&class, &member, tree, session, properties, env)?;
-    Ok(member.rand && !member.randc)
+    // A select names bits of the variable it selects.
+    let mut id = expression_binding::ungroup(id, native);
+    while let ExprKind::Select { expression, .. } = &native.expression(id).kind {
+        id = expression_binding::ungroup(*expression, native);
+    }
+    Ok(
+        match handle_member(id, tree, session, properties, names, env, inputs, &[]) {
+            // A static handle is a state value.
+            Ok(Some((PathHandle::Instance(handle), member))) => {
+                handle.rand_object(&session.types) && member.rand && !member.randc
+            }
+            _ => false,
+        },
+    )
+}
+
+/// The variable whose bits bound constraint operand `expr` selects (see
+/// the select binding), or `expr`: `disable soft` of a select names that
+/// variable (18.5.13.2).
+fn selected_variable(expr: ConstraintExpr) -> ConstraintExpr {
+    match expr {
+        ConstraintExpr::Resize { value, .. } => selected_variable(*value),
+        ConstraintExpr::Binary {
+            op, left, right, ..
+        } if op == ">>" && matches!(*right, ConstraintExpr::Literal(..)) => {
+            selected_variable(*left)
+        }
+        expr => expr,
+    }
 }
 
 /// The soft constraint or `disable soft` `constraint` with priority

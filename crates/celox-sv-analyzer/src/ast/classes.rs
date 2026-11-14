@@ -277,7 +277,13 @@ fn static_inputs(
 
 /// Whether constraint `expr` reads an input of its program.
 fn reads_input(expr: &celox_heap::randomization::Expr) -> bool {
-    expr.any(&mut |expr| matches!(expr, celox_heap::randomization::Expr::Input { .. }))
+    use celox_heap::randomization::Expr;
+    expr.any(&mut |expr| {
+        matches!(
+            expr,
+            Expr::Input { .. } | Expr::Member { input: Some(_), .. }
+        )
+    })
 }
 
 /// The name of the static bit that turns static rand property `name` off,

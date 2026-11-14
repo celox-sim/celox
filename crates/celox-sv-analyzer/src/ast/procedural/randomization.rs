@@ -1103,8 +1103,12 @@ pub(in crate::ast) fn inline_subroutines(
 
 /// Shift the inputs of constraint `expr` from index `first` on by `by`.
 fn shift_inputs(expr: &mut celox_heap::randomization::Expr, first: usize, by: usize) {
+    use celox_heap::randomization::Expr;
     expr.rewrite(&mut |expr| {
-        if let celox_heap::randomization::Expr::Input { index, .. } = expr
+        if let Expr::Input { index, .. }
+        | Expr::Member {
+            input: Some(index), ..
+        } = expr
             && *index >= first
         {
             *index += by;

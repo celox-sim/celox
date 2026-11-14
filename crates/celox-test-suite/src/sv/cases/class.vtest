@@ -6100,6 +6100,109 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq checks 1023))
 
+; A select of a member a handle path names, `h.m[0]`, `this.h.m[3:0]`,
+; `super.h.m[1:0]` or the receiver's `item.h.m[6]`, and of a member of a loop
+; element, takes its bits in every constraint position: a constraint, a
+; guard, `dist`, `solve ... before`, `disable soft` and a function's argument
+; (IEEE 1800-2023 11.5.1, 18.5.9, Syntax 18-8), through a static handle too;
+; so do `this.a[0]` and `this.q.size()`.
+(case constraint_member_path_selects
+  (source "member_path_selects.sv" #"
+module Top(output int checks);
+    class Inner;
+        rand bit [7:0] m;
+        bit [7:0] s = 8'hA5;
+    endclass
+    class Base;
+        rand Inner bh;
+        function new(); bh = new; endfunction
+    endclass
+    class Outer extends Base;
+        rand Inner h;
+        Inner st;
+        rand bit [7:0] a[2];
+        rand byte q[];
+        rand bit [3:0] y, z;
+        rand bit b;
+        function new(); super.new(); h = new; st = new; endfunction
+        function bit [3:0] id(bit [3:0] v); return v; endfunction
+        constraint c {
+            h.m[3:0] == 4'h3;
+            this.h.m[7] == 1'b1;
+            super.bh.m[1:0] == 2'b10;
+            y == st.s[3:0];
+            z == id(st.s[7:4]);
+            h.m[0] -> b;
+            st.s[7] -> this.a[0][1:0] == 2'b01;
+            b dist {0 := 1, 1 := 1};
+            this.q.size() inside {[1:3]};
+            solve h.m[0] before b;
+            solve this.a[0] before y;
+            solve this.q.size() before z;
+        }
+    endclass
+    class Soft;
+        rand Inner h;
+        function new(); h = new; endfunction
+        constraint s { soft h.m[7:4] == 4'h9; }
+        constraint d { disable soft h.m[2]; }
+    endclass
+    class Loop;
+        rand bit [3:0] v;
+        Inner hs[2];
+        function new(); foreach (hs[i]) hs[i] = new; endfunction
+        // A parenthesized element, `(hs[i]).s`, names the same member.
+        constraint c { foreach (hs[i]) { v > hs[i].s[3:0]; v < (hs[i]).s[3:0] + 4'h2; } }
+    endclass
+    // A static handle is a state value as another handle is.
+    class Shared;
+        static Inner head;
+        static Inner none;
+        rand bit [3:0] v, w;
+        constraint c {
+            v == head.s[3:0];
+            head.s[7] -> v != 0;
+            none != null -> w == none.s[3:0];
+            w == 4'h2;
+        }
+    endclass
+    function int via_receiver(Outer item);
+        return item.randomize() with { item.h.m[6] == 1'b0; };
+    endfunction
+    initial begin
+        Outer o = new;
+        Soft sf = new;
+        Loop lp = new;
+        Shared sh = new;
+        bit [7:0] m, bm, a0;
+        int nines;
+        checks = 0;
+        if (o.randomize()) begin
+            m = o.h.m;
+            bm = o.bh.m;
+            a0 = o.a[0];
+            checks += (m[3:0] == 4'h3 && m[7] && bm[1:0] == 2'b10) * 1;
+            checks += (o.y == 4'h5 && o.z == 4'hA && o.b == 1 && a0[1:0] == 2'b01) * 2;
+            checks += (o.q.size() inside {[1:3]}) * 4;
+        end
+        if (via_receiver(o)) begin
+            m = o.h.m;
+            checks += (m[6] == 1'b0 && m[3:0] == 4'h3) * 8;
+        end
+        nines = 0;
+        repeat (16) if (sf.randomize()) begin
+            m = sf.h.m;
+            if (m[7:4] == 4'h9) nines++;
+        end
+        checks += (nines < 16) * 16;
+        checks += (lp.randomize() && lp.v == 4'h6) * 32;
+        Shared::head = new;
+        checks += (sh.randomize() && sh.v == 4'h5 && sh.w == 4'h2) * 64;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 127))
+
 ; `std::randomize(v...) with { ... }` solves the variables with the
 ; constraints, which also read other variables of the scope, and writes them
 ; only when it succeeds (IEEE 1800-2023 18.12.1).

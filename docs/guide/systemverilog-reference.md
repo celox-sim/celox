@@ -363,9 +363,14 @@ blocks in programs. Two region deviations are listed under
   them exactly. A `unique` constraint takes singular properties of the class
   of equivalent types; other variables, arrays and slices in it are
   unsupported. A constraint may name a member of the object a handle
-  property refers to (`h.m`, 18.5.9): a variable solved with the object
-  through a rand handle, a state value through another; longer chains
-  (`h.g.m`) are unsupported. A guard of state values, as of `if` or `->`, is
+  property refers to (`h.m`, 18.5.9), the handle named as any property is,
+  as `this.h.m`, `super.h.m` or the receiver's `item.h.m`, a static handle
+  too: a variable solved with the object through a rand handle, a state
+  value through another;
+  longer chains (`h.g.m`) are unsupported. A select of such a member or of
+  a member of a loop element, as `h.m[3:0]` or `hs[i].m[0]`, takes its bits
+  in every constraint position, `solve ... before` and `disable soft`
+  included, the latter naming the member. A guard of state values, as of `if` or `->`, is
   evaluated before solving, so a constraint it leaves out reads no member of
   a null handle (18.5.13).
 - Inline `with` constraints: aggregate caller-scope inputs, typed
