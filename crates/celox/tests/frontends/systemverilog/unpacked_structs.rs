@@ -778,7 +778,6 @@ fn integral_array_member_boundaries_are_explicit() {
     }
     for fields in [
         "string values[2];",
-        "int values[];",
         "int values[0];",
         "int values[2] = '{1, 2};",
     ] {
@@ -870,5 +869,121 @@ endmodule
         assert_eq!(sim.get(sim.signal("b")), 5u32.into());
         assert_eq!(sim.get(sim.signal("kept")), 0xffff_ffffu32.into());
         assert_eq!(sim.get(sim.signal("results")), 1u8.into());
+    }
+}
+
+sv_backends! {
+    fn container_members_hold_values(sim) {
+        @setup {
+            // A dynamic array, queue or associative array member (IEEE
+            // 1800-2023 7.2, 7.4) is a container of its own: its methods,
+            // elements and patterns work as a variable's, and an assignment
+            // of the structure, a container element holding it, a formal and
+            // a function result copy its value (7.2.1, 7.6, 13.5).
+            let source = r#"module Top(output int sizes, output int copies,
+                                    output int patterns, output int calls);
+                typedef struct { string arg; string args[$]; int d[]; int m[string]; } p_t;
+                typedef struct { int tag; p_t inner; } n_t;
+                class K; p_t s; endclass
+                p_t q[$];
+                n_t n;
+                K k;
+                function automatic int poke(p_t v); v.args[0] = "f"; return v.args.size(); endfunction
+                function automatic p_t make();
+                    p_t r;
+                    r.args.push_back("r0");
+                    r.args.push_back("r1");
+                    return r;
+                endfunction
+                initial begin
+                    p_t t, t2, t3, t4;
+                    t.args.push_back("a");
+                    t.args.push_back("b");
+                    t.d = new[3];
+                    t.d[2] = 7;
+                    t.m["k"] = 5;
+                    sizes = t.args.size() * 1000 + t.d.size() * 100 + t.d[2] * 10 + t.m.size();
+                    // Copies keep their own containers.
+                    t2 = t;
+                    t2.args[0] = "z";
+                    t2.m["k"] = 6;
+                    q.push_back(t);
+                    t.args[1] = "y";
+                    t3 = q[0];
+                    t3.args.push_back("w");
+                    k = new;
+                    k.s = t;
+                    k.s.args[0] = "c";
+                    n.inner = t;
+                    n.inner.args[0] = "N";
+                    copies = (t.args[0] == "a") + 2 * (t2.args[0] == "z") + 4 * (t.m["k"] == 5)
+                        + 8 * (q[0].args[1] == "b") + 16 * (q[0].args.size() == 2)
+                        + 32 * (k.s.args[0] == "c") + 64 * (n.inner.args[0] == "N")
+                        + 128 * (t.args[0] == "a") + 256 * (t == t) + 512 * (t != t2);
+                    // Patterns give container members their values.
+                    t3 = '{arg: "x", args: '{"m", "n"}, d: '{1, 2}, m: t.m};
+                    q.push_back('{"p", {t.args, "e"}, t.d, t.m});
+                    patterns = (t3.args[1] == "n") + 2 * (t3.d.size() == 2) + 4 * (t3.m["k"] == 5)
+                        + 8 * (q[1].args.size() == 3) + 16 * (q[$].args[$] == "e");
+                    foreach (q[1].args[i]) patterns += 100;
+                    t4 = make();
+                    calls = poke(t) * 10 + (t.args[0] == "a") + 100 * (t4.args[1] == "r1");
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("container_members.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let sizes = sim.signal("sizes");
+        assert_eq!(sim.get(sizes), BigUint::from(2371u32));
+        let copies = sim.signal("copies");
+        assert_eq!(sim.get(copies), BigUint::from(1023u32));
+        let patterns = sim.signal("patterns");
+        assert_eq!(sim.get(patterns), BigUint::from(331u32));
+        let calls = sim.signal("calls");
+        assert_eq!(sim.get(calls), BigUint::from(121u32));
+    }
+}
+
+sv_backends! {
+    fn static_queues_of_structures_with_queue_members(sim) {
+        @setup {
+            // UVM 1.2's `uvm_component::m_uvm_applied_cl_action`: a static
+            // queue property of structures with a string queue member,
+            // filled from a local structure and updated by member.
+            let source = r#"module Top(output int value);
+                class C;
+                    typedef struct { string arg; string args[$]; int unsigned used; } parsed_t;
+                    static parsed_t applied[$];
+                    static function void add(string s);
+                        string a[$];
+                        parsed_t t;
+                        a.push_back(s);
+                        a.push_back("y");
+                        t.args = a;
+                        t.arg = s;
+                        applied.push_back(t);
+                    endfunction
+                    static function int use_all();
+                        int total;
+                        foreach (applied[i]) begin
+                            string args[$] = applied[i].args;
+                            applied[i].used++;
+                            total += args.size() * 100 + applied[i].used * 10 + (args[0] == applied[i].arg);
+                        end
+                        return total;
+                    endfunction
+                endclass
+                initial begin
+                    C::add("one");
+                    C::add("two");
+                    void'(C::use_all());
+                    value = C::use_all();
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("static_struct_queue.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(442u32));
     }
 }

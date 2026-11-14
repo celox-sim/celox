@@ -363,6 +363,19 @@ pub(super) fn native_type(
     {
         return Ok(shape.container.clone());
     }
+    // A member of a variable of unpacked structure type, which is a leaf
+    // variable of its own (see `unpacked_structs`).
+    if let Some(name) = unpacked_structs::native_member(id, native, dims)
+        && let Some(shape) = dims.get(&name)
+    {
+        return Ok(shape.container.clone());
+    }
+    // A container member of a container element, `q[i].m`.
+    if matches!(native.expression(ungrouped).kind, ExprKind::Member { .. })
+        && let Some((member, _)) = element_member(id, native, tree, session, dims)?
+    {
+        return Ok(member.container.clone());
+    }
     // A hierarchical name, or the name of a member of an interface, is
     // bound to a local variable of the type of the object it denotes.
     if matches!(native.expression(ungrouped).kind, ExprKind::Member { .. })

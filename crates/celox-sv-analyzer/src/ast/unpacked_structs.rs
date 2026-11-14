@@ -212,9 +212,19 @@ pub(in crate::ast) fn native_type(
     let members = fields
         .into_iter()
         .map(|(name, ty, default)| {
+            // A dynamic array, queue or associative array member is held by
+            // its handle (7.2.1, 7.4).
+            if ty.container.is_some() {
+                return Some(Member {
+                    name,
+                    r#type: ty,
+                    default,
+                    width: classes::HANDLE_WIDTH,
+                })
+                .filter(|member| member.default.is_none());
+            }
             // A chandle is no packed array element (IEEE 1800-2023 6.14).
-            if ty.container.is_some()
-                || (ty.is_chandle() && ty.packed_ranges.len() > 1)
+            if (ty.is_chandle() && ty.packed_ranges.len() > 1)
                 // Each event member would need its own synchronization
                 // object (IEEE 1800-2023 15.5).
                 || matches!(
@@ -809,9 +819,10 @@ pub(in crate::ast) fn record(
                 | TypeKind::Process
         )
     };
-    let handles = leaves
-        .iter()
-        .any(|leaf| matches!(leaf.r#type.kind, TypeKind::String | TypeKind::Object));
+    let handles = leaves.iter().any(|leaf| {
+        leaf.r#type.container.is_some()
+            || matches!(leaf.r#type.kind, TypeKind::String | TypeKind::Object)
+    });
     let uniform = leaves.iter().all(two_state) || !leaves.iter().any(two_state);
     if aggregate.width() <= 64 && !handles && uniform {
         return Ok(None);
