@@ -111,18 +111,10 @@ pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     pub(crate) timed: bool,
     /// Some report site reads the time it issues its report at.
     pub(crate) timestamped_reports: bool,
-    /// Identity of the state layout, computed on first checkpoint use.
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: a cached state-layout fingerprint filled on first checkpoint use behind &self"
-    )]
-    pub(super) checkpoint_fingerprint: std::sync::OnceLock<u64>,
-    /// State objects as state files name them, built on first use.
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: a cached state-file schema filled on first use behind &self"
-    )]
-    pub(super) state_schema: std::sync::OnceLock<Arc<state_file::StateSchema>>,
+    /// Identity of the state layout, which checkpoints carry.
+    pub(super) checkpoint_fingerprint: u64,
+    /// State objects as state files name them.
+    pub(super) state_schema: Arc<state_file::StateSchema>,
     pub(crate) diagnostics: crate::RuntimeDiagnostics,
     pub(crate) plusargs: celox_runtime::plusargs::Plusargs,
     tick_timing: TickTiming,
@@ -231,9 +223,14 @@ impl<B: SimBackend> Simulator<B> {
         let runtime_events = RuntimeEventStream::new(sites);
         let native = NativeHost::new(&backend, &program);
         let observation = SlotObservation::new(&program.runtime_schema);
+        // The tables of the state layout, which checkpoints, state files,
+        // collections and testbench writes read through `&self`.
+        let heap = super::heap::HeapRoots::new(&backend, &program);
+        let checkpoint_fingerprint = crate::ir::state_fingerprint(backend.layout(), &program);
+        let state_schema = Arc::new(Self::build_state_schema(&backend, &program));
         #[expect(
             clippy::disallowed_types,
-            reason = "cross-thread: creates the pending-event queue shared with a RuntimeEventDrain thread, and the single-threaded lazily filled caches"
+            reason = "cross-thread: creates the pending-event queue shared with a RuntimeEventDrain thread"
         )]
         let mut sim = Self {
             backend,
@@ -244,7 +241,7 @@ impl<B: SimBackend> Simulator<B> {
             dirty: false,
             declaration_phase: false,
             warnings,
-            heap: Default::default(),
+            heap,
             file_io: Default::default(),
             native,
             pending_host_events: Arc::new(std::sync::Mutex::new(PendingRuntimeEvents {
@@ -263,8 +260,8 @@ impl<B: SimBackend> Simulator<B> {
             tb_counters: (0, 0, 0),
             runtime_events,
             comb_observers,
-            checkpoint_fingerprint: std::sync::OnceLock::new(),
-            state_schema: std::sync::OnceLock::new(),
+            checkpoint_fingerprint,
+            state_schema,
             diagnostics: crate::RuntimeDiagnostics::default(),
             plusargs: celox_runtime::plusargs::Plusargs::default(),
             tick_timing: TickTiming::default(),
