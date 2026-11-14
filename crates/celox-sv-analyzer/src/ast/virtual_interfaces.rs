@@ -694,16 +694,20 @@ pub(super) fn read(
     for (id, signal) in signals {
         arms.push((id, select(Expr::Ident(signal))?));
     }
+    // The width of the selected member as the scope reads it, or else as
+    // the interface declares it: a scope outside the instances, such as a
+    // package's class, does not see their signals.
+    let declared = || {
+        casts::expr_type_from_type(functions, &found.r#type, &ConstEnv::default())
+            .map(|shape| shape.width)
+    };
     let (width, signed) = match arms.first() {
         Some((_, value)) => (
-            expr_static_width(tree, value, dimensions),
+            expr_static_width(tree, value, dimensions).or_else(declared),
             dimensions::expression_signedness(value, dimensions, &dimensions.const_env)
-                .unwrap_or(false),
+                .unwrap_or_else(|| found.r#type.is_signed()),
         ),
-        None => {
-            let shape = casts::expr_type_from_type(functions, &found.r#type, &ConstEnv::default());
-            (shape.map(|shape| shape.width), found.r#type.is_signed())
-        }
+        None => (declared(), found.r#type.is_signed()),
     };
     let width = width
         .ok_or_else(|| unsupported(format!("width of virtual interface member `{member}`")))?;
