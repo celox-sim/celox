@@ -825,6 +825,59 @@ fn randsequence_code_block_loops_keep_their_break_and_continue() {
 }
 
 #[test]
+fn randsequence_production_controls_choose_their_productions() {
+    // IEEE 1800-2023 18.17.2-18.17.4: `if` and `case` choose a production
+    // as the statements of their names do (`case` by `===`, several labels,
+    // `default`), and `repeat` repeats one, its count evaluated once.
+    let source = "module Top;
+        int calls;
+        function automatic int count(); calls++; return 3; endfunction
+        function automatic int run(int select, bit flag);
+            int x;
+            randsequence(main)
+                main : if (flag) set else clear pick repeat (count()) bump;
+                set : { x = 100; };
+                clear : { x = 0; };
+                pick : case (select) 0, 1 : low; 2 : high; default : none; endcase;
+                low : { x += 10; };
+                high : { x += 20; };
+                none : { x += 30; };
+                bump : { x++; };
+            endsequence
+            return x;
+        endfunction
+        initial $display(\"%0d %0d %0d %0d %0d\", run(0, 1), run(1, 0), run(2, 1), run(7, 0), calls);
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["113 13 123 33 4"]
+    );
+}
+
+#[test]
+fn randsequence_case_controls_compare_as_the_case_statement() {
+    // IEEE 1800-2023 18.17.3: a case production control is the case
+    // statement's comparison, chandles and `null` included (6.14).
+    let source = "module Top;
+        function automatic int run(chandle h, chandle other);
+            int x;
+            randsequence(main)
+                main : case (h) null : none; other : same; default : some; endcase;
+                none : { x = 1; };
+                same : { x = 2; };
+                some : { x = 3; };
+            endsequence
+            return x;
+        endfunction
+        initial begin
+            chandle h, k;
+            $display(\"%0d %0d\", run(null, k), run(h, null));
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1"]);
+}
+
+#[test]
 fn randsequence_forms_not_expanded_are_named() {
     // Each form the expansion does not provide yet is rejected by name; a
     // production that reaches itself has no expansion; an undeclared one is
@@ -835,16 +888,11 @@ fn randsequence_forms_not_expanded_are_named() {
             "recursive randsequence production `main`",
         ),
         ("main : missing;", "no randsequence production of this name"),
-        ("main : if (1) a; a : {};", "randsequence if production"),
-        (
-            "main : repeat (2) a; a : {};",
-            "randsequence repeat production",
-        ),
-        (
-            "main : case (1) 1 : a; endcase; a : {};",
-            "randsequence case production",
-        ),
         ("main : rand join a a; a : {};", "randsequence rand join"),
+        (
+            "main : case (1) default : a; 2 : a; default a; endcase; a : {};",
+            "randsequence case production with more than one default",
+        ),
         (
             "main : a := 1 {}; a : {};",
             "randsequence weight code block",

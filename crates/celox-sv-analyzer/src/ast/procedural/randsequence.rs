@@ -5,14 +5,16 @@
 //! expansion and a code block as its statements, which see the variables of
 //! the scope around the statement. A production of several rules picks one
 //! at random by their weights (18.17.1), 1 unless given, from the thread's
-//! random number generator as `randcase` does (18.14.2, 18.16). A
-//! production that refers to itself, directly or through others, has no
-//! expansion and is rejected; so are the forms not provided yet, each by
-//! its name.
+//! random number generator as `randcase` does (18.14.2, 18.16). The
+//! production controls `if`, `case` and `repeat` (18.17.2-18.17.4) become
+//! the statements of their names around their productions. A production
+//! that refers to itself, directly or through others, has no expansion and
+//! is rejected; so are the forms not provided yet, each by its name.
 
 use super::*;
 use celox_sv_syntax::{
-    ExprKind, Randsequence, RsProd, RsProduction, RsRule, StatementId, StatementKind,
+    ExprId, ExprKind, Randsequence, RsCaseItem, RsProd, RsProduction, RsRule, StatementId,
+    StatementKind,
 };
 
 /// How deep `randsequence` statements in code blocks may nest.
@@ -45,14 +47,40 @@ enum Frame<'p> {
         width: usize,
         items: Vec<Vec<Stmt>>,
     },
+    /// An `if` production control (18.17.2) on `condition`, its `then`
+    /// production expanded into `then_body` once done, then its `otherwise`
+    /// one if any.
+    If {
+        condition: Expr,
+        then_body: Option<Vec<Stmt>>,
+        otherwise: Option<ExprId>,
+    },
+    /// A `repeat` production control (18.17.4) of count `count`, evaluated
+    /// before it.
+    Repeat { count: Expr },
+    /// A `case` production control (18.17.3), of kind `kind` on `selector`
+    /// comparing chandles if `chandles`, as the case statement is: the
+    /// productions of `items` before `next` expanded into `arms` and
+    /// `default`.
+    Case {
+        kind: CaseKind,
+        selector: Expr,
+        chandles: bool,
+        items: &'p [RsCaseItem],
+        next: usize,
+        arms: Vec<CaseItemBase<Expr, LValue>>,
+        default: Option<Vec<Stmt>>,
+    },
 }
 
 /// What the frame on top of the stack does next.
 enum Step<'p> {
     /// Expand the production of this name.
     Enter(String),
-    /// Expand this rule.
+    /// Push this frame.
     Push(Frame<'p>),
+    /// Push this frame and expand the production of this name for it.
+    Within(Frame<'p>, String),
     /// The frame is done, with these statements.
     Finish(Vec<Stmt>),
 }
@@ -90,9 +118,9 @@ impl BodyBuilder<'_, '_, '_> {
     }
 
     /// The statements of production `main` (see the module documentation).
-    fn expand(
+    fn expand<'p>(
         &mut self,
-        productions: &HashMap<String, &RsProduction>,
+        productions: &HashMap<String, &'p RsProduction>,
         main: &str,
     ) -> Converted<Vec<Stmt>> {
         let mut frames = vec![self.enter(productions, main)?];
@@ -103,6 +131,7 @@ impl BodyBuilder<'_, '_, '_> {
             let step = match frames.last_mut() {
                 None => return Ok(finished.expect("the main production is expanded")),
                 Some(Frame::Rule { rule, next, output }) => {
+                    let rule: &'p RsRule = rule;
                     output.extend(finished.take().into_iter().flatten());
                     loop {
                         let Some(item) = rule.items.get(*next) else {
@@ -114,7 +143,58 @@ impl BodyBuilder<'_, '_, '_> {
                                 output.extend(self.native_body_machine(&[*block])?);
                             }
                             RsProd::Item(item) => break Step::Enter(item_name(native, *item)?),
-                            _ => unreachable!("rejected by `check`"),
+                            // A production control (18.17.2-18.17.4) behaves
+                            // as the statement of its name around its
+                            // productions.
+                            RsProd::If {
+                                condition,
+                                then,
+                                otherwise,
+                            } => {
+                                output.extend(self.effects(&[*condition])?);
+                                let condition = self.native_chandle_value(*condition)?;
+                                let frame = Frame::If {
+                                    condition,
+                                    then_body: None,
+                                    otherwise: *otherwise,
+                                };
+                                break Step::Within(frame, item_name(native, *then)?);
+                            }
+                            // Its count is evaluated once, before the first
+                            // repetition.
+                            RsProd::Repeat { count, item } => {
+                                output.extend(self.effects(&[*count])?);
+                                let value = self.native_value(*count)?;
+                                let saved = self.hidden_of(*count)?.1;
+                                output.push(Stmt::Assign {
+                                    lhs: LValue::Ident(saved.clone()),
+                                    rhs: value,
+                                    nonblocking: false,
+                                });
+                                let frame = Frame::Repeat {
+                                    count: Expr::Ident(saved),
+                                };
+                                break Step::Within(frame, item_name(native, *item)?);
+                            }
+                            // As the case statement is (18.17.3, 12.5).
+                            RsProd::Case { selector, items } => {
+                                let labels = items
+                                    .iter()
+                                    .flat_map(|item| item.labels.iter().copied())
+                                    .collect::<Vec<_>>();
+                                let (effects, kind, selector, chandles) =
+                                    self.case_header("case", None, *selector, &labels)?;
+                                output.extend(effects);
+                                break Step::Push(Frame::Case {
+                                    kind,
+                                    selector,
+                                    chandles,
+                                    items,
+                                    next: 0,
+                                    arms: Vec::new(),
+                                    default: None,
+                                });
+                            }
                         }
                     }
                 }
@@ -147,10 +227,80 @@ impl BodyBuilder<'_, '_, '_> {
                         }
                     }
                 }
+                Some(Frame::If {
+                    condition,
+                    then_body,
+                    otherwise,
+                }) => {
+                    let body = finished.take().expect("a production is expanded");
+                    match (then_body.is_none(), otherwise.take()) {
+                        (true, Some(item)) => {
+                            *then_body = Some(body);
+                            Step::Enter(item_name(native, item)?)
+                        }
+                        (true, None) => Step::Finish(vec![Stmt::If {
+                            condition: condition.clone(),
+                            then_body: body,
+                            else_body: Vec::new(),
+                        }]),
+                        (false, _) => Step::Finish(vec![Stmt::If {
+                            condition: condition.clone(),
+                            then_body: then_body.take().unwrap_or_default(),
+                            else_body: body,
+                        }]),
+                    }
+                }
+                Some(Frame::Repeat { count }) => Step::Finish(vec![Stmt::Loop {
+                    kind: LoopKind::Repeat(count.clone()),
+                    init: Vec::new(),
+                    condition: None,
+                    step: Vec::new(),
+                    body: finished.take().expect("a production is expanded"),
+                }]),
+                Some(Frame::Case {
+                    kind,
+                    selector,
+                    chandles,
+                    items,
+                    next,
+                    arms,
+                    default,
+                }) => {
+                    if let Some(body) = finished.take() {
+                        let item = &items[*next - 1];
+                        if item.labels.is_empty() {
+                            *default = Some(body);
+                        } else {
+                            let matches = item
+                                .labels
+                                .iter()
+                                .map(|label| celox_sv_syntax::CaseMatch::Expression(*label))
+                                .collect::<Vec<_>>();
+                            let labels = self.native_case_labels(&matches, false, *chandles)?;
+                            arms.push(CaseItemBase { labels, body });
+                        }
+                    }
+                    match (*items).get(*next) {
+                        Some(item) => {
+                            *next += 1;
+                            Step::Enter(item_name(native, item.item)?)
+                        }
+                        None => Step::Finish(vec![Stmt::Case {
+                            kind: *kind,
+                            selector: selector.clone(),
+                            items: std::mem::take(arms),
+                            default: default.take(),
+                        }]),
+                    }
+                }
             };
             match step {
                 Step::Enter(name) => frames.push(self.enter(productions, &name)?),
                 Step::Push(frame) => frames.push(frame),
+                Step::Within(frame, name) => {
+                    frames.push(frame);
+                    frames.push(self.enter(productions, &name)?);
+                }
                 Step::Finish(output) => {
                     frames.pop();
                     finished = Some(output);
@@ -290,11 +440,27 @@ fn check(
                 match item {
                     RsProd::Item(item) => jobs.push(Visit::Enter(item_name(native, *item)?)),
                     RsProd::Code(block) => check_code(native, *block)?,
-                    RsProd::If { .. } => return Err(unsupported("randsequence if production")),
-                    RsProd::Repeat { .. } => {
-                        return Err(unsupported("randsequence repeat production"));
+                    RsProd::If {
+                        then, otherwise, ..
+                    } => {
+                        for item in std::iter::once(then).chain(otherwise) {
+                            jobs.push(Visit::Enter(item_name(native, *item)?));
+                        }
                     }
-                    RsProd::Case { .. } => return Err(unsupported("randsequence case production")),
+                    RsProd::Repeat { item, .. } => {
+                        jobs.push(Visit::Enter(item_name(native, *item)?))
+                    }
+                    RsProd::Case { items, .. } => {
+                        // At most one default (18.17.3).
+                        if items.iter().filter(|item| item.labels.is_empty()).count() > 1 {
+                            return Err(AnalyzerError::Parse(
+                                "randsequence case production with more than one default".into(),
+                            ));
+                        }
+                        for item in items {
+                            jobs.push(Visit::Enter(item_name(native, item.item)?));
+                        }
+                    }
                 }
             }
         }

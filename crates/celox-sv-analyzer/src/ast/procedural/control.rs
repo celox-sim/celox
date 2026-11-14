@@ -519,53 +519,17 @@ impl BodyBuilder<'_, '_, '_> {
                         if mode.as_deref() == Some("matches") {
                             return Err(unsupported("pattern-matching case statement"));
                         }
-                        // A case statement compares with `===` (IEEE 1800-2023 12.5).
-                        let operator = match (mode.as_deref(), keyword.as_str()) {
-                            (Some("inside"), _) => "inside",
-                            (_, "case") => "===",
-                            (_, keyword) => keyword,
-                        };
-                        // Only `case` compares chandles, with chandle or
-                        // `null` items (6.14); the binder rejects them
-                        // elsewhere. A selector is a chandle also when only
-                        // a default arm compares nothing with it.
-                        let mut chandles = operator == "==="
-                            && expression_binding::native_chandle(
-                                self.tree,
-                                *value,
-                                native,
-                                &self.dims,
-                                self.session,
-                            );
-                        for case_match in arms.iter().flat_map(|arm| &arm.matches) {
-                            if let celox_sv_syntax::CaseMatch::Expression(label) = case_match {
-                                chandles |= expression_binding::check_chandle_equality(
-                                    operator,
-                                    *value,
-                                    *label,
-                                    self.tree,
-                                    native,
-                                    &self.dims,
-                                    self.session,
-                                )?;
-                            }
-                        }
-                        let kind = if mode.as_deref() == Some("inside") {
-                            CaseKind::Inside
-                        } else {
-                            match keyword.as_str() {
-                                "case" => CaseKind::Exact,
-                                "casez" => CaseKind::Z,
-                                "casex" => CaseKind::X,
-                                _ => return Err(disagreement()),
-                            }
-                        };
-                        output.extend(self.effects(&[*value])?);
-                        let selector = if chandles {
-                            self.native_chandle_value(*value)?
-                        } else {
-                            self.native_value(*value)?
-                        };
+                        let labels = arms
+                            .iter()
+                            .flat_map(|arm| &arm.matches)
+                            .filter_map(|case_match| match case_match {
+                                celox_sv_syntax::CaseMatch::Expression(label) => Some(*label),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        let (effects, kind, selector, chandles) =
+                            self.case_header(keyword, mode.as_deref(), *value, &labels)?;
+                        output.extend(effects);
                         jobs.push(Job::CaseNext(CaseState {
                             id,
                             index: 0,
@@ -1274,7 +1238,67 @@ impl BodyBuilder<'_, '_, '_> {
         }
         Ok(output)
     }
-    fn native_case_labels(
+    /// The header of case statement `keyword` (`case`, `casez` or `casex`)
+    /// in mode `mode` (`inside` or none) on selector `value`, its label
+    /// expressions `labels`: the statements evaluating the selector's
+    /// effects, the kind, the selector, and whether the statement compares
+    /// chandles (IEEE 1800-2023 12.5, 6.14).
+    pub(super) fn case_header(
+        &mut self,
+        keyword: &str,
+        mode: Option<&str>,
+        value: celox_sv_syntax::ExprId,
+        labels: &[celox_sv_syntax::ExprId],
+    ) -> Converted<(Vec<Stmt>, CaseKind, Expr, bool)> {
+        let native = self.tree.declarations();
+        // A case statement compares with `===` (IEEE 1800-2023 12.5).
+        let operator = match (mode, keyword) {
+            (Some("inside"), _) => "inside",
+            (_, "case") => "===",
+            (_, keyword) => keyword,
+        };
+        // Only `case` compares chandles, with chandle or `null` items
+        // (6.14); the binder rejects them elsewhere. A selector is a
+        // chandle also when only a default arm compares nothing with it.
+        let mut chandles = operator == "==="
+            && expression_binding::native_chandle(
+                self.tree,
+                value,
+                native,
+                &self.dims,
+                self.session,
+            );
+        for label in labels {
+            chandles |= expression_binding::check_chandle_equality(
+                operator,
+                value,
+                *label,
+                self.tree,
+                native,
+                &self.dims,
+                self.session,
+            )?;
+        }
+        let kind = if mode == Some("inside") {
+            CaseKind::Inside
+        } else {
+            match keyword {
+                "case" => CaseKind::Exact,
+                "casez" => CaseKind::Z,
+                "casex" => CaseKind::X,
+                _ => return Err(disagreement()),
+            }
+        };
+        let effects = self.effects(&[value])?;
+        let selector = if chandles {
+            self.native_chandle_value(value)?
+        } else {
+            self.native_value(value)?
+        };
+        Ok((effects, kind, selector, chandles))
+    }
+
+    pub(super) fn native_case_labels(
         &mut self,
         labels: &[celox_sv_syntax::CaseMatch],
         inside: bool,
