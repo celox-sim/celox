@@ -313,7 +313,7 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
   `cover property`（モジュール・generate 項目）。固定クロック数だけ離れた
   ステップ列（`a ##1 b`、最大1024ティック）を `|->` または `|=>` で連結したもの。
 - 上限のあるサイクル遅延範囲（`a ##[1:3] b`、先頭にも書けます）と、被演算子に match 項目を持たない
-  sequence の `or`・`and`・`intersect`。
+  sequence の `or`・`and`・`intersect`、`b throughout s`。
   試行は一致の仕方のいずれかが一致した最初のティックで成功し、どれも一致し得なく
   なった最初のティックで失敗します。一致の仕方は最大1024通りで、property 全体が
   その sequence である場合だけです（含意、`expect` 文、ローカル変数や match 項目を
@@ -324,14 +324,15 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
   領域で成功・失敗の文（既定は `$error`）を実行して続行します。property は Boolean、
   含意、固定遅延の sequence（名前付きも可）で、`disable iff`・ローカル変数・match 項目は未対応です。
 - 仮引数無しの名前付き property・sequence（同一モジュール、generate 外、
-  本体が同部分集合内）。組み込み整数型のローカル変数と match 項目。
+  本体が同部分集合内）。組み込み整数型のローカル変数と match 項目。ローカル変数を持たない
+  名前付き sequence は、同じクロックか先頭にあれば別の sequence の被演算子にできます。
 - 時間無しのブロッキングアクション、報告・重大度タスク、停止・ノンブロッキング
   代入・プロセス開始や制御・イベント発行をしないサブルーチン呼び出し。
 
 特に未対応: 手続き的並行アサーション、暗黙・既定クロック、仮引数付きや
 他スコープの名前付き property・sequence、上限の無いサイクル遅延範囲（`##[1:$]`）、
-繰り返し、sequence 演算子 `throughout`・`within`、同じティックで一致し得ない sequence の
-`intersect`、複数サイクル
+繰り返し、sequence 演算子 `within`、同じティックで一致し得ない sequence の `intersect`、
+異なるクロックやローカル変数を持つ名前付き sequence の sequence 内インスタンス、複数サイクル
 sequence 内のインスタンス、複数サイクル sequence への `disable iff`、
 複数サイクルや名前付きの被演算子を持つ `iff`、
 述語や match 項目値中のユーザー関数呼び出し、時間付き・ノンブロッキングなアクション文。

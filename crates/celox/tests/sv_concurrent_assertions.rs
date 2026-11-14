@@ -431,6 +431,47 @@ endmodule"#;
     assert_eq!(sim.get(sim.signal("failed")), 0u32.into());
 }
 
+/// `b throughout s` holds `b` at each tick from the start of `s` to its
+/// match (IEEE 1800-2023 16.9.9), and a named sequence is an operand as
+/// its body (16.8).
+#[test]
+fn throughout_holds_its_condition_over_each_tick_of_the_sequence() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit clk;
+ int cnt;
+ int j_passed, j_failed, k_passed, k_failed, l_passed, l_failed;
+ always @(posedge clk) cnt <= cnt + 1;
+ sequence s; @(posedge clk) cnt % 8 == 0 ##3 1; endsequence
+ // Attempts at ticks 0 and 8 hold `cnt < 12` over their four ticks; the
+ // one at 16 misses it at its first tick.
+ assert property (@(posedge clk) cnt < 12 throughout s) j_passed++; else j_failed++;
+ // `cnt % 8 != 3` misses at the fourth tick of the attempts at 0, 8 and
+ // 16, which fail then, the last at tick 19.
+ assert property (@(posedge clk) cnt % 8 != 3 throughout cnt % 8 == 0 ##3 1) k_passed++; else k_failed++;
+ // The shorter way passes before the condition misses.
+ assert property (@(posedge clk) cnt % 8 < 2 throughout (cnt % 8 == 0 ##[1:5] 1)) l_passed++; else l_failed++;
+ initial repeat (20) begin #1 clk = 1; #1 clk = 0; end
+endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("throughout.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(41).unwrap();
+    // Ticks 0 to 19 sample `cnt` 0 to 19: the attempts at 0, 8 and 16 start
+    // the sequences, the other 17 fail at their first tick.
+    for (name, expected) in [
+        ("j_passed", 2u32),
+        ("j_failed", 18),
+        ("k_passed", 0),
+        ("k_failed", 20),
+        ("l_passed", 3),
+        ("l_failed", 17),
+    ] {
+        assert_eq!(sim.get(sim.signal(name)), expected.into(), "{name}");
+    }
+}
+
 #[test]
 fn sequences_with_several_ways_to_match_name_what_they_do_not_support() {
     let long = vec!["a"; 1025].join(" ##0 ");
@@ -470,6 +511,15 @@ fn sequences_with_several_ways_to_match_name_what_they_do_not_support() {
             "@(posedge clk) (a ##1 b) intersect (a ##2 b)",
             "intersect of sequences without ways to match of one length",
         ),
+        (
+            "@(posedge clk) (a ##1 b) throughout b",
+            "throughout whose left operand is not a Boolean expression",
+        ),
+        // The clocking event of an instance after the start of a sequence.
+        (
+            "@(posedge clk) a ##1 s",
+            "multiclocked sequence: instance `s` has its own clocking event",
+        ),
         // The tick `|=>` adds may not overflow the first delay.
         (
             "@(posedge clk) a |=> ##4294967295 b",
@@ -478,6 +528,7 @@ fn sequences_with_several_ways_to_match_name_what_they_do_not_support() {
     ] {
         let source = format!(
             "module Top; bit clk, a, b; function automatic void note(); endfunction
+             sequence s; @(negedge clk) a; endsequence
              assert property ({property}); endmodule"
         );
         let error = celox::Simulation::from_sv_sources(

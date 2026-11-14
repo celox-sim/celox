@@ -98,9 +98,9 @@ impl Parser<'_> {
                     || (self.nth(offset + 1) == "["
                         && self.nth(offset + 2).starts_with(|c: char| c.is_ascii_digit()))))
             && word != "|=>"
-            // The sequence operators `or`, `and` and `intersect` (16.9.5 to
-            // 16.9.7).
-            && !matches!(word, "or" | "and" | "intersect")
+            // The sequence operators `or`, `and`, `intersect` and
+            // `throughout` (16.9.5 to 16.9.7, 16.9.9).
+            && !matches!(word, "or" | "and" | "intersect" | "throughout")
     }
 
     /// `[clocking_event] [disable iff (expression)] sequence [|-> sequence]`
@@ -222,12 +222,34 @@ impl Parser<'_> {
     }
 
     fn sequence_intersect(&mut self) -> Result<SequenceExpr> {
-        let mut left = self.sequence_concat()?;
+        let mut left = self.sequence_throughout()?;
         while self.eat("intersect") {
-            let right = self.sequence_concat()?;
+            let right = self.sequence_throughout()?;
             left = SequenceExpr::Intersect(Box::new(left), Box::new(right));
         }
         Ok(left)
+    }
+
+    /// `condition throughout sequence` (16.9.9), right-associative and
+    /// binding looser than a cycle delay (Table 16-1), or a concatenation.
+    fn sequence_throughout(&mut self) -> Result<SequenceExpr> {
+        let left = self.sequence_concat()?;
+        if !self.eat("throughout") {
+            return Ok(left);
+        }
+        let condition = match left {
+            SequenceExpr::Boolean(condition) if condition.items.is_empty() => condition,
+            _ => {
+                return Err(
+                    self.unsupported("throughout whose left operand is not a Boolean expression")
+                );
+            }
+        };
+        let sequence = self.sequence_throughout()?;
+        Ok(SequenceExpr::Throughout {
+            condition,
+            sequence: Box::new(sequence),
+        })
     }
 
     /// `[##delay] operand {##delay operand}` (16.7), left to right.
@@ -339,7 +361,7 @@ impl Parser<'_> {
                 }
                 // At any depth: a Boolean expression has no sequence
                 // operator, also in its own parentheses, as `((a or b))`.
-                "##" | "or" | "and" | "intersect" if depth >= 1 => return true,
+                "##" | "or" | "and" | "intersect" | "throughout" if depth >= 1 => return true,
                 _ => {}
             }
             offset += 1;
@@ -583,18 +605,137 @@ impl Parser<'_> {
     }
 
     /// The instances of declarations that `spec` writes as its antecedent or
-    /// its condition.
+    /// its condition, or as an operand of its sequence.
     fn instances(
         &self,
         spec: PropertySpec,
         names: &HashMap<String, AssertionDeclarationId>,
-    ) -> impl Iterator<Item = (ExprId, AssertionDeclarationId)> {
-        // The steps of a sequence over cycles are not substituted.
-        [spec.antecedent, Some(spec.condition)]
+    ) -> Vec<(ExprId, AssertionDeclarationId)> {
+        let operands = match spec.sequence {
+            None => [spec.antecedent, Some(spec.condition)]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
+            Some(sequence) => {
+                let sequence = &self.sequences[sequence.0];
+                sequence
+                    .antecedent
+                    .iter()
+                    .chain([&sequence.consequent])
+                    .flat_map(SequenceExpr::booleans)
+                    .map(|boolean| boolean.expression)
+                    .collect()
+            }
+        };
+        operands
             .into_iter()
-            .flatten()
-            .filter(move |_| spec.sequence.is_none())
-            .filter_map(move |expr| self.instance(expr, names).map(|id| (expr, id)))
+            .filter_map(|expr| self.instance(expr, names).map(|id| (expr, id)))
+            .collect()
+    }
+
+    /// `tree` with each operand that instantiates a named sequence replaced
+    /// by the sequence (16.8): the clock of one, unless the sequence is
+    /// clocked alike, becomes `clock` where it leads the tree (16.16.1).
+    /// Whether it replaced any.
+    fn substitute_sequence_instances(
+        &mut self,
+        tree: &mut SequenceExpr,
+        leading: bool,
+        names: &HashMap<String, AssertionDeclarationId>,
+        resolved: &HashMap<AssertionDeclarationId, PropertySpec>,
+        clock: &mut Option<TimingControlId>,
+    ) -> Result<bool> {
+        let (boolean, condition_leading) = match tree {
+            SequenceExpr::Boolean(boolean) => (boolean.clone(), leading),
+            SequenceExpr::Concat { left, right, .. } => {
+                let mut changed = false;
+                if let Some(left) = left {
+                    changed |=
+                        self.substitute_sequence_instances(left, leading, names, resolved, clock)?;
+                }
+                let right_leading = leading && left.is_none();
+                changed |= self.substitute_sequence_instances(
+                    right,
+                    right_leading,
+                    names,
+                    resolved,
+                    clock,
+                )?;
+                return Ok(changed);
+            }
+            SequenceExpr::Or(left, right)
+            | SequenceExpr::And(left, right)
+            | SequenceExpr::Intersect(left, right) => {
+                let left =
+                    self.substitute_sequence_instances(left, leading, names, resolved, clock)?;
+                let right =
+                    self.substitute_sequence_instances(right, leading, names, resolved, clock)?;
+                return Ok(left || right);
+            }
+            SequenceExpr::Throughout {
+                condition,
+                sequence,
+            } => {
+                if self.instance(condition.expression, names).is_some() {
+                    return Err(self.unsupported_at(
+                        condition.tokens,
+                        "instance of a named sequence as the left operand of throughout",
+                    ));
+                }
+                return self
+                    .substitute_sequence_instances(sequence, leading, names, resolved, clock);
+            }
+        };
+        let Some(id) = self.instance(boolean.expression, names) else {
+            return Ok(false);
+        };
+        let declaration = &self.assertion_declarations[id.0];
+        let name = declaration.name.value().to_owned();
+        if declaration.kind == AssertionDeclarationKind::Property {
+            return Err(self.error_at(
+                boolean.tokens,
+                format!("property `{name}` is an operand of a sequence (IEEE 1800-2023 16.12)"),
+            ));
+        }
+        if !boolean.items.is_empty() {
+            return Err(self.unsupported_at(
+                boolean.tokens,
+                "match items of an instance of a named sequence",
+            ));
+        }
+        let inner = resolved[&id];
+        if let Some(inner_clock) = inner.clock {
+            match *clock {
+                Some(outer) if self.same_clock(outer, inner_clock) => {}
+                None if condition_leading => *clock = Some(inner_clock),
+                _ => {
+                    return Err(self.unsupported_at(
+                        boolean.tokens,
+                        format!(
+                            "multiclocked sequence: instance `{name}` has its own clocking event"
+                        ),
+                    ));
+                }
+            }
+        }
+        *tree = match inner.sequence {
+            Some(sequence) => {
+                let body = self.sequences[sequence.0].clone();
+                if !body.locals.is_empty() {
+                    return Err(self.unsupported_at(
+                        boolean.tokens,
+                        format!("instance of named sequence `{name}` with local variables inside a sequence"),
+                    ));
+                }
+                body.consequent
+            }
+            None => SequenceExpr::Boolean(SequenceBoolean {
+                expression: inner.condition,
+                items: Vec::new(),
+                tokens: boolean.tokens,
+            }),
+        };
+        Ok(true)
     }
 
     /// Substitute the body of each declaration that `spec` instantiates,
@@ -607,7 +748,11 @@ impl Parser<'_> {
         names: &HashMap<String, AssertionDeclarationId>,
         resolved: &mut HashMap<AssertionDeclarationId, PropertySpec>,
     ) -> Result<()> {
-        let mut pending: Vec<_> = self.instances(spec, names).map(|(_, id)| id).collect();
+        let mut pending: Vec<_> = self
+            .instances(spec, names)
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect();
         // Declarations whose instances are being resolved: the path from an
         // instance in `spec` to the top of `pending`.
         let mut active = fxhash::FxHashSet::default();
@@ -650,20 +795,35 @@ impl Parser<'_> {
         resolved: &HashMap<AssertionDeclarationId, PropertySpec>,
     ) -> Result<PropertySpec> {
         if let Some(sequence) = spec.sequence {
-            let sequence = &self.sequences[sequence.0];
-            if let Some(step) = sequence
-                .antecedent
-                .iter()
-                .chain([&sequence.consequent])
-                .flat_map(SequenceExpr::booleans)
-                .find(|step| self.instance(step.expression, names).is_some())
-            {
-                return Err(self.unsupported_at(
-                    step.tokens,
-                    "instance of a named sequence or property in a sequence over cycles",
-                ));
+            let mut body = self.sequences[sequence.0].clone();
+            let mut clock = spec.clock;
+            let mut changed = false;
+            if let Some(antecedent) = &mut body.antecedent {
+                changed |= self
+                    .substitute_sequence_instances(antecedent, true, names, resolved, &mut clock)?;
             }
-            return Ok(spec);
+            let leading = body.antecedent.is_none();
+            changed |= self.substitute_sequence_instances(
+                &mut body.consequent,
+                leading,
+                names,
+                resolved,
+                &mut clock,
+            )?;
+            if !changed {
+                return Ok(spec);
+            }
+            let mut result = spec;
+            result.condition = body
+                .consequent
+                .booleans()
+                .last()
+                .expect("a sequence has a Boolean expression")
+                .expression;
+            result.clock = clock;
+            result.sequence = Some(SequenceId(self.sequences.len()));
+            self.sequences.push(body);
+            return Ok(result);
         }
         let mut result = spec;
         if let Some(equivalent) = spec.equivalent
