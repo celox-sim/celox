@@ -130,7 +130,24 @@ fn prototypes(
         .map(|(file, (_, path))| (&file.syntax_tree, *path))
         .collect::<Vec<_>>();
     let packages = if analyze_packages {
-        packages::Packages::analyze_with_options(&trees, None, options)
+        // Only the packages the interfaces name, and those they depend on:
+        // the classes of others may use the virtual interface types these
+        // prototypes declare.
+        // Those the compilation units of their sources import are visible
+        // in them too (IEEE 1800-2023 3.12.1, 26.3); only those units are
+        // analyzed.
+        let mut needed = HashSet::default();
+        let mut units = HashSet::default();
+        for interface in &declarations {
+            let tree = &files[interface.file].syntax_tree;
+            let scoped = tree.scoped(interface.scope)?;
+            needed.extend(super::imports::ScopeImports::from_scope(&scoped)?.packages);
+            if units.insert(sources[interface.file].1.to_path_buf()) {
+                let unit = tree.compilation_scope();
+                needed.extend(super::imports::ScopeImports::from_scope(&unit)?.packages);
+            }
+        }
+        packages::Packages::analyze_needed(&trees, &needed, &units, options)
             .map_err(|error| error.with_warnings(source_warnings))?
     } else {
         packages::Packages::default()

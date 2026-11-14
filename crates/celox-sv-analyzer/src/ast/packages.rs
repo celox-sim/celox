@@ -317,7 +317,30 @@ impl Packages {
         for (tree, _) in trees {
             super::warnings::append(&mut warnings, super::warnings::packages(tree));
         }
-        match Self::analyze_with_roots_impl(trees, roots, options) {
+        match Self::analyze_with_roots_impl(trees, roots, None, options) {
+            Ok(packages) => Ok(packages.with_warnings(warnings)),
+            Err(error) => Err(error.with_warnings(warnings)),
+        }
+    }
+
+    /// The packages `needed` of `trees` and those they depend on, with the
+    /// compilation units of the sources at `units`: what the declarations
+    /// that name only those need, such as the interfaces whose prototypes
+    /// are built before the types of virtual interfaces are known (see
+    /// `interfaces::interface_prototypes_with_options`). The other packages
+    /// and units, whose classes may use those types or import packages not
+    /// analyzed, are not analyzed.
+    pub(crate) fn analyze_needed(
+        trees: &[(&SyntaxTree, &Path)],
+        needed: &HashSet<String>,
+        units: &HashSet<std::path::PathBuf>,
+        options: crate::AnalysisOptions,
+    ) -> Result<Self, AnalyzerError> {
+        let mut warnings = Vec::new();
+        for (tree, _) in trees {
+            super::warnings::append(&mut warnings, super::warnings::packages(tree));
+        }
+        match Self::analyze_with_roots_impl(trees, None, Some((needed, units)), options) {
             Ok(packages) => Ok(packages.with_warnings(warnings)),
             Err(error) => Err(error.with_warnings(warnings)),
         }
@@ -326,6 +349,7 @@ impl Packages {
     fn analyze_with_roots_impl(
         trees: &[(&SyntaxTree, &Path)],
         roots: Option<&[&str]>,
+        needed: Option<(&HashSet<String>, &HashSet<std::path::PathBuf>)>,
         options: crate::AnalysisOptions,
     ) -> Result<Self, AnalyzerError> {
         let mut timescales = timescales::Timescales::collect_with_options(trees, options.clone())?;
@@ -338,7 +362,8 @@ impl Packages {
             virtual_interfaces: options.virtual_interfaces.clone(),
             ..Session::default()
         };
-        let mut packages = Self::analyze_packages(trees, timescales, session)?;
+        let mut packages =
+            Self::analyze_packages(trees, timescales, needed.map(|(needed, _)| needed), session)?;
         packages.virtual_interfaces = options.virtual_interfaces;
         if trees
             .iter()
@@ -356,7 +381,9 @@ impl Packages {
             .map(|(tree, path)| (tree.compilation_scope(), *path))
             .collect();
         for (tree, path) in &units {
-            if tree.body_membership()?.is_empty() {
+            if tree.body_membership()?.is_empty()
+                || needed.is_some_and(|(_, units)| !units.contains(*path))
+            {
                 continue;
             }
             let visibility = unit_visibility(tree)?;
@@ -403,9 +430,12 @@ impl Packages {
         Ok(packages)
     }
 
+    /// The packages of `trees`, only those `needed` and those they depend
+    /// on if given.
     fn analyze_packages(
         trees: &[(&SyntaxTree, &Path)],
         timescales: Arc<timescales::Timescales>,
+        needed: Option<&HashSet<String>>,
         session: &mut Session,
     ) -> Result<Self, AnalyzerError> {
         let mut declarations: Vec<(String, SyntaxTree)> = Vec::new();
@@ -449,6 +479,19 @@ impl Packages {
         let mut active = Vec::new();
         for index in 0..declarations.len() {
             visit(index, &declarations, &dependencies, &mut order, &mut active)?;
+        }
+        if let Some(needed) = needed {
+            // Those needed, and what they depend on.
+            let mut kept = HashSet::default();
+            let mut pending = needed.iter().cloned().collect::<Vec<_>>();
+            while let Some(name) = pending.pop() {
+                if let Some(index) = declarations.iter().position(|(known, _)| *known == name)
+                    && kept.insert(index)
+                {
+                    pending.extend(dependencies[index].iter().cloned());
+                }
+            }
+            order.retain(|index| kept.contains(index));
         }
         // Package bodies can query selected hierarchy roots while they are
         // collected, before any module is analyzed.
