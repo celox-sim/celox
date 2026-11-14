@@ -1057,6 +1057,154 @@ fn randsequence_rand_join_interleaves_its_productions_at_random() {
 }
 
 #[test]
+fn randsequence_productions_return_values_to_the_rules_using_them() {
+    // IEEE 1800-2023 18.17.7, its examples: a `return` with an expression
+    // gives a production its value and leaves it; the code of the rule
+    // using it reads the value by the production's name, or as an element
+    // from 1 of an array for a production the rule names several times,
+    // also in its production controls, in order.
+    let source = "module Top;
+        int cnt;
+        function automatic string example1();
+            string s;
+            byte unsigned v = 7;
+            randsequence( bin_op )
+                void bin_op : value operator value
+                    { s = $sformatf(\"%s %0d %0d\", operator, value[1], value[2]); };
+                bit [7:0] value : { v += 3; return v; };
+                string operator : { return \"+\"; } | { return \"-\"; } | { return \"*\"; };
+            endsequence
+            return s;
+        endfunction
+        function automatic string example2(bit cond);
+            string s;
+            randsequence( A )
+                void A : A1 A2;
+                void A1 : { cnt = 1; } B repeat(5) C B
+                    { s = $sformatf(\"c=%0d b1=%0d b2=%0d\", C, B[1], B[2]); };
+                void A2 : if (cond) D(5) else D(20)
+                    { s = {s, $sformatf(\" d=%0d\", cond ? D[1] : D[2])}; };
+                int B : C C { return C[2]; cnt += 100; };
+                int C : { cnt = cnt + 1; return cnt; };
+                int D (int prm) : { return prm; };
+            endsequence
+            return s;
+        endfunction
+        function automatic string texts();
+            string s;
+            int n;
+            randsequence( main )
+                main : word word { s = {word[2], word[1]}; } nibble { s = $sformatf(\"%s %0d\", s, nibble); };
+                string word : { n++; return n == 1 ? \"a\" : \"b\"; };
+                bit [3:0] nibble : { return 8'h1f; };
+            endsequence
+            return s;
+        endfunction
+        initial begin
+            int plus = 0, minus = 0, times = 0, values = 1;
+            string s;
+            repeat (64) begin
+                s = example1();
+                plus += s.substr(0, 0) == \"+\";
+                minus += s.substr(0, 0) == \"-\";
+                times += s.substr(0, 0) == \"*\";
+                values &= s.substr(1, s.len() - 1) == \" 10 13\";
+            end
+            $display(\"%0d %0d\", plus > 0 && minus > 0 && times > 0 && plus + minus + times == 64, values);
+            $display(\"%s|%s|%s\", example2(1), example2(0), texts());
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1 1", "c=8 b1=3 b2=10 d=5|c=8 b1=3 b2=10 d=20|ba 15"]
+    );
+}
+
+#[test]
+fn randsequence_productions_take_arguments() {
+    // IEEE 1800-2023 18.17.7: a production's formals take the arguments of
+    // the item that uses it, by position or by name, an omitted one its
+    // default, as a task call's do; the rule's code, production controls and
+    // weights see them, an argument sees the code of the rule passing it,
+    // and a production does not see those of the productions using it.
+    // Each production of a `rand join` keeps its own arguments.
+    let source = "module Top;
+        function automatic string passing();
+            string out;
+            int y = 1000;
+            randsequence(main)
+                main : gen gen(\"b\") gen(.n(3), .s(\"c\")) gen(, 4) count(3)
+                    weighted(0) weighted(1) choose(2) choose(5) lexical(7) chain;
+                void gen(string s = \"a\", int n = 1) : { out = {out, $sformatf(\"%s%0d \", s, n)}; };
+                count(int n) : repeat (n) tick { out = {out, $sformatf(\"%0d \", n)}; };
+                tick : { out = {out, \"t\"}; };
+                weighted(int w) : x := w | z := (1 - w);
+                choose(int k) : if (k == 2) x else z case (k) 2 : x; default : z; endcase;
+                x : { out = {out, \"x\"}; };
+                z : { out = {out, \"z\"}; };
+                lexical(int y) : peek { out = {out, $sformatf(\" %0d \", y)}; };
+                peek : { out = {out, $sformatf(\"%0d\", y)}; };
+                chain : one show(one + 1);
+                int one : { return 41; };
+                show(int v) : { out = {out, $sformatf(\"%0d\", v)}; };
+            endsequence
+            return out;
+        endfunction
+        function automatic string joined();
+            string out;
+            randsequence(main)
+                main : rand join gen(\"j\") gen(\"k\");
+                gen(string s) : { out = {out, s}; } { out = {out, s}; };
+            endsequence
+            return out;
+        endfunction
+        initial begin
+            int ok = 1;
+            string s;
+            repeat (32) begin
+                s = joined();
+                ok &= s == \"jjkk\" || s == \"jkjk\" || s == \"jkkj\" || s == \"kjjk\"
+                    || s == \"kjkj\" || s == \"kkjj\";
+            end
+            $display(\"%s|%0d\", passing(), ok);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["a1 b1 c3 a4 ttt3 zxxxzz1000 7 42|1"]
+    );
+}
+
+#[test]
+fn randsequence_arguments_are_evaluated_as_a_call_evaluates_them() {
+    // IEEE 1800-2023 18.17.7, 13.5.4: a production's arguments are bound as
+    // a task call's are, its actuals evaluated as written, named ones out
+    // of the formals' order included, and then the defaults of the formals
+    // given none.
+    let source = "module Top;
+        int count;
+        function automatic int tick();
+            count++;
+            return count;
+        endfunction
+        function automatic string ordered();
+            string out;
+            randsequence(main)
+                main : show(.b(tick()), .a(tick())) show(tick());
+                show(int a, int b = tick(), int c = tick() * 10) :
+                    { out = {out, $sformatf(\"%0d %0d %0d|\", a, b, c)}; };
+            endsequence
+            return out;
+        endfunction
+        initial $display(\"%s\", ordered());
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["2 1 30|4 5 60|"]
+    );
+}
+
+#[test]
 fn randsequence_forms_not_expanded_are_named() {
     // Each form the expansion does not provide yet is rejected by name; a
     // production that reaches itself has no expansion; an undeclared one is
@@ -1089,7 +1237,11 @@ fn randsequence_forms_not_expanded_are_named() {
         ),
         (
             "main : { return 1; };",
-            "randsequence production value returned",
+            "return with a value in void randsequence production `main`",
+        ),
+        (
+            "main : a; int a : { return; };",
+            "return without a value in randsequence production `a` with a value",
         ),
         (
             "main : { fork break; join };",
@@ -1101,11 +1253,32 @@ fn randsequence_forms_not_expanded_are_named() {
         ),
         (
             "main : a(1); a : {};",
-            "randsequence production with arguments",
+            "arguments of `a`: 1 actuals for 0 formals",
         ),
         (
             "main : a; void a(int v) : {};",
-            "randsequence production `a` with a result or formals",
+            "formal `v` has no default and is not given an actual",
+        ),
+        ("main : a(.w(1)); a(int v) : {};", "no formal named `w`"),
+        (
+            "main : a(1, .v(2)); a(int v) : {};",
+            "formal `v` is bound twice",
+        ),
+        (
+            "main : a(.v(1), 2); a(int v, int w) : {};",
+            "a positional actual after a named one",
+        ),
+        (
+            "main : a(1, 2); a(int v, int v) : {};",
+            "randsequence production `a` declares formal `v` twice",
+        ),
+        (
+            "main : a(x); a(output int v) : {};",
+            "randsequence production `a` formal `v` that is not an input",
+        ),
+        (
+            "main : a; a(int v[2] = '{1, 2}) : {};",
+            "randsequence production `a` formal `v` of an unpacked, dynamically sized or event type",
         ),
     ] {
         let source =

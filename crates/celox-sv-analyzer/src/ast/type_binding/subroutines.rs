@@ -15,15 +15,47 @@ pub(in crate::ast) fn subroutine_formals(
         Option<celox_sv_syntax::ExprId>,
     )>,
 > {
+    let what = if native.kind == celox_sv_syntax::SubroutineKind::Function {
+        "function"
+    } else {
+        "task"
+    };
+    port_formals(
+        native.ports.iter().flatten().chain(
+            native
+                .port_declarations
+                .iter()
+                .flat_map(|group| &group.ports),
+        ),
+        what,
+        tree,
+        session,
+        context,
+    )
+}
+
+/// The formals `ports` of a `what` (a function, task or randsequence
+/// production): `(name, direction, type, default)`. A formal without a
+/// direction takes the previous one's, and one without a type the previous
+/// one's type (IEEE 1800-2023 13.3).
+pub(in crate::ast) fn port_formals<'a>(
+    ports: impl IntoIterator<Item = &'a celox_sv_syntax::SubroutinePort>,
+    what: &str,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Converted<
+    Vec<(
+        String,
+        ParamDirection,
+        Type,
+        Option<celox_sv_syntax::ExprId>,
+    )>,
+> {
     let mut result = Vec::new();
     let mut previous_type: Option<Type> = None;
     let mut direction = ParamDirection::Input;
-    for port in native.ports.iter().flatten().chain(
-        native
-            .port_declarations
-            .iter()
-            .flat_map(|group| &group.ports),
-    ) {
+    for port in ports {
         if let Some(declared) = port.direction {
             if port.static_reference {
                 return Err(unsupported("ref static subroutine argument"));
@@ -48,16 +80,8 @@ pub(in crate::ast) fn subroutine_formals(
         } else if renamed.is_some() {
             Type::new(TypeKind::Logic)
         } else {
-            bind(port.data_type, tree, session, context)?.ok_or_else(|| {
-                unsupported(format!(
-                    "unsupported {} formal data type",
-                    if native.kind == celox_sv_syntax::SubroutineKind::Function {
-                        "function"
-                    } else {
-                        "task"
-                    }
-                ))
-            })?
+            bind(port.data_type, tree, session, context)?
+                .ok_or_else(|| unsupported(format!("unsupported {what} formal data type")))?
         };
         if ty.kind == TypeKind::Implicit {
             ty.kind = TypeKind::Logic;

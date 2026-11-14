@@ -342,9 +342,9 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// expanded has expanded so far (see `randsequence`).
     pub(super) randsequence_expanded: usize,
     /// The `break` and `return` statements of the `randsequence` code
-    /// block being lowered that leave the statement or a production, and the
-    /// block each disables (see `randsequence`).
-    pub(super) randsequence_exits: HashMap<celox_sv_syntax::StatementId, u64>,
+    /// block being lowered that leave the statement or a production, and
+    /// how each leaves (see `randsequence`).
+    pub(super) randsequence_exits: HashMap<celox_sv_syntax::StatementId, randsequence::Exit>,
 }
 
 /// The names a body declares: its scopes of locals, innermost last, and
@@ -929,17 +929,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
 
     fn declare_as(&mut self, source: &str, r#type: Type, unique: String, owned: bool) -> String {
         *self.state.counter += 1;
-        let shape = bound_dimensions_from_type(
-            &r#type,
-            &self.tree.functions,
-            &mut self.session.types,
-            &self.dims.const_env,
-        );
-        let entry = self.take_binding(source, Some(unique.clone()), r#type.packed_ranges.len());
-        self.dims.insert(source.to_string(), shape);
-        self.dims
-            .expression_signedness
-            .insert(source.to_string(), r#type.is_signed());
+        self.bind_as(source, &r#type, &unique);
         self.state.locals.push(LocalVariable {
             name: unique.clone(),
             source_name: source.to_string(),
@@ -951,13 +941,29 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             ),
             owned,
         });
+        unique
+    }
+
+    /// Bind `source` in the innermost scope to the local `unique` of type
+    /// `r#type`, declared already.
+    fn bind_as(&mut self, source: &str, r#type: &Type, unique: &str) {
+        let shape = bound_dimensions_from_type(
+            r#type,
+            &self.tree.functions,
+            &mut self.session.types,
+            &self.dims.const_env,
+        );
+        let entry = self.take_binding(source, Some(unique.to_owned()), r#type.packed_ranges.len());
+        self.dims.insert(source.to_string(), shape);
+        self.dims
+            .expression_signedness
+            .insert(source.to_string(), r#type.is_signed());
         self.names
             .scopes
             .last_mut()
             .expect("a body always has a scope")
             .entries
             .push(entry);
-        unique
     }
 
     /// Detach every view of a declaration before publishing the shadowing
