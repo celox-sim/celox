@@ -8,13 +8,14 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::mpsc::{Sender, channel},
 };
 struct ProofBackend {
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
-    sticky: Arc<Mutex<Vec<String>>>,
+    /// Where the backend reports the errors that fail its case.
+    sticky: Sender<String>,
     rejected: bool,
     rejection_message: Option<String>,
 }
@@ -44,6 +45,11 @@ fn path(p: &SignalPath) -> Value {
     json!({"name":p.name,"instances":p.instances.iter().map(|i|json!({"name":i.name,"index":i.index})).collect::<Vec<_>>()})
 }
 impl ProofBackend {
+    fn report(&self, error: String) {
+        // The case runner keeps the receiver until every backend of the case
+        // is dropped, so the send cannot fail.
+        let _ = self.sticky.send(error);
+    }
     fn exchange(&mut self, value: Value) -> Result<Value> {
         let result = self.exchange_raw(value);
         if let Err(error) = &result {
@@ -51,7 +57,7 @@ impl ProofBackend {
                 && error.downcast_ref::<FrontendUnsupported>().is_none()
                 && error.downcast_ref::<ProofBackendUnsupported>().is_none()
             {
-                self.sticky.lock().unwrap().push(error.to_string());
+                self.report(error.to_string());
             }
         }
         result
@@ -85,7 +91,7 @@ impl ProofBackend {
                 self.rejection_message = Some(error.to_string());
                 return Err(ProofBackendUnsupported(error.to_string()).into());
             }
-            self.sticky.lock().unwrap().push(error.to_string());
+            self.report(error.to_string());
             return Err(error.to_string().into());
         }
         if !reply["error"].is_null() {
@@ -103,11 +109,7 @@ impl ProofBackend {
         }
         Ok(reply)
     }
-    fn build(
-        design: &Design,
-        out: &Path,
-        sticky: Arc<Mutex<Vec<String>>>,
-    ) -> Result<Box<dyn Backend>> {
+    fn build(design: &Design, out: &Path, sticky: Sender<String>) -> Result<Box<dyn Backend>> {
         let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../lydite/conformance/veryl-proof/server.py");
         let mut child = Command::new("python3")
@@ -146,7 +148,7 @@ impl Backend for ProofBackend {
         })();
         if let Err(error) = &result {
             let error: &celox_test_suite::Error = error;
-            self.sticky.lock().unwrap().push(error.to_string());
+            self.report(error.to_string());
         }
         result
     }
@@ -174,22 +176,13 @@ impl Drop for ProofBackend {
                 && value["error"].as_str() == self.rejection_message.as_deref();
             let success_close = value["status"] == "passed" && value["error"].is_null();
             if !rejection_close && !success_close {
-                self.sticky
-                    .lock()
-                    .unwrap()
-                    .push(format!("invalid or failed close verdict: {value}"));
+                self.report(format!("invalid or failed close verdict: {value}"));
             }
         } else {
-            self.sticky
-                .lock()
-                .unwrap()
-                .push("backend close did not produce a verdict".into());
+            self.report("backend close did not produce a verdict".into());
         }
         if self.child.wait().map_or(true, |s| !s.success()) {
-            self.sticky
-                .lock()
-                .unwrap()
-                .push("backend process failed".into());
+            self.report("backend process failed".into());
         }
     }
 }
@@ -244,7 +237,7 @@ fn main() {
         cases().filter(|case| args.len() == 1 || args[1..].iter().any(|name| name == case.name))
     {
         let start = std::time::Instant::now();
-        let sticky = Arc::new(Mutex::new(vec![]));
+        let (sticky, reported) = channel();
         let mut designs = 0;
         let case_out = out.join(case.name.replace("::", "__"));
         std::fs::create_dir(&case_out).unwrap();
@@ -264,7 +257,7 @@ fn main() {
                 .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
                 .unwrap_or("nonstring panic".into())
         });
-        let errors = sticky.lock().unwrap().clone();
+        let errors = reported.try_iter().collect::<Vec<_>>();
         let passed = panic.is_none() && errors.is_empty();
         rows.push(json!({"case":case.name,"status":if passed{"passed"}else{"failed"},"expectation":format!("{:?}",case.expectation),"panic":panic,"errors":errors,"designs":designs,"elapsed_ms":start.elapsed().as_millis()}));
         std::fs::write(
