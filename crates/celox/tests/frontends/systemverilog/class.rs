@@ -5859,3 +5859,41 @@ sv_backends! {
         assert_eq!(sim.get(value), expected);
     }
 }
+
+// The expression of an immediate assertion is evaluated as the condition of
+// an `if` is (IEEE 1800-2023 16.3): a `$cast` to a class property, or to an
+// element of one, and an increment run before the assertion checks it.
+#[test]
+fn immediate_assertions_run_casts_and_updates_of_their_expression() {
+    let source = "module Top;
+        class Base; virtual function Base copy(); return null; endfunction endclass
+        class Item extends Base;
+            int v;
+            virtual function Base copy(); Item c = new; c.v = v + 1; return c; endfunction
+        endclass
+        class Other extends Base; endclass
+        class Holder;
+            Item one;
+            Item many[3];
+            int checks;
+            function void fill(Item from, Other other);
+                assert($cast(one, from.copy()));
+                for (int i = 0; i < 3; i++) assert($cast(many[i], one.copy())) checks++;
+                assert($cast(many[0], other)) else checks += 10;
+                assert(checks++ == 13);
+            endfunction
+        endclass
+        initial begin
+            Holder h = new;
+            Item i = new;
+            Other o = new;
+            i.v = 4;
+            h.fill(i, o);
+            $display(\"%0d %0d %0d %0d\", h.one.v, h.many[0].v, h.many[2].v, h.checks);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["5 6 6 14"]
+    );
+}
