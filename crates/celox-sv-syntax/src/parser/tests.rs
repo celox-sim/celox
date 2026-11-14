@@ -141,6 +141,124 @@ fn opaque_randsequence_owns_code_blocks_and_assignment_event_payloads() {
 }
 
 #[test]
+fn randsequence_productions_are_read_with_their_code_blocks() {
+    // IEEE 1800-2023 18.17, A.6.12: the productions of a randsequence, its
+    // code blocks the statement's items in order.
+    let syntax = parse(
+        "module M;initial randsequence(top)
+            top : a b := 2 {x=1;} | rand join (0.5) a b | if (c) a else b;
+            a : repeat (3) b | case (s) 0, 1 : a; default : b; endcase;
+            int b(int v) : {x=v;} add(v + 1);
+          endsequence endmodule",
+    );
+    let root = syntax.procedures[0].body;
+    let StatementKind::Unconverted { items, .. } = &syntax.statement(root).kind else {
+        panic!()
+    };
+    let randsequence = syntax.randsequence(root).expect("the productions parse");
+    assert_eq!(randsequence.main.as_ref().unwrap().spelling, "top");
+    let names = randsequence
+        .productions
+        .iter()
+        .map(|production| production.name.spelling.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["top", "a", "b"]);
+    let top = &randsequence.productions[0].rules;
+    assert_eq!(top.len(), 3);
+    assert!(matches!(
+        top[0].items.as_slice(),
+        [RsProd::Item(_), RsProd::Item(_)]
+    ));
+    assert!(top[0].weight.is_some());
+    assert_eq!(top[0].weight_code, Some(items[0]));
+    assert!(matches!(top[1].join, Some(Some(_))));
+    assert!(matches!(
+        top[2].items.as_slice(),
+        [RsProd::If {
+            otherwise: Some(_),
+            ..
+        }]
+    ));
+    let a = &randsequence.productions[1].rules;
+    assert!(matches!(a[0].items.as_slice(), [RsProd::Repeat { .. }]));
+    let [RsProd::Case { items: cases, .. }] = a[1].items.as_slice() else {
+        panic!()
+    };
+    assert_eq!(cases[0].labels.len(), 2);
+    assert!(cases[1].labels.is_empty());
+    let b = &randsequence.productions[2];
+    assert_eq!(syntax.token_text(b.return_type.unwrap()), "int");
+    assert_eq!(syntax.token_text(b.formals.unwrap()), "(int v)");
+    let [RsProd::Code(code), RsProd::Item(call)] = b.rules[0].items.as_slice() else {
+        panic!()
+    };
+    assert_eq!(*code, items[1]);
+    assert!(matches!(
+        syntax.expression(*call).kind,
+        ExprKind::Call { .. }
+    ));
+}
+
+#[test]
+fn randsequence_weights_follow_their_grammar() {
+    // IEEE 1800-2023 A.6.12: rs_weight_specification ::= integral_number |
+    // ps_identifier | ( expression ).
+    for weight in ["3", "8'h10", "W", "p::W", "(1 + 1)", "(W * 2)"] {
+        let syntax = parse(&format!(
+            "module M;initial randsequence() top : a := {weight} | b; a : {{}}; b : {{}}; endsequence endmodule"
+        ));
+        let root = syntax.procedures[0].body;
+        let randsequence = syntax.randsequence(root).expect(weight);
+        let rules = &randsequence.productions[0].rules;
+        assert_eq!(rules.len(), 2, "{weight}");
+        assert!(rules[0].weight.is_some(), "{weight}");
+    }
+    for weight in ["1 + 1", "-1", "'1", "1.5", "f(1)", "a.b", "a[0]"] {
+        let source = format!(
+            "module M;initial randsequence() top : a := {weight} | b; a : {{}}; b : {{}}; endsequence endmodule"
+        );
+        assert!(
+            Declarations::parse(&source, Path::new("weight.sv")).is_err(),
+            "{weight}"
+        );
+    }
+}
+
+#[test]
+fn randsequence_productions_are_read_past_directives_and_need_an_item() {
+    // A compiler directive among the productions is skipped as elsewhere
+    // (22.12), not read as a production's result type; an
+    // rs_production_list has at least one rs_prod (A.6.12).
+    let syntax = parse(
+        "module M;initial randsequence() top : a b;
+            `line 7 \"other.sv\" 0
+            a : {x=1;};
+            `celldefine
+            b : a | a;
+          endsequence endmodule",
+    );
+    let root = syntax.procedures[0].body;
+    let randsequence = syntax.randsequence(root).expect("the productions parse");
+    let names = randsequence
+        .productions
+        .iter()
+        .map(|production| {
+            assert!(production.return_type.is_none());
+            production.name.spelling.as_str()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["top", "a", "b"]);
+    assert_eq!(randsequence.productions[2].rules.len(), 2);
+    for productions in ["main : a | ; a : {};", "main : ;", "main : | a; a : {};"] {
+        let source = format!("module M;initial randsequence() {productions} endsequence endmodule");
+        assert!(
+            Declarations::parse(&source, Path::new("empty.sv")).is_err(),
+            "{productions}"
+        );
+    }
+}
+
+#[test]
 fn deeply_nested_opaque_code_blocks_parse_clone_and_drop_without_native_stack_recursion() {
     let source = format!(
         "module M;initial {}x=1;{}endmodule",

@@ -26,6 +26,7 @@ use foreach::ForeachLoop;
 pub(super) mod dpi_reports;
 mod places;
 pub(super) mod randomization;
+mod randsequence;
 pub(super) mod references;
 pub(crate) mod static_references;
 mod subroutines;
@@ -334,6 +335,12 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// branch's process handle and whether it is armed, and whether a
     /// `disable` has named the branch. Only such a branch takes a handle.
     pub(super) fork_blocks: Vec<(String, String, String, bool)>,
+    /// The `randsequence` statements being expanded around the statement
+    /// being lowered (see `randsequence`).
+    pub(super) randsequence_depth: usize,
+    /// The productions the outermost `randsequence` statement being
+    /// expanded has expanded so far (see `randsequence`).
+    pub(super) randsequence_expanded: usize,
 }
 
 /// The names a body declares: its scopes of locals, innermost last, and
@@ -655,6 +662,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             owned_locals: 0,
             named_blocks: Vec::new(),
             fork_blocks: Vec::new(),
+            randsequence_depth: 0,
+            randsequence_expanded: 0,
             tree,
             session,
             dims,

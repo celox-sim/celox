@@ -702,3 +702,179 @@ fn assignment_operators_check_each_part_of_a_concatenation() {
         assert!(error.contains(expected), "{body}: {error}");
     }
 }
+
+#[test]
+fn randsequence_expands_productions_and_picks_rules_by_weight() {
+    // IEEE 1800-2023 18.17, 18.17.1: the main production's items in order,
+    // a code block seeing the function's variables, a nested randsequence
+    // starting from its first production; a rule of weight 0 never picked,
+    // and rules without weights both picked over many runs.
+    let source = "module Top;
+        function automatic int sequence_value();
+            int x;
+            randsequence(main)
+                main : first second done;
+                first : { x = x + 1; };
+                second : { x = x * 10; randsequence() inner : { x = x + 5; }; endsequence };
+                done : { x = x + 3; };
+            endsequence
+            return x;
+        endfunction
+        function automatic int weighted();
+            int x;
+            randsequence(main)
+                main : a := 0 | b := 3;
+                a : { x = 1; };
+                b : { x = 2; };
+            endsequence
+            return x;
+        endfunction
+        function automatic int either();
+            int x;
+            randsequence(main)
+                main : a | b;
+                a : { x = 1; };
+                b : { x = 2; };
+            endsequence
+            return x;
+        endfunction
+        initial begin
+            int heavy = 1, ones = 0, twos = 0;
+            repeat (64) begin
+                heavy &= weighted() == 2;
+                if (either() == 1) ones++; else twos++;
+            end
+            $display(\"%0d %0d %0d\", sequence_value(), heavy, ones > 0 && twos > 0);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["18 1 1"]
+    );
+}
+
+#[test]
+fn randsequence_weights_sum_without_wrapping() {
+    // IEEE 1800-2023 18.17.1: a rule is picked in proportion to its
+    // weight; two of the largest 32-bit weights are equally likely, their
+    // sum wider than either.
+    let source = "module Top;
+        function automatic int pick();
+            int x;
+            randsequence(main)
+                main : a := 32'hffff_ffff | b := 32'hffff_ffff;
+                a : { x = 1; };
+                b : { x = 2; };
+            endsequence
+            return x;
+        endfunction
+        initial begin
+            int ones = 0, twos = 0;
+            repeat (64) if (pick() == 1) ones++; else twos++;
+            $display(\"%0d\", ones > 0 && twos > 0);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn randsequence_expansion_is_bounded() {
+    // A long chain of productions expands without nesting native calls,
+    // here on a test thread's small stack; a grammar doubling at each
+    // production is rejected once it expands too many.
+    let chain = (0..10_000)
+        .map(|index| format!("p{index} : p{};", index + 1))
+        .collect::<String>()
+        + "p10000 : { x++; };";
+    let chain = format!(
+        "module Top; initial begin int x; randsequence(p0) {chain} endsequence $display(\"%0d\", x); end endmodule"
+    );
+    assert_eq!(super::hierarchical_references::displayed(&chain), ["1"]);
+    let doubling = (0..20)
+        .map(|index| format!("p{index} : p{next} p{next};", next = index + 1))
+        .collect::<String>()
+        + "p20 : { x++; };";
+    let doubling = format!(
+        "module Top; initial begin int x; randsequence(p0) {doubling} endsequence end endmodule"
+    );
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(&doubling, Path::new("rs.sv"))], "Top")
+            .build_cranelift()
+    else {
+        panic!("accepted");
+    };
+    let message = "randsequence expanding more than 65536 productions";
+    assert!(format!("{error:?}").contains(message), "{error:?}");
+}
+
+#[test]
+fn randsequence_code_block_loops_keep_their_break_and_continue() {
+    // A `break` or `continue` in a loop of a code block is the loop's own
+    // (12.8): the code block and the productions after it go on.
+    let source = "module Top;
+        initial begin
+            int x;
+            randsequence(main)
+                main : { repeat (5) begin x++; if (x == 2) continue; if (x == 3) break; end x += 10; } done;
+                done : { x += 100; };
+            endsequence
+            $display(\"%0d\", x);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["113"]);
+}
+
+#[test]
+fn randsequence_forms_not_expanded_are_named() {
+    // Each form the expansion does not provide yet is rejected by name; a
+    // production that reaches itself has no expansion; an undeclared one is
+    // an error.
+    for (productions, message) in [
+        (
+            "main : a; a : main;",
+            "recursive randsequence production `main`",
+        ),
+        ("main : missing;", "no randsequence production of this name"),
+        ("main : if (1) a; a : {};", "randsequence if production"),
+        (
+            "main : repeat (2) a; a : {};",
+            "randsequence repeat production",
+        ),
+        (
+            "main : case (1) 1 : a; endcase; a : {};",
+            "randsequence case production",
+        ),
+        ("main : rand join a a; a : {};", "randsequence rand join"),
+        (
+            "main : a := 1 {}; a : {};",
+            "randsequence weight code block",
+        ),
+        ("main : { break; };", "break in a randsequence code block"),
+        (
+            "main : { continue; };",
+            "continue outside a loop in a randsequence code block",
+        ),
+        ("main : { return; };", "return in a randsequence code block"),
+        (
+            "main : a(1); a : {};",
+            "randsequence production with arguments",
+        ),
+        (
+            "main : a; void a(int v) : {};",
+            "randsequence production `a` with a result or formals",
+        ),
+    ] {
+        let source =
+            format!("module Top; initial randsequence(main) {productions} endsequence endmodule");
+        let Err(error) =
+            celox::Simulation::from_sv_sources(vec![(&source, Path::new("rs.sv"))], "Top")
+                .build_cranelift()
+        else {
+            panic!("accepted: {productions}");
+        };
+        assert!(
+            format!("{error:?}").contains(message),
+            "{productions}: {error:?}"
+        );
+    }
+}
