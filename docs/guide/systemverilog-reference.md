@@ -170,18 +170,22 @@ blocks in programs. Two region deviations are listed under
 
 - Unpacked structs as ports, nets, or parameters, or as `static`, `rand`,
   or `const` class properties.
-- Array members of enum, packed aggregate, `string`, handle, or unpacked
-  structure type; array members with variable-size dimensions or declared
-  initial values. Structures with array members cannot be ports, class
-  properties, subroutine interfaces, or dynamic container elements.
+- Fixed-size array members of enum, packed aggregate, `string`, handle, or
+  unpacked structure type, or with declared initial values. Structures with
+  fixed-size array members cannot be ports, class properties, subroutine
+  interfaces, or dynamic container elements.
+- Dynamic array, queue, and associative array members (7.2.1) with
+  declared initial values or with a fixed-size dimension before the dynamic
+  one (`int a[2][$]`); `%p` of a structure with such a member; fixed-size
+  arrays of such structures. Such a member is a container of its own,
+  copied with the structure.
 - Fixed-size arrays of structures whose members are `string` or handle
   typed, mix 2-state and 4-state leaves, or declare initial values; such
   arrays as ports, class properties, or subroutine interfaces.
 - Member initial values on enum or non-integral members, whole
   nested-structure member initializers, and defaulted structure types in
   module ports, subroutine interfaces, or dynamic containers.
-- Members that are `real` or arrays outside the cases above, including
-  dynamic arrays, queues, and associative arrays as members.
+- Members that are `real` or arrays outside the cases above.
 
 ### Processes, timing, and control flow {#timing-controls}
 
