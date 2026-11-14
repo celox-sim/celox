@@ -537,9 +537,13 @@ pub(crate) struct Facts {
 
 impl Facts {
     fn of(tree: &SyntaxTree) -> &Self {
+        &tree.spans().imports
+    }
+
+    /// The facts of the file whose arenas `native` are.
+    pub(crate) fn new(native: &celox_sv_syntax::Declarations) -> Self {
         use celox_sv_syntax::{DataTypeKind, ExprKind};
-        tree.spans().imports.get_or_init(|| {
-            let native = tree.declarations();
+        {
             let name = |id| {
                 matches!(native.expression(id).kind, ExprKind::Name(_))
                     .then_some(native.expression(id).tokens)
@@ -578,7 +582,7 @@ impl Facts {
                 qualified_bases,
                 pattern_keys,
             }
-        })
+        }
     }
 }
 
