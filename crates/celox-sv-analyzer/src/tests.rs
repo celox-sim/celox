@@ -7804,20 +7804,24 @@ fn folded_function_branches_still_reject_blocking_statements() {
 
 #[test]
 fn detached_function_scheduling_requires_a_process_caller() {
+    let function = "function int f(); fork #1; join_none return 1; endfunction";
     for body in [
         "final f();",
-        "int initialized = f();",
         "always_comb value = f();",
         "always_ff @(posedge clk) value <= f();",
     ] {
-        let source = format!(
-            "module Top; bit clk; int value; function int f(); fork #1; join_none return 1; endfunction {body} endmodule"
-        );
+        let source = format!("module Top; bit clk; int value; {function} {body} endmodule");
         assert!(
             analyze_source(&source, Path::new("invalid_join_none.sv")).is_err(),
             "{source}"
         );
     }
+    // A declaration initializer's fork is an error when it runs (IEEE
+    // 1800-2023 13.4.4 allows either), which the simulation reports (see
+    // `initializers_fork_only_on_paths_they_take` in celox's tests).
+    let source = format!("module Top; {function} int initialized = f(); endmodule");
+    analyze_source(&source, Path::new("initializer_join_none.sv"))
+        .unwrap_or_else(|error| panic!("{source}: {error}"));
     for statement in ["#1;", "wait (1);", "fork #1; join", "fork #1; join_any"] {
         let source = format!(
             "module Top; function void f(); {statement} endfunction initial f(); endmodule"
