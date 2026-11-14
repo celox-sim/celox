@@ -204,6 +204,11 @@ pub struct SimulationState<B: SimBackend> {
     /// The processes the current time slot ran, most recent last, up to
     /// [`RESUMED_PROCESSES`]: the ones a slot that does not settle reports.
     slot_resumed: std::collections::VecDeque<usize>,
+    /// The children that processes released when they blocked, those of the
+    /// latest first, which run before the other processes ready in their
+    /// region (see `SimulationState::next_spawned`). Transient: a
+    /// checkpoint leaves it out, and the children are ready all the same.
+    spawned: std::collections::VecDeque<usize>,
     /// Names of the processes for diagnostics, by index.
     process_names: Vec<String>,
     /// The loop that runs time slots, and the slots each loop ran.
@@ -303,6 +308,7 @@ impl<B: SimBackend> SimulationState<B> {
             return_budget: SLOT_RETURN_BUDGET,
             slot_passes: 0,
             slot_resumed: std::collections::VecDeque::new(),
+            spawned: std::collections::VecDeque::new(),
             process_names: Vec::new(),
             stats: SchedulerStats::default(),
             observed_events: Default::default(),
