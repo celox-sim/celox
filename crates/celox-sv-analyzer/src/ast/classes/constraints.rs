@@ -231,7 +231,8 @@ pub(in crate::ast) fn constrainable(property: &Property) -> bool {
 #[derive(Clone)]
 struct Loop {
     variable: String,
-    array: String,
+    /// The array property, by its index.
+    array: usize,
     element: std::sync::Arc<ContainerType>,
 }
 
@@ -275,12 +276,15 @@ fn object_member(
 
 /// The element `a[i]`, or the member `a[i].m` of the object it refers to,
 /// that `id` names, with `i` the variable of the loop over `a`.
+#[allow(clippy::too_many_arguments)]
 fn element(
     id: ExprId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     properties: &[Property],
+    names: &Names<'_>,
     env: &ConstEnv,
+    inputs: &HashMap<String, (usize, u32, bool)>,
     loops: &[Loop],
 ) -> Result<Option<Typed>, String> {
     if loops.is_empty() {
@@ -305,10 +309,10 @@ fn element(
     else {
         return Ok(None);
     };
-    let ExprKind::Name(array) = &native.expression(*expression).kind else {
+    let Some((array, _)) = array_property(*expression, native, properties, names, inputs, loops)?
+    else {
         return Ok(None);
     };
-    let array = instances::normalize_identifier(&array.spelling);
     if !loops.iter().any(|candidate| candidate.array == array) {
         return Ok(None);
     }
@@ -387,11 +391,8 @@ fn element_at(
     let celox_sv_syntax::DimensionKind::Index(index) = &dimension.kind else {
         return Ok(None);
     };
-    let Some((name, lineage)) = member_name(*expression, native, names, inputs, loops)? else {
-        return Ok(None);
-    };
-    let Some((position, property)) = instance(&name, lineage, properties, names)
-        .filter(|(_, property)| property.constraint_array())
+    let Some((position, property)) =
+        array_property(*expression, native, properties, names, inputs, loops)?
     else {
         return Ok(None);
     };
@@ -620,6 +621,13 @@ pub(in crate::ast) struct Names<'a> {
     pub statics: &'a [super::StaticProperty],
     pub inputs: &'a [super::StaticInput],
     pub slots: &'a [super::StaticSlot],
+    /// The caller's variable through which inline constraints name the
+    /// object their call randomizes, `h` of `h.randomize() with {...}`,
+    /// when its name resolves in the caller's scope (IEEE 1800-2023 18.7):
+    /// read once as the call starts, it holds that object, so a dotted name
+    /// it begins names a member of the object as `this` does, also after a
+    /// `pre_randomize()` that assigns the variable.
+    pub receiver: Option<&'a str>,
 }
 
 /// The instance property that `name` denotes, by its index, if a member of
@@ -702,6 +710,13 @@ fn member_name<'n>(
                     .get(1..)
                     .filter(|base| !base.is_empty())
                     .ok_or("`super` in a class without a base class")?,
+                root if names.receiver == Some(instances::normalize_identifier(root).as_str())
+                    && !loops
+                        .iter()
+                        .any(|looped| looped.variable == instances::normalize_identifier(root)) =>
+                {
+                    names.lineage
+                }
                 _ => return Ok(None),
             };
             Ok(Some((
@@ -948,6 +963,7 @@ fn remap_inputs(
 
 /// The class handle `id` names in a constraint, `null` or a handle
 /// property, as an unsigned integer; `None` for another expression.
+#[allow(clippy::too_many_arguments)]
 fn handle_operand(
     id: ExprId,
     tree: &AnalysisContext<'_>,
@@ -955,6 +971,8 @@ fn handle_operand(
     properties: &[Property],
     names: &Names<'_>,
     env: &ConstEnv,
+    inputs: &HashMap<String, (usize, u32, bool)>,
+    loops: &[Loop],
 ) -> Result<Option<Typed>, String> {
     let native = tree.declarations();
     let id = crate::ast::expression_binding::ungroup(id, native);
@@ -969,15 +987,12 @@ fn handle_operand(
             width,
             celox_heap::NULL as u64,
         ))),
-        ExprKind::Name(name) => {
-            let name = instances::normalize_identifier(&name.spelling);
-            match super::member(
-                &name,
-                names.lineage,
-                properties,
-                names.aggregates,
-                names.statics,
-            ) {
+        // A handle property, as other constraint operands name it.
+        ExprKind::Name(_) | ExprKind::Member { .. } => {
+            let Some((name, lineage)) = member_name(id, native, names, inputs, loops)? else {
+                return Ok(None);
+            };
+            match super::member(&name, lineage, properties, names.aggregates, names.statics) {
                 Some(super::Member::Instance(index))
                     if properties[index].r#type.class().is_some() =>
                 {
@@ -1037,10 +1052,26 @@ fn array_method(
     if separator != "." {
         return None;
     }
-    let (array, lineage) = member_name(*expression, native, names, inputs, loops).ok()??;
-    instance(&array, lineage, properties, names)
-        .filter(|(_, property)| property.constraint_array())
+    array_property(*expression, native, properties, names, inputs, loops)
+        .ok()?
         .map(|(index, _)| (index, instances::normalize_identifier(&name.spelling)))
+}
+
+/// The array property of the class that constraint operand `id` names, by
+/// its index, as [`member_name`] resolves it.
+fn array_property<'p>(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    properties: &'p [Property],
+    names: &Names<'_>,
+    inputs: &HashMap<String, (usize, u32, bool)>,
+    loops: &[Loop],
+) -> Result<Option<(usize, &'p Property)>, String> {
+    let Some((name, lineage)) = member_name(id, native, names, inputs, loops)? else {
+        return Ok(None);
+    };
+    Ok(instance(&name, lineage, properties, names)
+        .filter(|(_, property)| property.constraint_array()))
 }
 
 /// The sum of the elements of array property `index` of the class, of the
@@ -1323,7 +1354,7 @@ pub(in crate::ast) fn bind_inputs(
         {
             return Ok(element);
         }
-        if let Some(element) = element(id, tree, session, properties, env, loops)? {
+        if let Some(element) = element(id, tree, session, properties, names, env, inputs, loops)? {
             return Ok(element);
         }
         // A guard compares class handles, such as with `null`: their values
@@ -1335,8 +1366,10 @@ pub(in crate::ast) fn bind_inputs(
             right,
         } = &native.expression(id).kind
             && matches!(operator.as_str(), "==" | "!=" | "===" | "!==")
-            && let Some(a) = handle_operand(*left, tree, session, properties, names, env)?
-            && let Some(b) = handle_operand(*right, tree, session, properties, names, env)?
+            && let Some(a) =
+                handle_operand(*left, tree, session, properties, names, env, inputs, loops)?
+            && let Some(b) =
+                handle_operand(*right, tree, session, properties, names, env, inputs, loops)?
         {
             let operator = if operator.starts_with('=') {
                 "=="
@@ -1354,16 +1387,15 @@ pub(in crate::ast) fn bind_inputs(
                 variables,
                 body,
             } => {
-                let ExprKind::Name(name) = &native.expression(*array).kind else {
+                let Some((name, _)) = member_name(*array, native, names, inputs, loops)? else {
                     return Err("constraint foreach over an array other than a property".into());
                 };
-                let name = instances::normalize_identifier(&name.spelling);
                 let [Some(variable)] = variables.as_slice() else {
                     return Err("constraint foreach over more than one dimension".into());
                 };
-                let (index, property) = instance(&name, names.lineage, properties, names)
-                    .filter(|(_, property)| property.constraint_array())
-                    .ok_or_else(|| format!("constraint foreach over `{name}`"))?;
+                let (index, property) =
+                    array_property(*array, native, properties, names, inputs, loops)?
+                        .ok_or_else(|| format!("constraint foreach over `{name}`"))?;
                 // The elements of a rand array are solver variables
                 // (18.5.8.1), which the solver holds as its scalars.
                 if (property.rand || property.randc) && !random_array(property, tree, session, env)
@@ -1396,7 +1428,7 @@ pub(in crate::ast) fn bind_inputs(
                 let mut inner = loops.to_vec();
                 inner.push(Loop {
                     variable: instances::normalize_identifier(&variable.spelling),
-                    array: name,
+                    array: index,
                     element: property.array_storage().expect("an array property").clone(),
                 });
                 let body = expression(
@@ -1453,8 +1485,9 @@ pub(in crate::ast) fn bind_inputs(
             }
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
-                if let Some(member) =
-                    class_member(&name, names.lineage, tree, session, properties, names, env)?
+                if let Some((member, lineage)) = member_name(id, native, names, inputs, loops)?
+                    && let Some(member) =
+                        class_member(&member, lineage, tree, session, properties, names, env)?
                 {
                     member
                 } else if let Some(&(index, width, signed)) = inputs.get(&name) {
@@ -1512,21 +1545,12 @@ pub(in crate::ast) fn bind_inputs(
             }
             // A property qualified by `this` or `super` (IEEE 1800-2023
             // 8.11, 8.15): one of the class, or of its base, also in inline
-            // constraints, where it never names the caller's (18.7).
-            ExprKind::Member {
-                expression,
-                separator,
-                ..
-            } if separator == "."
-                && matches!(
-                    &native
-                        .expression(expression_binding::ungroup(*expression, native))
-                        .kind,
-                    ExprKind::Name(root) if matches!(root.spelling.as_str(), "this" | "super")
-                ) =>
-            {
+            // constraints, where it never names the caller's (18.7); or by
+            // the variable that holds the object the call randomizes (see
+            // `Names::receiver`).
+            ExprKind::Member { .. } if member_name(id, native, names, inputs, loops)?.is_some() => {
                 let (member, lineage) =
-                    member_name(id, native, names, inputs, loops)?.expect("a qualified name");
+                    member_name(id, native, names, inputs, loops)?.expect("a member name");
                 class_member(&member, lineage, tree, session, properties, names, env)?
                     .ok_or_else(|| format!("constraint variable `{member}`"))?
             }

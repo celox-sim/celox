@@ -354,8 +354,13 @@ blocks in programs. Two region deviations are listed under
   evaluated before solving, so a constraint it leaves out reads no member of
   a null handle (18.5.13).
 - Inline `with` constraints: four-state and aggregate caller-scope inputs,
-  typed parameter inputs, and a `local::` name of a property of the
-  caller's class.
+  typed parameter inputs, a `local::` name of a property of the caller's
+  class, and a member of a caller-scope variable (18.7) other than the one
+  that holds the object being randomized, as `h` of
+  `h.randomize() with { h.x > 0; }`, which names that object, also in
+  `foreach (h.a[i])`, `h.a[i]` and guards. That variable is read once as
+  the call starts: a `pre_randomize()` that assigns it does not change the
+  object its names refer to.
 - Enums with unresolved or X/Z values for randomization.
 
 ### Dynamic containers, strings, and reference arguments
