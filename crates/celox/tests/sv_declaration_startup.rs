@@ -517,3 +517,90 @@ fn deferred_declarations_run_on_the_first_step_if_no_checkpoint_is_loaded() {
     assert_eq!(std::fs::read(&output).unwrap(), b"");
     assert_ne!(simulation.get(simulation.signal("fd")), 0u32.into());
 }
+
+// IEEE 1800-2023 13.4.4: a function called by a declaration initializer may
+// fork a background process on a path the initializer never takes, as UVM
+// 1.2's factory registration reaches `uvm_component::m_set_cl_verb`, whose
+// fork only the root component runs and the root never reaches it from its
+// constructor. The error is issued when an initializer forks.
+const GUARDED_FORK: &str = r#"
+module Top;
+  int forks;
+  class Comp;
+    static Comp top;
+    function new(bit root);
+      if (root) begin
+        top = this;
+        return;
+      end
+      configure();
+    endfunction
+    function void configure();
+      if (this == top) fork forks++; join_none
+    endfunction
+  endclass
+  function automatic int register();
+    Comp c = new(1);
+    return 1;
+  endfunction
+  int registered = register();
+  initial begin
+    Comp::top.configure();
+    #1;
+    if (registered != 1 || forks != 1) $fatal(1, "registered %0d forks %0d", registered, forks);
+    $finish;
+  end
+endmodule
+"#;
+
+const INITIALIZER_FORK: &str = r#"
+module Top;
+  int hits;
+  function automatic bit watch();
+    fork hits++; join_none
+    return 1;
+  endfunction
+  bit y = watch();
+  initial $finish;
+endmodule
+"#;
+
+/// The run-time error of a declaration initializer that forks, raised
+/// while the simulation is built, which runs the initializers, or at its
+/// first step.
+fn rejects_initializer_fork<B: SimBackend>(
+    simulation: Result<Simulation<B>, celox::SimulatorError>,
+) {
+    // A run-time error, not the analyzer's rejection.
+    let error = match simulation {
+        Err(error) => format!("{error:?}"),
+        Ok(mut simulation) => loop {
+            match simulation.step() {
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("the initializer's fork stops the simulation"),
+                Err(error) => break format!("{error:?}"),
+            }
+        },
+    };
+    assert!(error.contains("Runtime"), "{error}");
+    assert!(error.contains("13.4.4"), "{error}");
+}
+
+#[test]
+fn initializers_fork_only_on_paths_they_take() {
+    fn build<'a>(source: &'a str, name: &'a str) -> celox::SimulatorBuilder<'a, Simulation> {
+        Simulation::from_sv_sources(vec![(source, Path::new(name))], "Top").four_state(true)
+    }
+    finishes(
+        build(GUARDED_FORK, "guarded_fork.sv")
+            .build_cranelift()
+            .unwrap(),
+    );
+    finishes(
+        build(GUARDED_FORK, "guarded_fork.sv")
+            .build_native()
+            .unwrap(),
+    );
+    rejects_initializer_fork(build(INITIALIZER_FORK, "initializer_fork.sv").build_cranelift());
+    rejects_initializer_fork(build(INITIALIZER_FORK, "initializer_fork.sv").build_native());
+}

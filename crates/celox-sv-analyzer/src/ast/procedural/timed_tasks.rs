@@ -113,13 +113,12 @@ pub(in crate::ast) fn classify<'a>(
             ));
         }
     }
-    for process in processes.iter().filter(|process| process.is_initializer()) {
-        if body_effects(&process.body, &known, &definitions).suspends {
-            return Err(unsupported(
-                "background process scheduled by a declaration initializer; IEEE 1800-2023 13.4.4 requires an initial/always process",
-            ));
-        }
-    }
+    // A declaration initializer may call a function that forks a
+    // background process on some path only, as UVM 1.2's factory
+    // registration reaches `uvm_component::m_set_cl_verb`, whose fork its
+    // condition never lets an initializer run. 13.4.4 lets the error be
+    // issued at run time: an initializer that forks or suspends stops the
+    // simulation then (see `celox_runtime`).
     let initial_count = processes.len();
     let mut retained = Vec::new();
     for process in std::mem::take(comb) {
