@@ -176,7 +176,7 @@ impl BoundPattern {
             .ok_or_else(|| unsupported("unpacked structure port type"))?;
         let syntax = SyntaxTree::empty();
         let tree = AnalysisContext::unspecialized(&syntax);
-        let shape = procedural::dimensions_from_type(target);
+        let shape = port_shape(session, &tree, target);
         let value = self.lower(&tree, session, &shape, &PackedDimensions::default())?;
         unpacked_structs::leaf_parts(aggregate, &value)
             .ok_or_else(|| unsupported("unpacked structure port pattern layout"))
@@ -187,7 +187,7 @@ impl BoundPattern {
         let session = &mut Session::default();
         let syntax = SyntaxTree::empty();
         let tree = AnalysisContext::unspecialized(&syntax);
-        let shape = procedural::dimensions_from_type(target);
+        let shape = port_shape(session, &tree, target);
         self.lower(&tree, session, &shape, &PackedDimensions::default())
             .map(Into::into)
     }
@@ -347,4 +347,22 @@ impl VariableDimensions {
             functions,
         })
     }
+}
+
+/// The shape of a port of type `target`, bound to its semantic type in the
+/// table of `session`: the port's type is specialized, so it names no
+/// constant of a scope.
+fn port_shape(
+    session: &mut Session,
+    tree: &AnalysisContext<'_>,
+    target: &Type,
+) -> VariableDimensions {
+    let mut target = target.clone();
+    semantic_types::bind_declared(
+        &mut session.types,
+        &tree.functions,
+        &mut target,
+        &ConstEnv::default(),
+    );
+    procedural::dimensions_from_type(&target)
 }

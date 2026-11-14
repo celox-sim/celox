@@ -188,17 +188,9 @@ fn select<'a>(
             true,
         ));
     }
-    if let Some((dim, rest)) = shape.unpacked.split_first() {
+    if let Some(dim) = shape.unpacked.first() {
         let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
-        // Selecting an unpacked dimension keeps the declaration of its
-        // element type, including the nominal structure identity and the
-        // class of a handle element.
-        let sub = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
-            container: None,
-            real: false,
-            unpacked: rest.to_vec(),
-            ..(*shape).clone_shape()
-        })));
+        let sub = Shape::Owned(Rc::new(shape.unpacked_element(&session.types)));
         let (kind, bindings, fill) =
             extract_type_fill(tree, session, functions, kind, bindings, &sub, dims)?;
         let items = indexed_items(
@@ -539,18 +531,13 @@ pub(in crate::ast) fn bind_native(
                 }
                 let pattern = matches!(native.expression(id).kind, ExprKind::Pattern { .. });
                 if default
-                    && let Some((dim, rest)) = shape.unpacked.split_first()
+                    && let Some(dim) = shape.unpacked.first()
                     && !pattern
                     && native_rank(id, native, tree, session, dims)? < shape.unpacked.len()
                 {
                     let (_, _, count) =
                         dimension_bounds(&tree.functions, &dim.left, &dim.right, dims)?;
-                    let sub = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
-                        container: None,
-                        real: false,
-                        unpacked: rest.to_vec(),
-                        ..(*shape).clone_shape()
-                    })));
+                    let sub = Shape::Owned(Rc::new(shape.unpacked_element(&session.types)));
                     jobs.push(Job::Broadcast(count));
                     jobs.push(Job::Value(Selected {
                         value: id,

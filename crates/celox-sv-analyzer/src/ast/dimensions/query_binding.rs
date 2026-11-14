@@ -1227,7 +1227,6 @@ mod tests {
                 chandle: false,
                 pattern_type: None,
                 enum_domain: None,
-                virtual_interface: None,
                 container: None,
             },
         );

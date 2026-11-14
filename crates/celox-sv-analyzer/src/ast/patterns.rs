@@ -275,10 +275,11 @@ pub(super) fn assignment_value(
         ));
     }
     let actual_shape = value_type.map(procedural::dimensions_from_type);
-    let actual = actual_shape
-        .as_ref()
-        .and_then(|actual| array_compatibility::unpacked_array_type(&tree.functions, actual, dims));
-    let target = array_compatibility::unpacked_array_type(&tree.functions, shape, dims);
+    let actual = actual_shape.as_ref().and_then(|actual| {
+        array_compatibility::unpacked_array_type(&tree.functions, &session.types, actual, dims)
+    });
+    let target =
+        array_compatibility::unpacked_array_type(&tree.functions, &session.types, shape, dims);
     if let Some((actual, target)) = actual_shape
         .as_ref()
         .and_then(|actual| array_compatibility::incompatible(tree, session, actual, shape, dims))

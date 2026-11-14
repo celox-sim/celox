@@ -710,22 +710,21 @@ pub(in crate::ast) struct BoundArguments {
     pub types: TypeAliases,
 }
 
-// Ordinary type equality ignores nominal declaration identity; specialization
-// matching must distinguish separately declared enum and aggregate types (8.25).
-impl PartialEq for BoundArguments {
-    fn eq(&self, other: &Self) -> bool {
+impl BoundArguments {
+    /// Whether `other` names the same specialization. Ordinary type equality
+    /// ignores nominal declaration identity; specialization matching must
+    /// distinguish separately declared enum and aggregate types (8.25).
+    pub(in crate::ast) fn same(&self, other: &Self, table: &semantic_types::TyTable) -> bool {
         self.values == other.values
             && self.types.len() == other.types.len()
             && self.types.iter().all(|(name, ty)| {
                 other
                     .types
                     .get(name)
-                    .is_some_and(|other| spelling(ty) == spelling(other))
+                    .is_some_and(|other| spelling(ty, table) == spelling(other, table))
             })
     }
 }
-
-impl Eq for BoundArguments {}
 
 pub(in crate::ast) fn bind_arguments(
     tree: &AnalysisContext<'_>,
@@ -858,9 +857,10 @@ fn prepare_bound(
         .class_specialization_names
         .get(generic)
         .and_then(|known| {
-            known
-                .iter()
-                .find(|known| known.of(&base_env, &base_aliases) && known.arguments == arguments)
+            known.iter().find(|known| {
+                known.of(&base_env, &base_aliases)
+                    && known.arguments.same(&arguments, &session.types)
+            })
         })
         .map(|known| known.name.clone())
         .filter(|name| named(session, name))
@@ -1372,7 +1372,8 @@ impl Parameters {
                     let ty = type_parameters::resolve(&tree.functions, ty, env)
                         .ok_or_else(|| unsupported(format!("type of type parameter `{name}`")))?;
                     if port {
-                        self.spelled.push(format!("{name}={}", spelling(&ty)));
+                        self.spelled
+                            .push(format!("{name}={}", spelling(&ty, &session.types)));
                         self.record_type(&ty);
                     }
                     aliases.insert(name.clone(), ty.clone());
@@ -1763,21 +1764,48 @@ fn literal_parameter(
 
 /// A spelling of type `ty` that tells it apart from other types, for the
 /// name of a specialization.
-pub(in crate::ast) fn spelling(ty: &Type) -> String {
+pub(in crate::ast) fn spelling(ty: &Type, table: &semantic_types::TyTable) -> String {
+    spelled(ty, ty.binding.get(table), table)
+}
+
+/// [`spelling`] of `ty`, whose semantic type is `id` if it has one.
+fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::TyTable) -> String {
     // A virtual interface type is its interface and modport (IEEE 1800-2023
     // 25.9), not the number that holds its value.
-    if let Some(interface) = ty.virtual_interface()
-        && ty.unpacked_ranges().is_empty()
-        && ty.container.is_none()
+    if let Some(id) = id
+        && let semantic_types::TyData::VirtualInterface { .. } = table.data(id)
     {
-        return interface.spelling();
+        return table.spell(id);
     }
+    debug_assert!(
+        ty.virtual_interface().is_none()
+            || !ty.unpacked_ranges().is_empty()
+            || ty.container.is_some(),
+        "a virtual interface type is spelled from its semantic type"
+    );
     let mut spelled = if let Some(container) = &ty.container {
+        // The element and key types of a container are those of its
+        // semantic type, where they are not bound themselves.
+        let (element, key) = match id.map(|id| table.data(id)) {
+            Some(semantic_types::TyData::Array { kind, element }) => (
+                Some(*element),
+                match kind {
+                    semantic_types::ArrayKind::Associative { key } => Some(*key),
+                    _ => None,
+                },
+            ),
+            _ => (None, None),
+        };
+        let element = container.element.binding.get(table).or(element);
         format!(
             "container({:?},{},{})",
             container.layout,
-            spelling(&container.element),
-            container.key.as_ref().map(spelling).unwrap_or_default()
+            spelled(&container.element, element, table),
+            container
+                .key
+                .as_ref()
+                .map(|ty| spelled(ty, ty.binding.get(table).or(key), table))
+                .unwrap_or_default()
         )
     } else {
         match (ty.class(), ty.kind()) {
@@ -2380,7 +2408,30 @@ mod tests {
     use std::path::Path;
 
     use super::super::super::shared_map::{SharedAliases, SharedEnv};
+    use super::super::super::virtual_interfaces::{VirtualInterface, value_type};
     use super::super::super::{AnalysisContext, ConstEnv, Session, TypeAliases};
+    use super::super::super::{const_functions, semantic_types};
+    use super::spelling;
+
+    /// A virtual interface type argument is spelled by the semantic type it
+    /// was bound to: its interface and modport (IEEE 1800-2023 25.9), so two
+    /// modports of one interface name different specializations.
+    #[test]
+    fn virtual_interface_type_arguments_are_spelled_by_their_semantic_types() {
+        let mut table = semantic_types::TyTable::default();
+        let functions = const_functions::ConstantFunctions::default();
+        let env = ConstEnv::default();
+        let mut spelled = |modport: Option<&str>| {
+            let mut ty = value_type(VirtualInterface {
+                interface: "bus_if".into(),
+                modport: modport.map(Into::into),
+            });
+            semantic_types::bind_declared(&mut table, &functions, &mut ty, &env);
+            spelling(&ty, &table)
+        };
+        assert_eq!(spelled(None), "virtual bus_if");
+        assert_eq!(spelled(Some("m")), "virtual bus_if.m");
+    }
 
     #[test]
     fn a_class_is_laid_out_again_once_its_scope_records_new_tables() {

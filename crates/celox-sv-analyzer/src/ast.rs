@@ -456,7 +456,11 @@ pub struct TypeShape {
     signed_element_depth: Option<usize>,
     /// The class of an object handle type.
     class: Option<Arc<str>>,
-    /// The interface of a virtual interface type (IEEE 1800-2023 25.9).
+    /// The interface of a virtual interface type (IEEE 1800-2023 25.9), or of
+    /// the elements of an array of them. Only the conversion to a semantic
+    /// type reads it: readers ask the type's `TyId`. It holds the element's
+    /// identity where a change of dimensions forgets the type's binding,
+    /// until the shape keeps its element's semantic type itself.
     virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
     /// The members of an unpacked structure type (IEEE 1800-2023 7.2).
     unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
@@ -795,8 +799,6 @@ struct Function {
     return_enum_domain: Option<Arc<enums::EnumDomain>>,
     /// The class of a class handle result.
     return_class: Option<String>,
-    /// The function returns a virtual interface of this type.
-    return_virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
     /// The container type of a dynamic array, associative array or queue
     /// result (IEEE 1800-2023 7.5, 7.8, 7.10).
     return_container: Option<Arc<ContainerType>>,
@@ -995,8 +997,6 @@ struct FunctionReturnMetadata {
     pattern_type: Option<Type>,
     /// The members of an enumerated return type, for its methods.
     enum_domain: Option<Arc<enums::EnumDomain>>,
-    /// The function returns a virtual interface of this type.
-    virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
     /// The function returns a dynamic array, associative array or queue of
     /// this type (IEEE 1800-2023 7.5, 7.8, 7.10).
     container: Option<Arc<ContainerType>>,

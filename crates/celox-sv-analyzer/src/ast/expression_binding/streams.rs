@@ -89,7 +89,7 @@ fn fixed_array(
     if shape.unpacked.is_empty() {
         return Ok(None);
     }
-    let array = array_compatibility::unpacked_array_type(functions, shape, dims)
+    let array = array_compatibility::unpacked_array_sizes(functions, shape, dims)
         .ok_or_else(|| unsupported("streaming concatenation of an array of unknown size"))?;
     let count = array
         .dims
@@ -803,7 +803,7 @@ fn element_reads(
     if target.unpacked.len() != 1 {
         return Ok(None);
     }
-    let Some(array) = array_compatibility::unpacked_array_type(&tree.functions, target, dims)
+    let Some(array) = array_compatibility::unpacked_array_sizes(&tree.functions, target, dims)
     else {
         return Ok(None);
     };
