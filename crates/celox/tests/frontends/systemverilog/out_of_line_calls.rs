@@ -5706,3 +5706,70 @@ endmodule
         }
     }
 }
+
+#[test]
+fn processes_blocked_in_one_task_keep_their_own_messages() {
+    // IEEE 1800-2023 15.4.3, 15.4.5, 15.4.7: processes that block in the
+    // same task, each on its own mailbox, and are served in the same time
+    // slot each go on with their own message, and only once: the peeked
+    // message is the one taken, and a later put waits for room of its own,
+    // also after another process's put in the task went through. The tasks
+    // are recursive, so they go out of line without the switch and every
+    // process shares their request sites.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int got1, output int got2, output int left1, output int left2,
+           output int order3, output int order4);
+ mailbox #(int) m1, m2, m3, m4, spare;
+ task automatic peek_in(mailbox #(int) m, output int v, input int depth);
+  if (depth > 0) peek_in(m, v, depth - 1);
+  else m.peek(v);
+ endtask
+ task automatic put_in(mailbox #(int) m, input int v, input int depth);
+  if (depth > 0) put_in(m, v, depth - 1);
+  else m.put(v);
+ endtask
+ task automatic take(mailbox #(int) m, output int v, output int left);
+  int p, t;
+  peek_in(m, p, 1);
+  #1;
+  void'(m.try_get(t));
+  v = p * 100 + t;
+  left = m.num();
+ endtask
+ task automatic give(mailbox #(int) m, input int base);
+  put_in(m, base + 1, 1);
+  put_in(spare, base, 1);
+  #1;
+  put_in(m, base + 2, 1);
+ endtask
+ task automatic drain(mailbox #(int) m, output int order);
+  int v;
+  repeat (3) begin #2 m.get(v); order = order * 10 + v; end
+ endtask
+ initial begin
+  m1 = new(1); m2 = new(1); m3 = new(1); m4 = new(1); spare = new;
+  void'(m3.try_put(0)); void'(m4.try_put(5));
+  fork
+   take(m1, got1, left1);
+   take(m2, got2, left2);
+   begin #1 void'(m1.try_put(3)); void'(m2.try_put(4)); end
+   give(m3, 0);
+   give(m4, 5);
+   drain(m3, order3);
+   drain(m4, order4);
+  join
+ end
+endmodule
+"#;
+    let names = ["got1", "got2", "left1", "left2", "order3", "order4"];
+    assert!(function_units(source, false) > 0, "function units");
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, false, backend, 10, &names),
+                Ok([303, 404, 0, 0, 12, 567].map(value).to_vec()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
