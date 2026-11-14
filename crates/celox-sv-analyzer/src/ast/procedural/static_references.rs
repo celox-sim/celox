@@ -66,9 +66,7 @@ pub(crate) fn candidates(native: &Declarations) -> Vec<Candidate> {
 
 /// The candidates of the file of `tree`.
 fn file_candidates<'t>(tree: &'t AnalysisContext<'_>) -> &'t [Candidate] {
-    tree.spans()
-        .static_references
-        .get_or_init(|| candidates(tree.declarations()))
+    &tree.spans().static_references
 }
 
 /// Whether the file of `tree` names variable `variable` of a subroutine

@@ -478,7 +478,7 @@ pub(crate) struct Facts {
 }
 
 impl Facts {
-    fn new(native: &celox_sv_syntax::Declarations) -> Self {
+    pub(crate) fn new(native: &celox_sv_syntax::Declarations) -> Self {
         use celox_sv_syntax::{BodyItemKind, ExprKind, ParameterKind, StatementKind};
         let controls = Ranges::new(native.body_items.iter().filter_map(|item| {
             matches!(
@@ -745,9 +745,7 @@ impl Facts {
     }
 
     pub(super) fn of(tree: &SyntaxTree) -> &Self {
-        tree.spans()
-            .validation
-            .get_or_init(|| Self::new(tree.declarations()))
+        &tree.spans().validation
     }
 }
 

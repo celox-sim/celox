@@ -33,6 +33,7 @@ mod casts;
 mod classes;
 pub(crate) use classes::ClassIndex;
 pub(crate) use procedural::static_references::Candidate as StaticReference;
+pub(crate) use procedural::static_references::candidates as static_reference_candidates;
 mod assertion_control;
 mod comb_process;
 mod continuous_delays;
