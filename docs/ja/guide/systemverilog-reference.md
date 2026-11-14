@@ -232,6 +232,11 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
 
 - スコープ `randomize()` / `std::randomize()`（18.12）: `with` 制約、未対応・
   未解決ドメインの enum、unpacked 配列、ネット、定数、選択、連結引数は未対応です。
+- `randsequence`（18.17）: 再帰するプロダクション、プロダクション制御の `if`・`case`・
+  `repeat`、`rand join`、コードブロック内の `break`・`return`、結果や仮引数を持つ
+  プロダクション、重みの後のコードブロックは未対応です。複数のルールを持つ
+  プロダクションは、重み（省略時は 1）に従ってスレッドの乱数生成器
+  （18.14.2）から 1 つを選びます。
 - クラス `randomize()`: 4値・集約プロパティ、static な rand プロパティ、
   64ビット以下の2値整数以外を要素に持つ rand 配列、`randc` 配列、オブジェクト・string の
   rand プロパティ、制約付き enum と `randc`、サイズを制約される rand 配列への `foreach`・

@@ -94,6 +94,9 @@ pub struct Declarations {
     pub timing_controls: Vec<TimingControl>,
     pub subroutines: Vec<Subroutine>,
     pub classes: Vec<ClassDeclaration>,
+    /// The productions of the `randsequence` statements whose structure
+    /// parsed (see [`Randsequence`]).
+    pub randsequences: Vec<Randsequence>,
 }
 
 impl Declarations {
@@ -149,6 +152,7 @@ impl Declarations {
             statements: Vec::new(),
             timing_controls: Vec::new(),
             subroutines: Vec::new(),
+            randsequences: Vec::new(),
             class_stack: Vec::new(),
             classes: Vec::new(),
             class_scopes: Vec::new(),
@@ -183,6 +187,7 @@ impl Declarations {
         let timing_controls = parser.timing_controls;
         let subroutines = parser.subroutines;
         let classes = parser.classes;
+        let randsequences = parser.randsequences;
         Ok(Self {
             source_items,
             expressions,
@@ -211,6 +216,7 @@ impl Declarations {
             timing_controls,
             subroutines,
             classes,
+            randsequences,
             sources,
             tokens,
             units,
@@ -332,6 +338,13 @@ impl Declarations {
         &self.procedures[id.0]
     }
 
+    /// The productions of `randsequence` statement `id`, if they parsed.
+    pub fn randsequence(&self, id: StatementId) -> Option<&Randsequence> {
+        self.randsequences
+            .iter()
+            .find(|randsequence| randsequence.statement == id)
+    }
+
     pub fn statement(&self, id: StatementId) -> &Statement {
         &self.statements[id.0]
     }
@@ -410,6 +423,7 @@ struct Parser<'a> {
     statements: Vec<Statement>,
     timing_controls: Vec<TimingControl>,
     subroutines: Vec<Subroutine>,
+    randsequences: Vec<Randsequence>,
     /// Classes whose `endclass` is still ahead, innermost last.
     class_stack: Vec<ClassDeclaration>,
     classes: Vec<ClassDeclaration>,

@@ -171,7 +171,10 @@ impl BodyBuilder<'_, '_, '_> {
         }
         result
     }
-    fn native_body_machine(&mut self, ids: &[StatementId]) -> Result<Vec<Stmt>, AnalyzerError> {
+    pub(super) fn native_body_machine(
+        &mut self,
+        ids: &[StatementId],
+    ) -> Result<Vec<Stmt>, AnalyzerError> {
         let native = self.tree.declarations();
         let mut jobs = Vec::new();
         jobs.extend(ids.iter().rev().map(|id| Job::Enter(*id)));
@@ -476,44 +479,10 @@ impl BodyBuilder<'_, '_, '_> {
                         if weight_ids.is_empty() {
                             return Err(unsupported("randcase without items"));
                         }
-                        let mut width = 1usize;
-                        for weight in &weight_ids {
-                            let ty = expression_types::type_of(
-                                self.tree,
-                                self.session,
-                                *weight,
-                                native,
-                                &self.dims,
-                            )?;
-                            let semantic_types::TyData::Packed(packed) =
-                                self.session.types.data(ty).clone()
-                            else {
-                                return Err(unsupported("non-integral randcase weight"));
-                            };
-                            width = width.max(
-                                usize::try_from(packed.bits())
-                                    .map_err(|_| unsupported("randcase weight width"))?,
-                            );
-                        }
-                        if width > 64 {
-                            return Err(unsupported("randcase weights wider than 64 bits"));
-                        }
-                        output.extend(self.effects(&weight_ids)?);
-                        let mut weights = Vec::new();
-                        for weight in &weight_ids {
-                            let value = self.native_value(*weight)?;
-                            let hidden = self.hidden(unsigned_type(width)).1;
-                            output.push(Stmt::Assign {
-                                lhs: LValue::Ident(hidden.clone()),
-                                rhs: Expr::Resize {
-                                    expr: Box::new(value),
-                                    width,
-                                    signed: false,
-                                },
-                                nonblocking: false,
-                            });
-                            weights.push(hidden);
-                        }
+                        let weight_ids = weight_ids.into_iter().map(Some).collect::<Vec<_>>();
+                        let (prelude, weights, width) =
+                            self.randcase_weights(&weight_ids, 1, 0, "randcase")?;
+                        output.extend(prelude);
                         jobs.push(Job::RandcaseNext(RandcaseState {
                             id,
                             index: 0,
@@ -905,6 +874,9 @@ impl BodyBuilder<'_, '_, '_> {
                             })
                             .transpose()?;
                         output.push(Stmt::Return(value));
+                    }
+                    StatementKind::Unconverted { category, .. } if category == "randsequence" => {
+                        output.extend(self.randsequence(id)?)
                     }
                     _ => output.extend(self.native_statement_leaf(&native.statement(id).kind)?),
                 },
@@ -1422,7 +1394,86 @@ impl BodyBuilder<'_, '_, '_> {
     /// to a nonzero total, draw a number below it with the thread RNG
     /// and take the first branch whose cumulative weight exceeds it; a
     /// zero total takes no branch (IEEE 1800-2023 18.16).
+    /// Evaluate weights `weight_ids` once, in order, into hidden unsigned
+    /// variables at the widest weight's precision (IEEE 1800-2023 18.16,
+    /// 18.17.1), `headroom` bits wider: the statements that do, the
+    /// variables, and the width, at which they are summed. A weight `None`
+    /// is 1. The widest weight is taken at least `minimum` wide. `what`
+    /// names the construct in diagnostics.
+    pub(super) fn randcase_weights(
+        &mut self,
+        weight_ids: &[Option<celox_sv_syntax::ExprId>],
+        minimum: usize,
+        headroom: usize,
+        what: &str,
+    ) -> Converted<(Vec<Stmt>, Vec<String>, usize)> {
+        let native = self.tree.declarations();
+        let mut width = minimum;
+        for weight in weight_ids.iter().flatten() {
+            let ty =
+                expression_types::type_of(self.tree, self.session, *weight, native, &self.dims)?;
+            let semantic_types::TyData::Packed(packed) = self.session.types.data(ty).clone() else {
+                return Err(unsupported(format!("non-integral {what} weight")));
+            };
+            width = width.max(
+                usize::try_from(packed.bits())
+                    .map_err(|_| unsupported(format!("{what} weight width")))?,
+            );
+        }
+        if width > 64 {
+            return Err(unsupported(format!("{what} weights wider than 64 bits")));
+        }
+        let width = width + headroom;
+        if width > 64 {
+            return Err(unsupported(format!("{what} weight sum wider than 64 bits")));
+        }
+        let present = weight_ids.iter().flatten().copied().collect::<Vec<_>>();
+        let mut output = self.effects(&present)?;
+        let mut weights = Vec::new();
+        for weight in weight_ids {
+            let value = match weight {
+                Some(weight) => self.native_value(*weight)?,
+                None => Expr::Literal(format!("{width}'d1")),
+            };
+            let hidden = self.hidden(unsigned_type(width)).1;
+            output.push(Stmt::Assign {
+                lhs: LValue::Ident(hidden.clone()),
+                rhs: Expr::Resize {
+                    expr: Box::new(value),
+                    width,
+                    signed: false,
+                },
+                nonblocking: false,
+            });
+            weights.push(hidden);
+        }
+        Ok((output, weights, width))
+    }
+
     fn randcase_finish(&mut self, state: RandcaseState) -> Vec<Stmt> {
+        self.weighted_choice(state.weights, state.width, state.items)
+    }
+
+    /// One of `items` picked at random with weights `weights` of width
+    /// `width` (see [`Self::randcase_weights`]), from the thread's random
+    /// number generator (IEEE 1800-2023 18.14.2, 18.16): none when the
+    /// weights sum to 0.
+    pub(super) fn weighted_choice(
+        &mut self,
+        weights: Vec<String>,
+        width: usize,
+        items: Vec<Vec<Stmt>>,
+    ) -> Vec<Stmt> {
+        struct Choice {
+            weights: Vec<String>,
+            width: usize,
+            items: Vec<Vec<Stmt>>,
+        }
+        let state = Choice {
+            weights,
+            width,
+            items,
+        };
         let width = state.width;
         let ty = unsigned_type(width);
         let literal = |value: u32| Expr::Literal(format!("{width}'d{value}"));

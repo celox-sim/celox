@@ -1886,3 +1886,67 @@ fn map_arguments(arguments: &[Argument], map: &mut dyn FnMut(ExprId) -> ExprId) 
         })
         .collect()
 }
+
+/// The productions of a `randsequence` statement (IEEE 1800-2023 18.17),
+/// which stays an unconverted statement whose items are its code blocks:
+/// each [`RsProd::Code`] and weight code block is one of them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Randsequence {
+    pub statement: StatementId,
+    /// The production `randsequence (main)` starts from; the first one
+    /// without it.
+    pub main: Option<Name>,
+    pub productions: Vec<RsProduction>,
+}
+
+/// `[data_type_or_void] name [(tf_port_list)] : rs_rule { | rs_rule } ;`
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RsProduction {
+    pub name: Name,
+    /// The tokens of its result type, if it declares one.
+    pub return_type: Option<TokenRange>,
+    /// The tokens of its formals, `( ... )`, if it declares them.
+    pub formals: Option<TokenRange>,
+    pub rules: Vec<RsRule>,
+    pub tokens: TokenRange,
+}
+
+/// `rs_production_list [:= weight [rs_code_block]]` (18.17.1).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RsRule {
+    /// `rand join [(expression)]` before the items (18.17.5): `Some` with
+    /// its expression, if any.
+    pub join: Option<Option<ExprId>>,
+    pub items: Vec<RsProd>,
+    pub weight: Option<ExprId>,
+    pub weight_code: Option<StatementId>,
+}
+
+/// One item of a production list: a production, which is a name or a call
+/// with arguments (18.17.7), a code block, or a production control
+/// (18.17.2-18.17.4).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RsProd {
+    Item(ExprId),
+    Code(StatementId),
+    If {
+        condition: ExprId,
+        then: ExprId,
+        otherwise: Option<ExprId>,
+    },
+    Repeat {
+        count: ExprId,
+        item: ExprId,
+    },
+    Case {
+        selector: ExprId,
+        items: Vec<RsCaseItem>,
+    },
+}
+
+/// An item of a `case` production control; no labels for `default`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RsCaseItem {
+    pub labels: Vec<ExprId>,
+    pub item: ExprId,
+}
