@@ -64,8 +64,9 @@
         },
         "by_failure_category": {
           "input_issue": 1,
+          "timeout": 1,
           "unclassified": 1,
-          "unsupported": 14
+          "unsupported": 13
         }
       },
       "4state": {
@@ -123,8 +124,8 @@
         },
         "by_failure_category": {
           "input_issue": 1,
-          "unclassified": 1,
-          "unsupported": 14
+          "unclassified": 2,
+          "unsupported": 13
         }
       }
     }
@@ -476,8 +477,8 @@
       "result": "fail",
       "mode": "elaboration",
       "tags": "scr1",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
+      "failure_category": "timeout",
+      "diagnostic": "runner_timeout",
       "input_issue": ""
     },
     {
@@ -486,8 +487,8 @@
       "result": "fail",
       "mode": "elaboration",
       "tags": "scr1",
-      "failure_category": "unsupported",
-      "diagnostic": "unsupported_construct",
+      "failure_category": "unclassified",
+      "diagnostic": "unrecognized_diagnostic",
       "input_issue": ""
     },
     {
@@ -552,7 +553,7 @@
     }
   ],
   "driver_profile": "release",
-  "measured_at": "2026-11-13T12:52:41.151941+00:00",
-  "celox_revision": "755290c4f5fd8c184d6cd593894fe033884895f6",
-  "run_url": "https://github.com/celox-sim/celox/actions/runs/43424615731"
+  "measured_at": "2026-11-14T11:58:06.823764+00:00",
+  "celox_revision": "9b77af5124c181037c4dc56ba93531dbf3906931",
+  "run_url": "https://github.com/celox-sim/celox/actions/runs/43590871832"
 }
