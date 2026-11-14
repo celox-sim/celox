@@ -939,6 +939,7 @@ fn shift_inputs(expr: &mut celox_heap::randomization::Expr, first: usize, by: us
         Expr::Input { .. }
         | Expr::Literal(..)
         | Expr::Field(_)
+        | Expr::Handle(_)
         | Expr::Size(_)
         | Expr::Sum(_)
         | Expr::Index { .. }

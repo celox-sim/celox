@@ -314,22 +314,23 @@ blocks in programs. Two region deviations are listed under
   sets, and `randc` domains beyond 1–8-bit integers and scalar enums with up
   to 256 members. Named constraint blocks cover only 1–64-bit two-state
   scalar integer properties with comparisons, logical and bitwise
-  operations, addition, subtraction, and multiplication. The elements of a
-  random array, fixed-size or dynamic, that a `foreach` or a `sum()` of a
-  constraint names are solver variables (18.5.8); the others are drawn at
-  random. A `dist` allows the values of its items of nonzero total weight, a
-  range bound `$` being the lowest or highest value of the type of its
-  expression; the solver first tries one item of each `dist`, picked by its
-  weight (one under `if` or `->` where its condition holds, one in a
-  `foreach` for each element), and then any allowed value, so the weights
-  bias the values without sampling them exactly. A `unique` constraint takes
-  singular properties of the class of equivalent types; other variables,
-  arrays and slices in it are unsupported. A constraint may name a member of
-  the object a handle property refers to (`h.m`, 18.5.9): a variable solved
-  with the object through a rand handle, a state value through another;
-  longer chains (`h.g.m`) are unsupported. A guard of state values, as of
-  `if` or `->`, is evaluated before solving, so a constraint it leaves out
-  reads no member of a null handle (18.5.13).
+  operations, addition, subtraction, and multiplication, and class handle
+  properties compared with each other or `null` by `==` and `!=`. The
+  elements of a random array, fixed-size or dynamic, that a `foreach` or a
+  `sum()` of a constraint names are solver variables (18.5.8); the others
+  are drawn at random. A `dist` allows the values of its items of nonzero
+  total weight, a range bound `$` being the lowest or highest value of the
+  type of its expression; the solver first tries one item of each `dist`,
+  picked by its weight (one under `if` or `->` where its condition holds,
+  one in a `foreach` for each element), and then any allowed value, so the
+  weights bias the values without sampling them exactly. A `unique`
+  constraint takes singular properties of the class of equivalent types;
+  other variables, arrays and slices in it are unsupported. A constraint may
+  name a member of the object a handle property refers to (`h.m`, 18.5.9): a
+  variable solved with the object through a rand handle, a state value
+  through another; longer chains (`h.g.m`) are unsupported. A guard of state
+  values, as of `if` or `->`, is evaluated before solving, so a constraint
+  it leaves out reads no member of a null handle (18.5.13).
 - Inline `with` constraints: four-state and aggregate caller-scope inputs,
   typed parameter inputs, qualified `this` / `super` references, restricted
   `with (names)` lookup, and scope `std::randomize(…) with`.

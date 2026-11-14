@@ -49,6 +49,10 @@ pub enum Expr {
     },
     Literal(u32, u64),
     Field(usize),
+    /// The class handle at this byte offset of the object, which no
+    /// randomization changes: a guard compares it, such as with `null`
+    /// (IEEE 1800-2023 18.5.13), as an integer of [`crate::HANDLE_BYTES`].
+    Handle(u32),
     /// The size of array `0` of the program, a 32-bit `int` (IEEE 1800-2023
     /// 7.5.2, 7.10.2.1): a solver variable while the array is random and a
     /// constraint names its size (18.4).
@@ -406,6 +410,7 @@ impl Expr {
             | Self::Input { .. }
             | Self::Index { .. }
             | Self::Member { .. }
+            | Self::Handle(_)
             | Self::Element { .. } => false,
         }
     }
@@ -444,6 +449,7 @@ impl Expr {
             }
             Self::Literal(..)
             | Self::Field(_)
+            | Self::Handle(_)
             | Self::Size(_)
             | Self::Input { .. }
             | Self::Index { .. }
@@ -478,6 +484,7 @@ impl Expr {
             Self::Literal(..)
             | Self::Sum(_)
             | Self::Static(_)
+            | Self::Handle(_)
             | Self::Input { .. }
             | Self::Index { .. }
             | Self::Member { .. }
@@ -518,6 +525,7 @@ impl Expr {
             }
             Self::Literal(..)
             | Self::Field(_)
+            | Self::Handle(_)
             | Self::Input { .. }
             | Self::Index { .. }
             | Self::Static(_)
@@ -564,6 +572,7 @@ impl Expr {
                 return Err("constraint loop outside its array".into());
             }
             Self::Sum(_) => return Err("constraint sum of an unread array".into()),
+            Self::Handle(_) => return Err("a handle the call did not read".into()),
             Self::Resize {
                 value,
                 width,
@@ -965,6 +974,10 @@ impl Heap {
                 )?),
             },
             Expr::DisableSoft { .. } => constraint.clone(),
+            Expr::Handle(offset) => Expr::Literal(
+                8 * crate::HANDLE_BYTES as u32,
+                self.load(object, *offset as usize, crate::HANDLE_BYTES),
+            ),
             Expr::Resize {
                 value,
                 width,
