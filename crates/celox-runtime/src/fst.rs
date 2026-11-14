@@ -23,7 +23,7 @@ use std::path::Path;
 use std::sync::Arc;
 #[expect(
     clippy::disallowed_types,
-    reason = "single-threaded: byte count shared between FstWriter and the CountingWriter that wavefst owns, both written and read on the simulation thread"
+    reason = "third-party ownership: wavefst 0.4 owns the CountingWriter and has no accessor for it, so FstWriter reads its byte count through this shared counter; the atomic keeps FstWriter Send"
 )]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -61,7 +61,7 @@ struct CountingWriter<W> {
     inner: W,
     #[expect(
         clippy::disallowed_types,
-        reason = "single-threaded: byte count shared between FstWriter and the CountingWriter that wavefst owns, both written and read on the simulation thread"
+        reason = "third-party ownership: wavefst 0.4 owns the CountingWriter and has no accessor for it, so FstWriter reads its byte count through this shared counter; the atomic keeps FstWriter Send"
     )]
     bytes: Arc<AtomicU64>,
 }
@@ -98,7 +98,7 @@ pub struct FstWriter<W: Write + Seek = File> {
     body: Option<wavefst::FstWriter<CountingWriter<W>>>,
     #[expect(
         clippy::disallowed_types,
-        reason = "single-threaded: byte count shared between FstWriter and the CountingWriter that wavefst owns, both written and read on the simulation thread"
+        reason = "third-party ownership: wavefst 0.4 owns the CountingWriter and has no accessor for it, so FstWriter reads its byte count through this shared counter; the atomic keeps FstWriter Send"
     )]
     bytes_written: Arc<AtomicU64>,
     closed: bool,
@@ -162,7 +162,7 @@ impl<W: Write + Seek> FstWriter<W> {
 
     #[expect(
         clippy::disallowed_types,
-        reason = "single-threaded: byte count shared between FstWriter and the CountingWriter that wavefst owns, both written and read on the simulation thread"
+        reason = "third-party ownership: wavefst 0.4 owns the CountingWriter and has no accessor for it, so FstWriter reads its byte count through this shared counter; the atomic keeps FstWriter Send"
     )]
     pub fn from_writer_with_time_precision(
         writer: W,
