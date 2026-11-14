@@ -135,9 +135,10 @@ impl Ff<'_, '_> {
     /// a fork in it shares in boxes (see [`SharedBox`]), which it pushes to
     /// [`CallStack::shared_boxes`]; the boxes of the formals are made here. A
     /// variable is shared when a branch names it, other than one the branch
-    /// declares, and the body writes it besides its declaration: one that no
-    /// one writes after the fork reads the same in every copy. Returns the
-    /// number of boxes pushed.
+    /// declares, and the body writes it besides its declaration from its
+    /// first statement that holds a fork on: one that no one writes after a
+    /// fork reads the same in every copy. Returns the number of boxes
+    /// pushed.
     pub(in crate::lowering::ff) fn share_forked(
         &mut self,
         subroutine: &sv::ir::Subroutine,
@@ -222,8 +223,22 @@ impl Ff<'_, '_> {
             named.extend(names.into_iter().filter(|name| !declared.contains(name)));
         }
         // What the body writes, but by declarations: by assignments, and
-        // through the arguments that the tasks and subroutines it calls write.
-        let written = self.m.written_names(&body);
+        // through the arguments that the tasks and subroutines it calls write,
+        // from its first statement that holds a fork on. The statements of
+        // the body run in order and each child starts in a copy of the
+        // parent's frames (see `Ff::fork_in_unit`), so what only statements
+        // before it write reads the same in the parent and in every child;
+        // a loop that holds the fork is that statement, which counts the
+        // writes of later iterations, and of the children.
+        let first = body
+            .iter()
+            .position(|stmt| {
+                let mut forks = false;
+                stmt.walk(&mut |stmt| forks |= matches!(stmt, sv::ir::Stmt::Fork { .. }));
+                forks
+            })
+            .unwrap_or(body.len());
+        let written = self.m.written_names(&body[first..]);
         let mut shared: Vec<&String> = automatic_names(subroutine)
             .filter(|name| {
                 named.contains(*name) && written.contains(*name) || passed.contains(*name)
