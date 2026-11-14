@@ -585,8 +585,8 @@ chapter-18/18.5.4--distribution_2.sv	2state	pass
 chapter-18/18.5.4--distribution_2.sv	4state	pass
 chapter-18/18.5.5--uniqueness-constraints_0.sv	2state	pass
 chapter-18/18.5.5--uniqueness-constraints_0.sv	4state	pass
-chapter-18/18.5.5--uniqueness-constraints_1.sv	2state	fail
-chapter-18/18.5.5--uniqueness-constraints_1.sv	4state	fail
+chapter-18/18.5.5--uniqueness-constraints_1.sv	2state	pass
+chapter-18/18.5.5--uniqueness-constraints_1.sv	4state	pass
 chapter-18/18.5.6--implication_0.sv	2state	pass
 chapter-18/18.5.6--implication_0.sv	4state	pass
 chapter-18/18.5.6--implication_1.sv	2state	pass
@@ -611,8 +611,8 @@ chapter-18/18.5.8.2--array-reduction-iterative-constraints_1.sv	2state	pass
 chapter-18/18.5.8.2--array-reduction-iterative-constraints_1.sv	4state	pass
 chapter-18/18.5.9--global-constraints_0.sv	2state	pass
 chapter-18/18.5.9--global-constraints_0.sv	4state	pass
-chapter-18/18.5.9--global-constraints_1.sv	2state	fail
-chapter-18/18.5.9--global-constraints_1.sv	4state	fail
+chapter-18/18.5.9--global-constraints_1.sv	2state	pass
+chapter-18/18.5.9--global-constraints_1.sv	4state	pass
 chapter-18/18.6.1--randomize-method_0.sv	2state	pass
 chapter-18/18.6.1--randomize-method_0.sv	4state	pass
 chapter-18/18.6.2--post-randomize_method_0.sv	2state	pass
@@ -625,8 +625,8 @@ chapter-18/18.6.2--pre-randomize-method_1.sv	2state	pass
 chapter-18/18.6.2--pre-randomize-method_1.sv	4state	pass
 chapter-18/18.6.3--behavior-of-randomization-methods_0.sv	2state	pass
 chapter-18/18.6.3--behavior-of-randomization-methods_0.sv	4state	pass
-chapter-18/18.6.3--behavior-of-randomization-methods_1.sv	2state	fail
-chapter-18/18.6.3--behavior-of-randomization-methods_1.sv	4state	fail
+chapter-18/18.6.3--behavior-of-randomization-methods_1.sv	2state	pass
+chapter-18/18.6.3--behavior-of-randomization-methods_1.sv	4state	pass
 chapter-18/18.6.3--behavior-of-randomization-methods_2.sv	2state	pass
 chapter-18/18.6.3--behavior-of-randomization-methods_2.sv	4state	pass
 chapter-18/18.6.3--behavior-of-randomization-methods_3.sv	2state	pass
@@ -659,8 +659,8 @@ chapter-18/18.8--disabling-random-variables-with-rand_mode_1.sv	2state	pass
 chapter-18/18.8--disabling-random-variables-with-rand_mode_1.sv	4state	pass
 chapter-18/18.8--disabling-random-variables-with-rand_mode_2.sv	2state	pass
 chapter-18/18.8--disabling-random-variables-with-rand_mode_2.sv	4state	pass
-chapter-18/18.8--disabling-random-variables-with-rand_mode_3.sv	2state	fail
-chapter-18/18.8--disabling-random-variables-with-rand_mode_3.sv	4state	fail
+chapter-18/18.8--disabling-random-variables-with-rand_mode_3.sv	2state	pass
+chapter-18/18.8--disabling-random-variables-with-rand_mode_3.sv	4state	pass
 chapter-18/18.8--disabling-random-variables-with-rand_mode_4.sv	2state	pass
 chapter-18/18.8--disabling-random-variables-with-rand_mode_4.sv	4state	pass
 chapter-18/18.8--disabling-random-variables-with-rand_mode_5.sv	2state	pass
