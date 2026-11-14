@@ -702,7 +702,7 @@ pub(super) fn enclose_aliased_packed_type(
         r#type.is_signed = false;
     }
     let mut ranges = direct_ranges;
-    ranges.extend(r#type.packed_ranges);
+    ranges.extend(std::mem::take(&mut r#type.packed_ranges));
     r#type.packed_ranges = ranges;
     r#type
 }
@@ -750,7 +750,7 @@ pub(super) fn type_with_unpacked_ranges(
         ));
     }
     let mut unpacked_ranges = ranges;
-    unpacked_ranges.extend(r#type.unpacked_ranges);
+    unpacked_ranges.extend(std::mem::take(&mut r#type.unpacked_ranges));
     r#type.unpacked_ranges = unpacked_ranges;
     Ok(r#type)
 }
