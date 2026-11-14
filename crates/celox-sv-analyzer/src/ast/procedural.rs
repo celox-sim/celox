@@ -460,7 +460,7 @@ pub(super) fn bound_dimensions_from_type(
     table: &mut semantic_types::TyTable,
     env: &ConstEnv,
 ) -> VariableDimensions {
-    let shape = dimensions_from_type(ty);
+    let mut shape = dimensions_from_type(ty);
     shape.bind_type(table, functions, env);
     shape
 }

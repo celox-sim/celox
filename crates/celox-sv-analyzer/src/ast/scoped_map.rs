@@ -70,6 +70,21 @@ impl<V> ScopedMap<V> {
 }
 
 impl<V: Clone> ScopedMap<V> {
+    /// Apply `update` to every value the scope sees, copying a table that
+    /// another scope shares.
+    pub fn update(&mut self, mut update: impl FnMut(&mut V)) {
+        let overlay = Arc::make_mut(&mut self.overlay);
+        for value in overlay.values_mut().flatten() {
+            update(value);
+        }
+        let hidden = &self.overlay;
+        for (name, value) in Arc::make_mut(&mut self.base).iter_mut() {
+            if !hidden.contains_key(name) {
+                update(value);
+            }
+        }
+    }
+
     pub fn insert(&mut self, name: String, value: V) -> Option<V> {
         // While constructing the module, populate the base without an overlay.
         if self.overlay.is_empty()
