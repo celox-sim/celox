@@ -26,6 +26,7 @@ pub(in crate::ast) fn of_type(
         enum_domain: ty.enum_domain.as_ref(),
         members: &ty.members,
         declaration: ty.declaration_name(),
+        scope: ty.declaration_scope(),
         signed: ty.is_signed,
         signed_element_depth: ty.signed_element_depth,
         packed: ty
@@ -77,6 +78,7 @@ pub(in crate::ast) fn of_shape(
         enum_domain: shape.enum_domain.as_ref(),
         members: &shape.members,
         declaration: type_names::declared_type(shape).and_then(Type::declaration_name),
+        scope: type_names::declared_type(shape).and_then(Type::declaration_scope),
         signed: shape.signed,
         signed_element_depth: shape.signed_element_depth,
         packed: shape
@@ -108,6 +110,9 @@ struct Parts<'a> {
     members: &'a [PackedMember],
     /// The typedef that names an enumeration, structure or union type.
     declaration: Option<&'a str>,
+    /// The elaborated scope that declares the enumeration, structure or
+    /// union type, if not a package or compilation unit.
+    scope: Option<&'a str>,
     signed: bool,
     signed_element_depth: Option<usize>,
     packed: Vec<(&'a ConstExpr, &'a ConstExpr)>,
@@ -187,9 +192,11 @@ impl Parts<'_> {
                     ))
                 })
                 .collect::<Option<Arc<[_]>>>()?;
-            return Some(TyData::UnpackedStruct(
-                self.aggregate_decl(aggregate.identity(), members),
-            ));
+            return Some(TyData::UnpackedStruct(self.aggregate_decl(
+                table,
+                aggregate.identity(),
+                members,
+            )));
         }
         if self.chandle {
             return Some(TyData::Chandle);
@@ -210,7 +217,9 @@ impl Parts<'_> {
         let named = self.declaration.map(Arc::<str>::from);
         let recorded = named.clone();
         let element = if self.enumeration
-            && let Some(decl) = named.map(Decl::Named).or(anonymous)
+            && let Some(decl) = named
+                .map(|declaration| Decl::Named(table.declare(&declaration, self.scope)))
+                .or(anonymous)
         {
             PackedElement::Enum {
                 decl,
@@ -232,7 +241,7 @@ impl Parts<'_> {
                     ))
                 })
                 .collect::<Option<Arc<[_]>>>()?;
-            PackedElement::Aggregate(self.aggregate_decl(&owner, members))
+            PackedElement::Aggregate(self.aggregate_decl(table, &owner, members))
         } else {
             PackedElement::Bits
         };
@@ -268,9 +277,14 @@ impl Parts<'_> {
     /// declares it (27.4), or the position of an anonymous declaration,
     /// with the types of its `members`, which tell the specializations of a
     /// parameterized scope apart.
-    fn aggregate_decl(&self, owner: &str, members: Arc<[(Arc<str>, TyId)]>) -> Decl {
+    fn aggregate_decl(
+        &self,
+        table: &mut TyTable,
+        owner: &str,
+        members: Arc<[(Arc<str>, TyId)]>,
+    ) -> Decl {
         Decl::Aggregate {
-            name: self.declaration.unwrap_or(owner).into(),
+            decl: table.declare(self.declaration.unwrap_or(owner), self.scope),
             members,
         }
     }
