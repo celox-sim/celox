@@ -908,8 +908,19 @@ fn shift_inputs(expr: &mut celox_heap::randomization::Expr, first: usize, by: us
     use celox_heap::randomization::Expr;
     match expr {
         Expr::Input { index, .. } if *index >= first => *index += by,
-        Expr::Enabled { value, .. } | Expr::Resize { value, .. } | Expr::Unary { value, .. } => {
-            shift_inputs(value, first, by)
+        Expr::Enabled { value, .. }
+        | Expr::Soft { value, .. }
+        | Expr::Resize { value, .. }
+        | Expr::Unary { value, .. } => shift_inputs(value, first, by),
+        Expr::DisableSoft {
+            variable,
+            condition,
+            ..
+        } => {
+            shift_inputs(variable, first, by);
+            if let Some(condition) = condition {
+                shift_inputs(condition, first, by);
+            }
         }
         Expr::Foreach { body, .. } => shift_inputs(body, first, by),
         Expr::Binary { left, right, .. } => {

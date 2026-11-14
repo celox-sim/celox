@@ -3120,8 +3120,48 @@ fn constraints_retain_simple_expressions_and_mark_other_forms() {
     assert!(
         matches!(&tree.expression(guarded[0]).kind, ExprKind::Binary { operator, .. } if operator == "||")
     );
-    assert!(blocks[2].expressions.is_none());
+    // A soft constraint and `disable soft` are retained (18.5.13).
+    let soft = blocks[2].expressions.as_ref().unwrap();
+    assert!(matches!(
+        &tree.expression(soft[0]).kind,
+        ExprKind::SoftConstraint { .. }
+    ));
     assert!(blocks[3].expressions.as_ref().unwrap().is_empty());
+    let tree = parse(
+        "class C; rand bit p; rand int x; constraint e { p -> soft x == 1; if (p) soft x == 2; soft p -> x == 3; disable soft x; } endclass",
+    );
+    let retained = tree.classes[0].constraints[0].expressions.as_ref().unwrap();
+    assert_eq!(retained.len(), 4);
+    for &guarded in &retained[..3] {
+        let ExprKind::SoftConstraint { expression } = tree.expression(guarded).kind else {
+            panic!("a soft constraint");
+        };
+        assert!(
+            matches!(&tree.expression(expression).kind, ExprKind::Binary { operator, .. } if operator == "||")
+        );
+    }
+    assert!(matches!(
+        tree.expression(retained[3]).kind,
+        ExprKind::DisableSoft {
+            condition: None,
+            ..
+        }
+    ));
+    // A guarded `disable soft` keeps the condition under which it applies.
+    let tree = parse(
+        "class C; rand bit p; rand int x; constraint e { if (p) disable soft x; p -> disable soft x; } endclass",
+    );
+    let retained = tree.classes[0].constraints[0].expressions.as_ref().unwrap();
+    assert_eq!(retained.len(), 2);
+    for &guarded in retained {
+        assert!(matches!(
+            tree.expression(guarded).kind,
+            ExprKind::DisableSoft {
+                condition: Some(_),
+                ..
+            }
+        ));
+    }
 }
 
 #[test]

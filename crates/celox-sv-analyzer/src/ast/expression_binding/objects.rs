@@ -1929,6 +1929,18 @@ pub(super) fn randomize_with(
                 }
                 None
             }
+            ExprKind::SoftConstraint { expression } => {
+                pending.push((*expression, loops));
+                None
+            }
+            ExprKind::DisableSoft {
+                variable,
+                condition,
+            } => {
+                pending.extend(condition.map(|condition| (condition, loops.clone())));
+                pending.push((*variable, loops));
+                None
+            }
             // A loop's body sees its variables (18.5.8.1).
             ExprKind::ConstraintForeach {
                 variables, body, ..
@@ -2015,7 +2027,8 @@ pub(super) fn randomize_with(
         .push((scope.clone().unwrap_or_default(), scope));
     let constraints = constraint_ids
         .iter()
-        .map(|&id| {
+        .enumerate()
+        .map(|(index, &id)| {
             classes::constraints::bind_inputs(
                 id,
                 tree,
@@ -2031,6 +2044,12 @@ pub(super) fn randomize_with(
                 &dimensions.const_env,
                 &inputs,
             )
+            .map(|constraint| {
+                classes::constraints::prioritize(
+                    constraint,
+                    classes::constraints::inline_priority(index),
+                )
+            })
             .map_err(|reason| unsupported(format!("inline constraints: {reason}")))
         })
         .collect::<Converted<Vec<_>>>();

@@ -400,6 +400,14 @@ impl Parser<'_> {
                 ExprKind::ConstraintForeach { array, body, .. } => {
                     pending.extend([*array, *body]);
                 }
+                ExprKind::SoftConstraint { expression } => pending.push(*expression),
+                ExprKind::DisableSoft {
+                    variable,
+                    condition,
+                } => {
+                    pending.push(*variable);
+                    pending.extend(*condition);
+                }
                 ExprKind::Call { .. }
                 | ExprKind::Parameterized { .. }
                 | ExprKind::Type(_)
