@@ -23,7 +23,8 @@ pub(in crate::ast) fn capture_member_type(
     {
         return None;
     }
-    for range in &mut ty.packed_ranges {
+    // The bounds become their values, which the type had already.
+    for range in &mut ty.shape_keeping_binding().packed_ranges {
         range.left = ConstExpr::Literal(format_typed_parameter_literal(
             eval_ast_const_expr(functions, &range.left, env)?,
             128,

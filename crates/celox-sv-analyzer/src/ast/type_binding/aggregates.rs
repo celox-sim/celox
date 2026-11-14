@@ -58,6 +58,43 @@ mod tests {
         assert_eq!(ty.members[1].name(), "high");
         assert_eq!(ty.members[1].offset(), 0);
     }
+    #[test]
+    fn types_keep_the_semantic_type_of_the_scope_that_declares_them() {
+        // IEEE 1800-2023 6.18, 23.9: the names in a type resolve in the scope
+        // that declares it. A reader in a scope that does not see `W` gets
+        // the type the declaring scope bound.
+        let session = &mut Session::default();
+        let tree = crate::source_tree::parse_source(
+            "module M;typedef logic[W-1:0] T;endmodule",
+            Path::new("declared-type.sv"),
+        )
+        .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let native = tree.declarations();
+        let celox_sv_syntax::TypeAliasTarget::DataType(root) = native.type_aliases[0].target else {
+            panic!()
+        };
+        let declaring = ConstEnv::from_iter([("W".into(), 4)]);
+        let ty = bind(
+            root,
+            native,
+            &tree,
+            session,
+            &declaring,
+            &TypeAliases::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let declared =
+            semantic_types::of_type(&mut session.types, &tree.functions, &ty, &declaring).unwrap();
+        let elsewhere = semantic_types::of_type(
+            &mut session.types,
+            &tree.functions,
+            &ty,
+            &ConstEnv::default(),
+        );
+        assert_eq!(elsewhere, Some(declared));
+    }
     struct Original(Option<SyntaxTree>);
     impl Drop for Original {
         fn drop(&mut self) {
