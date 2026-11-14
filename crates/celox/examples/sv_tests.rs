@@ -847,6 +847,11 @@ endmodule
                 "function automatic int f(); #1; return 0; endfunction",
                 "delay control in a function",
             ),
+            (
+                "undeclared_unit.sv",
+                "function automatic int f(); return missing; endfunction",
+                "`missing` is not declared",
+            ),
         ] {
             let path = fixture(dir.path(), name, code);
             let options = fixture_options(vec![path], Mode::Elaboration);

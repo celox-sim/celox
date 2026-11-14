@@ -65,6 +65,10 @@ pub(super) struct PackedDimensions {
     /// 6.21): `p.rand_mode()` names the static property only while `p`
     /// is one of them.
     pub(super) class_static_members: Arc<HashSet<String>>,
+    /// Whether these tables hold every value name the body being bound may
+    /// read, so that another one is undeclared (IEEE 1800-2023 6.6, 23.9):
+    /// those of a free subroutine of a package or of a compilation unit.
+    pub(super) declared_values: bool,
 }
 
 /// The tables of the scope that declares a class, which
@@ -151,6 +155,7 @@ impl PackedDimensions {
             constant_types: Arc::default(),
             class_base: None,
             class_static_members: Arc::default(),
+            declared_values: false,
         }
     }
 }
