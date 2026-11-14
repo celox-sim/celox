@@ -2760,6 +2760,10 @@ pub enum DpiBuiltin {
     ReMatch,
     /// UVM 1.2's `uvm_glob_to_re(glob)`.
     GlobToRe,
+    /// UVM 1.2's `uvm_dpi_regcomp(regex)`: `regex` compiled as it is
+    /// written, or `null`. Its `uvm_dpi_regexec` and `uvm_dpi_regfree` are
+    /// [`Self::ReExec`] and [`Self::ReFree`].
+    RegComp,
     /// UVM 1.2's `uvm_dump_re_cache()`, which only reports that its cache
     /// is not implemented: it does nothing.
     DumpReCache,
