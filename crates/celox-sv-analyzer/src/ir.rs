@@ -2756,6 +2756,13 @@ pub enum DpiBuiltin {
     NextArg,
     ToolName,
     ToolVersion,
+    /// UVM 1.2's `uvm_re_match(re, str)`: `0` when `str` matches `re`.
+    ReMatch,
+    /// UVM 1.2's `uvm_glob_to_re(glob)`.
+    GlobToRe,
+    /// UVM 1.2's `uvm_dump_re_cache()`, which only reports that its cache
+    /// is not implemented: it does nothing.
+    DumpReCache,
     /// A function of UVM's C library that Celox does not provide yet: it
     /// returns 0 (`null`, failure) and writes no output, so UVM reports the
     /// facility as unavailable.

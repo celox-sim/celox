@@ -221,6 +221,15 @@ const BUILTINS: &[(&str, DpiBuiltin, Option<Kind>, &[(Kind, bool)])] = {
             &[(Int, false)],
         ),
         ("uvm_dpi_get_tool_name_c", ToolName, Some(String), &[]),
+        // UVM 1.2's regular expressions (`src/dpi/uvm_regex.cc`).
+        (
+            "uvm_re_match",
+            ReMatch,
+            Some(Int),
+            &[(String, false), (String, false)],
+        ),
+        ("uvm_glob_to_re", GlobToRe, Some(String), &[(String, false)]),
+        ("uvm_dump_re_cache", DumpReCache, None, &[]),
         ("uvm_dpi_get_tool_version_c", ToolVersion, Some(String), &[]),
         (
             "uvm_hdl_check_path",

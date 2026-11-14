@@ -754,7 +754,10 @@ Supported subset; everything else is rejected:
   `uvm_dpi_get_next_arg_c` returns `celox` followed by the plusargs and
   `uvm_dpi_get_tool_name_c` returns `Celox`. The `uvm_hdl_*` and
   `uvm_polling_*` functions return 0 or `null`, so UVM reports those
-  facilities as unavailable.
+  facilities as unavailable. UVM 1.2's `uvm_re_match`, `uvm_glob_to_re` and
+  `uvm_dump_re_cache` are provided too; an expression `uvm_re_match` cannot
+  compile does not match, without UVM 1.2's `UVM/DPI/REGEX_INV` error, and
+  `uvm_dump_re_cache` does nothing.
 
 ## SystemVerilog emitted by Veryl {#systemverilog-emitted-by-veryl}
 
