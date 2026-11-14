@@ -406,7 +406,22 @@ impl BodyBuilder<'_, '_, '_> {
                             LoopSyntax::Repeat(value) => {
                                 // The count is evaluated once (12.7.2).
                                 output.extend(self.effects(&[*value])?);
-                                (LoopKind::Repeat(self.native_value(*value)?), None, false)
+                                let mut count = self.native_value(*value)?;
+                                // The count is evaluated once (IEEE 1800-2023
+                                // 12.7.2): one that calls a subroutine or has
+                                // an effect is saved before the loop, which may
+                                // read it more than once.
+                                if inlining::effectful(&count) || inlining::calls_subroutine(&count)
+                                {
+                                    let saved = self.hidden_of(*value)?.1;
+                                    output.push(Stmt::Assign {
+                                        lhs: LValue::Ident(saved.clone()),
+                                        rhs: count,
+                                        nonblocking: false,
+                                    });
+                                    count = Expr::Ident(saved);
+                                }
+                                (LoopKind::Repeat(count), None, false)
                             }
                             LoopSyntax::Forever => (LoopKind::Forever, None, false),
                             LoopSyntax::DoWhile(value) => {
