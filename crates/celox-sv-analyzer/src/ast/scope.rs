@@ -1000,20 +1000,23 @@ impl Renamer<'_> {
     }
 
     pub fn r#type(&self, mut r#type: Type) -> Type {
-        r#type.packed_ranges = std::mem::take(&mut r#type.packed_ranges)
+        // The names it renames denote what they did, so the type keeps its
+        // semantic type.
+        let shape = r#type.shape_keeping_binding();
+        shape.packed_ranges = std::mem::take(&mut shape.packed_ranges)
             .into_iter()
             .map(|range| self.packed_range(range))
             .collect();
-        for range in &mut r#type.unpacked_ranges {
+        for range in &mut shape.unpacked_ranges {
             range.left = self.const_expr(range.left.clone());
             range.right = self.const_expr(range.right.clone());
             range.size = range.size.take().map(|size| self.const_expr(size));
         }
-        r#type.members = std::mem::take(&mut r#type.members)
+        shape.members = std::mem::take(&mut shape.members)
             .into_iter()
-            .map(|member| member.with_type(|r#type| self.r#type(r#type)))
+            .map(|member| member.with_type(|ty| self.r#type(ty)))
             .collect();
-        r#type.container = r#type
+        shape.container = shape
             .container
             .take()
             .map(|container| self.container(&container));

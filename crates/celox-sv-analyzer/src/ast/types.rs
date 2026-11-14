@@ -546,7 +546,10 @@ pub(super) fn freeze_bounds(
     functions: &const_functions::ConstantFunctions,
     const_env: &ConstEnv,
 ) {
-    for range in &mut ty.packed_ranges {
+    // The bounds take their values where the type is declared, so the type
+    // keeps its semantic type.
+    let shape = ty.shape_keeping_binding();
+    for range in &mut shape.packed_ranges {
         if let Some(value) = eval_ast_const_expr(functions, &range.left, const_env) {
             range.left = bound_literal(value);
         }
@@ -554,7 +557,7 @@ pub(super) fn freeze_bounds(
             range.right = bound_literal(value);
         }
     }
-    for range in &mut ty.unpacked_ranges {
+    for range in &mut shape.unpacked_ranges {
         if let Some(value) = eval_ast_const_expr(functions, &range.left, const_env) {
             range.left = bound_literal(value);
         }

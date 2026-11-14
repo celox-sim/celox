@@ -185,18 +185,21 @@ impl Type {
     ) -> Option<Self> {
         let literal = |value: i128| ConstExpr::Literal(value.to_string());
         let mut resolved = self.clone();
-        for range in &mut resolved.packed_ranges {
+        // The bounds take their values in the declaring scope, so the type
+        // keeps its semantic type.
+        let shape = resolved.shape_keeping_binding();
+        for range in &mut shape.packed_ranges {
             let left = eval(&range.left().clone().into())?;
             let right = eval(&range.right().clone().into())?;
             *range = PackedRange::new(literal(left), literal(right));
         }
-        for range in &mut resolved.unpacked_ranges {
+        for range in &mut shape.unpacked_ranges {
             let left = eval(&range.left().clone().into())?;
             let right = eval(&range.right().clone().into())?;
             *range = UnpackedRange::new(literal(left), literal(right));
         }
         if let Some(container) = &self.container {
-            resolved.container = Some(Arc::new(ContainerType {
+            shape.container = Some(Arc::new(ContainerType {
                 key: match &container.key {
                     Some(key) => Some(key.with_resolved_container_bounds(eval)?),
                     None => None,
