@@ -29,6 +29,49 @@ fn typedefs(items: &str) -> (TyTable, HashMap<String, TyId>) {
     (table, ids)
 }
 
+/// The typedefs of `items` in module `M`, bound by an analysis of
+/// elaborated scope `scope`, as types of `table`.
+fn typedefs_in(table: &mut TyTable, scope: &str, items: &str) -> HashMap<String, TyId> {
+    let session = &mut Session {
+        scope: Some(scope.into()),
+        ..Session::default()
+    };
+    let source = format!("module M; {items} endmodule");
+    let tree =
+        crate::source_tree::parse_scope_fixture(&source, Path::new("semantic_types.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let env = ConstEnv::default();
+    let aliases = types::type_aliases_from_scope_with_env(&tree, session, &env).unwrap();
+    aliases
+        .iter()
+        .map(|(name, ty)| {
+            let id = of_type(table, &tree.functions, ty, &env)
+                .unwrap_or_else(|| panic!("`{name}` has no semantic type"));
+            (name.clone(), id)
+        })
+        .collect()
+}
+
+#[test]
+fn each_module_analysis_declares_types_of_its_own() {
+    // IEEE 1800-2023 6.22: the enumeration, structure and union types an
+    // instance declares are its own. Instances with the same parameter
+    // values share one analysis, and so its types.
+    let items = "typedef enum logic [1:0] {X, Y} e_t; typedef struct packed {logic a;} p_t;
+                 typedef struct {int a;} u_t; typedef bit [3:0] nibble;";
+    let mut table = TyTable::default();
+    let first = typedefs_in(&mut table, "M#1", items);
+    let again = typedefs_in(&mut table, "M#1", items);
+    let other = typedefs_in(&mut table, "M#2", items);
+    for name in ["e_t", "p_t", "u_t"] {
+        assert_eq!(first[name], again[name], "{name}");
+        assert!(!table.matches(first[name], other[name]), "{name}");
+        // Diagnostics write a declaration without its scope.
+        assert_eq!(table.spell(first[name]), table.spell(other[name]), "{name}");
+    }
+    assert!(table.matches(first["nibble"], other["nibble"]));
+}
+
 /// Whether each pair of typedefs of `items` matches as expected.
 fn assert_matching(items: &str, pairs: &[(&str, &str, bool)]) {
     let (table, ids) = typedefs(items);
@@ -501,8 +544,9 @@ fn bit_stream_casts_reject_destinations_holding_associative_arrays() {
         kind: ArrayKind::Fixed(Range { left: 0, right: 1 }),
         element: ids["map_t"],
     });
+    let decl = table.declare("holder_t", None);
     let holder = table.intern(TyData::UnpackedStruct(Decl::Aggregate {
-        name: "holder_t".into(),
+        decl,
         members: Arc::new([("i".into(), int), ("m".into(), ids["map_t"])]),
     }));
     for target in [ids["map_t"], maps, holder] {
@@ -513,4 +557,28 @@ fn bit_stream_casts_reject_destinations_holding_associative_arrays() {
             table.spell(target)
         );
     }
+}
+
+#[test]
+fn declarations_are_one_per_name_and_scope() {
+    let mut table = TyTable::default();
+    let scopes = (0..64)
+        .map(|index| format!("M#{index}"))
+        .collect::<Vec<_>>();
+    let ids = scopes
+        .iter()
+        .map(|scope| table.declare("M::e_t", Some(scope)))
+        .collect::<Vec<_>>();
+    let unscoped = table.declare("M::e_t", None);
+    let mut distinct = ids.clone();
+    distinct.push(unscoped);
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), scopes.len() + 1);
+    for (scope, id) in scopes.iter().zip(&ids) {
+        assert_eq!(table.declare("M::e_t", Some(scope)), *id);
+        assert_eq!(table.decl(*id).scope.as_deref(), Some(scope.as_str()));
+    }
+    assert_eq!(table.declare("M::e_t", None), unscoped);
+    assert_ne!(table.declare("M::f_t", None), unscoped);
 }

@@ -85,7 +85,8 @@ impl TyTable {
             // The base type's range is the last packed dimension, also of a
             // packed array of the enumeration; a base type without one has
             // none (6.19).
-            Decl::Named(name) => {
+            Decl::Named(decl) => {
+                let name = &self.decl(*decl).name;
                 let base = |range| {
                     self.enum_domains
                         .get(&(name.clone(), range, packed.four_state))

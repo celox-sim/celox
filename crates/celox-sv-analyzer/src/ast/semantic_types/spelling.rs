@@ -36,7 +36,7 @@ impl TyTable {
         match self.data(id) {
             TyData::Packed(packed) => match &packed.element {
                 PackedElement::Enum { decl, array } => {
-                    let name = format!("enum {}", spell_decl(decl));
+                    let name = format!("enum {}", self.spell_decl(decl));
                     match array {
                         false => name,
                         true => format!("{name} [{}:0]", packed.bits() - 1),
@@ -60,31 +60,33 @@ impl TyTable {
             TyData::String => "string".into(),
             TyData::Null => "null".into(),
             TyData::Chandle => "chandle".into(),
-            TyData::Class(decl) => format!("class {}", spell_decl(decl)),
+            TyData::Class(decl) => format!("class {}", self.spell_decl(decl)),
             TyData::VirtualInterface { interface, modport } => match modport {
-                Some(modport) => format!("virtual {}.{modport}", spell_decl(interface)),
-                None => format!("virtual {}", spell_decl(interface)),
+                Some(modport) => format!("virtual {}.{modport}", self.spell_decl(interface)),
+                None => format!("virtual {}", self.spell_decl(interface)),
             },
-            TyData::UnpackedStruct(decl) => format!("struct {}", spell_decl(decl)),
+            TyData::UnpackedStruct(decl) => format!("struct {}", self.spell_decl(decl)),
             TyData::Array { .. } => self.spell(id),
         }
     }
 }
 
-fn spell_decl(decl: &Decl) -> String {
-    match decl {
-        Decl::Named(name)
-        | Decl::Aggregate { name, .. }
-        | Decl::Class(name)
-        | Decl::Interface(name) => name.to_string(),
-        Decl::AnonymousEnum(domain) => format!(
-            "{{{}}}",
-            domain
-                .members
-                .iter()
-                .map(|member| format!("{}={}", member.name, domain.value_of(member)))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
+impl TyTable {
+    /// The name of a declaration as diagnostics write it, without its
+    /// elaborated scope.
+    fn spell_decl(&self, decl: &Decl) -> String {
+        match decl {
+            Decl::Named(decl) | Decl::Aggregate { decl, .. } => self.decl(*decl).name.to_string(),
+            Decl::Class(name) | Decl::Interface(name) => name.to_string(),
+            Decl::AnonymousEnum(domain) => format!(
+                "{{{}}}",
+                domain
+                    .members
+                    .iter()
+                    .map(|member| format!("{}={}", member.name, domain.value_of(member)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        }
     }
 }

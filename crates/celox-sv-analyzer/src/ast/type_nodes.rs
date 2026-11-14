@@ -44,21 +44,30 @@ impl Type {
     /// Name an enumeration, struct or union type after typedef `name`,
     /// unless an earlier typedef already named it (`typedef A B` names the
     /// type of `A`). `typename` is how `$typename` writes the name.
+    /// `scope` is the elaborated scope that declares the typedef (see
+    /// [`types::unit_scope`]).
     pub(super) fn name_declaration(
         &mut self,
+        scope: Option<Arc<str>>,
         name: impl FnOnce() -> (String, type_names::TypedefName),
     ) {
         if (self.is_enum || !self.members.is_empty() || self.unpacked_struct.is_some())
             && self.spelling.declaration().is_none()
         {
             let (name, typename) = name();
-            self.spelling.name(name.into(), typename);
+            self.spelling.name(name.into(), typename, scope);
         }
     }
 
     /// The typedef that names this enumeration, struct or union type.
     pub(super) fn declaration_name(&self) -> Option<&str> {
         self.spelling.declaration()
+    }
+
+    /// The elaborated scope that declares this enumeration, struct or
+    /// union type, if a module, interface or program does.
+    pub(super) fn declaration_scope(&self) -> Option<&str> {
+        self.spelling.scope()
     }
 
     /// Whether the type is a chandle or an unpacked structure with a
