@@ -2352,6 +2352,61 @@ fn guards_read_fixed_members_of_objects_the_call_solves() {
 }
 
 #[test]
+fn guards_of_any_state_expression_are_known_before_solving() {
+    // A guard is known before solving whatever operators it applies to
+    // state values, a shift or a state array's size among them (IEEE
+    // 1800-2023 18.5.13): a false one leaves out the member of a null
+    // handle.
+    let source = "class A; int v; endclass
+    class B;
+        bit [3:0] bits;
+        int arr[];
+        A h;
+        rand int x;
+        constraint c {
+            if (bits << 1) h.v == x;
+            if ((bits >> 3) == 1) h.v == x + 1;
+            if (arr.size() == 0) h.v == x + 2;
+        }
+    endclass
+    module Top;
+        B b;
+        int off, on;
+        initial begin
+            b = new;
+            b.arr = new[2];
+            off = b.randomize();
+            b.h = new;
+            b.h.v = 9;
+            b.bits = 4'b0100;
+            on = b.randomize() && b.x == 9;
+            $display(\"%0d %0d\", off, on);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1"]);
+}
+
+#[test]
+fn handle_members_named_like_array_methods_are_members() {
+    // `h.sum` and `h.size` name the members of the object `h` refers to,
+    // as `h` is a class handle, not an array (IEEE 1800-2023 7.12, 18.5.9).
+    let source = "class A; rand int sum; rand int size; endclass
+    class B;
+        rand A h;
+        constraint c { h.sum == 3; h.size == h.sum + 1; }
+        function new(); h = new; endfunction
+    endclass
+    module Top;
+        B b;
+        initial begin
+            b = new;
+            $display(\"%0d %0d %0d\", b.randomize(), b.h.sum, b.h.size);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 3 4"]);
+}
+
+#[test]
 fn constraints_name_members_only_through_handles_they_may_access() {
     // The handle of `h.m` is a member the constraint accesses: a `local`
     // one of a base class is not visible in a derived class's constraint

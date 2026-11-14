@@ -396,12 +396,15 @@ fn visible(
 }
 
 /// The array property whose size member `id` is, as `a.size`, if `a` is
-/// one.
-fn array_size(
+/// The array property and method that `id`, `a.m` with or without
+/// parentheses, names (IEEE 1800-2023 7.5.2, 7.12): when `a` is an array
+/// property of the class, by its type. A member of the object a handle `a`
+/// refers to is no array method, though named alike (`h.size`, `h.sum`).
+fn array_method(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
     properties: &[Property],
-) -> Option<String> {
+) -> Option<(String, String)> {
     let ExprKind::Member {
         expression,
         separator,
@@ -413,35 +416,16 @@ fn array_size(
     let ExprKind::Name(array) = &native.expression(*expression).kind else {
         return None;
     };
-    if separator != "." || name.spelling != "size" {
+    if separator != "." {
         return None;
     }
-    // By the type of the receiver: the `size` of an array, a member of the
-    // object a handle refers to.
     let array = instances::normalize_identifier(&array.spelling);
     properties
         .iter()
         .rev()
         .find(|property| property.name == array)
-        .filter(|property| property.sequence())
-        .map(|_| array)
-}
-
-/// The array property that `a.sum` names, with or without parentheses.
-fn array_sum(id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<String> {
-    let ExprKind::Member {
-        expression,
-        separator,
-        name,
-    } = &native.expression(id).kind
-    else {
-        return None;
-    };
-    let ExprKind::Name(array) = &native.expression(*expression).kind else {
-        return None;
-    };
-    (separator == "." && name.spelling == "sum")
-        .then(|| instances::normalize_identifier(&array.spelling))
+        .filter(|property| property.constraint_array())
+        .map(|_| (array, instances::normalize_identifier(&name.spelling)))
 }
 
 /// The sum of the elements of array property `name` among those of the
@@ -478,6 +462,22 @@ fn sum(
         width: element.layout.width,
         signed: element.layout.signed,
     })
+}
+
+/// Method `method` of array property `array` (see [`array_method`]).
+fn array_value(
+    array: String,
+    method: &str,
+    properties: &[Property],
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Result<Typed, String> {
+    match method {
+        "size" => size(array, properties),
+        "sum" => sum(array, properties, tree, session, env),
+        _ => Err(format!("constraint array method `{array}.{method}`")),
+    }
 }
 
 /// The size of array property `name` among those of the program.
@@ -759,42 +759,21 @@ pub(in crate::ast) fn bind_inputs(
                     return Err(format!("constraint variable `{name}`"));
                 }
             }
-            // The size of a dynamic array or queue (IEEE 1800-2023 7.5.2,
-            // 7.10.2.1, 18.4), with or without the parentheses.
+            // A method of an array property, with or without the
+            // parentheses: its size (IEEE 1800-2023 7.5.2, 7.10.2.1, 18.4) or
+            // the sum of its elements, of their type (7.12.3, 18.5.8.2).
             ExprKind::Call {
                 expression,
                 arguments,
-            } if arguments.is_empty() && array_size(*expression, native, properties).is_some() => {
-                return size(
-                    array_size(*expression, native, properties).unwrap(),
-                    properties,
-                );
+            } if arguments.is_empty()
+                && array_method(*expression, native, properties).is_some() =>
+            {
+                let (array, method) = array_method(*expression, native, properties).unwrap();
+                return array_value(array, &method, properties, tree, session, env);
             }
-            ExprKind::Member { .. } if array_size(id, native, properties).is_some() => {
-                return size(array_size(id, native, properties).unwrap(), properties);
-            }
-            // The sum of the elements of an array property, of their type
-            // (IEEE 1800-2023 7.12.3, 18.5.8.2).
-            ExprKind::Call {
-                expression,
-                arguments,
-            } if arguments.is_empty() && array_sum(*expression, native).is_some() => {
-                return sum(
-                    array_sum(*expression, native).unwrap(),
-                    properties,
-                    tree,
-                    session,
-                    env,
-                );
-            }
-            ExprKind::Member { .. } if array_sum(id, native).is_some() => {
-                return sum(
-                    array_sum(id, native).unwrap(),
-                    properties,
-                    tree,
-                    session,
-                    env,
-                );
+            ExprKind::Member { .. } if array_method(id, native, properties).is_some() => {
+                let (array, method) = array_method(id, native, properties).unwrap();
+                return array_value(array, &method, properties, tree, session, env);
             }
             ExprKind::Member {
                 expression,

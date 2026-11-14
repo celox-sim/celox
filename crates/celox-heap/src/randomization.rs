@@ -337,6 +337,36 @@ fn boolean(value: Term) -> Term {
 }
 
 impl Expr {
+    /// Whether the expression reads the solver variable of an object the
+    /// call solves.
+    fn mentions_solved(&self) -> bool {
+        match self {
+            Self::Solved(_) => true,
+            Self::Foreach { body, .. } => body.mentions_solved(),
+            Self::Enabled { value, .. }
+            | Self::Resize { value, .. }
+            | Self::Unary { value, .. } => value.mentions_solved(),
+            Self::Binary { left, right, .. } => left.mentions_solved() || right.mentions_solved(),
+            Self::Dist {
+                membership,
+                choices,
+            } => {
+                membership.mentions_solved()
+                    || choices
+                        .iter()
+                        .any(|choice| choice.predicate.mentions_solved())
+            }
+            Self::Literal(..)
+            | Self::Field(_)
+            | Self::Size(_)
+            | Self::Sum(_)
+            | Self::Input { .. }
+            | Self::Index { .. }
+            | Self::Member { .. }
+            | Self::Element { .. } => false,
+        }
+    }
+
     /// Whether the expression names the elements of array `index`: a loop
     /// over it or its sum.
     fn names_elements(&self, index: usize) -> bool {
@@ -527,9 +557,13 @@ impl Heap {
     /// replaced by the conjunction of its body for each element, which
     /// `loops` gives for the enclosing loops: (array, index).
     /// The width and value of unrolled constraint expression `expr` of
-    /// `object` if known before solving: one of literals, inputs and the
-    /// fields of the object that are not random for the call, as the guards
-    /// of constraints are (IEEE 1800-2023 18.5.13).
+    /// `object` if known before solving: one of literals, inputs, the fields
+    /// of the object that are not random for the call and the sizes of its
+    /// arrays that are not, as the guards of constraints are (IEEE 1800-2023
+    /// 18.5.13). It is the value of the term the solver takes for `expr`,
+    /// with those as constants and the random ones free, by the solver's own
+    /// evaluation; `&&`, `||` and `!` short-circuit (11.4.7), so that a guard
+    /// that a known operand decides is known though the other is random.
     fn known(
         &mut self,
         object: Handle,
@@ -538,86 +572,88 @@ impl Heap {
         check_only: bool,
         inputs: &[u64],
     ) -> Option<(u32, u64)> {
-        let mask = |width: u32, value: u64| value & (u64::MAX >> (64 - width.clamp(1, 64)));
-        let extend = |width: u32, value: u64| {
-            let shift = 64 - width.clamp(1, 64);
-            ((value << shift) as i64 >> shift) as u64
-        };
-        Some(match expr {
-            Expr::Literal(width, value) => (*width, mask(*width, *value)),
-            Expr::Input { index, width } => (*width, mask(*width, *inputs.get(*index)?)),
-            Expr::Field(index) => {
-                let field = program.fields.get(*index)?;
+        match expr {
+            Expr::Unary { op, value } if op == "!" => {
+                let (_, value) = self.known(object, program, value, check_only, inputs)?;
+                return Some((1, u64::from(value == 0)));
+            }
+            Expr::Binary {
+                op, left, right, ..
+            } if matches!(op.as_str(), "&&" | "||") => {
+                let left = self
+                    .known(object, program, left, check_only, inputs)
+                    .map(|(_, value)| value != 0);
+                let decided = match (op.as_str(), left) {
+                    ("&&", Some(false)) => Some(false),
+                    ("||", Some(true)) => Some(true),
+                    _ => None,
+                };
+                if let Some(decided) = decided {
+                    return Some((1, u64::from(decided)));
+                }
+                let right = self
+                    .known(object, program, right, check_only, inputs)
+                    .map(|(_, value)| value != 0);
+                // A known right operand decides it too; else, with the left
+                // one known not to, the right one is its value.
+                let value = match (op.as_str(), left, right) {
+                    ("&&", _, Some(false)) => false,
+                    ("||", _, Some(true)) => true,
+                    (_, Some(_), Some(right)) => right,
+                    _ => return None,
+                };
+                return Some((1, u64::from(value)));
+            }
+            _ => {}
+        }
+        // A variable of another object the call solves is not known.
+        if expr.mentions_solved() {
+            return None;
+        }
+        // The fields and array sizes as the solver takes them: a value when
+        // the call does not randomize it, free otherwise.
+        let fields = program
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let width = field.width.clamp(1, 64);
                 if !(1..=64).contains(&field.width)
                     || (!check_only && self.random_mode(object, field.offset, field.random))
                 {
-                    return None;
+                    var(format!("field{index}"), Sort::Bv(width))
+                } else {
+                    let value = self.load(
+                        object,
+                        field.offset as usize,
+                        field.width.div_ceil(8) as usize,
+                    );
+                    bv(width, value & (u64::MAX >> (64 - width)))
                 }
-                let value = self.load(
-                    object,
-                    field.offset as usize,
-                    field.width.div_ceil(8) as usize,
-                );
-                (field.width, mask(field.width, value))
-            }
-            Expr::Resize {
-                value,
-                width,
-                signed,
-            } => {
-                let (old, value) = self.known(object, program, value, check_only, inputs)?;
-                let value = if *signed { extend(old, value) } else { value };
-                (*width, mask(*width, value))
-            }
-            Expr::Unary { op, value } => {
-                let (width, value) = self.known(object, program, value, check_only, inputs)?;
-                match op.as_str() {
-                    "!" => (1, u64::from(value == 0)),
-                    "~" => (width, mask(width, !value)),
-                    "-" => (width, mask(width, value.wrapping_neg())),
-                    _ => return None,
+            })
+            .collect::<Vec<_>>();
+        let sizes = program
+            .arrays
+            .iter()
+            .enumerate()
+            .map(|(index, array)| {
+                if !check_only && self.random_mode(object, array.offset, array.random) {
+                    var(format!("size{index}"), Sort::Bv(32))
+                } else {
+                    let contents = self.load(object, array.offset as usize, crate::HANDLE_BYTES);
+                    bv(32, self.sequence_len(contents as Handle) as u64)
                 }
-            }
-            Expr::Binary {
-                op,
-                left,
-                right,
-                signed,
-            } => {
-                let (width, a) = self.known(object, program, left, check_only, inputs)?;
-                match (op.as_str(), a != 0) {
-                    ("&&", false) => return Some((1, 0)),
-                    ("||", true) => return Some((1, 1)),
-                    _ => {}
-                }
-                let (_, b) = self.known(object, program, right, check_only, inputs)?;
-                let ordered = |a: u64, b: u64| {
-                    if *signed {
-                        (extend(width, a) as i64).cmp(&(extend(width, b) as i64))
-                    } else {
-                        a.cmp(&b)
-                    }
-                };
-                let truth = |holds: bool| (1, u64::from(holds));
-                match op.as_str() {
-                    "==" => truth(a == b),
-                    "!=" => truth(a != b),
-                    "&&" | "||" => truth(b != 0),
-                    "<" => truth(ordered(a, b).is_lt()),
-                    "<=" => truth(ordered(a, b).is_le()),
-                    ">" => truth(ordered(a, b).is_gt()),
-                    ">=" => truth(ordered(a, b).is_ge()),
-                    "+" => (width, mask(width, a.wrapping_add(b))),
-                    "-" => (width, mask(width, a.wrapping_sub(b))),
-                    "*" => (width, mask(width, a.wrapping_mul(b))),
-                    "&" => (width, a & b),
-                    "|" => (width, a | b),
-                    "^" => (width, a ^ b),
-                    _ => return None,
-                }
-            }
-            _ => return None,
-        })
+            })
+            .collect::<Vec<_>>();
+        let term = expr.term(&fields, 0, &sizes, inputs).ok()?;
+        let terms = aplite::Env::from([(String::new(), term)]);
+        match aplite::finite::evaluate_scalar_terms(&terms, &Default::default(), Limits::default())
+            .ok()?
+            .remove("")?
+        {
+            Scalar::Bool(value) => Some((1, u64::from(value))),
+            Scalar::Bv { width, value } => Some((width, value)),
+        }
     }
 
     /// The solver variable of the member at `offset` of `object`, when the
