@@ -607,6 +607,7 @@ mod tests {
             simvariants: Vec::new(),
             files,
             source_encoding: Default::default(),
+            max_time: None,
         }
     }
 
@@ -816,35 +817,35 @@ endmodule
         ] {
             let path = fixture(dir.path(), name, code);
             let mut options = fixture_options(vec![path], Mode::Elaboration);
-            assert!(run(&options).unwrap_err().contains("module root"));
+            // Elaboration of packages and compilation-unit items alone
+            // elaborates those scopes (IEEE 1800-2023 3.12.1); a simulation
+            // needs a module root.
+            run(&options).unwrap_or_else(|error| panic!("{name}: {error}"));
             options.mode = Mode::Simulation;
             assert!(run(&options).unwrap_err().contains("module root"));
             options.mode = Mode::Elaboration;
             options.top = Some("Missing".into());
             assert!(run(&options).is_err());
         }
+        // A class or an interface no module instantiates elaborates as well,
+        // and has no module root to simulate.
+        for (name, code) in [
+            ("class.sv", "class C; int x; endclass"),
+            ("interface.sv", "interface Bus; logic x; endinterface"),
+        ] {
+            let path = fixture(dir.path(), name, code);
+            let mut options = fixture_options(vec![path], Mode::Elaboration);
+            run(&options).unwrap_or_else(|error| panic!("{name}: {error}"));
+            options.mode = Mode::Simulation;
+            assert!(run(&options).unwrap_err().contains("module root"), "{name}");
+        }
+        // Errors of such sources are errors of the elaboration.
         for (name, code, diagnostic) in [
-            ("class.sv", "class C; int x; endclass", "module root"),
-            (
-                "interface.sv",
-                "interface Bus; logic x; endinterface",
-                "module root",
-            ),
-            (
-                "unresolved_unit.sv",
-                "function automatic int f(); return missing; endfunction",
-                "module root",
-            ),
             ("parse.sv", "typedef logic [7:0]", "parse error"),
             (
                 "bad_unit.sv",
                 "function automatic int f(); #1; return 0; endfunction",
-                "module root",
-            ),
-            (
-                "bad_interface.sv",
-                "interface Bus; logic x; assign x = missing; endinterface",
-                "module root",
+                "delay control in a function",
             ),
         ] {
             let path = fixture(dir.path(), name, code);
