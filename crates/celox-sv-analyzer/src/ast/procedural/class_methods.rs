@@ -523,7 +523,8 @@ pub(super) fn lower_cast(
         scoped_type(handle.clone(), declaration_env),
         &item.env,
     );
-    let ir_int = super::super::ir_type(session, &tree.functions, int_type(), &item.env);
+    let int = semantic_types::bound_builtin(&mut session.types, &tree.functions, int_type());
+    let ir_int = super::super::ir_type(session, &tree.functions, int, &item.env);
     let mut labels = vec![0];
     labels.extend(classes::cast_targets(
         tree,

@@ -441,11 +441,10 @@ fn select(
             // A string character has type byte, as does getc (6.16,
             // Table 6-9). The index and runtime string length do not
             // affect its self-determined type.
-            TyData::String => semantic_types::of_type(
+            TyData::String => semantic_types::of_builtin(
                 &mut session.types,
                 &tree.functions,
                 &type_binding::builtin_type("byte", None)?,
-                &dims.const_env,
             ),
             TyData::Packed(mut packed) if !packed.dims.is_empty() => {
                 // 11.5.1, 11.8.1: a bit-select of any packed integral value,

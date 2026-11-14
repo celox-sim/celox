@@ -20,7 +20,7 @@ mod streams;
 mod tests;
 
 pub(super) use bindings::ConstantType;
-pub(super) use conversion::{bind_declared, bound_builtin, of_shape, of_type};
+pub(super) use conversion::{bind_declared, bound_builtin, of_builtin, of_shape, of_type};
 
 /// The bounds of the packed dimensions of `ty`, outermost first, as the
 /// type table resolves them with the constants of `env` (an element's, for
@@ -213,6 +213,10 @@ pub(super) struct TyTable {
     /// elaborated scope is called): a lookup allocates nothing, as types
     /// are converted at every reference.
     decl_ids: HashMap<Arc<str>, HashMap<Arc<str>, DeclId>>,
+    /// How many times a reader resolved a type that was not bound where it
+    /// was declared, which tests check producers against.
+    #[cfg(test)]
+    pub(super) unbound_reads: usize,
 }
 
 /// The classes a class extends and implements.

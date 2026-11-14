@@ -73,15 +73,18 @@ impl LocalSink {
             return name;
         }
         let owned = sink.owned;
+        // The local is declared where the call is (IEEE 1800-2023 6.18).
+        let mut r#type = procedural::scoped_type(r#type, &dims.const_env);
+        semantic_types::bind_declared(
+            &mut session.types,
+            &tree.functions,
+            &mut r#type,
+            &dims.const_env,
+        );
         sink.locals.push(LocalVariable {
             name: name.clone(),
             source_name: source.to_string(),
-            r#type: super::ir_type(
-                session,
-                &tree.functions,
-                procedural::scoped_type(r#type, &dims.const_env),
-                &dims.const_env,
-            ),
+            r#type: super::ir_type(session, &tree.functions, r#type, &dims.const_env),
             owned,
         });
         name
