@@ -764,3 +764,120 @@ fn package_classes_read_members_at_their_declared_widths() {
         .collect();
     assert_eq!(lines, ["25 deadbeef 1 -3"]);
 }
+
+/// The members of an interface that names a package (IEEE 1800-2023 26.3)
+/// reach the methods of a class of another package through a virtual
+/// interface of it, each in its own source, as the uvm-1.2 example
+/// `uvm_use_models_pipelined_item_done` declares `mbus_if`
+/// (`import mbus_types_pkg::*;`) and its driver: the declarations of the
+/// interface are built analyzing only the packages it names.
+#[test]
+fn interfaces_naming_packages_reach_classes_through_virtual_interfaces() {
+    let interface = "`timescale 1ns/1ns
+        package types_pkg;
+            typedef enum logic [1:0] {IDLE, SINGLE, BURST} op_e;
+        endpackage
+        interface bus_if;
+            import types_pkg::*;
+            logic clk;
+            logic resetn;
+            op_e opcode;
+            types_pkg::op_e last;
+        endinterface";
+    let driver = "`timescale 1ns/1ns
+        package driver_pkg;
+            import types_pkg::*;
+            class driver;
+                virtual bus_if bus;
+                int seen;
+                task run();
+                    @(posedge bus.resetn);
+                    bus.opcode = BURST;
+                    @(posedge bus.clk);
+                    seen = bus.opcode + bus.last;
+                endtask
+            endclass
+        endpackage";
+    let top = "`timescale 1ns/1ns
+        module Top(output int seen);
+            import driver_pkg::*;
+            bus_if bus();
+            driver d;
+            initial begin
+                d = new;
+                d.bus = bus;
+                bus.last = types_pkg::SINGLE;
+                bus.resetn = 0;
+                bus.clk = 0;
+                fork d.run(); join_none
+                #1 bus.resetn = 1;
+                #1 bus.clk = 1;
+                #1 seen = d.seen;
+            end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![
+            (interface, Path::new("bus_if.sv")),
+            (driver, Path::new("driver_pkg.sv")),
+            (top, Path::new("top.sv")),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(5).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 3u32.into());
+}
+
+/// So does one that names a package through an import of its source's
+/// compilation unit (IEEE 1800-2023 3.12.1, 26.3), in a design whose other
+/// sources import packages at their compilation unit's scope too.
+#[test]
+fn interfaces_naming_packages_through_unit_imports_reach_classes() {
+    let interface = "`timescale 1ns/1ns
+        package types_pkg;
+            typedef enum logic [1:0] {IDLE, SINGLE, BURST} op_e;
+        endpackage
+        import types_pkg::*;
+        interface bus_if;
+            logic resetn;
+            op_e opcode;
+        endinterface";
+    let driver = "`timescale 1ns/1ns
+        package driver_pkg;
+            import types_pkg::*;
+            class driver;
+                virtual bus_if bus;
+                task run();
+                    @(posedge bus.resetn);
+                    bus.opcode = BURST;
+                endtask
+            endclass
+        endpackage";
+    let top = "`timescale 1ns/1ns
+        import driver_pkg::*;
+        module Top(output int seen);
+            bus_if bus();
+            driver d;
+            initial begin
+                d = new;
+                d.bus = bus;
+                bus.resetn = 0;
+                fork d.run(); join_none
+                #1 bus.resetn = 1;
+                #1 seen = bus.opcode;
+            end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![
+            (interface, Path::new("bus_if.sv")),
+            (driver, Path::new("driver_pkg.sv")),
+            (top, Path::new("top.sv")),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(5).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
+}
