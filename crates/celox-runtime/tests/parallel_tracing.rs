@@ -2,6 +2,10 @@
 //! collect events from unrelated runtime tests. A thread-local subscriber can
 //! lose callsite interest when another thread first uses LanePool without it
 //! (https://github.com/celox-sim/celox/issues/1374).
+#![allow(
+    clippy::disallowed_types,
+    reason = "test-only: the capturing subscriber collects events from the lane pool's worker threads"
+)]
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

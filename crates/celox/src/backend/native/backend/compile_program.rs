@@ -211,6 +211,10 @@ pub(super) fn compile_program_with_outlining_threshold(
         && sir.sir.eval_comb.len() > 1
         && comb_size.1 >= outline_threshold;
     let mut comb_chunk_jits = Vec::new();
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: scoped compile worker threads in compile_program claim the next FF/process task from this shared counter"
+    )]
     let next_task = AtomicUsize::new(0);
     let mut pooled_process_jits = None;
     let (comb_jit, compiled_ff_codes) = if split_comb {
@@ -596,6 +600,10 @@ fn compile_split_comb(
 /// Compile `eval_comb` on a thread of its own while a pool compiles the FF
 /// tasks and, when they are pooled, the process units, which then go to
 /// `pooled_process_jits`. Returns `eval_comb` and the FF functions by task.
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: scoped compile worker threads in compile_program claim the next FF/process task from this shared counter"
+)]
 fn compile_comb_and_tasks_threaded(
     sir: &LaidOutProgram,
     layout: &MemoryLayout,

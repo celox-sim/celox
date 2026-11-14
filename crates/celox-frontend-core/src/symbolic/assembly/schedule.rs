@@ -94,7 +94,16 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     mut trace: Option<&mut FrontendTrace>,
     loop_members: &mut Vec<LoopMember>,
 ) -> Result<ScheduledRtlOutput, ParserError> {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: process-wide trace ID counter; simulator builds on different caller threads (parallel test threads, embedders) each draw a unique source-program ID"
+    )]
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: process-wide trace ID counter; simulator builds on different caller threads (parallel test threads, embedders) each draw a unique source-program ID"
+    )]
     static NEXT_SOURCE_PROGRAM: AtomicU64 = AtomicU64::new(1);
     let _diagnostic = tracing::trace_span!(target: "celox::parallel", "source_program",
         source_program = NEXT_SOURCE_PROGRAM

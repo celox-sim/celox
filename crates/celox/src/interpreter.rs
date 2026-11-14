@@ -17,6 +17,10 @@
 //! runtime events) are delegated to the [`InterpMachine`] trait so the
 //! interpreter stays independent of backend storage details.
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "single-threaded: lazily materialized SIRValue of a small interpreter register, filled behind &self by as_sir on the interpreting thread"
+)]
 use std::cell::OnceCell;
 use std::fmt;
 
@@ -1879,12 +1883,20 @@ enum RegisterValue {
     /// needs it.
     Small {
         value: u64,
+        #[expect(
+            clippy::disallowed_types,
+            reason = "single-threaded: lazily materialized SIRValue of a small interpreter register, filled behind &self by as_sir on the interpreting thread"
+        )]
         materialized: OnceCell<SIRValue>,
     },
     Wide(SIRValue),
 }
 
 impl RegisterValue {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: lazily materialized SIRValue of a small interpreter register, filled behind &self by as_sir on the interpreting thread"
+    )]
     fn small(value: u64) -> Self {
         Self::Small {
             value,

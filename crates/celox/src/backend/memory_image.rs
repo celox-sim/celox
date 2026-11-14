@@ -1,4 +1,9 @@
-use std::{any::Any, cell::UnsafeCell, sync::Arc};
+#[expect(
+    clippy::disallowed_types,
+    reason = "FFI/JIT: simulation state memory that JIT-compiled code and external zero-copy FFI views write through raw pointers from as_mut_ptr"
+)]
+use std::cell::UnsafeCell;
+use std::{any::Any, sync::Arc};
 
 /// Fixed-capacity storage for one host simulation memory image.
 ///
@@ -6,6 +11,10 @@ use std::{any::Any, cell::UnsafeCell, sync::Arc};
 /// view can keep the bytes alive without retaining compiled code, scheduler
 /// state, or background compilation workers.
 struct MemoryAllocation {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "FFI/JIT: simulation state memory that JIT-compiled code and external zero-copy FFI views write through raw pointers from as_mut_ptr"
+    )]
     words: Box<[UnsafeCell<u64>]>,
     start_word: usize,
     capacity_words: usize,
@@ -20,6 +29,10 @@ struct MemoryAllocation {
 unsafe impl Sync for MemoryAllocation {}
 
 impl MemoryAllocation {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "FFI/JIT: simulation state memory that JIT-compiled code and external zero-copy FFI views write through raw pointers from as_mut_ptr"
+    )]
     fn zeroed(capacity_words: usize) -> Self {
         let alignment = celox_state_layout::LANE_SEGMENT_ALIGN;
         let extra_words = alignment / std::mem::size_of::<u64>();
@@ -48,6 +61,10 @@ impl MemoryAllocation {
         unsafe { self.words.as_ptr().add(self.start_word).cast::<u64>() }
     }
 
+    #[expect(
+        clippy::disallowed_types,
+        reason = "FFI/JIT: simulation state memory that JIT-compiled code and external zero-copy FFI views write through raw pointers from as_mut_ptr"
+    )]
     fn as_mut_ptr(&self) -> *mut u64 {
         // SAFETY: start_word lies within the allocated initialized padding.
         unsafe { UnsafeCell::raw_get(self.words.as_ptr().add(self.start_word)) }

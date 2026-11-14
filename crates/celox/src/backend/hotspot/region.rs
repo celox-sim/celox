@@ -17,9 +17,14 @@ use celox_sir::{
     SIRValue,
 };
 use num_bigint::BigUint;
+#[expect(
+    clippy::disallowed_types,
+    reason = "single-threaded: lazily computed use counts and CFG analysis of a unit; only the hotspot worker thread fills and reads them, the simulation thread just holds the Arc"
+)]
+use std::sync::OnceLock;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
 
 #[cfg(test)]
@@ -246,8 +251,16 @@ const MAX_FRAME_BYTES: usize = 256 * 1024;
 
 pub(crate) struct RegionSource {
     unit: Arc<ExecutionUnit<RegionedAbsoluteAddr>>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: lazily computed use counts and CFG analysis of a unit; only the hotspot worker thread fills and reads them, the simulation thread just holds the Arc"
+    )]
     uses: OnceLock<HashMap<RegisterId, usize>>,
     next_register: usize,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: lazily computed use counts and CFG analysis of a unit; only the hotspot worker thread fills and reads them, the simulation thread just holds the Arc"
+    )]
     analysis: OnceLock<Option<SourceAnalysis>>,
 }
 
@@ -257,6 +270,10 @@ struct SourceAnalysis {
 }
 
 impl RegionSource {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: lazily computed use counts and CFG analysis of a unit; only the hotspot worker thread fills and reads them, the simulation thread just holds the Arc"
+    )]
     pub(crate) fn new(unit: Arc<ExecutionUnit<RegionedAbsoluteAddr>>) -> Self {
         let next_register = unit
             .register_map

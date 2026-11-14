@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_types,
+    reason = "test-only: gates and counters shared with the background compile thread"
+)]
 use super::*;
 use crate::backend::native::NativeBackend;
 use crate::{CodegenError, RuntimeEvent, Simulator, SimulatorBuilder, SimulatorErrorKind};

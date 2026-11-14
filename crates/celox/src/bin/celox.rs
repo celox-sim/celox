@@ -869,8 +869,16 @@ fn run_sv_slots<B: celox::SimBackend>(
     // The simulation waits for this thread instead of overwriting events
     // it has not taken.
     drain.set_backpressure(true);
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the simulation thread sets it when the run ends and the scoped output writer thread polls it"
+    )]
     let done = std::sync::atomic::AtomicBool::new(false);
     // A failed write ends the run at the next step boundary.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the scoped output writer thread sets it on a failed write and the simulation thread polls it to stop"
+    )]
     let broken = std::sync::atomic::AtomicBool::new(false);
     let signal = saves.signal.as_ref();
     let (run, drained) = std::thread::scope(|scope| {

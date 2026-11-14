@@ -21,7 +21,12 @@ use std::fs::File;
 use std::io::{self, Seek, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[expect(
+    clippy::disallowed_types,
+    reason = "single-threaded: byte count shared between FstWriter and the CountingWriter that wavefst owns, both written and read on the simulation thread"
+)]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use wavefst::{
     ChainCompression, FileType, GeomEntry, Header, HierarchyCompression, ScopeType, SignalValue,
     VarDir, VarType,
@@ -54,6 +59,10 @@ struct SignalState {
 /// approximated while `fst-writer` owns the stream.
 struct CountingWriter<W> {
     inner: W,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: byte count shared between FstWriter and the CountingWriter that wavefst owns, both written and read on the simulation thread"
+    )]
     bytes: Arc<AtomicU64>,
 }
 
@@ -87,6 +96,10 @@ pub struct FstWriter<W: Write + Seek = File> {
     /// externally supplied signals can still join the hierarchy.
     pending_output: Option<W>,
     body: Option<wavefst::FstWriter<CountingWriter<W>>>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: byte count shared between FstWriter and the CountingWriter that wavefst owns, both written and read on the simulation thread"
+    )]
     bytes_written: Arc<AtomicU64>,
     closed: bool,
     headers: Vec<HeaderSignal>,
@@ -147,6 +160,10 @@ impl<W: Write + Seek> FstWriter<W> {
         Self::from_writer_with_time_precision(writer, descs, celox_design::TimePrecision::default())
     }
 
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: byte count shared between FstWriter and the CountingWriter that wavefst owns, both written and read on the simulation thread"
+    )]
     pub fn from_writer_with_time_precision(
         writer: W,
         descs: &[VcdSignalDesc],

@@ -353,6 +353,10 @@ pub(crate) fn lower(program: &mut crate::ir::LaidOutProgram, native: bool) -> bo
 }
 
 #[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[allow(
+    clippy::disallowed_types,
+    reason = "test-only: the tests read back what the observers they hand to the simulation record"
+)]
 mod tests {
     use crate::{SignalRef, SimBackend, Simulation, SlotIo, SlotObserver};
     use std::sync::{Arc, Mutex};

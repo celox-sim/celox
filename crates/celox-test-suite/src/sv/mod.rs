@@ -12,6 +12,10 @@ use crate::TestCase;
 /// otherwise catalogue declaration order). A case's design is SystemVerilog
 /// source; build it with your SystemVerilog frontend.
 pub fn cases() -> impl Iterator<Item = &'static TestCase> {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "immutable static: the SystemVerilog test case catalogue, loaded on first use and then only read"
+    )]
     static CASES: std::sync::OnceLock<Vec<&'static TestCase>> = std::sync::OnceLock::new();
     CASES
         .get_or_init(|| {

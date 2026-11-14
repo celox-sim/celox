@@ -10,10 +10,23 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+use std::sync::Arc;
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: the scoped case-runner threads of the verification run push their result rows through it"
+)]
+use std::sync::Mutex;
+#[expect(
+    clippy::disallowed_types,
+    reason = "single-threaded: flag shared between the ObservedBackend adapter and run_case, both on the one runner thread that executes the case"
+)]
+use std::sync::atomic::AtomicBool;
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: case and reuse counters are shared by the scoped case-runner threads of the verification run"
+)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 mod report;
 pub use report::read_report;
@@ -217,8 +230,20 @@ pub fn run(tool: Tool, suite: &Suite, frontend: &'static dyn Frontend) -> Result
     } else {
         BTreeMap::new()
     };
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the scoped case-runner threads claim the next case index from it"
+    )]
     let next = AtomicUsize::new(0);
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the scoped case-runner threads count reused cached results in it"
+    )]
     let reused = AtomicUsize::new(0);
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the scoped case-runner threads push their result rows into it"
+    )]
     let results = Mutex::new(Vec::new());
     // Compiler and assertion panics are captured, with full diagnostics on disk.
     std::panic::set_hook(Box::new(|_| {}));
@@ -546,6 +571,10 @@ pub fn is_failure(status: &str) -> bool {
 // I/O failures without guessing from Rust's panic-message formatting.
 struct ObservedBackend {
     backend: Box<dyn Backend>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: flag shared between the ObservedBackend adapter and run_case, both on the one runner thread that executes the case"
+    )]
     failed: Arc<AtomicBool>,
 }
 impl Backend for ObservedBackend {
@@ -692,6 +721,10 @@ pub fn run_case(
         let (status, phase, detail) = run_script(case, &directory, four_state, builders.script);
         return finish(case, &directory, status, phase, detail, known_issue);
     }
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: flag shared between the ObservedBackend adapter and run_case, both on the one runner thread that executes the case"
+    )]
     let adapter_failed = Arc::new(AtomicBool::new(false));
     let mut phase = "setup";
     let mut unsupported = false;

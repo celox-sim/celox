@@ -23,7 +23,12 @@
 use super::hotspot::{EntryKey, HotspotRuntime, HotspotStats, RegionSource};
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[expect(
+    clippy::disallowed_types,
+    reason = "FFI/JIT: views of the runtime-event ring buffer that JIT-compiled code also writes and the host runtime-event drain reads, following the same seq protocol"
+)]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use celox_design::RegionedAbsoluteAddrBase;
 use celox_sir::{
@@ -633,6 +638,10 @@ impl Machine<'_> {
     /// address is installed in the state header, following the compiled
     /// protocol: reserve the slot with a `WRITING` marker, fill site and
     /// payload fields plainly, then publish with release semantics.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "FFI/JIT: views of the runtime-event ring buffer that JIT-compiled code also writes and the host runtime-event drain reads, following the same seq protocol"
+    )]
     fn emit_event_record(&mut self, site_id: u32, args: &[SIRValue]) {
         // Safety: the state header always holds a live buffer pointer that
         // outlives simulation, and the ring arithmetic stays inside the

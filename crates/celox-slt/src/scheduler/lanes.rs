@@ -22,7 +22,16 @@ use super::*;
 // One identity per partition invocation, shared across all address types.
 // Span IDs may be reused after planning finishes.
 fn new_source_partition_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: partitions are planned on whichever thread compiles a design (simulator builders, celox-jit-compile workers), all drawing from this one process-wide counter"
+    )]
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: partitions are planned on whichever thread compiles a design (simulator builders, celox-jit-compile workers), all drawing from this one process-wide counter"
+    )]
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
         .expect("source partition identity exhausted")

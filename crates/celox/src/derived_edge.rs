@@ -1039,6 +1039,10 @@ pub(crate) struct TestEdgeUnit {
 }
 
 #[cfg(all(test, feature = "cranelift"))]
+#[allow(
+    clippy::disallowed_types,
+    reason = "test-only: the tests read back the edge units that the compiled program records"
+)]
 pub(crate) type TestEdgeUnits = std::sync::Arc<std::sync::Mutex<Vec<TestEdgeUnit>>>;
 
 /// Append an edge unit of every event with a plan this module emits, for

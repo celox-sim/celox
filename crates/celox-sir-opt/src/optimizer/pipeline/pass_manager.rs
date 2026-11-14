@@ -201,6 +201,10 @@ impl ExecutionUnitPassManager {
             .collect::<Vec<_>>();
         // Workers pop the largest units first to keep the long tail bounded.
         pending.sort_unstable_by_key(|(work, index, _)| (*work, *index));
+        #[expect(
+            clippy::disallowed_types,
+            reason = "cross-thread: the scoped SIR optimization worker threads pop execution units from this shared work queue"
+        )]
         let pending = std::sync::Mutex::new(pending);
 
         std::thread::scope(|scope| {
@@ -275,6 +279,10 @@ pub(super) fn verify_unpacked_element_boundaries(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_types,
+    reason = "test-only: test passes count their runs on the optimizer's worker threads"
+)]
 mod tests {
     use super::*;
     use crate::ir::{BasicBlock, BlockId, RegisterId, RegisterType, SIRTerminator, SIRValue};

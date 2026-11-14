@@ -175,6 +175,10 @@ pub(super) fn optimize_unit_groups_cached(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_types,
+    reason = "test-only: a test pass counts its runs into a counter the test reads back"
+)]
 mod tests {
     use super::fingerprint;
     use crate::HashMap;

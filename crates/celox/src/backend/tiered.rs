@@ -291,6 +291,10 @@ struct ActiveExecutionTiming {
 }
 
 /// Background compilations the worker finished, shared with the backend.
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: the celox-jit-compile worker thread appends finished compile stages and the simulation thread reads them for tier stats"
+)]
 type CompileLog = Arc<std::sync::Mutex<Vec<TieredCompileStage>>>;
 
 /// Run one background compilation, recording how long it took.

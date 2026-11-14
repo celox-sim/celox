@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_types,
+    reason = "test-only: a process-wide counter names each test's files"
+)]
 use celox::{BigUint, RuntimeEvent, Simulator};
 use std::sync::atomic::{AtomicU64, Ordering};
 

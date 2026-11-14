@@ -381,7 +381,15 @@ pub(super) struct Scope<'a> {
     pub state: *const u8,
     pub state_size: usize,
     pub files: &'a mut celox_runtime::file_io::FileIo,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the simulator's pending runtime events, which a RuntimeEventDrain handle on another thread also locks"
+    )]
     pub pending: &'a Arc<std::sync::Mutex<PendingRuntimeEvents>>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the runtime-event read sequence, which a RuntimeEventDrain handle on another thread also advances"
+    )]
     pub read_seq: &'a AtomicU64,
     pub error: Option<RuntimeErrorCode>,
     pub calls: u64,
@@ -879,6 +887,10 @@ impl Scope<'_> {
         let pointer = unsafe { self.state.add(offset).cast::<*const u8>().read_unaligned() };
         let layout = &self.metadata.layout;
         let mut read_seq = self.read_seq.load(Ordering::Acquire);
+        #[expect(
+            clippy::disallowed_types,
+            reason = "FFI/JIT: loads sequence words of the runtime-event ring buffer that JIT-compiled code publishes with release stores"
+        )]
         let mut events = if pointer.is_null() {
             Vec::new()
         } else {
@@ -1144,6 +1156,10 @@ pub(crate) extern "C" fn call(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_types,
+    reason = "test-only: the tests build the runtime-event queues the simulator shares with a drain thread"
+)]
 mod tests {
     use super::*;
 
