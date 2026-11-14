@@ -35,7 +35,7 @@ pub(super) fn packed_bounds(
     env: &crate::ast::ConstEnv,
 ) -> Option<Vec<(i128, i128)>> {
     let id = of_type(table, functions, ty, env)?;
-    bounds_of(table, id)
+    packed_bounds_of(table, id)
 }
 
 /// The bounds of the packed dimensions of `ty` as [`packed_bounds`] tells
@@ -48,11 +48,12 @@ pub(super) fn declared_packed_bounds(
     env: &crate::ast::ConstEnv,
 ) -> Option<Vec<(i128, i128)>> {
     let id = of_declared(table, functions, ty, env)?;
-    bounds_of(table, id)
+    packed_bounds_of(table, id)
 }
 
-/// The bounds of the packed dimensions of type `id` (see [`packed_bounds`]).
-fn bounds_of(table: &TyTable, mut id: TyId) -> Option<Vec<(i128, i128)>> {
+/// The bounds of the packed dimensions of semantic type `id`, as
+/// [`packed_bounds`] gives them.
+pub(super) fn packed_bounds_of(table: &TyTable, mut id: TyId) -> Option<Vec<(i128, i128)>> {
     loop {
         match table.data(id) {
             TyData::Packed(packed) => {

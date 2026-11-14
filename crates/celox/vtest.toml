@@ -871,6 +871,12 @@ reason = "the wasm backend's process function exceeds wasmtime's 50,000 locals (
 ignore = ["wasm"]
 reason = "the wasm backend's process function exceeds wasmtime's 50,000 locals (#4036)"
 
+# The initial process's wasm function needs about 182,000 locals (see
+# above, #4036).
+[sv.cases."class::constrained_randomize_constant_elements"]
+ignore = ["wasm"]
+reason = "the wasm backend's process function exceeds wasmtime's 50,000 locals (#4036)"
+
 [sv.cases."concurrent_assertions::sampled_history_gates_and_indices"]
 add = ["native-image"]
 
