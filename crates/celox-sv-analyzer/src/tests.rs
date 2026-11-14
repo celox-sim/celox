@@ -6771,9 +6771,16 @@ fn explicit_output_data_types_default_to_variables() {
 fn class_randomize_rejects_unsupported_semantics() {
     for (members, call, expected) in [
         (
-            "rand int x; constraint c { soft x == 1; }",
+            "rand int x; int a[$]; constraint c { foreach (a[i]) soft x == a[i]; }",
             "c.randomize()",
-            "constraints",
+            "soft constraint in a constraint loop",
+        ),
+        // Soft constraints may not be specified for randc variables
+        // (18.5.13.1).
+        (
+            "randc bit [1:0] x; constraint c { soft x == 1; }",
+            "c.randomize()",
+            "a soft constraint on a randc variable",
         ),
         (
             "rand int x, y; constraint c { solve x before y; x == y; }",

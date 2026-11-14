@@ -452,8 +452,19 @@ pub(in crate::ast) fn resolve_statics(expr: &mut ConstraintExpr, first: usize) {
     match expr {
         ConstraintExpr::Static(slot) => *expr = ConstraintExpr::Field(first + *slot),
         ConstraintExpr::Enabled { value, .. }
+        | ConstraintExpr::Soft { value, .. }
         | ConstraintExpr::Resize { value, .. }
         | ConstraintExpr::Unary { value, .. } => resolve_statics(value, first),
+        ConstraintExpr::DisableSoft {
+            variable,
+            condition,
+            ..
+        } => {
+            resolve_statics(variable, first);
+            if let Some(condition) = condition {
+                resolve_statics(condition, first);
+            }
+        }
         ConstraintExpr::Foreach { body, .. } => resolve_statics(body, first),
         ConstraintExpr::Binary { left, right, .. } => {
             resolve_statics(left, first);
@@ -1359,21 +1370,189 @@ pub(in crate::ast) fn bind_inputs(
             | ExprKind::StreamSelect { .. } => {
                 return Err("unsupported scalar constraint expression".into());
             }
+            ExprKind::SoftConstraint { .. } | ExprKind::DisableSoft { .. } => {
+                return Err("soft constraint in a constraint loop".into());
+            }
         })
     }
-    expression(
-        id,
-        tree,
-        session,
-        properties,
-        names,
-        env,
-        inputs,
-        &[],
-        0,
-        &mut 16_384,
-    )
-    .map(|value| emit(value, None))
+    // The target of `disable soft h.m`, a member of the object a rand
+    // handle refers to: whether it is a random variable (18.5.13.2).
+    let random_member = match &tree.declarations().expression(id).kind {
+        ExprKind::DisableSoft { variable, .. } => {
+            random_member(*variable, tree, session, properties, env)?
+        }
+        _ => false,
+    };
+    let mut bound = |id| {
+        expression(
+            id,
+            tree,
+            session,
+            properties,
+            names,
+            env,
+            inputs,
+            &[],
+            0,
+            &mut 16_384,
+        )
+        .map(|value| emit(value, None))
+    };
+    // A soft constraint and `disable soft` take the priority of their place
+    // among the constraints of the class (see [`prioritize`]).
+    match tree.declarations().expression(id).kind {
+        // A soft distribution is legal (IEEE 1800-2023 18.5.13, Syntax
+        // 18-2) but unsupported: the solver keeps no weights for soft
+        // constraints.
+        ExprKind::SoftConstraint { expression } if soft_dist(expression, tree) => {
+            Err("soft dist constraints are not supported".into())
+        }
+        ExprKind::SoftConstraint { expression } => {
+            let value = bound(expression)?;
+            // Soft constraints may not be specified for randc variables
+            // (18.5.13.1).
+            if names_randc(&value, properties) {
+                return Err("a soft constraint on a randc variable".into());
+            }
+            Ok(ConstraintExpr::Soft {
+                priority: 0,
+                value: Box::new(value),
+            })
+        }
+        ExprKind::DisableSoft {
+            variable,
+            condition,
+        } => match bound(variable)? {
+            variable @ (ConstraintExpr::Field(_)
+            | ConstraintExpr::Static(_)
+            | ConstraintExpr::Size(_)) => Ok(ConstraintExpr::DisableSoft {
+                priority: 0,
+                variable: Box::new(variable),
+                condition: condition.map(&mut bound).transpose()?.map(Box::new),
+            }),
+            variable @ ConstraintExpr::Member { .. } if random_member => {
+                Ok(ConstraintExpr::DisableSoft {
+                    priority: 0,
+                    variable: Box::new(variable),
+                    condition: condition.map(&mut bound).transpose()?.map(Box::new),
+                })
+            }
+            _ => Err("disable soft of other than a random property or array size".into()),
+        },
+        _ => bound(id),
+    }
+}
+
+/// Whether soft constraint `expression` is a distribution, also one a
+/// guard or an implication makes conditional (see `ExprKind::SoftConstraint`).
+fn soft_dist(expression: ExprId, tree: &AnalysisContext<'_>) -> bool {
+    match &tree.declarations().expression(expression).kind {
+        ExprKind::Dist { .. } => true,
+        ExprKind::Binary {
+            operator, right, ..
+        } if operator == "||" => soft_dist(*right, tree),
+        _ => false,
+    }
+}
+
+/// Whether constraint `expr` names a randc property of `properties`.
+fn names_randc(expr: &ConstraintExpr, properties: &[Property]) -> bool {
+    match expr {
+        ConstraintExpr::Field(field) => properties
+            .iter()
+            .filter(|property| constrainable(property))
+            .nth(*field)
+            .is_some_and(|property| property.randc),
+        ConstraintExpr::Resize { value, .. } | ConstraintExpr::Unary { value, .. } => {
+            names_randc(value, properties)
+        }
+        ConstraintExpr::Binary { left, right, .. } => {
+            names_randc(left, properties) || names_randc(right, properties)
+        }
+        ConstraintExpr::Dist {
+            membership,
+            choices,
+        } => {
+            names_randc(membership, properties)
+                || choices
+                    .iter()
+                    .any(|choice| names_randc(&choice.predicate, properties))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `id` names a rand member, not randc, of the object a rand handle
+/// property of the class refers to, as `h.m` (IEEE 1800-2023 18.4, 18.5.9).
+fn random_member(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    properties: &[Property],
+    env: &ConstEnv,
+) -> Result<bool, String> {
+    let native = tree.declarations();
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(id).kind
+    else {
+        return Ok(false);
+    };
+    let ExprKind::Name(handle) = &native
+        .expression(expression_binding::ungroup(*expression, native))
+        .kind
+    else {
+        return Ok(false);
+    };
+    let handle = instances::normalize_identifier(&handle.spelling);
+    let Some(handle) = properties
+        .iter()
+        .rev()
+        .find(|property| property.name == handle)
+        .filter(|property| separator == "." && property.rand_object())
+    else {
+        return Ok(false);
+    };
+    let Some(class) = handle.r#type.class() else {
+        return Ok(false);
+    };
+    let member = instances::normalize_identifier(&name.spelling);
+    let member = object_member(class, &member, tree, session, properties, env)?;
+    Ok(member.rand && !member.randc)
+}
+
+/// The soft constraint or `disable soft` `constraint` with priority
+/// `priority` (IEEE 1800-2023 18.5.13.1); another constraint as it is.
+pub(in crate::ast) fn prioritize(constraint: ConstraintExpr, priority: u64) -> ConstraintExpr {
+    match constraint {
+        ConstraintExpr::Soft { value, .. } => ConstraintExpr::Soft { priority, value },
+        ConstraintExpr::DisableSoft {
+            variable,
+            condition,
+            ..
+        } => ConstraintExpr::DisableSoft {
+            priority,
+            variable,
+            condition,
+        },
+        constraint => constraint,
+    }
+}
+
+/// The priority of the constraint at `expression` of block `block` of a
+/// class `depth` classes below its root class: a later constraint of a
+/// block, one of a later block, by the order of the prototypes, and one of
+/// a derived class are above the others (IEEE 1800-2023 18.5.13.1).
+pub(in crate::ast) fn class_priority(depth: usize, block: usize, expression: usize) -> u64 {
+    ((depth as u64) << 40) | ((block as u64 & 0xf_ffff) << 20) | (expression as u64 & 0xf_ffff)
+}
+
+/// The priority of constraint `expression` of an inline constraint block,
+/// above every constraint of the class (18.5.13.1).
+pub(in crate::ast) fn inline_priority(expression: usize) -> u64 {
+    (1 << 62) | expression as u64
 }
 
 impl Class {

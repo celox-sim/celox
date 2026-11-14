@@ -5273,3 +5273,149 @@ module Top(output bit ok);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq ok 1))
+
+; Soft constraints (IEEE 1800-2023 18.5.13): the solver keeps each one the
+; hard constraints and the soft ones of higher priority allow, from the
+; highest priority down, and treats the others as true. A later constraint
+; of a block, one of a later block by its prototype, one of a derived class
+; and an inline one are above the others (18.5.13.1); `disable soft`
+; discards the lower soft constraints that name its variable (18.5.13.2); a
+; guard makes a soft constraint conditional.
+(case soft_constraints
+  (source "soft.sv" #"
+module Top(output int checks);
+    class A;
+        rand int b;
+        constraint c1 { soft b > 4; soft b < 12; }
+    endclass
+    class B extends A;
+        constraint c2 { soft b == 20; }
+    endclass
+    class C extends A;
+        constraint c2 { soft b == 20; }
+        constraint c3;
+    endclass
+    constraint C::c3 { soft b > 100; }
+    class D;
+        rand int b;
+        constraint c1 { soft b > 4; soft b < 12; }
+        constraint c2 { disable soft b; }
+        constraint c3 { soft b == 20; }
+    endclass
+    class E;
+        rand int b;
+        constraint h { b inside {[1:3]}; }
+        constraint s { soft b == 7; }
+    endclass
+    class F;
+        rand bit p;
+        rand int q;
+        constraint c { p == 1; p -> soft q == 5; if (!p) soft q == 6; }
+    endclass
+    class G;
+        rand int b;
+        constraint s1 { soft b == 3; }
+        constraint s2 { soft b == 4; }
+    endclass
+    initial begin
+        A a = new;
+        B b = new;
+        C c = new;
+        D d = new;
+        E e = new;
+        F f = new;
+        G g = new;
+        checks = 0;
+        checks += (a.randomize() && a.b > 4 && a.b < 12) * 1;
+        checks += (b.randomize() && b.b == 20) * 2;
+        checks += (c.randomize() && c.b > 100) * 4;
+        checks += (c.randomize() with { soft b == 90; } && c.b == 90) * 8;
+        checks += (d.randomize() && d.b == 20) * 16;
+        checks += (e.randomize() && e.b >= 1 && e.b <= 3) * 32;
+        checks += (f.randomize() && f.p == 1 && f.q == 5) * 64;
+        checks += (g.randomize() && g.b == 4) * 128;
+        b.c2.constraint_mode(0);
+        checks += (b.randomize() && b.b > 4 && b.b < 12) * 256;
+        checks += (c.randomize() with { b < 0; } && c.b < 0) * 512;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 1023))
+; The priorities of soft constraints follow the whole chain of classes,
+; also through a base class of a package (IEEE 1800-2023 18.5.13.1), and a
+; guarded `disable soft` discards while its guard holds (18.5.13.2).
+(case soft_constraint_classes_and_guarded_disables
+  (source "soft_more.sv" #"
+package P;
+    class A;
+        rand int b;
+        constraint a1 { soft b == 1; }
+    endclass
+endpackage
+module Top(output int checks);
+    class B extends P::A;
+        constraint p0 { b >= 0; }
+        constraint p1 { b < 100; }
+        constraint x1 { soft b == 2; }
+    endclass
+    class C extends B;
+        constraint y { soft b == 3; }
+    endclass
+    class G;
+        rand int x;
+        bit off;
+        constraint range { x inside {3, 4}; }
+        constraint c1 { soft x == 3; }
+        constraint c2 { if (off) disable soft x; }
+    endclass
+    initial begin
+        C c = new;
+        G g = new;
+        int fours;
+        checks = 0;
+        checks += (c.randomize() && c.b == 3) * 1;
+        fours = 0;
+        repeat (16) if (g.randomize() && g.x == 4) fours++;
+        checks += (fours == 0) * 2;
+        g.off = 1;
+        fours = 0;
+        repeat (32) if (g.randomize() && g.x == 4) fours++;
+        checks += (fours > 0) * 4;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 7))
+
+; `disable soft h.x` discards the soft constraints on the random variable
+; of the object a rand handle refers to (18.5.13.2).
+(case soft_constraints_disabled_through_rand_handles
+  (source "soft_handles.sv" #"
+module Top(output int checks);
+    class Child;
+        rand bit [7:0] x;
+        constraint c { soft x == 1; }
+    endclass
+    class Kept;
+        rand Child h;
+        function new(); h = new; endfunction
+    endclass
+    class Dropped;
+        rand Child h;
+        constraint d { disable soft h.x; }
+        function new(); h = new; endfunction
+    endclass
+    initial begin
+        Kept k = new;
+        Dropped d = new;
+        int others;
+        checks = 0;
+        others = 0;
+        repeat (16) if (!k.randomize() || k.h.x != 1) others++;
+        checks += (others == 0) * 1;
+        others = 0;
+        repeat (16) if (d.randomize() && d.h.x != 1) others++;
+        checks += (others > 0) * 2;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 3))
