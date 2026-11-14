@@ -500,24 +500,57 @@ impl Parser<'_> {
                 self.at += 1;
                 let parenthesized = self.peek() == "(";
                 // An unparenthesized delay value is a number, a time literal
-                // or an identifier (IEEE 1800-2023 A.2.2.3): in `#Tp (c) ?
-                // a : b` the parentheses begin the delayed expression, not
-                // arguments of a call.
-                let value = if !parenthesized
-                    && self.token().is_some_and(|token| {
-                        matches!(
-                            token.kind,
-                            TokenKind::Identifier | TokenKind::EscapedIdentifier
-                        )
-                    })
-                    && self.nth(1) == "("
-                {
-                    let name_start = self.at;
-                    let name = self.name()?;
-                    self.node(name_start, ExprKind::Name(name))?
-                } else {
-                    self.expression(14)?
+                // or a ps_identifier, an identifier with an optional package
+                // scope (IEEE 1800-2023 A.2.2.3, A.9.3): in `#Tp (c) ? a : b`
+                // or `#p::Tp (c) ? a : b` the parentheses begin the delayed
+                // expression, not arguments of a call.
+                let identifier = |parser: &Self, offset: usize| {
+                    parser
+                        .indices
+                        .get(parser.at + offset)
+                        .map(|index| &parser.tokens[*index])
+                        .is_some_and(|token| {
+                            matches!(
+                                token.kind,
+                                TokenKind::Identifier | TokenKind::EscapedIdentifier
+                            )
+                        })
                 };
+                let scoped = (identifier(self, 0) || self.peek() == "$unit")
+                    && self.nth(1) == "::"
+                    && identifier(self, 2)
+                    && self.nth(3) == "(";
+                let value =
+                    if !parenthesized && (scoped || (identifier(self, 0) && self.nth(1) == "(")) {
+                        let name_start = self.at;
+                        let first = if self.peek() == "$unit" {
+                            let token = self.token().expect("a `$unit` token");
+                            let name = Name {
+                                spelling: token.text.clone(),
+                                origin: token.origin,
+                            };
+                            self.at += 1;
+                            name
+                        } else {
+                            self.name()?
+                        };
+                        let mut value = self.node(name_start, ExprKind::Name(first))?;
+                        if scoped {
+                            self.expect("::")?;
+                            let name = self.name()?;
+                            value = self.node(
+                                name_start,
+                                ExprKind::Member {
+                                    expression: value,
+                                    separator: "::".into(),
+                                    name,
+                                },
+                            )?;
+                        }
+                        value
+                    } else {
+                        self.expression(14)?
+                    };
                 TimingControlKind::Delay {
                     value,
                     parenthesized,

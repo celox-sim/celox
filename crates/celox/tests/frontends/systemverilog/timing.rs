@@ -652,6 +652,7 @@ fn delays_named_by_parameters_precede_parenthesized_conditionals() {
     // b` the parentheses begin the delayed conditional (IEEE 1800-2023
     // A.2.2.3, 9.4.5), as in the OpenCores SPI clock generator.
     let source = r#"
+        package timing; timeunit 1ns / 1ns; parameter Tp = 2; endpackage
         module Top(output logic [7:0] q, output logic [7:0] r);
             timeunit 1ns / 1ns;
             parameter Tp = 2;
@@ -659,7 +660,7 @@ fn delays_named_by_parameters_precede_parenthesized_conditionals() {
             initial begin
                 q = 0; r = 0;
                 q <= #Tp (en && q == 0) ? 8'h11 : 8'h22;
-                r = #Tp (!en) ? 8'h33 : 8'h44;
+                r = #timing::Tp (!en) ? 8'h33 : 8'h44;
             end
         endmodule
     "#;
