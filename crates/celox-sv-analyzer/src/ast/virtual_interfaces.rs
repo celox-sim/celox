@@ -1179,33 +1179,6 @@ pub(super) fn arithmetic(op: &str, ty: &VirtualInterface) -> AnalyzerError {
     }
 }
 
-/// Check that a formal of virtual interface type `formal` may be copied out
-/// to the actual argument, native expression `id` (IEEE 1800-2023 13.5,
-/// 25.9).
-pub(super) fn check_copy_out(
-    tree: &AnalysisContext<'_>,
-    session: &mut Session,
-    id: celox_sv_syntax::ExprId,
-    native: &celox_sv_syntax::Declarations,
-    dimensions: &PackedDimensions,
-    formal: &VirtualInterface,
-) -> Converted<()> {
-    match native_type(tree, session, id, native, dimensions) {
-        Some(actual) => {
-            let source = formal.type_id(&mut session.types);
-            let target = actual.type_id(&mut session.types);
-            assignments::check_types(tree, session, dimensions, source, target, &|| {
-                "output argument".into()
-            })
-        }
-        None => Err(AnalyzerError::IncompatibleVirtualInterface {
-            context: "output argument".into(),
-            actual: format!("a `{}`", formal.spelling()),
-            target: "the argument".to_owned(),
-        }),
-    }
-}
-
 /// Check that native expression `id` may be assigned to an unpacked array
 /// of virtual interfaces of type `target`: an array variable of a virtual
 /// interface type that `target` accepts (IEEE 1800-2023 25.9, 7.6).

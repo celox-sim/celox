@@ -54,6 +54,72 @@ fn event_waits_through_task_arguments() {
     assert_eq!(sim.get(seen), num_bigint::BigUint::from(15u8));
 }
 
+/// An output argument copies the formal out to the actual (13.5.1): the
+/// actual handle takes the instance the task chose, and receives no value
+/// of the formal's type on the way in.
+#[test]
+fn output_arguments_copy_handles_out() {
+    let source = "`timescale 1ns/1ns
+        interface bus_if(input logic clk); logic [7:0] data; endinterface
+        module top(output logic [7:0] seen);
+            logic clk = 0;
+            bus_if a(clk);
+            bus_if b(clk);
+            virtual bus_if chosen;
+            task automatic pick(input bit second, output virtual bus_if v);
+                if (second) v = b; else v = a;
+            endtask
+            initial begin
+                a.data = 8'd3;
+                b.data = 8'd7;
+                pick(1'b1, chosen);
+                #1 seen = chosen.data;
+            end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build()
+        .unwrap();
+    let seen = sim.signal("seen");
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(seen), num_bigint::BigUint::from(7u8));
+}
+
+/// The formal of an output or inout argument is copied out to its actual
+/// (13.5.1), so an array of virtual interfaces is only copied to an actual
+/// array of a compatible virtual interface type (25.9, 7.6).
+#[test]
+fn output_arrays_of_virtual_interfaces_need_compatible_actuals() {
+    for (direction, actual, accepted) in [
+        ("output", "virtual bus_if", true),
+        ("output", "virtual other_if", false),
+        ("inout", "virtual other_if", false),
+    ] {
+        let source = format!(
+            "interface bus_if(input logic clk); logic data; endinterface
+             interface other_if(input logic clk); logic data; endinterface
+             module top;
+                 logic clk = 0;
+                 bus_if a(clk);
+                 {actual} chosen[2];
+                 task automatic pick({direction} virtual bus_if v[2]);
+                     v[0] = a;
+                     v[1] = a;
+                 endtask
+                 initial pick(chosen);
+             endmodule"
+        );
+        let result =
+            celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("vif.sv"))], "top")
+                .build();
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "{direction} {actual}: {:?}",
+            result.err()
+        );
+    }
+}
+
 /// A member access compares the handle with each instance, so a handle
 /// expression whose evaluation may have effects is rejected; and the
 /// instance a port of an interface without members denotes is unknown.
