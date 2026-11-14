@@ -4,6 +4,58 @@
 use super::*;
 
 impl Comb<'_, '_> {
+    /// The bits `target` of variable `id` that `value` defines (from bit
+    /// `origin` of the value), when the value reads bits of `id` itself:
+    /// one piece per bit, with the sources of that bit. A continuous
+    /// assignment whose bits each read only other bits of its net, such as a
+    /// Gray-code decoder `assign b = {1'b0, b[N-1:1]} ^ g;`, settles as those
+    /// bits do (IEEE 1800-2023 10.3.2). Any other process, or a bit that
+    /// reads itself, would hold its previous value: a latch.
+    fn own_bit_pieces(
+        &mut self,
+        id: SourceVarId,
+        value: NodeId,
+        sources: &Sources,
+        target: BitAccess,
+        origin: usize,
+    ) -> Result<Vec<(BitAccess, NodeId, Sources)>, sv::AnalyzerError> {
+        let message = format!(
+            "latch inference inside always_comb for `{}` (self dependency at bits {}:{})",
+            self.m.var(id).path.join("."),
+            target.msb,
+            target.lsb
+        );
+        let latch = || unsupported(message.clone());
+        if !self.continuous {
+            return Err(latch());
+        }
+        let others: Sources = sources
+            .iter()
+            .copied()
+            .filter(|source| source.id != id)
+            .collect();
+        let mut pieces = Vec::new();
+        for bit in target.lsb..=target.msb {
+            let relative = BitAccess::new(bit - origin, bit - origin);
+            let own = bit_sources(self.arena, value, relative).ok_or_else(latch)?;
+            let own: Sources = own.into_iter().filter(|source| source.id == id).collect();
+            if own
+                .iter()
+                .any(|source| source.access.lsb <= bit && bit <= source.access.msb)
+            {
+                return Err(latch());
+            }
+            let mut sources = others.clone();
+            sources.extend(own);
+            pieces.push((
+                BitAccess::new(bit, bit),
+                self.slice(value, relative)?,
+                sources,
+            ));
+        }
+        Ok(pieces)
+    }
+
     /// Execute one combinational process and return the logic it defines.
     pub fn lower_process(
         &mut self,
@@ -57,48 +109,51 @@ impl Comb<'_, '_> {
                 .map(|(&lsb, (value, width, origin))| (lsb, value.clone(), *width, *origin))
                 .collect();
             for (lsb, value, width, origin) in ranges {
-                let Some((expr, sources)) = value else {
+                let Some((value, sources)) = value else {
                     continue;
                 };
                 let msb = lsb + width - 1;
-                let relative = BitAccess::new(lsb - origin, msb - origin);
-                let expr = self.slice(expr, relative)?;
                 let target = BitAccess::new(lsb, msb);
-                if sources
+                // A value that reads other bits of its own net defines each
+                // bit apart, from the current values of those bits.
+                let split = sources
                     .iter()
-                    .any(|source| source.id == id && source.access.overlaps(&target))
-                {
-                    return Err(unsupported(format!(
-                        "latch inference inside always_comb for `{}` (self dependency at bits {msb}:{lsb})",
-                        self.m.var(id).path.join(".")
-                    )));
-                }
-                let previous_sources = sources
-                    .iter()
-                    .copied()
-                    .filter(|source| source.id != id || !source.access.overlaps(&target))
-                    .filter(|source| {
-                        written_atoms.iter().any(|written| {
-                            written.id == source.id && written.access.overlaps(&source.access)
+                    .any(|source| source.id == id && source.access.overlaps(&target));
+                let pieces = if split {
+                    self.own_bit_pieces(id, value, &sources, target, origin)?
+                } else {
+                    let relative = BitAccess::new(lsb - origin, msb - origin);
+                    vec![(target, self.slice(value, relative)?, sources)]
+                };
+                for (target, expr, sources) in pieces {
+                    let previous_sources = sources
+                        .iter()
+                        .copied()
+                        .filter(|source| source.id != id || !source.access.overlaps(&target))
+                        .filter(|source| !split || source.id != id)
+                        .filter(|source| {
+                            written_atoms.iter().any(|written| {
+                                written.id == source.id && written.access.overlaps(&source.access)
+                            })
                         })
-                    })
-                    .collect();
-                paths.push(LogicPath {
-                    transparent_copy: self.continuous,
-                    target: LogicPathTarget::Var(VarAtomBase::new(id, lsb, msb)),
-                    sources: sources
-                        .into_iter()
-                        .filter(|source| !self.m.is_hidden(source.id))
-                        .collect(),
-                    previous_sources,
-                    address_sources: HashSet::default(),
-                    local_inputs: Vec::new(),
-                    order_before: HashSet::default(),
-                    comb_capture_enable_sites: Vec::new(),
-                    comb_capture_enable_always: false,
-                    pre_lower_nodes: Vec::new(),
-                    expr,
-                });
+                        .collect();
+                    paths.push(LogicPath {
+                        transparent_copy: self.continuous,
+                        target: LogicPathTarget::Var(VarAtomBase::new(id, target.lsb, target.msb)),
+                        sources: sources
+                            .into_iter()
+                            .filter(|source| !self.m.is_hidden(source.id))
+                            .collect(),
+                        previous_sources,
+                        address_sources: HashSet::default(),
+                        local_inputs: Vec::new(),
+                        order_before: HashSet::default(),
+                        comb_capture_enable_sites: Vec::new(),
+                        comb_capture_enable_always: false,
+                        pre_lower_nodes: Vec::new(),
+                        expr,
+                    });
+                }
             }
         }
         if !self.events.observers.is_empty() {
@@ -307,4 +362,81 @@ pub(in crate::lowering) fn static_writes(
             }
         }
     }
+}
+
+/// The bits of the variables that bits `bits` of `node` are computed from,
+/// through operators that take each result bit from the same bits of their
+/// operands (bitwise operators, concatenations and selects); `None` where
+/// the expression mixes bits otherwise.
+fn bit_sources(
+    arena: &SLTNodeArena<SourceVarId>,
+    node: NodeId,
+    bits: BitAccess,
+) -> Option<Sources> {
+    let width = |node| celox_slt::get_width(node, arena);
+    let whole = |node| BitAccess::new(0, width(node) - 1);
+    Some(match arena.get(node) {
+        SLTNode::Input {
+            variable,
+            index,
+            access,
+            ..
+        } if index.is_empty() => std::iter::once(VarAtomBase::new(
+            *variable,
+            access.lsb + bits.lsb,
+            access.lsb + bits.msb,
+        ))
+        .collect(),
+        SLTNode::Constant(..) => Sources::default(),
+        SLTNode::Binary(
+            left,
+            celox_design::BinaryOp::And | celox_design::BinaryOp::Or | celox_design::BinaryOp::Xor,
+            right,
+        ) if width(*left) == width(node) && width(*right) == width(node) => {
+            let mut sources = bit_sources(arena, *left, bits)?;
+            sources.extend(bit_sources(arena, *right, bits)?);
+            sources
+        }
+        SLTNode::Unary(
+            celox_design::UnaryOp::Ident
+            | celox_design::UnaryOp::BitNot
+            | celox_design::UnaryOp::ToTwoState,
+            operand,
+        ) if width(*operand) == width(node) => bit_sources(arena, *operand, bits)?,
+        SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            let mut sources = bit_sources(arena, *cond, whole(*cond))?;
+            sources.extend(bit_sources(arena, *then_expr, bits)?);
+            sources.extend(bit_sources(arena, *else_expr, bits)?);
+            sources
+        }
+        SLTNode::Slice { expr, access } => bit_sources(
+            arena,
+            *expr,
+            BitAccess::new(access.lsb + bits.lsb, access.lsb + bits.msb),
+        )?,
+        SLTNode::Capture { expr, .. } => bit_sources(arena, *expr, bits)?,
+        SLTNode::Concat(parts) => {
+            // Most significant part first.
+            let mut sources = Sources::default();
+            let mut top = width(node);
+            for &(part, part_width) in parts {
+                let low = top - part_width;
+                let (from, to) = (bits.lsb.max(low), bits.msb.min(top - 1));
+                if from <= to {
+                    sources.extend(bit_sources(
+                        arena,
+                        part,
+                        BitAccess::new(from - low, to - low),
+                    )?);
+                }
+                top = low;
+            }
+            sources
+        }
+        _ => return None,
+    })
 }
