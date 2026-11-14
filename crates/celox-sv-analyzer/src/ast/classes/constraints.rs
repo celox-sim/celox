@@ -361,6 +361,137 @@ fn element(
     }))
 }
 
+/// The type of the property that name `id` denotes in a constraint, whose
+/// bits a select of it reads: an instance or static property of the class.
+fn select_operand_type(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    properties: &[Property],
+    names: &Names<'_>,
+    inputs: &HashMap<String, (usize, u32, bool)>,
+    loops: &[Loop],
+) -> Option<Type> {
+    let ExprKind::Name(name) = &tree.declarations().expression(id).kind else {
+        return None;
+    };
+    let name = instances::normalize_identifier(&name.spelling);
+    if inputs.contains_key(&name) || loops.iter().any(|candidate| candidate.variable == name) {
+        return None;
+    }
+    match super::member(
+        &name,
+        names.lineage,
+        properties,
+        names.aggregates,
+        names.statics,
+    )? {
+        super::Member::Instance(index) => Some(properties[index].r#type.clone()),
+        super::Member::Static(index) => Some(names.statics[index].r#type.clone()),
+        // A member of an unpacked structure property has no select here.
+        super::Member::Aggregate(_) => None,
+    }
+}
+
+/// The lowest bit and the width of the bits that select `dimension` takes
+/// of a `width`-bit value of type `ty`, at constant positions of its
+/// outermost packed dimension (IEEE 1800-2023 7.4.6, 11.5.1), and whether
+/// they are signed, by the type of the select: an element of a signed
+/// packed element type is (7.4.1), a bit-select or part-select is not
+/// (11.8.1).
+fn selected_bits(
+    dimension: &celox_sv_syntax::Dimension,
+    ty: &Type,
+    width: u32,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Result<(u32, u32, bool), String> {
+    use celox_sv_syntax::DimensionKind;
+    let bounds = semantic_types::packed_bounds(&mut session.types, &tree.functions, ty, env)
+        .ok_or("a select of a constraint variable of no packed type")?;
+    // An integral type without packed dimensions, such as `int` or a packed
+    // structure, selects as if declared `[width-1:0]` (6.11.1, 7.2.1).
+    let (left, right) = bounds
+        .first()
+        .copied()
+        .unwrap_or((i128::from(width) - 1, 0));
+    let size = left.abs_diff(right) + 1;
+    if size == 0 || u128::from(width) % size != 0 {
+        return Err("a select of a constraint variable of unknown layout".into());
+    }
+    let element = u128::from(width) / size;
+    let descending = left >= right;
+    // The offset of position `index` from the lowest one.
+    let offset = |index: i128| -> Result<u128, String> {
+        if index < left.min(right) || index > left.max(right) {
+            return Err("a constraint select outside the range of its variable".into());
+        }
+        Ok(if descending {
+            index.abs_diff(right)
+        } else {
+            right.abs_diff(index)
+        })
+    };
+    let value = |id: ExprId| {
+        constant(id, tree, session, env).ok_or("a constraint select at a non-constant position")
+    };
+    let (low, high) = match dimension.kind {
+        DimensionKind::Index(index) => {
+            let index = value(index)?;
+            (index, index)
+        }
+        DimensionKind::Range {
+            left: msb,
+            right: lsb,
+        } => {
+            let (msb, lsb) = (value(msb)?, value(lsb)?);
+            // A part-select runs in the direction of the range (11.5.1).
+            if (msb >= lsb) != descending && msb != lsb {
+                return Err("a constraint part-select against the direction of its range".into());
+            }
+            (msb, lsb)
+        }
+        DimensionKind::Indexed {
+            base,
+            ref operator,
+            width: count,
+        } => {
+            let (base, count) = (value(base)?, value(count)?);
+            if count <= 0 {
+                return Err("a constraint indexed part-select of no bits".into());
+            }
+            // An endpoint past the integers is outside the range too.
+            let outside = || "a constraint select outside the range of its variable".to_owned();
+            if operator == "+:" {
+                (base, base.checked_add(count - 1).ok_or_else(outside)?)
+            } else {
+                (base.checked_sub(count - 1).ok_or_else(outside)?, base)
+            }
+        }
+        _ => return Err("unsupported constraint select".into()),
+    };
+    let (a, b) = (offset(low)?, offset(high)?);
+    let lowest = a.min(b) * element;
+    let bits = (a.abs_diff(b) + 1) * element;
+    let base = semantic_types::of_type(&mut session.types, &tree.functions, ty, env)
+        .ok_or("a select of a constraint variable of no packed type")?;
+    let dimensions = PackedDimensions::new(HashMap::default(), env, &TypeAliases::default());
+    let selected = expression_types::select(
+        tree,
+        session,
+        base,
+        &dimension.kind,
+        tree.declarations(),
+        &dimensions,
+    )
+    .ok_or("a select of a constraint variable of no type")?;
+    let signed = matches!(
+        session.types.data(selected),
+        semantic_types::TyData::Packed(packed) if packed.signed
+    );
+    Ok((lowest as u32, bits as u32, signed))
+}
+
 /// Whether the constraint being bound may access property `property`: a
 /// local member in its class only, a protected one also in those deriving
 /// from it (IEEE 1800-2023 8.18), from the constraint's lexical class.
@@ -1651,6 +1782,41 @@ pub(in crate::ast) fn bind_inputs(
                     kind: Kind::Leaf(ConstraintExpr::Input {
                         index: RESULT_INPUTS + index,
                         width,
+                    }),
+                    width,
+                    signed,
+                }
+            }
+            // A select of a property at constant positions: its bits, an
+            // unsigned value unless they are an element of a signed type
+            // (IEEE 1800-2023 7.4.1, 11.5.1, 11.8.1).
+            ExprKind::Select {
+                expression: operand,
+                dimension,
+            } if select_operand_type(*operand, tree, properties, names, inputs, loops)
+                .is_some() =>
+            {
+                let ty = select_operand_type(*operand, tree, properties, names, inputs, loops)
+                    .expect("a select operand type");
+                let value = recurse(session, budget, *operand)?;
+                let (lowest, width, signed) =
+                    selected_bits(dimension, &ty, value.width, tree, session, env)?;
+                let value = emit(value, None);
+                let shifted = if lowest == 0 {
+                    value
+                } else {
+                    ConstraintExpr::Binary {
+                        op: ">>".into(),
+                        left: Box::new(value),
+                        right: Box::new(ConstraintExpr::Literal(32, u64::from(lowest))),
+                        signed: false,
+                    }
+                };
+                Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Resize {
+                        value: Box::new(shifted),
+                        width,
+                        signed: false,
                     }),
                     width,
                     signed,

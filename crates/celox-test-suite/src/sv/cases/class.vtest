@@ -2654,6 +2654,63 @@ endmodule
   (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
   (expect_output "0\n"))
 
+(case constrained_randomize_selects
+  (source "selects.sv" #"
+module Top(output int bad, output bit done);
+    typedef bit signed [3:0] nibble_t;
+    class Selects;
+        rand bit [31:0] addr;
+        rand bit [0:7] up;
+        rand bit [35:4] off;
+        rand bit [3:0][7:0] p;
+        rand int i;
+        rand bit signed [7:0] g;
+        rand bit [15:0] w;
+        // An element of a signed named type is signed (7.4.1).
+        rand nibble_t [1:0] n;
+        constraint c {
+            addr[1:0] == 0;
+            addr[31] == 1'b1;
+            up[0:3] == 4'ha;
+            up[7] == 1'b1;
+            off[11:4] == 8'h3c;
+            off[35-:4] == 4'h9;
+            off[12+:4] == 4'h6;
+            p[2] == 8'h5a;
+            i[31] == 1'b1;
+            // A select is unsigned: a negative g reads as a positive byte.
+            g[7:0] > 0 && g < 0;
+            w[15:8] == w[7:0] + 8'h1;
+            n[0] < 0;
+            n[1] > 0;
+        }
+    endclass
+    Selects s;
+    // n[0] < 0 and n[1] > 0, read from the whole value.
+    function automatic int nibbles(bit [7:0] v);
+        return v[3] == 1 && v[7] == 0 && v[7:4] != 0;
+    endfunction
+    initial begin
+        s = new;
+        for (int n = 0; n < 20; n++) begin
+            if (s.randomize() == 0) bad++;
+            // `up` and `off` are read whole: up[0:3] are its high bits and
+            // off[11:4] its low ones.
+            if (s.addr[1:0] != 0 || s.addr[31] != 1 || s.up >> 4 != 4'ha || s.up % 2 != 1
+                || s.off % 256 != 8'h3c || s.off >> 28 != 4'h9 || s.off / 256 % 16 != 4'h6
+                || (s.p >> 16) % 256 != 8'h5a || s.i >= 0 || s.g >= 0 || s.w[15:8] != s.w[7:0] + 8'h1
+                || nibbles(s.n) != 1)
+                bad++;
+            if (s.randomize() with { addr[3:2] == 2'b11; } == 0 || s.addr[3:0] != 4'hc) bad++;
+        end
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
 (case constrained_randomize_shifts
   (source "shifts.sv" #"
 module Top(output int bad, output bit done);

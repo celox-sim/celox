@@ -327,8 +327,9 @@ blocks in programs. Two region deviations are listed under
   integers and scalar enums with up to 256 members. Named constraint blocks
   cover only 1–64-bit two-state scalar integer properties with comparisons,
   logical and bitwise operations, addition, subtraction, and multiplication,
-  class handle properties compared with each other or `null` by `==` and
-  `!=`, and calls of functions of the class with input arguments (18.5.11);
+  bit-selects and part-selects of a property at constant positions, class
+  handle properties compared with each other or `null` by `==` and `!=`,
+  and calls of functions of the class with input arguments (18.5.11);
   a call in a constraint loop, in inline constraints, in the constraints of
   an object a rand handle reaches, or in an argument of another is
   unsupported. The elements of a random array, fixed-size or dynamic, that a
