@@ -805,6 +805,18 @@ fn randsequence_expansion_is_bounded() {
     };
     let message = "randsequence expanding more than 65536 productions";
     assert!(format!("{error:?}").contains(message), "{error:?}");
+    // So is a `rand join` of as many productions, whose rules are expanded
+    // without entering them.
+    let joined = format!(
+        "module Top; initial begin int x; randsequence(main) main : rand join {}; a : {{ x++; }}; endsequence end endmodule",
+        vec!["a"; 70_000].join(" ")
+    );
+    let Err(error) = celox::Simulation::from_sv_sources(vec![(&joined, Path::new("rs.sv"))], "Top")
+        .build_cranelift()
+    else {
+        panic!("accepted");
+    };
+    assert!(format!("{error:?}").contains(message), "{error:?}");
 }
 
 #[test]
@@ -976,6 +988,75 @@ fn randsequence_exits_belong_to_their_activation_and_statement() {
 }
 
 #[test]
+fn randsequence_rand_join_interleaves_its_productions_at_random() {
+    // IEEE 1800-2023 18.17.5: `rand join` interleaves the productions'
+    // items at random from the thread's generator, each production's in
+    // its order: with the default bias every interleaving occurs; a bias
+    // of 0.0 gives priority to the shortest (A B C D, C D A B) and 1.0 to
+    // the longest (A C B D, A C D B, C A B D, C A D B). The bias is
+    // evaluated once each time. A `return` leaves only its production, a
+    // `break` the statement.
+    let source = "module Top;
+        int calls;
+        function automatic real bias(real value); calls++; return value; endfunction
+        function automatic string run(int mode);
+            string s;
+            randsequence(top)
+                top : if (mode == 0) plain else if_biased;
+                if_biased : if (mode == 1) shortest else longest_or_exits;
+                longest_or_exits : if (mode == 2) longest else exits;
+                exits : if (mode == 3) returned else broken;
+                plain : rand join s1 s2;
+                shortest : rand join (bias(0.0)) s1 s2;
+                longest : rand join (bias(1.0)) s1 s2;
+                returned : rand join r s2;
+                broken : rand join k s2;
+                s1 : a b;
+                s2 : c d;
+                r : a { return; } b;
+                k : a { break; } b;
+                a : { s = {s, \"A\"}; };
+                b : { s = {s, \"B\"}; };
+                c : { s = {s, \"C\"}; };
+                d : { s = {s, \"D\"}; };
+            endsequence
+            return s;
+        endfunction
+        initial begin
+            int seen[string][int];
+            string s;
+            int ordered = 1, exits = 1, runs = 0, cut = 0;
+            for (int mode = 0; mode < 3; mode++)
+                repeat (400) begin
+                    s = run(mode);
+                    if (s.len() != 4 || s.getc(0) == \"B\" || s.getc(0) == \"D\") ordered = 0;
+                    seen[s][mode] = 1;
+                    if (mode > 0) runs++;
+                end
+            repeat (100) begin
+                // `return` leaves `r` after A; `s2` goes on to its end.
+                s = run(3);
+                for (int i = 0; i < s.len(); i++) if (s.getc(i) == \"B\") exits = 0;
+                if (s.len() != 3) exits = 0;
+                // `break` leaves the statement, sometimes before D.
+                s = run(4);
+                for (int i = 0; i < s.len(); i++) if (s.getc(i) == \"B\") exits = 0;
+                if (s.len() < 3) cut++;
+            end
+            $display(\"%0d %0d %0d\", ordered, exits && cut > 0, calls == runs);
+            foreach (seen[order]) $display(\"%s %0d%0d%0d\", order,
+                seen[order].exists(0), seen[order].exists(1), seen[order].exists(2));
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        [
+            "1 1 1", "ABCD 110", "ACBD 101", "ACDB 101", "CABD 101", "CADB 101", "CDAB 110"
+        ]
+    );
+}
+
+#[test]
 fn randsequence_forms_not_expanded_are_named() {
     // Each form the expansion does not provide yet is rejected by name; a
     // production that reaches itself has no expansion; an undeclared one is
@@ -986,7 +1067,14 @@ fn randsequence_forms_not_expanded_are_named() {
             "recursive randsequence production `main`",
         ),
         ("main : missing;", "no randsequence production of this name"),
-        ("main : rand join a a; a : {};", "randsequence rand join"),
+        (
+            "main : rand join a; a : {};",
+            "randsequence rand join of fewer than two production items",
+        ),
+        (
+            "main : rand join a {}; a : {};",
+            "randsequence rand join of fewer than two production items",
+        ),
         (
             "main : case (1) default : a; 2 : a; default a; endcase; a : {};",
             "randsequence case production with more than one default",
