@@ -982,6 +982,10 @@ fn target_base(
     if let Some((element, target, ..)) = containers::selected_element(root, tree, session, dims)? {
         return Ok(Some((element, target.element.clone())));
     }
+    // A member of an element of unpacked structure type.
+    if let Some((member, _)) = containers::element_member(base, native, tree, session, dims)? {
+        return Ok(Some((base, member)));
+    }
     if let Some((property, _)) = objects::property(tree, session, base, native, dims)? {
         return Ok(Some((base, property.r#type)));
     }
@@ -1181,6 +1185,12 @@ fn path_context(
     }
     if objects::property(tree, session, root, native, dims)?.is_some() {
         return Ok(None);
+    }
+    // A member of an element of unpacked structure type of a container,
+    // which the element's place is written through (see `object_place`).
+    if let Some((member, _)) = containers::element_member(root, native, tree, session, dims)? {
+        let member = selected_type(authored, root, member, native, tree, session, dims)?;
+        return Ok(Some((Vec::new(), member)));
     }
     if let Some(element) = element_members::element_member(root, native, tree, session, dims) {
         let view;
