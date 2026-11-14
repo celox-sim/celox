@@ -878,6 +878,104 @@ fn randsequence_case_controls_compare_as_the_case_statement() {
 }
 
 #[test]
+fn randsequence_break_and_return_leave_the_statement_and_the_production() {
+    // IEEE 1800-2023 18.17.6: `return` aborts the production whose code
+    // block it is in, generation continuing after it (the LRM's example);
+    // `break` leaves the randsequence, or the loop around it in the code
+    // block; a nested randsequence's `break` leaves only that one.
+    let source = "module Top;
+        function automatic string run(int flag);
+            string s;
+            randsequence()
+                top : p1 p2;
+                p1 : a b c;
+                p2 : a { if (flag == 1) return; } b c;
+                a : { s = {s, \"A\"}; };
+                b : { if (flag == 2) return; s = {s, \"B\"}; };
+                c : { s = {s, \"C\"}; };
+            endsequence
+            return s;
+        endfunction
+        function automatic int leave(int stop);
+            int x;
+            randsequence(main)
+                main : first second third;
+                first : { x += 1; for (int i = 0; i < 5; i++) if (i == 2) break; else x += 10; };
+                second : { if (stop) break; randsequence() inner : { x += 100; break; }; endsequence } fourth;
+                third : { x += 1000; };
+                fourth : { x += 10000; };
+            endsequence
+            return x;
+        endfunction
+        initial $display(\"%s %s %s %0d %0d\", run(0), run(1), run(2), leave(1), leave(0));
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["ABCABC ABCA ACAC 21 11121"]
+    );
+}
+
+#[test]
+fn randsequence_exits_belong_to_their_activation_and_statement() {
+    // IEEE 1800-2023 18.17.6: a `break` leaves its own activation's
+    // randsequence (two overlapping automatic task calls go on each by its
+    // own), the randsequence also inside a loop (the loop goes on), and a
+    // `repeat` production's repetitions; a `return` in a loop of a code
+    // block leaves the loop and the production.
+    let source = "`timescale 1ns/1ns
+    module Top;
+        task automatic run(int stop, output int x);
+            x = 0;
+            randsequence(main)
+                main : first second;
+                first : { #(stop ? 1 : 3); x += 1; if (stop) break; };
+                second : { #2; x += 10; };
+            endsequence
+        endtask
+        function automatic int looped();
+            int x;
+            for (int i = 0; i < 3; i++)
+                randsequence()
+                    main : { x++; break; } other;
+                    other : { x += 100; };
+                endsequence
+            return x;
+        endfunction
+        function automatic int repeated();
+            int x;
+            randsequence()
+                main : repeat (5) p after;
+                p : { x++; if (x == 2) break; };
+                after : { x += 100; };
+            endsequence
+            return x;
+        endfunction
+        function automatic int returned();
+            int x;
+            randsequence()
+                main : p q;
+                p : { for (int i = 0; i < 10; i++) begin x++; if (i == 2) return; end x += 100; } r;
+                q : { x += 1000; };
+                r : { x += 10000; };
+            endsequence
+            return x;
+        endfunction
+        initial begin
+            int a, b;
+            fork
+                run(1, a);
+                run(0, b);
+            join
+            $display(\"%0d %0d %0d %0d %0d\", a, b, looped(), repeated(), returned());
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1 11 3 2 1003"]
+    );
+}
+
+#[test]
 fn randsequence_forms_not_expanded_are_named() {
     // Each form the expansion does not provide yet is rejected by name; a
     // production that reaches itself has no expansion; an undeclared one is
@@ -897,12 +995,22 @@ fn randsequence_forms_not_expanded_are_named() {
             "main : a := 1 {}; a : {};",
             "randsequence weight code block",
         ),
-        ("main : { break; };", "break in a randsequence code block"),
         (
             "main : { continue; };",
             "continue outside a loop in a randsequence code block",
         ),
-        ("main : { return; };", "return in a randsequence code block"),
+        (
+            "main : { return 1; };",
+            "randsequence production value returned",
+        ),
+        (
+            "main : { fork break; join };",
+            "break leaving a fork branch in a randsequence code block",
+        ),
+        (
+            "main : { fork begin return; end join_none };",
+            "return in a fork branch in a randsequence code block",
+        ),
         (
             "main : a(1); a : {};",
             "randsequence production with arguments",
