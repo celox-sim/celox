@@ -59,6 +59,10 @@ struct ScopeEntry {
     shadowed_literal: Option<String>,
     shadowed_parameter_value: Option<Expr>,
     shadowed_signedness: Option<bool>,
+    /// Whether the name was one of `class_static_members` before this
+    /// entry bound it: restored when the scope ends; `None` when the entry
+    /// left the set as it was.
+    shadowed_static_member: Option<bool>,
 }
 
 /// Per-module state shared by every body converted in that module.
@@ -760,6 +764,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 }
             }
             let signedness = &mut self.dims.expression_signedness;
+            match entry.shadowed_static_member {
+                Some(true) => {
+                    Arc::make_mut(&mut self.dims.class_static_members).insert(entry.source.clone());
+                }
+                Some(false) => {
+                    Arc::make_mut(&mut self.dims.class_static_members).remove(&entry.source);
+                }
+                None => {}
+            }
             match entry.shadowed_signedness {
                 Some(signed) => {
                     signedness.insert(entry.source, signed);
@@ -932,6 +945,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 None
             },
             shadowed_signedness: self.dims.expression_signedness.remove(source),
+            // Any binding of the name hides a static property of it.
+            shadowed_static_member: self
+                .dims
+                .class_static_members
+                .contains(source)
+                .then(|| Arc::make_mut(&mut self.dims.class_static_members).remove(source)),
         }
     }
 
@@ -982,11 +1001,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 &mut self.session.types,
                 &self.dims.const_env,
             );
-            let entry = self.take_binding(
+            let mut entry = self.take_binding(
                 &property.name,
                 Some(property.variable.clone()),
                 property.r#type.packed_ranges.len(),
             );
+            // The name denotes the static property until the scope ends or
+            // a local hides it.
+            entry.shadowed_static_member.get_or_insert(false);
+            Arc::make_mut(&mut self.dims.class_static_members).insert(property.name.clone());
             self.dims.insert(property.name.clone(), shape);
             self.dims
                 .expression_signedness

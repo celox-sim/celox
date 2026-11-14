@@ -60,6 +60,11 @@ pub(super) struct PackedDimensions {
     /// Inside a class specialization, the tables of the scope around the
     /// class, before the specialization's parameters were added.
     pub(super) class_base: Option<ClassBase>,
+    /// The names in a method's body that denote static properties of its
+    /// class, until a local or formal of the name hides one (IEEE 1800-2023
+    /// 6.21): `p.rand_mode()` names the static property only while `p`
+    /// is one of them.
+    pub(super) class_static_members: Arc<HashSet<String>>,
 }
 
 /// The tables of the scope that declares a class, which
@@ -145,6 +150,7 @@ impl PackedDimensions {
             last_indices: Arc::default(),
             constant_types: Arc::default(),
             class_base: None,
+            class_static_members: Arc::default(),
         }
     }
 }

@@ -43,6 +43,82 @@ pub(super) struct Property {
     pub storage: Option<Arc<ContainerType>>,
 }
 
+/// Where a randomize call solves a static rand property (see
+/// [`StaticProperty::rand`]): a slot of each object of the class, which is
+/// no member of it, keyed by the declaration of the property, its variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StaticSlot {
+    /// The variable that holds the property.
+    pub variable: String,
+    /// The variable of the bit that turns it off for every object (18.8).
+    pub mode: String,
+    pub r#type: Type,
+    /// The bytes of the object the call solves it in.
+    pub field: ObjectField,
+}
+
+/// The member of a class that a name denotes in it (IEEE 1800-2023 8.14):
+/// the one the most derived of the class and its bases declares, an
+/// instance property, one of unpacked structure type, or a static
+/// property, which hide each other alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Member {
+    /// Property `0` of [`Class::properties`].
+    Instance(usize),
+    /// Property `0` of [`Class::aggregates`], of unpacked structure type.
+    Aggregate(usize),
+    /// Property `0` of [`Class::statics`].
+    Static(usize),
+}
+
+/// The member that `name` denotes in a class whose lineage, from the class
+/// itself to its root, is `lineage`, with `properties`, `aggregates` and
+/// `statics` (see [`Member`]).
+pub(super) fn member(
+    name: &str,
+    lineage: &[String],
+    properties: &[Property],
+    aggregates: &[AggregateProperty],
+    statics: &[StaticProperty],
+) -> Option<Member> {
+    let instance = |owner: Option<&str>| {
+        properties
+            .iter()
+            .rposition(|property| {
+                property.name == name && owner.is_none_or(|owner| property.owner == owner)
+            })
+            .map(Member::Instance)
+    };
+    let aggregate = |owner: Option<&str>| {
+        aggregates
+            .iter()
+            .rposition(|aggregate| {
+                aggregate.name == name && owner.is_none_or(|owner| aggregate.owner == owner)
+            })
+            .map(Member::Aggregate)
+    };
+    let shared = |owner: Option<&str>| {
+        statics
+            .iter()
+            .rposition(|property| {
+                property.name == name
+                    && property.mode_of.is_none()
+                    && owner.is_none_or(|owner| property.owner == owner)
+            })
+            .map(Member::Static)
+    };
+    let declared = |owner: Option<&str>| {
+        instance(owner)
+            .or_else(|| aggregate(owner))
+            .or_else(|| shared(owner))
+    };
+    lineage
+        .iter()
+        .find_map(|owner| declared(Some(owner)))
+        // A class whose lineage is not known names its members as declared.
+        .or_else(|| declared(None))
+}
+
 impl Property {
     /// A rand object handle: the variables and constraints of the object it
     /// refers to are solved with those of the object that holds it (IEEE
@@ -134,6 +210,106 @@ pub(super) struct StaticProperty {
     /// The name of the variable that holds the property.
     pub variable: String,
     pub initializer: Option<celox_sv_syntax::ExprId>,
+    /// A `static rand` property, one variable of the class that every
+    /// randomize call of an object of it solves (IEEE 1800-2023 18.4): the
+    /// call solves it in the object's [`StaticSlot`] for it, seeded from it,
+    /// and writes it back; whether it is random is a static bit all objects
+    /// share (18.8).
+    pub rand: bool,
+    /// For the bit that turns static rand property `name` off, `name`: a
+    /// variable of the class no source names (see [`static_rand_mode`]).
+    pub mode_of: Option<String>,
+}
+
+/// The static properties the constraints of class `owner` read as inputs
+/// of its program: those of its base, at the indices the base's constraints
+/// read them at, then those it declares that the solver holds, as it holds
+/// a property (see `constraints::solver_type`). An input is its variable:
+/// a static the class redeclares is another input (8.14, 18.5).
+fn static_inputs(
+    owner: &str,
+    base: Option<&[StaticInput]>,
+    statics: &[StaticProperty],
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Vec<StaticInput> {
+    let mut inputs = base.map(<[_]>::to_vec).unwrap_or_default();
+    for property in statics {
+        if property.owner != owner || property.rand || property.mode_of.is_some() {
+            continue;
+        }
+        if constraints::solver_type(&property.r#type, tree, session, env).is_err() {
+            continue;
+        }
+        let Some(shape) = casts::expr_type_from_type(&tree.functions, &property.r#type, env) else {
+            continue;
+        };
+        inputs.push(StaticInput {
+            name: property.name.clone(),
+            variable: property.variable.clone(),
+            width: shape.width as u32,
+            signed: shape.signed,
+        });
+    }
+    inputs
+}
+
+/// Whether constraint `expr` reads an input of its program.
+fn reads_input(expr: &celox_heap::randomization::Expr) -> bool {
+    use celox_heap::randomization::Expr;
+    match expr {
+        Expr::Input { .. } => true,
+        Expr::Enabled { value, .. } | Expr::Resize { value, .. } | Expr::Unary { value, .. } => {
+            reads_input(value)
+        }
+        Expr::Foreach { body, .. } => reads_input(body),
+        Expr::Binary { left, right, .. } => reads_input(left) || reads_input(right),
+        Expr::Dist {
+            membership,
+            choices,
+        } => reads_input(membership) || choices.iter().any(|choice| reads_input(&choice.predicate)),
+        Expr::Literal(..)
+        | Expr::Field(_)
+        | Expr::Size(_)
+        | Expr::Sum(_)
+        | Expr::Index { .. }
+        | Expr::Static(_)
+        | Expr::Solved(_)
+        | Expr::Member { .. }
+        | Expr::Element { .. } => false,
+    }
+}
+
+/// The name of the static bit that turns static rand property `name` off,
+/// for every object: a `$` starts it, as no identifier of a source starts
+/// once normalized, so that it names no property of the class.
+fn static_rand_mode(name: &str) -> String {
+    format!("$rand_mode${name}")
+}
+
+/// The change key of the slot of static rand property `name` (see
+/// [`StaticSlot`]), which no identifier of a source is either (see
+/// [`static_rand_mode`]).
+fn static_rand_slot(name: &str) -> String {
+    format!("$slot${name}")
+}
+
+/// The variable of the bit that turns static rand property `name` of class
+/// `owner` off (see [`StaticSlot::mode`]).
+pub(super) fn static_rand_mode_variable(owner: &str, name: &str) -> String {
+    Class::subroutine_name(owner, &static_rand_mode(name))
+}
+
+/// A static property that a constraint reads: the value of its variable,
+/// input `index` of the program when a randomize call starts (IEEE
+/// 1800-2023 18.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StaticInput {
+    pub name: String,
+    pub variable: String,
+    pub width: u32,
+    pub signed: bool,
 }
 
 /// A method of a class.
@@ -190,6 +366,23 @@ pub(super) struct Class {
     pub aggregates: Vec<AggregateProperty>,
     /// Static properties of the class and its bases.
     pub statics: Vec<StaticProperty>,
+    /// The static properties its constraints read, input `n` of its program
+    /// the `n`th (see [`StaticInput`]).
+    pub static_inputs: Vec<StaticInput>,
+    /// The slots its randomize calls solve its static rand properties in,
+    /// those of its base first, [`Expr::Static`] `n` the `n`th.
+    ///
+    /// [`Expr::Static`]: celox_heap::randomization::Expr::Static
+    pub static_slots: Vec<StaticSlot>,
+    /// The bit of the argument of a randomize call that selects each of
+    /// `properties` and each of `static_slots` (see
+    /// [`Class::selection_type`]): a base's bits are those of the base, so
+    /// that a mask a call through a base handle builds selects the same
+    /// members in the class it dispatches to.
+    pub property_bits: Vec<usize>,
+    pub slot_bits: Vec<usize>,
+    /// The class and its bases, from the class to its root.
+    pub lineage: Vec<String>,
     /// Methods visible in the class, overrides replacing inherited ones.
     pub methods: Vec<Method>,
     /// The parameters and typedefs of an interface class, its own and
@@ -217,8 +410,50 @@ pub(super) fn unsigned_type(width: usize) -> Type {
 }
 
 impl Class {
+    /// The bits of the selection of a randomize call: whether it has
+    /// arguments, then whether it names each property, then each static
+    /// rand property, by its slot (18.11).
     pub fn selection_type(&self) -> Type {
-        unsigned_type(self.properties.len() + 1)
+        unsigned_type(self.properties.len() + self.static_slots.len() + 1)
+    }
+
+    /// The bits of a selection for the members a class adds to those of
+    /// `base`: its new properties and slots take the bits after the base's
+    /// (see [`Class::property_bits`]).
+    fn selection_bits(
+        base: Option<&Class>,
+        properties: usize,
+        slots: usize,
+    ) -> (Vec<usize>, Vec<usize>) {
+        let (mut property_bits, mut slot_bits) = base
+            .map(|base| (base.property_bits.clone(), base.slot_bits.clone()))
+            .unwrap_or_default();
+        let mut next = 1 + property_bits.len() + slot_bits.len();
+        for bits in [(&mut property_bits, properties), (&mut slot_bits, slots)] {
+            while bits.0.len() < bits.1 {
+                bits.0.push(next);
+                next += 1;
+            }
+        }
+        (property_bits, slot_bits)
+    }
+
+    /// The member that `name` denotes in the class (see [`Member`]).
+    pub(super) fn member(&self, name: &str) -> Option<Member> {
+        member(
+            name,
+            &self.lineage,
+            &self.properties,
+            &self.aggregates,
+            &self.statics,
+        )
+    }
+
+    /// The slot of static rand property `property` (see [`StaticSlot`]).
+    pub(super) fn static_slot(&self, property: &StaticProperty) -> Option<usize> {
+        self.static_slots
+            .iter()
+            .position(|slot| slot.variable == property.variable)
     }
 
     /// Register the class's constraint program once, from its constructor,
@@ -228,13 +463,26 @@ impl Class {
     /// registers why, which faults only when such an object is reached.
     pub fn program_registration(&self) -> Option<Stmt> {
         use celox_heap::randomization::Registered;
-        if !self.has_constraints && !self.properties.iter().any(|p| p.rand || p.randc) {
+        if !self.has_constraints
+            && !self.properties.iter().any(|p| p.rand || p.randc)
+            && self.static_slots.is_empty()
+        {
             return None;
         }
         let program = match self
             .check_randomize()
             .and_then(|()| self.constraint_program())
         {
+            // The static properties of the class are read and written by
+            // its own randomize call (see `StaticInput`), which an object a
+            // rand handle reaches does not make.
+            Ok(program)
+                if !self.static_slots.is_empty() || program.constraints.iter().any(reads_input) =>
+            {
+                Registered::Unsupported(
+                    "a rand object member whose constraints name static properties".into(),
+                )
+            }
             Ok(program) => Registered::Program(program.into()),
             Err(error) => Registered::Unsupported(error.to_string()),
         };
@@ -262,7 +510,9 @@ impl Class {
     }
 
     /// Whether `randomize` solves the class's constraint program: it has
-    /// constraints, rand object handles or rand arrays.
+    /// constraints, rand object handles or rand arrays. Otherwise each
+    /// random property, and each static rand one in its slot (see
+    /// `Class::static_slots`), is drawn on its own.
     pub fn solved(&self) -> bool {
         self.has_constraints
             || self.has_rand_objects()
@@ -295,6 +545,20 @@ impl Class {
                 ));
             }
         }
+        // A static rand property is checked as an instance one.
+        for slot in &self.static_slots {
+            if slot.field.four_state {
+                return Err(unsupported("randomization of a 4-state class property"));
+            }
+            if slot.field.handle.is_some()
+                || slot.r#type.holds_chandle()
+                || (slot.r#type.is_enum && slot.r#type.enum_domain.is_none())
+            {
+                return Err(unsupported(
+                    "class randomize requires integral rand properties with a supported enum domain",
+                ));
+            }
+        }
         for hook in ["pre_randomize", "post_randomize"] {
             if let Some(method) = self.method(hook) {
                 if !method.is_function
@@ -314,6 +578,12 @@ impl Class {
     /// The property `name`; one the class declares hides one of a base
     /// (IEEE 1800-2023 8.14).
     pub fn property(&self, name: &str) -> Option<&Property> {
+        // The member the first name of a path denotes, a static property of
+        // a derived class hiding an instance one of a base too (8.14).
+        let root = name.split('.').next().unwrap_or(name);
+        if matches!(self.member(root), Some(Member::Static(_))) {
+            return None;
+        }
         let (index, property) = self
             .properties
             .iter()
@@ -325,6 +595,12 @@ impl Class {
 
     /// The property or member of unpacked structure type `name`.
     pub fn aggregate(&self, name: &str) -> Option<&AggregateProperty> {
+        // The member the first name of a path denotes, a static property of
+        // a derived class hiding one of a base too (8.14).
+        let root = name.split('.').next().unwrap_or(name);
+        if matches!(self.member(root), Some(Member::Static(_))) {
+            return None;
+        }
         let aggregate = self
             .aggregates
             .iter()
@@ -352,8 +628,13 @@ impl Class {
             })
     }
 
+    /// The static property `name` denotes in the class (see [`member`]):
+    /// none when an instance property of a more derived class hides it.
     pub fn static_property(&self, name: &str) -> Option<&StaticProperty> {
-        self.statics.iter().find(|property| property.name == name)
+        match self.member(name)? {
+            Member::Static(index) => Some(&self.statics[index]),
+            Member::Instance(_) | Member::Aggregate(_) => None,
+        }
     }
 
     pub fn method(&self, name: &str) -> Option<&Method> {
@@ -1056,15 +1337,21 @@ pub(super) fn shared_class(
         .as_ref()
         .map(|base| base.statics.clone())
         .unwrap_or_default();
+    let mut static_slots = base
+        .as_ref()
+        .map(|base| base.static_slots.clone())
+        .unwrap_or_default();
+    let lineage = std::iter::once(name.to_owned())
+        .chain(base.iter().flat_map(|base| base.lineage.iter().cloned()))
+        .collect::<Vec<_>>();
     let mut size = base.as_ref().map_or(0, |base| base.size);
     for property in &declaration.properties {
         if property.declaration.constant && (property.qualifiers.rand || property.qualifiers.randc)
         {
             return Err(unsupported("const random class property"));
         }
-        if property.qualifiers.is_static && (property.qualifiers.rand || property.qualifiers.randc)
-        {
-            return Err(unsupported("static random class property"));
+        if property.qualifiers.is_static && property.qualifiers.randc {
+            return Err(unsupported("randc static class property"));
         }
         let ty = type_binding::binding::bind_in(
             property.declaration.data_type,
@@ -1163,16 +1450,50 @@ pub(super) fn shared_class(
                 continue;
             }
             if property.qualifiers.is_static {
-                statics.retain(|known| known.name != property_name);
+                let rand = property.qualifiers.rand;
+                let variable_name = Class::subroutine_name(name, &property_name);
+                statics.retain(|known| known.mode_of.is_some() || known.name != property_name);
                 statics.push(StaticProperty {
                     local: property.qualifiers.local,
                     protected: property.qualifiers.protected,
-                    variable: Class::subroutine_name(name, &property_name),
-                    name: property_name,
+                    variable: variable_name.clone(),
+                    name: property_name.clone(),
                     owner: name.to_owned(),
                     r#type: ty.clone(),
                     initializer: variable.value,
+                    rand,
+                    mode_of: None,
                 });
+                if rand {
+                    // The bit and the field are the class's own: a derived
+                    // class that redeclares the property solves both.
+                    let mode = static_rand_mode_variable(name, &property_name);
+                    statics.push(StaticProperty {
+                        local: true,
+                        protected: false,
+                        variable: mode.clone(),
+                        name: static_rand_mode(&property_name),
+                        owner: name.to_owned(),
+                        r#type: unsigned_type(1),
+                        initializer: None,
+                        rand: false,
+                        mode_of: Some(property_name.clone()),
+                    });
+                    // The slot is laid out as an instance property of the
+                    // type is, and named by no member (see `StaticSlot`).
+                    let mut field = field(&tree.functions, &ty, env, size)?;
+                    size = field.offset + field.storage();
+                    field.key = crate::system_functions::ChangeKey::Property(property_key(
+                        name,
+                        &static_rand_slot(&property_name),
+                    ));
+                    static_slots.push(StaticSlot {
+                        variable: variable_name,
+                        mode,
+                        r#type: procedural::scoped_type(ty.clone(), env),
+                        field,
+                    });
+                }
                 continue;
             }
             let owner = name.to_owned();
@@ -1306,6 +1627,24 @@ pub(super) fn shared_class(
         .as_ref()
         .map(|base| base.constraints.clone())
         .unwrap_or_default();
+    // A constraint reads a static property as an input of the program, and
+    // solves a static rand property in the object's slot for it (see
+    // `StaticProperty::rand`).
+    let static_inputs = static_inputs(
+        name,
+        base.as_ref().map(|base| base.static_inputs.as_slice()),
+        &statics,
+        tree,
+        session,
+        env,
+    );
+    let names = constraints::Names {
+        lineage: &lineage,
+        aggregates: &aggregates,
+        statics: &statics,
+        inputs: &static_inputs,
+        slots: &static_slots,
+    };
     let scope = (name.to_owned(), base.as_ref().map(|base| base.name.clone()));
     session.constraint_owners.push(scope.clone());
     session.constraint_scopes.push(scope);
@@ -1319,7 +1658,17 @@ pub(super) fn shared_class(
             .and_then(|expressions| {
                 expressions
                     .iter()
-                    .map(|&id| constraints::bind(id, tree, session, &properties, env))
+                    .map(|&id| {
+                        constraints::bind_inputs(
+                            id,
+                            tree,
+                            session,
+                            &properties,
+                            &names,
+                            env,
+                            &HashMap::default(),
+                        )
+                    })
                     .collect()
             });
         // Constraint indices survive overrides, including calls via base handles.
@@ -1331,6 +1680,8 @@ pub(super) fn shared_class(
     }
     session.constraint_owners.pop();
     session.constraint_scopes.pop();
+    let (property_bits, slot_bits) =
+        Class::selection_bits(base.as_deref(), properties.len(), static_slots.len());
     let mut class = Class {
         name: name.to_owned(),
         id: class_id(name),
@@ -1346,6 +1697,11 @@ pub(super) fn shared_class(
         base_properties,
         aggregates,
         statics,
+        static_inputs,
+        static_slots,
+        property_bits,
+        slot_bits,
+        lineage,
         methods,
         declarations: Vec::new(),
         size: size.max(1),
@@ -1466,6 +1822,11 @@ fn interface_class(
         base_properties: 0,
         aggregates: Vec::new(),
         statics: Vec::new(),
+        static_inputs: Vec::new(),
+        static_slots: Vec::new(),
+        property_bits: Vec::new(),
+        slot_bits: Vec::new(),
+        lineage: vec![name.to_owned()],
         methods,
         declarations,
         size: 1,
