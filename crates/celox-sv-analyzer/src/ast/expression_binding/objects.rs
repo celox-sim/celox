@@ -2024,6 +2024,21 @@ fn scope_randomize_with(
         &mut input_types,
         &mut input_values,
     )?;
+    // A 4-state input passes its known bits, and after the inputs, the mask
+    // of its X and Z bits, as one of `randomize() with` does.
+    let mut unknown_inputs = Vec::new();
+    let mut masks = Vec::new();
+    for (index, ty) in input_types.iter().enumerate() {
+        if ty.kind() == TypeKind::Logic
+            && let Some(value) = input_values[index].take()
+        {
+            let (value, mask) = classes::known_bits(value);
+            input_values[index] = Some(value);
+            unknown_inputs.push((index, input_values.len() + masks.len()));
+            masks.push(Some(mask));
+        }
+    }
+    input_values.extend(masks);
     let scope = scope_class(dimensions);
     session
         .constraint_scopes
@@ -2062,6 +2077,7 @@ fn scope_randomize_with(
     let program = celox_heap::randomization::Program {
         fields,
         constraints: constraints?,
+        unknown_inputs,
         ..Default::default()
     };
     Ok(Some(Expr::Call {
@@ -2274,28 +2290,31 @@ fn caller_inputs(
                 return Err(unsupported(format!("inline local variable `{name}`")));
             }
             let ty = expression_types::type_of(tree, session, id, native, dimensions)?;
-            let (width, signed) = match session.types.data(ty) {
+            let (width, signed, four_state) = match session.types.data(ty) {
                 semantic_types::TyData::Chandle => {
                     return Err(AnalyzerError::IllegalChandleUse {
                         detail: "a chandle in a constraint".into(),
                     });
                 }
-                semantic_types::TyData::Packed(packed) if !packed.four_state => {
-                    (packed.bits(), packed.signed)
+                semantic_types::TyData::Packed(packed) => {
+                    (packed.bits(), packed.signed, packed.four_state)
                 }
                 _ => {
                     return Err(unsupported(
-                        "inline inputs require two-state scalar variables",
+                        "inline inputs require integral scalar variables of at most 64 bits",
                     ));
                 }
             };
             let width = u32::try_from(width)
                 .ok()
                 .filter(|width| (1..=64).contains(width))
-                .ok_or_else(|| unsupported("inline input width"))?;
+                .ok_or_else(|| {
+                    unsupported(
+                        "inline inputs require integral scalar variables of at most 64 bits",
+                    )
+                })?;
             let value = bind_value(id, native, tree, session, dimensions, None)?;
-            let mut input_type = classes::unsigned_type(width as usize);
-            input_type.is_signed = signed;
+            let input_type = input_type(width as usize, signed, four_state);
             inputs.insert(
                 key,
                 classes::constraints::CallerInput {
@@ -2319,18 +2338,16 @@ fn caller_inputs(
             || shape_class(variable, tree, session, dimensions).is_some()
             || containers::holds_container(variable, tree, session, dimensions)
             || !variable.unpacked.is_empty()
-            || !variable.is_2state
         {
             return Err(unsupported(
-                "inline inputs require two-state scalar variables",
+                "inline inputs require integral scalar variables of at most 64 bits",
             ));
         }
         let value = Expr::Ident(name);
         let width = expr_static_width(tree, &value, dimensions)
             .filter(|width| (1..=64).contains(width))
             .ok_or_else(|| unsupported("inline input width"))?;
-        let mut ty = classes::unsigned_type(width);
-        ty.is_signed = variable.signed;
+        let ty = input_type(width, variable.signed, !variable.is_2state);
         inputs.insert(
             key,
             classes::constraints::CallerInput {
@@ -2344,6 +2361,18 @@ fn caller_inputs(
         input_values.push(Some(value));
     }
     Ok(())
+}
+
+/// The type of an input of inline constraints, a `width`-bit integral one:
+/// a 4-state one keeps its X and Z bits, which a constraint may not read
+/// (IEEE 1800-2023 18.3; see `Program::unknown_inputs`).
+fn input_type(width: usize, signed: bool, four_state: bool) -> Type {
+    let mut ty = classes::unsigned_type(width);
+    ty.is_signed = signed;
+    if four_state {
+        ty.kind = TypeKind::Logic;
+    }
+    ty
 }
 
 pub(super) fn randomize_with(
