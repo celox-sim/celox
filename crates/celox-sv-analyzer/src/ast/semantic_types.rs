@@ -84,10 +84,13 @@ pub(super) struct DeclId(u32);
 /// interface or program declares types of its own (IEEE 1800-2023 6.22);
 /// instances with the same parameter values share one analysis and so one
 /// scope here.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub(super) struct DeclData {
     pub name: Arc<str>,
     pub scope: Option<Arc<str>>,
+    /// The members of an enumeration the declaration declares (6.19),
+    /// once a type of it has been converted with them.
+    pub domain: Option<Arc<super::enums::EnumDomain>>,
 }
 
 /// The identity of the declaration of a named type.
@@ -204,9 +207,6 @@ pub(super) struct TyTable {
     closed_shapes: HashMap<u64, Vec<(crate::ast::variable_dimensions::VariableShape, TyId)>>,
     /// Whether a `chandle` type has been interned (6.14).
     chandle: bool,
-    /// The members of each named enumeration a type of the table is of
-    /// (6.19), which its `Decl::Named` does not hold.
-    enum_domains: HashMap<EnumKey, Arc<super::enums::EnumDomain>>,
     /// The declarations the types of the table name.
     decls: Vec<DeclData>,
     /// The declarations by name, then by scope (`""` for none, which no
@@ -214,11 +214,6 @@ pub(super) struct TyTable {
     /// are converted at every reference.
     decl_ids: HashMap<Arc<str>, HashMap<Arc<str>, DeclId>>,
 }
-
-/// A named enumeration as its specialization declares it: its declaration,
-/// and the range and state of its base type (6.19), which the parameters of
-/// a parameterized scope may change.
-type EnumKey = (Arc<str>, Option<Range>, bool);
 
 /// The classes a class extends and implements.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -378,6 +373,7 @@ impl TyTable {
         let data = DeclData {
             name: name.into(),
             scope: scope.map(Into::into),
+            domain: None,
         };
         self.decl_ids
             .entry(data.name.clone())

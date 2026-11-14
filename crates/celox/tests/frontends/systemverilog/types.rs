@@ -644,3 +644,33 @@ sv_backends! {
         assert_eq!(u64::try_from(sim.get(wide)).unwrap(), 4);
     }
 }
+
+// Instances whose parameters change only the values of an enumeration's
+// members, not its base type, still declare types of their own (IEEE
+// 1800-2023 6.19, 6.22): the methods of each take its own members.
+sv_backends! {
+    fn enum_methods_of_specializations_with_one_base_type(sim) {
+        @setup {
+            let source = r#"
+    module Leaf #(parameter int W = 1)(output logic [7:0] last);
+      typedef enum logic [3:0] {A, B = W} e_t;
+      e_t v;
+      always_comb begin
+        v = A;
+        last = 8'(v.last());
+      end
+    endmodule
+    module Top(output logic [7:0] one, output logic [7:0] two);
+      Leaf #(1) a(.last(one));
+      Leaf #(2) b(.last(two));
+    endmodule
+  "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("enum_values.sv"))], "Top");
+        let one = sim.signal("one");
+        let two = sim.signal("two");
+        sim.eval_comb().unwrap();
+        assert_eq!(u64::try_from(sim.get(one)).unwrap(), 1);
+        assert_eq!(u64::try_from(sim.get(two)).unwrap(), 2);
+    }
+}
