@@ -273,7 +273,6 @@ fn run(options: &Options) -> Result<(), String> {
         Mode::Simulation => {
             let top = &tops[0];
             // Upstream simvariants are separate runs, each with one plusarg.
-            // Recreate the simulation so no variable or scheduler state leaks.
             let variants: Vec<Vec<String>> = if options.simvariants.is_empty() {
                 vec![Vec::new()]
             } else {
@@ -283,18 +282,77 @@ fn run(options: &Options) -> Result<(), String> {
                     .map(|arg| vec![arg.clone()])
                     .collect()
             };
-            for plusargs in variants {
-                let sim = celox::Simulation::from_sv_sources(sources.clone(), top)
+            if let [plusargs] = variants.as_slice() {
+                let sim = celox::Simulation::from_sv_sources(sources, top)
                     .four_state(options.four_state)
                     .diagnostics_from_env()
-                    .plusargs(plusargs)
+                    .plusargs(plusargs.clone())
                     .build()
                     .map_err(|error| error.to_string())?;
-                simulate(sim, options.max_time)?;
+                return simulate(sim, options.max_time);
             }
-            Ok(())
+            simulate_variants(
+                sources,
+                top,
+                options.four_state,
+                &variants,
+                options.max_time,
+            )
         }
     }
+}
+
+/// Run each of `variants` in a fresh simulation of `top`. Plusargs are read
+/// at run time (IEEE 1800-2023 21.6), so the design compiles once and each
+/// variant starts its own instance of the one compiled program: no variable,
+/// heap, random or scheduler state is shared, while the analysis and code
+/// generation of a large design such as UVM run once rather than per
+/// variant.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn simulate_variants(
+    sources: Vec<(&str, &std::path::Path)>,
+    top: &str,
+    four_state: bool,
+    variants: &[Vec<String>],
+    max_time: Option<u64>,
+) -> Result<(), String> {
+    let image = celox::Simulation::from_sv_sources(sources, top)
+        .four_state(four_state)
+        .diagnostics_from_env()
+        .compile_native()
+        .map_err(|error| error.to_string())?
+        .into_program_image();
+    for plusargs in variants {
+        let sim = celox::Simulation::from_sv_sources(Vec::new(), "")
+            .diagnostics_from_env()
+            .plusargs(plusargs.clone())
+            .build_native_from_image(image.clone())
+            .map_err(|error| error.to_string())?;
+        simulate(sim, max_time)?;
+    }
+    Ok(())
+}
+
+/// Run each of `variants` in a simulation of `top` built for it, on a host
+/// without native images.
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn simulate_variants(
+    sources: Vec<(&str, &std::path::Path)>,
+    top: &str,
+    four_state: bool,
+    variants: &[Vec<String>],
+    max_time: Option<u64>,
+) -> Result<(), String> {
+    for plusargs in variants {
+        let sim = celox::Simulation::from_sv_sources(sources.clone(), top)
+            .four_state(four_state)
+            .diagnostics_from_env()
+            .plusargs(plusargs.clone())
+            .build()
+            .map_err(|error| error.to_string())?;
+        simulate(sim, max_time)?;
+    }
+    Ok(())
 }
 
 /// Runs the simulation until `$finish` or until no event is left. A run
@@ -607,6 +665,7 @@ mod tests {
             simvariants: Vec::new(),
             files,
             source_encoding: Default::default(),
+            max_time: None,
         }
     }
 
