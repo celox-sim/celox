@@ -657,14 +657,47 @@ pub(super) fn parameters_from_native_with_environment(
                     Err(_) => None,
                 }
             } else {
-                constant_binding::bind(
-                    ownership::default(native).ok_or_else(|| {
-                        AnalyzerError::Parse("native parameter default is missing".into())
-                    })?,
-                    syntax_tree,
-                    session,
-                    &proof_context,
-                )?
+                let root = ownership::default(native).ok_or_else(|| {
+                    AnalyzerError::Parse("native parameter default is missing".into())
+                })?;
+                match constant_binding::bind(root, syntax_tree, session, &proof_context) {
+                    Ok(value) => value,
+                    // An initializer that names an earlier parameter of the
+                    // scope whose value is not known yet, as one that names
+                    // an enumeration member before the members are, is left
+                    // to a later collection pass like that parameter, as
+                    // its selected values are, when only those values are
+                    // missing: it is a constant once they are given any value.
+                    Err(error) if !matches!(error, AnalyzerError::Parse(_)) => {
+                        let unresolved = unresolved_parameters(
+                            root,
+                            syntax_tree.declarations(),
+                            parameters,
+                            environment,
+                        );
+                        if unresolved.is_empty() {
+                            return Err(error);
+                        }
+                        let mut placeholder = proof_context.clone();
+                        for name in &unresolved {
+                            placeholder.const_env.insert(name.clone(), 1);
+                            placeholder
+                                .const_env
+                                .insert(parameter_width_marker(name), 32);
+                            placeholder
+                                .const_env
+                                .insert(parameter_signed_marker(name), 1);
+                        }
+                        if !matches!(
+                            constant_binding::bind(root, syntax_tree, session, &placeholder),
+                            Ok(Some(_))
+                        ) {
+                            return Err(error);
+                        }
+                        None
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         } else {
             None
@@ -939,6 +972,32 @@ pub(super) fn extend_const_env_with_parameters(
             parameter,
         );
     }
+}
+
+/// The parameters of `parameters` that expression `root` names and that
+/// have neither a value nor a literal in `environment` yet.
+fn unresolved_parameters(
+    root: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
+    parameters: &[Parameter],
+    environment: &ParameterEnvironment<'_>,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        if let celox_sv_syntax::ExprKind::Name(name) = &native.expression(id).kind {
+            let name = instances::normalize_identifier(&name.spelling);
+            if parameters.iter().any(|parameter| parameter.name() == name)
+                && !environment.constants.contains_key(&name)
+                && !environment.literals.contains_key(&name)
+                && !names.contains(&name)
+            {
+                names.push(name);
+            }
+        }
+        pending.extend(skipped::children(id, native));
+    }
+    names
 }
 
 pub(super) fn bind_parameter(
