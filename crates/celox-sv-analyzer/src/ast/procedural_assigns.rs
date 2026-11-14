@@ -422,6 +422,7 @@ fn called_actual_target<'a>(
 fn check_target(
     name: String,
     dimensions: &PackedDimensions,
+    types: &semantic_types::TyTable,
     ports: &[Port],
     signals: &[Signal],
 ) -> Converted<()> {
@@ -438,7 +439,12 @@ fn check_target(
     } else {
         false
     };
+    // The type the variable was bound to tells whether it is integral
+    // (6.11.1); a shape bound to none, by its kind of value.
     let integral = dimensions.get(&name).is_some_and(|shape| {
+        if let Some(id) = shape.bound(types) {
+            return types.is_integral(id);
+        }
         !(shape.string
             || shape.real
             || shape.class.is_some()
@@ -458,6 +464,7 @@ fn check_target(
 
 pub(super) fn lower(
     dimensions: &PackedDimensions,
+    types: &semantic_types::TyTable,
     ports: &[Port],
     signals: &mut Vec<Signal>,
     comb: &[CombProcess],
@@ -493,11 +500,11 @@ pub(super) fn lower(
     // A `deassign` names a variable an `assign` may target (10.6.1), also
     // where no `assign` does and the statement ends nothing.
     for name in deassigned.iter().filter(|name| !names.contains(name)) {
-        check_target(name.clone(), dimensions, ports, signals)?;
+        check_target(name.clone(), dimensions, types, ports, signals)?;
     }
     let mut targets: HashMap<String, (String, usize)> = HashMap::default();
     for name in names {
-        check_target(name.clone(), dimensions, ports, signals)?;
+        check_target(name.clone(), dimensions, types, ports, signals)?;
         let mut serial = targets.len();
         let select = loop {
             let select = format!("%procedural_assign{serial}_select");

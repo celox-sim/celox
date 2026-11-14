@@ -116,6 +116,7 @@ impl ScopeElaboration<'_> {
         }
         procedural_assigns::lower(
             &self.packed_dimensions,
+            &session.types,
             &self.ports,
             &mut self.signals,
             &self.comb_processes,
