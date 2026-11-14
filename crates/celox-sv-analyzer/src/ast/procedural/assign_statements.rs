@@ -404,13 +404,13 @@ impl BodyBuilder<'_, '_, '_> {
                 self.session,
                 &self.dims,
             )
-            && containers::native_type(
+            && containers::value_container(
                 right,
                 self.tree.declarations(),
                 self.tree,
                 self.session,
                 &self.dims,
-            )?
+            )
             .is_some()
         {
             // A fixed-size unpacked array, also a selected element of an

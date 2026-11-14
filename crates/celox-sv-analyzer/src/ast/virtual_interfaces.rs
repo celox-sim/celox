@@ -1052,15 +1052,10 @@ fn native_value_type(
                     instances::normalize_identifier(&name.spelling).as_str(),
                     "pop_front" | "pop_back"
                 )
-                && let Ok(Some(container)) =
-                    containers::native_type(*receiver, native, tree, session, dimensions)
-                && let Some(element) = semantic_types::of_type(
-                    &mut session.types,
-                    &tree.functions,
-                    &container.element,
-                    &dimensions.const_env,
-                )
-                .and_then(|element| of_type(&session.types, element))
+                && let Some(container) =
+                    containers::value_container(*receiver, native, tree, session, dimensions)
+                && let semantic_types::TyData::Array { element, .. } = session.types.data(container)
+                && let Some(element) = of_type(&session.types, *element)
             {
                 return Ok(Some(element.as_ref().clone()));
             }

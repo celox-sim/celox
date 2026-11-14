@@ -69,9 +69,8 @@ pub(super) fn enter(
                 ExprKind::Conditional { .. }
             )
         })
-        && containers::native_type(id, native, tree, session, dimensions)?.is_some()
+        && let Some(source) = containers::value_container(id, native, tree, session, dimensions)
     {
-        let source = expression_types::type_of(tree, session, id, native, dimensions)?;
         let fixed = shape
             .type_id(&mut session.types, &tree.functions, &dimensions.const_env)
             .ok_or_else(|| unsupported("type of a fixed-size unpacked array"))?;
