@@ -108,6 +108,9 @@ fn lower_methods(
             None => String::new(),
         };
         let mut input_values = Vec::new();
+        // The masks of the X and Z bits of the 4-state ones, by their
+        // positions among them (see `Program::unknown_inputs`).
+        let mut input_masks = Vec::new();
         if let Some(inline) = inline.filter(|_| !prepare) {
             for (index, ty) in inline.inputs.iter().enumerate() {
                 let name = builder.declare(&format!("$input{index}"), ty.clone());
@@ -119,7 +122,13 @@ fn lower_methods(
                     default: None,
                     leaves: Vec::new(),
                 });
-                input_values.push(Expr::Ident(name));
+                if ty.kind() == TypeKind::Logic {
+                    let (value, mask) = classes::known_bits(Expr::Ident(name));
+                    input_masks.push((input_values.len(), mask));
+                    input_values.push(value);
+                } else {
+                    input_values.push(Expr::Ident(name));
+                }
             }
         }
         // Faults are consumed after the kernel completes. Return immediately
@@ -405,14 +414,25 @@ fn lower_methods(
                     }
                     // The static properties the constraints read, then the
                     // values of the call (see `classes::StaticInput`).
+                    // The masks of the 4-state values follow them.
                     let solve_inputs = class
                         .static_inputs
                         .iter()
                         .map(|input| Expr::Ident(input.variable.clone()))
                         .chain(input_values.iter().cloned())
+                        .chain(input_masks.iter().map(|(_, mask)| mask.clone()))
                         .collect::<Vec<_>>();
                     if class.solved() || inline.is_some() {
                         let mut program = class.constraint_program()?;
+                        let first_value = class.static_inputs.len();
+                        let first_mask = first_value + input_values.len();
+                        program.unknown_inputs = input_masks
+                            .iter()
+                            .enumerate()
+                            .map(|(position, (input, _))| {
+                                (first_value + input, first_mask + position)
+                            })
+                            .collect();
                         if let Some(inline) = inline {
                             // The inline constraints were bound for the class
                             // of the handle, whose static inputs this class's
