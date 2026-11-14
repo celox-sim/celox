@@ -683,6 +683,22 @@ pub(in crate::ast) fn subroutines_with_symbolic_parameters(
 
 /// The class identifiers that the case on the class of an object in `body`,
 /// the body of a dispatcher or a `$cast` helper, selects.
+/// The IR type of formal or result `ty` of a subroutine: the constants of
+/// `declaration_env`, those of the scope that declares it, its class's
+/// parameters among them, become their values, and the type is bound in
+/// `item`'s, where the subroutine is lowered (IEEE 1800-2023 6.18, 13.3).
+fn interface_type(
+    session: &mut Session,
+    tree: &AnalysisContext<'_>,
+    ty: Type,
+    declaration_env: &ConstEnv,
+    item: &generate::Item,
+) -> crate::ir::Type {
+    let mut ty = scoped_type(ty, declaration_env);
+    semantic_types::bind_declared(&mut session.types, &tree.functions, &mut ty, &item.env);
+    super::super::ir_type(session, &tree.functions, ty, &item.env)
+}
+
 pub(super) fn case_ids(body: &[Stmt]) -> HashSet<u32> {
     let Some(Stmt::Case { items, .. }) = body.first() else {
         return HashSet::default();
@@ -961,12 +977,7 @@ pub(in crate::ast) fn lower_subroutine(
             name,
             source_name: source,
             direction,
-            r#type: super::super::ir_type(
-                builder.session,
-                &tree.functions,
-                scoped_type(r#type, declaration_env),
-                &item.env,
-            ),
+            r#type: interface_type(builder.session, tree, r#type, declaration_env, item),
             default,
             leaves: Vec::new(),
         });
@@ -1152,14 +1163,8 @@ pub(in crate::ast) fn lower_subroutine(
             .map(|(_, local)| local.name.clone())
             .collect(),
         persistent_locals: Vec::new(),
-        return_type: return_type.map(|r#type| {
-            super::super::ir_type(
-                builder.session,
-                &tree.functions,
-                scoped_type(r#type, declaration_env),
-                &item.env,
-            )
-        }),
+        return_type: return_type
+            .map(|r#type| interface_type(builder.session, tree, r#type, declaration_env, item)),
         params: lowered_params,
         return_var,
         body,
