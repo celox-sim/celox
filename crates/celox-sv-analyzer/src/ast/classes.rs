@@ -1165,7 +1165,16 @@ pub(super) fn handle_type(
     name: &str,
 ) -> Option<Type> {
     (builtin(name) || declaration(tree, session, name).is_some() || imported(tree, name).is_some())
-        .then(|| handle(name))
+        .then(|| {
+            let mut ty = handle(name);
+            semantic_types::bind_declared(
+                &mut session.types,
+                &tree.functions,
+                &mut ty,
+                &ConstEnv::default(),
+            );
+            ty
+        })
 }
 
 /// Class `name` as the scope that declares it laid it out, when the current

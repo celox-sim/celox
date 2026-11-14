@@ -66,7 +66,69 @@ pub(in crate::ast) fn subroutine_formals(
         // A container formal that is not a reference holds a copy of the
         // container (IEEE 1800-2023 13.5.1), as an assignment makes one.
         ty = containers::with_dimensions(ty, &port.dimensions, tree, session, context)?;
+        semantic_types::bind_declared(
+            &mut session.types,
+            &tree.functions,
+            &mut ty,
+            &context.const_env,
+        );
         result.push((name, direction, ty, port.default));
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn subroutine_interfaces_keep_the_types_of_their_declarations() {
+        // IEEE 1800-2023 6.18, 23.9: the names in a type resolve in the scope
+        // that declares it. A formal declared where `W` is 4, an implicit
+        // result type and a class handle are bound as they are built, so a
+        // reader that does not see `W` gets the formal's declared type, also
+        // once the body's constants are substituted into it.
+        let session = &mut Session::default();
+        let tree = crate::source_tree::parse_source(
+            "module M; class C; endclass
+             function automatic logic [W-1:0] f(input logic [W-1:0] a [2]); endfunction
+             endmodule",
+            Path::new("subroutine-interface.sv"),
+        )
+        .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let native = &tree.declarations().subroutines[0];
+        let declaring = ConstEnv::from_iter([("W".into(), 4)]);
+        let context =
+            PackedDimensions::new(HashMap::default(), &declaring, &TypeAliases::default());
+        let formals = subroutine_formals(native, &tree, session, &context).unwrap();
+        let formal = &formals[0].2;
+        let declared =
+            semantic_types::of_type(&mut session.types, &tree.functions, formal, &declaring)
+                .unwrap();
+        let scoped = procedural::scoped_type(formal.clone(), &declaring);
+        for ty in [formal, &scoped] {
+            assert_eq!(
+                semantic_types::of_type(
+                    &mut session.types,
+                    &tree.functions,
+                    ty,
+                    &ConstEnv::default()
+                ),
+                Some(declared)
+            );
+        }
+        let result = implicit_subroutine_type(
+            native.return_type.unwrap(),
+            &tree,
+            session,
+            &declaring,
+            &TypeAliases::default(),
+        )
+        .unwrap();
+        assert!(result.binding.get(&session.types).is_some());
+        let handle = classes::handle_type(&tree, session, "C").unwrap();
+        assert!(handle.binding.get(&session.types).is_some());
+    }
 }

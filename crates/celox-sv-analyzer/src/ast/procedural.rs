@@ -468,11 +468,14 @@ pub(super) fn bound_dimensions_from_type(
 /// `r#type` with the constants of its declaration scope substituted into its
 /// ranges, so it keeps its meaning outside that scope.
 pub(super) fn scoped_type(mut r#type: Type, const_env: &ConstEnv) -> Type {
-    for range in &mut r#type.packed_ranges {
+    // The constants of the declaring scope become their values, which keeps
+    // the semantic type.
+    let shape = r#type.shape_keeping_binding();
+    for range in &mut shape.packed_ranges {
         range.left = substitute_dimension_constants(range.left.clone(), const_env);
         range.right = substitute_dimension_constants(range.right.clone(), const_env);
     }
-    for range in &mut r#type.unpacked_ranges {
+    for range in &mut shape.unpacked_ranges {
         range.left = substitute_dimension_constants(range.left.clone(), const_env);
         range.right = substitute_dimension_constants(range.right.clone(), const_env);
         range.size = range
