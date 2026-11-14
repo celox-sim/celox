@@ -318,6 +318,11 @@ impl<B: SimBackend> SimulationState<B> {
             return;
         }
         let pending = std::mem::take(&mut self.process_state.activations[process].pending);
+        // They start now, before the processes ready already (see
+        // `Self::next_spawned`).
+        for &child in pending.iter().rev() {
+            self.spawned.push_front(child);
+        }
         for child in pending {
             let state = &mut self.process_state;
             wake_in_region(

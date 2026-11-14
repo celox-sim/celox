@@ -329,6 +329,7 @@ impl<B: SimBackend> SimulationState<B> {
         }
         while let Some(process) = resume_process
             .take()
+            .or_else(|| self.next_spawned(reactive))
             .or_else(|| self.region_ready(reactive).pop_first())
         {
             loop {
@@ -388,6 +389,23 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         Ok(())
+    }
+
+    /// The next child a process released when it blocked that is ready in
+    /// the Reactive region if `reactive`, otherwise in the Active region.
+    /// The processes of a fork start when their parent blocks (IEEE
+    /// 1800-2023 9.3.2): they run before the other ready processes, as
+    /// other simulators run them, rather than in the order of their index,
+    /// after the processes the parent's blocking statement wakes, the
+    /// parent among them. Region order and execution order within a region
+    /// are otherwise free (4.7); this keeps both deterministic.
+    fn next_spawned(&mut self, reactive: bool) -> Option<usize> {
+        while let Some(child) = self.spawned.pop_front() {
+            if self.region_ready(reactive).remove(&child) {
+                return Some(child);
+            }
+        }
+        None
     }
 
     /// The processes ready in the Reactive region if `reactive`, otherwise in

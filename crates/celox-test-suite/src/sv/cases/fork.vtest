@@ -336,3 +336,33 @@ endmodule"#)
  (assert_eq c 11)
  (assert_eq d 40)
  (assert_eq q 5))
+
+; 9.3.2: the processes of a fork ... join_none start when their parent
+; blocks, here at a wait that a process its trigger wakes satisfies in the
+; same time slot: each child runs before the parent resumes, and reads the
+; loop variable of its own iteration. Each child adds i + 1 to the log, the
+; parent i + 5 when it resumes.
+(case join_none_children_start_when_their_parent_blocks
+ (source "spawned_first.sv" #"module Top(output int log);
+ int done_id = -1;
+ int next;
+ event go;
+ initial forever begin
+  @(go);
+  done_id = next;
+ end
+ initial begin
+  #1;
+  for (int i = 0; i < 3; i++) begin
+   fork
+    log = log * 10 + i + 1;
+   join_none
+   next = i;
+   done_id = -1;
+   -> go;
+   wait (done_id == i);
+   log = log * 10 + i + 5;
+  end
+ end
+endmodule"#)
+ (top Top) (run_until 2) (assert_eq log 152637))
