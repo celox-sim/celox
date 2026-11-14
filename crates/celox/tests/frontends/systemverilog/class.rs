@@ -2670,27 +2670,6 @@ fn distributions_constrain_values_and_weigh_their_items() {
             "{operand}: {error}"
         );
     }
-    // A soft distribution (IEEE 1800-2023 18.5.13) stays unsupported rather
-    // than taking another expression as its operand.
-    let source = "class C;
-        rand int b;
-        constraint c { soft b dist {10 := 1}; }
-    endclass
-    module Top; C c; initial begin c = new; void'(c.randomize()); end endmodule";
-    let error =
-        match celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
-            .build()
-        {
-            Err(error) => error.to_string(),
-            Ok(mut sim) => sim
-                .run_until(1)
-                .expect_err("a soft distribution")
-                .to_string(),
-        };
-    assert!(
-        error.contains("soft dist constraints are not supported"),
-        "{error}"
-    );
 }
 
 #[test]

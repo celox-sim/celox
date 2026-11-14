@@ -404,6 +404,55 @@ struct Arrays {
     sizes: fxhash::FxHashMap<(Handle, usize), usize>,
 }
 
+/// A soft constraint a call takes (IEEE 1800-2023 18.5.13): its rank, its
+/// truth, the variables that appear in it, whether X or Z bits decide its
+/// truth (see [`x_truth`]) and the weighted items of its distributions (see
+/// [`weighted_items`]).
+struct Soft {
+    rank: Rank,
+    constraint: Term,
+    names: Vec<String>,
+    unknown: Option<Term>,
+    distributions: Vec<Vec<(Term, num_bigint::BigUint)>>,
+}
+
+/// The items of each distribution of `constraint`, also one under `if` or
+/// `->`, or in a `foreach` one for each element, with their nonzero weights
+/// (IEEE 1800-2023 18.5.3): each holds where a guard keeps the distribution
+/// from applying.
+fn weighted_items(
+    constraint: &Expr,
+    terms: &[Term],
+    base: usize,
+    sizes: &[Term],
+    inputs: &[u64],
+) -> Result<Vec<Vec<(Term, num_bigint::BigUint)>>, String> {
+    let mut found = Vec::new();
+    distributions_of(constraint, &mut Vec::new(), &mut found);
+    found
+        .into_iter()
+        .map(|(guards, choices)| {
+            // The distribution applies unless a guard holds.
+            let mut skipped = boolv(false);
+            for guard in guards {
+                let guard = truth(guard.term(terms, base, sizes, inputs)?);
+                skipped = not(and(not(skipped), not(guard)));
+            }
+            choices
+                .iter()
+                .filter(|choice| choice.weight != num_bigint::BigUint::ZERO)
+                .map(|choice| {
+                    let item = truth(choice.predicate.term(terms, base, sizes, inputs)?);
+                    Ok((
+                        not(and(not(skipped.clone()), not(item))),
+                        choice.weight.clone(),
+                    ))
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// The distributions of `constraint`, each with the operands whose truth
 /// keeps it from applying: the other operand of each `||` above it, such as
 /// the negated condition of an `if` or `->` (IEEE 1800-2023 18.5.6, 18.5.7).
@@ -1838,7 +1887,7 @@ impl Heap {
             // The soft constraints, with their ranks and the variables
             // that appear in them, and the variables `disable soft` names,
             // with its ranks (18.5.13).
-            let mut soft: Vec<(Rank, Term, Vec<String>, Option<Term>)> = Vec::new();
+            let mut soft: Vec<Soft> = Vec::new();
             let mut disabled: Vec<(Rank, String, Option<Term>)> = Vec::new();
             let ranks = self.handle_ranks(handle, &program.handles);
             let mut limited = boolv(true);
@@ -2115,12 +2164,15 @@ impl Heap {
                             // below).
                             let (term, mask) =
                                 value.four_state(&terms, base, sizes, inputs, &unknown)?;
-                            soft.push((
-                                rank(*priority),
-                                truth(term.clone()),
+                            soft.push(Soft {
+                                rank: rank(*priority),
+                                unknown: mask.map(|mask| x_truth(&term, &mask)),
+                                constraint: truth(term),
                                 names,
-                                mask.map(|mask| x_truth(&term, &mask)),
-                            ));
+                                // A soft distribution weights the solutions
+                                // while it is kept (18.5.13).
+                                distributions: weighted_items(&value, &terms, base, sizes, inputs)?,
+                            });
                         }
                         Expr::DisableSoft {
                             priority,
@@ -2193,32 +2245,13 @@ impl Heap {
                                 constraint.four_state(&terms, base, sizes, inputs, &unknown)?;
                             checks.extend(mask.map(|mask| x_truth(&term, &mask)));
                             formula = and(formula, truth(term));
-                            // Each distribution, also one under `if` or `->`, whose
-                            // item is tried only where its guards let it apply, or
-                            // in a `foreach`, one for each element.
-                            let mut found = Vec::new();
-                            distributions_of(&constraint, &mut Vec::new(), &mut found);
-                            for (guards, choices) in found {
-                                // The distribution applies unless a guard holds.
-                                let mut skipped = boolv(false);
-                                for guard in guards {
-                                    let guard = truth(guard.term(&terms, base, sizes, inputs)?);
-                                    skipped = not(and(not(skipped), not(guard)));
-                                }
-                                let mut weighted = Vec::new();
-                                for choice in choices
-                                    .iter()
-                                    .filter(|choice| choice.weight != num_bigint::BigUint::ZERO)
-                                {
-                                    let item =
-                                        truth(choice.predicate.term(&terms, base, sizes, inputs)?);
-                                    weighted.push((
-                                        not(and(not(skipped.clone()), not(item))),
-                                        choice.weight.clone(),
-                                    ));
-                                }
-                                distributions.push(weighted);
-                            }
+                            distributions.extend(weighted_items(
+                                &constraint,
+                                &terms,
+                                base,
+                                sizes,
+                                inputs,
+                            )?);
                         }
                     }
                 }
@@ -2230,22 +2263,35 @@ impl Heap {
             // 18.5.13.1).
             // A guarded `disable soft` discards them while its condition
             // holds: the soft constraint is then `condition || constraint`.
+            // A soft distribution applies, as the constraint, where no such
+            // condition holds.
             let mut kept = Vec::new();
-            'soft: for (rank, mut constraint, names, mut unknown) in soft {
+            'soft: for mut soft in soft {
                 for (disable, name, condition) in &disabled {
-                    if disable > &rank && names.contains(name) {
+                    if disable > &soft.rank && soft.names.contains(name) {
                         match condition {
                             None => continue 'soft,
                             Some(condition) => {
-                                constraint =
-                                    node(Sort::Bool, "or", vec![condition.clone(), constraint]);
-                                unknown =
-                                    unknown.map(|unknown| and(not(condition.clone()), unknown));
+                                soft.constraint = node(
+                                    Sort::Bool,
+                                    "or",
+                                    vec![condition.clone(), soft.constraint],
+                                );
+                                soft.unknown = soft
+                                    .unknown
+                                    .map(|unknown| and(not(condition.clone()), unknown));
+                                for (item, _) in soft.distributions.iter_mut().flatten() {
+                                    *item = node(
+                                        Sort::Bool,
+                                        "or",
+                                        vec![condition.clone(), item.clone()],
+                                    );
+                                }
                             }
                         }
                     }
                 }
-                kept.push((rank, constraint, unknown));
+                kept.push((soft.rank, soft.constraint, soft.distributions, soft.unknown));
             }
             // The solve of the rest keeps the solution of the arguments
             // (18.5.11).
@@ -2274,7 +2320,7 @@ impl Heap {
                 self.random_object(handle)
             };
             kept.sort_by(|a, b| b.0.cmp(&a.0));
-            for (_, constraint, unknown) in kept {
+            for (_, constraint, weighted, unknown) in kept {
                 let attempt = and(formula.clone(), constraint);
                 let bound = if bounded {
                     and(attempt.clone(), limited.clone())
@@ -2285,9 +2331,12 @@ impl Heap {
                 // call fails with the reason, as a solve that cannot be
                 // decided does.
                 let outcome = solve_seeded(&bound, &projection, limits.clone(), seed);
+                // A discarded one has no effect on the distribution of
+                // the solutions (18.5.13).
                 match outcome.verdict {
                     Verdict::Sat => {
                         formula = attempt;
+                        distributions.extend(weighted);
                         checks.extend(unknown);
                     }
                     Verdict::Unsat => {}
@@ -2309,14 +2358,10 @@ impl Heap {
                 }
             }
             // A solve of arguments gives the values of the variables in
-            // them and of each argument, and changes nothing (18.5.11).
+            // them and of each argument, each in a variable of its own, and
+            // changes nothing (18.5.11); it is solved as every phase is,
+            // below, so that the weights and soft constraints shape it too.
             if phase == Phase::Arguments {
-                let mut projection = projection.clone();
-                let mut attempt = if bounded {
-                    and(formula.clone(), limited.clone())
-                } else {
-                    formula.clone()
-                };
                 let sizes = &size_terms[..program.arrays.len().min(size_terms.len())];
                 for (index, argument) in arguments.iter().enumerate() {
                     let Some(argument) = argument else {
@@ -2338,64 +2383,9 @@ impl Heap {
                     };
                     let name = format!("a{index}");
                     let value = var(name.clone(), Sort::Bv(width));
-                    attempt = and(attempt, eq(value.clone(), term));
+                    formula = and(formula, eq(value.clone(), term));
                     projection.insert(name, value);
                 }
-                // A randc variable takes a value its cycle has not produced
-                // yet, unless none of them is a solution (18.4.2).
-                let mut restricted = attempt.clone();
-                for (object, field, term) in &cyclic {
-                    let remaining =
-                        self.cycle_remaining(*object, field.offset, cycle_size(field), false);
-                    restricted = and(
-                        restricted,
-                        member(
-                            term,
-                            field.width,
-                            remaining.into_iter().map(|entry| cycle_value(field, entry)),
-                        ),
-                    );
-                }
-                let mut outcome = solve_seeded(&restricted, &projection, limits.clone(), seed);
-                if !cyclic.is_empty() && matches!(outcome.verdict, Verdict::Unsat) {
-                    outcome = solve_seeded(&attempt, &projection, limits.clone(), seed);
-                }
-                return match outcome.verdict {
-                    Verdict::Unsat => Ok(false),
-                    Verdict::Unknown => Err(outcome
-                        .reason
-                        .unwrap_or_else(|| "constraint solving incomplete".into())),
-                    Verdict::Sat => {
-                        if decided_by_unknown(&deferred, &state, &outcome) {
-                            return Err(UNKNOWN_VALUE.into());
-                        }
-                        let model = &outcome.context_values;
-                        let value = |name: &str| match model.get(name) {
-                            Some(Scalar::Bv { value, .. }) => Some(*value),
-                            _ => None,
-                        };
-                        let variables = ordered
-                            .iter()
-                            .filter_map(|name| Some((name.clone(), value(name)?)))
-                            .collect();
-                        let values = (0..arguments.len())
-                            .map(|index| value(&format!("a{index}")).unwrap_or(0))
-                            .collect();
-                        self.arguments.push(Arguments {
-                            object: handle,
-                            variables,
-                            values,
-                        });
-                        if !presized.is_empty() {
-                            self.staged.push(Staged {
-                                object: handle,
-                                kept: true,
-                                sizes: presized,
-                            });
-                        }
-                        Ok(true)
-                    }
-                };
             }
             // Initial integration uses seeded SAT search, not hash-cell acceptance.
             // It finds a valid model without claiming uniform sampling (#2187).
@@ -2540,6 +2530,36 @@ impl Heap {
                 Verdict::Unknown => Err(outcome
                     .reason
                     .unwrap_or_else(|| "constraint solving incomplete".into())),
+                Verdict::Sat if phase == Phase::Arguments => {
+                    if decided_by_unknown(&deferred, &state, &outcome) {
+                        return Err(UNKNOWN_VALUE.into());
+                    }
+                    let model = &outcome.context_values;
+                    let value = |name: &str| match model.get(name) {
+                        Some(Scalar::Bv { value, .. }) => Some(*value),
+                        _ => None,
+                    };
+                    let variables = ordered
+                        .iter()
+                        .filter_map(|name| Some((name.clone(), value(name)?)))
+                        .collect();
+                    let values = (0..arguments.len())
+                        .map(|index| value(&format!("a{index}")).unwrap_or(0))
+                        .collect();
+                    self.arguments.push(Arguments {
+                        object: handle,
+                        variables,
+                        values,
+                    });
+                    if !presized.is_empty() {
+                        self.staged.push(Staged {
+                            object: handle,
+                            kept: true,
+                            sizes: presized,
+                        });
+                    }
+                    Ok(true)
+                }
                 Verdict::Sat if phase == Phase::Sizes => {
                     // The sizes, for the solve of the rest, which changes
                     // the object.

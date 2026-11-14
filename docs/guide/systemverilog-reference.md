@@ -320,7 +320,7 @@ blocks in programs. Two region deviations are listed under
   reaches (its randomization fails), random arrays of elements other than
   2-state integral ones of at most 64 bits, `randc` arrays, random object
   and string properties, constrained enums and `randc`, `sum() with`, `soft`
-  constraints in a `foreach` or with `dist`, `dist` with `default :/`,
+  constraints in a `foreach`, `dist` with `default :/`,
   weights other than constant expressions or ranges weighted per value with
   bounds other than constant expressions, typed parameters in constraints,
   array sets, X/Z wildcard items and `$` bounds in `inside` sets, and
@@ -643,7 +643,10 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
   (18.5.13.1): each is kept when the hard constraints and the soft ones
   kept before it allow it, and is otherwise discarded; a `disable soft`
   discards the lower soft constraints that name its variable (18.5.13.2).
-  The search for each keeps the seed, so the choice is reproducible.
+  The search for each keeps the seed, so the choice is reproducible. A
+  soft `dist` constrains its operand to its items of nonzero weight; while
+  it is kept, its weights shape the choice as those of a hard one do
+  (18.5.3), and a discarded one has no effect on it.
 - A 4-state rand property takes a 2-state value. The X and Z bits of a
   4-state state property, and of the value of a function a constraint
   calls whose type is 4-state, follow the 4-state semantics of each
