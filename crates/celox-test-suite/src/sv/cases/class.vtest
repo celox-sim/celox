@@ -5910,7 +5910,10 @@ endmodule
 ; makes the call, and its arguments. A restricted constraint block
 ; resolves only the names it lists into the object's class, the others in
 ; the caller's scope, a dotted name by its first identifier (IEEE 1800-2023
-; 18.7).
+; 18.7). The caller's variable that holds the object the call randomizes
+; names it there, unless the class has a member of its name that the block
+; does not leave out, also in loops, at constant positions and in guards:
+; read once as the call starts, also after a pre_randomize() assigns it.
 (case inline_constraint_caller_names
   (source "inline_caller.sv" #"
 class C0;
@@ -5940,6 +5943,49 @@ endfunction
 function int dotted(C1 obj);
     return obj.randomize() with (x, cfg) { x == cfg.limit; };
 endfunction
+function int via_receiver(C1 item, int v);
+    return item.randomize() with { item.x == v; };
+endfunction
+function int via_receiver_restricted(C1 item);
+    return item.randomize() with (y) { item.x == 6; };
+endfunction
+class Node;
+    rand int x;
+    Node next;
+endclass
+function int member_first(Node next);
+    return next.randomize() with { x == next.x + 1; };
+endfunction
+class Tagged;
+    rand int x, y;
+    int item;
+    rand bit [7:0] a[3];
+    Node link;
+endclass
+function int collision_unlisted(Tagged item);
+    return item.randomize() with (x) { item.y == 4; };
+endfunction
+function int receiver_elements(Tagged h);
+    return h.randomize() with {
+        foreach (h.a[i]) h.a[i] == i + 1;
+        h.a[1] == 2;
+        foreach (a[j]) h.a[j] > 0;
+        h.link == null -> h.x == 3;
+    };
+endfunction
+typedef class Redirected;
+class Holder;
+    static Redirected current, other;
+    static function int go();
+        return current.randomize() with { current.x == 5; };
+    endfunction
+endclass
+class Redirected;
+    rand int x;
+    function void pre_randomize();
+        Holder::current = Holder::other;
+    endfunction
+endclass
 module Top(output int checks);
     initial begin
         C0 b = new;
@@ -5955,10 +6001,28 @@ module Top(output int checks);
         checks += (ok == 8) * 2;
         checks += (listed(c, 9) && c.x == -1) * 4;
         checks += (dotted(c) && c.x == 2) * 8;
+        checks += (via_receiver(c, 5) && c.x == 5) * 16;
+        checks += (via_receiver_restricted(c) && c.x == 6) * 32;
+        begin
+            Node n = new, m = new;
+            m.x = 7;
+            n.next = m;
+            checks += (member_first(n) && n.x == 8) * 64;
+        end
+        begin
+            Tagged t = new;
+            Redirected first = new;
+            checks += (collision_unlisted(t) && t.y == 4) * 128;
+            checks += (receiver_elements(t) && t.a[0] == 1 && t.a[2] == 3 && t.x == 3) * 256;
+            Holder::current = first;
+            Holder::other = new;
+            checks += (Holder::go() && first.x == 5 && Holder::other.x == 0
+                && Holder::current == Holder::other) * 512;
+        end
     end
 endmodule
 "#)
-  (top Top) (run_until 0) (assert_eq checks 15))
+  (top Top) (run_until 0) (assert_eq checks 1023))
 
 ; `std::randomize(v...) with { ... }` solves the variables with the
 ; constraints, which also read other variables of the scope, and writes them

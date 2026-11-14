@@ -1828,6 +1828,7 @@ pub(super) fn shared_class(
         statics: &statics,
         inputs: &static_inputs,
         slots: &static_slots,
+        receiver: None,
     };
     let scope = (name.to_owned(), base.as_ref().map(|base| base.name.clone()));
     session.constraint_owners.push(scope.clone());
