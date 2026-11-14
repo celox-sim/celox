@@ -6799,6 +6799,13 @@ fn class_randomize_rejects_unsupported_semantics() {
             "c.randomize()",
             "soft constraint in a constraint loop",
         ),
+        // An indexed part-select whose end is past the integers is outside
+        // the range, not an overflow.
+        (
+            "rand bit [7:0] x; constraint c { x[2 +: 128'h7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff] == 0; }",
+            "c.randomize()",
+            "outside the range of its variable",
+        ),
         // A dotted name that a restricted block does not list resolves in
         // the caller's scope (18.7), whose members constraints do not read.
         (
