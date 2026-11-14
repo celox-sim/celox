@@ -698,7 +698,12 @@ impl Scope<'_> {
         Ok(())
     }
 
-    fn publish_nba(&mut self) -> Result<u64, RuntimeErrorCode> {
+    /// Publish the queued and flagged nonblocking updates at `timestamp`,
+    /// one at a time. A flagged site with a delay, such as a fused
+    /// flip-flop's `q <= #1 d`, is queued for its due time instead (IEEE
+    /// 1800-2023 9.4.5, 10.4.2), as the generated queues do where they
+    /// hold the updates.
+    fn publish_nba(&mut self, timestamp: u64) -> Result<u64, RuntimeErrorCode> {
         loop {
             let update = if let Some(update) = self.nbas.pop_front() {
                 Some(update)
@@ -713,12 +718,25 @@ impl Scope<'_> {
                         if site.width == 0 || site.lsb >= site.target.width {
                             continue;
                         }
-                        update = Some(celox_runtime::NbaUpdate {
+                        let flagged = celox_runtime::NbaUpdate {
                             target: site.target,
                             lsb: site.lsb,
                             width: site.width,
                             value: self.value(site.value)?,
-                        });
+                        };
+                        if site.delay > 0 {
+                            let due = timestamp.checked_add(site.delay).ok_or_else(|| {
+                                RuntimeErrorCode::Runtime {
+                                    message: "nonblocking assignment delay overflows simulation \
+                                              time"
+                                        .into(),
+                                    signals: Vec::new(),
+                                }
+                            })?;
+                            self.delayed.push_back((due, flagged));
+                            continue;
+                        }
+                        update = Some(flagged);
                         break;
                     }
                 }
@@ -1102,7 +1120,7 @@ pub(crate) extern "C" fn call(
         } else if encoded == COMB_AFTER {
             scope.after_comb();
         } else if encoded == NBA_PUBLISH {
-            return scope.publish_nba();
+            return scope.publish_nba(timestamp);
         } else {
             if encoded != CHECKPOINT {
                 if encoded & NBA_REQUEST != 0 {
@@ -1225,13 +1243,13 @@ mod tests {
         }
         scope.store_value(dirty, &value(0, 0)).unwrap();
         scope.nbas.push_back(update(target, 0, 8, 0x55, 0));
-        assert_eq!(scope.publish_nba().unwrap(), 2);
+        assert_eq!(scope.publish_nba(0).unwrap(), 2);
         assert_eq!(scope.value(target).unwrap(), value(0xa5, 0));
         assert_eq!(scope.value(dirty).unwrap(), value(1, 0));
         for flag in flags {
             assert_eq!(scope.value(flag).unwrap(), value(0, 0));
         }
-        assert_eq!(scope.publish_nba().unwrap(), 0);
+        assert_eq!(scope.publish_nba(0).unwrap(), 0);
         assert!(scope.nbas.is_empty());
 
         scope.store_value(target, &value(0x55, 0)).unwrap();
@@ -1242,15 +1260,15 @@ mod tests {
             update(target, 4, 4, 0, 15),
             update(target, 4, 4, 0, 15),
         ]);
-        assert_eq!(scope.publish_nba().unwrap(), 2);
+        assert_eq!(scope.publish_nba(0).unwrap(), 2);
         assert_eq!(scope.value(target).unwrap(), value(0xf5, 0xf0));
         assert_eq!(scope.value(dirty).unwrap(), value(1, 0));
         scope.store_value(dirty, &value(0, 0)).unwrap();
-        assert_eq!(scope.publish_nba().unwrap(), 2);
+        assert_eq!(scope.publish_nba(0).unwrap(), 2);
         assert_eq!(scope.value(target).unwrap(), value(5, 0xf0));
         assert_eq!(scope.value(dirty).unwrap(), value(1, 0));
         scope.store_value(dirty, &value(0, 0)).unwrap();
-        assert_eq!(scope.publish_nba().unwrap(), 0);
+        assert_eq!(scope.publish_nba(0).unwrap(), 0);
         assert!(scope.nbas.is_empty());
 
         assert_eq!(scope.value(dirty).unwrap(), value(0, 0));
@@ -1258,6 +1276,6 @@ mod tests {
         // A target without a mask plane compares its stored representation.
         let bit_target = signal(10, 8, false);
         scope.nbas.push_back(update(bit_target, 0, 8, 0, 255));
-        assert_eq!(scope.publish_nba().unwrap(), 0);
+        assert_eq!(scope.publish_nba(0).unwrap(), 0);
     }
 }
