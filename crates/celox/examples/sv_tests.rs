@@ -852,6 +852,11 @@ endmodule
                 "function automatic int f(); return missing; endfunction",
                 "`missing` is not declared",
             ),
+            (
+                "undeclared_interface.sv",
+                "interface Bus; logic x; assign x = missing; endinterface",
+                "`missing` is not declared",
+            ),
         ] {
             let path = fixture(dir.path(), name, code);
             let options = fixture_options(vec![path], Mode::Elaboration);

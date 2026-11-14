@@ -251,6 +251,7 @@ impl ParsedSource {
                     .0,
                 );
             }
+            packages.check_unreferenced_interfaces(&trees)?;
             Ok(packages)
         })();
         match packages {

@@ -120,6 +120,12 @@ impl ScopeElaboration<'_> {
                 &self.parameters,
                 self.imported,
             ));
+        // The body of an interface analyzed by itself reads only names it
+        // declares or imports (see `Packages::check_unreferenced_interfaces`).
+        self.packed_dimensions.declared_values = syntax_tree.declared_values
+            && syntax_tree
+                .root_unit()
+                .is_ok_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Interface);
     }
 
     /// The declaration types of the constants the scope sees: the enum
