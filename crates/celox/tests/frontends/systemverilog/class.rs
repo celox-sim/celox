@@ -2602,8 +2602,9 @@ fn distributions_constrain_values_and_weigh_their_items() {
         error.contains("distribution weight other than a constant"),
         "{error}"
     );
-    // However the operand names the randc property.
-    for operand in ["b", "(b)"] {
+    // However the operand names the randc property, or reads it among other
+    // operands.
+    for operand in ["b", "(b)", "b + 4'd1"] {
         let source = format!(
             "class C;
                 randc bit [3:0] b;
@@ -3201,6 +3202,74 @@ endmodule"#;
     sim.run_until(0).unwrap();
     assert_eq!(sim.get(sim.signal("value")), 11u32.into());
     assert_eq!(sim.get(sim.signal("width")), 8u32.into());
+}
+
+#[test]
+fn randc_cycles_hold_up_to_16_bits() {
+    // IEEE 1800-2023 18.4.2: a randc property takes each value of its cycle
+    // once before the cycle restarts, also for the 16-bit
+    // `uvm_sequence_library::select_randc` that a constraint holds to a few
+    // values, and for a 9-bit property and an enumeration of 300 members.
+    let members = (0..300)
+        .map(|i| format!("M{i}={}", i * 3))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        "module Top;
+        typedef enum bit [9:0] {{ {members} }} E;
+        class Lib;
+            int unsigned size = 5;
+            randc bit [15:0] select_randc;
+            constraint valid_randc_selection {{ select_randc inside {{[0:size-1]}}; }}
+            function new(); valid_randc_selection.constraint_mode(0); endfunction
+            function bit pick(); return randomize(select_randc); endfunction
+        endclass
+        class Wide; randc bit [8:0] x; endclass
+        class Enumerated; randc E e; endclass
+        initial begin
+            Lib lib;
+            Wide wide;
+            Enumerated enumerated;
+            bit [4:0] mask;
+            bit seen[int];
+            int ok = 1;
+            lib = new;
+            wide = new;
+            enumerated = new;
+            lib.valid_randc_selection.constraint_mode(1);
+            repeat (3) begin
+                mask = 0;
+                repeat (5) begin
+                    ok &= lib.pick();
+                    mask |= 5'b1 << lib.select_randc;
+                end
+                ok &= mask == 5'b11111;
+            end
+            lib.valid_randc_selection.constraint_mode(0);
+            repeat (64) begin
+                ok &= lib.randomize();
+                seen[lib.select_randc] = 1;
+            end
+            $display(\"%0d %0d\", ok, seen.num());
+            seen.delete();
+            repeat (512) begin
+                void'(wide.randomize());
+                seen[wide.x] = 1;
+            end
+            $display(\"%0d\", seen.num());
+            seen.delete();
+            repeat (300) begin
+                void'(enumerated.randomize());
+                seen[enumerated.e] = 1;
+            end
+            $display(\"%0d\", seen.num());
+        end
+    endmodule"
+    );
+    assert_eq!(
+        super::hierarchical_references::displayed(&source),
+        ["1 64", "512", "300"]
+    );
 }
 
 sv_backends! {

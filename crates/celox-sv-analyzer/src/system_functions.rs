@@ -1370,7 +1370,7 @@ pub enum ObjectOp {
     /// Draw a domain index without replacement for the property at `offset`.
     RandomCyclic {
         offset: u32,
-        count: u16,
+        count: u32,
     },
     /// Seed the object's RNG from the second argument.
     Seed,

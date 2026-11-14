@@ -321,8 +321,8 @@ blocks in programs. Two region deviations are listed under
   `dist`, `dist` with `default :/`, weights other than constant expressions
   or ranges weighted per value with bounds other than constant expressions,
   `solve before`, typed parameters in constraints, array sets, X/Z wildcard
-  items and `$` bounds in `inside` sets, and `randc` domains beyond 1–8-bit
-  integers and scalar enums with up to 256 members. Named constraint blocks
+  items and `$` bounds in `inside` sets, and `randc` domains beyond 1–16-bit
+  integers and scalar enums with up to 65536 members. Named constraint blocks
   cover only 1–64-bit two-state scalar integer properties with comparisons,
   logical and bitwise operations, addition, subtraction, and multiplication,
   and class handle properties compared with each other or `null` by `==` and

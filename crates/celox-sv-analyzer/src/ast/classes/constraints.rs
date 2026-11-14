@@ -16,6 +16,49 @@ enum Kind {
     Unary(String, Box<Typed>),
     Binary(String, Box<Typed>, Box<Typed>),
 }
+/// Whether `value` reads a field that `field` tells.
+fn typed_reads(value: &Typed, field: &impl Fn(usize) -> bool) -> bool {
+    match &value.kind {
+        Kind::Leaf(expr) => reads(expr, field),
+        Kind::Context(child) | Kind::Unary(_, child) => typed_reads(child, field),
+        Kind::Binary(_, left, right) => typed_reads(left, field) || typed_reads(right, field),
+    }
+}
+
+/// Whether `expr` reads a field that `field` tells.
+fn reads(expr: &ConstraintExpr, field: &impl Fn(usize) -> bool) -> bool {
+    match expr {
+        ConstraintExpr::Field(index) => field(*index),
+        ConstraintExpr::Enabled { value, .. }
+        | ConstraintExpr::Soft { value, .. }
+        | ConstraintExpr::Resize { value, .. }
+        | ConstraintExpr::Unary { value, .. } => reads(value, field),
+        ConstraintExpr::Foreach { body, .. } => reads(body, field),
+        ConstraintExpr::DisableSoft {
+            variable,
+            condition,
+            ..
+        } => reads(variable, field) || condition.as_ref().is_some_and(|c| reads(c, field)),
+        ConstraintExpr::Binary { left, right, .. } => reads(left, field) || reads(right, field),
+        ConstraintExpr::Dist {
+            membership,
+            choices,
+        } => {
+            reads(membership, field) || choices.iter().any(|choice| reads(&choice.predicate, field))
+        }
+        ConstraintExpr::Literal(..)
+        | ConstraintExpr::Handle(_)
+        | ConstraintExpr::Size(_)
+        | ConstraintExpr::Index { .. }
+        | ConstraintExpr::Static(_)
+        | ConstraintExpr::Solved(_)
+        | ConstraintExpr::Element { .. }
+        | ConstraintExpr::Sum(_)
+        | ConstraintExpr::Member { .. }
+        | ConstraintExpr::Input { .. } => false,
+    }
+}
+
 fn relation(op: &str, left: Typed, right: Typed) -> Typed {
     Typed {
         kind: Kind::Binary(op.into(), Box::new(left), Box::new(right)),
@@ -1220,15 +1263,16 @@ pub(in crate::ast) fn bind_inputs(
             ExprKind::Dist { expression, items } => {
                 let value = recurse(session, budget, *expression)?;
                 // A distribution shall not apply to a randc variable
-                // (18.5.3): the property the operand resolves to, however
-                // it is named (`b`, `this.b`).
-                if let Kind::Leaf(ConstraintExpr::Field(field)) = &value.kind
-                    && properties
+                // (18.5.3): to no operand that reads one, however it is
+                // named (`b`, `this.b`) or selected (`b[3:0]`, `b + 1`).
+                let randc = |field: usize| {
+                    properties
                         .iter()
                         .filter(|property| constrainable(property))
-                        .nth(*field)
+                        .nth(field)
                         .is_some_and(|property| property.randc)
-                {
+                };
+                if typed_reads(&value, &randc) {
                     return Err("a distribution of a randc variable (IEEE 1800-2023 18.5.3)".into());
                 }
                 let mut members = Vec::new();
@@ -1688,10 +1732,10 @@ impl Class {
                 continue;
             }
             // A randc property draws from the cycle of its whole domain
-            // (IEEE 1800-2023 18.4.2), kept for at most 256 values.
+            // (IEEE 1800-2023 18.4.2), kept for at most 65536 values.
             if property.randc && property.cyclic_domain_size().is_none() {
                 return Err(unsupported(
-                    "constraints on a randc property of more than 256 values",
+                    "constraints on a randc property of more than 65536 values",
                 ));
             }
             // A random enumeration takes only the values of its type (18.3).

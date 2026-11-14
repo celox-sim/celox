@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8; 8] = b"CELOXCP1";
 // Bump whenever a serialized core-state schema or its interpretation changes.
 // Version 7 keeps the private slots of an activation as the bytes of their
-// planes.
-const VERSION: u32 = 7;
+// planes. Version 8 keeps the cycle of a randc property of a heap object as
+// its entries, those left first, with the position of each and how many are
+// left.
+const VERSION: u32 = 8;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointFileError {

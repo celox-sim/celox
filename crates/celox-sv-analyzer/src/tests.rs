@@ -6797,7 +6797,7 @@ fn class_randomize_rejects_unsupported_semantics() {
             "c.randomize()",
             "constraints",
         ),
-        ("randc bit [8:0] x;", "c.randomize()", "randc"),
+        ("randc bit [16:0] x;", "c.randomize()", "randc"),
         ("rand int x;", "c.srandom()", "argument"),
         ("rand int x;", "c.srandom(1, 2)", "arguments"),
         (
@@ -7011,23 +7011,32 @@ endmodule
 
 #[test]
 fn class_randc_checks_domain_limits() {
+    // IEEE 1800-2023 18.4.2: an implementation may limit the size of a randc
+    // variable to no less than 8 bits; Celox keeps cycles of up to 16 bits
+    // or 65536 enumeration members.
     let values = (0..257)
         .map(|i| format!("V{i}={i}"))
         .collect::<Vec<_>>()
         .join(",");
-    for (declarations, members) in [
-        (String::new(), "randc bit [8:0] x;"),
-        (
-            format!("typedef enum bit [15:0] {{{values}}} E;"),
-            "randc E x;",
-        ),
-    ] {
-        for call in ["c.randomize()", "c.randomize(x)"] {
-            let source = format!(
-                "module Top; {declarations} class C; {members} endclass C c; initial begin c=new; void'({call}); end endmodule"
-            );
-            let error = analyze_source(&source, Path::new("randc_limits.sv")).unwrap_err();
-            assert!(error.to_string().contains("randc"), "{error}");
+    let enumeration = format!("typedef enum bit [15:0] {{{values}}} E;");
+    let source = |declarations: &str, members: &str, call: &str| {
+        format!(
+            "module Top; {declarations} class C; {members} endclass C c; initial begin c=new; void'({call}); end endmodule"
+        )
+    };
+    for call in ["c.randomize()", "c.randomize(x)"] {
+        let error = analyze_source(
+            &source("", "randc bit [16:0] x;", call),
+            Path::new("randc_limits.sv"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("randc"), "{error}");
+        for (declarations, members) in [
+            ("", "randc bit [15:0] x;"),
+            (enumeration.as_str(), "randc E x;"),
+        ] {
+            analyze_source(&source(declarations, members, call), Path::new("randc.sv"))
+                .unwrap_or_else(|error| panic!("{members}: {error}"));
         }
     }
 }

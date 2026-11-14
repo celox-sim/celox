@@ -222,6 +222,40 @@ fn member(term: &Term, width: u32, values: impl IntoIterator<Item = u64>) -> Ter
     not(all(differs))
 }
 
+/// The solver variables term `term` names.
+fn term_variables(term: &Term) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut seen = fxhash::FxHashSet::default();
+    let mut pending = vec![term];
+    while let Some(term) = pending.pop() {
+        if !seen.insert(std::rc::Rc::as_ptr(&term.0)) {
+            continue;
+        }
+        if let Some(name) = term.0.op.strip_prefix('@') {
+            names.insert(name.to_owned());
+        }
+        pending.extend(&term.0.args);
+    }
+    names
+}
+
+/// The number of values of a randc cycle that a restriction of a solve
+/// samples while it has many values left and has produced many: the size
+/// of the formula does not grow with the cycle. A few values keep each
+/// solve small; a sample whose values the constraints all exclude is drawn
+/// again, and then every value left is listed.
+const SAMPLE: usize = 8;
+
+/// The most values a randc cycle that no constraint relates to another
+/// random variable has produced while the solver draws its value excluding
+/// them, as for one held to a few values (UVM's `select_randc`); past them,
+/// the values left that its constraints allow are listed instead.
+const EXCLUDED: usize = 64;
+
+/// The most values of a randc cycle that an exact restriction of a solve
+/// lists or excludes rather than listing every value left.
+const LISTED: usize = 1024;
+
 /// The number of values in the cycle of randc `field`: the members of an
 /// enumeration, which the cycle holds by their indices, or every value of
 /// its width.
@@ -1243,6 +1277,145 @@ impl Heap {
         self.randomize_object_with_limits(handle, program, check_only, inputs, Limits::default())
     }
 
+    /// The next value of the cycle of randc `field` of `object`, solver
+    /// variable `name`, that its constraints `own`, which name no other
+    /// random variable, allow (IEEE 1800-2023 18.4.2): a value the cycle has
+    /// not produced, each as likely, or else one of a new cycle. With it,
+    /// its entry among those left and whether the cycle restarts, which
+    /// take effect when the call succeeds; `Some(None)` when no value of
+    /// the field's domain is allowed, and `None` when the constraints
+    /// cannot be evaluated alone. Random entries are tried first, so that
+    /// a cycle its constraints hardly restrict, such as one no constraint
+    /// names, takes each value at once; then, while the cycle has produced
+    /// at most [`EXCLUDED`] values, the solver finds one of the others,
+    /// excluding those; otherwise the entries left that the constraints
+    /// allow are listed, once per cycle and set of constraints, and drawn
+    /// from (see `Heap::draw_allowed`). No call costs more than a pass over
+    /// the cycle, and only the first after a new cycle or other constraints
+    /// costs that.
+    #[allow(clippy::type_complexity)]
+    fn next_cyclic(
+        &mut self,
+        object: Handle,
+        field: &Field,
+        name: &str,
+        own: &[Term],
+    ) -> Option<Option<(u64, usize, bool)>> {
+        let size = cycle_size(field);
+        let constraints = own
+            .iter()
+            .enumerate()
+            .map(|(index, term)| (index.to_string(), term.clone()))
+            .collect::<aplite::Env>();
+        let allows = |value: u64| -> Option<bool> {
+            if constraints.is_empty() {
+                return Some(true);
+            }
+            let assignments = std::collections::BTreeMap::from([(
+                name.to_owned(),
+                Scalar::Bv {
+                    width: field.width,
+                    value,
+                },
+            )]);
+            let results = aplite::finite::evaluate_scalar_terms(
+                &constraints,
+                &assignments,
+                Limits::default(),
+            )
+            .ok()?;
+            Some(results.values().all(|result| *result == Scalar::Bool(true)))
+        };
+        for restart in [false, true] {
+            let left = if restart {
+                size as usize
+            } else {
+                self.cycle_left(object, field.offset, size)
+            };
+            let entry = |heap: &mut Self, index: usize| {
+                if restart {
+                    index as u64
+                } else {
+                    heap.cycle_entry(object, field.offset, size, index)
+                }
+            };
+            for _ in 0..64 {
+                let index = self.random_below(object, left as u64) as usize;
+                let value = cycle_value(field, entry(self, index));
+                if allows(value)? {
+                    return Some(Some((value, index, restart)));
+                }
+            }
+            let produced = size as usize - left;
+            if produced <= EXCLUDED {
+                // Those it allows but has not produced, by the solver.
+                let term = var(name.to_owned(), Sort::Bv(field.width));
+                let mut formula = own.iter().cloned().fold(boolv(true), and);
+                if !field.domain.is_empty() {
+                    formula = and(
+                        formula,
+                        member(&term, field.width, field.domain.iter().copied()),
+                    );
+                }
+                if !restart && produced > 0 {
+                    let values = self
+                        .cycle_entries(object, field.offset, size, false)
+                        .into_iter()
+                        .map(|entry| cycle_value(field, entry));
+                    formula = and(formula, not(member(&term, field.width, values)));
+                }
+                let projection = aplite::Env::from([(name.to_owned(), term)]);
+                let seed = self.random_object(object);
+                let outcome = solve_seeded(&formula, &projection, Limits::default(), seed);
+                match outcome.verdict {
+                    Verdict::Sat => {
+                        let Some(Scalar::Bv { value, .. }) = outcome.context_values.get(name)
+                        else {
+                            return None;
+                        };
+                        let target = cycle_index(field, *value)?;
+                        let index = if restart {
+                            target as usize
+                        } else {
+                            self.cycle_position(object, field.offset, size, target)?
+                        };
+                        return Some(Some((*value, index, restart)));
+                    }
+                    Verdict::Unsat => continue,
+                    Verdict::Unknown => return None,
+                }
+            }
+            // The entries left that the constraints allow, listed once per
+            // cycle and set of constraints (see `Heap::draw_allowed`); a new
+            // cycle is listed whole, once.
+            if !restart {
+                let key = fxhash::hash64(&format!("{own:?}"));
+                let mut allows_entry = |entry: u64| allows(cycle_value(field, entry));
+                match self.draw_allowed(object, field.offset, size, key, &mut allows_entry)? {
+                    Some((entry, index)) => {
+                        return Some(Some((cycle_value(field, entry), index, false)));
+                    }
+                    None => continue,
+                }
+            }
+            let mut allowed = Vec::new();
+            for index in 0..left {
+                if allows(cycle_value(field, entry(self, index)))? {
+                    allowed.push(index);
+                }
+            }
+            if !allowed.is_empty() {
+                let index = allowed[self.random_below(object, allowed.len() as u64) as usize];
+                return Some(Some((
+                    cycle_value(field, entry(self, index)),
+                    index,
+                    restart,
+                )));
+            }
+        }
+        Some(None)
+    }
+
     fn randomize_object_with_limits(
         &mut self,
         handle: Handle,
@@ -1284,6 +1457,8 @@ impl Heap {
             let mut active = Vec::new();
             let mut cyclic = Vec::new();
             let mut formula = boolv(true);
+            // The hard constraints, each as a term.
+            let mut hard = Vec::new();
             let mut bases = Vec::new();
             let mut size_terms = Vec::new();
             let mut size_bases = Vec::new();
@@ -1340,10 +1515,10 @@ impl Heap {
                             );
                         }
                         if field.cyclic {
-                            if field.domain.is_empty() && field.width > 8
-                                || field.domain.len() > 256
+                            if field.domain.is_empty() && field.width > 16
+                                || field.domain.len() > 1 << 16
                             {
-                                return Err("randc property with more than 256 values".into());
+                                return Err("randc property with more than 65536 values".into());
                             }
                             cyclic.push((object, field, term.clone()));
                         }
@@ -1550,10 +1725,9 @@ impl Heap {
                                 check_only,
                                 inputs,
                             )?;
-                            formula = and(
-                                formula,
-                                truth(constraint.term(&terms, base, sizes, inputs)?),
-                            );
+                            let term = truth(constraint.term(&terms, base, sizes, inputs)?);
+                            hard.push(term.clone());
+                            formula = and(formula, term);
                             // Each distribution, also one under `if` or `->`, whose
                             // item is tried only where its guards let it apply, or
                             // in a `foreach`, one for each element.
@@ -1582,6 +1756,42 @@ impl Heap {
                             }
                         }
                     }
+                }
+            }
+            // The randc variables are solved first (18.4.2). One that no
+            // constraint relates to another random variable takes a value of
+            // its cycle that its own constraints allow, drawn here (see
+            // `Heap::next_cyclic`); the others are solved with the rest.
+            let constrained = hard
+                .iter()
+                .map(|term| (term, term_variables(term)))
+                .collect::<Vec<_>>();
+            let mut drawn = Vec::new();
+            for (object, field, term) in std::mem::take(&mut cyclic) {
+                let name = term.0.op.strip_prefix('@').unwrap_or_default().to_owned();
+                let separate = constrained
+                    .iter()
+                    .all(|(_, names)| !names.contains(&name) || names.len() == 1)
+                    && !soft.iter().any(|(_, _, names)| names.contains(&name));
+                let own = constrained
+                    .iter()
+                    .filter(|(_, names)| names.contains(&name))
+                    .map(|(term, _)| (*term).clone())
+                    .collect::<Vec<_>>();
+                let next = if separate {
+                    self.next_cyclic(object, field, &name, &own)
+                } else {
+                    None
+                };
+                match next {
+                    Some(Some((value, index, restart))) => {
+                        formula = and(formula, eq(term.clone(), bv(field.width, value)));
+                        drawn.push((object, field, index, restart));
+                    }
+                    // No value of the cycle, nor of a new one, satisfies
+                    // its constraints.
+                    Some(None) => return Ok(false),
+                    None => cyclic.push((object, field, term)),
                 }
             }
             let seed = if projection.is_empty() {
@@ -1640,37 +1850,88 @@ impl Heap {
             // their own, then, while the remaining values of the others
             // still exclude every solution, one more cycle at a time.
             // A restart takes effect only when the call succeeds.
-            let restriction =
-                |heap: &mut Self, object: Handle, field: &Field, term: &Term, restart: bool| {
-                    let remaining = if restart {
-                        (0..cycle_size(field)).collect()
-                    } else {
-                        heap.cycle_remaining(object, field.offset, cycle_size(field), false)
-                    };
-                    member(
-                        term,
-                        field.width,
-                        remaining.into_iter().map(|entry| cycle_value(field, entry)),
-                    )
+            // A new cycle allows every value: the field's domain already holds
+            // it to its type's values. Otherwise the values left are listed,
+            // or those produced excluded, while they are few. A cycle with
+            // many of both is held first to a random sample of the values
+            // left, whose size does not grow with the cycle (see `SAMPLE`):
+            // a sample that allows a solution gives a value of the cycle, and
+            // one that allows none proves nothing, so the restriction is
+            // `exact` only when asked, listing every value left.
+            let restriction = |heap: &mut Self,
+                               object: Handle,
+                               field: &Field,
+                               term: &Term,
+                               restart: bool,
+                               exact: bool|
+             -> (Term, bool) {
+                if restart {
+                    return (boolv(true), true);
+                }
+                let size = cycle_size(field);
+                let left = heap.cycle_left(object, field.offset, size);
+                let produced = size as usize - left;
+                let values = |entries: Vec<u64>| {
+                    let mut values = entries
+                        .into_iter()
+                        .map(|entry| cycle_value(field, entry))
+                        .collect::<Vec<_>>();
+                    values.sort_unstable();
+                    values.dedup();
+                    values
                 };
+                let listed = if exact { LISTED } else { SAMPLE };
+                if left <= listed {
+                    let left = values(heap.cycle_entries(object, field.offset, size, true));
+                    return (member(term, field.width, left), true);
+                }
+                if produced <= listed {
+                    let produced = values(heap.cycle_entries(object, field.offset, size, false));
+                    return (not(member(term, field.width, produced)), true);
+                }
+                if exact {
+                    let left = values(heap.cycle_entries(object, field.offset, size, true));
+                    return (member(term, field.width, left), true);
+                }
+                let sample = (0..SAMPLE)
+                    .map(|_| {
+                        let index = heap.random_below(object, left as u64) as usize;
+                        heap.cycle_entry(object, field.offset, size, index)
+                    })
+                    .collect();
+                (member(term, field.width, values(sample)), false)
+            };
             // A size within the preferred bound is sought first.
             // Without `restart`, no randc cycle restarts.
             let run = |heap: &mut Self, formula: &Term, restart: bool| {
                 let mut restarted = vec![false; cyclic.len()];
-                let solve_with = |heap: &mut Self, restarted: &[bool]| {
+                let solve_with = |heap: &mut Self, restarted: &[bool], exact: bool| {
                     let mut attempt = formula.clone();
+                    let mut sampled = false;
                     for ((object, field, term), restart) in cyclic.iter().zip(restarted) {
-                        attempt = and(attempt, restriction(heap, *object, field, term, *restart));
+                        let (restriction, whole) =
+                            restriction(heap, *object, field, term, *restart, exact);
+                        attempt = and(attempt, restriction);
+                        sampled |= !whole;
                     }
-                    solve_seeded(&attempt, &projection, limits.clone(), seed)
+                    (
+                        solve_seeded(&attempt, &projection, limits.clone(), seed),
+                        sampled,
+                    )
                 };
-                let mut outcome = solve_with(heap, &restarted);
+                // Other samples are tried before every value left.
+                let mut outcome = solve_with(heap, &restarted, false);
+                for exact in [false, false, false, true] {
+                    if !(outcome.1 && matches!(outcome.0.verdict, Verdict::Unsat)) {
+                        break;
+                    }
+                    outcome = solve_with(heap, &restarted, exact);
+                }
+                let mut outcome = outcome.0;
                 if restart && matches!(outcome.verdict, Verdict::Unsat) && !cyclic.is_empty() {
                     for (position, (object, field, term)) in cyclic.iter().enumerate() {
-                        let alone = and(
-                            formula.clone(),
-                            restriction(heap, *object, field, term, false),
-                        );
+                        let (restriction, _) = restriction(heap, *object, field, term, false, true);
+                        let alone = and(formula.clone(), restriction);
                         restarted[position] = matches!(
                             solve_seeded(&alone, &projection, limits.clone(), seed).verdict,
                             Verdict::Unsat
@@ -1679,7 +1940,7 @@ impl Heap {
                     let mut next = 0;
                     loop {
                         if restarted.iter().any(|restart| *restart) {
-                            outcome = solve_with(heap, &restarted);
+                            outcome = solve_with(heap, &restarted, true).0;
                             if !matches!(outcome.verdict, Verdict::Unsat) {
                                 break;
                             }
@@ -1820,11 +2081,23 @@ impl Heap {
                         .collect::<Result<Vec<_>, _>>()?;
                     for ((object, field, _), restart) in cyclic.iter().zip(&restarted) {
                         if *restart {
-                            self.cycle_remaining(*object, field.offset, cycle_size(field), true);
+                            self.restart_cycle(*object, field.offset, cycle_size(field));
                         }
+                    }
+                    for &(object, field, index, restart) in &drawn {
+                        self.take_cycle_index(
+                            object,
+                            field.offset,
+                            cycle_size(field),
+                            index,
+                            restart,
+                        );
                     }
                     for (object, field, value) in &updates {
                         if field.cyclic
+                            && !drawn.iter().any(|&(drawn, other, ..)| {
+                                drawn == *object && other.offset == field.offset
+                            })
                             && let Some(entry) = cycle_index(field, *value)
                         {
                             self.take_cycle_entry(*object, field.offset, cycle_size(field), entry);
@@ -2478,6 +2751,150 @@ mod tests {
             }
             seen.sort_unstable();
             assert_eq!(seen, [0, 1, 2]);
+        }
+    }
+
+    /// A 16-bit randc field, at byte 0, and a 4-bit rand field at byte 2,
+    /// with constraints `constraints`.
+    fn wide_cycle(constraints: Vec<Expr>) -> Program {
+        let field = |offset, width, cyclic| Field {
+            offset,
+            width,
+            random: true,
+            domain: Vec::new(),
+            cyclic,
+        };
+        Program {
+            fields: vec![field(0, 16, true), field(2, 4, false)],
+            constraints,
+            ..Default::default()
+        }
+    }
+
+    fn below(field: usize, width: u32, bound: u64) -> Expr {
+        Expr::Binary {
+            op: "<".into(),
+            left: Box::new(Expr::Field(field)),
+            right: Box::new(Expr::Literal(width, bound)),
+            signed: false,
+        }
+    }
+
+    #[test]
+    fn wide_cycles_take_every_value_once_without_the_solver() {
+        // IEEE 1800-2023 18.4.2: a randc variable no constraint relates to
+        // another takes each value of its cycle once, drawn from the cycle
+        // in constant time: a whole 16-bit cycle takes 65536 calls.
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 3);
+        let program = wide_cycle(vec![below(1, 4, 10)]);
+        let start = std::time::Instant::now();
+        for _ in 0..2 {
+            let mut seen = vec![false; 1 << 16];
+            for _ in 0..1 << 16 {
+                assert!(heap.randomize_object(object, &program, false));
+                let value = heap.load(object, 0, 2) as usize;
+                assert!(!seen[value], "{value} repeated within its cycle");
+                seen[value] = true;
+                assert!(heap.load(object, 2, 1) < 10);
+            }
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn wide_cycles_related_to_other_variables_take_every_value_once() {
+        // A randc variable a constraint relates to another random variable
+        // is solved with the rest, held to a sample of its cycle's values
+        // left, whose size does not grow with the values produced: a whole
+        // 16-bit cycle takes 65536 calls, each a solve of the same size.
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 4);
+        let field = |offset, cyclic| Field {
+            offset,
+            width: 16,
+            random: true,
+            domain: Vec::new(),
+            cyclic,
+        };
+        let program = Program {
+            fields: vec![field(0, true), field(2, false)],
+            constraints: vec![Expr::Binary {
+                op: "==".into(),
+                left: Box::new(Expr::Field(0)),
+                right: Box::new(Expr::Field(1)),
+                signed: false,
+            }],
+            ..Default::default()
+        };
+        let start = std::time::Instant::now();
+        let mut seen = vec![false; 1 << 16];
+        for _ in 0..1 << 16 {
+            assert!(heap.randomize_object(object, &program, false));
+            let value = heap.load(object, 0, 2) as usize;
+            assert!(!seen[value], "{value} repeated within its cycle");
+            seen[value] = true;
+            assert_eq!(heap.load(object, 2, 2) as usize, value);
+        }
+        // The next call starts a new cycle.
+        assert!(heap.randomize_object(object, &program, false));
+        assert!(start.elapsed() < std::time::Duration::from_secs(90));
+    }
+
+    #[test]
+    fn wide_cycles_held_to_a_share_of_their_values_take_each_once() {
+        // `x < 2000` of a 16-bit randc no other variable relates to: random
+        // entries of the cycle rarely meet it, and those left are listed
+        // once per cycle, not once per draw, so each call costs about the
+        // same. Two cycles of 2000 values.
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 3);
+        let program = wide_cycle(vec![below(0, 16, 2000)]);
+        let start = std::time::Instant::now();
+        for _ in 0..2 {
+            let mut seen = vec![false; 2000];
+            for _ in 0..2000 {
+                assert!(heap.randomize_object(object, &program, false));
+                let value = heap.load(object, 0, 2) as usize;
+                assert!(value < 2000, "{value} outside the constraint");
+                assert!(!seen[value], "{value} repeated within its cycle");
+                seen[value] = true;
+            }
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn wide_cycles_held_to_few_values_restart_when_those_run_out() {
+        // A 16-bit cycle its constraint holds to 5 values, as UVM's
+        // uvm_sequence_library::select_randc, takes each of them once
+        // before any repeats; one held to 1000 values after 300 others
+        // were produced takes none of those again.
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 3);
+        let few = wide_cycle(vec![below(0, 16, 5)]);
+        for _ in 0..3 {
+            let mut seen = (0..5)
+                .map(|_| {
+                    assert!(heap.randomize_object(object, &few, false));
+                    heap.load(object, 0, 2)
+                })
+                .collect::<Vec<_>>();
+            seen.sort_unstable();
+            assert_eq!(seen, [0, 1, 2, 3, 4]);
+        }
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 3);
+        let free = wide_cycle(Vec::new());
+        let held = wide_cycle(vec![below(0, 16, 1000)]);
+        let mut seen = fxhash::FxHashSet::default();
+        // At most 300 of the 1000 values below 1000 are produced first.
+        for index in 0..1000 {
+            let program = if index < 300 { &free } else { &held };
+            assert!(heap.randomize_object(object, program, false));
+            let value = heap.load(object, 0, 2);
+            assert!(seen.insert(value), "{value} repeated within its cycle");
+            assert!(index < 300 || value < 1000);
         }
     }
 

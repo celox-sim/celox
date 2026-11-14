@@ -76,8 +76,8 @@ pub(crate) struct Object {
     constraint_default: bool,
     constraint_modes: fxhash::FxHashMap<u32, bool>,
     saved_random_modes: Vec<RandomModes>,
-    /// Remaining domain indices for each randc property, keyed by byte offset.
-    random_cycles: fxhash::FxHashMap<u32, Vec<u16>>,
+    /// The cycle of each randc property, keyed by byte offset.
+    random_cycles: fxhash::FxHashMap<u32, Cycle>,
     bytes: Box<[u8]>,
     /// Byte offsets of the handle properties, with what they refer to.
     pub(crate) handles: Vec<(u32, HandleKind)>,
@@ -354,11 +354,11 @@ impl Heap {
     /// 18.4.2). Lazy Fisher-Yates uses bounded storage and uniform draws.
     /// Seeding changes the RNG, but does not discard an unfinished cycle.
     pub(crate) fn random_cyclic_object(&mut self, handle: Handle, offset: u32, count: u64) -> u64 {
-        assert!((1..=256).contains(&count), "invalid randc domain size");
+        assert!((1..=1 << 16).contains(&count), "invalid randc domain size");
         let Some(object) = self.object_mut(handle) else {
             return 0;
         };
-        let left = cycle(object, offset, count, false).len() as u64;
+        let left = cycle(object, offset, count, false).left();
         let threshold = left.wrapping_neg() % left;
         let index = loop {
             let draw = object.random();
@@ -366,33 +366,159 @@ impl Heap {
                 break (draw % left) as usize;
             }
         };
-        u64::from(cycle(object, offset, count, false).swap_remove(index))
+        u64::from(cycle(object, offset, count, false).take(index))
     }
 
     /// The entries the current cycle of the randc property at `offset`, of
-    /// `count` entries, has not produced; `restart` starts a new cycle.
-    pub(crate) fn cycle_remaining(
+    /// `count` entries, has not produced if `left`, otherwise those it has.
+    pub(crate) fn cycle_entries(
         &mut self,
         handle: Handle,
         offset: u32,
         count: u64,
-        restart: bool,
+        left: bool,
     ) -> Vec<u64> {
         self.object_mut(handle).map_or_else(Vec::new, |object| {
-            cycle(object, offset, count, restart)
-                .iter()
-                .map(|entry| u64::from(*entry))
-                .collect()
+            let cycle = cycle(object, offset, count, false);
+            let entries = if left {
+                cycle.remaining()
+            } else {
+                cycle.produced()
+            };
+            entries.iter().map(|entry| u64::from(*entry)).collect()
         })
+    }
+
+    /// Start a new cycle of the randc property at `offset`, of `count`
+    /// entries.
+    pub(crate) fn restart_cycle(&mut self, handle: Handle, offset: u32, count: u64) {
+        if let Some(object) = self.object_mut(handle) {
+            cycle(object, offset, count, true);
+        }
+    }
+
+    /// How many entries the current cycle of the randc property at
+    /// `offset`, of `count` entries, has not produced.
+    pub(crate) fn cycle_left(&mut self, handle: Handle, offset: u32, count: u64) -> usize {
+        self.object_mut(handle).map_or(0, |object| {
+            cycle(object, offset, count, false).left() as usize
+        })
+    }
+
+    /// Where entry `entry` is among those the current cycle of the randc
+    /// property at `offset`, of `count` entries, has not produced, if it is
+    /// one of them.
+    pub(crate) fn cycle_position(
+        &mut self,
+        handle: Handle,
+        offset: u32,
+        count: u64,
+        entry: u64,
+    ) -> Option<usize> {
+        self.object_mut(handle)
+            .and_then(|object| cycle(object, offset, count, false).position(entry))
+    }
+
+    /// Entry `index` of those the current cycle of the randc property at
+    /// `offset`, of `count` entries, has not produced.
+    pub(crate) fn cycle_entry(
+        &mut self,
+        handle: Handle,
+        offset: u32,
+        count: u64,
+        index: usize,
+    ) -> u64 {
+        self.object_mut(handle).map_or(0, |object| {
+            u64::from(cycle(object, offset, count, false).remaining()[index])
+        })
+    }
+
+    /// Record that the cycle of the randc property at `offset`, of `count`
+    /// entries, produced its entry `index` of those left, restarting it
+    /// first if `restart`: entry `index` of the new cycle is `index`.
+    pub(crate) fn take_cycle_index(
+        &mut self,
+        handle: Handle,
+        offset: u32,
+        count: u64,
+        index: usize,
+        restart: bool,
+    ) {
+        if let Some(object) = self.object_mut(handle) {
+            cycle(object, offset, count, restart).take(index);
+        }
+    }
+
+    /// A random number below `count` from the RNG of `handle`, each as
+    /// likely.
+    pub(crate) fn random_below(&mut self, handle: Handle, count: u64) -> u64 {
+        if self.object_mut(handle).is_none() {
+            return 0;
+        }
+        let threshold = count.wrapping_neg() % count;
+        loop {
+            let draw = self.random_object(handle);
+            if draw >= threshold {
+                return draw % count;
+            }
+        }
+    }
+
+    /// An entry of those the current cycle of the randc property at
+    /// `offset`, of `count` entries, has not produced that `allows` accepts,
+    /// each as likely, with its index among those left; `None` inside when
+    /// there is none, and `None` when `allows` cannot tell. The entries
+    /// `allows` accepts are listed once per cycle and constraints `key`:
+    /// later draws take from that list, dropping the entries the cycle
+    /// produced since, so a cycle costs one pass over its entries for each
+    /// set of constraints, whatever share of them the constraints allow.
+    pub(crate) fn draw_allowed(
+        &mut self,
+        handle: Handle,
+        offset: u32,
+        count: u64,
+        key: u64,
+        allows: &mut dyn FnMut(u64) -> Option<bool>,
+    ) -> Option<Option<(u64, usize)>> {
+        let object = self.object_mut(handle)?;
+        let current = cycle(object, offset, count, false);
+        if current
+            .allowed
+            .as_ref()
+            .is_none_or(|(known, _)| *known != key)
+        {
+            let mut found = Vec::new();
+            for &entry in current.remaining() {
+                if allows(u64::from(entry))? {
+                    found.push(entry);
+                }
+            }
+            current.allowed = Some((key, found));
+        }
+        loop {
+            let found = cycle_allowed(object, offset, count).len() as u64;
+            if found == 0 {
+                return Some(None);
+            }
+            let pick = random_below(object, found) as usize;
+            let current = cycle(object, offset, count, false);
+            let entry = current.allowed.as_ref().map_or(0, |(_, found)| found[pick]);
+            match current.position(u64::from(entry)) {
+                Some(index) => return Some(Some((u64::from(entry), index))),
+                None => {
+                    cycle_allowed(object, offset, count).swap_remove(pick);
+                }
+            }
+        }
     }
 
     /// Record that the cycle of the randc property at `offset`, of `count`
     /// entries, produced `entry`.
     pub(crate) fn take_cycle_entry(&mut self, handle: Handle, offset: u32, count: u64, entry: u64) {
         if let Some(object) = self.object_mut(handle) {
-            let remaining = cycle(object, offset, count, false);
-            if let Some(index) = remaining.iter().position(|left| u64::from(*left) == entry) {
-                remaining.swap_remove(index);
+            let cycle = cycle(object, offset, count, false);
+            if let Some(index) = cycle.position(entry) {
+                cycle.take(index);
             }
         }
     }
@@ -587,19 +713,101 @@ impl Heap {
     }
 }
 
-/// The cycle of the randc property at `offset` of `object`: the entries,
-/// `0..count`, that it has not produced, a new cycle once it has produced
-/// them all or when `restart` asks. Both the unconstrained draw and the
-/// constraint solver keep a property's cycle here, as the indices of the
-/// members of an enumeration and as the values of an integral property
-/// (IEEE 1800-2023 18.4.2).
-fn cycle(object: &mut Object, offset: u32, count: u64, restart: bool) -> &mut Vec<u16> {
-    let remaining = object.random_cycles.entry(offset).or_default();
-    if restart || remaining.is_empty() {
-        remaining.clear();
-        remaining.extend(0..count as u16);
+/// The cycle of the randc property at `offset` of `object`, a new one once
+/// it has produced every entry or when `restart` asks. Both the
+/// unconstrained draw and the constraint solver keep a property's cycle
+/// here, as the indices of the members of an enumeration and as the values
+/// of an integral property (IEEE 1800-2023 18.4.2).
+fn cycle(object: &mut Object, offset: u32, count: u64, restart: bool) -> &mut Cycle {
+    let cycle = object.random_cycles.entry(offset).or_default();
+    if restart || cycle.left == 0 || cycle.entries.len() as u64 != count {
+        // Entries of a cycle of at most 65536 values.
+        cycle.entries = (0..count).map(|entry| entry as u16).collect();
+        cycle.positions = cycle.entries.clone();
+        cycle.left = count as u32;
+        cycle.allowed = None;
     }
-    remaining
+    cycle
+}
+
+/// The entries of the cycle of the randc property at `offset` of `object`
+/// that the constraints last listed allowed (see [`Heap::draw_allowed`]).
+fn cycle_allowed(object: &mut Object, offset: u32, count: u64) -> &mut Vec<u16> {
+    &mut cycle(object, offset, count, false)
+        .allowed
+        .get_or_insert_with(|| (0, Vec::new()))
+        .1
+}
+
+/// A random number below `count` from the RNG of `object`, each as likely.
+fn random_below(object: &mut Object, count: u64) -> u64 {
+    let threshold = count.wrapping_neg() % count;
+    loop {
+        let draw = object.random();
+        if draw >= threshold {
+            return draw % count;
+        }
+    }
+}
+
+/// The cycle of a randc property: its entries `0..count`, those it has not
+/// produced first, in the order draws take them from, and where each entry
+/// is among them. Taking an entry, finding one, and listing those left or
+/// those produced cost no more than the entries they touch, whatever the
+/// size of the cycle.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+struct Cycle {
+    entries: Vec<u16>,
+    /// The position of each entry in `entries`.
+    positions: Vec<u16>,
+    /// How many entries, at the start of `entries`, it has not produced.
+    left: u32,
+    /// The entries left that the constraints of a key allowed when they were
+    /// last listed (see [`Heap::draw_allowed`]), some of which the cycle may
+    /// have produced since; a new cycle drops them. Derived state, which a
+    /// checkpoint and a comparison leave out.
+    #[serde(skip)]
+    allowed: Option<(u64, Vec<u16>)>,
+}
+
+impl PartialEq for Cycle {
+    fn eq(&self, other: &Self) -> bool {
+        (&self.entries, &self.positions, self.left)
+            == (&other.entries, &other.positions, other.left)
+    }
+}
+
+impl Eq for Cycle {}
+
+impl Cycle {
+    fn left(&self) -> u64 {
+        u64::from(self.left)
+    }
+
+    fn remaining(&self) -> &[u16] {
+        &self.entries[..self.left as usize]
+    }
+
+    fn produced(&self) -> &[u16] {
+        &self.entries[self.left as usize..]
+    }
+
+    /// Where `entry` is among the entries not produced, if it is one.
+    fn position(&self, entry: u64) -> Option<usize> {
+        let position = usize::from(*self.positions.get(usize::try_from(entry).ok()?)?);
+        (position < self.left as usize).then_some(position)
+    }
+
+    /// Produce the entry at `index` of those left: the last one left takes
+    /// its place, as `Vec::swap_remove` would.
+    fn take(&mut self, index: usize) -> u16 {
+        let last = self.left as usize - 1;
+        self.entries.swap(index, last);
+        self.positions[usize::from(self.entries[index])] = index as u16;
+        self.positions[usize::from(self.entries[last])] = last as u16;
+        self.left -= 1;
+        self.entries[last]
+    }
 }
 
 #[cfg(test)]
