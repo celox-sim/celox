@@ -2751,14 +2751,17 @@ module Top(output int bad, output bit done);
             x < 8'h80;
         }
     endclass
-    // A select of a rand variable (Syntax 18-8), as other constraints name
-    // it.
+    // A select of a rand variable and a class-scoped static rand property
+    // (Syntax 18-8, 8.23), as other constraints name them.
     class Scoped;
+        static rand bit [7:0] s;
         rand bit [1:0] a;
         rand bit b;
         constraint c {
             solve a[0] before b;
+            solve Scoped::s before a;
             b == a[0];
+            Scoped::s < 8'h10;
         }
     endclass
     Fill f;
@@ -2791,7 +2794,7 @@ module Top(output int bad, output bit done);
             if (std::randomize(a, b) with { solve a before b; b == a + 1; a < 8'h10; } == 0
                 || b != a + 1 || a >= 8'h10)
                 bad++;
-            if (sc.randomize() == 0 || sc.b != sc.a[0]) bad++;
+            if (sc.randomize() == 0 || sc.b != sc.a[0] || Scoped::s >= 8'h10) bad++;
         end
         $display("%0d", bad);
         done = bad == 0;
@@ -2868,6 +2871,102 @@ module Top(output int bad, output bit done);
             if (item.randomize() == 0 || item.addr[1:0] != 0 || item.addr >= 32'h100
                 || item.data[3:0] != 4'h9 || item.state != 4'h9)
                 bad++;
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
+; An element at a constant position outside a loop over its array (18.4,
+; 18.5.8); an array whose size and elements constraints name has its size
+; solved first (18.5.7.1), and an element past the end reads as 0 (7.4.6).
+(case constrained_randomize_constant_elements
+  (source "constant_elements.sv" #"
+module Top(output int bad, output bit done);
+    class B_item;
+        rand byte fb[$];
+        rand byte burst_len;
+        constraint small_burst_len_range { burst_len > 1 && burst_len < 10; }
+        constraint byte_zero_is_length { fb[0] == burst_len; }
+        constraint length_is_consistent { burst_len == fb.size() - 1; }
+    endclass
+    class Mixed;
+        rand bit [7:0] d[];
+        rand bit [7:0] f[4];
+        bit [7:0] s[$];
+        rand bit [7:0] x;
+        constraint c {
+            d.size() == 3;
+            foreach (d[i]) d[i] > d[0] || i == 0;
+            d[0] == s[1];
+            f[3] == x + 1;
+            x == s[0];
+            d[5] == 0;
+        }
+    endclass
+    // The arguments of a function solve after the sizes and before the
+    // rest (18.5.7.1, 18.5.11).
+    class Called;
+        rand bit [7:0] a[];
+        rand bit [7:0] x;
+        function bit [7:0] id(bit [7:0] v); return v; endfunction
+        constraint c { a.size() inside {[2:4]}; a[0] inside {[4:5]}; x == id(a[0]); }
+    endclass
+    // A size the argument solve does not solve is a value there: one solved
+    // before, and that of a state array.
+    class Sized;
+        rand bit [7:0] a[];
+        rand bit [7:0] z;
+        bit [7:0] q[$];
+        rand bit [7:0] x, y;
+        function bit [7:0] id(bit [7:0] v); return v; endfunction
+        constraint c {
+            this.a.size() == 3;
+            a[0] == a.size();
+            x == id(a[0]);
+            z == q.size();
+            y == id(z);
+        }
+    endclass
+    // An element named through `this` or `super` (8.11, 8.15).
+    class Base; rand bit [7:0] e[2]; endclass
+    class Named extends Base;
+        rand bit [7:0] w;
+        constraint c { this.e[0] == 8'h11; super.e[1] == w; w == 8'h22; }
+    endclass
+    B_item b;
+    Mixed m;
+    Called k;
+    Sized z;
+    Named n;
+    initial begin
+        b = new;
+        m = new;
+        k = new;
+        z = new;
+        n = new;
+        m.s = '{7, 20};
+        z.q = '{1, 2, 3, 4, 5};
+        for (int i = 0; i < 20; i++) begin
+            if (b.randomize() == 0 || b.burst_len < 2 || b.burst_len > 9
+                || b.fb.size() != b.burst_len + 1 || b.fb[0] != b.burst_len)
+                bad++;
+            if (m.randomize() == 0 || m.d.size() != 3 || m.d[0] != 20 || m.d[1] <= 20
+                || m.d[2] <= 20 || m.x != 7 || m.f[3] != 8)
+                bad++;
+            if (b.randomize() with { fb[1] == 8'h55; } == 0 || b.fb[1] != 8'h55
+                || b.fb[0] != b.fb.size() - 1)
+                bad++;
+            if (k.randomize() == 0 || k.a.size() < 2 || k.a.size() > 4 || k.a[0] < 4
+                || k.a[0] > 5 || k.x != k.a[0])
+                bad++;
+            if (z.randomize() == 0 || z.a.size() != 3 || z.a[0] != 3 || z.x != 3 || z.z != 5
+                || z.y != 5)
+                bad++;
+            if (n.randomize() == 0 || n.e[0] != 8'h11 || n.e[1] != 8'h22) bad++;
+        end
         $display("%0d", bad);
         done = bad == 0;
     end

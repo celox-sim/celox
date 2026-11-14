@@ -1501,24 +1501,30 @@ endmodule
     assert_eq!(sim.get(sim.signal("ok")), BigUint::from(1u8));
     assert_eq!(sim.get(sim.signal("fixed_sum")), BigUint::from(25u8));
     assert_eq!(sim.get(sim.signal("state_sum")), BigUint::from(6u8));
-    // A loop over a rand array whose size a constraint names would need
-    // its elements before its size: the call faults.
-    let source = r#"module Top;
-    class C; rand int a[]; constraint k { a.size() == 2; foreach (a[i]) a[i] == 1; } endclass
+    // A rand array whose size and elements constraints name has its size
+    // solved first, which is then state to the loop and the sum over it
+    // (IEEE 1800-2023 18.5.7.1, 18.5.7.2).
+    let source = r#"module Top(output int ok);
+    class C;
+        rand int a[];
+        constraint k { a.size() inside {[1:4]}; foreach (a[i]) a[i] == i; a.sum() * 2 == a.size() * (a.size() - 1); }
+    endclass
     C c;
-    initial begin c = new; void'(c.randomize()); end
+    initial begin
+        c = new;
+        ok = 1;
+        repeat (8) begin
+            ok &= c.randomize() && c.a.size() >= 1 && c.a.size() <= 4;
+            foreach (c.a[i]) ok &= c.a[i] == i;
+        end
+    end
 endmodule
 "#;
     let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("sized.sv"))], "Top")
         .build()
         .unwrap();
-    let error = sim.run_until(0).unwrap_err().to_string();
-    assert!(
-        error.contains(
-            "a constraint on the elements of a random array whose size a constraint names"
-        ),
-        "{error}"
-    );
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("ok")), BigUint::from(1u8));
 }
 
 #[test]

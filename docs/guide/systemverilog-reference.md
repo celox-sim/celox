@@ -319,14 +319,13 @@ blocks in programs. Two region deviations are listed under
   constraints that name static properties in an object that a rand handle
   reaches (its randomization fails), random arrays of elements other than
   2-state integral ones of at most 64 bits, `randc` arrays, random object
-  and string properties, constrained enums and `randc`, a `foreach` or
-  `sum()` over a random array whose size a constraint names, `sum() with`,
-  `soft` constraints in a `foreach` or with `dist`, `dist` with `default
-  :/`, weights other than constant expressions or ranges weighted per value
-  with bounds other than constant expressions, typed parameters in
-  constraints, array sets, X/Z wildcard items and `$` bounds in `inside`
-  sets, and `randc` domains beyond 1–8-bit integers and scalar enums with up
-  to 256 members. Named constraint blocks cover only 1–64-bit scalar integer
+  and string properties, constrained enums and `randc`, `sum() with`, `soft`
+  constraints in a `foreach` or with `dist`, `dist` with `default :/`,
+  weights other than constant expressions or ranges weighted per value with
+  bounds other than constant expressions, typed parameters in constraints,
+  array sets, X/Z wildcard items and `$` bounds in `inside` sets, and
+  `randc` domains beyond 1–8-bit integers and scalar enums with up to 256
+  members. Named constraint blocks cover only 1–64-bit scalar integer
   properties with comparisons, logical and bitwise operations, addition,
   subtraction, and multiplication, bit-selects and part-selects of a
   property at constant positions, class handle properties compared with each
@@ -334,18 +333,23 @@ blocks in programs. Two region deviations are listed under
   input arguments (18.5.11); a call in a constraint loop, in inline
   constraints, in the constraints of an object a rand handle reaches, or in
   an argument of another is unsupported. The elements of a random array,
-  fixed-size or dynamic, that a `foreach` or a `sum()` of a constraint names
-  are solver variables (18.5.8); the others are drawn at random. A `dist`
-  allows the values of its items of nonzero total weight, a range bound `$`
-  being the lowest or highest value of the type of its expression; the
-  solver first tries one item of each `dist`, picked by its weight (one
-  under `if` or `->` where its condition holds, one in a `foreach` for each
-  element), and then any allowed value, so the weights bias the values
-  without sampling them exactly. A `unique` constraint takes singular
-  properties of the class of equivalent types; other variables, arrays and
-  slices in it are unsupported. A constraint may name a member of the object
-  a handle property refers to (`h.m`, 18.5.9): a variable solved with the
-  object through a rand handle, a state value through another; longer chains
+  fixed-size or dynamic, that a `foreach`, a `sum()` or an element at a
+  constant position of a constraint names are solver variables (18.5.8); the
+  others are drawn at random. An array whose size a constraint names too has
+  its size solved first, without the constraints on its elements, which then
+  take it as state (18.5.7.1), so they can leave the call no solution; those
+  sizes are solved before the arguments of the functions the constraints
+  call (18.5.11); an element past the end reads as 0. A `dist` allows the
+  values of its items of nonzero total weight, a range bound `$` being the
+  lowest or highest value of the type of its expression; the solver first
+  tries one item of each `dist`, picked by its weight (one under `if` or
+  `->` where its condition holds, one in a `foreach` for each element), and
+  then any allowed value, so the weights bias the values without sampling
+  them exactly. A `unique` constraint takes singular properties of the class
+  of equivalent types; other variables, arrays and slices in it are
+  unsupported. A constraint may name a member of the object a handle
+  property refers to (`h.m`, 18.5.9): a variable solved with the object
+  through a rand handle, a state value through another; longer chains
   (`h.g.m`) are unsupported. A guard of state values, as of `if` or `->`, is
   evaluated before solving, so a constraint it leaves out reads no member of
   a null handle (18.5.13).

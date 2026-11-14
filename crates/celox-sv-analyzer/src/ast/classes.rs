@@ -294,7 +294,8 @@ fn reads_input(expr: &celox_heap::randomization::Expr) -> bool {
         | Expr::Static(_)
         | Expr::Solved(_)
         | Expr::Member { .. }
-        | Expr::Element { .. } => false,
+        | Expr::Element { .. }
+        | Expr::ElementAt { .. } => false,
     }
 }
 
