@@ -4990,3 +4990,61 @@ fn constraints_read_fixed_size_array_properties() {
         ["0", "0", "0", "0"]
     );
 }
+
+#[test]
+fn inherited_properties_keep_the_types_their_class_declares() {
+    // A property of a base class has the type its declaration names in the
+    // base (IEEE 1800-2023 8.13): the base's own typedef or local parameter,
+    // not one of the same name of a derived specialization whose method
+    // first lays the base out (uvm-1.2's `uvm_callbacks_base::m_this_type`).
+    let source = "package p;
+        class Base;
+            typedef Base this_type;
+            localparam int W = 4;
+            this_type items[$];
+            bit [W-1:0] x;
+        endclass
+        class Mid #(type T = int) extends Base;
+            typedef Mid#(T) this_type;
+            localparam int W = 8;
+        endclass
+        class Leaf #(type T = int) extends Mid#(T);
+            static function int add();
+                Leaf#(T) me = new;
+                Mid#(T) base_inst = new;
+                base_inst.items.push_back(me);
+                base_inst.items.push_back(base_inst);
+                base_inst.x = 8'hff;
+                return base_inst.items.size() * 100 + base_inst.x;
+            endfunction
+        endclass
+        typedef Leaf#(byte) lb_t;
+        typedef Leaf#(shortint) ls_t;
+    endpackage
+    module Top;
+        import p::*;
+        initial $display(\"%0d %0d\", lb_t::add(), ls_t::add());
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["215 215"]
+    );
+    // The element type is the base's, which an unrelated class is not.
+    let source = "package p;
+        class Other; endclass
+        class Base; typedef Base this_type; this_type items[$]; endclass
+        class Mid #(type T = int) extends Base; typedef Mid#(T) this_type; endclass
+        class Leaf #(type T = int) extends Mid#(T);
+            static function void add(); Other o = new; Mid#(T) b = new; b.items.push_back(o); endfunction
+        endclass
+        typedef Leaf#(byte) lb_t;
+    endpackage
+    module Top; import p::*; initial lb_t::add(); endmodule";
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("other.sv"))], "Top")
+            .build_cranelift()
+    else {
+        panic!("an unrelated class was accepted as an element");
+    };
+    assert!(error.to_string().contains("`p::Base`"), "{error}");
+}
