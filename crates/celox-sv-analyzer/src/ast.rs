@@ -490,6 +490,15 @@ impl std::ops::DerefMut for Type {
     }
 }
 
+impl Type {
+    /// The shape of the type, for a change that keeps its semantic type,
+    /// such as a bound replaced by its value: unlike through `DerefMut`, the
+    /// type keeps its binding.
+    pub(in crate::ast) fn shape_keeping_binding(&mut self) -> &mut TypeShape {
+        Arc::make_mut(&mut self.shape)
+    }
+}
+
 impl From<TypeShape> for Type {
     fn from(shape: TypeShape) -> Self {
         Self {

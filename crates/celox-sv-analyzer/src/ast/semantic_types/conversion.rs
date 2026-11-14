@@ -9,6 +9,11 @@ use crate::ast::{
 
 /// The semantic type of `ty`, whose ranges name constants of `env`; `None`
 /// if a range is not constant or the type has no semantic type yet.
+///
+/// A type bound where it was declared (see [`bind_declared`]) is that
+/// semantic type: the names in a type resolve in the scope that declares it
+/// (IEEE 1800-2023 6.18, 23.9), which `env` may not see. Where `env` does
+/// tell a type, debug builds check it is the same one.
 pub(in crate::ast) fn of_type(
     table: &mut TyTable,
     functions: &const_functions::ConstantFunctions,
@@ -16,11 +21,45 @@ pub(in crate::ast) fn of_type(
     env: &ConstEnv,
 ) -> Option<TyId> {
     if let Some(id) = ty.binding.get(table) {
-        debug_assert_eq!(
-            Some(id),
-            convert(table, functions, ty, env),
-            "a type bound to a semantic type converts to another"
-        );
+        #[cfg(debug_assertions)]
+        if let Some(fresh) = convert(table, functions, ty, env) {
+            assert_eq!(
+                fresh, id,
+                "a type bound where it was declared converts to another type"
+            );
+        }
+        return Some(id);
+    }
+    nested_type(table, functions, ty, env)
+}
+
+/// Bind `ty` to its semantic type in `env`, the constants of the scope that
+/// declares it (see [`of_type`]), unless it is bound already or has none.
+/// Each type a declaration nests is bound before the type that holds it, so
+/// that converting one never descends further than its own members.
+pub(in crate::ast) fn bind_declared(
+    table: &mut TyTable,
+    functions: &const_functions::ConstantFunctions,
+    ty: &mut Type,
+    env: &ConstEnv,
+) {
+    if ty.binding.get(table).is_none()
+        && let Some(id) = convert(table, functions, ty, env)
+    {
+        ty.binding.set(table, id);
+    }
+}
+
+/// The semantic type of `ty` nested in a type being converted: its binding
+/// if it has one, unchecked, so that the check of [`of_type`] stays one
+/// level deep.
+fn nested_type(
+    table: &mut TyTable,
+    functions: &const_functions::ConstantFunctions,
+    ty: &Type,
+    env: &ConstEnv,
+) -> Option<TyId> {
+    if let Some(id) = ty.binding.get(table) {
         return Some(id);
     }
     convert(table, functions, ty, env)
@@ -181,12 +220,12 @@ impl Parts<'_> {
                     bound: capacity.checked_sub(1),
                 },
                 ContainerKind::Associative { .. } => ArrayKind::Associative {
-                    key: of_type(table, functions, container.key.as_ref()?, env)?,
+                    key: nested_type(table, functions, container.key.as_ref()?, env)?,
                 },
             };
             return Some(TyData::Array {
                 kind,
-                element: of_type(table, functions, &container.element, env)?,
+                element: nested_type(table, functions, &container.element, env)?,
             });
         }
         // Events and processes are handles of built-in classes.
@@ -206,7 +245,7 @@ impl Parts<'_> {
                 .map(|member| {
                     Some((
                         Arc::<str>::from(member.name.as_str()),
-                        of_type(table, functions, &member.r#type, env)?,
+                        nested_type(table, functions, &member.r#type, env)?,
                     ))
                 })
                 .collect::<Option<Arc<[_]>>>()?;
@@ -258,7 +297,7 @@ impl Parts<'_> {
                 .map(|member| {
                     Some((
                         Arc::<str>::from(member.name()),
-                        of_type(table, functions, member.r#type(), env)?,
+                        nested_type(table, functions, member.r#type(), env)?,
                     ))
                 })
                 .collect::<Option<Arc<[_]>>>()?;

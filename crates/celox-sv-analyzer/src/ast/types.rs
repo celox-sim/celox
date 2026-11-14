@@ -528,7 +528,15 @@ pub(super) fn bind_alias(
         name,
     );
     let context = PackedDimensions::new(HashMap::default(), dimension_env, aliases);
-    containers::with_dimensions(base, &alias.dimensions, syntax_tree, session, &context).map(Some)
+    let mut ty =
+        containers::with_dimensions(base, &alias.dimensions, syntax_tree, session, &context)?;
+    semantic_types::bind_declared(
+        &mut session.types,
+        &syntax_tree.functions,
+        &mut ty,
+        &context.const_env,
+    );
+    Ok(Some(ty))
 }
 
 /// `ty` with the bounds of its ranges evaluated in `const_env`, the

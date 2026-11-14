@@ -20,7 +20,7 @@ mod streams;
 mod tests;
 
 pub(super) use bindings::ConstantType;
-pub(super) use conversion::{of_shape, of_type};
+pub(super) use conversion::{bind_declared, of_shape, of_type};
 
 /// The bounds of the packed dimensions of `ty`, outermost first, as the
 /// type table resolves them with the constants of `env` (an element's, for
@@ -228,8 +228,9 @@ pub(super) struct Supertypes {
 }
 
 /// The semantic type a [`crate::ast::Type`] was bound to, kept until the
-/// type changes. Whoever builds a type binds it; a copy of the type keeps
-/// the binding, and any change of its shape forgets it.
+/// type changes: the one the scope that declares it tells (see
+/// [`bind_declared`]). Whoever builds a type binds it; a copy of the type
+/// keeps the binding, and any change of its shape forgets it.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Binding(Option<RetainedType>);
 
@@ -242,6 +243,11 @@ impl Binding {
     /// The semantic type in `table`, if bound to one of its types.
     pub(super) fn get(&self, table: &TyTable) -> Option<TyId> {
         self.0.as_ref()?.in_table(table)
+    }
+
+    /// Bind to type `id` of `table`.
+    pub(super) fn set(&mut self, table: &TyTable, id: TyId) {
+        self.0 = Some(table.retain(id));
     }
 }
 
