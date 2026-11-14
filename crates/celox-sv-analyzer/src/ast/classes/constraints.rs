@@ -1032,6 +1032,81 @@ fn solver_element(
         && solver_type(&container.element, tree, session, env).is_ok()
 }
 
+/// The value of member `name` of the class whose lineage, from the class
+/// on, is `lineage`, if it is a property of the class (IEEE 1800-2023 18.5):
+/// the variable of an instance or a static rand one, the value of another
+/// static one.
+fn class_member(
+    name: &str,
+    lineage: &[String],
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    properties: &[Property],
+    names: &Names<'_>,
+    env: &ConstEnv,
+) -> Result<Option<Typed>, String> {
+    match super::member(name, lineage, properties, names.aggregates, names.statics) {
+        Some(super::Member::Static(index)) => {
+            // A static property of the class: the variable of the rand one
+            // the call solves, the value of another.
+            let property = &names.statics[index];
+            accessible(
+                &property.owner,
+                &property.name,
+                property.local,
+                property.protected,
+                tree,
+                session,
+                env,
+            )?;
+            solver_type(&property.r#type, tree, session, env)?;
+            Ok(Some(if property.rand {
+                let slot = names
+                    .slots
+                    .iter()
+                    .position(|slot| slot.variable == property.variable)
+                    .ok_or("a static rand property without its slot")?;
+                Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Static(slot)),
+                    width: names.slots[slot].field.width,
+                    signed: names.slots[slot].field.signed,
+                }
+            } else {
+                let index = names
+                    .inputs
+                    .iter()
+                    .position(|input| input.variable == property.variable)
+                    .ok_or("a static property wider than 64 bits in a constraint")?;
+                let input = &names.inputs[index];
+                Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Input {
+                        index,
+                        width: input.width,
+                    }),
+                    width: input.width,
+                    signed: input.signed,
+                }
+            }))
+        }
+        Some(super::Member::Instance(index)) => {
+            let property = &properties[index];
+            visible(property, tree, session, env)?;
+            solver_holds(property, tree, session, env)?;
+            // The field of the property among those of the program.
+            let field = properties[..index]
+                .iter()
+                .filter(|property| constrainable(property))
+                .count();
+            Ok(Some(Typed {
+                kind: Kind::Leaf(ConstraintExpr::Field(field)),
+                width: property.field.width,
+                signed: property.field.signed,
+            }))
+        }
+        Some(super::Member::Aggregate(_)) | None => Ok(None),
+    }
+}
+
 /// Constraint `id` of a class with `properties` and `names`, whose other
 /// names are the variables of a randomize call, input `index` of the
 /// program, of `width` bits and `signed`, by `inputs`.
@@ -1206,69 +1281,10 @@ pub(in crate::ast) fn bind_inputs(
             }
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
-                let member = super::member(
-                    &name,
-                    names.lineage,
-                    properties,
-                    names.aggregates,
-                    names.statics,
-                );
-                if let Some(super::Member::Static(index)) = member {
-                    // A static property of the class (18.5): the variable
-                    // of the rand one the call solves, the value of another.
-                    let property = &names.statics[index];
-                    accessible(
-                        &property.owner,
-                        &property.name,
-                        property.local,
-                        property.protected,
-                        tree,
-                        session,
-                        env,
-                    )?;
-                    solver_type(&property.r#type, tree, session, env)?;
-                    return Ok(if property.rand {
-                        let slot = names
-                            .slots
-                            .iter()
-                            .position(|slot| slot.variable == property.variable)
-                            .ok_or("a static rand property without its slot")?;
-                        Typed {
-                            kind: Kind::Leaf(ConstraintExpr::Static(slot)),
-                            width: names.slots[slot].field.width,
-                            signed: names.slots[slot].field.signed,
-                        }
-                    } else {
-                        let index = names
-                            .inputs
-                            .iter()
-                            .position(|input| input.variable == property.variable)
-                            .ok_or("a static property wider than 64 bits in a constraint")?;
-                        let input = &names.inputs[index];
-                        Typed {
-                            kind: Kind::Leaf(ConstraintExpr::Input {
-                                index,
-                                width: input.width,
-                            }),
-                            width: input.width,
-                            signed: input.signed,
-                        }
-                    });
-                }
-                if let Some(super::Member::Instance(index)) = member {
-                    let property = &properties[index];
-                    visible(property, tree, session, env)?;
-                    solver_holds(property, tree, session, env)?;
-                    // The field of the property among those of the program.
-                    let field = properties[..index]
-                        .iter()
-                        .filter(|property| constrainable(property))
-                        .count();
-                    Typed {
-                        kind: Kind::Leaf(ConstraintExpr::Field(field)),
-                        width: property.field.width,
-                        signed: property.field.signed,
-                    }
+                if let Some(member) =
+                    class_member(&name, names.lineage, tree, session, properties, names, env)?
+                {
+                    member
                 } else if let Some(&(index, width, signed)) = inputs.get(&name) {
                     Typed {
                         kind: Kind::Leaf(ConstraintExpr::Input { index, width }),
@@ -1316,6 +1332,40 @@ pub(in crate::ast) fn bind_inputs(
             ExprKind::Member { .. } if array_method(id, native, properties, names).is_some() => {
                 let (array, method) = array_method(id, native, properties, names).unwrap();
                 return array_value(array, &method, properties, names, tree, session, env);
+            }
+            // A property qualified by `this` or `super` (IEEE 1800-2023
+            // 8.11, 8.15): one of the class, or of its base, also in inline
+            // constraints, where it never names the caller's (18.7).
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "."
+                && matches!(
+                    &native
+                        .expression(expression_binding::ungroup(*expression, native))
+                        .kind,
+                    ExprKind::Name(root) if matches!(root.spelling.as_str(), "this" | "super")
+                ) =>
+            {
+                let ExprKind::Name(root) = &native
+                    .expression(expression_binding::ungroup(*expression, native))
+                    .kind
+                else {
+                    unreachable!("`this` or `super`");
+                };
+                let lineage = if root.spelling == "super" {
+                    names
+                        .lineage
+                        .get(1..)
+                        .filter(|base| !base.is_empty())
+                        .ok_or("`super` in a class without a base class")?
+                } else {
+                    names.lineage
+                };
+                let member = instances::normalize_identifier(&name.spelling);
+                class_member(&member, lineage, tree, session, properties, names, env)?
+                    .ok_or_else(|| format!("constraint variable `{}.{member}`", root.spelling))?
             }
             ExprKind::Member {
                 expression,
@@ -1849,6 +1899,9 @@ pub(in crate::ast) fn bind_inputs(
             ExprKind::SoftConstraint { .. } | ExprKind::DisableSoft { .. } => {
                 return Err("soft constraint in a constraint loop".into());
             }
+            ExprKind::SolveBefore { .. } => {
+                return Err("solve before inside a constraint expression".into());
+            }
         })
     }
     // The target of `disable soft h.m`, a member of the object a rand
@@ -1858,6 +1911,15 @@ pub(in crate::ast) fn bind_inputs(
             random_member(*variable, tree, session, properties, env)?
         }
         _ => false,
+    };
+    // Each variable of `solve before`, as `h.m` too, likewise (18.5.9).
+    let ordered_members = match &tree.declarations().expression(id).kind {
+        ExprKind::SolveBefore { before, after } => before
+            .iter()
+            .chain(after)
+            .map(|&variable| self::random_member(variable, tree, session, properties, env))
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => Vec::new(),
     };
     let mut bound = |id| {
         expression(
@@ -1915,7 +1977,60 @@ pub(in crate::ast) fn bind_inputs(
             }
             _ => Err("disable soft of other than a random property or array size".into()),
         },
+        // An order of random variables (18.5.9) leaves the solutions as
+        // they are, and the search keeps no uniform distribution that it
+        // would shape: each must be a rand variable or the size of a rand
+        // array, and the constraint holds.
+        ExprKind::SolveBefore {
+            ref before,
+            ref after,
+        } => {
+            for (position, &variable) in before.iter().chain(after).enumerate() {
+                // The variable it names, a select of one too (Syntax 18-8),
+                // as the constraint's other expressions name it.
+                let mut variables = Vec::new();
+                operand_variables(
+                    &bound(variable)?,
+                    properties,
+                    ordered_members[position],
+                    &mut variables,
+                );
+                if variables != [true] {
+                    return Err(
+                        "solve before of other than a rand variable, a select of one or the size of a rand array"
+                            .into(),
+                    );
+                }
+            }
+            Ok(ConstraintExpr::Literal(1, 1))
+        }
         _ => bound(id),
+    }
+}
+
+/// Whether `variable`, an operand as the constraint's other expressions
+/// bind it, is a random variable of the solve that is not randc, or the
+/// size of a rand array (IEEE 1800-2023 18.5.9); `member` tells it for a
+/// member of the object a rand handle refers to (see [`random_member`]).
+fn random_variable(variable: &ConstraintExpr, properties: &[Property], member: bool) -> bool {
+    match variable {
+        ConstraintExpr::Field(field) => properties
+            .iter()
+            .filter(|property| constrainable(property))
+            .nth(*field)
+            .is_some_and(|property| property.rand && !property.randc),
+        // Only a rand static property is a variable of the solve.
+        ConstraintExpr::Static(_) => true,
+        ConstraintExpr::Size(array) => properties
+            .iter()
+            .filter(|property| property.constraint_array())
+            .nth(*array)
+            .is_some_and(|property| property.rand),
+        ConstraintExpr::Member { .. } => member,
+        // An argument of a scope randomize call, which [`scope_fields`]
+        // makes a field of the solve: a random variable (18.12.1).
+        ConstraintExpr::Input { index, .. } => *index >= SCOPE_FIELDS,
+        _ => false,
     }
 }
 
@@ -1928,6 +2043,34 @@ fn soft_dist(expression: ExprId, tree: &AnalysisContext<'_>) -> bool {
             operator, right, ..
         } if operator == "||" => soft_dist(*right, tree),
         _ => false,
+    }
+}
+
+/// The variables that bound constraint operand `expr` reads, each with
+/// whether it is a random variable as [`random_variable`] tells.
+fn operand_variables(
+    expr: &ConstraintExpr,
+    properties: &[Property],
+    member: bool,
+    variables: &mut Vec<bool>,
+) {
+    match expr {
+        ConstraintExpr::Field(_)
+        | ConstraintExpr::Static(_)
+        | ConstraintExpr::Size(_)
+        | ConstraintExpr::Member { .. }
+        | ConstraintExpr::Input { .. } => {
+            variables.push(random_variable(expr, properties, member));
+        }
+        ConstraintExpr::Sum(_) => variables.push(false),
+        ConstraintExpr::Resize { value, .. } | ConstraintExpr::Unary { value, .. } => {
+            operand_variables(value, properties, member, variables);
+        }
+        ConstraintExpr::Binary { left, right, .. } => {
+            operand_variables(left, properties, member, variables);
+            operand_variables(right, properties, member, variables);
+        }
+        _ => {}
     }
 }
 

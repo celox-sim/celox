@@ -405,7 +405,8 @@ pub(in crate::ast) fn validate(
             | ExprKind::RandomizeWith { .. }
             | ExprKind::ConstraintForeach { .. }
             | ExprKind::SoftConstraint { .. }
-            | ExprKind::DisableSoft { .. } => {
+            | ExprKind::DisableSoft { .. }
+            | ExprKind::SolveBefore { .. } => {
                 return Err(unsupported("array method with expression"));
             }
             ExprKind::Parameterized { .. } => {
@@ -690,7 +691,8 @@ pub(in crate::ast) fn literal_widths(
             | ExprKind::RandomizeWith { .. }
             | ExprKind::ConstraintForeach { .. }
             | ExprKind::SoftConstraint { .. }
-            | ExprKind::DisableSoft { .. } => {
+            | ExprKind::DisableSoft { .. }
+            | ExprKind::SolveBefore { .. } => {
                 return Err(unsupported("array method with expression"));
             }
             ExprKind::Literal(text) if evaluated => {
@@ -1298,6 +1300,7 @@ pub(in crate::ast) fn children(
             children.push(*variable);
             children.extend(*condition);
         }
+        ExprKind::SolveBefore { before, after } => children.extend(before.iter().chain(after)),
         ExprKind::Call {
             expression,
             arguments,

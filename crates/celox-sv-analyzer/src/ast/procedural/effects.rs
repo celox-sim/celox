@@ -95,6 +95,7 @@ fn operands(kind: &ExprKind) -> Vec<ExprId> {
             operands.push(*variable);
             operands.extend(*condition);
         }
+        ExprKind::SolveBefore { before, after } => operands.extend(before.iter().chain(after)),
         ExprKind::RandomizeWith {
             expression,
             constraints,
