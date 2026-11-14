@@ -502,6 +502,114 @@ pub(super) fn property_place(
     })
 }
 
+/// The place of the member of an element of unpacked structure type of a
+/// container that native expression `root` writes or selects into:
+/// `q[i].m`, `q[i].s.m[3:0]`, `q[i].p.f` of a packed member `p`. The place
+/// holds the leaves of the member that the members of `root` name down to
+/// the first that is no unpacked structure, or that no member follows; it
+/// is returned with that member's native expression, which the rest of
+/// `root` selects into as into a value of its type (7.2, 7.4).
+fn struct_member_place(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(ObjectPlace, ExprId)>> {
+    // The members and selects above the element, innermost last.
+    let mut above = Vec::new();
+    let mut id = ungroup(root, native);
+    let (target, container, index) = loop {
+        let next = match &native.expression(id).kind {
+            ExprKind::Member {
+                expression,
+                separator,
+                ..
+            } if separator == "." => *expression,
+            ExprKind::Select { expression, .. } => {
+                let member_above = above.last().is_some_and(|above: &ExprId| {
+                    matches!(native.expression(*above).kind, ExprKind::Member { .. })
+                });
+                if member_above
+                    && let Some(found) =
+                        containers::struct_element_place(id, tree, session, dimensions)?
+                {
+                    break found;
+                }
+                *expression
+            }
+            _ => return Ok(None),
+        };
+        above.push(id);
+        id = ungroup(next, native);
+    };
+    let aggregate = target
+        .element
+        .unpacked_struct()
+        .expect("an element of unpacked structure type")
+        .clone();
+    // The members that name the place, from the element up.
+    let mut names = Vec::new();
+    let mut member = None;
+    let mut current = aggregate.as_ref();
+    for &id in above.iter().rev() {
+        let ExprKind::Member { name, .. } = &native.expression(id).kind else {
+            break;
+        };
+        let name = instances::normalize_identifier(&name.spelling);
+        let Some(declared) = current.member(&name) else {
+            return Ok(None);
+        };
+        names.push(name);
+        member = Some(id);
+        match declared.r#type.unpacked_struct() {
+            Some(inner) if declared.r#type.unpacked_ranges.is_empty() => current = inner,
+            _ => break,
+        }
+    }
+    let Some(member) = member else {
+        return Ok(None);
+    };
+    let Some((member_type, leaves)) = unpacked_structs::member_leaves(&aggregate, &names) else {
+        return Ok(None);
+    };
+    let offset = leaves.iter().map(|leaf| leaf.offset).min().unwrap_or(0);
+    let width = leaves.iter().map(|leaf| leaf.width).sum::<usize>();
+    let end = leaves
+        .iter()
+        .map(|leaf| leaf.offset + leaf.width)
+        .max()
+        .unwrap_or(0);
+    if width == 0 || end - offset != width {
+        return Err(unsupported(
+            "assignment to a structure member whose members are not adjacent in its element",
+        ));
+    }
+    let outer_width = aggregate
+        .leaves()
+        .iter()
+        .map(|leaf| leaf.offset + leaf.width)
+        .max()
+        .unwrap_or(0);
+    let element = ObjectPlace::Element {
+        container,
+        index,
+        layout: target.layout,
+        element: target.element.clone(),
+        record: target.record.clone(),
+    };
+    Ok(Some((
+        ObjectPlace::Member {
+            outer: Box::new(element),
+            offset,
+            width,
+            outer_width,
+            r#type: member_type,
+        },
+        member,
+    )))
+}
+
 /// The target that native expression `root` assigns when it is a class
 /// property of integral type, a select of one, or a select of an element
 /// that a container holds by value: an [`LValue::Object`], whose selection
@@ -544,9 +652,15 @@ pub(in crate::ast) fn object_place(
                 index,
                 layout: target.layout,
                 element: target.element.clone(),
+                record: target.record.clone(),
             },
             element,
         )
+    } else if let Some((place, member)) =
+        struct_member_place(root, native, tree, session, dimensions)?
+    {
+        containers::check_written_storage(root, tree, session, dimensions)?;
+        (place, member)
     } else {
         return Ok(None);
     };

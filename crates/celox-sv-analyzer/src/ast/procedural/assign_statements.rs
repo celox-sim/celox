@@ -94,19 +94,6 @@ impl BodyBuilder<'_, '_, '_> {
                 "operator `{op}` on an unpacked structure"
             )));
         }
-        if containers::element_member(
-            left,
-            self.tree.declarations(),
-            self.tree,
-            self.session,
-            &self.dims,
-        )?
-        .is_some()
-        {
-            return Err(unsupported(
-                "assignment to a member of an element of a dynamic container or a fixed-size array class property",
-            ));
-        }
         let declarations = self.tree.declarations();
         // A chandle is only assigned (IEEE 1800-2023 6.14); the destinations
         // dispatched below write without `variable_lvalue`, so its target
@@ -300,6 +287,9 @@ impl BodyBuilder<'_, '_, '_> {
         }
         if let Some(stmt) = self.aggregate_assignment(op, nonblocking, left, right)? {
             return Ok(vec![stmt]);
+        }
+        if let Some(stmts) = self.element_struct_member_assignment(nonblocking, left, right)? {
+            return Ok(stmts);
         }
         if op != "=" {
             self.reject_tagged_integral_target(left)?;

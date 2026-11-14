@@ -885,7 +885,8 @@ pub(in crate::ast) fn shape(
 ) -> Converted<Option<VariableDimensions>> {
     enum Job {
         Enter(ExprId),
-        Index(ExprId),
+        /// An index, or `None` for `$`, the last element of a queue.
+        Index(Option<ExprId>),
         Range(ExprId, ExprId, bool),
         Member(String),
     }
@@ -1026,7 +1027,8 @@ pub(in crate::ast) fn shape(
                         dimension,
                     } => {
                         match dimension.kind {
-                            DimensionKind::Index(index) => jobs.push(Job::Index(index)),
+                            DimensionKind::Index(index) => jobs.push(Job::Index(Some(index))),
+                            DimensionKind::Queue(None) => jobs.push(Job::Index(None)),
                             DimensionKind::Range { left, right } => {
                                 jobs.push(Job::Range(left, right, false))
                             }
@@ -1118,7 +1120,9 @@ pub(in crate::ast) fn shape(
                 }
             }
             Job::Index(index) => {
-                validate_index(index, tree, session, context)?;
+                if let Some(index) = index {
+                    validate_index(index, tree, session, context)?;
+                }
                 let shape = values
                     .last_mut()
                     .ok_or_else(|| unsupported("query shape"))?;
