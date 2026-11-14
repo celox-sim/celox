@@ -353,8 +353,8 @@ blocks in programs. Two region deviations are listed under
   (`h.g.m`) are unsupported. A guard of state values, as of `if` or `->`, is
   evaluated before solving, so a constraint it leaves out reads no member of
   a null handle (18.5.13).
-- Inline `with` constraints: four-state and aggregate caller-scope inputs,
-  typed parameter inputs, a `local::` name of a property of the caller's
+- Inline `with` constraints: aggregate caller-scope inputs, typed
+  parameter inputs, a `local::` name of a property of the caller's
   class, and a member of a caller-scope variable (18.7) other than the one
   that holds the object being randomized, as `h` of
   `h.randomize() with { h.x > 0; }`, which names that object, also in
@@ -653,14 +653,15 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
   it is kept, its weights shape the choice as those of a hard one do
   (18.5.3), and a discarded one has no effect on it.
 - A 4-state rand property takes a 2-state value. The X and Z bits of a
-  4-state state property, and of the value of a function a constraint
-  calls whose type is 4-state, follow the 4-state semantics of each
-  operation (11.4): a constraint or guard whose truth they decide ends the
-  simulation with an error (18.3), one they do not decide, as through a
-  mask, a select or an `&&` a known 0 decides, takes its value, and such a
-  guard is evaluated before solving (18.5.13). Where the truth also
-  depends on random variables, the solution found decides whether they
-  reach it.
+  4-state state property, of the value of a function a constraint calls
+  whose type is 4-state, and of a 4-state caller-scope input of inline
+  constraints or of `std::randomize() with`, follow the 4-state semantics
+  of each operation (11.4): a constraint or guard whose truth they decide
+  ends the simulation with an error (18.3), one they do not decide, as
+  through a mask, a select or an `&&` a known 0 decides, takes its value,
+  and such a guard is evaluated before solving (18.5.13). Where the truth
+  also depends on random variables, the solution found decides whether
+  they reach it.
 - `solve before` (18.5.9) leaves the solutions as they are, and the search
   does not order its choices by it; a circular order is not diagnosed.
 - A function a constraint calls (18.5.11) runs as any call of it does,

@@ -1598,6 +1598,99 @@ fn four_state_properties_randomize_to_two_state_values() {
 }
 
 #[test]
+fn four_state_inline_inputs_take_their_known_bits() {
+    // A 4-state variable of the caller is an input of inline constraints
+    // while its bits are known; one a constraint reads with X or Z bits is
+    // an error (IEEE 1800-2023 18.3, 18.7).
+    let run = |body: &str, four_state: bool| {
+        let source = format!(
+            "module Top(output int ok, output int got);
+                class C; rand bit [7:0] x; endclass
+                C c;
+                logic [7:0] base;
+                initial begin c = new; {body} got = c.x; end
+            endmodule"
+        );
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        let (ok, got) = (sim.signal("ok"), sim.signal("got"));
+        sim.run_until(0).map(|()| (sim.get(ok), sim.get(got)))
+    };
+    let one = BigUint::from(1u8);
+    for four_state in [false, true] {
+        let (ok, got) = run(
+            "base = 8'h20; ok = c.randomize() with { x inside {[base:base + 8'h3]}; };",
+            four_state,
+        )
+        .unwrap();
+        assert!(
+            ok == one
+                && (0x20u8..=0x23)
+                    .contains(&(got.to_u32_digits().first().copied().unwrap_or(0) as u8)),
+            "{four_state}"
+        );
+    }
+    let scope = "begin bit [7:0] v; ok = std::randomize(v) with { v == base; }; c.x = v; end";
+    for body in [
+        "base = 8'bxxxx_0101; ok = c.randomize() with { x == base; };".to_owned(),
+        format!("base = 8'bxxxx_0101; {scope}"),
+    ] {
+        assert_eq!(run(&body, false).unwrap().0, one, "{body}");
+        let error = run(&body, true).unwrap_err().to_string();
+        assert!(error.contains("X or Z bits"), "{body}: {error}");
+    }
+    // X and Z bits follow the 4-state semantics of each operation: only
+    // those that decide a constraint's or a guard's truth count, in
+    // `std::randomize` too.
+    for (body, want) in [
+        (
+            "base = 8'b1010_xxxx; ok = c.randomize() with { x == base >> 4; };",
+            0xa,
+        ),
+        (
+            "base = 8'b1010_xxxx; ok = c.randomize() with { x == (base & 8'hf0); };",
+            0xa0,
+        ),
+        (
+            "base = 8'b0xxx_xxxx; ok = c.randomize() with { if (base >> 7) x == 1; else x == 2; };",
+            2,
+        ),
+        (
+            "base = 8'b1xxx_xxxx; ok = c.randomize() with { if (base >> 7) x == 1; else x == 2; };",
+            1,
+        ),
+        (
+            "base = 8'b1010_xxxx; begin bit [7:0] v; ok = std::randomize(v) with { v == base >> 4; }; c.x = v; end",
+            0xa,
+        ),
+        (
+            "base = 8'b1010_xxxx; ok = c.randomize() with { x == (base & ~8'h0f); };",
+            0xa0,
+        ),
+        (
+            "base = 8'bx000_0000; ok = c.randomize() with { if ((base >> 7) && 1'b0) x == 1; x == 2; };",
+            2,
+        ),
+    ] {
+        let (ok, got) = run(body, true).unwrap();
+        assert_eq!(
+            (ok, got),
+            (one.clone(), BigUint::from(want as u8)),
+            "{body}"
+        );
+    }
+    // An X that decides a guard's truth is an error.
+    let decided = "base = 8'bx000_0000; ok = c.randomize() with { if ((base >> 7) && 1'b1) x == 1; x == 2; };";
+    let error = run(decided, true).unwrap_err().to_string();
+    assert!(error.contains("X or Z bits"), "{error}");
+}
+
+#[test]
 fn misplaced_super_new_static_misuse_and_unimplemented_methods_are_rejected() {
     for (body, want) in [
         (

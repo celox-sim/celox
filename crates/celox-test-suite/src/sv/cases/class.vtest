@@ -2853,6 +2853,38 @@ endmodule
   (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
   (expect_output "0\n"))
 
+; A 4-state variable of the caller is an input of inline constraints while
+; the bits they read are known (18.3, 18.7), as UVM 1.2's
+; mbus_pipelined_seq reads its `logic [31:0] base_address`.
+(case inline_constraint_four_state_inputs
+  (source "four_state_inputs.sv" #"
+module Top(output int bad, output bit done);
+    class Item; rand bit [31:0] maddr; endclass
+    class Seq;
+        logic [31:0] base_address;
+        Item req;
+        function new(); req = new; endfunction
+        function int go();
+            return req.randomize() with {
+                maddr inside {[base_address:(base_address + 32'h1000)]};
+            };
+        endfunction
+    endclass
+    Seq s;
+    initial begin
+        s = new;
+        s.base_address = 32'h4000;
+        for (int i = 0; i < 10; i++)
+            if (s.go() == 0 || s.req.maddr < 32'h4000 || s.req.maddr > 32'h5000) bad++;
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (four_state)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
 ; In 2-state simulation a 4-state property holds plain values (18.3).
 (case randomize_four_state_properties_two_state
   (source "four_state_two_state.sv" #"
