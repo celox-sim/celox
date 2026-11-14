@@ -715,3 +715,52 @@ endmodule
         assert_eq!(sim.get(sim.signal("last")), 6u32.into());
     }
 }
+
+/// A class of a package reads and writes members through a virtual
+/// interface at the widths and signedness the interface declares (IEEE
+/// 1800-2023 25.9), though the package does not see the instance's
+/// signals, as a UVM driver does.
+#[test]
+fn package_classes_read_members_at_their_declared_widths() {
+    let source = "`timescale 1ns/1ns
+        interface bus_if;
+            logic clk;
+            logic ready;
+            logic valid;
+            logic [31:0] read_data;
+            logic signed [7:0] offset;
+        endinterface
+        package p;
+            class drv;
+                virtual bus_if BUS;
+                int data;
+                task run();
+                    BUS.valid <= 1;
+                    while (BUS.ready != 1) @(posedge BUS.clk);
+                    data = BUS.read_data;
+                    $display(\"%0t %h %0d %0d\", $time, data, BUS.valid, BUS.offset);
+                endtask
+            endclass
+        endpackage
+        module top;
+            import p::*;
+            bus_if b();
+            drv d;
+            initial begin b.clk = 0; b.ready = 0; b.offset = -3; forever #5 b.clk = ~b.clk; end
+            initial begin #22 b.ready = 1; b.read_data = 32'hdeadbeef; end
+            initial begin d = new; d.BUS = b; d.run(); end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build()
+        .unwrap();
+    sim.run_until(40).unwrap();
+    let lines: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines, ["25 deadbeef 1 -3"]);
+}
