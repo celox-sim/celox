@@ -752,6 +752,7 @@ fn class_builtin_signatures(
             )
         });
         if let Some((argument, ty)) = argument {
+            let ty = semantic_types::bound_builtin(&mut session.types, &tree.functions, ty);
             formals.push((
                 FunctionArgumentMetadata {
                     name: argument.into(),
@@ -764,11 +765,14 @@ fn class_builtin_signatures(
         publish_signature(
             classes::Class::subroutine_name(class_name, method),
             formals,
-            Some(match method {
-                "randomize" => Some(procedural::int_type()),
-                "get_randstate" => Some(procedural::randomization::string_type()),
-                _ => None,
-            }),
+            Some(
+                match method {
+                    "randomize" => Some(procedural::int_type()),
+                    "get_randstate" => Some(procedural::randomization::string_type()),
+                    _ => None,
+                }
+                .map(|ty| semantic_types::bound_builtin(&mut session.types, &tree.functions, ty)),
+            ),
             tree,
             session,
             context,
@@ -809,7 +813,11 @@ fn class_builtin_signatures(
             formal(procedural::CAST_DESTINATION, ParamDirection::Inout),
             formal(procedural::CAST_SOURCE, ParamDirection::Input),
         ],
-        Some(Some(procedural::int_type())),
+        Some(Some(semantic_types::bound_builtin(
+            &mut session.types,
+            &tree.functions,
+            procedural::int_type(),
+        ))),
         tree,
         session,
         context,
