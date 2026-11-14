@@ -15,6 +15,11 @@ pub(crate) struct Session {
     pub(super) next_call_site: usize,
     pub(super) diagnostics: Vec<warnings::AnalyzerWarning>,
     pub(super) generate_items: generate::Memo,
+    /// The locals the array locator calls of each body being lowered have
+    /// declared, by the id of its [`locators::LocalSink`].
+    pub(super) locator_locals: HashMap<u64, Vec<LocalVariable>>,
+    /// The id of the last [`locators::LocalSink`] opened.
+    pub(super) next_locator_sink: u64,
     /// Classes laid out so far, by name, each with the recording of the
     /// tables of its declaring scope it was laid out in (see
     /// [`classes::specializations::DeclaringScope`]).

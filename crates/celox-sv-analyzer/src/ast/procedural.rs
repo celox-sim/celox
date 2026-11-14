@@ -624,6 +624,9 @@ pub(super) fn int_type() -> Type {
 impl Drop for BodyBuilder<'_, '_, '_> {
     fn drop(&mut self) {
         self.flush_locator_locals();
+        if let Some(sink) = &self.dims.locator_locals {
+            sink.close(self.session);
+        }
     }
 }
 
@@ -638,7 +641,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let type_aliases = (*dims.type_aliases).clone();
         let automatic = state.automatic;
         let mut dims = dims.clone();
-        dims.locator_locals = Some(locators::LocalSink::new(*state.counter));
+        dims.locator_locals = Some(locators::LocalSink::new(session, *state.counter));
         let mut builder = Self {
             automatic,
             subroutine: body == system_functions::Body::Subroutine,
@@ -675,7 +678,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     /// expressions use (see [`locators`]).
     pub(super) fn flush_locator_locals(&mut self) {
         if let Some(sink) = &self.dims.locator_locals {
-            for local in sink.take() {
+            for local in sink.take(self.session) {
                 // A call bound again declares the same locals.
                 if !self
                     .state
@@ -823,7 +826,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     /// Name the variables of the body after subroutine `owner` (see
     /// [`Self::declare`]).
     pub(super) fn set_owner(&mut self, owner: String) {
-        self.dims.locator_locals = Some(locators::LocalSink::owned(&owner));
+        // The body is named anew: what its old sink collected is dropped
+        // with it.
+        if let Some(sink) = &self.dims.locator_locals {
+            sink.close(self.session);
+        }
+        self.dims.locator_locals = Some(locators::LocalSink::owned(self.session, &owner));
         self.owner = Some(owner);
         self.owned_locals = 0;
     }

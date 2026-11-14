@@ -7,25 +7,23 @@
 //! procedural body, the way `foreach` declares its loop variables.
 use super::*;
 use celox_sv_syntax::{Declarations, ExprId, ExprKind};
-use std::sync::Mutex;
 use system_functions::{
     ContainerKind, ContainerLayout, ContainerOp, HandleProperty, Locator, LocatorKey,
     LocatorMethod, LocatorSource,
 };
 
-/// The locals that locator methods declare while a procedural body binds
-/// its expressions, which the body then declares (see
-/// [`procedural::BodyBuilder`]).
-#[derive(Debug, Clone, Default)]
-pub(super) struct LocalSink(Arc<Mutex<Sink>>);
-
-#[derive(Debug, Default)]
-struct Sink {
+/// Where the locals that locator methods declare while a procedural body
+/// binds its expressions are collected, which the body then declares (see
+/// [`procedural::BodyBuilder`]). The locals are kept in the session, by the
+/// sink's id: binding contexts pass the sink by copy, and binding has the
+/// session by `&mut`.
+#[derive(Debug, Clone)]
+pub(super) struct LocalSink {
+    id: u64,
     /// What joins the source name and the site in a local's name.
-    prefix: String,
+    prefix: Arc<str>,
     /// Whether that names the body's subroutine (see `LocalVariable::owned`).
     owned: bool,
-    locals: Vec<LocalVariable>,
 }
 
 /// A body's sink is its own: binding contexts compare equal regardless.
@@ -38,21 +36,28 @@ impl PartialEq for LocalSink {
 impl Eq for LocalSink {}
 
 impl LocalSink {
-    pub(super) fn new(prefix: usize) -> Self {
-        Self(Arc::new(Mutex::new(Sink {
-            prefix: format!("@{prefix}."),
-            ..Sink::default()
-        })))
+    pub(super) fn new(session: &mut Session, prefix: usize) -> Self {
+        Self::open(session, format!("@{prefix}."), false)
     }
+
     /// The sink of the body of subroutine `owner`, whose locals its name
     /// tells apart from those of every other body, in every analysis that
     /// lowers it (see `BodyBuilder::declare`).
-    pub(super) fn owned(owner: &str) -> Self {
-        Self(Arc::new(Mutex::new(Sink {
-            prefix: format!("%{:016x}@", fxhash::hash64(&(owner, "locator"))),
-            owned: true,
-            ..Sink::default()
-        })))
+    pub(super) fn owned(session: &mut Session, owner: &str) -> Self {
+        Self::open(
+            session,
+            format!("%{:016x}@", fxhash::hash64(&(owner, "locator"))),
+            true,
+        )
+    }
+
+    fn open(session: &mut Session, prefix: String, owned: bool) -> Self {
+        session.next_locator_sink += 1;
+        Self {
+            id: session.next_locator_sink,
+            prefix: prefix.into(),
+            owned,
+        }
     }
 
     /// Declare local `source` of the locator call at `site`. The name joins
@@ -67,29 +72,45 @@ impl LocalSink {
         session: &mut Session,
         dims: &PackedDimensions,
     ) -> String {
-        let mut sink = self.0.lock().expect("locator locals");
-        let name = format!("{source}{}{site}", sink.prefix);
-        if sink.locals.iter().any(|local| local.name == name) {
+        let name = format!("{source}{}{site}", self.prefix);
+        if session
+            .locator_locals
+            .get(&self.id)
+            .is_some_and(|locals| locals.iter().any(|local| local.name == name))
+        {
             return name;
         }
-        let owned = sink.owned;
-        sink.locals.push(LocalVariable {
-            name: name.clone(),
-            source_name: source.to_string(),
-            r#type: super::ir_type(
-                session,
-                &tree.functions,
-                procedural::scoped_type(r#type, &dims.const_env),
-                &dims.const_env,
-            ),
-            owned,
-        });
+        let r#type = super::ir_type(
+            session,
+            &tree.functions,
+            procedural::scoped_type(r#type, &dims.const_env),
+            &dims.const_env,
+        );
+        session
+            .locator_locals
+            .entry(self.id)
+            .or_default()
+            .push(LocalVariable {
+                name: name.clone(),
+                source_name: source.to_string(),
+                r#type,
+                owned: self.owned,
+            });
         name
     }
 
     /// The locals declared since the last call.
-    pub(super) fn take(&self) -> Vec<LocalVariable> {
-        std::mem::take(&mut self.0.lock().expect("locator locals").locals)
+    pub(super) fn take(&self, session: &mut Session) -> Vec<LocalVariable> {
+        session
+            .locator_locals
+            .get_mut(&self.id)
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// Forget the sink, once its body is complete.
+    pub(super) fn close(&self, session: &mut Session) {
+        session.locator_locals.remove(&self.id);
     }
 }
 
