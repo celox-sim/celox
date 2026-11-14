@@ -102,6 +102,25 @@ impl Registry {
             .values()
             .find_map(|symbols| symbols.class_member_types.get(name)?.get(member).cloned())
     }
+    /// Whether class `generic` (`pkg::C`) of a package registered here
+    /// declares a covergroup `member`; `None` when the package or the class
+    /// is unknown here.
+    pub fn declares_covergroup(&self, generic: &str, member: &str) -> Option<bool> {
+        let (package, class) = generic.split_once("::")?;
+        let declarations = self.owners.get(package)?.tree.declarations();
+        let declaration = declarations.classes.iter().find(|declaration| {
+            instances::normalize_identifier(&declaration.name.spelling) == class
+                && enclosing_unit(declarations, declaration.tokens).is_some_and(|unit| {
+                    unit.kind == celox_sv_syntax::UnitKind::Package
+                        && instances::normalize_identifier(&unit.name.spelling) == package
+                })
+        })?;
+        Some(super::declares_covergroup(
+            declarations,
+            declaration,
+            member,
+        ))
+    }
     pub fn names(&self) -> Vec<String> {
         self.templates.keys().cloned().collect()
     }
