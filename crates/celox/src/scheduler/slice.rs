@@ -33,6 +33,10 @@ struct Indexed {
     incoming: HashMap<BlockId, Vec<(BlockId, Vec<RegisterId>)>>,
     /// Immediate controlling branch/switch blocks and their selectors.
     control: HashMap<BlockId, Vec<(BlockId, RegisterId)>>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: a lazily computed index of completed-only control dependencies, filled behind &self by the slicer that owns it"
+    )]
     completed_control: std::cell::OnceCell<HashMap<BlockId, Vec<(BlockId, RegisterId)>>>,
 }
 
@@ -212,6 +216,10 @@ fn post_dominators(unit: &Unit, completed_only: bool) -> HashMap<BlockId, Option
         .collect()
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "single-threaded: creates the empty lazily filled completed-control index of a slicer"
+)]
 fn index(unit: &Unit) -> Indexed {
     let mut definitions = HashMap::default();
     let mut incoming: HashMap<BlockId, Vec<(BlockId, Vec<RegisterId>)>> = HashMap::default();

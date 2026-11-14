@@ -3377,6 +3377,10 @@ fn test_ff_runtime_events_support_wide_four_state_args(sim) {
     );
 }
 
+#[allow(
+    clippy::disallowed_types,
+    reason = "test-only: a drain thread collects runtime events while the test steps the simulation"
+)]
 fn test_ff_runtime_event_drain_handle_can_run_during_simulation(sim) {
     @omit_veryl;
     @ignore_on(wasm);
