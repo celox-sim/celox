@@ -533,8 +533,8 @@ chapter-18/18.5.12--functions-in-constraint_1.sv	2state	fail
 chapter-18/18.5.12--functions-in-constraint_1.sv	4state	fail
 chapter-18/18.5.13--constraint-guards_0.sv	2state	pass
 chapter-18/18.5.13--constraint-guards_0.sv	4state	pass
-chapter-18/18.5.13--constraint-guards_1.sv	2state	fail
-chapter-18/18.5.13--constraint-guards_1.sv	4state	fail
+chapter-18/18.5.13--constraint-guards_1.sv	2state	pass
+chapter-18/18.5.13--constraint-guards_1.sv	4state	pass
 chapter-18/18.5.14--soft-constraints_0.sv	2state	pass
 chapter-18/18.5.14--soft-constraints_0.sv	4state	pass
 chapter-18/18.5.14--soft-constraints_1.sv	2state	pass
