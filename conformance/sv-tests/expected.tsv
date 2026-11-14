@@ -497,8 +497,8 @@ chapter-18/18.17.6--aborting-productions-break-and-return_2.sv	2state	pass
 chapter-18/18.17.6--aborting-productions-break-and-return_2.sv	4state	pass
 chapter-18/18.17.6--aborting-productions-break-and-return_2_fail.sv	2state	pass
 chapter-18/18.17.6--aborting-productions-break-and-return_2_fail.sv	4state	pass
-chapter-18/18.17.7--value-passing-between-productions_0.sv	2state	fail
-chapter-18/18.17.7--value-passing-between-productions_0.sv	4state	fail
+chapter-18/18.17.7--value-passing-between-productions_0.sv	2state	pass
+chapter-18/18.17.7--value-passing-between-productions_0.sv	4state	pass
 chapter-18/18.4.1--rand-modifier.sv	2state	pass
 chapter-18/18.4.1--rand-modifier.sv	4state	pass
 chapter-18/18.4.2--randc-modifier.sv	2state	pass
