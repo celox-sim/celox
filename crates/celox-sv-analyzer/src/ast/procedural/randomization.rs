@@ -1076,7 +1076,8 @@ fn shift_inputs(expr: &mut celox_heap::randomization::Expr, first: usize, by: us
         | Expr::Static(_)
         | Expr::Solved(_)
         | Expr::Member { .. }
-        | Expr::Element { .. } => {}
+        | Expr::Element { .. }
+        | Expr::ElementAt { .. } => {}
     }
 }
 

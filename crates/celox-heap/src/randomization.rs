@@ -106,6 +106,15 @@ pub enum Expr {
         member: u32,
         width: u32,
     },
+    /// Element `index` of array `array` of the program, of `width` bits,
+    /// outside a loop over it (IEEE 1800-2023 18.4, 18.5.8): its solver
+    /// variable while the array is random, else its value, and the default
+    /// value 0 past the end of the array (7.4.6).
+    ElementAt {
+        array: usize,
+        index: u64,
+        width: u32,
+    },
     /// Read-only scalar supplied by this call, never a solver variable.
     Input {
         index: usize,
@@ -189,11 +198,27 @@ pub struct Arguments {
 
 /// What a solve takes: every constraint, or only those that name no
 /// variable but the random variables in the arguments of the functions the
-/// constraints call (IEEE 1800-2023 18.5.11).
+/// constraints call (IEEE 1800-2023 18.5.11), or every constraint but those
+/// on the elements of the random arrays whose size a constraint names too
+/// and those that read a value of a call, whose sizes are solved first
+/// (18.5.7.1). A call orders them so: its sizes, its arguments, the rest,
+/// the latter two with the sizes of the first.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     All,
     Arguments,
+    Sizes,
+}
+
+/// The sizes a solve of sizes gave the arrays of the randomize call of
+/// `object`, by object and array (see [`Phase::Sizes`]): for the solve of
+/// arguments, then the solve of the rest, or for the solve of the rest
+/// once the solve of arguments `kept` them.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Staged {
+    object: Handle,
+    kept: bool,
+    sizes: fxhash::FxHashMap<(Handle, usize), usize>,
 }
 
 /// A dynamic array or queue property of a constraint program.
@@ -369,6 +394,16 @@ fn search<T>(
     found.expect("a solver attempt")
 }
 
+/// The arrays of the objects a call solves, by object and array: the first
+/// solver variable of the elements of each random array a constraint names
+/// the elements of, with their number, and the size of each array whose
+/// size the call does not solve, a known value (IEEE 1800-2023 18.4).
+#[derive(Default)]
+struct Arrays {
+    elements: fxhash::FxHashMap<(Handle, usize), (usize, usize)>,
+    sizes: fxhash::FxHashMap<(Handle, usize), usize>,
+}
+
 /// The distributions of `constraint`, each with the operands whose truth
 /// keeps it from applying: the other operand of each `||` above it, such as
 /// the negated condition of an `if` or `->` (IEEE 1800-2023 18.5.6, 18.5.7).
@@ -449,7 +484,8 @@ impl Expr {
             | Self::Index { .. }
             | Self::Member { .. }
             | Self::Handle(_)
-            | Self::Element { .. } => false,
+            | Self::Element { .. }
+            | Self::ElementAt { .. } => false,
         }
     }
 
@@ -457,7 +493,7 @@ impl Expr {
     /// over it or its sum.
     fn names_elements(&self, index: usize) -> bool {
         match self {
-            Self::Sum(array) => *array == index,
+            Self::Sum(array) | Self::ElementAt { array, .. } => *array == index,
             Self::Foreach { array, body } => *array == index || body.names_elements(index),
             Self::Enabled { value, .. }
             | Self::Soft { value, .. }
@@ -526,7 +562,8 @@ impl Expr {
             | Self::Input { .. }
             | Self::Index { .. }
             | Self::Member { .. }
-            | Self::Element { .. } => {}
+            | Self::Element { .. }
+            | Self::ElementAt { .. } => {}
         }
     }
 
@@ -570,7 +607,8 @@ impl Expr {
             | Self::Index { .. }
             | Self::Solved(_)
             | Self::Member { .. }
-            | Self::Element { .. } => false,
+            | Self::Element { .. }
+            | Self::ElementAt { .. } => false,
         }
     }
 
@@ -595,7 +633,7 @@ impl Expr {
             }
             Self::Binary { left, right, .. } => left.names_size(index) || right.names_size(index),
             Self::Foreach { body, .. } => body.names_size(index),
-            Self::Sum(_) => false,
+            Self::Sum(_) | Self::ElementAt { .. } => false,
             Self::Dist {
                 membership,
                 choices,
@@ -689,6 +727,7 @@ impl Expr {
             Self::Foreach { .. } | Self::Index { .. } | Self::Element { .. } => {
                 return Err("constraint loop outside its array".into());
             }
+            Self::ElementAt { .. } => return Err("constraint element of an unread array".into()),
             Self::Sum(_) => return Err("constraint sum of an unread array".into()),
             Self::Handle(_) => return Err("a handle the call did not read".into()),
             Self::Resize {
@@ -1148,7 +1187,7 @@ impl Heap {
         constraint: &Expr,
         loops: &mut Vec<(usize, u64)>,
         solved: &fxhash::FxHashMap<Handle, (usize, &Program)>,
-        elements: &fxhash::FxHashMap<(Handle, usize), usize>,
+        arrays: &Arrays,
         check_only: bool,
         inputs: &[u64],
     ) -> Result<Expr, String> {
@@ -1161,19 +1200,25 @@ impl Heap {
                     .ok_or("invalid constraint array")?;
                 let offset = looped.offset;
                 // An array the call randomizes has a solver variable for
-                // each element (see `element_bases`).
+                // each element (see `Arrays`).
                 if !check_only
                     && self.random_mode(object, offset, looped.random)
-                    && !elements.contains_key(&(object, *array))
+                    && !arrays.elements.contains_key(&(object, *array))
                 {
                     return Err("a constraint loop over an array the call randomizes".into());
                 }
                 let contents = self.load(object, offset as usize, crate::HANDLE_BYTES) as Handle;
+                // A random array has the elements of its solved size, which
+                // a solve of sizes may have given it (see `Phase::Sizes`).
+                let length = match arrays.elements.get(&(object, *array)) {
+                    Some(&(_, length)) => length,
+                    None => self.sequence_len(contents),
+                };
                 let mut each = Vec::new();
-                for index in 0..self.sequence_len(contents) as u64 {
+                for index in 0..length as u64 {
                     loops.push((*array, index));
                     each.push(self.unroll(
-                        object, program, body, loops, solved, elements, check_only, inputs,
+                        object, program, body, loops, solved, arrays, check_only, inputs,
                     )?);
                     loops.pop();
                 }
@@ -1213,7 +1258,7 @@ impl Heap {
                     .get(*level as usize)
                     .ok_or("invalid constraint loop")?;
                 if member.is_none()
-                    && let Some(&base) = elements.get(&(object, array))
+                    && let Some(&(base, _)) = arrays.elements.get(&(object, array))
                 {
                     return Ok(Expr::Solved(base + index as usize));
                 }
@@ -1254,10 +1299,10 @@ impl Heap {
                     self.load(object, summed.offset as usize, crate::HANDLE_BYTES) as Handle;
                 let length = self.sequence_len(contents);
                 let mask = u64::MAX >> (64 - width);
-                match elements.get(&(object, *array)) {
+                match arrays.elements.get(&(object, *array)) {
                     // The sum of the solver variables of its elements, at
                     // their width, as a balanced tree.
-                    Some(&base) => {
+                    Some(&(base, length)) => {
                         fn add(mut each: Vec<Expr>, width: u32) -> Expr {
                             match each.len() {
                                 0 => Expr::Literal(width, 0),
@@ -1314,16 +1359,47 @@ impl Heap {
                 let value = self.load(target, *member as usize, width.div_ceil(8) as usize);
                 Expr::Literal(*width, value & (u64::MAX >> (64 - width)))
             }
+            Expr::ElementAt {
+                array,
+                index,
+                width,
+            } => {
+                if !(1..=64).contains(width) {
+                    return Err("invalid constraint element width".into());
+                }
+                let read = program
+                    .arrays
+                    .get(*array)
+                    .ok_or("invalid constraint array")?;
+                // An element past the end reads as the default value
+                // (IEEE 1800-2023 7.4.6).
+                if let Some(&(base, length)) = arrays.elements.get(&(object, *array)) {
+                    return Ok(match usize::try_from(*index) {
+                        Ok(index) if index < length => Expr::Solved(base + index),
+                        _ => Expr::Literal(*width, 0),
+                    });
+                }
+                if !check_only && self.random_mode(object, read.offset, read.random) {
+                    return Err("a constraint on an element of an array the call randomizes".into());
+                }
+                let contents =
+                    self.load(object, read.offset as usize, crate::HANDLE_BYTES) as Handle;
+                let value = usize::try_from(*index)
+                    .ok()
+                    .and_then(|index| self.sequence_element(contents, index))
+                    .unwrap_or(0);
+                Expr::Literal(*width, value & (u64::MAX >> (64 - width)))
+            }
             Expr::Enabled { index, value } => Expr::Enabled {
                 index: *index,
                 value: boxed(self.unroll(
-                    object, program, value, loops, solved, elements, check_only, inputs,
+                    object, program, value, loops, solved, arrays, check_only, inputs,
                 )?),
             },
             Expr::Soft { priority, value } => Expr::Soft {
                 priority: *priority,
                 value: boxed(self.unroll(
-                    object, program, value, loops, solved, elements, check_only, inputs,
+                    object, program, value, loops, solved, arrays, check_only, inputs,
                 )?),
             },
             Expr::DisableSoft { .. } => constraint.clone(),
@@ -1337,7 +1413,7 @@ impl Heap {
                 signed,
             } => Expr::Resize {
                 value: boxed(self.unroll(
-                    object, program, value, loops, solved, elements, check_only, inputs,
+                    object, program, value, loops, solved, arrays, check_only, inputs,
                 )?),
                 width: *width,
                 signed: *signed,
@@ -1345,7 +1421,7 @@ impl Heap {
             Expr::Unary { op, value } => Expr::Unary {
                 op: op.clone(),
                 value: boxed(self.unroll(
-                    object, program, value, loops, solved, elements, check_only, inputs,
+                    object, program, value, loops, solved, arrays, check_only, inputs,
                 )?),
             },
             Expr::Binary {
@@ -1355,7 +1431,7 @@ impl Heap {
                 signed,
             } => {
                 let left = self.unroll(
-                    object, program, left, loops, solved, elements, check_only, inputs,
+                    object, program, left, loops, solved, arrays, check_only, inputs,
                 )?;
                 // A guard whose value is known before solving (IEEE
                 // 1800-2023 18.5.13), as that of `if` or `->` is the left
@@ -1373,7 +1449,7 @@ impl Heap {
                 }
                 let right = self
                     .unroll(
-                        object, program, right, loops, solved, elements, check_only, inputs,
+                        object, program, right, loops, solved, arrays, check_only, inputs,
                     )
                     .map_err(|reason| match known {
                         Some(None) => UNKNOWN_VALUE.to_owned(),
@@ -1391,7 +1467,7 @@ impl Heap {
                 choices,
             } => Expr::Dist {
                 membership: boxed(self.unroll(
-                    object, program, membership, loops, solved, elements, check_only, inputs,
+                    object, program, membership, loops, solved, arrays, check_only, inputs,
                 )?),
                 choices: choices
                     .iter()
@@ -1403,7 +1479,7 @@ impl Heap {
                                 &choice.predicate,
                                 loops,
                                 solved,
-                                elements,
+                                arrays,
                                 check_only,
                                 inputs,
                             )?,
@@ -1412,10 +1488,14 @@ impl Heap {
                     })
                     .collect::<Result<_, String>>()?,
             },
+            // A size the call does not solve is a known value (18.4).
+            Expr::Size(index) => match arrays.sizes.get(&(object, *index)) {
+                Some(&length) => Expr::Literal(32, length as u64),
+                None => constraint.clone(),
+            },
             Expr::Literal(..)
             | Expr::Field(_)
             | Expr::Input { .. }
-            | Expr::Size(_)
             | Expr::Static(_)
             | Expr::Solved(_) => constraint.clone(),
         })
@@ -1664,6 +1744,28 @@ impl Heap {
             return false;
         }
         let result = (|| -> Result<bool, String> {
+            // The sizes a solve of sizes gave this call's arrays.
+            // A solve of arguments takes those of a solve of sizes just
+            // before it, the solve of the rest those of either.
+            // This call's sizes: those of another call stay for it, as a
+            // function a constraint calls may randomize another object
+            // between the solves of this call.
+            let mine =
+                |staged: &Staged| staged.object == handle && (phase == Phase::All || !staged.kept);
+            let presized = match phase {
+                Phase::All | Phase::Arguments => self
+                    .staged
+                    .iter()
+                    .rposition(mine)
+                    .map(|position| self.staged.remove(position).sizes)
+                    .unwrap_or_default(),
+                Phase::Sizes => fxhash::FxHashMap::default(),
+            };
+            // A solve of arguments starts a call: what an earlier call of
+            // the object left behind is not its.
+            if phase == Phase::Arguments {
+                self.staged.retain(|staged| staged.object != handle);
+            }
             // The object and those its enabled rand handles refer to, each
             // once, with the program of its class (18.4, 18.8). The handles
             // themselves are never changed.
@@ -1724,10 +1826,14 @@ impl Heap {
             let mut size_terms = Vec::new();
             let mut size_bases = Vec::new();
             let mut refills = Vec::new();
-            // The first solver variable of the elements of each random array
-            // a constraint names the elements of, by object and array.
-            let mut element_bases: fxhash::FxHashMap<(Handle, usize), usize> =
-                fxhash::FxHashMap::default();
+            // The solver variables of the elements of the arrays and their
+            // known sizes (see [`Arrays`]).
+            let mut arrays = Arrays::default();
+            // The random arrays whose size and elements constraints name,
+            // with the variables of their sizes, in a solve of sizes; in a
+            // solve of the rest, whether one has no size yet (18.5.7.1).
+            let mut staged: Vec<(Handle, usize, String)> = Vec::new();
+            let mut unsized_arrays = false;
             let mut preferred = boolv(true);
             // The soft constraints, with their ranks and the variables
             // that appear in them, and the variables `disable soft` names,
@@ -1819,6 +1925,24 @@ impl Heap {
                                     .iter()
                                     .flatten()
                                     .any(|argument| argument.names_size(index)));
+                    let named = enabled
+                        && (constraints[position]
+                            .iter()
+                            .any(|constraint| constraint.names_elements(index))
+                            || position == 0
+                                && arguments
+                                    .iter()
+                                    .flatten()
+                                    .any(|argument| argument.names_elements(index)));
+                    // The size of an array whose size and elements
+                    // constraints name is solved first, and is then state
+                    // to the constraints on the elements (18.5.7.1).
+                    let solved_size = presized.get(&(object, index)).copied();
+                    if sized && named && phase != Phase::Sizes && solved_size.is_none() {
+                        unsized_arrays = true;
+                    }
+                    let length = solved_size.unwrap_or(length);
+                    let sized = sized && solved_size.is_none();
                     let term = if sized {
                         let name = format!("s{}", size_terms.len());
                         let term = var(name.clone(), Sort::Bv(32));
@@ -1861,22 +1985,18 @@ impl Heap {
                     };
                     size_terms.push(match &term {
                         Some(name) => var(name.clone(), Sort::Bv(32)),
-                        None => bv(32, length as u64),
+                        None => {
+                            arrays.sizes.insert((object, index), length);
+                            bv(32, length as u64)
+                        }
                     });
                     // A random array whose elements a constraint names has a
                     // solver variable for each (18.4, 18.5.8): its size is
-                    // the one it has.
-                    let named = enabled
-                        && constraints[position]
-                            .iter()
-                            .any(|constraint| constraint.names_elements(index));
-                    let elements = if named {
-                        if term.is_some() {
-                            return Err(
-                                "a constraint on the elements of a random array whose size a constraint names"
-                                    .into(),
-                            );
-                        }
+                    // the one it has or a solve of sizes gave it.
+                    if let (true, Some(name)) = (named && phase == Phase::Sizes, &term) {
+                        staged.push((object, index, name.clone()));
+                    }
+                    let elements = if named && term.is_none() {
                         let base = terms.len();
                         for _ in 0..length {
                             let name = terms.len().to_string();
@@ -1890,7 +2010,7 @@ impl Heap {
                             }
                             terms.push(element);
                         }
-                        element_bases.insert((object, index), base);
+                        arrays.elements.insert((object, index), (base, length));
                         Some(base)
                     } else {
                         None
@@ -1899,6 +2019,22 @@ impl Heap {
                         refills.push((object, array, term, length, elements));
                     }
                 }
+            }
+            // A solve of sizes first, then of the rest with those sizes
+            // (18.5.7.1), each with the members whose hooks ran.
+            if unsized_arrays {
+                self.prepared = Some((handle, participants));
+                if !self.solve(
+                    handle,
+                    program,
+                    check_only,
+                    inputs,
+                    limits.clone(),
+                    Phase::Sizes,
+                ) {
+                    return Ok(false);
+                }
+                return Ok(self.solve(handle, program, check_only, inputs, limits, phase));
             }
             // The items of each distribution the call solves, with their
             // weights (18.5.3).
@@ -1911,12 +2047,24 @@ impl Heap {
                 .collect();
             // The random variables in the arguments of the calls, which a
             // solve of arguments takes alone (18.5.11).
+            // An element of an array an argument names, as `a[0]`, is its
+            // solver variable. A solve of sizes takes no argument.
             let mut ordered = Vec::new();
-            for argument in arguments.iter().flatten() {
+            for argument in arguments.iter().flatten().filter(|_| phase != Phase::Sizes) {
+                let argument = self.unroll(
+                    handle,
+                    program,
+                    argument,
+                    &mut Vec::new(),
+                    &solved,
+                    &arrays,
+                    check_only,
+                    inputs,
+                )?;
                 argument.variables(0, 0, &mut ordered);
             }
             let first = |names: &[String], value: &Expr| {
-                phase == Phase::All
+                phase != Phase::Arguments
                     || (names.iter().all(|name| ordered.contains(name))
                         && !value.reads_input_from(inputs.len()))
             };
@@ -1928,6 +2076,17 @@ impl Heap {
             {
                 let sizes = &size_terms[size_base..size_base + current.arrays.len()];
                 for constraint in enabled {
+                    // A solve of sizes leaves the constraints on the
+                    // elements whose sizes it solves to the solve of the
+                    // rest (18.5.7.1).
+                    if phase == Phase::Sizes
+                        && (constraint.reads_input_from(inputs.len())
+                            || staged.iter().any(|(staged, array, _)| {
+                                staged == object && constraint.names_elements(*array)
+                            }))
+                    {
+                        continue;
+                    }
                     // The object's rank among those the call solves: the
                     // object of the call above those of its rand handles,
                     // a later one above an earlier one (18.5.13.1).
@@ -1943,7 +2102,7 @@ impl Heap {
                                 value,
                                 &mut Vec::new(),
                                 &solved,
-                                &element_bases,
+                                &arrays,
                                 check_only,
                                 inputs,
                             )?;
@@ -1976,7 +2135,7 @@ impl Heap {
                                 variable,
                                 &mut Vec::new(),
                                 &solved,
-                                &element_bases,
+                                &arrays,
                                 check_only,
                                 inputs,
                             )?;
@@ -1990,7 +2149,7 @@ impl Heap {
                                         condition,
                                         &mut Vec::new(),
                                         &solved,
-                                        &element_bases,
+                                        &arrays,
                                         check_only,
                                         inputs,
                                     )?;
@@ -2021,7 +2180,7 @@ impl Heap {
                                 constraint,
                                 &mut Vec::new(),
                                 &solved,
-                                &element_bases,
+                                &arrays,
                                 check_only,
                                 inputs,
                             )?;
@@ -2169,7 +2328,7 @@ impl Heap {
                         argument,
                         &mut Vec::new(),
                         &solved,
-                        &element_bases,
+                        &arrays,
                         check_only,
                         inputs,
                     )?;
@@ -2227,6 +2386,13 @@ impl Heap {
                             variables,
                             values,
                         });
+                        if !presized.is_empty() {
+                            self.staged.push(Staged {
+                                object: handle,
+                                kept: true,
+                                sizes: presized,
+                            });
+                        }
                         Ok(true)
                     }
                 };
@@ -2374,6 +2540,30 @@ impl Heap {
                 Verdict::Unknown => Err(outcome
                     .reason
                     .unwrap_or_else(|| "constraint solving incomplete".into())),
+                Verdict::Sat if phase == Phase::Sizes => {
+                    // The sizes, for the solve of the rest, which changes
+                    // the object.
+                    let model = &outcome.context_values;
+                    let mut sizes = fxhash::FxHashMap::default();
+                    for (object, array, name) in &staged {
+                        let Some(Scalar::Bv { value, .. }) = model.get(name) else {
+                            return Err("missing constraint array size".into());
+                        };
+                        if *value > ARRAY_SIZE_LIMIT {
+                            return Err(format!(
+                                "random array size {value} above the limit of {ARRAY_SIZE_LIMIT}"
+                            ));
+                        }
+                        sizes.insert((*object, *array), *value as usize);
+                    }
+                    self.staged.push(Staged {
+                        object: handle,
+                        kept: false,
+                        sizes,
+                    });
+                    self.prepared = Some((handle, participants));
+                    Ok(true)
+                }
                 Verdict::Sat => {
                     if decided_by_unknown(&deferred, &state, &outcome) {
                         return Err(UNKNOWN_VALUE.into());
@@ -3024,6 +3214,145 @@ mod tests {
         assert_eq!(heap.take_fault(), None);
     }
 
+    /// A call orders its solves: the sizes of the arrays whose size and
+    /// elements constraints name (18.5.7.1), then the arguments of the
+    /// functions its constraints call, an element `a[0]` among them
+    /// (18.5.11), then the rest, both with those sizes.
+    #[test]
+    fn sizes_come_before_arguments_and_elements() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 16);
+        let layout = crate::containers::parameter(8, true, 0, 0, 0, false, false, false);
+        let compare = |op: &str, left: Expr, right: Expr| Expr::Binary {
+            op: op.into(),
+            left: Box::new(left),
+            right: Box::new(right),
+            signed: false,
+        };
+        let element = || Expr::ElementAt {
+            array: 0,
+            index: 0,
+            width: 8,
+        };
+        let program = Program {
+            fields: vec![Field {
+                offset: 0,
+                width: 8,
+                random: true,
+                domain: Vec::new(),
+                cyclic: false,
+                four_state: false,
+            }],
+            arrays: vec![Array {
+                offset: 8,
+                layout,
+                width: 8,
+                random: true,
+                domain: Vec::new(),
+            }],
+            constraints: vec![
+                compare(
+                    "&&",
+                    compare(">", Expr::Size(0), Expr::Literal(32, 1)),
+                    compare("<", Expr::Size(0), Expr::Literal(32, 5)),
+                ),
+                compare(
+                    "&&",
+                    compare(">", element(), Expr::Literal(8, 3)),
+                    compare("<", element(), Expr::Literal(8, 6)),
+                ),
+                // The value of a call of `id(a[0])`.
+                compare("==", Expr::Field(0), Expr::Input { index: 0, width: 8 }),
+            ],
+            arguments: vec![element()],
+            ..Program::default()
+        };
+        for _ in 0..8 {
+            assert!(heap.solve_arguments(object, &program, false, &[]));
+            let argument = heap.argument_value(0);
+            assert!((4..6).contains(&argument));
+            assert!(heap.randomize_object_with_inputs(object, &program, false, &[argument]));
+            let contents = heap.load(object, 8, crate::HANDLE_BYTES) as Handle;
+            assert!((2..5).contains(&heap.sequence_len(contents)));
+            assert_eq!(heap.sequence_element(contents, 0), Some(argument));
+            assert_eq!(heap.load(object, 0, 1), argument);
+        }
+        assert_eq!(heap.take_fault(), None);
+    }
+
+    /// A randomize call between the solve of arguments and the solve of the
+    /// rest of another call, as a function its constraints call makes,
+    /// leaves the sizes that call solved for it.
+    #[test]
+    fn nested_calls_leave_staged_sizes() {
+        let mut heap = Heap::new();
+        let layout = crate::containers::parameter(8, true, 0, 0, 0, false, false, false);
+        let compare = |op: &str, left: Expr, right: Expr| Expr::Binary {
+            op: op.into(),
+            left: Box::new(left),
+            right: Box::new(right),
+            signed: false,
+        };
+        let program = Program {
+            fields: vec![Field {
+                offset: 0,
+                width: 32,
+                random: true,
+                domain: Vec::new(),
+                cyclic: false,
+                four_state: false,
+            }],
+            arrays: vec![Array {
+                offset: 8,
+                layout,
+                width: 8,
+                random: true,
+                domain: Vec::new(),
+            }],
+            constraints: vec![
+                compare(
+                    "&&",
+                    compare(">", Expr::Size(0), Expr::Literal(32, 1)),
+                    compare("<", Expr::Size(0), Expr::Literal(32, 9)),
+                ),
+                compare(
+                    "==",
+                    Expr::ElementAt {
+                        array: 0,
+                        index: 0,
+                        width: 8,
+                    },
+                    Expr::Literal(8, 7),
+                ),
+                // The value of a call of `f(a.size())`.
+                compare(
+                    "==",
+                    Expr::Field(0),
+                    Expr::Input {
+                        index: 0,
+                        width: 32,
+                    },
+                ),
+            ],
+            arguments: vec![Expr::Size(0)],
+            ..Program::default()
+        };
+        let (outer, inner) = (heap.new_object(1, 16), heap.new_object(1, 16));
+        for _ in 0..8 {
+            assert!(heap.solve_arguments(outer, &program, false, &[]));
+            let size = heap.argument_value(0);
+            // The function randomizes another object of the class.
+            assert!(heap.solve_arguments(inner, &program, false, &[]));
+            let inner_size = heap.argument_value(0);
+            assert!(heap.randomize_object_with_inputs(inner, &program, false, &[inner_size]));
+            assert!(heap.randomize_object_with_inputs(outer, &program, false, &[size]));
+            let contents = heap.load(outer, 8, crate::HANDLE_BYTES) as Handle;
+            assert_eq!(heap.sequence_len(contents) as u64, size);
+            assert_eq!(heap.load(outer, 0, 4), size);
+        }
+        assert_eq!(heap.take_fault(), None);
+    }
+
     /// A soft constraint whose trial the solver cannot decide fails the
     /// call with the reason, rather than being dropped (18.5.13).
     #[test]
@@ -3165,6 +3494,80 @@ mod tests {
         assert!(ranks[&last] > ranks[&nested]);
         assert!(ranks[&nested] > ranks[&shared]);
         assert_eq!(ranks[&inner], vec![1, 0, u32::MAX]);
+    }
+
+    /// The size of a random array whose size and elements constraints name
+    /// is solved first, without the constraints on its elements, and is
+    /// then state to them (IEEE 1800-2023 18.5.7.1); an element past the
+    /// end reads as 0 (7.4.6).
+    #[test]
+    fn sizes_are_solved_before_the_elements_they_size() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 16);
+        let layout = crate::containers::parameter(8, true, 0, 0, 0, false, false, false);
+        let binary = |op: &str, left: Expr, right: Expr| Expr::Binary {
+            op: op.into(),
+            left: Box::new(left),
+            right: Box::new(right),
+            signed: false,
+        };
+        let element = |index| Expr::ElementAt {
+            array: 0,
+            index,
+            width: 8,
+        };
+        let length = Expr::Resize {
+            value: Box::new(Expr::Field(0)),
+            width: 32,
+            signed: false,
+        };
+        let mut program = Program {
+            fields: vec![Field {
+                offset: 0,
+                width: 8,
+                random: true,
+                domain: Vec::new(),
+                cyclic: false,
+                four_state: false,
+            }],
+            arrays: vec![Array {
+                offset: 8,
+                layout,
+                width: 8,
+                random: true,
+                domain: Vec::new(),
+            }],
+            constraints: vec![
+                binary(
+                    "&&",
+                    binary(">", Expr::Field(0), Expr::Literal(8, 1)),
+                    binary("<", Expr::Field(0), Expr::Literal(8, 10)),
+                ),
+                binary("==", element(0), Expr::Field(0)),
+                binary(
+                    "==",
+                    Expr::Size(0),
+                    binary("+", length, Expr::Literal(32, 1)),
+                ),
+                binary("==", element(20), Expr::Literal(8, 0)),
+            ],
+            ..Program::default()
+        };
+        for _ in 0..20 {
+            assert!(heap.randomize_object(object, &program, false));
+            let burst = heap.load(object, 0, 1);
+            let contents = heap.load(object, 8, crate::HANDLE_BYTES) as Handle;
+            assert!((2..10).contains(&burst));
+            assert_eq!(heap.sequence_len(contents) as u64, burst + 1);
+            assert_eq!(heap.sequence_element(contents, 0), Some(burst));
+        }
+        // A size the constraints on the elements cannot take fails the call.
+        program.constraints = vec![
+            binary("==", Expr::Size(0), Expr::Literal(32, 0)),
+            binary("==", element(0), Expr::Literal(8, 5)),
+        ];
+        assert!(!heap.randomize_object(object, &program, false));
+        assert_eq!(heap.take_fault(), None);
     }
 
     /// A random array whose size a constraint names is resized to a size

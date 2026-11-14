@@ -6876,10 +6876,16 @@ fn class_randomize_rejects_unsupported_semantics() {
             "c.randomize()",
             "solve before of other than a rand variable",
         ),
-        // A select of a variable that is not random and more than one
-        // variable (Syntax 18-8).
+        // A select of a variable that is not random, a class-scoped static
+        // property that is not rand, and more than one variable (Syntax
+        // 18-8).
         (
             "bit [1:0] a; rand bit b; constraint c { solve a[0] before b; }",
+            "c.randomize()",
+            "solve before of other than a rand variable",
+        ),
+        (
+            "static bit [7:0] s; rand int x; constraint c { solve C::s before x; }",
             "c.randomize()",
             "solve before of other than a rand variable",
         ),

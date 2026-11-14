@@ -138,6 +138,13 @@ pub struct Heap {
     /// [`Heap::end_visits`].
     #[serde(default)]
     prepared: Option<(Handle, Vec<Handle>)>,
+    /// The sizes solves of sizes gave the random arrays of the randomize
+    /// calls in progress whose size and elements constraints name, for the
+    /// solves that follow them, innermost last (see `randomization::Staged`):
+    /// a function a constraint calls may randomize another object between
+    /// the solves of a call. They last only within their calls.
+    #[serde(skip)]
+    staged: Vec<randomization::Staged>,
     /// The rand object members the last successful randomize solve took,
     /// whose post_randomize runs, see [`Heap::begin_solved_visits`].
     #[serde(default)]
@@ -190,6 +197,7 @@ impl Heap {
             arguments: Vec::new(),
             visits: Vec::new(),
             prepared: None,
+            staged: Vec::new(),
             solved: Vec::new(),
             edges: HashMap::default(),
             dpi: dpi::CallArea::default(),
