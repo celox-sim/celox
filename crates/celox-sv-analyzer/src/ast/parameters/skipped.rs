@@ -370,6 +370,11 @@ pub(in crate::ast) fn validate(
                     dimension_jobs(&part.kind, &mut jobs, query);
                 }
             }
+            ExprKind::Unique(items) => {
+                for item in items {
+                    dimension_jobs(&item.kind, &mut jobs, query);
+                }
+            }
             ExprKind::Dist { expression, items } => {
                 push(&mut jobs, *expression);
                 for item in items {

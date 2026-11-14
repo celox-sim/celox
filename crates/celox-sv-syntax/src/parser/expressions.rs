@@ -365,6 +365,11 @@ impl Parser<'_> {
                         constant_dimension_operands(dimension, &mut pending);
                     }
                 }
+                ExprKind::Unique(items) => {
+                    for item in items {
+                        constant_dimension_operands(item, &mut pending);
+                    }
+                }
                 ExprKind::Dist { expression, items } => {
                     pending.push(*expression);
                     for item in items {

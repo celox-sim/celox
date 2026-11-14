@@ -2240,6 +2240,121 @@ fn package_classes_name_the_compilation_unit_classes_of_other_files() {
 }
 
 #[test]
+fn uniqueness_constraints_keep_their_members_apart() {
+    // `unique` gives its members pairwise different values, with other
+    // constraints; a group of fewer than two members has no effect, and a
+    // group with no different values left fails the call (IEEE 1800-2023
+    // 18.5.4).
+    let source = "class C;
+        rand bit [1:0] a, b, c;
+        rand int x;
+        constraint k { unique {a, b, c}; a != 3; b != 3; c != 3; unique {x}; }
+    endclass
+    module Top;
+        C o;
+        int ok, failed;
+        initial begin
+            o = new;
+            ok = 1;
+            repeat (50) ok &= o.randomize() && o.a != o.b && o.b != o.c && o.a != o.c;
+            failed = o.randomize() with { a == b; };
+            $display(\"%0d %0d\", ok, failed);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 0"]);
+    for (members, constraint, message) in [
+        (
+            "randc bit [1:0] a; rand bit [1:0] b;",
+            "unique {a, b};",
+            "a randc variable in a uniqueness constraint",
+        ),
+        (
+            "rand bit [1:0] a; rand int b;",
+            "unique {a, b};",
+            "members of types that are not equivalent",
+        ),
+        (
+            "rand int a; rand int q[];",
+            "unique {a, q};",
+            "an array in a uniqueness constraint",
+        ),
+    ] {
+        let error = uniqueness_error(members, constraint);
+        assert!(error.contains(message), "{constraint}: {error}");
+    }
+}
+
+/// The error of randomizing a class with `members` and `constraint`.
+fn uniqueness_error(members: &str, constraint: &str) -> String {
+    let source = format!(
+        "class C; {members} constraint k {{ {constraint} }} endclass
+        module Top; C c; initial begin c = new; void'(c.randomize()); end endmodule"
+    );
+    match celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("class.sv"))], "Top")
+        .build()
+    {
+        Err(error) => error.to_string(),
+        Ok(mut sim) => sim.run_until(1).expect_err(constraint).to_string(),
+    }
+}
+
+#[test]
+fn uniqueness_constraint_members_are_variables() {
+    // A member is a variable, not a value computed from one (IEEE 1800-2023
+    // 18.5.4).
+    let error = uniqueness_error("rand int a, b;", "unique {a + 1, b};");
+    assert!(
+        error.contains("a uniqueness constraint member that is not a variable"),
+        "{error}"
+    );
+}
+
+#[test]
+fn uniqueness_constraint_members_are_of_equivalent_types() {
+    // Two enumerations of one base type are not equivalent (IEEE 1800-2023
+    // 6.22.2, 18.5.4).
+    let error = uniqueness_error(
+        "typedef enum bit [1:0] {A0, A1} ea; typedef enum bit [1:0] {B0, B1} eb; rand ea a; rand eb b;",
+        "unique {a, b};",
+    );
+    assert!(
+        error.contains("members of types that are not equivalent"),
+        "{error}"
+    );
+}
+
+#[test]
+fn uniqueness_constraints_of_many_members_stay_solvable() {
+    // 33 members make 528 pairwise differences, which the solver takes as
+    // a balanced conjunction (IEEE 1800-2023 18.5.4).
+    let names: Vec<String> = (0..33).map(|index| format!("m{index}")).collect();
+    let source = format!(
+        "class C;
+        rand bit [7:0] {};
+        constraint k {{ unique {{{}}}; }}
+    endclass
+    module Top;
+        C o;
+        int ok, apart;
+        initial begin
+            o = new;
+            ok = o.randomize();
+            apart = 1;
+            {}
+            $display(\"%0d %0d\", ok, apart);
+        end
+    endmodule",
+        names.join(", "),
+        names.join(", "),
+        (0..33)
+            .flat_map(|a| ((a + 1)..33).map(move |b| format!("apart &= o.m{a} != o.m{b};")))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    assert_eq!(super::hierarchical_references::displayed(&source), ["1 1"]);
+}
+
+#[test]
 fn distributions_constrain_values_and_weigh_their_items() {
     // `dist` allows the values of its items of nonzero total weight, weighs
     // a range by its values with `:=` and as a whole with `:/`, and its

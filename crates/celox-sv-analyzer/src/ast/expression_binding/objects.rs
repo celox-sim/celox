@@ -1615,6 +1615,14 @@ pub(super) fn randomize_with(
                 pending.extend([(*right, loops.clone()), (*left, loops)]);
                 None
             }
+            ExprKind::Unique(items) => {
+                for item in items {
+                    if let celox_sv_syntax::DimensionKind::Index(id) = item.kind {
+                        pending.push((id, loops.clone()));
+                    }
+                }
+                None
+            }
             ExprKind::Dist { expression, items } => {
                 pending.push((*expression, loops.clone()));
                 for item in items {

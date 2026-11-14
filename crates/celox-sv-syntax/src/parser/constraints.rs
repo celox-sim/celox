@@ -301,8 +301,8 @@ impl Parser<'_> {
                         self.constraint_primary()?;
                         self.expect(";")?;
                     } else if self.eat("unique") {
-                        supported = false;
-                        self.constraint_ranges(false)?;
+                        let items = self.unique_items()?;
+                        expressions.push(self.node(start, ExprKind::Unique(items))?);
                         self.expect(";")?;
                     } else {
                         let soft = self.eat("soft");
@@ -357,6 +357,35 @@ impl Parser<'_> {
         Ok((expression, simple))
     }
 
+    /// The members of a uniqueness constraint `{ item {, item} }`, each a
+    /// variable or a slice of an array variable (IEEE 1800-2023 18.5.4).
+    fn unique_items(&mut self) -> Result<Vec<Dimension>> {
+        self.expect("{")?;
+        let mut items = Vec::new();
+        loop {
+            let start = self.at;
+            // A value range is in the grammar of the list, though no member
+            // of the group (18.5.4).
+            if self.peek() == "[" {
+                let dimension = self.dimension()?;
+                if !matches!(dimension.kind, DimensionKind::Range { .. }) {
+                    return Err(self.error("constraint value range requires two endpoints"));
+                }
+                items.push(dimension);
+            } else {
+                let value = self.expression(0)?;
+                items.push(Dimension {
+                    kind: DimensionKind::Index(value),
+                    tokens: self.range(start),
+                });
+            }
+            if self.eat("}") {
+                return Ok(items);
+            }
+            self.expect(",")?;
+        }
+    }
+
     /// The items of a distribution `{ item [weight] {, item [weight]} }`
     /// (IEEE 1800-2023 18.5.3).
     fn dist_items(&mut self) -> Result<Vec<DistItem>> {
@@ -404,32 +433,6 @@ impl Parser<'_> {
             items.push(DistItem { value, weight });
             if self.eat("}") {
                 return Ok(items);
-            }
-            self.expect(",")?;
-        }
-    }
-
-    fn constraint_ranges(&mut self, distribution: bool) -> Result<()> {
-        self.expect("{")?;
-        loop {
-            if self.peek() == "default" {
-                return Err(self.unsupported(
-                    "default distribution weights are outside the existing constraint grammar",
-                ));
-            }
-            if self.peek() == "[" {
-                let dimension = self.dimension()?;
-                if !matches!(dimension.kind, DimensionKind::Range { .. }) {
-                    return Err(self.error("constraint value range requires two endpoints"));
-                }
-            } else {
-                self.expression(0)?;
-            }
-            if distribution && (self.eat(":=") || self.eat(":/")) {
-                self.expression(0)?;
-            }
-            if self.eat("}") {
-                return Ok(());
             }
             self.expect(",")?;
         }
