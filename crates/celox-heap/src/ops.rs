@@ -221,12 +221,18 @@ pub const UVM_GLOB_TO_RE: u64 = 153;
 /// UVM 1.2's `uvm_dpi_regcomp(regex)` (see `uvm_dpi`): the handle of the
 /// expression compiled as it is written, or `0` (`null`).
 pub const UVM_DPI_REGCOMP: u64 = 154;
+/// Field `a` of the report a UVM function recorded (see `uvm_dpi`): with
+/// `0`, whether one was recorded, which then is the one the other fields
+/// read.
+pub const UVM_REPORT_FIELD: u64 = 155;
+/// UVM 1.2's `uvm_dump_re_cache()`, which only reports.
+pub const UVM_DUMP_RE_CACHE: u64 = 156;
 
 const _: () = assert!(
     crate::containers::RSORT < UVM_RE_COMP
         && crate::streams::TRUNCATE < UVM_RE_COMP
         && UVM_TOOL_VERSION <= 0xff
-        && UVM_DPI_REGCOMP <= 0xff
+        && UVM_DUMP_RE_CACHE <= 0xff
 );
 
 impl Heap {
@@ -254,7 +260,9 @@ impl Heap {
             op @ (UVM_RE_COMP..=UVM_TOOL_VERSION
             | UVM_RE_MATCH
             | UVM_GLOB_TO_RE
-            | UVM_DPI_REGCOMP) => self.uvm_call(op, a, b, c),
+            | UVM_DPI_REGCOMP
+            | UVM_REPORT_FIELD
+            | UVM_DUMP_RE_CACHE) => self.uvm_call(op, a, b, c),
             op @ DPI_AREA..=DPI_FROM_C_STRING => self.dpi_call(op, a, b),
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {

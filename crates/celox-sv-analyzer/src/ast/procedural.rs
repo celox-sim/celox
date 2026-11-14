@@ -23,6 +23,7 @@ mod locals;
 mod loops;
 mod ordering;
 use foreach::ForeachLoop;
+pub(super) mod dpi_reports;
 mod places;
 pub(super) mod randomization;
 pub(super) mod references;
