@@ -74,6 +74,7 @@ pub(in crate::ast::expression_binding) fn path(
     if let Some(variable) = objects::static_property(tree, session, root, native, dimensions)? {
         return Ok((vec![variable], None));
     }
+    objects::check_member_declared(tree, session, root, native, dimensions)?;
     let mut parts = Vec::new();
     let mut qualified = None;
     loop {
