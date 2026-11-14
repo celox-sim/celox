@@ -478,7 +478,15 @@ pub(in crate::ast) fn subroutines_with_symbolic_parameters(
         if item.is_parameter_declaration(tree.declarations()) {
             continue;
         }
-        for native_id in subroutine_owners::item(item.id, tree)? {
+        let mut owners = subroutine_owners::item(item.id, tree)?;
+        // A subroutine whose statics the file names is lowered before the
+        // others, which may name them (see `static_references`).
+        owners.sort_by_key(|&id| {
+            let name =
+                instances::normalize_identifier(&tree.declarations().subroutine(id).name.spelling);
+            !static_references::named(tree, &name)
+        });
+        for native_id in owners {
             let (item_dimensions, literals) = views.get(item);
             let item_dimensions = if symbolic_parameters.is_empty() {
                 std::borrow::Cow::Borrowed(item_dimensions)
@@ -947,7 +955,13 @@ pub(in crate::ast) fn lower_subroutine(
             // classes, with their formals.
             None => {
                 let declaration = formal_declaration(native, &source);
-                builder.declare_owned(&source, r#type.clone(), declaration)
+                let unique = builder.declare_owned(&source, r#type.clone(), declaration);
+                // A formal of a static subroutine is a static variable of
+                // it (IEEE 1800-2023 13.3.1).
+                if !builder.automatic {
+                    builder.register_static(&source, &unique, r#type.clone());
+                }
+                unique
             }
         };
         if r#type.unpacked_struct().is_some() {
@@ -1220,11 +1234,27 @@ pub(in crate::ast) fn lower_subroutine(
                 builder.state.subroutine_directions,
             )
             .is_err();
+        // A static that a hierarchical name reaches keeps its value and is
+        // initialized once, before simulation starts, whether or not the
+        // subroutine reads it (IEEE 1800-2023 6.21, 23.6).
+        let referenced = builder
+            .state
+            .subroutine_statics
+            .get(&subroutine.name)
+            .map(|statics| {
+                statics
+                    .iter()
+                    .filter(|(source, _)| static_references::referenced(tree, &name, source))
+                    .map(|(_, (unique, _))| unique.clone())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
         // Keep scratch arrays/bitwise result proofs on the existing temporary path.
         let retained_types = static_types
             .iter()
             .filter(|(name, _)| {
                 suspends
+                    || referenced.contains(*name)
                     || lifetimes::check_subroutine_statics(
                         tree,
                         builder.session,
@@ -1255,7 +1285,9 @@ pub(in crate::ast) fn lower_subroutine(
             std::iter::once((&mut subroutine.body, false)),
             &statics,
             &formals,
-            suspends,
+            // A static that a hierarchical name reaches keeps its value even
+            // where the subroutine does not read it.
+            suspends || !referenced.is_empty(),
         )?;
         if retain_result {
             kept.extend(subroutine.return_var.clone());

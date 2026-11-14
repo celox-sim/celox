@@ -371,7 +371,15 @@ pub(super) fn lower_class(
     };
     let mut subroutines = Vec::new();
     let mut constructor = false;
-    for (id, is_static) in classes::declared_methods(tree, session, name)? {
+    let mut methods = classes::declared_methods(tree, session, name)?;
+    // A method whose statics the file names is lowered before the others,
+    // which may name them (see `static_references`).
+    methods.sort_by_key(|&(id, _)| {
+        let name =
+            instances::normalize_identifier(&tree.declarations().subroutine(id).name.spelling);
+        !static_references::named(tree, &name)
+    });
+    for (id, is_static) in methods {
         if static_functions && !(is_static && is_function(tree.declarations(), id)) {
             continue;
         }

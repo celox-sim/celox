@@ -356,3 +356,148 @@ fn enum_assignments_between_instances_of_one_module_are_accepted() {
     "#;
     assert_eq!(displayed(source), ["v=1 p.a=5 p.e=2"]);
 }
+
+#[test]
+fn static_variables_of_subroutines_are_named_through_their_subroutines() {
+    // `f.v` names the static variable `v` of subroutine `f` (IEEE 1800-2023
+    // 23.6, 6.21): of a method of the class or a base, also when only the
+    // method writes it, per specialization, and of a function or task of the
+    // module; it is read and written through the name (uvm-1.2's
+    // `visit.compiled_regex`).
+    let source = "package p;
+    class Base;
+        virtual function void visit(int n);
+            static int count;
+            static int last;
+            static chandle h;
+            count += n;
+            last = n;
+            if (h == null) h = null;
+        endfunction
+        function int peek(); return visit.count * 100 + visit.last + (visit.h == null); endfunction
+    endclass
+    class Derived extends Base;
+        function void reset(); visit.count = 0; endfunction
+    endclass
+    class G #(int W = 1);
+        function int bump(); static int k; k += W; return k; endfunction
+        function int seen(); return bump.k; endfunction
+    endclass
+    endpackage
+    module Top;
+        import p::*;
+        typedef G#(1) g1_t;
+        typedef G#(10) g10_t;
+        function automatic int tally(); static int calls; calls++; return calls; endfunction
+        task automatic tick(); static int n; n++; endtask
+        initial begin
+            Derived d = new;
+            g1_t a = new;
+            g10_t b = new;
+            d.visit(2);
+            d.visit(3);
+            $display(\"%0d\", d.peek());
+            d.reset();
+            d.visit(7);
+            $display(\"%0d\", d.peek());
+            void'(a.bump());
+            void'(a.bump());
+            void'(b.bump());
+            $display(\"%0d %0d\", a.seen(), b.seen());
+            void'(tally());
+            tick();
+            tally.calls = 10;
+            $display(\"%0d %0d %0d\", tally(), tally.calls, tick.n);
+        end
+    endmodule";
+    assert_eq!(displayed(source), ["504", "708", "2 10", "11 11 1"]);
+}
+
+#[test]
+fn automatic_variables_of_subroutines_have_no_hierarchical_names() {
+    // An automatic variable is no object a hierarchical name reaches
+    // (IEEE 1800-2023 6.21).
+    let source = "class V;
+        function void visit(); int count; count++; endfunction
+        function int peek(); return visit.count; endfunction
+    endclass
+    module Top; initial begin V v = new; $display(\"%0d\", v.peek()); end endmodule";
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("auto.sv"))], "Top")
+            .build_cranelift()
+    else {
+        panic!("an automatic variable was named hierarchically");
+    };
+    assert!(error.to_string().contains("visit.count"), "{error}");
+}
+
+#[test]
+fn static_variable_references_resolve_where_they_are_written() {
+    // `f.v` names the static `v` of the `f` visible at the reference (IEEE
+    // 1800-2023 23.6): a module's own function, not another module's; a
+    // method of the class before a function of the module (8.5); a
+    // protected method of a base (8.18). `v` has the type `f` declares it
+    // with, a local typedef included, and its initial value before `f` is
+    // ever called (6.21); a formal of a static function is a static
+    // variable of it too (13.3.1).
+    for (body, expected) in [
+        (
+            "module M1; function int f(); static int v = 7; v++; return v; endfunction
+                initial void'(f()); endmodule
+             module Top; M1 m1();
+                function int f(); static int v = 100; return v; endfunction
+                initial #1 $display(\"%0d\", f.v); endmodule",
+            "100",
+        ),
+        (
+            "module Top;
+                function int f(); static int v = 1; return v; endfunction
+                class C;
+                    function int f(); static int v = 2; return v; endfunction
+                    function int g(); return f.v; endfunction
+                endclass
+                initial begin C c = new; $display(\"%0d %0d\", c.g(), f.v); end
+             endmodule",
+            "2 1",
+        ),
+        (
+            "class B; protected function int h(); static int w = 4; return w; endfunction endclass
+             class D extends B; function int g(); return h.w; endfunction endclass
+             module Top; initial begin D d = new; $display(\"%0d\", d.g()); end endmodule",
+            "4",
+        ),
+        (
+            "module Top;
+                function int f(); typedef bit [11:0] w_t; static w_t v; return v; endfunction
+                initial begin f.v = 13'h1fff; $display(\"%h %0d\", f.v, $bits(f.v)); end
+             endmodule",
+            "fff 12",
+        ),
+        (
+            "module Top; function int f(int arg); return arg; endfunction
+                initial begin void'(f(5)); $display(\"%0d\", f.arg); end endmodule",
+            "5",
+        ),
+    ] {
+        assert_eq!(displayed(body), [expected], "{body}");
+    }
+    // Rejected: a function of another module, an automatic variable by the
+    // unit's default lifetime (6.21), a local method of a base (8.18).
+    for body in [
+        "module M1; function int f(); static int v = 7; return v; endfunction endmodule
+         module Top; M1 m1(); initial $display(\"%0d\", f.v); endmodule",
+        "module automatic Top; function int f(); int v = 1; return v; endfunction
+            initial $display(\"%0d\", f.v); endmodule",
+        "class B; local function int f(); static int v = 3; return v; endfunction endclass
+         class D extends B; function int g(); return f.v; endfunction endclass
+         module Top; initial begin D d = new; $display(\"%0d\", d.g()); end endmodule",
+    ] {
+        let Err(error) =
+            celox::Simulation::from_sv_sources(vec![(body, Path::new("refs.sv"))], "Top")
+                .build_cranelift()
+        else {
+            panic!("accepted: {body}");
+        };
+        assert!(error.to_string().contains("f.v"), "{body}: {error}");
+    }
+}

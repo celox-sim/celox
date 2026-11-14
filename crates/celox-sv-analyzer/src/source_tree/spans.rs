@@ -142,6 +142,9 @@ pub(crate) struct Spans {
     pub imports: std::sync::OnceLock<crate::ast::imports::Facts>,
     /// The class declarations by their declared names.
     pub classes: std::sync::OnceLock<crate::ast::ClassIndex>,
+    /// The `f.v` names of subroutines' static variables the file may use
+    /// (see `procedural::static_references`).
+    pub static_references: std::sync::OnceLock<Vec<crate::ast::StaticReference>>,
     pub(super) text: std::sync::OnceLock<SourceText>,
 }
 
@@ -202,6 +205,7 @@ impl Spans {
             validation: Default::default(),
             imports: Default::default(),
             classes: Default::default(),
+            static_references: Default::default(),
             text: Default::default(),
         }
     }

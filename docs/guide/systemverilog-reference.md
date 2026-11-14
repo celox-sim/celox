@@ -75,7 +75,11 @@ constructs without a dedicated issue point to the frontend roadmap,
   of an element of a packed array of structures is rejected), or `real`,
   `string` (except through the host API name, see below), or class-typed
   signals; names that start inside a generate block relative to it are also
-  rejected.
+  rejected. A static variable of a subroutine is named as `f.v` (23.6) only
+  from a scope that `f` is visible in by its simple name: a method of the
+  class or a base, or a subroutine of the design element; not through an
+  instance, package or named block, and not when the variable is of
+  unpacked structure type.
 - Packages: package nets
   ([#1146](https://github.com/celox-sim/celox/issues/1146)); a package
   variable cannot be a clock or reset.

@@ -22,6 +22,7 @@ impl ScopeElaboration<'_> {
             automatic: lifetimes::automatic_by_default(syntax_tree),
             statics: Vec::new(),
             explicit_statics: HashSet::default(),
+            subroutine_statics: HashMap::default(),
             static_initializers: Vec::new(),
             constant_evaluation: false,
         };

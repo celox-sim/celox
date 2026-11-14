@@ -27,6 +27,7 @@ pub(super) mod dpi_reports;
 mod places;
 pub(super) mod randomization;
 pub(super) mod references;
+pub(crate) mod static_references;
 mod subroutines;
 pub(super) mod timed_tasks;
 mod timing;
@@ -82,6 +83,12 @@ pub(super) struct BodyState<'a> {
     pub statics: Vec<(String, Type)>,
     /// The statics declared with the `static` keyword.
     pub explicit_statics: HashSet<String>,
+    /// The variables with a static lifetime of each subroutine lowered so
+    /// far, by its owner name (see `BodyBuilder::set_owner`): by the names
+    /// they are declared with, their unique names and types, which a
+    /// hierarchical name `f.v` reaches (IEEE 1800-2023 23.6, see
+    /// `static_references`).
+    pub subroutine_statics: HashMap<String, HashMap<String, (String, Type)>>,
     /// Function static declarations initialized once at time zero.
     pub static_initializers: Vec<Stmt>,
     /// Constant calls get a fresh frame, even for static declarations (13.4.3).
@@ -629,7 +636,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let automatic = state.automatic;
         let mut dims = dims.clone();
         dims.locator_locals = Some(locators::LocalSink::new(*state.counter));
-        Self {
+        let mut builder = Self {
             automatic,
             subroutine: body == system_functions::Body::Subroutine,
             task_timing: false,
@@ -655,7 +662,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             state,
             type_aliases,
             body,
-        }
+        };
+        // A class whose layout fails is rejected where it is used.
+        let _ = builder.bind_static_references();
+        builder
     }
 
     /// Declare the locals that the array locator methods of the bound
@@ -831,7 +841,24 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         r#type: Type,
         declaration: usize,
     ) -> String {
-        self.declare_owned(source, r#type, declaration)
+        let unique = self.declare_owned(source, r#type.clone(), declaration);
+        self.register_static(source, &unique, r#type);
+        unique
+    }
+
+    /// Record static variable `source` of the subroutine being lowered,
+    /// named `unique`, of type `r#type`, for the hierarchical names that
+    /// reach it (see `static_references`). The first of a name is the
+    /// subroutine's own, before any of its nested blocks.
+    pub(super) fn register_static(&mut self, source: &str, unique: &str, r#type: Type) {
+        if let Some(owner) = &self.owner {
+            self.state
+                .subroutine_statics
+                .entry(owner.clone())
+                .or_default()
+                .entry(source.to_owned())
+                .or_insert_with(|| (unique.to_owned(), r#type));
+        }
     }
 
     /// Declare a variable of the subroutine being lowered, declared at
@@ -1022,6 +1049,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 .entries
                 .push(entry);
         }
+        // `m.v` of a static variable of a method `m` of the class (23.6). A
+        // class whose layout fails is rejected where it is used.
+        let _ = self.bind_static_references();
     }
 
     fn rename_expr(&self, expr: &mut Expr) {
