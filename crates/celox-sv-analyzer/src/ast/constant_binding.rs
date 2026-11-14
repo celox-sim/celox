@@ -63,6 +63,75 @@ pub(super) fn bind_in(
 ) -> Converted<Option<ConstExpr>> {
     bind_in_context(root, native, tree, session, dimensions, dimensions)
 }
+/// `value` with each name of a constant that only its literal holds, one
+/// too wide for the numeric environment such as a wide enumeration member,
+/// replaced by that literal: a cast folds its operand's value (IEEE
+/// 1800-2023 6.24.1), which the name alone does not give.
+fn with_wide_literals(value: ConstExpr, dimensions: &PackedDimensions) -> ConstExpr {
+    let wide = |value: Box<ConstExpr>| Box::new(with_wide_literals(*value, dimensions));
+    match value {
+        ConstExpr::Ident(name) if !dimensions.const_env.contains_key(&name) => {
+            match dimensions.parameter_values.get(&name) {
+                Some(Expr::Literal(text)) if typecheck::parse_integral_literal(text).is_some() => {
+                    ConstExpr::Literal(text.clone())
+                }
+                _ => ConstExpr::Ident(name),
+            }
+        }
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => value,
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: wide(expr),
+            bit: wide(bit),
+        },
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: wide(expr),
+            msb: wide(msb),
+            lsb: wide(lsb),
+            signed,
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: wide(expr),
+            width,
+            signed,
+        },
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee,
+            args: args
+                .into_iter()
+                .map(|arg| with_wide_literals(arg, dimensions))
+                .collect(),
+            site,
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op,
+            expr: wide(expr),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: wide(left),
+            op,
+            right: wide(right),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: wide(condition),
+            then_expr: wide(then_expr),
+            else_expr: wide(else_expr),
+        },
+    }
+}
+
 fn bind_in_context(
     root: ExprId,
     native: &Declarations,
@@ -491,6 +560,7 @@ fn bind_in_context(
             },
             Job::Cast(target) => {
                 let value = values.pop().ok_or_else(disagreement)?;
+                let value = with_wide_literals(value, dimensions);
                 let Some(value) = casts::cast_constant_target(
                     tree,
                     session,
