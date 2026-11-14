@@ -19,7 +19,7 @@ celox           = { path = "../celox" }
 clap            = { workspace = true }
 fxhash          = { workspace = true }
 libc            = { workspace = true }
-object          = { version = "0.40", default-features = false, features = ["read_core", "elf", "std"] }
+object          = { version = "0.41", default-features = false, features = ["read_core", "elf", "std"] }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
 tempfile        = { workspace = true }
