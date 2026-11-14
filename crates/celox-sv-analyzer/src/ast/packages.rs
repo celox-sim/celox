@@ -60,6 +60,14 @@ pub struct Design {
     pub(super) types: semantic_types::TyTable,
 }
 
+impl Design {
+    /// Take back the types that an analysis of the design moved into its
+    /// [`Source`](super::Source) and published the IR with.
+    pub(crate) fn restore_publication(&mut self, publication: super::Publication) {
+        self.types = publication.0;
+    }
+}
+
 /// The compilation-unit scope of a source file.
 #[derive(Debug)]
 pub(super) struct Unit {
@@ -912,10 +920,13 @@ pub(super) fn analyze_package_with_symbols(
     let state_module = if variables.is_empty() {
         None
     } else {
-        let ir = crate::analyze::analyze_source(Source {
+        let (ir, publication) = crate::analyze::analyze_source_keeping(Source {
             modules: vec![module],
             diagnostics: Vec::new(),
-        })?;
+            types: std::mem::take(&mut session.types),
+        });
+        session.types = publication.0;
+        let ir = ir?;
         ir.modules().first().cloned()
     };
     let qualified = |item: &String| format!("{name}::{item}");

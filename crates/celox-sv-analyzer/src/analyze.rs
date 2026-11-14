@@ -9,16 +9,46 @@ use crate::{
 
 pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
     let warnings = source.warnings();
-    crate::finish_analysis(analyze_source_impl(source), warnings)
+    let (modules, mut publication) = source.into_publication();
+    crate::finish_analysis(publish(modules, &mut publication), warnings)
 }
 
-fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
+/// [`analyze_source`] of a source analyzed in `design`, which takes back
+/// the types the analysis moved into it.
+pub(crate) fn analyze_source_in(
+    source: ast::Source,
+    design: &mut ast::packages::Design,
+) -> Result<ir::Ir, AnalyzerError> {
+    let warnings = source.warnings();
+    let (modules, mut publication) = source.into_publication();
+    let ir = publish(modules, &mut publication);
+    design.restore_publication(publication);
+    crate::finish_analysis(ir, warnings)
+}
+
+/// [`analyze_source`], with the types the source carried back, for the
+/// session that analyzed it.
+pub(crate) fn analyze_source_keeping(
+    source: ast::Source,
+) -> (Result<ir::Ir, AnalyzerError>, ast::Publication) {
+    let warnings = source.warnings();
+    let (modules, mut publication) = source.into_publication();
+    let ir = publish(modules, &mut publication);
+    (crate::finish_analysis(ir, warnings), publication)
+}
+
+/// The IR of `modules`, whose types are bound in those of `publication`.
+fn publish(
+    source_modules: Vec<ast::Module>,
+    publication: &mut ast::Publication,
+) -> Result<ir::Ir, AnalyzerError> {
     let mut module_table = ModuleTable::default();
     let mut modules = Vec::new();
-    for mut module in source.into_modules() {
+    for mut module in source_modules {
         let syntax = crate::source_tree::SourceTree::empty();
         let tree = &module.constant_context(&syntax);
-        let session = &mut ast::Session::default();
+        let mut lent = publication.lend();
+        let session: &mut ast::Session = &mut lent;
         let id = module_table.insert(&module)?;
         let mut constants = crate::ast::ConstEnv::default();
         let mut parameter_types = HashMap::default();
