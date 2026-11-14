@@ -1256,7 +1256,33 @@ pub(super) fn shared_class(
         session.classes.insert(name.to_owned(), class.clone());
         return Ok(class);
     };
-    let (scope_env, scope_aliases) = specializations::shared_scope(session, name, env, aliases);
+    let (mut scope_env, mut scope_aliases) =
+        specializations::shared_scope(session, name, env, aliases);
+    // A class no specialization records declares its typedefs and
+    // parameters in its body, which hide a type or constant of that name in
+    // the tables it is laid out in, such as one of a class whose method
+    // names it (IEEE 1800-2023 8.13, 8.25).
+    if specializations::lookup(session, name).is_none() {
+        let native = tree.declarations();
+        for &id in &declaration.type_aliases {
+            let own = instances::normalize_identifier(&native.type_alias(id).name.spelling);
+            if scope_aliases.contains_key(&own) {
+                scope_aliases.remove(&own);
+            }
+        }
+        for &id in &declaration.parameters {
+            for parameter in &native.parameter_declaration(id).parameters {
+                let own = instances::normalize_identifier(&parameter.name.spelling);
+                if matches!(parameter.kind, celox_sv_syntax::ParameterKind::Type { .. }) {
+                    if scope_aliases.contains_key(&own) {
+                        scope_aliases.remove(&own);
+                    }
+                } else if scope_env.contains_key(&own) {
+                    scope_env.remove(&own);
+                }
+            }
+        }
+    }
     // The types of the class are bound in one context of its scope, which
     // the declarations of the scope around it are discovered without.
     let outer = PackedDimensions {
