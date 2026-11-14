@@ -673,9 +673,27 @@ fn schedule_sources_collecting(
         let mut instance_values = Vec::new();
         let mut modules = HashMap::default();
         let mut module_names = HashMap::default();
+        // A combinational loop through level lists is scheduled again with
+        // them demoted, which lowers their modules again and glues every
+        // module anew. Without a list left to demote, a loop is final and
+        // nothing below runs again: the glued modules take the lowered
+        // modules' symbolic modules and calls instead of copies, and the
+        // lowering is released before scheduling builds the program, the
+        // frontend's largest.
+        let last_attempt = !can_demote_level_lists(&lowered_modules, &demoted);
+        let design_waits = DesignWaits::of(&lowered_modules);
         for (key, &module_id) in &module_ids {
+            let (mut sim_module, mut calls) = if last_attempt {
+                let lowered = lowered_modules.get_mut(&module_id).unwrap();
+                (
+                    std::mem::take(&mut lowered.sim_module),
+                    lowered.calls.take(),
+                )
+            } else {
+                let lowered = &lowered_modules[&module_id];
+                (lowered.sim_module.clone(), lowered.calls.clone())
+            };
             let lowered = &lowered_modules[&module_id];
-            let mut sim_module = lowered.sim_module.clone();
             if let Some(references) = references.get(&module_id) {
                 sim_module.hierarchical_bindings =
                     hierarchy::bindings(references, lowered, &lowered_modules)?;
@@ -690,13 +708,13 @@ fn schedule_sources_collecting(
             if let Some((instances, _)) = &virtual_instances {
                 instance_values.extend(instances.values(module_id, lowered));
             }
-            let mut calls = lowered.calls.clone();
             let glued = attach_instance_glue(
                 &mut sim_module,
                 lowered,
                 key,
                 &module_ids,
                 &lowered_modules,
+                &design_waits,
                 four_state,
                 allow_inferred_latches,
                 false,
@@ -764,12 +782,7 @@ fn schedule_sources_collecting(
         };
         checkpoint!("packages");
         drop(package_states);
-        // A combinational loop through level lists is scheduled again with
-        // them demoted, which lowers their modules again. Without a list left
-        // to demote, a loop is final and nothing above runs again: release
-        // the lowering and the analyses before scheduling builds the program,
-        // the frontend's largest.
-        if !can_demote_level_lists(&lowered_modules, &demoted) {
+        if last_attempt {
             drop(std::mem::take(&mut lowered_modules));
             drop(std::mem::take(&mut analyses));
             drop(std::mem::take(&mut discovery_analyses));

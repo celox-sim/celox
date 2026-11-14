@@ -2,12 +2,39 @@
 
 use super::*;
 
+/// What the glue of each module reads of the waits of the whole design.
+pub(crate) struct DesignWaits {
+    /// Whether a module waits.
+    any: bool,
+    /// Whether a module switches a nonblocking write.
+    nba_switches: bool,
+    /// Whether a wait of a module has a gate.
+    gated: bool,
+}
+
+impl DesignWaits {
+    pub(crate) fn of(lowered_modules: &HashMap<ModuleId, LoweredSvModule>) -> Self {
+        let modules = || lowered_modules.values().map(|module| &module.sim_module);
+        Self {
+            any: modules().any(|module| !module.wait_sites.is_empty()),
+            nba_switches: modules().any(|module| !module.nba_switches.is_empty()),
+            gated: modules().any(|module| {
+                module
+                    .wait_sites
+                    .iter()
+                    .any(|site| site.gates.iter().any(Option::is_some))
+            }),
+        }
+    }
+}
+
 pub(crate) fn attach_instance_glue(
     module: &mut SimModule,
     lowered: &LoweredSvModule,
     current_key: &LoweredSvModuleKey,
     module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
     lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
+    design_waits: &DesignWaits,
     four_state: bool,
     allow_inferred_latches: bool,
     foreign: bool,
@@ -147,9 +174,7 @@ pub(crate) fn attach_instance_glue(
     // The repeated writes of flip-flops and combinational processes are
     // counted only in a design with a wait, so a design without one, such
     // as pure RTL, lowers exactly as before.
-    let waits = lowered_modules
-        .values()
-        .any(|module| !module.sim_module.wait_sites.is_empty());
+    let waits = design_waits.any;
     // An `always_comb` alternative is kept only if a wait or a flip-flop
     // domain counts one of its targets. Within the module, they name its
     // wait terms, its triggers and whole-variable copies of them; beyond
@@ -158,12 +183,7 @@ pub(crate) fn attach_instance_glue(
     // a design declares also keeps nonblocking writes queued, so a design
     // with a nonblocking switch lowers every alternative, and so does a
     // module of a design with foreign modules, which this module does not see.
-    let watch_seeds = (waits
-        && !foreign
-        && !lowered_modules
-            .values()
-            .any(|module| !module.sim_module.nba_switches.is_empty()))
-    .then(|| {
+    let watch_seeds = (waits && !foreign && !design_waits.nba_switches).then(|| {
         // A gate is read at each write of its term's signal too.
         let mut seeds: HashSet<SourceVarId> = module
             .wait_sites
@@ -224,13 +244,7 @@ pub(crate) fn attach_instance_glue(
         );
         seeds
     });
-    let gated_waits = lowered_modules.values().any(|module| {
-        module
-            .sim_module
-            .wait_sites
-            .iter()
-            .any(|site| site.gates.iter().any(Option::is_some))
-    });
+    let gated_waits = design_waits.gated;
     let (comb_blocks, arena, created, comb_observers, comb_sites, comb_alternatives) =
         lower_comb_processes(
             &lowered.source,
