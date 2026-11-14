@@ -459,7 +459,7 @@ fn packed_members(
                         && ty.packed_ranges.len() == 1
                 })
             {
-                return Ok(Some(ty.members));
+                return Ok(Some(ty.members.clone()));
             }
         }
         _ => {}

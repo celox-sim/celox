@@ -274,7 +274,7 @@ pub(super) fn fixed_storage(
         tree,
         context,
     )?;
-    Ok(storage.container.expect("a container type"))
+    Ok(storage.container.clone().expect("a container type"))
 }
 
 impl ContainerType {
@@ -377,7 +377,7 @@ pub(super) fn native_type(
     if let Some((property, _)) =
         expression_binding::object_property(tree, session, id, native, dims)?
     {
-        return Ok(property.storage.or(property.r#type.container));
+        return Ok(property.storage.or(property.r#type.container.clone()));
     }
     if let Some(name) = expression_binding::object_static_property(tree, session, id, native, dims)?
         && let Some(shape) = dims.get(&name)

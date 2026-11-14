@@ -597,7 +597,7 @@ pub(super) fn rename_expr_idents(
 
 /// The `int` type of a loop variable declared by `foreach`.
 pub(super) fn int_type() -> Type {
-    Type {
+    Type::from(TypeShape {
         container: None,
         is_enum: false,
         enum_domain: None,
@@ -615,7 +615,7 @@ pub(super) fn int_type() -> Type {
         virtual_interface: None,
         unpacked_struct: None,
         spelling: type_names::Spelling::keyword("int"),
-    }
+    })
 }
 
 impl Drop for BodyBuilder<'_, '_, '_> {

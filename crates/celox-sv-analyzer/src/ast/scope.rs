@@ -1000,8 +1000,7 @@ impl Renamer<'_> {
     }
 
     pub fn r#type(&self, mut r#type: Type) -> Type {
-        r#type.packed_ranges = r#type
-            .packed_ranges
+        r#type.packed_ranges = std::mem::take(&mut r#type.packed_ranges)
             .into_iter()
             .map(|range| self.packed_range(range))
             .collect();
@@ -1010,12 +1009,14 @@ impl Renamer<'_> {
             range.right = self.const_expr(range.right.clone());
             range.size = range.size.take().map(|size| self.const_expr(size));
         }
-        r#type.members = r#type
-            .members
+        r#type.members = std::mem::take(&mut r#type.members)
             .into_iter()
             .map(|member| member.with_type(|r#type| self.r#type(r#type)))
             .collect();
-        r#type.container = r#type.container.map(|container| self.container(&container));
+        r#type.container = r#type
+            .container
+            .take()
+            .map(|container| self.container(&container));
         r#type
     }
 

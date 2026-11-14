@@ -232,6 +232,24 @@ pub(super) struct Supertypes {
     pub interface: bool,
 }
 
+/// The semantic type a [`crate::ast::Type`] was bound to, kept until the
+/// type changes. Whoever builds a type binds it; a copy of the type keeps
+/// the binding, and any change of its shape forgets it.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Binding(Option<RetainedType>);
+
+impl Binding {
+    /// Forget the semantic type, as the type changes.
+    pub(super) fn forget(&mut self) {
+        self.0 = None;
+    }
+
+    /// The semantic type in `table`, if bound to one of its types.
+    pub(super) fn get(&self, table: &TyTable) -> Option<TyId> {
+        self.0.as_ref()?.in_table(table)
+    }
+}
+
 /// A declaration's ID together with its immutable interned node. A cloned
 /// table shares its prefix; unrelated or independently appended nodes do not.
 #[derive(Clone, Debug)]
