@@ -2710,6 +2710,19 @@ fn class_property_payloads_validate_while_opaque_nonproperty_items_keep_boundari
 }
 
 #[test]
+fn solve_before_keeps_its_ordered_variables() {
+    let tree = parse(
+        "class C; rand int a, b; rand byte q[$]; constraint c { solve a, q.size() before b; a < b; } endclass",
+    );
+    let expressions = tree.classes[0].constraints[0].expressions.as_ref().unwrap();
+    assert_eq!(expressions.len(), 2);
+    let ExprKind::SolveBefore { before, after } = &tree.expression(expressions[0]).kind else {
+        panic!("a solve before");
+    };
+    assert_eq!((before.len(), after.len()), (2, 1));
+}
+
+#[test]
 fn constraint_declarations_validate_control_sets_ranges_and_prototypes() {
     for declaration in [
         "constraint c;",

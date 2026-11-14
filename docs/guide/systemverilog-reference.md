@@ -322,7 +322,7 @@ blocks in programs. Two region deviations are listed under
   constraint names, `sum() with`, `soft` constraints in a `foreach` or with
   `dist`, `dist` with `default :/`, weights other than constant expressions
   or ranges weighted per value with bounds other than constant expressions,
-  `solve before`, typed parameters in constraints, array sets, X/Z wildcard
+  typed parameters in constraints, array sets, X/Z wildcard
   items and `$` bounds in `inside` sets, and `randc` domains beyond 1–8-bit
   integers and scalar enums with up to 256 members. Named constraint blocks
   cover only 1–64-bit two-state scalar integer properties with comparisons,
@@ -349,8 +349,8 @@ blocks in programs. Two region deviations are listed under
   evaluated before solving, so a constraint it leaves out reads no member of
   a null handle (18.5.13).
 - Inline `with` constraints: four-state and aggregate caller-scope inputs,
-  typed parameter inputs, qualified `this` / `super` references, and a
-  `local::` name of a property of the caller's class.
+  typed parameter inputs, and a `local::` name of a property of the
+  caller's class.
 - Enums with unresolved or X/Z values for randomization.
 
 ### Dynamic containers, strings, and reference arguments
@@ -639,6 +639,8 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
   kept before it allow it, and is otherwise discarded; a `disable soft`
   discards the lower soft constraints that name its variable (18.5.13.2).
   The search for each keeps the seed, so the choice is reproducible.
+- `solve before` (18.5.9) leaves the solutions as they are, and the search
+  does not order its choices by it; a circular order is not diagnosed.
 - A function a constraint calls (18.5.11) runs as any call of it does,
   the override of the object's class included, after the random variables
   in its arguments are solved by the constraints that name only them; its

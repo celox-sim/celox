@@ -113,6 +113,13 @@ pub enum ExprKind {
         variable: ExprId,
         condition: Option<ExprId>,
     },
+    /// `solve before before after` (IEEE 1800-2023 18.5.9): an order in
+    /// which to choose the values of random variables, which leaves the
+    /// solutions as they are.
+    SolveBefore {
+        before: Vec<ExprId>,
+        after: Vec<ExprId>,
+    },
     /// Per-call class constraints (IEEE 1800-2023 18.7).
     RandomizeWith {
         expression: ExprId,
@@ -1675,6 +1682,10 @@ impl ExprKind {
             } => ExprKind::DisableSoft {
                 variable: map(*variable),
                 condition: condition.map(&mut *map),
+            },
+            ExprKind::SolveBefore { before, after } => ExprKind::SolveBefore {
+                before: before.iter().map(|id| map(*id)).collect(),
+                after: after.iter().map(|id| map(*id)).collect(),
             },
             ExprKind::RandomizeWith {
                 expression,

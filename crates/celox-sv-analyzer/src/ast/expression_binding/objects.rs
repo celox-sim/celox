@@ -2114,6 +2114,10 @@ fn caller_inputs(
                 pending.push((*variable, loops));
                 None
             }
+            ExprKind::SolveBefore { before, after } => {
+                pending.extend(before.iter().chain(after).map(|id| (*id, loops.clone())));
+                None
+            }
             // A loop's body sees its variables (18.5.8.1).
             ExprKind::ConstraintForeach {
                 variables, body, ..

@@ -6476,6 +6476,12 @@ fn scope_randomize_validates_variable_arguments() {
             "std::randomize(value) with {value == 1;}",
         ),
         ("bit value;", "std::randomize(value[0]) with {value == 1;}"),
+        // Its arguments are its random variables, the caller's other
+        // variables state values (18.12.1), which no order names (18.5.9).
+        (
+            "bit [3:0] a, b, s;",
+            "std::randomize(a, b) with {solve s before a;}",
+        ),
         // A scope randomize takes no restricted constraint block (18.7).
         (
             "bit value;",
@@ -6843,10 +6849,50 @@ fn class_randomize_rejects_unsupported_semantics() {
             "c.randomize() with { x == f(y); }",
             "in inline constraints",
         ),
+        // `solve before` orders rand variables only (18.5.9).
         (
-            "rand int x, y; constraint c { solve x before y; x == y; }",
+            "int x; rand int y; constraint c { solve x before y; }",
             "c.randomize()",
-            "constraints",
+            "solve before of other than a rand variable",
+        ),
+        (
+            "randc bit [1:0] x; rand int y; constraint c { solve y before x; }",
+            "c.randomize()",
+            "solve before of other than a rand variable",
+        ),
+        (
+            "rand int x; int a[$];",
+            "c.randomize() with { solve a.size() before x; }",
+            "solve before of other than a rand variable",
+        ),
+        (
+            "class D; int m; endclass rand D h; rand int x; constraint c { solve h.m before x; }",
+            "c.randomize()",
+            "solve before of other than a rand variable",
+        ),
+        // However the variable is named (8.11).
+        (
+            "rand int x; int y; constraint c { solve this.y before x; }",
+            "c.randomize()",
+            "solve before of other than a rand variable",
+        ),
+        // A select of a variable that is not random and more than one
+        // variable (Syntax 18-8).
+        (
+            "bit [1:0] a; rand bit b; constraint c { solve a[0] before b; }",
+            "c.randomize()",
+            "solve before of other than a rand variable",
+        ),
+        (
+            "rand bit [7:0] x, y, z; constraint c { solve x + y before z; }",
+            "c.randomize()",
+            "expected `before`",
+        ),
+        // `super` names a member of the base class (8.15).
+        (
+            "rand int x; constraint c { super.x == 1; }",
+            "c.randomize()",
+            "`super` in a class without a base class",
         ),
         (
             "rand int x; constraint c { x inside {[1:$]}; }",
