@@ -194,8 +194,15 @@ pub(super) fn enter_call(
         );
         return Ok(None);
     }
-    let name = bound_callable_name(tree, session, *expression, native, dimensions)?
-        .ok_or_else(|| unsupported("method or randomize call"))?;
+    let Some(name) = bound_callable_name(tree, session, *expression, native, dimensions)? else {
+        // A dotted name that calls nothing of the scope is a hierarchical
+        // name of a subroutine of another instance (IEEE 1800-2023 23.8),
+        // which the caller resolves.
+        if let Some(path) = hierarchical_callee(tree, session, *expression, native, dimensions) {
+            return Err(AnalyzerError::HierarchicalReference { path });
+        }
+        return Err(unsupported("method or randomize call"));
+    };
     let cast = match name.as_str() {
         "$cast" => objects::cast(tree, session, args, native, dimensions)?,
         _ => None,

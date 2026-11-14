@@ -77,14 +77,91 @@ pub(in crate::ast) fn callable_name(
     if separator != "." {
         return None;
     }
+    // A subroutine of another instance (IEEE 1800-2023 23.8), which the
+    // module calls by the name its hierarchical names resolve to.
+    let imported = scope::imported(tree);
+    if let Some(path) = dotted_name(id, native)
+        && let Some(subroutine) = imported.hierarchical_subroutine(&path)
+    {
+        return Some(subroutine.name.clone());
+    }
     let handle = call_name(tree, *expression, native)?;
-    scope::imported(tree)
+    imported
         .interface_members
         .get(&format!(
             "{handle}.{}",
             instances::normalize_identifier(&name.spelling)
         ))
         .cloned()
+}
+
+/// The hierarchical name that the callee `id` of a call spells, as
+/// [`crate::ParsedSource::hierarchical_names`] spells it, its instance
+/// indices, constant expressions, evaluated (IEEE 1800-2023 23.6): `None`
+/// for a callee that is no dotted name.
+pub(in crate::ast) fn hierarchical_callee(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(ungroup(id, native)).kind
+    else {
+        return None;
+    };
+    if separator != "." {
+        return None;
+    }
+    let (parts, qualified) =
+        selected_values::path(*expression, native, tree, session, dimensions).ok()?;
+    qualified.is_none().then(|| {
+        format!(
+            "{}.{}",
+            parts.join("."),
+            instances::normalize_identifier(&name.spelling)
+        )
+    })
+}
+
+/// The dotted name `a.b.c` that expression `id` spells, as
+/// [`crate::ParsedSource::hierarchical_names`] spells its components: a
+/// constant decimal index of a component other than the last stays part of
+/// it, as in `u[1]`.
+pub(in crate::ast) fn dotted_name(id: ExprId, native: &Declarations) -> Option<String> {
+    match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Name(name) => Some(instances::normalize_identifier(&name.spelling)),
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "." => Some(format!(
+            "{}.{}",
+            dotted_prefix(*expression, native)?,
+            instances::normalize_identifier(&name.spelling)
+        )),
+        _ => None,
+    }
+}
+
+/// [`dotted_name`] of the components before the last one, which may carry a
+/// constant decimal index.
+fn dotted_prefix(id: ExprId, native: &Declarations) -> Option<String> {
+    if let ExprKind::Select {
+        expression,
+        dimension,
+    } = &native.expression(ungroup(id, native)).kind
+        && let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind
+        && let ExprKind::Literal(literal) = &native.expression(index).kind
+        && let Ok(index) = literal.replace('_', "").parse::<u64>()
+    {
+        return Some(format!("{}[{index}]", dotted_name(*expression, native)?));
+    }
+    dotted_name(id, native)
 }
 
 /// Resolve interface selections with the constant environment of the call site.
@@ -102,6 +179,11 @@ pub(super) fn bound_callable_name(
         objects::method(tree, session, id, native, dimensions)?
     {
         return Ok(Some(name));
+    }
+    if let Some(path) = hierarchical_callee(tree, session, id, native, dimensions)
+        && let Some(subroutine) = scope::imported(tree).hierarchical_subroutine(&path)
+    {
+        return Ok(Some(subroutine.name.clone()));
     }
     interface_member_name(tree, session, id, native, dimensions)
 }

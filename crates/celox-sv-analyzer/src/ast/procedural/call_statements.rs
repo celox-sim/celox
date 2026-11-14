@@ -429,6 +429,18 @@ impl BodyBuilder<'_, '_, '_> {
             _ => return Err(unsupported("system task or function name")),
         };
         let celox_sv_syntax::ExprKind::Name(name) = &declarations.expression(callee).kind else {
+            // A dotted name that calls nothing of the scope is a
+            // hierarchical name of a subroutine of another instance (IEEE
+            // 1800-2023 23.8), which the caller resolves.
+            if let Some(path) = expression_binding::hierarchical_callee(
+                self.tree,
+                self.session,
+                callee,
+                declarations,
+                &self.dims,
+            ) {
+                return Err(AnalyzerError::HierarchicalReference { path });
+            }
             return Err(unsupported("system task or function name"));
         };
         let presence = arguments

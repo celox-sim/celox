@@ -374,19 +374,23 @@ fn schedule_sources_collecting(
         // Discovery needs only instance bindings and reflected declarations.
         // Executable lowering is deferred until hierarchy and foreign writers
         // are known, rather than constructing and discarding a full SimModule.
-        let discovery =
-            analyze_specialization(base, &mut design, &key, &[], warnings).and_then(|ir| {
-                let source = ir
-                    .modules()
-                    .iter()
-                    .find(|module| module.name() == base.name)
-                    .ok_or_else(|| {
-                        sv::AnalyzerError::Unsupported(format!("module `{}`", base.name))
-                    })?;
-                let declarations =
-                    hierarchy::ElaboratedModule::from_declarations(source, &key.force_signals)?;
-                Ok((declarations, ir))
-            });
+        let discovery = analyze_specialization(
+            base,
+            &mut design,
+            &key,
+            sv::ast::HierarchicalObjects::default(),
+            warnings,
+        )
+        .and_then(|ir| {
+            let source = ir
+                .modules()
+                .iter()
+                .find(|module| module.name() == base.name)
+                .ok_or_else(|| sv::AnalyzerError::Unsupported(format!("module `{}`", base.name)))?;
+            let declarations =
+                hierarchy::ElaboratedModule::from_declarations(source, &key.force_signals)?;
+            Ok((declarations, ir))
+        });
         let module = match discovery {
             Ok((declarations, ir)) => {
                 discovery_analyses.insert(module_id, ir);
@@ -467,51 +471,158 @@ fn schedule_sources_collecting(
     let mut foreign_references: HashMap<ModuleId, HashSet<String>> = HashMap::default();
     let mut foreign_writes: HashMap<ModuleId, HashMap<String, hierarchy::ForeignWrites>> =
         HashMap::default();
-    for &module_id in &hierarchical_modules {
-        let key = keys[&module_id];
-        let mut resolved = hierarchy::resolve(&hierarchy, module_id);
-        let ir = loop {
-            let signals: Vec<_> = resolved
-                .iter()
-                .map(|reference| reference.signal.clone())
-                .collect();
-            match analyze_specialization(
-                &analyzed[&key.name],
-                &mut design,
-                key,
-                &signals,
-                &mut Vec::new(),
-            ) {
-                Ok(ir) => break ir,
-                // A name with an instance index that is a constant
-                // expression reaches the analysis with the index evaluated.
-                Err(error) => match hierarchical_reference_path(&error) {
-                    Some(path)
-                        if hierarchy::resolve_name(
-                            &hierarchy,
-                            module_id,
-                            &path.split('.').map(str::to_string).collect::<Vec<_>>(),
-                            &mut resolved,
-                        )? => {}
-                    _ => return Err(error.into()),
-                },
+    // A module that calls a subroutine of another instance through a
+    // hierarchical name is analyzed after the callee, whose analyzed body it
+    // imports (see `hierarchy::calls`).
+    let mut pending = hierarchical_modules.clone();
+    while !pending.is_empty() {
+        let mut deferred = Vec::new();
+        for &module_id in &pending {
+            let key = keys[&module_id];
+            let (mut resolved, mut calls) = hierarchy::resolve(&hierarchy, module_id);
+            let analysis = |id: &ModuleId| {
+                analyses
+                    .get(id)
+                    .or_else(|| discovery_analyses.get(id))
+                    .and_then(|ir: &sv::Ir| {
+                        ir.modules()
+                            .iter()
+                            .find(|module| module.name() == keys[id].name)
+                    })
+            };
+            let analyzed_ir = loop {
+                // The callees whose analyses are done. The scan of the
+                // module's names also finds calls in inactive generate
+                // branches: one whose callee is still to come waits only
+                // once the analysis needs it.
+                let mut callees = Vec::new();
+                let mut waiting = Vec::new();
+                for call in &calls {
+                    let (id, _) = call.callee()?;
+                    match analysis(&id) {
+                        Some(module) => callees.push(hierarchy::calls::CallTarget {
+                            call,
+                            id,
+                            module,
+                            references: references.get(&id).map_or(&[][..], Vec::as_slice),
+                        }),
+                        None => waiting.push((call.written.as_str(), id)),
+                    }
+                }
+                let signals: Vec<_> = resolved
+                    .iter()
+                    .map(|reference| reference.signal.clone())
+                    .collect();
+                let subroutines = callees
+                    .iter()
+                    .map(|callee| callee.signature(&hierarchy))
+                    .collect::<Result<Vec<_>, _>>()?;
+                match analyze_specialization(
+                    &analyzed[&key.name],
+                    &mut design,
+                    key,
+                    sv::ast::HierarchicalObjects {
+                        signals: &signals,
+                        subroutines: &subroutines,
+                    },
+                    &mut Vec::new(),
+                ) {
+                    Ok(mut ir) => {
+                        let mut imported = hierarchy::calls::Imported::default();
+                        if let Some(module) =
+                            ir.modules().iter().find(|module| module.name() == key.name)
+                        {
+                            for callee in &callees {
+                                hierarchy::calls::import(
+                                    &hierarchy,
+                                    module,
+                                    callee,
+                                    &resolved,
+                                    &mut imported,
+                                )?;
+                            }
+                        }
+                        if let Some(module) = ir.module_mut(&key.name) {
+                            module.import_subroutines(
+                                imported.subroutines,
+                                imported.signals,
+                                imported.locals,
+                                imported.dpi_imports,
+                            );
+                        }
+                        resolved.extend(imported.references);
+                        break Some(ir);
+                    }
+                    // A name with an instance index that is a constant
+                    // expression reaches the analysis with the index
+                    // evaluated.
+                    Err(error) => match hierarchical_reference_path(&error) {
+                        Some(path) if waiting.iter().any(|(written, _)| *written == path) => {
+                            if waiting
+                                .iter()
+                                .any(|&(written, id)| written == path && id == module_id)
+                            {
+                                return Err(sv::AnalyzerError::Unsupported(format!(
+                                    "hierarchical call `{path}` of a subroutine of the calling \
+                                     module itself"
+                                ))
+                                .into());
+                            }
+                            // The callee's own analysis is still to come.
+                            break None;
+                        }
+                        Some(path) => {
+                            let components =
+                                path.split('.').map(str::to_string).collect::<Vec<_>>();
+                            if !hierarchy::resolve_name(
+                                &hierarchy,
+                                module_id,
+                                &components,
+                                &mut resolved,
+                            )? && !hierarchy::resolve_call(
+                                &hierarchy,
+                                module_id,
+                                &components,
+                                &mut calls,
+                            )? {
+                                return Err(error.into());
+                            }
+                        }
+                        None => return Err(error.into()),
+                    },
+                }
+            };
+            let Some(mut ir) = analyzed_ir else {
+                deferred.push(module_id);
+                continue;
+            };
+            ir.expand_virtual_interface_instances(&virtual_ids);
+            if let Some(module) = ir.modules().iter().find(|module| module.name() == key.name) {
+                hierarchy::collect_foreign_writes(module, &resolved, &mut foreign_writes);
             }
-        };
-        let mut ir = ir;
-        ir.expand_virtual_interface_instances(&virtual_ids);
-        if let Some(module) = ir.modules().iter().find(|module| module.name() == key.name) {
-            hierarchy::collect_foreign_writes(module, &resolved, &mut foreign_writes);
-        }
-        for reference in &resolved {
-            for (target_module, target) in &reference.targets {
-                foreign_references
-                    .entry(*target_module)
-                    .or_default()
-                    .insert(target.clone());
+            for reference in &resolved {
+                for (target_module, target) in &reference.targets {
+                    foreign_references
+                        .entry(*target_module)
+                        .or_default()
+                        .insert(target.clone());
+                }
             }
+            references.insert(module_id, resolved);
+            analyses.insert(module_id, ir);
         }
-        references.insert(module_id, resolved);
-        analyses.insert(module_id, ir);
+        if deferred.len() == pending.len() {
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "hierarchical calls between the subroutines of modules `{}`",
+                deferred
+                    .iter()
+                    .map(|id| keys[id].name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("`, `")
+            ))
+            .into());
+        }
+        pending = deferred;
     }
     // The elaboration only served to resolve the hierarchical names.
     drop(hierarchy);

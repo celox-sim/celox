@@ -179,6 +179,17 @@ impl ScopeElaboration<'_> {
                         .collect()
                 });
         }
+        // The subroutines of other instances that hierarchical names call.
+        for subroutine in &self.imported.hierarchical_subroutines {
+            self.subroutine_directions.insert(
+                subroutine.name.clone(),
+                subroutine
+                    .formals
+                    .iter()
+                    .map(|formal| formal.direction)
+                    .collect(),
+            );
+        }
         for (name, target) in &self.imported.aliases {
             if let Some(directions) = self.subroutine_directions.get(target).cloned() {
                 self.subroutine_directions

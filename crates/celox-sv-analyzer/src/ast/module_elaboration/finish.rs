@@ -26,6 +26,8 @@ impl ScopeElaboration<'_> {
                 .collect(),
             class_member_types: classes::specializations::export_member_types(syntax_tree, session),
             inline_randomizations,
+            // A scope exports no other instance's subroutines.
+            hierarchical_subroutines: Vec::new(),
             declarations_only: self.imported.declarations_only,
             type_parameter_bindings: HashMap::default(),
             pattern_parameter_bindings: HashMap::default(),

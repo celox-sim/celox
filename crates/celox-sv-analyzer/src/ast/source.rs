@@ -119,7 +119,7 @@ impl Source {
                 values: parameter_overrides,
                 types: &[],
                 patterns: &[],
-                hierarchical: &[],
+                hierarchical: HierarchicalObjects::default(),
             },
             extra_interfaces,
             &packages,
@@ -209,7 +209,7 @@ impl Source {
                         type_parameters::bind_patterns(syntax_tree, bindings.patterns)?;
                     // A hierarchical name reads and writes the local signal
                     // bound to the other instance's object.
-                    for signal in bindings.hierarchical {
+                    for signal in bindings.hierarchical.signals {
                         for path in &signal.paths {
                             imported
                                 .interface_members
@@ -230,6 +230,51 @@ impl Source {
                             package_variable: None,
                             hierarchical: signal.paths.first().cloned(),
                         });
+                    }
+                    // A hierarchical name calls the subroutine of the other
+                    // instance as the module's subroutine of its name, which
+                    // the caller supplies; the calls bind by its signature.
+                    for subroutine in bindings.hierarchical.subroutines {
+                        let formals = subroutine
+                            .formals
+                            .iter()
+                            .map(|formal| FunctionArgumentMetadata {
+                                name: formal.name.clone(),
+                                direction: formal.direction,
+                                has_default: formal.has_default,
+                            })
+                            .collect();
+                        if !subroutine.is_task {
+                            imported.function_return_types.insert(
+                                subroutine.name.clone(),
+                                FunctionReturnMetadata::from_type(
+                                    syntax_tree,
+                                    session,
+                                    subroutine.result.as_ref(),
+                                    formals,
+                                    &PackedDimensions::default(),
+                                ),
+                            );
+                        }
+                        imported.subroutine_params.insert(
+                            subroutine.name.clone(),
+                            subroutine
+                                .formals
+                                .iter()
+                                .map(|formal| formal.name.clone())
+                                .collect(),
+                        );
+                        imported.subroutine_shapes.insert(
+                            subroutine.name.clone(),
+                            Arc::new(
+                                subroutine
+                                    .formals
+                                    .iter()
+                                    .map(|formal| procedural::dimensions_from_type(&formal.r#type))
+                                    .collect(),
+                            ),
+                        );
+                        imported.hierarchical_subroutines.push(subroutine.clone());
                     }
                     if let Some(mut module) = interface_binding::analyze_module(
                         syntax_tree,
