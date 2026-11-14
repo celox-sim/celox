@@ -208,6 +208,9 @@ impl Type {
                 element: container.element.with_resolved_container_bounds(eval)?,
                 record: container.record.clone(),
                 fixed: container.fixed,
+                // The bounds take their values where the type is declared:
+                // the container type stays the same.
+                binding: container.binding.clone(),
             }));
         }
         Some(resolved)

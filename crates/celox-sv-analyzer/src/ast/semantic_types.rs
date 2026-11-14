@@ -238,6 +238,19 @@ pub(super) struct Supertypes {
 #[derive(Debug, Clone, Default)]
 pub(super) struct Binding(Option<RetainedType>);
 
+/// A binding never tells two types apart: their shapes do.
+impl PartialEq for Binding {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Binding {}
+
+impl std::hash::Hash for Binding {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+}
+
 impl Binding {
     /// Forget the semantic type, as the type changes.
     pub(super) fn forget(&mut self) {

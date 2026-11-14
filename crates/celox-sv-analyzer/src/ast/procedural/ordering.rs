@@ -117,6 +117,7 @@ impl BodyBuilder<'_, '_, '_> {
             element: key_type.clone(),
             record: None,
             fixed: None,
+            binding: Default::default(),
         }));
         let keys = self.declare("$celox_sort_keys", keys_type);
         let index = self.declare("$celox_sort_index", int_type());

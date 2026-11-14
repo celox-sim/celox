@@ -524,6 +524,10 @@ struct ContainerType {
     /// elements: its type stays the fixed-size array (see
     /// `classes::Property::storage`).
     fixed: Option<(i128, i128)>,
+    /// The semantic type of the container type, as the type that holds the
+    /// container was bound to it (see [`semantic_types::Binding`]), so a
+    /// reader that has the container alone takes it too.
+    binding: semantic_types::Binding,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
