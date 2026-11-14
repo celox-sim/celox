@@ -348,8 +348,8 @@ blocks in programs. Two region deviations are listed under
   evaluated before solving, so a constraint it leaves out reads no member of
   a null handle (18.5.13).
 - Inline `with` constraints: four-state and aggregate caller-scope inputs,
-  typed parameter inputs, qualified `this` / `super` references, restricted
-  `with (names)` lookup, and scope `std::randomize(…) with`.
+  typed parameter inputs, qualified `this` / `super` references, and a
+  `local::` name of a property of the caller's class.
 - Enums with unresolved or X/Z values for randomization.
 
 ### Dynamic containers, strings, and reference arguments

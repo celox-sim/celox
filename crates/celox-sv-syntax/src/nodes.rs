@@ -117,6 +117,10 @@ pub enum ExprKind {
     RandomizeWith {
         expression: ExprId,
         constraints: Option<Vec<ExprId>>,
+        /// The identifier list of a restricted constraint block, `with
+        /// (x, y) {...}`: only names that begin with one of them resolve
+        /// into the object's class.
+        restricted: Option<Vec<Name>>,
     },
     Parameterized {
         expression: ExprId,
@@ -1675,11 +1679,13 @@ impl ExprKind {
             ExprKind::RandomizeWith {
                 expression,
                 constraints,
+                restricted,
             } => ExprKind::RandomizeWith {
                 expression: map(*expression),
                 constraints: constraints
                     .as_ref()
                     .map(|constraints| constraints.iter().map(|id| map(*id)).collect()),
+                restricted: restricted.clone(),
             },
             ExprKind::Parameterized {
                 expression,

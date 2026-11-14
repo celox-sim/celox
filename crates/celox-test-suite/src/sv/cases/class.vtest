@@ -5531,6 +5531,61 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq checks 1023))
 
+; Inline constraints name the caller's variables where the object's class
+; has no member of the name: a property of the class of the method that
+; makes the call, and its arguments. A restricted constraint block
+; resolves only the names it lists into the object's class, the others in
+; the caller's scope, a dotted name by its first identifier (IEEE 1800-2023
+; 18.7).
+(case inline_constraint_caller_names
+  (source "inline_caller.sv" #"
+class C0;
+    rand int x;
+endclass
+class Limits;
+    int limit = 2;
+endclass
+class C1;
+    rand int x;
+    int y = -1;
+    Limits cfg;
+    function new(); cfg = new; endfunction
+endclass
+class C2;
+    int x = 100, y = 5;
+    function int doit(C0 f, int x, int z);
+        return f.randomize() with { x > 0; x < y + z; };
+    endfunction
+endclass
+function int restricted(C1 obj, int y);
+    return obj.randomize() with (x) { x > 0; x < y; };
+endfunction
+function int listed(C1 obj, int y);
+    return obj.randomize() with (x, y) { x == y; };
+endfunction
+function int dotted(C1 obj);
+    return obj.randomize() with (x, cfg) { x == cfg.limit; };
+endfunction
+module Top(output int checks);
+    initial begin
+        C0 b = new;
+        C1 c = new;
+        C2 d = new;
+        int ok;
+        checks = 0;
+        ok = 0;
+        repeat (8) if (d.doit(b, 50, 2) && b.x > 0 && b.x < 7) ok++;
+        checks += (ok == 8) * 1;
+        ok = 0;
+        repeat (8) if (restricted(c, 4) && c.x inside {[1:3]}) ok++;
+        checks += (ok == 8) * 2;
+        checks += (listed(c, 9) && c.x == -1) * 4;
+        checks += (dotted(c) && c.x == 2) * 8;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 15))
+
 ; `std::randomize(v...) with { ... }` solves the variables with the
 ; constraints, which also read other variables of the scope, and writes them
 ; only when it succeeds (IEEE 1800-2023 18.12.1).

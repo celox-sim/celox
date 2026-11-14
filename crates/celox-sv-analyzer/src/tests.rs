@@ -6476,6 +6476,11 @@ fn scope_randomize_validates_variable_arguments() {
             "std::randomize(value) with {value == 1;}",
         ),
         ("bit value;", "std::randomize(value[0]) with {value == 1;}"),
+        // A scope randomize takes no restricted constraint block (18.7).
+        (
+            "bit value;",
+            "std::randomize(value) with (value) {value == 1;}",
+        ),
     ] {
         let source = format!("module Top; {declaration} bit ok; initial ok = {call}; endmodule");
         assert!(
@@ -6793,6 +6798,13 @@ fn class_randomize_rejects_unsupported_semantics() {
             "rand int x; int a[$]; constraint c { foreach (a[i]) soft x == a[i]; }",
             "c.randomize()",
             "soft constraint in a constraint loop",
+        ),
+        // A dotted name that a restricted block does not list resolves in
+        // the caller's scope (18.7), whose members constraints do not read.
+        (
+            "class D; int limit; endclass rand int x; D settings;",
+            "c.randomize() with (x) { settings.limit == 3; }",
+            "a member of a variable of the caller",
         ),
         // Soft constraints may not be specified for randc variables
         // (18.5.13.1).

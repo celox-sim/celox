@@ -675,12 +675,14 @@ fn enter_kind(
         ExprKind::RandomizeWith {
             expression,
             constraints,
+            restricted,
         } => {
             values.push(objects::randomize_with(
                 tree,
                 session,
                 *expression,
                 constraints.as_deref(),
+                restricted.as_deref(),
                 native,
                 dimensions,
             )?);
