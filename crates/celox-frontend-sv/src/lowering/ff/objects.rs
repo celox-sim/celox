@@ -148,7 +148,7 @@ impl Ff<'_, '_> {
                 let arguments = matches!(op, ObjectOp::SolveArguments(_));
                 let object = self.handle(&args[0])?;
                 let check = self.integer_of_width(&args[1], 1, false)?;
-                let bytes = serde_json::to_vec(program).expect("constraint program serialization");
+                let bytes = self.program_bytes(program);
                 let program = self.frozen_bytes(&bytes);
                 let result = if args.len() == 2 && !arguments {
                     self.heap_call(ops::OBJECT_RANDOMIZE, &[object, program, check])
@@ -402,7 +402,16 @@ impl Ff<'_, '_> {
             }
             ObjectOp::RegisterProgram(class, program) => {
                 let class = self.constant64(u64::from(*class));
-                let bytes = serde_json::to_vec(program).expect("constraint program serialization");
+                let bytes = match program {
+                    celox_heap::randomization::Registered::Program(program) => {
+                        let program = self.two_state_program(program);
+                        serde_json::to_vec(&celox_heap::randomization::Registered::Program(
+                            program.into_owned().into(),
+                        ))
+                    }
+                    unsupported => serde_json::to_vec(unsupported),
+                }
+                .expect("constraint program serialization");
                 let program = self.frozen_bytes(&bytes);
                 self.heap_call(ops::OBJECT_REGISTER_PROGRAM, &[class, program])
             }
@@ -781,6 +790,31 @@ impl Ff<'_, '_> {
         }
         let offset = self.constant64(u64::from(field.offset));
         self.heap_call(ops::OBJECT_STORE_BYTES, &[object, offset, buffer]);
+    }
+
+    /// The serialized constraint program `program` (see
+    /// [`Self::two_state_program`]).
+    fn program_bytes(&self, program: &celox_heap::randomization::Program) -> Vec<u8> {
+        serde_json::to_vec(&self.two_state_program(program))
+            .expect("constraint program serialization")
+    }
+
+    /// Constraint program `program` as the simulation holds its fields: a
+    /// 4-state field holds the complements of its planes only in 4-state
+    /// simulation (see [`Self::complement`]), and is a plain field in 2-state
+    /// simulation.
+    fn two_state_program<'p>(
+        &self,
+        program: &'p celox_heap::randomization::Program,
+    ) -> std::borrow::Cow<'p, celox_heap::randomization::Program> {
+        if self.m.four_state || !program.fields.iter().any(|field| field.four_state) {
+            return std::borrow::Cow::Borrowed(program);
+        }
+        let mut program = program.clone();
+        for field in &mut program.fields {
+            field.four_state = false;
+        }
+        std::borrow::Cow::Owned(program)
     }
 
     /// A 4-state property holds the complement of its value and mask planes,

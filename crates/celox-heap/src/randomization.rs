@@ -18,6 +18,13 @@ pub struct Field {
     /// allow before repeating one (IEEE 1800-2023 18.4.2).
     #[serde(default)]
     pub cyclic: bool,
+    /// A 4-state property of a 4-state simulation, which holds the
+    /// complement of its value bits and then of its unknown-bit mask, so
+    /// that zeroed bytes read as X: the solver gives it a 2-state value, and
+    /// a constraint takes its value only while it has no X or Z bits (IEEE
+    /// 1800-2023 18.3).
+    #[serde(default)]
+    pub four_state: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -163,6 +170,11 @@ pub struct Program {
     /// the solve of the rest.
     #[serde(default)]
     pub arguments: Vec<Expr>,
+    /// The inputs that hold 4-state values, each with the input that holds
+    /// the mask of its X and Z bits, which are 0 in the value: a constraint
+    /// may read only its other bits (IEEE 1800-2023 18.3).
+    #[serde(default)]
+    pub unknown_inputs: Vec<(usize, usize)>,
 }
 
 /// The solution of a solve of arguments (see [`Heap::solve_arguments`]):
@@ -614,29 +626,65 @@ impl Expr {
         sizes: &[Term],
         inputs: &[u64],
     ) -> Result<Term, String> {
+        self.four_state(terms, base, sizes, inputs, &Unknown::default())
+            .map(|(value, _)| value)
+    }
+
+    /// [`Self::term`] of the expression with the mask of its X and Z bits,
+    /// `None` while it has none, by the 4-state semantics of each operator
+    /// (IEEE 1800-2023 11.4), from those of the state fields and inputs in
+    /// `unknown`: an operand bit that cannot change the result, as one a
+    /// known 0 masks with `&` or a decided `&&` or `||` leaves out, makes no
+    /// result bit X. A value bit under the mask is arbitrary.
+    fn four_state(
+        &self,
+        terms: &[Term],
+        base: usize,
+        sizes: &[Term],
+        inputs: &[u64],
+        unknown: &Unknown,
+    ) -> Result<(Term, Option<Term>), String> {
+        let masked = |width: u32, bits: Option<&u64>| {
+            bits.map(|bits| bits & low(width))
+                .filter(|bits| *bits != 0)
+                .map(|bits| bv(width, bits))
+        };
         Ok(match self {
             Self::Enabled { .. } => return Err("nested constraint mode predicate".into()),
-            Self::Dist { membership, .. } => membership.term(terms, base, sizes, inputs)?,
+            Self::Dist { membership, .. } => {
+                membership.four_state(terms, base, sizes, inputs, unknown)?
+            }
             Self::Soft { .. } | Self::DisableSoft { .. } => {
                 return Err("nested soft constraint".into());
             }
-            Self::Literal(width, value) => bv(*width, *value),
+            Self::Literal(width, value) => (bv(*width, *value), None),
             Self::Input { index, width } => {
                 if !(1..=64).contains(width) {
                     return Err("invalid constraint input width".into());
                 }
-                bv(
-                    *width,
-                    *inputs.get(*index).ok_or("missing constraint input")?,
+                (
+                    bv(
+                        *width,
+                        *inputs.get(*index).ok_or("missing constraint input")?,
+                    ),
+                    masked(*width, unknown.inputs.get(index)),
                 )
             }
-            Self::Field(index) => terms
-                .get(base + *index)
-                .ok_or("invalid constraint field")?
-                .clone(),
-            Self::Solved(index) => terms.get(*index).ok_or("invalid solver variable")?.clone(),
+            Self::Field(index) | Self::Solved(index) => {
+                let index = if matches!(self, Self::Field(_)) {
+                    base + *index
+                } else {
+                    *index
+                };
+                let term = terms.get(index).ok_or("invalid constraint field")?.clone();
+                let mask = masked(width_of(&term), unknown.fields.get(&index));
+                (term, mask)
+            }
             Self::Static(_) => return Err("a static rand property outside a program".into()),
-            Self::Size(index) => sizes.get(*index).ok_or("invalid constraint array")?.clone(),
+            Self::Size(index) => (
+                sizes.get(*index).ok_or("invalid constraint array")?.clone(),
+                None,
+            ),
             Self::Member { .. } => return Err("constraint member of an unread handle".into()),
             Self::Foreach { .. } | Self::Index { .. } | Self::Element { .. } => {
                 return Err("constraint loop outside its array".into());
@@ -648,36 +696,40 @@ impl Expr {
                 width,
                 signed,
             } => {
-                let value = value.term(terms, base, sizes, inputs)?;
-                let Sort::Bv(old) = value.0.sort else {
-                    unreachable!()
-                };
-                if old == *width {
-                    value
-                } else {
-                    let op = if old > *width {
-                        format!("(_ extract {} 0)", width - 1)
+                let (value, mask) = value.four_state(terms, base, sizes, inputs, unknown)?;
+                let old = width_of(&value);
+                // A sign extension extends an X sign bit too.
+                let resize = |value: Term| {
+                    if old == *width {
+                        value
                     } else {
-                        format!(
-                            "(_ {}_extend {})",
-                            if *signed { "sign" } else { "zero" },
-                            width - old
-                        )
-                    };
-                    node(Sort::Bv(*width), op, vec![value])
-                }
+                        let op = if old > *width {
+                            format!("(_ extract {} 0)", width - 1)
+                        } else {
+                            format!(
+                                "(_ {}_extend {})",
+                                if *signed { "sign" } else { "zero" },
+                                width - old
+                            )
+                        };
+                        node(Sort::Bv(*width), op, vec![value])
+                    }
+                };
+                (resize(value), mask.map(resize))
             }
             Self::Unary { op, value } => {
-                let value = value.term(terms, base, sizes, inputs)?;
+                let (value, mask) = value.four_state(terms, base, sizes, inputs, unknown)?;
+                let width = width_of(&value);
                 match op.as_str() {
-                    "!" => boolean(not(truth(value))),
-                    "~" => node(value.0.sort.clone(), "bvnot", vec![value]),
-                    "-" => {
-                        let Sort::Bv(width) = value.0.sort else {
-                            unreachable!()
-                        };
-                        node(Sort::Bv(width), "bvsub", vec![bv(width, 0), value])
+                    "!" => {
+                        let mask = mask.map(|mask| boolean(x_truth(&value, &mask)));
+                        (boolean(not(truth(value))), mask)
                     }
+                    "~" => (node(Sort::Bv(width), "bvnot", vec![value]), mask),
+                    "-" => (
+                        node(Sort::Bv(width), "bvsub", vec![bv(width, 0), value]),
+                        mask.map(|mask| any_x(&mask, width)),
+                    ),
                     _ => return Err("invalid constraint unary operation".into()),
                 }
             }
@@ -687,8 +739,8 @@ impl Expr {
                 right,
                 signed,
             } => {
-                let a = left.term(terms, base, sizes, inputs)?;
-                let b = right.term(terms, base, sizes, inputs)?;
+                let (a, ma) = left.four_state(terms, base, sizes, inputs, unknown)?;
+                let (b, mb) = right.four_state(terms, base, sizes, inputs, unknown)?;
                 let relation = match op.as_str() {
                     "==" => Some(eq(a.clone(), b.clone())),
                     "!=" => Some(not(eq(a.clone(), b.clone()))),
@@ -713,7 +765,15 @@ impl Expr {
                     }
                     _ => None,
                 };
-                if let Some(relation) = relation {
+                let mask = if ma.is_none() && mb.is_none() {
+                    None
+                } else {
+                    let (wa, wb) = (width_of(&a), width_of(&b));
+                    let ma = ma.unwrap_or_else(|| bv(wa, 0));
+                    let mb = mb.unwrap_or_else(|| bv(wb, 0));
+                    Some(binary_mask(op, (&a, &ma), (&b, &mb), *signed)?)
+                };
+                let value = if let Some(relation) = relation {
                     boolean(relation)
                 } else if matches!(op.as_str(), "<<" | "<<<" | ">>" | ">>>") {
                     shifted(op, a, b, *signed)
@@ -728,24 +788,206 @@ impl Expr {
                         _ => return Err("invalid constraint binary operation".into()),
                     };
                     node(a.0.sort.clone(), op, vec![a, b])
-                }
+                };
+                (value, mask)
             }
         })
     }
+}
+
+/// The X and Z bits of the state values of a call, the masks of the state
+/// fields by their solver variables and of the inputs by their indices
+/// (see [`Program::unknown_inputs`]).
+#[derive(Default)]
+struct Unknown {
+    fields: fxhash::FxHashMap<usize, u64>,
+    inputs: fxhash::FxHashMap<usize, u64>,
+}
+
+/// The error of a constraint whose value or guard X or Z bits decide
+/// (IEEE 1800-2023 18.3).
+const UNKNOWN_VALUE: &str = "a constraint on a value with X or Z bits";
+
+/// The truth of Boolean term `check` with the variables of `assignments`,
+/// `None` while it reads another.
+fn evaluate_check(
+    check: &Term,
+    assignments: &std::collections::BTreeMap<String, Scalar>,
+) -> Option<bool> {
+    let terms = aplite::Env::from([(String::new(), check.clone())]);
+    match aplite::finite::evaluate_scalar_terms(&terms, assignments, Limits::default())
+        .ok()?
+        .remove("")?
+    {
+        Scalar::Bool(value) => Some(value),
+        Scalar::Bv { .. } => None,
+    }
+}
+
+/// Whether X or Z bits decide the truth of one of `checks` (see
+/// [`x_truth`]) with the state values `state` and the solution of
+/// `outcome`; one that cannot be evaluated counts.
+fn decided_by_unknown(
+    checks: &[Term],
+    state: &std::collections::BTreeMap<String, Scalar>,
+    outcome: &aplite::finite::Outcome,
+) -> bool {
+    if checks.is_empty() {
+        return false;
+    }
+    let mut values = state.clone();
+    values.extend(outcome.assignments.clone());
+    values.extend(outcome.context_values.clone());
+    checks
+        .iter()
+        .any(|check| evaluate_check(check, &values) != Some(false))
+}
+
+/// The low `width` bits.
+fn low(width: u32) -> u64 {
+    u64::MAX.checked_shr(64 - width.min(64)).unwrap_or(0)
+}
+
+/// The width of bit-vector term `term`.
+fn width_of(term: &Term) -> u32 {
+    let Sort::Bv(width) = term.0.sort else {
+        unreachable!("a bit-vector term")
+    };
+    width
+}
+
+/// Whether a value with X or Z bits `mask` has a truth value that they
+/// decide: no known bit is 1 and some bit is X (IEEE 1800-2023 11.4.7, 12.4).
+fn x_truth(value: &Term, mask: &Term) -> Term {
+    let width = width_of(mask);
+    let known = node(
+        Sort::Bv(width),
+        "bvand",
+        vec![
+            value.clone(),
+            node(Sort::Bv(width), "bvnot", vec![mask.clone()]),
+        ],
+    );
+    and(eq(known, bv(width, 0)), not(eq(mask.clone(), bv(width, 0))))
+}
+
+/// The truth of a known value, its width, value and mask of X and Z bits:
+/// true with a known 1 bit, false with every bit a known 0, and `None`, X,
+/// otherwise (IEEE 1800-2023 12.4).
+fn known_truth((_, value, mask): (u32, u64, u64)) -> Option<bool> {
+    if value & !mask != 0 {
+        Some(true)
+    } else {
+        (mask == 0).then_some(false)
+    }
+}
+
+/// All `width` bits X while `mask` has an X bit, as an arithmetic result is.
+fn any_x(mask: &Term, width: u32) -> Term {
+    let source = width_of(mask);
+    ite(
+        eq(mask.clone(), bv(source, 0)),
+        bv(width, 0),
+        bv(width, low(width)),
+    )
+}
+
+/// The mask of the X bits of binary operation `op` of `a` and `b`, each a
+/// value and the mask of its X bits (IEEE 1800-2023 11.4).
+fn binary_mask(
+    op: &str,
+    (a, ma): (&Term, &Term),
+    (b, mb): (&Term, &Term),
+    signed: bool,
+) -> Result<Term, String> {
+    let width = width_of(a);
+    let op2 = |op: &str, x: Term, y: Term| node(x.0.sort.clone(), op, vec![x, y]);
+    let invert = |x: &Term| node(x.0.sort.clone(), "bvnot", vec![x.clone()]);
+    let either = op2("bvor", ma.clone(), mb.clone());
+    let none = |mask: &Term| eq(mask.clone(), bv(width_of(mask), 0));
+    // A known value: a known 1 bit makes it true, all bits known 0 false.
+    let known_true =
+        |value: &Term, mask: &Term| not_zero(&op2("bvand", value.clone(), invert(mask)));
+    let known_false =
+        |value: &Term, mask: &Term| and(none(mask), eq(value.clone(), bv(width_of(value), 0)));
+    Ok(match op {
+        // Ambiguous by an X bit where the known bits are equal (11.4.5).
+        "==" | "!=" => boolean(and(
+            eq(
+                op2("bvand", op2("bvxor", a.clone(), b.clone()), invert(&either)),
+                bv(width, 0),
+            ),
+            not_zero(&either),
+        )),
+        // Decided by a known operand that decides it (11.4.7).
+        "&&" | "||" => {
+            let decided = if op == "&&" {
+                node(
+                    Sort::Bool,
+                    "or",
+                    vec![known_false(a, ma), known_false(b, mb)],
+                )
+            } else {
+                node(Sort::Bool, "or", vec![known_true(a, ma), known_true(b, mb)])
+            };
+            boolean(and(
+                not(decided),
+                node(Sort::Bool, "or", vec![x_truth(a, ma), x_truth(b, mb)]),
+            ))
+        }
+        "<" | "<=" | ">" | ">=" => boolean(not_zero(&either)),
+        // A known 0 of the other operand masks an X bit of `&`, a known 1
+        // of `|` (11.4.8).
+        "&" => op2(
+            "bvand",
+            either,
+            op2(
+                "bvand",
+                op2("bvor", ma.clone(), a.clone()),
+                op2("bvor", mb.clone(), b.clone()),
+            ),
+        ),
+        "|" => op2(
+            "bvand",
+            either,
+            op2(
+                "bvand",
+                op2("bvor", ma.clone(), invert(a)),
+                op2("bvor", mb.clone(), invert(b)),
+            ),
+        ),
+        "^" => either,
+        // A shift moves the X bits of its value; an X amount makes all X
+        // (11.4.10).
+        "<<" | "<<<" | ">>" | ">>>" => ite(
+            none(mb),
+            shifted(op, ma.clone(), b.clone(), signed),
+            bv(width, low(width)),
+        ),
+        "+" | "-" | "*" => any_x(&either, width),
+        _ => return Err("invalid constraint binary operation".into()),
+    })
+}
+
+/// Whether bit-vector `value` is not 0.
+fn not_zero(value: &Term) -> Term {
+    not(eq(value.clone(), bv(width_of(value), 0)))
 }
 
 impl Heap {
     /// `constraint` of object `object` with each loop over a state array
     /// replaced by the conjunction of its body for each element, which
     /// `loops` gives for the enclosing loops: (array, index).
-    /// The width and value of unrolled constraint expression `expr` of
-    /// `object` if known before solving: one of literals, inputs, the fields
-    /// of the object that are not random for the call and the sizes of its
-    /// arrays that are not, as the guards of constraints are (IEEE 1800-2023
-    /// 18.5.13). It is the value of the term the solver takes for `expr`,
-    /// with those as constants and the random ones free, by the solver's own
-    /// evaluation; `&&`, `||` and `!` short-circuit (11.4.7), so that a guard
-    /// that a known operand decides is known though the other is random.
+    /// The width, value and mask of X and Z bits of unrolled constraint
+    /// expression `expr` of `object` if known before solving: one of
+    /// literals, inputs, the fields of the object that are not random for
+    /// the call and the sizes of its arrays that are not, as the guards of
+    /// constraints are (IEEE 1800-2023 18.5.13). It is the value of the term
+    /// the solver takes for `expr` by its 4-state semantics (see
+    /// [`Expr::four_state`]), with those as constants and the random ones
+    /// free, by the solver's own evaluation; `&&`, `||` and `!`
+    /// short-circuit (11.4.7), so that a guard that a known operand decides
+    /// is known though the other is random.
     fn known(
         &mut self,
         object: Handle,
@@ -753,38 +995,39 @@ impl Heap {
         expr: &Expr,
         check_only: bool,
         inputs: &[u64],
-    ) -> Option<(u32, u64)> {
+    ) -> Option<(u32, u64, u64)> {
+        let boolean = |value: Option<bool>| match value {
+            Some(value) => (1, u64::from(value), 0),
+            None => (1, 0, 1),
+        };
         match expr {
             Expr::Unary { op, value } if op == "!" => {
-                let (_, value) = self.known(object, program, value, check_only, inputs)?;
-                return Some((1, u64::from(value == 0)));
+                let value = self.known(object, program, value, check_only, inputs)?;
+                return Some(boolean(known_truth(value).map(|value| !value)));
             }
             Expr::Binary {
                 op, left, right, ..
             } if matches!(op.as_str(), "&&" | "||") => {
+                // A known operand of the value that decides it decides it,
+                // also with an X other; else both known decide it, and an X
+                // one makes it X (11.4.7).
+                let decisive = op == "||";
                 let left = self
                     .known(object, program, left, check_only, inputs)
-                    .map(|(_, value)| value != 0);
-                let decided = match (op.as_str(), left) {
-                    ("&&", Some(false)) => Some(false),
-                    ("||", Some(true)) => Some(true),
-                    _ => None,
-                };
-                if let Some(decided) = decided {
-                    return Some((1, u64::from(decided)));
+                    .map(known_truth);
+                if left == Some(Some(decisive)) {
+                    return Some(boolean(Some(decisive)));
                 }
                 let right = self
                     .known(object, program, right, check_only, inputs)
-                    .map(|(_, value)| value != 0);
-                // A known right operand decides it too; else, with the left
-                // one known not to, the right one is its value.
-                let value = match (op.as_str(), left, right) {
-                    ("&&", _, Some(false)) => false,
-                    ("||", _, Some(true)) => true,
-                    (_, Some(_), Some(right)) => right,
-                    _ => return None,
+                    .map(known_truth);
+                if right == Some(Some(decisive)) {
+                    return Some(boolean(Some(decisive)));
+                }
+                return match (left?, right?) {
+                    (Some(_), Some(_)) => Some(boolean(Some(!decisive))),
+                    _ => Some(boolean(None)),
                 };
-                return Some((1, u64::from(value)));
             }
             _ => {}
         }
@@ -793,25 +1036,28 @@ impl Heap {
             return None;
         }
         // The fields and array sizes as the solver takes them: a value when
-        // the call does not randomize it, free otherwise.
+        // the call does not randomize it, free otherwise, with the X and Z
+        // bits of a 4-state one, as those of an input of the call.
+        let mut unknown = Unknown::default();
+        for &(input, mask) in &program.unknown_inputs {
+            if let Some(&bits) = inputs.get(mask) {
+                unknown.inputs.insert(input, bits);
+            }
+        }
         let fields = program
             .fields
             .iter()
             .enumerate()
             .map(|(index, field)| {
                 let width = field.width.clamp(1, 64);
-                if !(1..=64).contains(&field.width)
-                    || (!check_only && self.random_mode(object, field.offset, field.random))
-                {
-                    var(format!("field{index}"), Sort::Bv(width))
-                } else {
-                    let value = self.load(
-                        object,
-                        field.offset as usize,
-                        field.width.div_ceil(8) as usize,
-                    );
-                    bv(width, value & (u64::MAX >> (64 - width)))
+                let value = (1..=64).contains(&field.width)
+                    && !(!check_only && self.random_mode(object, field.offset, field.random));
+                if !value {
+                    return var(format!("field{index}"), Sort::Bv(width));
                 }
+                let (value, bits) = self.field_bits(object, field);
+                unknown.fields.insert(index, bits);
+                bv(width, value)
             })
             .collect::<Vec<_>>();
         let sizes = program
@@ -827,14 +1073,51 @@ impl Heap {
                 }
             })
             .collect::<Vec<_>>();
-        let term = expr.term(&fields, 0, &sizes, inputs).ok()?;
-        let terms = aplite::Env::from([(String::new(), term)]);
-        match aplite::finite::evaluate_scalar_terms(&terms, &Default::default(), Limits::default())
-            .ok()?
-            .remove("")?
-        {
+        let (value, mask) = expr.four_state(&fields, 0, &sizes, inputs, &unknown).ok()?;
+        let width = width_of(&value);
+        let terms = aplite::Env::from([
+            ("value".to_owned(), value),
+            ("mask".to_owned(), mask.unwrap_or_else(|| bv(width, 0))),
+        ]);
+        let mut values =
+            aplite::finite::evaluate_scalar_terms(&terms, &Default::default(), Limits::default())
+                .ok()?;
+        let mut scalar = |name: &str| match values.remove(name)? {
             Scalar::Bool(value) => Some((1, u64::from(value))),
             Scalar::Bv { width, value } => Some((width, value)),
+        };
+        let (width, value) = scalar("value")?;
+        let (_, mask) = scalar("mask")?;
+        Some((width, value, mask))
+    }
+
+    /// The value of `field` of `object`, 1 to 64 bits, as constraints read
+    /// it, the one decoding of every reader: its bits, or for a 4-state
+    /// field, which holds the complements of its value and of its
+    /// unknown-bit mask (see [`Field::four_state`]), its known bits, `0`
+    /// for each X or Z bit, and the mask of those (IEEE 1800-2023 18.3).
+    fn field_bits(&mut self, object: Handle, field: &Field) -> (u64, u64) {
+        let bytes = field.width.div_ceil(8) as usize;
+        let bits = u64::MAX >> (64 - field.width);
+        let value = self.load(object, field.offset as usize, bytes);
+        if !field.four_state {
+            return (value & bits, 0);
+        }
+        let unknown = !self.load(object, field.offset as usize + bytes, bytes) & bits;
+        (!value & bits & !unknown, unknown)
+    }
+
+    /// Store solution `value` in `field` of `object`, as [`Self::field_bits`]
+    /// reads it: a 4-state field holds the complements of the value and of
+    /// a mask without X or Z bits.
+    fn store_field(&mut self, object: Handle, field: &Field, value: u64) {
+        let bytes = field.width.div_ceil(8) as usize;
+        if field.four_state {
+            let bits = u64::MAX >> (64 - field.width);
+            self.store(object, field.offset as usize, bytes, !value & bits);
+            self.store(object, field.offset as usize + bytes, bytes, bits);
+        } else {
+            self.store(object, field.offset as usize, bytes, value);
         }
     }
 
@@ -1078,21 +1361,28 @@ impl Heap {
                 // 1800-2023 18.5.13), as that of `if` or `->` is the left
                 // operand of `||`, decides whether what it guards applies:
                 // when it does not, that is not unrolled, nor the handles it
-                // names dereferenced.
+                // names dereferenced. An X or Z guard decides nothing: what
+                // it guards may then not be unrolled either (18.3).
                 let known = self
                     .known(object, program, &left, check_only, inputs)
-                    .map(|(_, value)| value != 0);
+                    .map(known_truth);
                 match (op.as_str(), known) {
-                    ("||", Some(true)) => return Ok(Expr::Literal(1, 1)),
-                    ("&&", Some(false)) => return Ok(Expr::Literal(1, 0)),
+                    ("||", Some(Some(true))) => return Ok(Expr::Literal(1, 1)),
+                    ("&&", Some(Some(false))) => return Ok(Expr::Literal(1, 0)),
                     _ => {}
                 }
+                let right = self
+                    .unroll(
+                        object, program, right, loops, solved, elements, check_only, inputs,
+                    )
+                    .map_err(|reason| match known {
+                        Some(None) => UNKNOWN_VALUE.to_owned(),
+                        _ => reason,
+                    })?;
                 Expr::Binary {
                     op: op.clone(),
                     left: boxed(left),
-                    right: boxed(self.unroll(
-                        object, program, right, loops, solved, elements, check_only, inputs,
-                    )?),
+                    right: boxed(right),
                     signed: *signed,
                 }
             }
@@ -1415,6 +1705,20 @@ impl Heap {
             let mut terms = Vec::new();
             let mut active = Vec::new();
             let mut cyclic = Vec::new();
+            // The X and Z bits of the 4-state state values of the call, the
+            // values of its state fields, and whether those bits decide the
+            // truth of each constraint the call takes or of a guard, which
+            // is an error (IEEE 1800-2023 18.3), by 4-state semantics (see
+            // [`Expr::four_state`]): a bit an operation leaves out decides
+            // nothing.
+            let mut unknown = Unknown::default();
+            for &(input, mask) in &program.unknown_inputs {
+                if let Some(&bits) = inputs.get(mask) {
+                    unknown.inputs.insert(input, bits);
+                }
+            }
+            let mut state = std::collections::BTreeMap::new();
+            let mut checks = Vec::new();
             let mut formula = boolv(true);
             let mut bases = Vec::new();
             let mut size_terms = Vec::new();
@@ -1428,7 +1732,7 @@ impl Heap {
             // The soft constraints, with their ranks and the variables
             // that appear in them, and the variables `disable soft` names,
             // with its ranks (18.5.13).
-            let mut soft: Vec<(Rank, Term, Vec<String>)> = Vec::new();
+            let mut soft: Vec<(Rank, Term, Vec<String>, Option<Term>)> = Vec::new();
             let mut disabled: Vec<(Rank, String, Option<Term>)> = Vec::new();
             let ranks = self.handle_ranks(handle, &program.handles);
             let mut limited = boolv(true);
@@ -1480,12 +1784,17 @@ impl Heap {
                             cyclic.push((object, field, term.clone()));
                         }
                     } else {
-                        let value = self.load(
-                            object,
-                            field.offset as usize,
-                            field.width.div_ceil(8) as usize,
-                        );
+                        // Its known bits, with the mask of its X and Z bits.
+                        let (value, bits) = self.field_bits(object, field);
                         formula = and(formula, eq(term.clone(), bv(field.width, value)));
+                        unknown.fields.insert(terms.len(), bits);
+                        state.insert(
+                            name,
+                            Scalar::Bv {
+                                width: field.width,
+                                value,
+                            },
+                        );
                     }
                     terms.push(term);
                 }
@@ -1643,10 +1952,15 @@ impl Heap {
                             if !first(&names, &value) {
                                 continue;
                             }
+                            // Its X and Z bits count once it is kept (see
+                            // below).
+                            let (term, mask) =
+                                value.four_state(&terms, base, sizes, inputs, &unknown)?;
                             soft.push((
                                 rank(*priority),
-                                truth(value.term(&terms, base, sizes, inputs)?),
+                                truth(term.clone()),
                                 names,
+                                mask.map(|mask| x_truth(&term, &mask)),
                             ));
                         }
                         Expr::DisableSoft {
@@ -1687,7 +2001,10 @@ impl Heap {
                                     if !first(&guard, &condition) {
                                         continue;
                                     }
-                                    Some(truth(condition.term(&terms, base, sizes, inputs)?))
+                                    let (term, mask) = condition
+                                        .four_state(&terms, base, sizes, inputs, &unknown)?;
+                                    checks.extend(mask.map(|mask| x_truth(&term, &mask)));
+                                    Some(truth(term))
                                 }
                                 None => None,
                             };
@@ -1713,10 +2030,10 @@ impl Heap {
                             if !first(&names, &constraint) {
                                 continue;
                             }
-                            formula = and(
-                                formula,
-                                truth(constraint.term(&terms, base, sizes, inputs)?),
-                            );
+                            let (term, mask) =
+                                constraint.four_state(&terms, base, sizes, inputs, &unknown)?;
+                            checks.extend(mask.map(|mask| x_truth(&term, &mask)));
+                            formula = and(formula, truth(term));
                             // Each distribution, also one under `if` or `->`, whose
                             // item is tried only where its guards let it apply, or
                             // in a `foreach`, one for each element.
@@ -1747,6 +2064,30 @@ impl Heap {
                     }
                 }
             }
+            // The soft constraints a `disable soft` of higher priority does
+            // not discard (18.5.13.2), which alone read what they name; from
+            // the highest priority down, each is kept when the constraints
+            // kept so far allow it, and otherwise treated as true (18.5.13,
+            // 18.5.13.1).
+            // A guarded `disable soft` discards them while its condition
+            // holds: the soft constraint is then `condition || constraint`.
+            let mut kept = Vec::new();
+            'soft: for (rank, mut constraint, names, mut unknown) in soft {
+                for (disable, name, condition) in &disabled {
+                    if disable > &rank && names.contains(name) {
+                        match condition {
+                            None => continue 'soft,
+                            Some(condition) => {
+                                constraint =
+                                    node(Sort::Bool, "or", vec![condition.clone(), constraint]);
+                                unknown =
+                                    unknown.map(|unknown| and(not(condition.clone()), unknown));
+                            }
+                        }
+                    }
+                }
+                kept.push((rank, constraint, unknown));
+            }
             // The solve of the rest keeps the solution of the arguments
             // (18.5.11).
             if phase == Phase::All
@@ -1773,29 +2114,8 @@ impl Heap {
             } else {
                 self.random_object(handle)
             };
-            // The soft constraints a `disable soft` of higher priority does
-            // not discard (18.5.13.2), from the highest priority down, each
-            // kept when the constraints kept so far allow it, and otherwise
-            // treated as true (18.5.13, 18.5.13.1).
-            // A guarded `disable soft` discards them while its condition
-            // holds: the soft constraint is then `condition || constraint`.
-            let mut kept = Vec::new();
-            'soft: for (rank, mut constraint, names) in soft {
-                for (disable, name, condition) in &disabled {
-                    if disable > &rank && names.contains(name) {
-                        match condition {
-                            None => continue 'soft,
-                            Some(condition) => {
-                                constraint =
-                                    node(Sort::Bool, "or", vec![condition.clone(), constraint]);
-                            }
-                        }
-                    }
-                }
-                kept.push((rank, constraint));
-            }
             kept.sort_by(|a, b| b.0.cmp(&a.0));
-            for (_, constraint) in kept {
+            for (_, constraint, unknown) in kept {
                 let attempt = and(formula.clone(), constraint);
                 let bound = if bounded {
                     and(attempt.clone(), limited.clone())
@@ -1807,13 +2127,26 @@ impl Heap {
                 // decided does.
                 let outcome = solve_seeded(&bound, &projection, limits.clone(), seed);
                 match outcome.verdict {
-                    Verdict::Sat => formula = attempt,
+                    Verdict::Sat => {
+                        formula = attempt;
+                        checks.extend(unknown);
+                    }
                     Verdict::Unsat => {}
                     Verdict::Unknown => {
                         return Err(outcome
                             .reason
                             .unwrap_or_else(|| "soft constraint solving incomplete".into()));
                     }
+                }
+            }
+            // A constraint or guard whose truth X or Z bits decide without
+            // the solution is an error; the others are checked against it.
+            let mut deferred = Vec::new();
+            for check in checks {
+                match evaluate_check(&check, &state) {
+                    Some(true) => return Err(UNKNOWN_VALUE.into()),
+                    Some(false) => {}
+                    None => deferred.push(check),
                 }
             }
             // A solve of arguments gives the values of the variables in
@@ -1874,6 +2207,9 @@ impl Heap {
                         .reason
                         .unwrap_or_else(|| "constraint solving incomplete".into())),
                     Verdict::Sat => {
+                        if decided_by_unknown(&deferred, &state, &outcome) {
+                            return Err(UNKNOWN_VALUE.into());
+                        }
                         let model = &outcome.context_values;
                         let value = |name: &str| match model.get(name) {
                             Some(Scalar::Bv { value, .. }) => Some(*value),
@@ -2039,6 +2375,9 @@ impl Heap {
                     .reason
                     .unwrap_or_else(|| "constraint solving incomplete".into())),
                 Verdict::Sat => {
+                    if decided_by_unknown(&deferred, &state, &outcome) {
+                        return Err(UNKNOWN_VALUE.into());
+                    }
                     let model = &outcome.context_values;
                     let updates = active
                         .into_iter()
@@ -2094,12 +2433,7 @@ impl Heap {
                         }
                     }
                     for (object, field, value) in updates {
-                        self.store(
-                            object,
-                            field.offset as usize,
-                            field.width.div_ceil(8) as usize,
-                            value,
-                        );
+                        self.store_field(object, field, value);
                     }
                     // Each random array, resized to its size, gets the solved
                     // elements, or random ones when no constraint names them.
@@ -2186,6 +2520,7 @@ mod tests {
                 random: true,
                 domain: Vec::new(),
                 cyclic: false,
+                four_state: false,
             }],
             constraints: vec![Expr::Binary {
                 op: "<".into(),
@@ -2254,6 +2589,383 @@ mod tests {
         assert_eq!(heap.take_fault(), None);
     }
 
+    /// A solution of a 4-state field has no X or Z bits, and a constraint
+    /// that reads a 4-state state value with X or Z bits is an error (IEEE
+    /// 1800-2023 18.3); one no constraint reads may have them.
+    #[test]
+    fn four_state_fields_take_two_state_values() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 8);
+        let field = |offset, random| Field {
+            offset,
+            width: 8,
+            random,
+            domain: Vec::new(),
+            cyclic: false,
+            four_state: true,
+        };
+        let program = Program {
+            // Each mask byte follows its value byte. The field at 4, which
+            // no constraint reads, stays X.
+            fields: vec![field(0, true), field(2, false), field(4, false)],
+            constraints: vec![Expr::Binary {
+                op: "==".into(),
+                left: Box::new(Expr::Field(0)),
+                right: Box::new(Expr::Field(1)),
+                signed: false,
+            }],
+            ..Program::default()
+        };
+        // Each field holds the complements of its planes: zeroed bytes are X.
+        heap.store(object, 2, 1, !7 & 0xff);
+        heap.store(object, 3, 1, 0xff);
+        assert!(heap.randomize_object(object, &program, false));
+        assert_eq!(
+            (heap.load(object, 0, 1), heap.load(object, 1, 1)),
+            (!7 & 0xff, 0xff)
+        );
+        assert_eq!((heap.load(object, 4, 1), heap.load(object, 5, 1)), (0, 0));
+        heap.store(object, 3, 1, 0xfe);
+        assert!(!heap.randomize_object(object, &program, false));
+        assert!(matches!(
+            heap.take_fault(),
+            Some(Fault::ConstraintRandomization(reason)) if reason.contains("X or Z")
+        ));
+    }
+
+    /// A guard decided before solving reads a 4-state state field by its
+    /// value, not by the complemented planes it holds (IEEE 1800-2023 18.3,
+    /// 18.5.13): `if (state == 0) x == 1; else x == 2;`.
+    #[test]
+    fn guards_read_four_state_fields_by_their_values() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 8);
+        let compare = |op: &str, left: Expr, right: Expr| Expr::Binary {
+            op: op.into(),
+            left: Box::new(left),
+            right: Box::new(right),
+            signed: false,
+        };
+        let state = || compare("==", Expr::Field(1), Expr::Literal(4, 0));
+        let program = Program {
+            fields: vec![
+                Field {
+                    offset: 0,
+                    width: 8,
+                    random: true,
+                    domain: Vec::new(),
+                    cyclic: false,
+                    four_state: false,
+                },
+                Field {
+                    offset: 2,
+                    width: 4,
+                    random: false,
+                    domain: Vec::new(),
+                    cyclic: false,
+                    four_state: true,
+                },
+            ],
+            constraints: vec![
+                compare(
+                    "||",
+                    Expr::Unary {
+                        op: "!".into(),
+                        value: Box::new(state()),
+                    },
+                    compare("==", Expr::Field(0), Expr::Literal(8, 1)),
+                ),
+                compare(
+                    "||",
+                    state(),
+                    compare("==", Expr::Field(0), Expr::Literal(8, 2)),
+                ),
+            ],
+            ..Program::default()
+        };
+        // state = 0: the complements of the value 0 and of a known mask.
+        heap.store(object, 2, 1, 0xf);
+        heap.store(object, 3, 1, 0xf);
+        for _ in 0..8 {
+            assert!(heap.randomize_object(object, &program, false));
+            assert_eq!(heap.load(object, 0, 1), 1);
+        }
+        // state = 3.
+        heap.store(object, 2, 1, !3 & 0xf);
+        assert!(heap.randomize_object(object, &program, false));
+        assert_eq!(heap.load(object, 0, 1), 2);
+        // An X guard is no value: the call fails as it reads it.
+        heap.store(object, 3, 1, 0);
+        assert!(!heap.randomize_object(object, &program, false));
+        assert!(matches!(
+            heap.take_fault(),
+            Some(Fault::ConstraintRandomization(reason)) if reason.contains("X or Z")
+        ));
+    }
+
+    /// A select of a 4-state state field reads only the bits it selects
+    /// (IEEE 1800-2023 11.5.1): known ones are its value, an X or Z one is
+    /// an error (18.3).
+    #[test]
+    fn four_state_selects_read_only_their_bits() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 8);
+        let resize = |value: Expr, width| Expr::Resize {
+            value: Box::new(value),
+            width,
+            signed: false,
+        };
+        let shifted = |shift| Expr::Binary {
+            op: ">>".into(),
+            left: Box::new(Expr::Field(1)),
+            right: Box::new(Expr::Literal(32, shift)),
+            signed: false,
+        };
+        let program = |selected: Expr| Program {
+            fields: vec![
+                Field {
+                    offset: 0,
+                    width: 8,
+                    random: true,
+                    domain: Vec::new(),
+                    cyclic: false,
+                    four_state: false,
+                },
+                Field {
+                    offset: 2,
+                    width: 8,
+                    random: false,
+                    domain: Vec::new(),
+                    cyclic: false,
+                    four_state: true,
+                },
+            ],
+            constraints: vec![Expr::Binary {
+                op: "==".into(),
+                left: Box::new(Expr::Field(0)),
+                right: Box::new(selected),
+                signed: false,
+            }],
+            ..Program::default()
+        };
+        let fails = |heap: &mut Heap, program: &Program| {
+            !heap.randomize_object(object, program, false)
+                && matches!(
+                    heap.take_fault(),
+                    Some(Fault::ConstraintRandomization(reason)) if reason.contains("X or Z")
+                )
+        };
+        // state = 8'bxxxx_0101: the complements of the value and of the mask.
+        heap.store(object, 2, 1, !0x05 & 0xff);
+        heap.store(object, 3, 1, !0xf0 & 0xff);
+        // x == state[3:0]
+        let low = program(resize(resize(Expr::Field(1), 4), 8));
+        assert!(heap.randomize_object(object, &low, false));
+        assert_eq!(heap.load(object, 0, 1), 5);
+        // x == state[7:4] and x == state read X bits.
+        assert!(fails(&mut heap, &program(resize(resize(shifted(4), 4), 8))));
+        assert!(fails(&mut heap, &program(Expr::Field(1))));
+        // state = 8'b1010_xxxx: x == state[7:4]
+        heap.store(object, 2, 1, !0xa0 & 0xff);
+        heap.store(object, 3, 1, !0x0f & 0xff);
+        let high = program(resize(resize(shifted(4), 4), 8));
+        assert!(heap.randomize_object(object, &high, false));
+        assert_eq!(heap.load(object, 0, 1), 0xa);
+        assert!(fails(&mut heap, &low));
+    }
+
+    /// A 4-state input of a call has its known bits and the mask of its X
+    /// and Z bits (see [`Program::unknown_inputs`]), which operations carry
+    /// by their 4-state semantics (IEEE 1800-2023 11.4): a constraint or a
+    /// guard whose truth they do not decide, as through a shift, a
+    /// narrowing, a mask or a decided `&&`, takes its value; one whose truth
+    /// they decide is an error (18.3).
+    #[test]
+    fn four_state_inputs_take_four_state_semantics() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 1);
+        let binary = |op: &str, left: Expr, right: Expr| Expr::Binary {
+            op: op.into(),
+            left: Box::new(left),
+            right: Box::new(right),
+            signed: false,
+        };
+        let input = || Expr::Input { index: 0, width: 8 };
+        let x = || Expr::Field(0);
+        let program = |constraints| Program {
+            fields: vec![Field {
+                offset: 0,
+                width: 8,
+                random: true,
+                domain: Vec::new(),
+                cyclic: false,
+                four_state: false,
+            }],
+            constraints,
+            unknown_inputs: vec![(0, 1)],
+            ..Program::default()
+        };
+        let fails = |heap: &mut Heap, program: &Program, inputs: &[u64]| {
+            !heap.randomize_object_with_inputs(object, program, false, inputs)
+                && matches!(
+                    heap.take_fault(),
+                    Some(Fault::ConstraintRandomization(reason)) if reason.contains("X or Z")
+                )
+        };
+        // x == base >> 4 and x == (base & 8'hf0) with base = 8'b1010_xxxx.
+        let shifted = program(vec![binary(
+            "==",
+            x(),
+            binary(">>", input(), Expr::Literal(32, 4)),
+        )]);
+        let masked = program(vec![binary(
+            "==",
+            x(),
+            binary("&", input(), Expr::Literal(8, 0xf0)),
+        )]);
+        let narrowed = program(vec![binary(
+            "==",
+            x(),
+            Expr::Resize {
+                value: Box::new(Expr::Resize {
+                    value: Box::new(input()),
+                    width: 4,
+                    signed: false,
+                }),
+                width: 8,
+                signed: false,
+            },
+        )]);
+        assert!(heap.randomize_object_with_inputs(object, &shifted, false, &[0xa0, 0x0f]));
+        assert_eq!(heap.load(object, 0, 1), 0xa);
+        assert!(heap.randomize_object_with_inputs(object, &masked, false, &[0xa0, 0x0f]));
+        assert_eq!(heap.load(object, 0, 1), 0xa0);
+        assert!(fails(&mut heap, &narrowed, &[0xa0, 0x0f]));
+        // base = 8'bxxxx_0101: its low bits only.
+        assert!(heap.randomize_object_with_inputs(object, &narrowed, false, &[0x05, 0xf0]));
+        assert_eq!(heap.load(object, 0, 1), 5);
+        assert!(fails(&mut heap, &shifted, &[0x05, 0xf0]));
+        // `if (base >> 7) x == 1; else x == 2;` with base = 8'b0xxx_xxxx:
+        // the guard reads only bit 7.
+        let guard = || {
+            binary(
+                "!=",
+                binary(">>", input(), Expr::Literal(32, 7)),
+                Expr::Literal(8, 0),
+            )
+        };
+        let guarded = program(vec![
+            binary(
+                "||",
+                Expr::Unary {
+                    op: "!".into(),
+                    value: Box::new(guard()),
+                },
+                binary("==", x(), Expr::Literal(8, 1)),
+            ),
+            binary("||", guard(), binary("==", x(), Expr::Literal(8, 2))),
+        ]);
+        assert!(heap.randomize_object_with_inputs(object, &guarded, false, &[0x00, 0x7f]));
+        assert_eq!(heap.load(object, 0, 1), 2);
+        assert!(heap.randomize_object_with_inputs(object, &guarded, false, &[0x80, 0x7f]));
+        assert_eq!(heap.load(object, 0, 1), 1);
+        assert!(fails(&mut heap, &guarded, &[0x00, 0x80]));
+        // `if ((base >> 7) && 1'b0) x == 1;` with X in bit 7: a known 0
+        // decides the guard; with `1'b1` the X does, as an X `x == base`
+        // decides nothing while it is not the value of a constraint.
+        let decided = |right| {
+            program(vec![
+                binary(
+                    "||",
+                    Expr::Unary {
+                        op: "!".into(),
+                        value: Box::new(binary(
+                            "&&",
+                            binary(">>", input(), Expr::Literal(32, 7)),
+                            Expr::Literal(1, right),
+                        )),
+                    },
+                    binary("==", x(), Expr::Literal(8, 1)),
+                ),
+                binary("==", x(), Expr::Literal(8, 2)),
+            ])
+        };
+        assert!(heap.randomize_object_with_inputs(object, &decided(0), false, &[0x00, 0x80]));
+        assert_eq!(heap.load(object, 0, 1), 2);
+        assert!(fails(&mut heap, &decided(1), &[0x00, 0x80]));
+        // x == (base & ~8'h0f): the mask leaves out the X bits.
+        let inverted = program(vec![binary(
+            "==",
+            x(),
+            binary(
+                "&",
+                input(),
+                Expr::Unary {
+                    op: "~".into(),
+                    value: Box::new(Expr::Literal(8, 0x0f)),
+                },
+            ),
+        )]);
+        assert!(heap.randomize_object_with_inputs(object, &inverted, false, &[0xa0, 0x0f]));
+        assert_eq!(heap.load(object, 0, 1), 0xa0);
+        assert!(fails(&mut heap, &inverted, &[0xa0, 0xf0]));
+    }
+
+    /// A soft constraint that a `disable soft` of higher priority discards
+    /// reads nothing (IEEE 1800-2023 18.5.13.2): an X state value in it is
+    /// no error (18.3).
+    #[test]
+    fn discarded_soft_constraints_read_no_unknown_values() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 8);
+        let soft = Expr::Soft {
+            priority: 0,
+            value: Box::new(Expr::Binary {
+                op: "==".into(),
+                left: Box::new(Expr::Field(0)),
+                right: Box::new(Expr::Field(1)),
+                signed: false,
+            }),
+        };
+        let program = |constraints| Program {
+            fields: vec![
+                Field {
+                    offset: 0,
+                    width: 8,
+                    random: true,
+                    domain: Vec::new(),
+                    cyclic: false,
+                    four_state: false,
+                },
+                Field {
+                    offset: 2,
+                    width: 8,
+                    random: false,
+                    domain: Vec::new(),
+                    cyclic: false,
+                    four_state: true,
+                },
+            ],
+            constraints,
+            ..Program::default()
+        };
+        // state is all X: zeroed planes.
+        let disabled = program(vec![
+            soft.clone(),
+            Expr::DisableSoft {
+                priority: 1,
+                variable: Box::new(Expr::Field(0)),
+                condition: None,
+            },
+        ]);
+        assert!(heap.randomize_object(object, &disabled, false));
+        assert!(!heap.randomize_object(object, &program(vec![soft]), false));
+        assert!(matches!(
+            heap.take_fault(),
+            Some(Fault::ConstraintRandomization(reason)) if reason.contains("X or Z")
+        ));
+    }
+
     /// A solve of arguments solves the variables in them by the constraints
     /// that name only them, gives the values of the arguments and changes
     /// nothing; the solve of the rest keeps those variables, through a
@@ -2269,6 +2981,7 @@ mod tests {
             random: true,
             domain: Vec::new(),
             cyclic: false,
+            four_state: false,
         };
         let compare = |op: &str, left: Expr, right: Expr| Expr::Binary {
             op: op.into(),
@@ -2589,6 +3302,7 @@ mod tests {
                 random: true,
                 domain: Vec::new(),
                 cyclic: true,
+                four_state: false,
             }],
             arrays: vec![Array {
                 offset: 8,
@@ -2812,6 +3526,7 @@ mod tests {
             random: true,
             domain: Vec::new(),
             cyclic: true,
+            four_state: false,
         };
         let below = |field, bound| Expr::Binary {
             op: "<".into(),
@@ -2965,6 +3680,7 @@ mod tests {
                     random: true,
                     domain: Vec::new(),
                     cyclic: false,
+                    four_state: false,
                 })
                 .collect(),
             constraints: vec![

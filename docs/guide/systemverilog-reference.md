@@ -313,38 +313,39 @@ blocks in programs. Two region deviations are listed under
   otherwise any production with items left, each as likely. So 0.5 (the
   default) prefers no length, and 0.0 and 1.0 always prefer the shortest
   and the longest.
-- Class `randomize()`: 4-state and aggregate properties, static or not,
-  `randc` static properties, constraints that name static properties in an
-  object that a rand handle reaches (its randomization fails), random arrays
-  of elements other than 2-state integral ones of at most 64 bits, `randc`
-  arrays, random object and string properties, constrained enums and
-  `randc`, a `foreach` or `sum()` over a random array whose size a
-  constraint names, `sum() with`, `soft` constraints in a `foreach` or with
-  `dist`, `dist` with `default :/`, weights other than constant expressions
-  or ranges weighted per value with bounds other than constant expressions,
-  typed parameters in constraints, array sets, X/Z wildcard
-  items and `$` bounds in `inside` sets, and `randc` domains beyond 1–8-bit
-  integers and scalar enums with up to 256 members. Named constraint blocks
-  cover only 1–64-bit two-state scalar integer properties with comparisons,
-  logical and bitwise operations, addition, subtraction, and multiplication,
-  bit-selects and part-selects of a property at constant positions, class
-  handle properties compared with each other or `null` by `==` and `!=`,
-  and calls of functions of the class with input arguments (18.5.11);
-  a call in a constraint loop, in inline constraints, in the constraints of
-  an object a rand handle reaches, or in an argument of another is
-  unsupported. The elements of a random array, fixed-size or dynamic, that a
-  `foreach` or a `sum()` of a constraint names are solver variables
-  (18.5.8); the others are drawn at random. A `dist` allows the values of
-  its items of nonzero total weight, a range bound `$` being the lowest or
-  highest value of the type of its expression; the solver first tries one
-  item of each `dist`, picked by its weight (one under `if` or `->` where
-  its condition holds, one in a `foreach` for each element), and then any
-  allowed value, so the weights bias the values without sampling them
-  exactly. A `unique` constraint takes singular properties of the class of
-  equivalent types; other variables, arrays and slices in it are
-  unsupported. A constraint may name a member of the object a handle
-  property refers to (`h.m`, 18.5.9): a variable solved with the object
-  through a rand handle, a state value through another; longer chains
+- Class `randomize()`: aggregate properties, static or not, 4-state static
+  properties a constraint reads as state, 4-state members of other objects
+  and 4-state array elements in constraints, `randc` static properties,
+  constraints that name static properties in an object that a rand handle
+  reaches (its randomization fails), random arrays of elements other than
+  2-state integral ones of at most 64 bits, `randc` arrays, random object
+  and string properties, constrained enums and `randc`, a `foreach` or
+  `sum()` over a random array whose size a constraint names, `sum() with`,
+  `soft` constraints in a `foreach` or with `dist`, `dist` with `default
+  :/`, weights other than constant expressions or ranges weighted per value
+  with bounds other than constant expressions, typed parameters in
+  constraints, array sets, X/Z wildcard items and `$` bounds in `inside`
+  sets, and `randc` domains beyond 1–8-bit integers and scalar enums with up
+  to 256 members. Named constraint blocks cover only 1–64-bit scalar integer
+  properties with comparisons, logical and bitwise operations, addition,
+  subtraction, and multiplication, bit-selects and part-selects of a
+  property at constant positions, class handle properties compared with each
+  other or `null` by `==` and `!=`, and calls of functions of the class with
+  input arguments (18.5.11); a call in a constraint loop, in inline
+  constraints, in the constraints of an object a rand handle reaches, or in
+  an argument of another is unsupported. The elements of a random array,
+  fixed-size or dynamic, that a `foreach` or a `sum()` of a constraint names
+  are solver variables (18.5.8); the others are drawn at random. A `dist`
+  allows the values of its items of nonzero total weight, a range bound `$`
+  being the lowest or highest value of the type of its expression; the
+  solver first tries one item of each `dist`, picked by its weight (one
+  under `if` or `->` where its condition holds, one in a `foreach` for each
+  element), and then any allowed value, so the weights bias the values
+  without sampling them exactly. A `unique` constraint takes singular
+  properties of the class of equivalent types; other variables, arrays and
+  slices in it are unsupported. A constraint may name a member of the object
+  a handle property refers to (`h.m`, 18.5.9): a variable solved with the
+  object through a rand handle, a state value through another; longer chains
   (`h.g.m`) are unsupported. A guard of state values, as of `if` or `->`, is
   evaluated before solving, so a constraint it leaves out reads no member of
   a null handle (18.5.13).
@@ -639,6 +640,15 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
   kept before it allow it, and is otherwise discarded; a `disable soft`
   discards the lower soft constraints that name its variable (18.5.13.2).
   The search for each keeps the seed, so the choice is reproducible.
+- A 4-state rand property takes a 2-state value. The X and Z bits of a
+  4-state state property, and of the value of a function a constraint
+  calls whose type is 4-state, follow the 4-state semantics of each
+  operation (11.4): a constraint or guard whose truth they decide ends the
+  simulation with an error (18.3), one they do not decide, as through a
+  mask, a select or an `&&` a known 0 decides, takes its value, and such a
+  guard is evaluated before solving (18.5.13). Where the truth also
+  depends on random variables, the solution found decides whether they
+  reach it.
 - `solve before` (18.5.9) leaves the solutions as they are, and the search
   does not order its choices by it; a circular order is not diagnosed.
 - A function a constraint calls (18.5.11) runs as any call of it does,
