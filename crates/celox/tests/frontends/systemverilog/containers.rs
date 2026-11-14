@@ -624,3 +624,207 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("grown")), BigUint::from(0xf0u32));
     }
 }
+
+sv_backends! {
+    fn members_of_container_elements_are_written_through_the_element(sim) {
+        @setup {
+            // A member write of a container element rewrites the element
+            // with the member's bits replaced (IEEE 1800-2023 7.2, 7.10):
+            // elements of records (string members), of integral structures
+            // and of packed structures; through `$`, a run-time index, a
+            // nested container and an associative array; whole, by an
+            // operator, by a part-select and as a whole unpacked structure.
+            // A copy of the container keeps its own elements.
+            let source = r#"module Top(output int strings, output int counts,
+                                    output int bits, output int others);
+                typedef struct packed { logic [3:0] hi; logic [3:0] lo; } pk_t;
+                typedef struct { int a; byte b; } in_t;
+                typedef struct { string arg; int unsigned used; in_t s; pk_t p; bit [7:0] v; } e_t;
+                e_t q[$], c[$];
+                e_t m[string];
+                in_t nq[$][$];
+                pk_t pq[$];
+                in_t plain[$];
+                initial begin
+                    e_t t;
+                    in_t i;
+                    t.arg = "one"; t.used = 5; t.s.a = 7; t.s.b = 3; t.p = 8'h12; t.v = 8'hf0;
+                    q.push_back(t); q.push_back(t);
+                    q[0].used++;
+                    q[1].used += 10;
+                    for (int k = 0; k < 2; k++) q[k].used += k;
+                    q[0].arg = "uno";
+                    q[1].arg = {q[0].arg, "!"};
+                    q[0].s.a = -2;
+                    q[1].s = '{a: 40, b: 4};
+                    q[0].p.hi = 4'h9;
+                    q[1].v[3:0] = 4'ha;
+                    q[$].v[7] = 1'b0;
+                    q[$].used *= 2;
+                    c = q;
+                    c[0].used = 99;
+                    c[0].arg = "copy";
+                    m["k"] = t; m["k"].used = 77;
+                    i.a = 1; i.b = 2;
+                    nq = '{'{i, i}, '{i}};
+                    nq[0][1].a = 70;
+                    pq.push_back(8'h34); pq[0].hi = 4'hf;
+                    plain.push_back(i); plain[0].a = -5; plain[0].b[2] = 1'b1;
+                    strings = (q[0].arg == "uno") + 2 * (q[1].arg == "uno!")
+                        + 4 * (c[0].arg == "copy") + 8 * (t.arg == "one");
+                    counts = q[0].used * 1000000 + q[1].used * 1000 + c[0].used;
+                    bits = {q[0].p, q[1].v, q[0].s.b, q[1].s.b};
+                    others = q[0].s.a * 1000000 + q[1].s.a * 10000 + m["k"].used * 100
+                        + nq[0][1].a + nq[0][0].a + pq[0] - 8'hf4 + plain[0].a + plain[0].b;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("element_members.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let strings = sim.signal("strings");
+        assert_eq!(sim.get(strings), BigUint::from(15u8));
+        // q[0]: 5 + 1 + 0; q[1]: (5 + 10 + 1) * 2; the copy's change stays there.
+        let counts = sim.signal("counts");
+        assert_eq!(sim.get(counts), BigUint::from(6_032_099u32));
+        let bits = sim.signal("bits");
+        assert_eq!(sim.get(bits), BigUint::from(0x92_7a_03_04u32));
+        // -2, 40, 77, 70 + 1, 0, -5 + 6.
+        let expected: i64 = -2 * 1_000_000 + 40 * 10_000 + 77 * 100 + 70 + 1 - 5 + 6;
+        let others = sim.signal("others");
+        assert_eq!(sim.get(others), BigUint::from(expected as u32));
+    }
+}
+
+sv_backends! {
+    fn members_of_class_container_elements_are_written(sim) {
+        @setup {
+            // Elements of a fixed-size array property, of a queue property
+            // and of a static queue property, written by member in methods
+            // and through a handle; the static queue of structures with a
+            // string member is UVM 1.2's `m_uvm_applied_cl_action`.
+            let source = r#"module Top(output int pairs, output int records, output int statics);
+                typedef struct { int a; byte b; } pair_t;
+                typedef struct { string arg; int unsigned used; } rec_t;
+                class C;
+                    pair_t pairs[2];
+                    rec_t recs[$];
+                    static rec_t applied[$];
+                    function void bump(int i); pairs[i].b += 2; recs[i].used++; endfunction
+                    static function void apply(string arg);
+                        rec_t t;
+                        t.arg = arg;
+                        applied.push_back(t);
+                        foreach (applied[i]) applied[i].used++;
+                    endfunction
+                endclass
+                initial begin
+                    C c = new;
+                    rec_t r;
+                    r.arg = "r"; r.used = 10;
+                    c.recs.push_back(r); c.recs.push_back(r);
+                    c.pairs[0].a = 1; c.pairs[1].a++; c.pairs[0].b += 1;
+                    c.bump(1);
+                    c.recs[0].arg = "zero";
+                    C::apply("a"); C::apply("b");
+                    pairs = c.pairs[0].a * 1000 + c.pairs[0].b * 100 + c.pairs[1].a * 10 + c.pairs[1].b;
+                    records = (c.recs[0].arg == "zero") * 1000 + c.recs[0].used * 10 + c.recs[1].used - 10;
+                    statics = C::applied[0].used * 10 + C::applied[1].used + (C::applied[1].arg == "b") * 100;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("class_element_members.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let pairs = sim.signal("pairs");
+        assert_eq!(sim.get(pairs), BigUint::from(1112u32));
+        let records = sim.signal("records");
+        assert_eq!(sim.get(records), BigUint::from(1101u32));
+        let statics = sim.signal("statics");
+        assert_eq!(sim.get(statics), BigUint::from(121u32));
+    }
+}
+
+sv_backends! {
+    fn selects_of_container_element_members_use_their_declared_ranges(sim) {
+        @setup {
+            // A bit-select or part-select written into a member of a
+            // container element takes the positions of the member's declared
+            // range (IEEE 1800-2023 7.4.6, 11.5.1), descending or ascending.
+            let source = r#"module Top(output bit [15:0] value);
+                typedef struct { bit [15:8] hi; string s; logic [0:7] up; } h_t;
+                h_t q[$];
+                initial begin
+                    h_t t;
+                    t.hi = 8'h00; t.up = 8'h00;
+                    q.push_back(t);
+                    q[0].hi[8] = 1;
+                    q[0].hi[15:12] = 4'hc;
+                    q[0].hi[9] ^= 1;
+                    q[0].up[0] = 1;
+                    q[0].up[6:7] = 2'b11;
+                    value = {q[0].hi, q[0].up};
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("element_member_ranges.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(0xc383u16));
+    }
+}
+
+sv_backends! {
+    fn compound_member_updates_of_the_last_element_fix_its_index_first(sim) {
+        @setup {
+            // `q[$].m op= f()` reads and writes the element that `$` named
+            // before `f()` appended to the queue: the address of the target
+            // is evaluated once (IEEE 1800-2023 11.4.1), for elements of any
+            // type.
+            let source = r#"module Top(output int structs, output int records, output int ints);
+                typedef struct { int a; byte b; } pair_t;
+                typedef struct { string s; int n; } rec_t;
+                pair_t q[$];
+                rec_t r[$];
+                int v[$];
+                function automatic int grow_q();
+                    pair_t p;
+                    p.a = 100;
+                    q.push_back(p);
+                    return 5;
+                endfunction
+                function automatic int grow_r();
+                    rec_t e;
+                    e.n = 100;
+                    r.push_back(e);
+                    return 5;
+                endfunction
+                function automatic int grow_v();
+                    v.push_back(100);
+                    return 5;
+                endfunction
+                initial begin
+                    pair_t p;
+                    rec_t e;
+                    p.a = 1;
+                    e.n = 1;
+                    q.push_back(p);
+                    r.push_back(e);
+                    v.push_back(1);
+                    q[$].a += grow_q();
+                    r[$].n += grow_r();
+                    v[$] += grow_v();
+                    structs = q[0].a * 1000 + q[1].a;
+                    records = r[0].n * 1000 + r[1].n;
+                    ints = v[0] * 1000 + v[1];
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("last_element_updates.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let structs = sim.signal("structs");
+        assert_eq!(sim.get(structs), BigUint::from(6100u32));
+        let records = sim.signal("records");
+        assert_eq!(sim.get(records), BigUint::from(6100u32));
+        let ints = sim.signal("ints");
+        assert_eq!(sim.get(ints), BigUint::from(6100u32));
+    }
+}

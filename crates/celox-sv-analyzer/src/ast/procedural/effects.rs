@@ -1349,6 +1349,14 @@ impl BodyBuilder<'_, '_, '_> {
         {
             return Ok(self.hidden(property.r#type));
         }
+        // So does a member of a container element, whose selects are those
+        // of its declared range (`q[i].m[8]` of `bit [15:8] m`).
+        if let Some((ty, _)) =
+            containers::element_member(id, native, self.tree, self.session, &self.dims)?
+            && ty.unpacked_struct().is_none()
+        {
+            return Ok(self.hidden(ty));
+        }
         // A streaming concatenation that is unpacked into holds the bits of
         // its operands, a vector of their width (11.4.14.3).
         if let ExprKind::Streaming { expressions, .. } = &native

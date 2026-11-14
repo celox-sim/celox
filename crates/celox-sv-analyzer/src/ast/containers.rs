@@ -1857,9 +1857,10 @@ fn query(
 }
 
 /// The element `c[k]` of a dynamic array, queue or associative array of
-/// integral elements that native target `left` is, or selects bits of, as
-/// in `c[k][i] = v`: its native expression, the container's type, and the
-/// values of the container and the index.
+/// integral elements that native target `left` is, or selects bits or
+/// packed structure members of, as in `c[k][i] = v` or `c[k].f = v`: its
+/// native expression, the container's type, and the values of the
+/// container and the index.
 pub(super) fn selected_element(
     left: ExprId,
     tree: &AnalysisContext<'_>,
@@ -1902,29 +1903,134 @@ pub(super) fn selected_element(
             {
                 return Ok(None);
             }
-            let container_value =
-                expression_binding::value(*container, native, tree, session, dims)?;
-            let index = match dimension.kind {
-                DimensionKind::Index(index) => {
-                    index_value(index, *container, tree, session, dims, &target)?
-                }
-                // `q[$]`, the last element of a queue: its index, which an
-                // assignment may have saved (see `last_index`).
-                _ if matches!(target.layout.kind, ContainerKind::Queue { .. }) => {
-                    match dims.last_indices.get(&element) {
-                        Some(index) => index.clone(),
-                        None => last_index(&target, container_value.clone())?,
-                    }
-                }
-                _ => return Ok(None),
+            let Some((container_value, index)) = element_address(
+                element,
+                *container,
+                &dimension.kind,
+                &target,
+                tree,
+                session,
+                dims,
+            )?
+            else {
+                return Ok(None);
             };
             return Ok(Some((element, target, container_value, index)));
         }
-        let ExprKind::Select { expression, .. } = &native.expression(element).kind else {
-            return Ok(None);
+        // A select, or a member of a packed structure element (7.2.1).
+        element = match &native.expression(element).kind {
+            ExprKind::Select { expression, .. } => *expression,
+            ExprKind::Member {
+                expression,
+                separator,
+                ..
+            } if separator == "." => *expression,
+            _ => return Ok(None),
         };
-        element = expression_binding::ungroup(*expression, native);
+        element = expression_binding::ungroup(element, native);
     }
+}
+
+/// The value of container `container`, of type `target`, and the index of
+/// its element `element`, which selects it by `dimension`: `c[k]`, or
+/// `c[$]` of a queue.
+#[allow(clippy::too_many_arguments)]
+fn element_address(
+    element: ExprId,
+    container: ExprId,
+    dimension: &DimensionKind,
+    target: &ContainerType,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<(Expr, Expr)>> {
+    let native = tree.declarations();
+    let container_value = expression_binding::value(container, native, tree, session, dims)?;
+    let index = match dimension {
+        DimensionKind::Index(index) => index_value(*index, container, tree, session, dims, target)?,
+        // `q[$]`, the last element of a queue: its index, which an
+        // assignment may have saved (see `last_index`).
+        DimensionKind::Queue(None) if matches!(target.layout.kind, ContainerKind::Queue { .. }) => {
+            match dims.last_indices.get(&element) {
+                Some(index) => index.clone(),
+                None => last_index(target, container_value.clone())?,
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some((container_value, index)))
+}
+
+/// The index of the element that native select `select`, `c[k]` or `c[$]`
+/// of a container of any element type, names: what the address of a place
+/// it is or holds evaluates once (IEEE 1800-2023 11.4.1).
+pub(super) fn element_index(
+    select: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<Expr>> {
+    let native = tree.declarations();
+    let select = expression_binding::ungroup(select, native);
+    let ExprKind::Select {
+        expression: container,
+        dimension,
+    } = &native.expression(select).kind
+    else {
+        return Ok(None);
+    };
+    let Some(target) = native_type(*container, native, tree, session, dims)? else {
+        return Ok(None);
+    };
+    Ok(element_address(
+        select,
+        *container,
+        &dimension.kind,
+        &target,
+        tree,
+        session,
+        dims,
+    )?
+    .map(|(_, index)| index))
+}
+
+/// The element of unpacked structure type that native expression `id`
+/// selects of a container, `c[k]` or `c[$]`, as a place a member write goes
+/// through: the container's type, its value and the index.
+pub(super) fn struct_element_place(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<(Arc<ContainerType>, Expr, Expr)>> {
+    let native = tree.declarations();
+    let id = expression_binding::ungroup(id, native);
+    let ExprKind::Select {
+        expression: container,
+        dimension,
+    } = &native.expression(id).kind
+    else {
+        return Ok(None);
+    };
+    let Some(target) = native_type(*container, native, tree, session, dims)? else {
+        return Ok(None);
+    };
+    if target.element.unpacked_struct().is_none() {
+        return Ok(None);
+    }
+    let Some((container_value, index)) = element_address(
+        id,
+        *container,
+        &dimension.kind,
+        &target,
+        tree,
+        session,
+        dims,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((target, container_value, index)))
 }
 
 pub(super) fn set(

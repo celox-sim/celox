@@ -4740,23 +4740,12 @@ fn fixed_size_array_property_bounds_outside_int_are_rejected() {
 
 #[test]
 fn fixed_size_array_properties_are_not_written_through_other_places() {
-    // An assignment to a member of a structure element, and the formal of
-    // an output or inout argument, would write the container that holds
-    // the property through a place that does not reach it (see
-    // `Property::storage`): each is rejected, never accepted and dropped.
+    // The formal of an output or inout argument would write the container
+    // that holds the property through a place that does not reach it (see
+    // `Property::storage`): it is rejected, never accepted and dropped. A
+    // member of a structure element is written through the element (see
+    // `members_of_class_container_elements_are_written`).
     for (statement, message) in [
-        (
-            "c.pairs[0].a = 1;",
-            "assignment to a member of an element of a dynamic container or a fixed-size array class property",
-        ),
-        (
-            "c.pairs[1].a++;",
-            "assignment to a member of an element of a dynamic container or a fixed-size array class property",
-        ),
-        (
-            "c.pairs[0].b += 1;",
-            "assignment to a member of an element of a dynamic container or a fixed-size array class property",
-        ),
         (
             "out(c.tab);",
             "fixed-size array class property as an output or inout argument",

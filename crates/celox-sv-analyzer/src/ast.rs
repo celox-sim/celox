@@ -586,8 +586,9 @@ pub enum LValue {
 /// The variable a selection of an [`ObjectPlace`] selects from.
 pub(crate) const OBJECT_VALUE: &str = crate::ir::PLACE_VALUE;
 
-/// Where an [`LValue::Object`] is: a property of the object `handle`, or an
-/// element, held by value, of the container `container` at `index`.
+/// Where an [`LValue::Object`] is: a property of the object `handle`, an
+/// element, held by value, of the container `container` at `index`, or a
+/// member of the unpacked structure value at another place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectPlace {
     Property {
@@ -600,6 +601,20 @@ pub enum ObjectPlace {
         index: Expr,
         layout: crate::system_functions::ContainerLayout,
         element: Type,
+        /// The immutable record that holds an element of unpacked
+        /// structure type: a write stores a new record.
+        record: Option<crate::system_functions::Record>,
+    },
+    /// The bits `offset` up of width `width` of the flat value at `outer`,
+    /// of `outer_width` bits: the leaves of a member of an unpacked
+    /// structure (7.2). A write stores the whole value at `outer` with
+    /// these bits replaced.
+    Member {
+        outer: Box<ObjectPlace>,
+        offset: usize,
+        width: usize,
+        outer_width: usize,
+        r#type: Type,
     },
 }
 

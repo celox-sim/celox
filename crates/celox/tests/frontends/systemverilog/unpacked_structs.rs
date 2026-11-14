@@ -520,14 +520,6 @@ fn unsupported_and_illegal_uses_are_rejected() {
             "sorting unpacked structures requires a with expression",
         ),
         (
-            "s_t q[$]; initial begin q.push_back('{1, \"x\"}); q[0].a = 5; end",
-            "assignment to a member of an element of a dynamic container or a fixed-size array class property",
-        ),
-        (
-            "s_t q[$]; initial begin q.push_back('{1, \"x\"}); q[0].a++; end",
-            "assignment to a member of an element of a dynamic container or a fixed-size array class property",
-        ),
-        (
             "typedef struct { bit [15:8] hi; string s; } h_t; h_t q[$]; bit x; initial x = q[0].hi[8];",
             "select of a container element member that is not declared [N-1:0]",
         ),

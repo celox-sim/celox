@@ -281,11 +281,13 @@ impl BodyBuilder<'_, '_, '_> {
         // The index that `$` names, of the queue the saved operands select,
         // innermost first.
         for select in lasts.into_iter().rev() {
-            let Some((element, _, _, index)) =
-                containers::selected_element(select, self.tree, self.session, &self.dims)?
+            // Of an element of any type: integral, a structure, a record.
+            let Some(index) =
+                containers::element_index(select, self.tree, self.session, &self.dims)?
             else {
                 continue;
             };
+            let element = select;
             let (source, unique) = self.hidden(int_type());
             let mut index = index;
             self.rename_expr(&mut index);
@@ -362,6 +364,73 @@ impl BodyBuilder<'_, '_, '_> {
             },
             place.store(Expr::Ident(unique)),
         ])
+    }
+
+    /// `e.s = v` for a member `s` of unpacked structure type of a container
+    /// element `e`: the flat value of the structure (7.2) is held in a
+    /// vector local while the element is written with it. An operator
+    /// assignment to an unpacked structure was rejected already.
+    pub(super) fn element_struct_member_assignment(
+        &mut self,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Converted<Option<Vec<Stmt>>> {
+        let native = self.tree.declarations();
+        let Some((ty, _)) =
+            containers::element_member(left, native, self.tree, self.session, &self.dims)?
+        else {
+            return Ok(None);
+        };
+        let Some(structure) = ty
+            .unpacked_struct()
+            .filter(|_| ty.unpacked_ranges.is_empty())
+        else {
+            return Ok(None);
+        };
+        if nonblocking {
+            return Err(unsupported(
+                "nonblocking assignment to a class property or container element",
+            ));
+        }
+        let width = structure
+            .leaves()
+            .iter()
+            .map(|leaf| leaf.offset + leaf.width)
+            .max()
+            .unwrap_or(0);
+        let id = unpacked_structs::type_id(&ty, self.tree, self.session, &self.dims)?;
+        unpacked_structs::check_value(id, right, native, self.tree, self.session, &self.dims)?;
+        let shape = dimensions_from_type(&ty);
+        let mut value = expression_binding::bind_value(
+            right,
+            native,
+            self.tree,
+            self.session,
+            &self.dims,
+            Some(&shape),
+        )?;
+        self.rename_expr(&mut value);
+        let mut local = Type::new(TypeKind::Logic);
+        local.packed_ranges = vec![PackedRange::new(
+            ConstExpr::Literal((width - 1).to_string()),
+            ConstExpr::Literal("0".into()),
+        )];
+        let (source, unique) = self.hidden(local);
+        let saved = (
+            self.dims.effect_values.clone(),
+            self.dims.last_indices.clone(),
+        );
+        let mut stmts = vec![Stmt::Assign {
+            lhs: LValue::Ident(unique),
+            rhs: value,
+            nonblocking: false,
+        }];
+        self.save_destination(left, false, &mut stmts)?;
+        let (written, _) = self.native_lvalue(left, true)?;
+        stmts.extend(self.emit_assign(written, Expr::Ident(source), false)?);
+        (self.dims.effect_values, self.dims.last_indices) = saved;
+        Ok(Some(stmts))
     }
 
     pub(super) fn aggregate_property_assignment(
