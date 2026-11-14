@@ -106,6 +106,25 @@ pub(super) struct Iterator {
     record: Option<(Arc<ContainerType>, String)>,
 }
 
+impl Iterator {
+    /// The iterator `source` of a `with` expression over elements kept as
+    /// records of `container`, whose record handle local `handle` holds and
+    /// whose index local `index` holds (see [`record_iterator`]).
+    pub(super) fn record(
+        source: String,
+        index: String,
+        container: Arc<ContainerType>,
+        handle: String,
+    ) -> Self {
+        Self {
+            source,
+            method: "index".into(),
+            index,
+            record: Some((container, handle)),
+        }
+    }
+}
+
 /// The array a locator method searches.
 enum Array {
     Container(Arc<ContainerType>),

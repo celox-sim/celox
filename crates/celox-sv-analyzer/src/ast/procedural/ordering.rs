@@ -58,11 +58,6 @@ impl BodyBuilder<'_, '_, '_> {
                 "an associative array has no ordering methods (IEEE 1800-2023 7.12.2)".into(),
             ));
         }
-        if target.record.is_some() {
-            return Err(unsupported(
-                "ordering method with expression on elements held in records",
-            ));
-        }
         // `a.sort()` lists one empty argument.
         let arguments = match arguments {
             [argument] if argument.name.is_none() && argument.value.is_none() => &[],
@@ -80,6 +75,22 @@ impl BodyBuilder<'_, '_, '_> {
         };
         let element = target.element.clone();
         let layout = target.layout;
+        // An element held in a record (see `unpacked_structs::record`) is
+        // moved by its record's handle, which is immutable, and the key
+        // reads the members of the record the iterator holds.
+        let handle_type = || {
+            let mut handle = Type::new(TypeKind::Bit);
+            handle.packed_ranges.push(PackedRange::new(
+                ConstExpr::Literal((classes::HANDLE_WIDTH - 1).to_string()),
+                ConstExpr::Literal("0".into()),
+            ));
+            handle
+        };
+        let (item_type, held_type) = match &target.record {
+            Some(_) => (handle_type(), handle_type()),
+            None => (element.clone(), element.clone()),
+        };
+        let record = target.record.is_some().then(|| target.clone());
         let array = self.native_value(*base)?;
         // The loops read and update the array many times, so a receiver
         // read through an expression with a side effect, such as
@@ -89,8 +100,10 @@ impl BodyBuilder<'_, '_, '_> {
                 "ordering method with expression on an array read through an expression with a side effect",
             ));
         }
-        let item = self.declare("$celox_sort_item", element.clone());
-        let (key, key_type) = self.ordering_key(predicate, &iterator, &element, &item)?;
+        let item = self.declare("$celox_sort_item", item_type);
+        let index = self.declare("$celox_sort_index", int_type());
+        let (key, key_type) =
+            self.ordering_key(predicate, &iterator, &element, &item, &index, record)?;
         let key_layout = ContainerLayout {
             kind: ContainerKind::Queue { capacity: 0 },
             width: if key_type.kind() == TypeKind::String {
@@ -119,9 +132,8 @@ impl BodyBuilder<'_, '_, '_> {
             fixed: None,
         }));
         let keys = self.declare("$celox_sort_keys", keys_type);
-        let index = self.declare("$celox_sort_index", int_type());
         let slot = self.declare("$celox_sort_slot", int_type());
-        let held = self.declare("$celox_sort_held", element);
+        let held = self.declare("$celox_sort_held", held_type);
         let held_key = self.declare("$celox_sort_held_key", key_type.clone());
 
         let ident = |name: &str| Expr::Ident(name.to_string());
@@ -248,6 +260,8 @@ impl BodyBuilder<'_, '_, '_> {
         iterator: &str,
         element: &Type,
         item: &str,
+        index: &str,
+        record: Option<Arc<ContainerType>>,
     ) -> Converted<(Expr, Type)> {
         let native = self.tree.declarations();
         // The iterator is visible in the with expression only (7.12).
@@ -257,10 +271,26 @@ impl BodyBuilder<'_, '_, '_> {
             scope.const_env.remove(&key);
         }
         scope.parameter_values.remove(iterator);
-        scope.insert(iterator.to_string(), shape);
-        scope
-            .expression_signedness
-            .insert(iterator.to_string(), element.is_signed());
+        match record {
+            // Members of the element are read from its record (see
+            // `locators::record_iterator`).
+            Some(container) => {
+                scope.remove(iterator);
+                scope.expression_signedness.remove(iterator);
+                Arc::make_mut(&mut scope.locator_iterators).push(locators::Iterator::record(
+                    iterator.to_string(),
+                    index.to_string(),
+                    container,
+                    item.to_string(),
+                ));
+            }
+            None => {
+                scope.insert(iterator.to_string(), shape);
+                scope
+                    .expression_signedness
+                    .insert(iterator.to_string(), element.is_signed());
+            }
+        }
         let mut key =
             expression_binding::value(predicate, native, self.tree, self.session, &scope)?;
         let string = expression_binding::string_value(&key, &scope)

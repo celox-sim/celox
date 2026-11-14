@@ -344,7 +344,7 @@ blocks in programs. Two region deviations are listed under
   of index entries with `default:`, in associative array literals are
   unsupported (a default-only literal is supported, 7.8.6).
 - Container methods: locator methods returning indices for integral keys
-  wider than 64 bits; sorting elements wider than 64 bits or with a `with`
+  wider than 64 bits; sorting elements wider than 64 bits without a `with`
   expression; ordering fixed arrays; comparing containers of elements
   wider than 64 bits with `==`, reducing them, or printing them with `%p`;
   type queries (`$bits`, …) on string- or class-valued queue pop results;
