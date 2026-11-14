@@ -656,11 +656,15 @@ pub(super) fn array_argument_shape(
             Job::Conditional => {
                 let right = values.pop()?;
                 let left = values.pop()?;
-                let left_type =
-                    array_compatibility::unpacked_array_type(&tree.functions, &left, dims)?;
-                let right_type =
-                    array_compatibility::unpacked_array_type(&tree.functions, &right, dims)?;
-                if left_type != right_type
+                // The branches are of equivalent unpacked array types (IEEE
+                // 1800-2023 11.4.11, 6.22.2), as the type system tells.
+                if left.unpacked.is_empty() || right.unpacked.is_empty() {
+                    return None;
+                }
+                let table = &mut session.types;
+                let left_type = left.type_id(table, &tree.functions, &dims.const_env)?;
+                let right_type = right.type_id(table, &tree.functions, &dims.const_env)?;
+                if !table.equivalent(left_type, right_type)
                     || left.packed != right.packed
                     || left.members != right.members
                 {
