@@ -3175,15 +3175,15 @@ fn external_constraints_track_unsupported_definitions_and_static_prototypes() {
         )
         .is_err()
     );
-    // A static prototype completed externally stays static and so keeps
-    // no executable expressions (18.5.10).
+    // A static prototype completed externally stays static, with its
+    // expressions (18.5.10, 18.5.11).
     let tree = parse(
         "class C; rand int x; extern static constraint c; endclass constraint C::c { x > 0; }",
     );
     let block = &tree.classes[0].constraints[0];
     assert!(block.defined);
     assert!(block.is_static);
-    assert!(block.expressions.is_none());
+    assert_eq!(block.expressions.as_ref().map(Vec::len), Some(1));
 }
 
 #[test]

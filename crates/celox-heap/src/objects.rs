@@ -47,6 +47,12 @@ const _: () = {
     }
 };
 
+/// The key of the shared mode of static constraint block `index` that class
+/// `owner` declares (see `Heap::static_modes`).
+fn static_mode_key(owner: u32, index: u32) -> u64 {
+    (u64::from(owner) << 32) | u64::from(index)
+}
+
 /// The identifier of a class whose name hashes to `hash`: never 0, which
 /// `null` reads as, and never a reserved class's.
 pub const fn class_identifier(hash: u32) -> u32 {
@@ -225,7 +231,16 @@ impl Heap {
     }
 
     /// Persistent per-object constraint modes (IEEE 1800-2023 18.9).
+    /// The constraint mode of block `index` of the object (IEEE 1800-2023
+    /// 18.9): that of the object, or for a static block of its class, the
+    /// one every object of the class shares (18.5.11).
     pub fn constraint_mode(&mut self, handle: Handle, index: u32) -> bool {
+        if self.object_mut(handle).is_none() {
+            return false;
+        }
+        if let Some(key) = self.static_block_key(handle, index) {
+            return self.static_modes.get(&key).copied().unwrap_or(true);
+        }
         self.object_mut(handle).is_some_and(|object| {
             object
                 .constraint_modes
@@ -235,15 +250,61 @@ impl Heap {
         })
     }
 
+    /// Set the constraint mode of block `index` of the object, or of every
+    /// block of it with `None` (18.9): a static block's for every object
+    /// of its class (18.5.11).
     pub fn set_constraint_mode(&mut self, handle: Handle, index: Option<u32>, enabled: bool) {
-        if let Some(object) = self.object_mut(handle) {
-            if let Some(index) = index {
+        if self.object_mut(handle).is_none() {
+            return;
+        }
+        let statics = match index {
+            Some(index) => self.static_block_key(handle, index).into_iter().collect(),
+            None => {
+                let class = self.class_of(handle);
+                self.static_blocks
+                    .get(&class)
+                    .map(|blocks| {
+                        blocks
+                            .iter()
+                            .map(|&(index, owner)| static_mode_key(owner, index))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            }
+        };
+        for key in &statics {
+            self.static_modes.insert(*key, enabled);
+        }
+        let Some(object) = self.object_mut(handle) else {
+            return;
+        };
+        match index {
+            Some(_) if !statics.is_empty() => {}
+            Some(index) => {
                 object.constraint_modes.insert(index, enabled);
-            } else {
+            }
+            None => {
                 object.constraint_modes.clear();
                 object.constraint_default = enabled;
             }
         }
+    }
+
+    /// Register the static constraint blocks of class `class`, each block's
+    /// index among the class's with the class that declares it (18.5.11).
+    pub fn register_static_blocks(&mut self, class: u32, blocks: Vec<(u32, u32)>) {
+        self.static_blocks.entry(class).or_insert(blocks);
+    }
+
+    /// The key of the shared mode of block `index` of the object, if a
+    /// static block of its class.
+    fn static_block_key(&self, handle: Handle, index: u32) -> Option<u64> {
+        let class = self.objects.get(&handle)?.class;
+        self.static_blocks
+            .get(&class)?
+            .iter()
+            .find(|(block, _)| *block == index)
+            .map(|&(index, owner)| static_mode_key(owner, index))
     }
 
     /// Seed an object's independent random stream (IEEE 1800-2023 18.13.3).
