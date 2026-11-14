@@ -2931,7 +2931,8 @@ impl InterfaceDecl {
             | native::BodyItemKind::Block { .. }
             | native::BodyItemKind::Conditional { .. }
             | native::BodyItemKind::Case { .. }
-            | native::BodyItemKind::Loop { .. } => self.items.push(Item::Process(span)),
+            | native::BodyItemKind::Loop { .. }
+            | native::BodyItemKind::Assertion(_) => self.items.push(Item::Process(span)),
             native::BodyItemKind::Unconverted { category, .. } => match category.as_str() {
                 ";" => {}
                 "genvar" => {
@@ -2963,7 +2964,8 @@ impl InterfaceDecl {
                         self.name
                     )));
                 }
-                "bind" | "alias" | "assert" | "assume" | "cover" | "restrict" => {
+                "assert" | "assume" | "cover" => self.items.push(Item::Process(span)),
+                "bind" | "alias" | "restrict" => {
                     return Err(unsupported(format!(
                         "instantiation, assertion, or alias in interface `{}`",
                         self.name
