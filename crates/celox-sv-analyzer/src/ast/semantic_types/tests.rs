@@ -632,3 +632,40 @@ fn declarations_are_one_per_name_and_scope() {
     assert_eq!(table.declare("M::e_t", None), unscoped);
     assert_ne!(table.declare("M::f_t", None), unscoped);
 }
+
+#[test]
+fn variables_keep_the_semantic_types_of_their_declarations() {
+    // IEEE 1800-2023 6.18: the names in a type resolve in the scope that
+    // declares it. A class property or a module variable with unpacked
+    // dimensions is bound to its semantic type where it is declared, and
+    // keeps the binding when its constants are substituted, so a reader
+    // neither resolves it again nor needs to see `W`.
+    let session = &mut Session::default();
+    let source = "module M;
+        class C; bit d [W]; logic [W-1:0] q [$:W]; endclass
+        logic [W-1:0] a [2][W];
+        endmodule";
+    let tree =
+        crate::source_tree::parse_scope_fixture(source, Path::new("semantic_types.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let declaring = ConstEnv::from_iter([("W".into(), 4)]);
+    let class =
+        crate::ast::classes::class(&tree, session, "C", &declaring, &TypeAliases::default())
+            .unwrap();
+    for property in &class.properties {
+        assert!(
+            property.r#type.binding.get(&session.types).is_some(),
+            "property `{}`",
+            property.name
+        );
+    }
+    let signals = crate::ast::declarations::signals_from_scope(
+        &tree,
+        session,
+        &declaring,
+        &TypeAliases::default(),
+    )
+    .unwrap();
+    let signal = signals.iter().find(|signal| signal.name() == "a").unwrap();
+    assert!(signal.r#type().binding.get(&session.types).is_some());
+}
