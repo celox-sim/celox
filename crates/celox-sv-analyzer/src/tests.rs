@@ -35,13 +35,16 @@ fn eval_test_const_expr(expr: &ir::ConstExpr) -> Option<i128> {
 
 #[test]
 fn caps_aggregate_nested_generate_expansion() {
-    for (outer, inner, accepted) in [(2, 3, true), (100, 100, false), (10_000, 10_000, false)] {
+    for (outer, inner, accepted) in [(2, 3, true), (100, 100, true), (1001, 1000, false)] {
+        // A loop past the cap expands the cap's iterations before it is
+        // rejected; empty bodies keep that cheap.
+        let body = if accepted { "assign y = 1'b1;" } else { "" };
         let source = format!(
             r#"
             module Top(output wire y);
                 for (genvar i = 0; i < {outer}; i++) begin : outer_loop
                     for (genvar j = 0; j < {inner}; j++) begin : inner_loop
-                        assign y = 1'b1;
+                        {body}
                     end
                 end
             endmodule
