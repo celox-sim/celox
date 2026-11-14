@@ -570,17 +570,19 @@ fn prepare_external_hierarchy_collecting(
         });
     };
     let package_states = lower_package_states(
-        &any_module.packages,
-        &design,
+        package_states(
+            &any_module.packages,
+            &design,
+            &properties,
+            time_format,
+            &expansion,
+        ),
         module_ids.len(),
         four_state,
         false,
-        &properties,
-        time_format,
         warnings,
         force_out_of_line,
         None,
-        &expansion,
     )?;
     // How often the design instantiates these modules is not known here;
     // assembly checks the drivers of package variables across instances.
