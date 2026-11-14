@@ -1434,6 +1434,7 @@ impl<'a> Elaborator<'a, '_> {
                 &scope.env,
                 &aliases,
                 &HashMap::default(),
+                Some(&scope.path),
             )?;
             for name in type_names {
                 if !declared.insert(name.clone()) {

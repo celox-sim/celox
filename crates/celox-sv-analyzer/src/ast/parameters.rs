@@ -1217,6 +1217,7 @@ pub(super) fn enum_member_constants_from_scope(
         base_const_env,
         type_aliases,
         parameter_overrides,
+        None,
     )
 }
 
@@ -1227,6 +1228,7 @@ pub(super) fn enum_member_constants_from_items(
     base_const_env: &ConstEnv,
     type_aliases: &TypeAliases,
     parameter_overrides: &HashMap<String, ConstExpr>,
+    generate_scope: Option<&str>,
 ) -> Result<EnumMemberConstants, AnalyzerError> {
     use celox_sv_syntax::{BodyItemKind, DataDeclaration, DataTypeKind, TypeAliasTarget};
     let native = syntax_tree.declarations();
@@ -1293,6 +1295,7 @@ pub(super) fn enum_member_constants_from_items(
                 declarations,
                 &eval_env,
                 &resolved_type_aliases,
+                generate_scope,
             )?;
             continue;
         }
@@ -1351,6 +1354,7 @@ pub(super) fn enum_member_constants_from_items(
             declarations,
             &eval_env,
             &resolved_type_aliases,
+            generate_scope,
         )?;
     }
     Ok(constants)
