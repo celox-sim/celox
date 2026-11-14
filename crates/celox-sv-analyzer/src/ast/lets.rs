@@ -52,9 +52,10 @@ pub(crate) fn expand(tree: &mut SyntaxTree) -> Converted<()> {
     // A call in a body is expanded before the calls of that body copy it,
     // as the body comes first.
     expansions.sort_by_key(|expansion| native.expression(expansion.call).tokens.start);
-    let native = tree.declarations_mut();
+    // The arenas' index is built again once every call is expanded.
+    let mut native = tree.declarations_mut();
     for expansion in &expansions {
-        apply(native, expansion);
+        apply(&mut native, expansion);
     }
     Ok(())
 }

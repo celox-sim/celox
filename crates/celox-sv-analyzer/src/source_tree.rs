@@ -8,33 +8,80 @@ pub(crate) use scopes::ScopeHandle;
 mod spans;
 pub(crate) use spans::{Ranges, SourceText, Spans, Starts};
 
-/// Shared native arena with copy-on-write support for ownership regressions.
-/// The span index is built on first use and dropped when the arena changes.
+/// A file's native arenas, shared by the trees that view them, with the
+/// index of their spans and the facts analyses derive from them, which are
+/// built with the arenas (see [`Spans`]).
 #[derive(Clone, Debug)]
-pub(super) struct Shared<T: Clone>(
-    std::sync::Arc<T>,
-    std::sync::Arc<std::sync::OnceLock<spans::Spans>>,
-);
-impl<T: Clone> From<T> for Shared<T> {
-    fn from(value: T) -> Self {
-        Self(std::sync::Arc::new(value), Default::default())
+pub(super) struct Arena {
+    declarations: std::sync::Arc<celox_sv_syntax::Declarations>,
+    spans: std::sync::Arc<Spans>,
+    /// Tests change the arenas in place (see the `DerefMut` below); the
+    /// index of the changed arenas is built when it is first read.
+    #[cfg(test)]
+    changed: Option<std::sync::Arc<std::sync::OnceLock<Spans>>>,
+}
+impl From<celox_sv_syntax::Declarations> for Arena {
+    fn from(declarations: celox_sv_syntax::Declarations) -> Self {
+        let spans = std::sync::Arc::new(Spans::new(&declarations));
+        Self {
+            declarations: std::sync::Arc::new(declarations),
+            spans,
+            #[cfg(test)]
+            changed: None,
+        }
     }
 }
-impl<T: Clone> std::ops::Deref for Shared<T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        &self.0
+impl Arena {
+    fn spans(&self) -> &Spans {
+        #[cfg(test)]
+        if let Some(changed) = &self.changed {
+            return changed.get_or_init(|| Spans::new(&self.declarations));
+        }
+        &self.spans
     }
 }
-impl<T: Clone> std::ops::DerefMut for Shared<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        self.1 = Default::default();
-        std::sync::Arc::make_mut(&mut self.0)
+/// Tests change the arenas of a tree in place, to check what an analysis
+/// makes of arenas a parse would not produce.
+#[cfg(test)]
+impl std::ops::DerefMut for Arena {
+    fn deref_mut(&mut self) -> &mut celox_sv_syntax::Declarations {
+        self.changed = Some(Default::default());
+        std::sync::Arc::make_mut(&mut self.declarations)
+    }
+}
+impl std::ops::Deref for Arena {
+    type Target = celox_sv_syntax::Declarations;
+    fn deref(&self) -> &celox_sv_syntax::Declarations {
+        &self.declarations
+    }
+}
+
+/// The arenas of a tree, being changed: the index and facts of the changed
+/// arenas are built again once the change is complete.
+pub(crate) struct ArenaMut<'a>(&'a mut Arena);
+impl std::ops::Deref for ArenaMut<'_> {
+    type Target = celox_sv_syntax::Declarations;
+    fn deref(&self) -> &celox_sv_syntax::Declarations {
+        &self.0.declarations
+    }
+}
+impl std::ops::DerefMut for ArenaMut<'_> {
+    fn deref_mut(&mut self) -> &mut celox_sv_syntax::Declarations {
+        std::sync::Arc::make_mut(&mut self.0.declarations)
+    }
+}
+impl Drop for ArenaMut<'_> {
+    fn drop(&mut self) {
+        self.0.spans = std::sync::Arc::new(Spans::new(&self.0.declarations));
+        #[cfg(test)]
+        {
+            self.0.changed = None;
+        }
     }
 }
 #[derive(Clone, Debug)]
 pub(crate) struct SourceTree {
-    declarations: Shared<celox_sv_syntax::Declarations>,
+    declarations: Arena,
     scope: scopes::View,
     compilation_path: std::sync::Arc<std::path::PathBuf>,
 }
@@ -146,31 +193,30 @@ impl SourceTree {
         &self.declarations
     }
     /// The arena, to rewrite, which drops its span index.
-    pub(crate) fn declarations_mut(&mut self) -> &mut celox_sv_syntax::Declarations {
-        &mut self.declarations
+    /// The arenas, to change them: their index and facts are built again
+    /// when the change is complete.
+    pub(crate) fn declarations_mut(&mut self) -> ArenaMut<'_> {
+        ArenaMut(&mut self.declarations)
     }
     /// A handle that keeps the address of [`Self::declarations`] from being
     /// reused while it is held, so that the address identifies this arena.
     pub(crate) fn declarations_incarnation(
         &self,
     ) -> std::sync::Weak<celox_sv_syntax::Declarations> {
-        std::sync::Arc::downgrade(&self.declarations.0)
+        std::sync::Arc::downgrade(&self.declarations.declarations)
     }
     /// The token-order index of this file's arenas.
     pub(crate) fn spans(&self) -> &Spans {
-        self.declarations
-            .1
-            .get_or_init(|| Spans::new(&self.declarations))
+        self.declarations.spans()
     }
     /// The expanded token text of this file.
     pub(crate) fn source_text(&self) -> &SourceText {
-        self.spans()
-            .text
-            .get_or_init(|| SourceText::new(&self.declarations))
+        &self.spans().text
     }
 
     pub(crate) fn into_declarations(self) -> celox_sv_syntax::Declarations {
-        std::sync::Arc::try_unwrap(self.declarations.0).unwrap_or_else(|shared| (*shared).clone())
+        std::sync::Arc::try_unwrap(self.declarations.declarations)
+            .unwrap_or_else(|shared| (*shared).clone())
     }
 }
 

@@ -5,7 +5,7 @@ use celox_sv_syntax::StatementKind;
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn rejects_body(tree: &mut SourceTree, native: Shared<celox_sv_syntax::Declarations>) {
+    fn rejects_body(tree: &mut SourceTree, native: Arena) {
         let previous = std::mem::replace(&mut tree.declarations, native);
         assert!(crate::ast::Source::from_syntax(tree).is_err());
         tree.declarations = previous;
