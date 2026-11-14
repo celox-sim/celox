@@ -342,3 +342,55 @@ endmodule
         );
     }
 }
+
+/// UVM 1.2's regular expressions (`src/dpi/uvm_regex.cc`), declared as its
+/// `context` imports: `uvm_re_match` compiles and matches in one call, `0`
+/// on a match, without the brackets of `/re/`; `uvm_glob_to_re` brackets the
+/// expression of a glob, gives "" for an empty one or a lone `/`, and keeps
+/// one already bracketed; `uvm_dump_re_cache` does nothing.
+const UVM_12_SOURCE: &str = r#"
+module Top(output int checks, output int failed);
+  import "DPI-C" context function int uvm_re_match(string re, string str);
+  import "DPI-C" context function void uvm_dump_re_cache();
+  import "DPI-C" context function string uvm_glob_to_re(string glob);
+  initial begin
+    checks = 0; failed = 0;
+    if (uvm_glob_to_re("top.u?.*") == "/^top\\.u.\\..*$/") checks++; else failed |= 1;
+    if (uvm_glob_to_re("") == "" && uvm_glob_to_re("/") == "") checks++; else failed |= 2;
+    if (uvm_glob_to_re("/^a+$/") == "/^a+$/") checks++; else failed |= 4;
+    if (uvm_re_match(uvm_glob_to_re("uvm_test_top.*"), "uvm_test_top.env") == 0) checks++; else failed |= 8;
+    if (uvm_re_match(uvm_glob_to_re("uvm_test_top.*"), "top.env") != 0) checks++; else failed |= 16;
+    if (uvm_re_match("/^a[0-9]+b$/", "a42b") == 0 && uvm_re_match("^a[0-9]+b$", "ab") != 0) checks++; else failed |= 32;
+    if (uvm_re_match("(", "x") != 0) checks++; else failed |= 64;
+    uvm_dump_re_cache();
+  end
+endmodule
+"#;
+
+#[test]
+fn uvm_12_regular_expressions() {
+    fn check<B: celox::SimBackend>(mut sim: celox::Simulation<B>, four_state: bool) {
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("failed")),
+            0u8.into(),
+            "four_state={four_state}"
+        );
+        assert_eq!(
+            sim.get(sim.signal("checks")),
+            7u8.into(),
+            "four_state={four_state}"
+        );
+    }
+    for four_state in [false, true] {
+        let build = || {
+            celox::Simulation::from_sv_sources(
+                vec![(UVM_12_SOURCE, Path::new("uvm12_dpi.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+        };
+        check(build().build_interpreter().unwrap(), four_state);
+        check(build().build().unwrap(), four_state);
+    }
+}
