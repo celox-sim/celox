@@ -33,6 +33,7 @@ use celox_slt::{
 use num_traits::{ToPrimitive, Zero};
 
 pub(super) use comb_process::*;
+pub(super) use loops::RUNTIME_LOOP_CONDITION;
 use rewrite::*;
 
 type Sources = HashSet<VarAtomBase<SourceVarId>>;

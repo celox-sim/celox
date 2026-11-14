@@ -187,3 +187,54 @@ sv_backends! {
         assert_eq!(bits & BigUint::from(0b0111u8), BigUint::from(0b101u8));
     }
 }
+
+sv_backends! {
+    // A loop whose condition depends on the values of the process, such as
+    // one that stops at the first sign change, runs in a continuous
+    // assignment's function and in an `always_comb` as the values make it
+    // stop (IEEE 1800-2023 12.7).
+    fn loops_with_value_dependent_conditions(sim) {
+        @setup {
+            let source = r#"
+            module Top(input logic [15:0] a, output logic [3:0] lead, output logic [4:0] ones);
+              function [3:0] lead_of(input [15:0] v);
+                reg [3:0] i;
+                reg done;
+                begin
+                  done = 0;
+                  lead_of = 15;
+                  for (i = 14; done == 0; i = i - 1) begin
+                    if (v[i + 1] != v[i]) begin
+                      lead_of = 14 - i;
+                      done = 1;
+                    end else if (i == 0) done = 1;
+                  end
+                end
+              endfunction
+              assign lead = lead_of(a);
+              always_comb begin
+                int k;
+                ones = 0;
+                k = 0;
+                while (k < 16 && a[k]) begin
+                  ones = ones + 1;
+                  k = k + 1;
+                end
+              end
+            endmodule"#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("value_loops.sv"))], "Top");
+        let a = sim.signal("a");
+        for (value, lead, ones) in [
+            (0x0f00u16, 3u8, 0u8),
+            (0xfff7, 11, 3),
+            (0x0000, 15, 0),
+            (0x7fff, 0, 15),
+            (0xffff, 15, 16),
+        ] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("lead")), BigUint::from(lead), "{value:#x}");
+            assert_eq!(sim.get(sim.signal("ones")), BigUint::from(ones), "{value:#x}");
+        }
+    }
+}

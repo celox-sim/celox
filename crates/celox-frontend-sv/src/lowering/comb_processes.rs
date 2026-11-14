@@ -173,8 +173,16 @@ pub(super) fn lower_comb_processes(
         comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
         let lowered = comb.lower_process(process.body());
         // The guarded unit accepts whatever the symbolic form refuses of an
-        // `always @*`, as it did before the symbolic attempt.
+        // `always @*`, as it did before the symbolic attempt, and runs a
+        // loop whose condition the symbolic form cannot bound, as in
+        // `for (i = W - 2; done == 0; i = i - 1)`: the process executes its
+        // statements, so the loop ends as the values make it end.
+        let runtime_loop = matches!(
+            &lowered,
+            Err(sv::AnalyzerError::Unsupported(reason)) if reason == comb::RUNTIME_LOOP_CONDITION
+        );
         let fallback = (symbolic_star && lowered.is_err())
+            || runtime_loop
             || matches!(
                 &lowered,
                 Err(sv::AnalyzerError::Unsupported(reason))
@@ -256,6 +264,41 @@ pub(super) fn lower_comb_processes(
                 continue;
             }
             Ok(paths) => comb_blocks.extend(paths),
+            // A continuous assignment is evaluated again when its own
+            // target changes (IEEE 1800-2023 10.3.2), which a guarded unit,
+            // scheduled after what it reads other than what it writes, does
+            // not do. As in the symbolic form, one that reads the bits of its
+            // target, also in the functions it calls, is refused; other bits
+            // of the target variable, as in `assign y[3:0] = f(y[7:4]);`,
+            // are read like any other variable.
+            Err(_)
+                if runtime_loop
+                    && process.kind() == sv::ir::CombProcessKind::ContinuousAssign
+                    && {
+                        // The reads by longest static prefixes (9.2.2.2.1),
+                        // so a constant select reads only its bits.
+                        let target = comb.continuous_target_bits(process.body());
+                        let written = comb.m.written_variables(process.body());
+                        comb.m
+                            .implicit_reads(process.body(), true)
+                            .iter()
+                            .any(|read| match &target {
+                                // A variable of the target: the bits it writes.
+                                Some(bits) if bits.iter().any(|(id, _)| *id == read.id) => {
+                                    bits.iter().any(|(id, access)| {
+                                        *id == read.id && read.access.overlaps(access)
+                                    })
+                                }
+                                _ => written.contains(&read.id),
+                            })
+                    } =>
+            {
+                return Err(sv::AnalyzerError::Unsupported(
+                    "continuous assignment that reads its own target through a loop whose \
+                     condition depends on values"
+                        .into(),
+                ));
+            }
             Err(_) if fallback => {
                 // A retained output is procedural state. The guarded unit
                 // executes once per implicit-sensitivity change, without
