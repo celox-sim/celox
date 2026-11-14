@@ -94,6 +94,145 @@ pub(in crate::ast) fn check_access(
     })
 }
 
+/// Reject `h.m`, a select or a method call through a handle `h` that no
+/// binder resolved, when the class of `h` declares no member `m` (IEEE
+/// 1800-2023 8.5): no property, method, constraint, parameter, local
+/// parameter, enumeration label or typedef of that name in its member
+/// tables, those of its bases or those of the interface classes it
+/// implements. An undeclared name is an error of the source, not a shape
+/// the analyzer leaves unsupported. In a chain `h.a.b` whose receiver
+/// `h.a` has no class, the first link is checked. A class whose constants
+/// and types are not at hand is left to the caller.
+pub(in crate::ast) fn check_member_declared(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(ungroup(id, native)).kind
+    else {
+        return Ok(());
+    };
+    if separator != "." {
+        return Ok(());
+    }
+    let Some(class_name) = native_class(tree, session, *expression, native, dimensions) else {
+        // `h.a.b`: the receiver `h.a` may name no member of the class of
+        // `h`, which is the error.
+        return check_member_declared(tree, session, *expression, native, dimensions);
+    };
+    if classes::builtin(&class_name) {
+        return Ok(());
+    }
+    let member = instances::normalize_identifier(&name.spelling);
+    let mut pending = vec![class_name.clone()];
+    let mut seen = HashSet::default();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current.clone()) {
+            continue;
+        }
+        let Ok(class) = class(tree, session, dimensions, &current) else {
+            return Ok(());
+        };
+        match declares(session, &class, &member) {
+            Some(false) => {}
+            Some(true) | None => return Ok(()),
+        }
+        // A covergroup the class declares (IEEE 1800-2023 19.4), which the
+        // analyzer does not lay out as a member.
+        match declares_covergroup(tree, session, &current, &member) {
+            Some(false) => {}
+            Some(true) | None => return Ok(()),
+        }
+        pending.extend(class.base.iter().cloned());
+        pending.extend(class.interfaces.iter().cloned());
+    }
+    Err(AnalyzerError::UnknownClassMember {
+        class: classes::specializations::generic(session, &class_name),
+        name: member,
+    })
+}
+
+/// Whether class `name` declares a covergroup `member`, or `None` when its
+/// declaration is not at hand.
+fn declares_covergroup(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    name: &str,
+    member: &str,
+) -> Option<bool> {
+    let generic = classes::specializations::generic(session, name);
+    match classes::declaration(tree, session, name) {
+        Some(declaration) => Some(classes::declares_covergroup(
+            tree.declarations(),
+            declaration,
+            member,
+        )),
+        None => session.foreign.declares_covergroup(&generic, member),
+    }
+}
+
+/// Whether `class` itself declares a member `name` (IEEE 1800-2023 8.5),
+/// or `None` when its constants and types are not known here.
+fn declares(session: &Session, class: &Class, name: &str) -> Option<bool> {
+    // A property of unpacked structure type is laid out as its leaves,
+    // `s.a`, which its name `s` heads.
+    let heads = |path: &str| {
+        path == name
+            || path
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with('.'))
+    };
+    if class
+        .properties
+        .iter()
+        .any(|property| heads(&property.name))
+        || class
+            .aggregates
+            .iter()
+            .any(|aggregate| heads(&aggregate.name))
+        || class.statics.iter().any(|property| heads(&property.name))
+        || class.method(name).is_some()
+        || class
+            .constraints
+            .iter()
+            .any(|(constraint, _)| constraint == name)
+        || class
+            .declarations
+            .iter()
+            .any(|(declared, _)| declared == name)
+    {
+        return Some(true);
+    }
+    // Parameters, local parameters, enumeration labels and typedefs: those
+    // of the specialization this scope made, or of a package's class.
+    if let Some(specialization) = classes::specializations::lookup(session, &class.name)
+        .or_else(|| session.foreign.specialization(&class.name))
+    {
+        return Some(
+            specialization.declared_env.contains_key(name)
+                || specialization.declared_aliases.contains_key(name)
+                || specialization.literals.contains_key(name)
+                || specialization.constant_types.contains_key(name)
+                || specialization.nonconstant_members.contains(name)
+                || specialization.hidden.iter().any(|hidden| hidden == name),
+        );
+    }
+    let declarations = session.foreign.declarations(&class.name)?;
+    Some(
+        declarations.env.contains_key(name)
+            || declarations.types.contains_key(name)
+            || declarations.literals.contains_key(name)
+            || declarations.constant_types.contains_key(name)
+            || declarations.nonconstant_members.contains(name),
+    )
+}
+
 /// The class whose method is being bound, whose properties and methods
 /// unqualified names may refer to.
 pub(in crate::ast) fn scope_class(dimensions: &PackedDimensions) -> Option<String> {
