@@ -2625,8 +2625,8 @@ fn distributions_constrain_values_and_weigh_their_items() {
             "{operand}: {error}"
         );
     }
-    // A soft distribution, the only constraint of its block, keeps the block
-    // unsupported rather than taking another expression as its operand.
+    // A soft distribution (IEEE 1800-2023 18.5.13) stays unsupported rather
+    // than taking another expression as its operand.
     let source = "class C;
         rand int b;
         constraint c { soft b dist {10 := 1}; }
@@ -2642,7 +2642,10 @@ fn distributions_constrain_values_and_weigh_their_items() {
                 .expect_err("a soft distribution")
                 .to_string(),
         };
-    assert!(error.contains("constraint block form"), "{error}");
+    assert!(
+        error.contains("soft dist constraints are not supported"),
+        "{error}"
+    );
 }
 
 #[test]
