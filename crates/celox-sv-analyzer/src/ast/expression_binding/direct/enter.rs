@@ -7,7 +7,7 @@ use super::*;
 /// it.
 pub(super) fn enter(
     id: ExprId,
-    target: Option<Rc<VariableDimensions>>,
+    target: Option<Destination>,
     scope: &Option<Rc<PackedDimensions>>,
     root: ExprId,
     permits: &mut chandles::Permits,
@@ -223,7 +223,7 @@ pub(super) fn enter(
 fn check_received(
     id: ExprId,
     root: ExprId,
-    target: &Option<Rc<VariableDimensions>>,
+    target: &Option<Destination>,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -267,9 +267,14 @@ fn check_received(
     }
     // A virtual interface, or a fixed-size array of them, takes the values
     // of its own type (25.9).
-    let target_type = target.as_deref().and_then(|shape| {
-        shape.type_id(&mut session.types, &tree.functions, &dimensions.const_env)
-    });
+    // The formal of an output argument is copied out to the actual, which
+    // receives no value of the formal's virtual interface type.
+    let target_type = target
+        .as_ref()
+        .filter(|destination| !destination.is_copied_out())
+        .and_then(|shape| {
+            shape.type_id(&mut session.types, &tree.functions, &dimensions.const_env)
+        });
     if let Some(ty) = target_type.and_then(|ty| virtual_interfaces::of_type(&session.types, ty)) {
         virtual_interfaces::check_assignment(tree, session, id, native, dimensions, &ty)?;
     }
@@ -313,7 +318,7 @@ fn check_received(
 /// that bind its operands and finish it.
 fn enter_kind(
     id: ExprId,
-    target: Option<Rc<VariableDimensions>>,
+    target: Option<Destination>,
     scope: &Option<Rc<PackedDimensions>>,
     permitted: bool,
     permits: &mut chandles::Permits,
@@ -456,7 +461,9 @@ fn enter_kind(
             )?),
             vec![(
                 *expression,
-                cast_shape(*target, native, tree, session, dimensions)?.map(Rc::new),
+                cast_shape(*target, native, tree, session, dimensions)?
+                    .map(Rc::new)
+                    .map(Destination::receiving),
             )],
         ),
         _ if let Some((_, args)) = method_call => {
@@ -628,7 +635,12 @@ fn enter_kind(
             }
             let children = value
                 .iter()
-                .map(|id| (*id, plan.shape.clone().map(Rc::new)))
+                .map(|id| {
+                    (
+                        *id,
+                        plan.shape.clone().map(Rc::new).map(Destination::receiving),
+                    )
+                })
                 .collect();
             (Finish::Tagged(plan), children)
         }
@@ -736,7 +748,7 @@ fn enter_conditional(
     condition: &ExprId,
     then_expression: &ExprId,
     else_expression: &ExprId,
-    target: &Option<Rc<VariableDimensions>>,
+    target: &Option<Destination>,
     permitted: bool,
     permits: &mut chandles::Permits,
     native: &Declarations,
@@ -761,7 +773,7 @@ fn enter_conditional(
     let target = match target.clone() {
         Some(target) => Some(target),
         None => containers::native_type(id, native, tree, session, dimensions)?
-            .map(|container| Rc::new(containers::shape(&container))),
+            .map(|container| Destination::receiving(Rc::new(containers::shape(&container)))),
     };
     Ok((
         Finish::Mux(containers::conditional(

@@ -60,15 +60,15 @@ pub(super) fn enter_method_call(
         check_written_container(&name, first + position, value, tree, session, dimensions)?;
         let shape = shapes.and_then(|shapes| shapes.get(first + position));
         let copied_in = copied_in(dimensions, &name, first + position);
-        // The formal is copied out to the actual.
-        if let Some(formal) = shape
-            .filter(|_| !copied_in)
-            .and_then(|shape| {
-                shape.type_id(&mut session.types, &tree.functions, &dimensions.const_env)
-            })
-            .and_then(|ty| virtual_interfaces::of_type(&session.types, ty))
-        {
-            virtual_interfaces::check_copy_out(tree, session, value, native, dimensions, &formal)?;
+        // The formal of an output or inout argument is copied out to the
+        // actual; a method whose directions are not known copies none out.
+        let written = dimensions
+            .subroutine_directions
+            .get(&name)
+            .and_then(|directions| directions.get(first + position))
+            .is_some_and(|direction| direction.is_written());
+        if let Some(shape) = shape.filter(|_| written) {
+            check_copy_out(&name, shape, value, native, tree, session, dimensions)?;
         }
         let shape = shape
             .filter(|shape| {
@@ -81,7 +81,8 @@ pub(super) fn enter_method_call(
                         && copied_in
             })
             .cloned()
-            .map(Rc::new);
+            .map(Rc::new)
+            .map(Destination::receiving);
         children.push((value, shape));
     }
     Ok((
@@ -550,14 +551,7 @@ fn enter_subroutine_call(
             {
                 check_tagged_copyout(*id, Some(shape), tree, session, dimensions)?;
                 // The formal is copied out to the actual.
-                if let Some(formal) = shape
-                    .type_id(&mut session.types, &tree.functions, &dimensions.const_env)
-                    .and_then(|ty| virtual_interfaces::of_type(&session.types, ty))
-                {
-                    virtual_interfaces::check_copy_out(
-                        tree, session, *id, native, dimensions, &formal,
-                    )?;
-                }
+                check_copy_out(&name, shape, *id, native, tree, session, dimensions)?;
             }
         }
     }
@@ -582,15 +576,14 @@ fn enter_subroutine_call(
                                 || copied_in(dimensions, &name, position)
                         })
                         .cloned()
+                        .map(Rc::new)
                         // An output actual is not a value
                         // assigned to the formal.
-                        .map(|mut shape| {
-                            if output {
-                                shape.virtual_interface = None;
-                            }
-                            shape
-                        })
-                        .map(Rc::new),
+                        .map(if output {
+                            Destination::copied_out
+                        } else {
+                            Destination::receiving
+                        }),
                 )
             })
         })
@@ -889,5 +882,31 @@ pub(super) fn finish_subroutine_call(
         callee: Callee::Subroutine(name),
         args: values,
         arg_order: order,
+    })
+}
+
+/// Check that the formal of shape `formal` of an output or inout argument
+/// may be copied out to actual `id` (IEEE 1800-2023 13.5.1): the formal's
+/// type is assignment compatible with the actual's (6.22.3), whatever type
+/// it is, an array of virtual interfaces included. An actual whose type is
+/// not known is checked where it is bound as a target.
+fn check_copy_out(
+    name: &str,
+    formal: &VariableDimensions,
+    id: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    let Some(source) = formal.type_id(&mut session.types, &tree.functions, &dimensions.const_env)
+    else {
+        return Ok(());
+    };
+    let Ok(target) = expression_types::type_of(tree, session, id, native, dimensions) else {
+        return Ok(());
+    };
+    assignments::check_types(tree, session, dimensions, source, target, &|| {
+        format!("output argument of `{name}`")
     })
 }

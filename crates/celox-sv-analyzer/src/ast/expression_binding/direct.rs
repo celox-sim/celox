@@ -581,12 +581,47 @@ struct MethodCall {
     selection: Option<Expr>,
 }
 
+/// Where the value of an operand the binder enters goes: the shape that
+/// receives it, or the formal of an output argument, whose value is copied
+/// out to the actual (IEEE 1800-2023 13.5), so that the actual receives no
+/// value of its own.
+#[derive(Debug, Clone)]
+pub(super) struct Destination {
+    shape: Rc<VariableDimensions>,
+    copied_out: bool,
+}
+
+impl Destination {
+    pub(super) fn receiving(shape: Rc<VariableDimensions>) -> Self {
+        Self {
+            shape,
+            copied_out: false,
+        }
+    }
+
+    pub(super) fn copied_out(shape: Rc<VariableDimensions>) -> Self {
+        Self {
+            shape,
+            copied_out: true,
+        }
+    }
+
+    /// Whether the destination is the formal of an output argument.
+    pub(super) fn is_copied_out(&self) -> bool {
+        self.copied_out
+    }
+}
+
+impl std::ops::Deref for Destination {
+    type Target = VariableDimensions;
+
+    fn deref(&self) -> &VariableDimensions {
+        &self.shape
+    }
+}
+
 enum Job {
-    Enter(
-        ExprId,
-        Option<Rc<VariableDimensions>>,
-        Option<Rc<PackedDimensions>>,
-    ),
+    Enter(ExprId, Option<Destination>, Option<Rc<PackedDimensions>>),
     Finish(Finish, usize, Option<Rc<PackedDimensions>>),
     /// A streaming concatenation operand of a bit-stream cast to an integral
     /// type (IEEE 1800-2023 11.4.14).
@@ -599,7 +634,7 @@ enum Job {
 
 /// The operands of an expression the binder entered, each with the shape
 /// that receives it, and what makes its value of theirs.
-type Operands = (Finish, Vec<(ExprId, Option<Rc<VariableDimensions>>)>);
+type Operands = (Finish, Vec<(ExprId, Option<Destination>)>);
 
 /// Whether the call copies actual `position` of `name` into its formal and
 /// never back: an input, not a reference (IEEE 1800-2023 13.5.1).
@@ -682,7 +717,11 @@ fn bind_value_in(
     session: &mut Session,
 ) -> Converted<Expr> {
     let mut permits = chandles::Permits::new(root, chandle);
-    let mut jobs = vec![Job::Enter(root, target.cloned().map(Rc::new), None)];
+    let mut jobs = vec![Job::Enter(
+        root,
+        target.cloned().map(Rc::new).map(Destination::receiving),
+        None,
+    )];
     let mut values = Vec::new();
     while let Some(job) = jobs.pop() {
         match job {
