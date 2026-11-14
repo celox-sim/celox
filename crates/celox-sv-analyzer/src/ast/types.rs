@@ -36,13 +36,17 @@ pub(super) fn type_aliases_from_scope_with_env(
     )
 }
 
-/// Resolve a selected body while retaining its enclosing lexical type bindings.
+/// Resolve a selected body while retaining its enclosing lexical type
+/// bindings. `generate_scope` is the path of the elaborated generate scope
+/// of the body, if it is one, whose typedefs are its own (see
+/// [`type_aliases_of_generate_scope`]).
 pub(super) fn type_aliases_from_body_with_env(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     items: &[celox_sv_syntax::BodyItemId],
     const_env: &ConstEnv,
     inherited: &TypeAliases,
+    generate_scope: Option<&str>,
 ) -> Converted<TypeAliases> {
     type_aliases_in_scope(
         syntax_tree,
@@ -52,7 +56,7 @@ pub(super) fn type_aliases_from_body_with_env(
         false,
         Some(items),
         false,
-        None,
+        generate_scope,
     )
 }
 

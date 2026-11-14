@@ -235,6 +235,56 @@ fn aggregates_of_each_generate_scope_are_types_of_their_own() {
         assert_eq!(first[index], again[index]);
     }
 }
+
+#[test]
+fn enumeration_constants_of_each_generate_scope_have_its_type() {
+    let session = &mut Session::default();
+    // IEEE 1800-2023 27.4: an enumeration typedef in a generate scope
+    // declares a type of its own in each iteration, which is the type of its
+    // constants there (6.19.3), also for an enumeration declared after
+    // another, whose typedefs are bound again with its constants.
+    let source = "module M; typedef enum {A, B} e_t; typedef enum {C, D} f_t; endmodule";
+    let tree =
+        crate::source_tree::parse_scope_fixture(source, Path::new("semantic_types.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let items = tree.body_membership().unwrap();
+    let env = ConstEnv::default();
+    let mut scope = |path| {
+        let aliases = types::type_aliases_of_generate_scope(
+            &tree,
+            session,
+            &items,
+            &env,
+            &TypeAliases::default(),
+            path,
+        )
+        .unwrap();
+        let constants = crate::ast::parameters::enum_member_constants_from_items(
+            &tree,
+            session,
+            &items,
+            &env,
+            &aliases,
+            &HashMap::default(),
+            Some(path),
+        )
+        .unwrap();
+        [("e_t", "A"), ("f_t", "C")].map(|(typedef, constant)| {
+            let typedef =
+                of_type(&mut session.types, &tree.functions, &aliases[typedef], &env).unwrap();
+            let constant = constants.declarations[constant]
+                .type_id(&mut session.types)
+                .unwrap();
+            (typedef, constant)
+        })
+    };
+    let (first, second) = (scope("g[0]"), scope("g[1]"));
+    for index in 0..2 {
+        assert_eq!(first[index].0, first[index].1);
+        assert_eq!(second[index].0, second[index].1);
+        assert!(!session.types.matches(first[index].1, second[index].0));
+    }
+}
 #[test]
 fn packed_types_of_the_same_bits_states_and_signing_are_equivalent() {
     // IEEE 1800-2023 6.22.2 c; an enumeration is equivalent only to a type it
