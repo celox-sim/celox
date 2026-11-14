@@ -915,7 +915,7 @@ pub(super) fn scope_classes(
     names
         .into_iter()
         .filter_map(|name| {
-            let mut class = Class::clone(session.classes.get(&name)?);
+            let mut class = Class::clone(&*laid_out(session, &name)?);
             // The types are fixed in the scope that declares the class,
             // whose names another scope does not see.
             let (env, _) = specializations::scope(session, &name, env, &TypeAliases::default());
@@ -1235,6 +1235,21 @@ pub(super) fn handle(name: &str) -> Type {
     ty
 }
 
+/// Class `name` as it was laid out, unless the scope that declares it has
+/// recorded other tables since: a layout in tables the scope has replaced,
+/// such as those before its constants were all known, is not served again.
+fn laid_out(session: &Session, name: &str) -> Option<Rc<Class>> {
+    let (class, recording) = session.classes.get(name)?;
+    (*recording == specializations::declaring_recording(session, name)).then(|| class.clone())
+}
+
+/// Keep `class`, laid out as class `name`, with the recording of the tables
+/// of its declaring scope it was laid out in.
+fn keep_layout(session: &mut Session, name: &str, class: Rc<Class>) {
+    let recording = specializations::declaring_recording(session, name);
+    session.classes.insert(name.to_owned(), (class, recording));
+}
+
 /// The class `name`, laid out with its bases.
 pub(super) fn class(
     tree: &AnalysisContext<'_>,
@@ -1243,8 +1258,8 @@ pub(super) fn class(
     env: &ConstEnv,
     aliases: &TypeAliases,
 ) -> Converted<Rc<Class>> {
-    if let Some(class) = session.classes.get(name) {
-        return Ok(class.clone());
+    if let Some(class) = laid_out(session, name) {
+        return Ok(class);
     }
     shared_class(
         tree,
@@ -1264,8 +1279,8 @@ pub(super) fn shared_class(
     aliases: &SharedAliases,
     session: &mut Session,
 ) -> Converted<Rc<Class>> {
-    if let Some(class) = session.classes.get(name) {
-        return Ok(class.clone());
+    if let Some(class) = laid_out(session, name) {
+        return Ok(class);
     }
     // A class of another scope is laid out in its own scope, where the
     // names it uses are declared.
@@ -1276,9 +1291,16 @@ pub(super) fn shared_class(
     });
     let Some(declaration) = declaration else {
         let class = imported(tree, name).ok_or_else(|| unsupported(format!("class `{name}`")))?;
-        session.classes.insert(name.to_owned(), class.clone());
+        keep_layout(session, name, class.clone());
         return Ok(class);
     };
+    // It is laid out in the tables of the scope that declares it, not in
+    // those of the scope that first names it, such as the method of another
+    // class with names of its own (IEEE 1800-2023 8.13, 8.25).
+    let declaring = specializations::declaring_tables(session, name);
+    let (env, aliases) = declaring
+        .as_ref()
+        .map_or((env, aliases), |(env, aliases)| (env, aliases));
     let (mut scope_env, mut scope_aliases) =
         specializations::shared_scope(session, name, env, aliases);
     // A class no specialization records declares its typedefs and
@@ -1364,11 +1386,13 @@ pub(super) fn shared_class(
                         .ok_or_else(|| unsupported("base class type"))?
                 }
             };
+            // The base is declared outside the class, so the names the
+            // class declares do not reach it.
             Some(shared_class(
                 tree,
                 &ty,
-                &scope_env,
-                &scope_aliases,
+                &outer.const_env,
+                &outer.type_aliases,
                 session,
             )?)
         }
@@ -1768,7 +1792,7 @@ pub(super) fn shared_class(
     };
     class.program = class.build_constraint_program(tree, session, env);
     let class = Rc::new(class);
-    session.classes.insert(name.to_owned(), class.clone());
+    keep_layout(session, name, class.clone());
     Ok(class)
 }
 
@@ -1892,7 +1916,7 @@ fn interface_class(
         declarations,
         size: 1,
     });
-    session.classes.insert(name.to_owned(), class.clone());
+    keep_layout(session, name, class.clone());
     Ok(class)
 }
 

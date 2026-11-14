@@ -350,7 +350,7 @@ pub(in crate::ast) fn class_base(
         constant_types: dimensions.constant_types.clone(),
         ..PackedDimensions::default()
     };
-    if let Some((env, aliases)) = session
+    if let Some(DeclaringScope { env, aliases, .. }) = session
         .class_declaration_scopes
         .get(&generic(session, name))
     {
@@ -1448,35 +1448,89 @@ impl Parameters {
     }
 }
 
-/// Record `env` and `aliases`, those of the current scope, as the scope that
-/// declares each class of it, until [`collect`] finds the generate scopes
-/// around their declarations: elaborating those scopes binds the types they
-/// declare, specializations among them.
+/// Record `env` and `aliases`, the tables of the current scope as they stand,
+/// as the scope that declares each class of it, until [`collect`] finds the
+/// generate scopes around their declarations: elaborating those scopes binds
+/// the types they declare, specializations among them. The scope records
+/// them again whenever its tables change, before it lays out a class, so a
+/// class is laid out in the scope that declares it however it is first
+/// named (IEEE 1800-2023 8.13).
 pub(in crate::ast) fn declare_scopes(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &ConstEnv,
-    aliases: &TypeAliases,
+    env: &SharedEnv,
+    aliases: &SharedAliases,
 ) {
     let native = tree.declarations();
     let scope = tree.root_unit().ok().map(|unit| unit.tokens);
-    let scopes = &mut session.class_declaration_scopes;
-    // The classes of the scope share its tables.
-    let tables = (
-        SharedMap::from(env.clone()),
-        SharedMap::from(aliases.clone()),
-    );
     for class in &native.classes {
         if super::enclosing_unit(native, class.tokens).map(|unit| unit.tokens) == scope {
-            scopes.insert(super::declared_name(tree, class), tables.clone());
+            record_scope(
+                session,
+                super::declared_name(tree, class),
+                env.clone(),
+                aliases.clone(),
+            );
         }
     }
 }
 
+/// The tables of the scope that declares a class, as the scope recorded
+/// them. Each recording has a number of its own, so that a layout of the
+/// class in tables the scope has replaced since is not used again.
+#[derive(Clone)]
+pub(in crate::ast) struct DeclaringScope {
+    env: SharedEnv,
+    aliases: SharedAliases,
+    recording: u64,
+}
+
+/// Record `env` and `aliases` as the tables of the scope that declares
+/// class `name`. Tables with the entries of the recorded ones keep that
+/// recording, and with it the layouts made in them.
+fn record_scope(session: &mut Session, name: String, env: SharedEnv, aliases: SharedAliases) {
+    if session
+        .class_declaration_scopes
+        .get(&name)
+        .is_some_and(|scope| scope.env == env && scope.aliases == aliases)
+    {
+        return;
+    }
+    session.class_scope_recordings += 1;
+    let recording = session.class_scope_recordings;
+    session.class_declaration_scopes.insert(
+        name,
+        DeclaringScope {
+            env,
+            aliases,
+            recording,
+        },
+    );
+}
+
 /// The constants and types of the scope that declares class `generic`,
-/// which [`collect`] records.
-fn declaration_scope(session: &mut Session, generic: &str) -> Option<(SharedEnv, SharedAliases)> {
-    session.class_declaration_scopes.get(generic).cloned()
+/// which [`declare_scopes`] and [`collect`] record.
+fn declaration_scope(session: &Session, generic: &str) -> Option<(SharedEnv, SharedAliases)> {
+    let scope = session.class_declaration_scopes.get(generic)?;
+    Some((scope.env.clone(), scope.aliases.clone()))
+}
+
+/// The tables of the scope that declares class `name`, a specialization or
+/// not, once that scope has recorded them.
+pub(in crate::ast) fn declaring_tables(
+    session: &Session,
+    name: &str,
+) -> Option<(SharedEnv, SharedAliases)> {
+    declaration_scope(session, &generic(session, name))
+}
+
+/// Which recording of the tables of the scope that declares class `name`
+/// is the current one, if the scope has recorded them.
+pub(in crate::ast) fn declaring_recording(session: &Session, name: &str) -> Option<u64> {
+    session
+        .class_declaration_scopes
+        .get(&generic(session, name))
+        .map(|scope| scope.recording)
 }
 
 /// The type that argument `id` of a type parameter names, or `None` while a
@@ -2014,7 +2068,7 @@ pub(in crate::ast) fn collect(
         if item.is_some_and(|item| items.iter().filter(|other| other.id == item.id).count() > 1) {
             session.class_declarations_repeated.insert(name.clone());
         }
-        session.class_declaration_scopes.insert(name, scope);
+        record_scope(session, name, scope.0, scope.1);
     }
     // Whether `tokens` is in a block of a generate construct.
     let generated = |tokens: celox_sv_syntax::TokenRange| {
@@ -2324,6 +2378,53 @@ pub(in crate::ast) fn export_constant_types(
 mod tests {
 
     use std::path::Path;
+
+    use super::super::super::shared_map::{SharedAliases, SharedEnv};
+    use super::super::super::{AnalysisContext, ConstEnv, Session, TypeAliases};
+
+    #[test]
+    fn a_class_is_laid_out_again_once_its_scope_records_new_tables() {
+        // A class laid out in tables its scope has since replaced, such as
+        // those before the scope's constants were all known, is not served
+        // again: the scope's new tables lay it out.
+        let session = &mut Session::default();
+        let tree = crate::source_tree::parse_scope_fixture(
+            "module Top; class C; bit [W-1:0] x; endclass endmodule",
+            Path::new("relaid-class.sv"),
+        )
+        .unwrap();
+        let module_scope = AnalysisContext::unspecialized(&tree)
+            .root_scopes()
+            .unwrap()
+            .into_iter()
+            .find(|handle| {
+                handle.unit(tree.declarations()).unwrap().kind == celox_sv_syntax::UnitKind::Module
+            })
+            .unwrap();
+        let tree = tree.scoped(module_scope).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let width = |session: &mut Session, w: i128| {
+            let env = SharedEnv::from(ConstEnv::from_iter([("W".to_owned(), w)]));
+            super::declare_scopes(&tree, session, &env, &SharedAliases::default());
+            let name = session
+                .class_declaration_scopes
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            let class = super::super::class(
+                &tree,
+                session,
+                &name,
+                &ConstEnv::default(),
+                &TypeAliases::default(),
+            )
+            .unwrap();
+            class.properties[0].field.width
+        };
+        assert_eq!(width(session, 4), 4);
+        assert_eq!(width(session, 12), 12);
+    }
 
     #[test]
     fn inheritance_specialization_uses_the_default_thread_stack() {
