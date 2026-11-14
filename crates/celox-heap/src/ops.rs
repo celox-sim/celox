@@ -227,6 +227,10 @@ pub const UVM_DPI_REGCOMP: u64 = 154;
 pub const UVM_REPORT_FIELD: u64 = 155;
 /// UVM 1.2's `uvm_dump_re_cache()`, which only reports.
 pub const UVM_DUMP_RE_CACHE: u64 = 156;
+/// Register the static constraint blocks of class a, the JSON pairs in
+/// string b of a block's index and the class that declares it, see
+/// [`Heap::register_static_blocks`].
+pub const OBJECT_REGISTER_STATIC_BLOCKS: u64 = 157;
 
 const _: () = assert!(
     crate::containers::RSORT < UVM_RE_COMP
@@ -465,6 +469,18 @@ impl Heap {
             OBJECT_GET_RANDSTATE => u64::from(self.object_randstate(a as Handle)),
             OBJECT_SET_RANDSTATE => {
                 self.set_object_randstate(a as Handle, b as Handle);
+                0
+            }
+            OBJECT_REGISTER_STATIC_BLOCKS => {
+                match serde_json::from_slice::<Vec<(u32, u32)>>(self.string(b as Handle)) {
+                    Ok(blocks) => self.register_static_blocks(a as u32, blocks),
+                    Err(error) => {
+                        self.fault
+                            .get_or_insert(crate::Fault::ConstraintRandomization(
+                                error.to_string(),
+                            ));
+                    }
+                }
                 0
             }
             OBJECT_CHECK => u64::from(self.check_object(a as Handle, parameter as u32)),

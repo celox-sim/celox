@@ -391,6 +391,12 @@ impl Ff<'_, '_> {
                 let program = self.frozen_bytes(&bytes);
                 self.heap_call(ops::OBJECT_REGISTER_PROGRAM, &[class, program])
             }
+            ObjectOp::RegisterStaticBlocks(class, blocks) => {
+                let class = self.constant64(u64::from(*class));
+                let bytes = serde_json::to_vec(blocks).expect("static block serialization");
+                let blocks = self.frozen_bytes(&bytes);
+                self.heap_call(ops::OBJECT_REGISTER_STATIC_BLOCKS, &[class, blocks])
+            }
             ObjectOp::ProgramRegistered(class) => {
                 let class = self.constant64(u64::from(*class));
                 self.heap_call(ops::OBJECT_PROGRAM_REGISTERED, &[class])
@@ -435,6 +441,7 @@ impl Ff<'_, '_> {
             ObjectOp::GetRandstate => Some(celox_design::ValueKind::StrRef),
             ObjectOp::Randomize(_)
             | ObjectOp::RegisterProgram(..)
+            | ObjectOp::RegisterStaticBlocks(..)
             | ObjectOp::ProgramRegistered(_)
             | ObjectOp::VisitBegin
             | ObjectOp::VisitSolved

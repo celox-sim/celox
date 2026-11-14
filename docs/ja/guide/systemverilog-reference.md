@@ -238,7 +238,7 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
 - クラス `randomize()`: 4値・集約プロパティ、static な rand プロパティ、
   64ビット以下の2値整数以外を要素に持つ rand 配列、`randc` 配列、オブジェクト・string の
   rand プロパティ、制約付き enum と `randc`、サイズを制約される rand 配列への `foreach`・
-  `sum()`、`sum() with`、`foreach` 内や `dist` 付きの `soft` 制約、`default :/` を持つ・定数式でない重みや、境界が定数式でない範囲に値ごとの重みを持つ `dist`、`solve before`、外部・static 制約ブロック、制約中の
+  `sum()`、`sum() with`、`foreach` 内や `dist` 付きの `soft` 制約、`default :/` を持つ・定数式でない重みや、境界が定数式でない範囲に値ごとの重みを持つ `dist`、`solve before`、制約中の
   型パラメータ、`inside` 集合の配列集合・X/Z ワイルドカード・`$` 境界、
   1–8ビット整数と256メンバまでのスカラ enum を超える `randc` ドメインは未対応です。
   名前付き制約ブロックは、比較・論理・ビット演算・加減乗算を使う
