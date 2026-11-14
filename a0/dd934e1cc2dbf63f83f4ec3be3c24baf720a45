@@ -1,0 +1,1 @@
+Sync with master; #3835: add uvm-1.2 pick_sequence (functions with no rand argument as state values) as a vtest
