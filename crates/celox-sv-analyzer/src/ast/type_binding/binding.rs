@@ -18,7 +18,11 @@ pub(in crate::ast) fn bind_in(
     session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Option<Type>> {
-    bind_in_mode(root, native, tree, session, context, BindingMode::Use)
+    let mut ty = bind_in_mode(root, native, tree, session, context, BindingMode::Use)?;
+    if let Some(ty) = &mut ty {
+        semantic_types::bind_declared(&mut session.types, &tree.functions, ty, &context.const_env);
+    }
+    Ok(ty)
 }
 
 /// Typedef discovery precedes enum constant resolution, so dependent aliases
@@ -111,6 +115,19 @@ fn append_member_dimensions(
         .ok_or_else(|| unsupported("structure member type"))?;
     values.push(type_with_unpacked_ranges(ty, ranges)?);
     Ok(())
+}
+
+/// Bind an aggregate type as soon as its members are, so that binding the
+/// type that holds it converts one level (see
+/// [`semantic_types::bind_declared`]): a deeply nested declaration would
+/// otherwise be converted in one deep recursion.
+fn bind_nested(
+    ty: &mut Type,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) {
+    semantic_types::bind_declared(&mut session.types, &tree.functions, ty, &context.const_env);
 }
 
 fn bind_in_mode(
@@ -537,6 +554,7 @@ fn bind_in_mode(
                     if let Some(scope) = scope {
                         ty.spelling.declared_in(scope);
                     }
+                    bind_nested(&mut ty, tree, session, context);
                     values.push(ty);
                     continue;
                 }
@@ -572,6 +590,7 @@ fn bind_in_mode(
                 if let Some(scope) = scope {
                     ty.spelling.declared_in(scope);
                 }
+                bind_nested(&mut ty, tree, session, context);
                 values.push(ty);
             }
         }
