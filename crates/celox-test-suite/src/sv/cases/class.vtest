@@ -5707,6 +5707,59 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq checks 7))
 
+; A soft distribution (18.5.13) constrains its operand to its items of
+; nonzero weight while it is kept, and its weights shape the choice as those
+; of a hard one do (18.5.3); one that other constraints contradict, or that
+; a `disable soft` discards, has no effect, also on a variable a function
+; call in a constraint takes, solved first.
+(case soft_distributions
+  (source "soft_dist.sv" #"
+module Top(output int checks);
+    class D;
+        rand bit [3:0] x;
+        bit off;
+        constraint c { soft x dist {1 := 9, 2 := 0, [8:9] :/ 1}; }
+        constraint d { if (off) disable soft x; }
+    endclass
+    class F;
+        rand bit [3:0] a, b;
+        function bit [3:0] same(bit [3:0] v); return v; endfunction
+        constraint c { soft a dist {11 := 9, [0:15] :/ 1}; b == same(a); }
+    endclass
+    initial begin
+        D d = new;
+        F f = new;
+        int ones, others, highs, elevens, mismatched;
+        checks = 0;
+        ones = 0;
+        others = 0;
+        repeat (64) if (d.randomize()) begin
+            if (d.x == 1) ones++;
+            else if (!(d.x inside {8, 9})) others++;
+        end
+        checks += (others == 0 && ones > 32 && ones < 64) * 1;
+        checks += (d.randomize() with { x == 5; } && d.x == 5) * 2;
+        highs = 0;
+        repeat (16) if (d.randomize() with { x > 1; } && d.x inside {8, 9}) highs++;
+        checks += (highs == 16) * 4;
+        d.off = 1;
+        others = 0;
+        repeat (32) if (d.randomize() && !(d.x inside {1, 8, 9})) others++;
+        checks += (others > 0) * 8;
+        // A function argument is solved first (18.5.11), its soft
+        // distribution weighting it there too.
+        elevens = 0;
+        mismatched = 0;
+        repeat (64) if (f.randomize()) begin
+            if (f.a == 11) elevens++;
+            if (f.b != f.a) mismatched++;
+        end
+        checks += (elevens > 32 && elevens < 64 && mismatched == 0) * 16;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 31))
+
 ; `disable soft h.x` discards the soft constraints on the random variable
 ; of the object a rand handle refers to (18.5.13.2).
 (case soft_constraints_disabled_through_rand_handles

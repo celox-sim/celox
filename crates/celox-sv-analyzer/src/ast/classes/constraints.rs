@@ -2102,12 +2102,6 @@ pub(in crate::ast) fn bind_inputs(
     // A soft constraint and `disable soft` take the priority of their place
     // among the constraints of the class (see [`prioritize`]).
     match tree.declarations().expression(id).kind {
-        // A soft distribution is legal (IEEE 1800-2023 18.5.13, Syntax
-        // 18-2) but unsupported: the solver keeps no weights for soft
-        // constraints.
-        ExprKind::SoftConstraint { expression } if soft_dist(expression, tree) => {
-            Err("soft dist constraints are not supported".into())
-        }
         ExprKind::SoftConstraint { expression } => {
             let value = bound(expression)?;
             // Soft constraints may not be specified for randc variables
@@ -2193,18 +2187,6 @@ fn random_variable(variable: &ConstraintExpr, properties: &[Property], member: b
         // An argument of a scope randomize call, which [`scope_fields`]
         // makes a field of the solve: a random variable (18.12.1).
         ConstraintExpr::Input { index, .. } => *index >= SCOPE_FIELDS,
-        _ => false,
-    }
-}
-
-/// Whether soft constraint `expression` is a distribution, also one a
-/// guard or an implication makes conditional (see `ExprKind::SoftConstraint`).
-fn soft_dist(expression: ExprId, tree: &AnalysisContext<'_>) -> bool {
-    match &tree.declarations().expression(expression).kind {
-        ExprKind::Dist { .. } => true,
-        ExprKind::Binary {
-            operator, right, ..
-        } if operator == "||" => soft_dist(*right, tree),
         _ => false,
     }
 }
