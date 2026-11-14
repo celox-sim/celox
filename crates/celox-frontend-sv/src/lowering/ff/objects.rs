@@ -137,6 +137,7 @@ impl Ff<'_, '_> {
             }
         }
         let result = match op {
+            ObjectOp::ScopeRandomize(_) => unreachable!("lowered by `scope_randomize`"),
             ObjectOp::Randomize(program) => {
                 let object = self.handle(&args[0])?;
                 let check = self.integer_of_width(&args[1], 1, false)?;
@@ -440,6 +441,7 @@ impl Ff<'_, '_> {
             }),
             ObjectOp::GetRandstate => Some(celox_design::ValueKind::StrRef),
             ObjectOp::Randomize(_)
+            | ObjectOp::ScopeRandomize(_)
             | ObjectOp::RegisterProgram(..)
             | ObjectOp::RegisterStaticBlocks(..)
             | ObjectOp::ProgramRegistered(_)
@@ -472,6 +474,67 @@ impl Ff<'_, '_> {
         }
         self.store(temp, SIROffset::Static(0), width, value);
         Ok(sv::ir::Expr::Ident(name))
+    }
+
+    /// `std::randomize(v...) with { ... }` (IEEE 1800-2023 18.12.1): the
+    /// variables in the first arguments are solved in the fields of a new
+    /// object, at their offsets in `program`, and each takes its field's
+    /// value when the call succeeds; the values the constraints read
+    /// follow. The call's value is whether it succeeded.
+    pub(super) fn scope_randomize(
+        &mut self,
+        program: &celox_heap::randomization::Program,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{Callee, Expr, ObjectField, ObjectOp};
+        let count = program.fields.len();
+        let object = self.object_call(
+            &ObjectOp::New {
+                class: celox_heap::SCOPE_RANDOMIZE_CLASS,
+                size: 8 * count as u32,
+                handles: Vec::new(),
+            },
+            &[],
+        )?;
+        let solved = Expr::Call {
+            callee: Callee::Object(Box::new(ObjectOp::Randomize(program.clone()))),
+            args: [Some(object.clone()), Some(Expr::Literal("1'b0".into()))]
+                .into_iter()
+                .chain(args[count..].iter().cloned())
+                .collect(),
+            arg_order: Vec::new(),
+        };
+        let solved = self.hoist(&solved)?;
+        for (field, variable) in program.fields.iter().zip(&args[..count]) {
+            let Some(Expr::Ident(name)) = variable else {
+                return Err(unsupported("scope randomize variable"));
+            };
+            let target = sv::ir::LValue::Ident(name.clone());
+            let value = Expr::Call {
+                callee: Callee::Object(Box::new(ObjectOp::Load(ObjectField {
+                    offset: field.offset,
+                    width: field.width,
+                    signed: false,
+                    handle: None,
+                    four_state: false,
+                    nullable: false,
+                    real: false,
+                    key: Default::default(),
+                }))),
+                args: vec![Some(object.clone())],
+                arg_order: Vec::new(),
+            };
+            let value = self.hoist(&value)?;
+            self.assign(
+                &target,
+                &Expr::Mux {
+                    condition: Box::new(solved.clone()),
+                    then_expr: Box::new(value),
+                    else_expr: Box::new(Expr::Ident(name.clone())),
+                },
+            )?;
+        }
+        Ok(solved)
     }
 
     /// The value of `field` of the object in 64-bit `object`: a register of

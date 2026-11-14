@@ -417,10 +417,10 @@ chapter-18/18.12--randomization-of-scope-variables_0.sv	2state	pass
 chapter-18/18.12--randomization-of-scope-variables_0.sv	4state	pass
 chapter-18/18.12--randomization-of-scope-variables_1.sv	2state	fail
 chapter-18/18.12--randomization-of-scope-variables_1.sv	4state	fail
-chapter-18/18.12.1--adding-constraints-to-scope-variables_0.sv	2state	fail
-chapter-18/18.12.1--adding-constraints-to-scope-variables_0.sv	4state	fail
-chapter-18/18.12.1--adding-constraints-to-scope-variables_1.sv	2state	fail
-chapter-18/18.12.1--adding-constraints-to-scope-variables_1.sv	4state	fail
+chapter-18/18.12.1--adding-constraints-to-scope-variables_0.sv	2state	pass
+chapter-18/18.12.1--adding-constraints-to-scope-variables_0.sv	4state	pass
+chapter-18/18.12.1--adding-constraints-to-scope-variables_1.sv	2state	pass
+chapter-18/18.12.1--adding-constraints-to-scope-variables_1.sv	4state	pass
 chapter-18/18.13.1--urandom_0.sv	2state	pass
 chapter-18/18.13.1--urandom_0.sv	4state	pass
 chapter-18/18.13.1--urandom_1.sv	2state	fail

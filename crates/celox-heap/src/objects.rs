@@ -30,8 +30,18 @@ pub const SCHEDULER_CLASS: u32 = u32::MAX - 1;
 /// a box by its value, a string by its contents (see [`Heap::box_contents`]).
 pub const BOX_CLASS: u32 = u32::MAX - 2;
 
+/// The class of the object a scope randomize call with constraints solves
+/// its variables in (IEEE 1800-2023 18.12.1): an object no class declares,
+/// a field of the call's constraint program for each variable.
+pub const SCOPE_RANDOMIZE_CLASS: u32 = u32::MAX - 3;
+
 const _: () = {
-    let reserved = [RECORD_CLASS, SCHEDULER_CLASS, BOX_CLASS];
+    let reserved = [
+        RECORD_CLASS,
+        SCHEDULER_CLASS,
+        BOX_CLASS,
+        SCOPE_RANDOMIZE_CLASS,
+    ];
     let mut i = 0;
     while i < reserved.len() {
         assert!(

@@ -297,8 +297,9 @@ blocks in programs. Two region deviations are listed under
 
 ### Randomization and constraints
 
-- Scope `randomize()` / `std::randomize()` (18.12): `with` constraints,
-  enums with unsupported or unresolved domains, unpacked arrays, nets,
+- Scope `randomize()` / `std::randomize()` (18.12): `with` constraints on
+  other than integral variables of at most 64 bits, such as enums, enums
+  with unsupported or unresolved domains, unpacked arrays, nets,
   constants, selects, and concatenation arguments.
 - `randsequence` (18.17): recursive productions, code blocks after a
   weight, and production formals and values of unpacked, dynamically sized
