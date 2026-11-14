@@ -6,19 +6,94 @@ fn integer(value: i128) -> Expr {
     Expr::Literal(value.to_string())
 }
 
-fn query_context(context: &PackedDimensions) -> PackedDimensions {
+#[cfg(test)]
+thread_local! {
+    /// How many variables [`query_context`] derived a shape or a signedness
+    /// for.
+    pub(in crate::ast) static QUERY_CONTEXT_VARIABLES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// `context` for binding the query operands `operands`: with the shapes of
+/// the variables the constant environment describes, and their signedness.
+/// Only the variables the operands name are derived, so that a scope with
+/// many variables and many queries, such as a function of many pattern
+/// assignments, does not derive all of them for each operand.
+fn query_context(
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+    operands: &[ExprId],
+) -> PackedDimensions {
     let mut query = context.clone();
+    let names = operand_names(tree, context, operands);
     if !context.scope_types_complete {
-        extend_variable_dimensions_from_const_env(&mut query, &context.const_env);
+        extend_variable_dimensions_of(&mut query, &context.const_env, &names);
     }
-    let signedness = context
+    let signedness = names
         .iter()
-        .map(|(name, shape)| (name.clone(), shape.signed))
+        .filter_map(|name| Some((name.clone(), context.get(name)?.signed)))
         .collect::<Vec<_>>();
+    #[cfg(test)]
+    QUERY_CONTEXT_VARIABLES.with(|count| count.set(count.get() + names.len()));
     query.expression_signedness.extend(signedness);
     query.functions = Arc::default();
     query.type_query = true;
     query
+}
+
+/// The names of variables that `operands` may read: each name, each dotted
+/// prefix of a member path, which may name a variable of a generate block,
+/// and the local signal that a hierarchical or interface name binds.
+fn operand_names(
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+    operands: &[ExprId],
+) -> HashSet<String> {
+    let native = tree.declarations();
+    let mut names = HashSet::default();
+    let mut pending = operands.to_vec();
+    let mut seen = HashSet::default();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(path) = dotted_path(id, native) {
+            for length in 1..=path.len() {
+                names.insert(path[..length].join("."));
+            }
+            let mut bound = path;
+            if packed_structs::bind_interface_path(tree, &mut bound, context) {
+                names.insert(bound[0].clone());
+            }
+        }
+        pending.extend(parameters::skipped::children(id, native));
+    }
+    names
+}
+
+/// The components of `id` when it is a name or a dotted member path.
+fn dotted_path(id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut id = id;
+    loop {
+        match &native.expression(id).kind {
+            ExprKind::Name(name) => {
+                parts.push(instances::normalize_identifier(&name.spelling));
+                break;
+            }
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "." => {
+                parts.push(instances::normalize_identifier(&name.spelling));
+                id = *expression;
+            }
+            _ => return None,
+        }
+    }
+    parts.reverse();
+    Some(parts)
 }
 
 /// These operands carry all type information in their literal leaves. Walking
@@ -183,6 +258,7 @@ fn operand_context(
     context: &PackedDimensions,
 ) -> Converted<PackedDimensions> {
     let native = tree.declarations();
+    let operands: Vec<_> = [Some(root), evaluated].into_iter().flatten().collect();
     // Aggregate port defaults commonly repeat literal arithmetic. Rediscovering
     // all declarations for each item repeatedly snapshots the growing prefix.
     if context.scope_types_complete
@@ -190,11 +266,10 @@ fn operand_context(
         || (evaluated.is_none_or(|evaluated| literal_operand(evaluated, native))
             && bound_type_operand(root, tree, context)?)
     {
-        return Ok(query_context(context));
+        return Ok(query_context(tree, context, &operands));
     }
-    Ok(query_context(&query_operand_dimensions_id(
-        root, tree, session, context,
-    )?))
+    let operand = query_operand_dimensions_id(root, tree, session, context)?;
+    Ok(query_context(tree, &operand, &operands))
 }
 
 pub(in crate::ast) fn validate_data_operand(
@@ -261,7 +336,7 @@ pub(in crate::ast) fn query_value(
         None
     };
     let context = if let Some((name, shape)) = declared {
-        let mut query = query_context(context);
+        let mut query = query_context(tree, context, &[argument]);
         query.insert(name, shape);
         query
     } else {
