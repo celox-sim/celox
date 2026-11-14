@@ -290,6 +290,11 @@ pub enum AnalyzerError {
     /// (IEEE 1800-2023 8.25).
     #[error("class `{class}` has no parameter `{name}` that a specialization may assign")]
     UnknownClassParameter { class: String, name: String },
+    /// A member select through a handle names nothing that the class, its
+    /// bases or the interface classes it implements declare (IEEE 1800-2023
+    /// 8.5).
+    #[error("no member named `{name}` in class `{class}`")]
+    UnknownClassMember { class: String, name: String },
     /// A `ref` or `const ref` formal bound to an actual, or used in a way,
     /// that IEEE 1800-2023 13.5.2 forbids.
     /// A use of a `chandle` that IEEE 1800-2023 6.14 does not allow.

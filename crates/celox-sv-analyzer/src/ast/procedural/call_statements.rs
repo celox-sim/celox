@@ -451,6 +451,14 @@ impl BodyBuilder<'_, '_, '_> {
             _ => return Err(unsupported("system task or function name")),
         };
         let celox_sv_syntax::ExprKind::Name(name) = &declarations.expression(callee).kind else {
+            // `h.m();` of a class that declares no `m` (8.5).
+            expression_binding::check_member_declared(
+                self.tree,
+                self.session,
+                callee,
+                declarations,
+                &self.dims,
+            )?;
             return Err(unsupported("system task or function name"));
         };
         let presence = arguments

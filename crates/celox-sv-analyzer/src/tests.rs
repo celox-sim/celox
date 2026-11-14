@@ -7026,6 +7026,160 @@ fn class_randc_checks_domain_limits() {
 }
 
 #[test]
+fn undeclared_class_members_are_errors() {
+    let classes = "class K; int depth; endclass \
+        class P; K knobs; function new(); knobs = new; endfunction endclass \
+        class C; int x; endclass class D extends C; endclass";
+    for (access, class, member) in [
+        ("result = p.nope;", "P", "nope"),
+        ("result = p.knobs.sprint;", "K", "sprint"),
+        ("p.knobs.sprint = 1;", "K", "sprint"),
+        ("result = d.nope;", "D", "nope"),
+        ("result = ds[0].nope;", "D", "nope"),
+        ("result = p.knobs.sprint[0];", "K", "sprint"),
+        // The name of the class is no member of it.
+        ("result = p.knobs.K;", "K", "K"),
+        // A method call, as an operand and as a statement.
+        ("result = p.nope();", "P", "nope"),
+        ("p.knobs.nope();", "K", "nope"),
+        // The first link of a chain that names no member.
+        ("result = p.nope.more;", "P", "nope"),
+        ("p.nope.more = 1;", "P", "nope"),
+        ("result = p.nope.more();", "P", "nope"),
+        // A constant of the scope around the class is no member of it.
+        ("result = p.NOPE;", "P", "NOPE"),
+    ] {
+        let source = format!(
+            "module Top; localparam int NOPE = 3; {classes} P p; D d; D ds[2]; int result; \
+             initial begin p = new; d = new; ds[0] = d; {access} end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("members.sv")).unwrap_err();
+        assert!(
+            matches!(&error, AnalyzerError::UnknownClassMember { class: c, name } if c == class && name == member),
+            "{source}: {error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("no member named `{member}` in class `{class}`")
+        );
+    }
+    // Members the class, a base or an implemented interface class declares
+    // are still read: properties, statics, parameters, local parameters
+    // and enumeration labels (8.5).
+    for access in [
+        "result = p.knobs.depth;",
+        "result = d.x;",
+        "result = g.W;",
+        "result = g.L;",
+        "result = g.s;",
+        "result = g.GREEN;",
+    ] {
+        let source = format!(
+            "module Top; {classes} \
+             class G #(int W = 3); localparam int L = W + 1; static int s = 5; \
+             typedef enum {{RED, GREEN}} color_t; endclass \
+             P p; D d; G #(4) g; int result; \
+             initial begin p = new; d = new; g = new; {access} end endmodule"
+        );
+        analyze_source(&source, Path::new("members.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+}
+
+#[test]
+fn covergroups_of_classes_are_declared_members() {
+    // A covergroup a class declares is a member of it (IEEE 1800-2023
+    // 19.4): a select of it is no undeclared member, whatever the analyzer
+    // makes of it otherwise.
+    let class = "class C; int x; covergroup cg; coverpoint x; endgroup \
+        function new(); cg = new; endfunction endclass";
+    for access in ["c.cg.sample();", "void'(c.cg);"] {
+        let source =
+            format!("module Top; {class} C c; initial begin c = new; {access} end endmodule");
+        if let Err(error) = analyze_source(&source, Path::new("covergroups.sv")) {
+            assert!(
+                !matches!(error, AnalyzerError::UnknownClassMember { .. }),
+                "{access}: {error}"
+            );
+        }
+    }
+    let package = format!("package p; {class} endpackage");
+    for access in ["c.cg.sample();", "void'(c.cg);"] {
+        let packages = analyze_packages(&[(&package, Path::new("covergroups-p.sv"))]).unwrap();
+        let result = analyze_source_module_with_packages(
+            &format!("module Top; import p::*; C c; initial begin c = new; {access} end endmodule"),
+            Path::new("covergroups-top.sv"),
+            "Top",
+            &HashMap::default(),
+            &packages,
+            &mut packages.design(),
+        );
+        if let Err(error) = result {
+            assert!(
+                !matches!(error, AnalyzerError::UnknownClassMember { .. }),
+                "{access}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn undeclared_members_of_classes_of_other_files_are_errors() {
+    let base = r#"
+        package base_pkg;
+            class K; int depth; endclass
+            class P; K knobs; function new(); knobs = new; endfunction endclass
+            class C #(int W = 2); int x; localparam int L = W + 1;
+                typedef enum {RED, GREEN} color_t; endclass
+        endpackage
+    "#;
+    let analyze = |access: &str| {
+        let agent = format!(
+            "package agent_pkg; import base_pkg::*; \
+             class D extends C #(5); endclass \
+             class Item; function int f(P printer, D d); {access} endfunction endclass \
+             endpackage"
+        );
+        let packages = analyze_packages(&[
+            (base, Path::new("members-base.sv")),
+            (&agent, Path::new("members-agent.sv")),
+        ])?;
+        analyze_source_module_with_packages(
+            "module Top; import base_pkg::*; import agent_pkg::*; Item i; P p; D d; int r; \
+             initial begin i = new; p = new; d = new; r = i.f(p, d); end endmodule",
+            Path::new("members-top.sv"),
+            "Top",
+            &HashMap::default(),
+            &packages,
+            &mut packages.design(),
+        )
+    };
+    for (access, class, member) in [
+        ("return printer.knobs.sprint;", "base_pkg::K", "sprint"),
+        ("return printer.nope;", "base_pkg::P", "nope"),
+        ("return d.nope;", "agent_pkg::D", "nope"),
+        ("return printer.knobs.K;", "base_pkg::K", "K"),
+        ("return printer.nope();", "base_pkg::P", "nope"),
+        ("return printer.nope.more;", "base_pkg::P", "nope"),
+    ] {
+        let error = analyze(access).unwrap_err();
+        assert!(
+            matches!(&error, AnalyzerError::UnknownClassMember { class: c, name } if c == class && name == member),
+            "{access}: {error}"
+        );
+    }
+    for access in [
+        "return printer.knobs.depth;",
+        "return d.x;",
+        "return d.W;",
+        "return d.L;",
+        "return d.GREEN;",
+    ] {
+        analyze(access).unwrap_or_else(|error| panic!("{access}: {error}"));
+    }
+}
+
+#[test]
 fn class_visibility_rejects_inaccessible_members() {
     for visibility in ["local", "protected"] {
         for member in [

@@ -829,6 +829,20 @@ pub(super) fn declaration<'a>(
     index.by_name.get(&name).map(|index| &classes[*index])
 }
 
+/// Whether class declaration `declaration` of `native` declares a
+/// covergroup `member` (IEEE 1800-2023 19.4).
+pub(super) fn declares_covergroup(
+    native: &celox_sv_syntax::Declarations,
+    declaration: &celox_sv_syntax::ClassDeclaration,
+    member: &str,
+) -> bool {
+    let within = declaration.tokens.range();
+    native.covergroups.iter().any(|covergroup| {
+        within.contains(&covergroup.tokens.start)
+            && instances::normalize_identifier(&covergroup.name.spelling) == member
+    })
+}
+
 /// The class declarations of a file by [`declared_name`], the first of each
 /// name, indexed once per file.
 #[derive(Debug)]
