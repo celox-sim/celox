@@ -1,22 +1,23 @@
 //! A declaration's shape and its resolved semantic type. Mutable shape access
 //! invalidates the retained ID; declaration-preserving renaming keeps it.
 use super::*;
-use std::sync::Mutex;
 
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct VariableDimensions {
     shape: VariableShape,
-    binding: Mutex<Option<semantic_types::RetainedType>>,
+    /// The semantic type the declaration was bound to where it is declared
+    /// (see [`Self::bind_type`]).
+    binding: Option<semantic_types::RetainedType>,
 }
 
 impl VariableDimensions {
     pub(super) fn new(shape: VariableShape) -> Self {
         Self {
             shape,
-            binding: Mutex::new(None),
+            binding: None,
         }
     }
 
@@ -38,23 +39,22 @@ impl VariableDimensions {
     /// Resolve a declaration only in its own, evaluated parameter environment.
     /// An unresolved range leaves no provisional ID behind.
     pub(super) fn bind_type(
-        &self,
+        &mut self,
         table: &mut semantic_types::TyTable,
         functions: &const_functions::ConstantFunctions,
         env: &ConstEnv,
     ) -> Option<semantic_types::TyId> {
-        if let Some(id) = self
-            .binding
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|binding| binding.in_table(table))
-        {
+        if let Some(id) = self.bound(table) {
             return Some(id);
         }
         let id = semantic_types::of_shape(table, functions, self, env);
-        *self.binding.lock().unwrap() = id.map(|id| table.retain(id));
+        self.binding = id.map(|id| table.retain(id));
         id
+    }
+
+    /// The semantic type the declaration was bound to, if it was.
+    pub(super) fn bound(&self, table: &semantic_types::TyTable) -> Option<semantic_types::TyId> {
+        self.binding.as_ref()?.in_table(table)
     }
 
     /// A bound declaration keeps its type when a caller shadows its parameter
@@ -65,13 +65,7 @@ impl VariableDimensions {
         functions: &const_functions::ConstantFunctions,
         env: &ConstEnv,
     ) -> Option<semantic_types::TyId> {
-        if let Some(id) = self
-            .binding
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|binding| binding.in_table(table))
-        {
+        if let Some(id) = self.bound(table) {
             return Some(id);
         }
         // A shape whose bounds are all literals has the same type in every
@@ -95,9 +89,7 @@ impl VariableDimensions {
         if self.shape != other.shape {
             return false;
         }
-        let left = self.binding.lock().unwrap().clone();
-        let right = other.binding.lock().unwrap();
-        match (left.as_ref(), right.as_ref()) {
+        match (self.binding.as_ref(), other.binding.as_ref()) {
             (Some(left), Some(right)) => left.same_node(right),
             (None, None) => true,
             _ => false,
@@ -130,14 +122,6 @@ impl VariableDimensions {
     }
 }
 
-impl Clone for VariableDimensions {
-    fn clone(&self) -> Self {
-        Self {
-            shape: self.shape.clone(),
-            binding: Mutex::new(self.binding.lock().unwrap().clone()),
-        }
-    }
-}
 impl PartialEq for VariableDimensions {
     fn eq(&self, other: &Self) -> bool {
         // Enriching a shape is not a lexical edit. Signature publishers use
@@ -154,7 +138,7 @@ impl Deref for VariableDimensions {
 }
 impl DerefMut for VariableDimensions {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        *self.binding.get_mut().unwrap() = None;
+        self.binding = None;
         &mut self.shape
     }
 }
