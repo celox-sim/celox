@@ -1,0 +1,1 @@
+Restack onto #3733 d0c20d3dae: soft constraints keep the dist handling of hard constraints; handle/soft/function walks cover Expr::Dist; docs merged with the dist paragraph
