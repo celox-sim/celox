@@ -20,7 +20,7 @@ mod streams;
 mod tests;
 
 pub(super) use bindings::ConstantType;
-pub(super) use conversion::{bind_declared, bound_builtin, of_shape, of_type};
+pub(super) use conversion::{bind_declared, bound_builtin, of_declared, of_shape, of_type};
 
 /// The bounds of the packed dimensions of `ty`, outermost first, as the
 /// type table resolves them with the constants of `env` (an element's, for
@@ -32,7 +32,25 @@ pub(super) fn packed_bounds(
     ty: &crate::ast::Type,
     env: &crate::ast::ConstEnv,
 ) -> Option<Vec<(i128, i128)>> {
-    let mut id = of_type(table, functions, ty, env)?;
+    let id = of_type(table, functions, ty, env)?;
+    bounds_of(table, id)
+}
+
+/// The bounds of the packed dimensions of `ty` as [`packed_bounds`] tells
+/// them, for a type that `env` may not name the way its declaring scope does
+/// (see [`of_declared`]).
+pub(super) fn declared_packed_bounds(
+    table: &mut TyTable,
+    functions: &crate::ast::const_functions::ConstantFunctions,
+    ty: &crate::ast::Type,
+    env: &crate::ast::ConstEnv,
+) -> Option<Vec<(i128, i128)>> {
+    let id = of_declared(table, functions, ty, env)?;
+    bounds_of(table, id)
+}
+
+/// The bounds of the packed dimensions of type `id` (see [`packed_bounds`]).
+fn bounds_of(table: &TyTable, mut id: TyId) -> Option<Vec<(i128, i128)>> {
     loop {
         match table.data(id) {
             TyData::Packed(packed) => {

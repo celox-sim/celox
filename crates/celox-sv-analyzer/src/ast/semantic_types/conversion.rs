@@ -30,6 +30,34 @@ pub(in crate::ast) fn of_type(
         }
         return Some(id);
     }
+    unbound(table, functions, ty, env)
+}
+
+/// The semantic type of `ty` where `env` may tell its names apart from the
+/// way the scope that declares it does: a signal of a generate block, read
+/// with the constants of its module, names a function its block imports
+/// where the module imports another of that name (IEEE 1800-2023 26.3). A
+/// bound type is its binding, which debug builds do not check against `env`
+/// (see [`of_type`]).
+pub(in crate::ast) fn of_declared(
+    table: &mut TyTable,
+    functions: &const_functions::ConstantFunctions,
+    ty: &Type,
+    env: &ConstEnv,
+) -> Option<TyId> {
+    match ty.binding.get(table) {
+        Some(id) => Some(id),
+        None => unbound(table, functions, ty, env),
+    }
+}
+
+/// The semantic type of `ty`, which has no binding, in `env`.
+fn unbound(
+    table: &mut TyTable,
+    functions: &const_functions::ConstantFunctions,
+    ty: &Type,
+    env: &ConstEnv,
+) -> Option<TyId> {
     nested_type(table, functions, ty, env)
 }
 

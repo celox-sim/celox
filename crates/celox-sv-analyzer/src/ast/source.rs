@@ -74,6 +74,7 @@ impl Source {
         Ok(Self {
             modules,
             diagnostics: session.diagnostics.clone(),
+            types: std::mem::take(&mut session.types),
         })
     }
 
@@ -274,6 +275,7 @@ impl Source {
         Ok(Self {
             modules,
             diagnostics: session.diagnostics.clone(),
+            types: std::mem::take(&mut session.types),
         })
     }
 
@@ -315,9 +317,9 @@ impl Source {
         &self.modules
     }
 
-    /// The modules, to analyze them from their own bodies.
-    pub(crate) fn into_modules(self) -> Vec<Module> {
-        self.modules
+    /// The modules, to publish them as IR, with the types of the analysis.
+    pub(crate) fn into_publication(self) -> (Vec<Module>, Publication) {
+        (self.modules, Publication(self.types))
     }
 
     pub(crate) fn warnings(&self) -> Vec<warnings::AnalyzerWarning> {
@@ -467,5 +469,81 @@ mod scope_tests {
             ),
             scope_with(table, &[], &[("S".into(), b), ("T".into(), a)])
         );
+    }
+}
+
+/// The types an analysis interned, which publishing its modules as IR
+/// reads: a type bound during the analysis is bound in them (see
+/// [`semantic_types::bind_declared`]), so the publication takes that
+/// binding instead of resolving the type again.
+pub(crate) struct Publication(pub(super) semantic_types::TyTable);
+
+impl Publication {
+    /// A session of its own for publishing one module, which works in
+    /// these types and gives them back when it is dropped.
+    pub(crate) fn lend(&mut self) -> Lent<'_> {
+        let session = Session {
+            types: std::mem::take(&mut self.0),
+            ..Session::default()
+        };
+        Lent {
+            publication: self,
+            session,
+        }
+    }
+}
+
+/// A session working in the types of a [`Publication`], until it is dropped.
+pub(crate) struct Lent<'a> {
+    publication: &'a mut Publication,
+    session: Session,
+}
+
+impl std::ops::Deref for Lent<'_> {
+    type Target = Session;
+    fn deref(&self) -> &Session {
+        &self.session
+    }
+}
+
+impl std::ops::DerefMut for Lent<'_> {
+    fn deref_mut(&mut self) -> &mut Session {
+        &mut self.session
+    }
+}
+
+impl Drop for Lent<'_> {
+    fn drop(&mut self) {
+        self.publication.0 = std::mem::take(&mut self.session.types);
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    #[test]
+    fn the_ir_is_published_with_the_types_of_the_analysis() {
+        // A type bound during the analysis (IEEE 1800-2023 6.18) is bound in
+        // the types the publication works in, so publishing reads its
+        // binding instead of resolving it again; a lent session gives the
+        // types back however it ends.
+        let tree = crate::source_tree::parse_source(
+            "module M #(parameter int W = 4); logic [W-1:0] a [2]; endmodule",
+            Path::new("publication.sv"),
+        )
+        .unwrap();
+        let source = Source::from_syntax(&tree).unwrap();
+        let (modules, mut publication) = source.into_publication();
+        let signal = modules[0]
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "a")
+            .unwrap();
+        {
+            let lent = publication.lend();
+            assert!(signal.r#type().binding.get(&lent.types).is_some());
+        }
+        assert!(signal.r#type().binding.get(&publication.0).is_some());
     }
 }

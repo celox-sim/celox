@@ -318,6 +318,28 @@ pub(crate) fn ir_type(
     env: &ConstEnv,
 ) -> crate::ir::Type {
     let bounds = semantic_types::packed_bounds(&mut session.types, functions, &ty, env);
+    ir_type_with_bounds(functions, ty, env, bounds)
+}
+
+/// [`ir_type`] for a type `env` may not name the way its declaring scope
+/// does: a signal of a generate block published with the constants of its
+/// module (see [`semantic_types::of_declared`]).
+pub(crate) fn declared_ir_type(
+    session: &mut Session,
+    functions: &const_functions::ConstantFunctions,
+    ty: Type,
+    env: &ConstEnv,
+) -> crate::ir::Type {
+    let bounds = semantic_types::declared_packed_bounds(&mut session.types, functions, &ty, env);
+    ir_type_with_bounds(functions, ty, env, bounds)
+}
+
+fn ir_type_with_bounds(
+    functions: &const_functions::ConstantFunctions,
+    ty: Type,
+    env: &ConstEnv,
+    bounds: Option<Vec<(i128, i128)>>,
+) -> crate::ir::Type {
     crate::ir::Type::from_ast(
         ty,
         &const_functions::Environment {

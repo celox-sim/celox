@@ -232,10 +232,13 @@ pub(super) fn signature(
     module.subroutines.clear();
     module.locals.clear();
     module.instances.clear();
-    let ir = crate::analyze::analyze_source(Source {
+    let (ir, publication) = crate::analyze::analyze_source_keeping(Source {
         modules: vec![module],
         diagnostics: Vec::new(),
-    })?;
+        types: std::mem::take(&mut session.types),
+    });
+    session.types = publication.0;
+    let ir = ir?;
     ir.modules()
         .first()
         .cloned()
