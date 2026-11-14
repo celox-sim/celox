@@ -403,6 +403,34 @@ impl Heap {
             }
             ops::UVM_TOOL_NAME => self.uvm_string(b"Celox"),
             ops::UVM_TOOL_VERSION => self.uvm_string(env!("CARGO_PKG_VERSION").as_bytes()),
+            // UVM 1.2 compiles `re`, without the brackets of `/re/`, and
+            // matches `str` in one call; an expression it cannot compile
+            // does not match (`regcomp`'s nonzero code).
+            ops::UVM_RE_MATCH => {
+                let rexp = self.re_comp(a as Handle, false);
+                if rexp == 0 {
+                    return REG_NOMATCH;
+                }
+                let matched = self.re_exec(rexp, b as Handle);
+                self.re_free(rexp);
+                matched
+            }
+            // UVM 1.2 turns an empty glob or a lone `/` into "", and longer
+            // ones as `uvm_re_deglobbed(glob, 1)` does; one longer than it
+            // takes is returned as it is.
+            ops::UVM_GLOB_TO_RE => {
+                let glob = self.string(a as Handle).to_vec();
+                if glob.is_empty() || glob == b"/" {
+                    return EMPTY_STRING as u64;
+                }
+                if glob.len() > 2040 {
+                    return a;
+                }
+                match deglob(&glob, true) {
+                    Ok(regex) => self.uvm_string(&regex),
+                    Err(_) => a,
+                }
+            }
             _ => unreachable!("UVM DPI operation {op}"),
         }
     }

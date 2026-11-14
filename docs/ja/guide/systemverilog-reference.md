@@ -597,7 +597,9 @@ let mut sim = unsafe {
   まれな構文で POSIX 拡張正規表現と異なります。`uvm_dpi_get_next_arg_c` は
   `celox` と plusargs を返し、`uvm_dpi_get_tool_name_c` は `Celox` を返します。
   `uvm_hdl_*` と `uvm_polling_*` は 0 または `null` を返すため、UVM は
-  それらの機能を利用不可と報告します。
+  それらの機能を利用不可と報告します。UVM 1.2 の `uvm_re_match`・`uvm_glob_to_re`・
+  `uvm_dump_re_cache` も提供します。`uvm_re_match` がコンパイルできない式は一致せず、
+  UVM 1.2 の `UVM/DPI/REGEX_INV` エラーは出しません。`uvm_dump_re_cache` は何もしません。
 
 ## Veryl が出力する SystemVerilog {#systemverilog-emitted-by-veryl}
 

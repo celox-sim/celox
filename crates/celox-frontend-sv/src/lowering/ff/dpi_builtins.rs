@@ -104,6 +104,16 @@ impl Ff<'_, '_> {
             }
             DpiBuiltin::ToolName => Some(call(self, ops::UVM_TOOL_NAME, &[])),
             DpiBuiltin::ToolVersion => Some(call(self, ops::UVM_TOOL_VERSION, &[])),
+            DpiBuiltin::ReMatch => {
+                let re = operand(self, 0)?;
+                let string = operand(self, 1)?;
+                Some(call(self, ops::UVM_RE_MATCH, &[re, string]))
+            }
+            DpiBuiltin::GlobToRe => {
+                let glob = operand(self, 0)?;
+                Some(call(self, ops::UVM_GLOB_TO_RE, &[glob]))
+            }
+            DpiBuiltin::DumpReCache => None,
             // `null`, 0 or "" (an empty string has handle 0): the facility
             // is unavailable; outputs keep their values, though their
             // selectors are evaluated as for any call.

@@ -214,11 +214,16 @@ pub const OBJECT_GET_RANDSTATE: u64 = 150;
 /// `set_randstate(object, state)`: restore the state of the object's RNG
 /// from string `state`, as `get_randstate` returned it (18.13.5).
 pub const OBJECT_SET_RANDSTATE: u64 = 151;
+/// UVM 1.2's `uvm_re_match(re, str)` (see `uvm_dpi`): `0` on a match.
+pub const UVM_RE_MATCH: u64 = 152;
+/// UVM 1.2's `uvm_glob_to_re(glob)`.
+pub const UVM_GLOB_TO_RE: u64 = 153;
 
 const _: () = assert!(
     crate::containers::RSORT < UVM_RE_COMP
         && crate::streams::TRUNCATE < UVM_RE_COMP
         && UVM_TOOL_VERSION <= 0xff
+        && UVM_GLOB_TO_RE <= 0xff
 );
 
 impl Heap {
@@ -243,7 +248,9 @@ impl Heap {
             crate::containers::HANDLE_PATTERN => {
                 self.new_buffer(crate::containers::handle_pattern(a as u32 as u64))
             }
-            op @ UVM_RE_COMP..=UVM_TOOL_VERSION => self.uvm_call(op, a, b, c),
+            op @ (UVM_RE_COMP..=UVM_TOOL_VERSION | UVM_RE_MATCH | UVM_GLOB_TO_RE) => {
+                self.uvm_call(op, a, b, c)
+            }
             op @ DPI_AREA..=DPI_FROM_C_STRING => self.dpi_call(op, a, b),
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {
