@@ -764,10 +764,14 @@ impl BodyBuilder<'_, '_, '_> {
                     // In a randsequence code block, `break` outside a loop
                     // and `return` leave the statement or a production
                     // (IEEE 1800-2023 18.17.6).
-                    StatementKind::Break | StatementKind::Return(None)
-                        if let Some(block) = self.randsequence_exits.get(&id) =>
+                    StatementKind::Break | StatementKind::Return(_)
+                        if let Some(exit) = self.randsequence_exits.get(&id).cloned() =>
                     {
-                        output.push(Stmt::DisableBlock(*block));
+                        let value = match &native.statement(id).kind {
+                            StatementKind::Return(value) => *value,
+                            _ => None,
+                        };
+                        output.extend(self.randsequence_exit(value, exit)?);
                     }
                     StatementKind::Break => output.push(Stmt::Break),
                     StatementKind::Continue => output.push(Stmt::Continue),

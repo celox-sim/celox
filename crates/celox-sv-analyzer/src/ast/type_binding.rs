@@ -463,4 +463,4 @@ pub(super) fn alias_signals(
 }
 
 mod subroutines;
-pub(super) use subroutines::subroutine_formals;
+pub(super) use subroutines::{port_formals, subroutine_formals};

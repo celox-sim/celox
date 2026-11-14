@@ -1903,10 +1903,10 @@ pub struct Randsequence {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RsProduction {
     pub name: Name,
-    /// The tokens of its result type, if it declares one.
-    pub return_type: Option<TokenRange>,
-    /// The tokens of its formals, `( ... )`, if it declares them.
-    pub formals: Option<TokenRange>,
+    /// Its result type, `void` included, if it declares one.
+    pub return_type: Option<TypeId>,
+    /// Its formals, if it declares them (18.17.7).
+    pub formals: Option<Vec<SubroutinePort>>,
     pub rules: Vec<RsRule>,
     pub tokens: TokenRange,
 }
