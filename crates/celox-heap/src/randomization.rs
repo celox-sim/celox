@@ -60,6 +60,15 @@ pub enum Expr {
     /// The sum of the elements of array `0` of the program, at their width
     /// (IEEE 1800-2023 7.12.3, 18.5.8.2).
     Sum(usize),
+    /// The `width`-bit property at byte offset `member` of the object the
+    /// handle at byte offset `handle` of the object refers to (IEEE
+    /// 1800-2023 18.5.9): its solver variable when the call solves that
+    /// object, its value otherwise.
+    Member {
+        handle: u32,
+        member: u32,
+        width: u32,
+    },
     /// Read-only scalar supplied by this call, never a solver variable.
     Input {
         index: usize,
@@ -328,6 +337,36 @@ fn boolean(value: Term) -> Term {
 }
 
 impl Expr {
+    /// Whether the expression reads the solver variable of an object the
+    /// call solves.
+    fn mentions_solved(&self) -> bool {
+        match self {
+            Self::Solved(_) => true,
+            Self::Foreach { body, .. } => body.mentions_solved(),
+            Self::Enabled { value, .. }
+            | Self::Resize { value, .. }
+            | Self::Unary { value, .. } => value.mentions_solved(),
+            Self::Binary { left, right, .. } => left.mentions_solved() || right.mentions_solved(),
+            Self::Dist {
+                membership,
+                choices,
+            } => {
+                membership.mentions_solved()
+                    || choices
+                        .iter()
+                        .any(|choice| choice.predicate.mentions_solved())
+            }
+            Self::Literal(..)
+            | Self::Field(_)
+            | Self::Size(_)
+            | Self::Sum(_)
+            | Self::Input { .. }
+            | Self::Index { .. }
+            | Self::Member { .. }
+            | Self::Element { .. } => false,
+        }
+    }
+
     /// Whether the expression names the elements of array `index`: a loop
     /// over it or its sum.
     fn names_elements(&self, index: usize) -> bool {
@@ -355,6 +394,7 @@ impl Expr {
             | Self::Input { .. }
             | Self::Index { .. }
             | Self::Solved(_)
+            | Self::Member { .. }
             | Self::Element { .. } => false,
         }
     }
@@ -383,6 +423,7 @@ impl Expr {
             | Self::Input { .. }
             | Self::Index { .. }
             | Self::Solved(_)
+            | Self::Member { .. }
             | Self::Element { .. } => false,
         }
     }
@@ -415,6 +456,7 @@ impl Expr {
                 .clone(),
             Self::Solved(index) => terms.get(*index).ok_or("invalid solver variable")?.clone(),
             Self::Size(index) => sizes.get(*index).ok_or("invalid constraint array")?.clone(),
+            Self::Member { .. } => return Err("constraint member of an unread handle".into()),
             Self::Foreach { .. } | Self::Index { .. } | Self::Element { .. } => {
                 return Err("constraint loop outside its array".into());
             }
@@ -514,6 +556,126 @@ impl Heap {
     /// `constraint` of object `object` with each loop over a state array
     /// replaced by the conjunction of its body for each element, which
     /// `loops` gives for the enclosing loops: (array, index).
+    /// The width and value of unrolled constraint expression `expr` of
+    /// `object` if known before solving: one of literals, inputs, the fields
+    /// of the object that are not random for the call and the sizes of its
+    /// arrays that are not, as the guards of constraints are (IEEE 1800-2023
+    /// 18.5.13). It is the value of the term the solver takes for `expr`,
+    /// with those as constants and the random ones free, by the solver's own
+    /// evaluation; `&&`, `||` and `!` short-circuit (11.4.7), so that a guard
+    /// that a known operand decides is known though the other is random.
+    fn known(
+        &mut self,
+        object: Handle,
+        program: &Program,
+        expr: &Expr,
+        check_only: bool,
+        inputs: &[u64],
+    ) -> Option<(u32, u64)> {
+        match expr {
+            Expr::Unary { op, value } if op == "!" => {
+                let (_, value) = self.known(object, program, value, check_only, inputs)?;
+                return Some((1, u64::from(value == 0)));
+            }
+            Expr::Binary {
+                op, left, right, ..
+            } if matches!(op.as_str(), "&&" | "||") => {
+                let left = self
+                    .known(object, program, left, check_only, inputs)
+                    .map(|(_, value)| value != 0);
+                let decided = match (op.as_str(), left) {
+                    ("&&", Some(false)) => Some(false),
+                    ("||", Some(true)) => Some(true),
+                    _ => None,
+                };
+                if let Some(decided) = decided {
+                    return Some((1, u64::from(decided)));
+                }
+                let right = self
+                    .known(object, program, right, check_only, inputs)
+                    .map(|(_, value)| value != 0);
+                // A known right operand decides it too; else, with the left
+                // one known not to, the right one is its value.
+                let value = match (op.as_str(), left, right) {
+                    ("&&", _, Some(false)) => false,
+                    ("||", _, Some(true)) => true,
+                    (_, Some(_), Some(right)) => right,
+                    _ => return None,
+                };
+                return Some((1, u64::from(value)));
+            }
+            _ => {}
+        }
+        // A variable of another object the call solves is not known.
+        if expr.mentions_solved() {
+            return None;
+        }
+        // The fields and array sizes as the solver takes them: a value when
+        // the call does not randomize it, free otherwise.
+        let fields = program
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let width = field.width.clamp(1, 64);
+                if !(1..=64).contains(&field.width)
+                    || (!check_only && self.random_mode(object, field.offset, field.random))
+                {
+                    var(format!("field{index}"), Sort::Bv(width))
+                } else {
+                    let value = self.load(
+                        object,
+                        field.offset as usize,
+                        field.width.div_ceil(8) as usize,
+                    );
+                    bv(width, value & (u64::MAX >> (64 - width)))
+                }
+            })
+            .collect::<Vec<_>>();
+        let sizes = program
+            .arrays
+            .iter()
+            .enumerate()
+            .map(|(index, array)| {
+                if !check_only && self.random_mode(object, array.offset, array.random) {
+                    var(format!("size{index}"), Sort::Bv(32))
+                } else {
+                    let contents = self.load(object, array.offset as usize, crate::HANDLE_BYTES);
+                    bv(32, self.sequence_len(contents as Handle) as u64)
+                }
+            })
+            .collect::<Vec<_>>();
+        let term = expr.term(&fields, 0, &sizes, inputs).ok()?;
+        let terms = aplite::Env::from([(String::new(), term)]);
+        match aplite::finite::evaluate_scalar_terms(&terms, &Default::default(), Limits::default())
+            .ok()?
+            .remove("")?
+        {
+            Scalar::Bool(value) => Some((1, u64::from(value))),
+            Scalar::Bv { width, value } => Some((width, value)),
+        }
+    }
+
+    /// The solver variable of the member at `offset` of `object`, when the
+    /// call solves the object and the member is random in it: not a state
+    /// member, nor one whose rand_mode is off, nor any in a call that only
+    /// checks (IEEE 1800-2023 18.8, 18.11.1), which keep their values.
+    fn solver_variable(
+        &mut self,
+        object: Handle,
+        offset: u32,
+        solved: &fxhash::FxHashMap<Handle, (usize, &Program)>,
+        check_only: bool,
+    ) -> Option<usize> {
+        let &(base, program) = solved.get(&object)?;
+        let index = program
+            .fields
+            .iter()
+            .position(|field| field.offset == offset)?;
+        (!check_only && self.random_mode(object, offset, program.fields[index].random))
+            .then_some(base + index)
+    }
+
     fn unroll(
         &mut self,
         object: Handle,
@@ -523,6 +685,7 @@ impl Heap {
         solved: &fxhash::FxHashMap<Handle, (usize, &Program)>,
         elements: &fxhash::FxHashMap<(Handle, usize), usize>,
         check_only: bool,
+        inputs: &[u64],
     ) -> Result<Expr, String> {
         let boxed = |value: Expr| Box::new(value);
         Ok(match constraint {
@@ -544,9 +707,9 @@ impl Heap {
                 let mut each = Vec::new();
                 for index in 0..self.sequence_len(contents) as u64 {
                     loops.push((*array, index));
-                    each.push(
-                        self.unroll(object, program, body, loops, solved, elements, check_only)?,
-                    );
+                    each.push(self.unroll(
+                        object, program, body, loops, solved, elements, check_only, inputs,
+                    )?);
                     loops.pop();
                 }
                 // A balanced conjunction stays within the solver's depth.
@@ -601,15 +764,12 @@ impl Heap {
                         if element == crate::objects::NULL {
                             return Err("a null object handle in a constraint".into());
                         }
-                        // A member of an object the call solves is its
-                        // solver variable.
-                        if let Some(&(base, program)) = solved.get(&element)
-                            && let Some(field) = program
-                                .fields
-                                .iter()
-                                .position(|field| field.offset == *member)
+                        // A random member of an object the call solves is
+                        // its solver variable; a fixed one, its value.
+                        if let Some(field) =
+                            self.solver_variable(element, *member, solved, check_only)
                         {
-                            return Ok(Expr::Solved(base + field));
+                            return Ok(Expr::Solved(field));
                         }
                         self.load(element, *member as usize, width.div_ceil(8) as usize)
                     }
@@ -668,50 +828,87 @@ impl Heap {
                     }
                 }
             }
+            Expr::Member {
+                handle,
+                member,
+                width,
+            } => {
+                if !(1..=64).contains(width) {
+                    return Err("invalid constraint member width".into());
+                }
+                let target = self.load(object, *handle as usize, crate::HANDLE_BYTES) as Handle;
+                if target == crate::objects::NULL {
+                    return Err("a null object handle in a constraint".into());
+                }
+                // A random member of an object the call solves is its
+                // solver variable; a fixed one, or one of another object,
+                // its value, which a guard reads before solving (18.5.13).
+                if let Some(field) = self.solver_variable(target, *member, solved, check_only) {
+                    return Ok(Expr::Solved(field));
+                }
+                let value = self.load(target, *member as usize, width.div_ceil(8) as usize);
+                Expr::Literal(*width, value & (u64::MAX >> (64 - width)))
+            }
             Expr::Enabled { index, value } => Expr::Enabled {
                 index: *index,
-                value: boxed(
-                    self.unroll(object, program, value, loops, solved, elements, check_only)?,
-                ),
+                value: boxed(self.unroll(
+                    object, program, value, loops, solved, elements, check_only, inputs,
+                )?),
             },
             Expr::Resize {
                 value,
                 width,
                 signed,
             } => Expr::Resize {
-                value: boxed(
-                    self.unroll(object, program, value, loops, solved, elements, check_only)?,
-                ),
+                value: boxed(self.unroll(
+                    object, program, value, loops, solved, elements, check_only, inputs,
+                )?),
                 width: *width,
                 signed: *signed,
             },
             Expr::Unary { op, value } => Expr::Unary {
                 op: op.clone(),
-                value: boxed(
-                    self.unroll(object, program, value, loops, solved, elements, check_only)?,
-                ),
+                value: boxed(self.unroll(
+                    object, program, value, loops, solved, elements, check_only, inputs,
+                )?),
             },
             Expr::Binary {
                 op,
                 left,
                 right,
                 signed,
-            } => Expr::Binary {
-                op: op.clone(),
-                left: boxed(
-                    self.unroll(object, program, left, loops, solved, elements, check_only)?,
-                ),
-                right: boxed(
-                    self.unroll(object, program, right, loops, solved, elements, check_only)?,
-                ),
-                signed: *signed,
-            },
+            } => {
+                let left = self.unroll(
+                    object, program, left, loops, solved, elements, check_only, inputs,
+                )?;
+                // A guard whose value is known before solving (IEEE
+                // 1800-2023 18.5.13), as that of `if` or `->` is the left
+                // operand of `||`, decides whether what it guards applies:
+                // when it does not, that is not unrolled, nor the handles it
+                // names dereferenced.
+                let known = self
+                    .known(object, program, &left, check_only, inputs)
+                    .map(|(_, value)| value != 0);
+                match (op.as_str(), known) {
+                    ("||", Some(true)) => return Ok(Expr::Literal(1, 1)),
+                    ("&&", Some(false)) => return Ok(Expr::Literal(1, 0)),
+                    _ => {}
+                }
+                Expr::Binary {
+                    op: op.clone(),
+                    left: boxed(left),
+                    right: boxed(self.unroll(
+                        object, program, right, loops, solved, elements, check_only, inputs,
+                    )?),
+                    signed: *signed,
+                }
+            }
             Expr::Dist {
                 membership,
                 choices,
             } => Expr::Dist {
                 membership: boxed(self.unroll(
-                    object, program, membership, loops, solved, elements, check_only,
+                    object, program, membership, loops, solved, elements, check_only, inputs,
                 )?),
                 choices: choices
                     .iter()
@@ -725,6 +922,7 @@ impl Heap {
                                 solved,
                                 elements,
                                 check_only,
+                                inputs,
                             )?,
                             weight: choice.weight.clone(),
                         })
@@ -1110,6 +1308,7 @@ impl Heap {
                         &solved,
                         &element_bases,
                         check_only,
+                        inputs,
                     )?;
                     formula = and(
                         formula,
