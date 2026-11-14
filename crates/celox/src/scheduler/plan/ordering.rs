@@ -282,7 +282,7 @@ impl<'a> PlanBuilder<'a> {
     pub(super) fn stable_events<F: FnOnce() -> CombSlicer<'a>>(
         &mut self,
         plan: &Plan,
-        comb_slicer: &Slicer<'a, F>,
+        comb_slicer: &mut Slicer<'a, F>,
     ) {
         let program = self.program;
         let schema = self.schema;
@@ -375,6 +375,7 @@ impl<'a> PlanBuilder<'a> {
         // appear in the frontend's clock-gate topology (a constant has no
         // source clock at all). Prove stability from the actual SIR cone.
         if !effects {
+            let mut completed = CompletedControl::default();
             for &index in rtl_written.difference(derived) {
                 let signal = plan.events[index].signal;
                 if stable_host_events.contains(&index)
@@ -383,7 +384,8 @@ impl<'a> PlanBuilder<'a> {
                     continue;
                 }
                 if comb_slicer
-                    .stateless_cone(signal, partition_flags)
+                    .get()
+                    .stateless_cone(signal, partition_flags, &mut completed)
                     .is_some_and(|(writes, inputs)| {
                         tracing::debug!(target: "celox::scheduler", signal = ?program.get_path(&signal), scheduled = ?writes.intersection(&scheduled_stores).map(|a| program.get_path(a)).take(8).collect::<Vec<_>>(), unstable = ?inputs.iter().filter(|a| Some(**a) != partition_flags && !stable_input(**a)).map(|a| program.get_path(a)).take(8).collect::<Vec<_>>(), "event cone external dependencies");
                         writes.is_disjoint(&scheduled_stores)
@@ -405,7 +407,7 @@ impl<'a> PlanBuilder<'a> {
     pub(super) fn orphan_clocks<F: FnOnce() -> CombSlicer<'a>>(
         &mut self,
         plan: &Plan,
-        comb_slicer: &Slicer<'a, F>,
+        comb_slicer: &mut Slicer<'a, F>,
     ) {
         let model = self.model;
         let topology = self.topology;
@@ -454,6 +456,7 @@ impl<'a> PlanBuilder<'a> {
                 for index in candidates {
                     let active = !active_stores.is_empty()
                         && comb_slicer
+                            .get()
                             .input_signals([plan.events[index].signal])
                             .iter()
                             .any(|input| active_stores.contains(&storage(*input)));

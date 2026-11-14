@@ -73,7 +73,7 @@ impl<'a> PlanBuilder<'a> {
     /// them (see [`Lazy`]).
     pub(super) fn deferred_settles<F: FnOnce() -> CombSlicer<'a>>(
         &mut self,
-        comb_slicer: &Slicer<'a, F>,
+        comb_slicer: &mut Slicer<'a, F>,
     ) {
         let schema = self.schema;
         let model = self.model;
@@ -143,7 +143,7 @@ impl<'a> PlanBuilder<'a> {
                     if stateful.is_empty() && watched_comb.is_empty() {
                         return Some(Vec::new());
                     }
-                    let slicer = &**comb_slicer;
+                    let slicer = comb_slicer.get();
                     let targets = stateful
                         .iter()
                         .map(|target| target.absolute_addr())
@@ -264,7 +264,7 @@ impl<'a> PlanBuilder<'a> {
     /// small enough to run alone (see [`Incremental`]).
     pub(super) fn incremental_settle<F: FnOnce() -> CombSlicer<'a>>(
         &mut self,
-        comb_slicer: &Slicer<'a, F>,
+        comb_slicer: &mut Slicer<'a, F>,
     ) {
         let program = self.program;
         let schema = self.schema;
@@ -370,7 +370,7 @@ impl<'a> PlanBuilder<'a> {
                                     .collect()
                             },
                         );
-                        let slicer = &**comb_slicer;
+                        let slicer = comb_slicer.get();
                         let inputs = sources
                             .iter()
                             .copied()
