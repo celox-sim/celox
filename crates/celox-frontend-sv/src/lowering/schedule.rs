@@ -743,18 +743,32 @@ fn schedule_sources_collecting(
         }
 
         checkpoint!("instance_glue");
-        let package_states = lower_package_states(
+        for (key, id) in &module_ids {
+            restore_interface_member_paths(modules.get_mut(id).unwrap(), &analyzed[&key.name]);
+        }
+        let package_states = package_states(
             &analyzed[&top].packages,
             &design,
+            &properties,
+            time_format,
+            &virtual_ids,
+        );
+        // Nothing reads the analyses past this point unless a retry lowers
+        // modules again: release them before the packages are lowered.
+        if last_attempt {
+            drop(std::mem::take(&mut analyses));
+            drop(std::mem::take(&mut discovery_analyses));
+            drop(std::mem::take(&mut design));
+            drop(std::mem::take(&mut analyzed));
+        }
+        let package_states = lower_package_states(
+            package_states,
             module_ids.len(),
             four_state,
             parallel.enabled(),
-            &properties,
-            time_format,
             warnings,
             analysis_options.force_out_of_line_calls,
             analysis_options.recursion_report.as_deref(),
-            &virtual_ids,
         )?;
         validate_package_variable_drivers([&root_key], &module_ids, &lowered_modules)?;
         let mut packages = Vec::new();
@@ -770,9 +784,6 @@ fn schedule_sources_collecting(
                 .map(|(&module_id, lowered)| (module_id, lowered)),
             &package_states,
         )?;
-        for (key, id) in &module_ids {
-            restore_interface_member_paths(modules.get_mut(id).unwrap(), &analyzed[&key.name]);
-        }
         let symbolic = SymbolicRtl {
             modules,
             module_names,
@@ -784,10 +795,6 @@ fn schedule_sources_collecting(
         drop(package_states);
         if last_attempt {
             drop(std::mem::take(&mut lowered_modules));
-            drop(std::mem::take(&mut analyses));
-            drop(std::mem::take(&mut discovery_analyses));
-            drop(std::mem::take(&mut design));
-            drop(std::mem::take(&mut analyzed));
         }
         let mut loop_members = Vec::new();
         let scheduled =
