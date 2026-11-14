@@ -491,3 +491,44 @@ fn sequences_with_several_ways_to_match_name_what_they_do_not_support() {
         assert!(error.contains(message), "{property}: {error}");
     }
 }
+
+/// An interface declares properties and sequences and checks them with
+/// concurrent assertions and cover statements (IEEE 1800-2023 16.2, 25.3),
+/// each instance on its own members, as the APB interface of the UVM
+/// examples does, also in a design that holds it in a virtual interface.
+#[test]
+fn interfaces_check_their_own_concurrent_assertions() {
+    let source = r#"`timescale 1ns/1ns
+interface chk_if(input clk);
+ logic [3:0] v;
+ int fails, covered;
+ property bounded; @(posedge clk) v < 8; endproperty: bounded
+ CHK: assert property (bounded) else fails++;
+ sequence rise; @(posedge clk) v == 1 ##1 v == 2; endsequence
+ COV: cover property (rise) covered++;
+endinterface: chk_if
+module Top;
+ bit clk;
+ int a_fails, b_fails, a_covered;
+ chk_if a(clk);
+ chk_if b(clk);
+ virtual chk_if vif;
+ initial forever #5 clk = ~clk;
+ initial begin
+  vif = b;
+  a.v = 1; b.v = 9;
+  #10 a.v = 2; b.v = 3;
+  #10 b.v = 12;
+  #20 a_fails = a.fails; b_fails = vif.fails; a_covered = a.covered;
+ end
+endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("interface.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(41).unwrap();
+    // Ticks at 5, 15, 25 and 35: b exceeds 7 at the first, third and fourth.
+    for (name, expected) in [("a_fails", 0u32), ("b_fails", 3), ("a_covered", 1)] {
+        assert_eq!(sim.get(sim.signal(name)), expected.into(), "{name}");
+    }
+}
