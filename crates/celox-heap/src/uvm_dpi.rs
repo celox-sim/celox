@@ -262,6 +262,43 @@ pub fn deglob(glob: &[u8], with_brackets: bool) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// The longest glob UVM 1.2's `uvm_glob_to_re` translates.
+const UVM_12_GLOB_LENGTH: usize = 2040;
+
+/// UVM 1.2's `uvm_glob_to_re` (`src/dpi/uvm_regex.cc`): "" for an empty glob
+/// or a lone `/`, a bracketed glob as it is, and otherwise the bracketed
+/// ERE of the glob, `^` and `$` added. The C writes the expression into a
+/// 2052-byte buffer without bounds checks, so a translation longer than
+/// that is undefined there; it is given in full here, never the glob
+/// itself, and `uvm_re_match` then takes it as longer than it compiles.
+pub fn uvm_12_glob_to_re(glob: &[u8]) -> Vec<u8> {
+    const BRACKET: u8 = b'/';
+    if glob.is_empty() || glob == [BRACKET] {
+        return Vec::new();
+    }
+    if glob[0] == BRACKET && glob[glob.len() - 1] == BRACKET {
+        return glob.to_vec();
+    }
+    let mut out = Vec::with_capacity(glob.len() * 2 + 4);
+    out.push(BRACKET);
+    if glob[0] != b'^' {
+        out.push(b'^');
+    }
+    for &byte in glob {
+        match byte {
+            b'*' | b'+' => out.extend([b'.', byte]),
+            b'.' | b'[' | b']' | b'(' | b')' => out.extend([b'\\', byte]),
+            b'?' => out.push(b'.'),
+            _ => out.push(byte),
+        }
+    }
+    if out.last() != Some(&b'$') {
+        out.push(b'$');
+    }
+    out.push(BRACKET);
+    out
+}
+
 impl Heap {
     /// Set the tool's command line: the program name, then its arguments.
     pub fn set_tool_arguments(&mut self, arguments: Vec<String>) {
@@ -415,21 +452,15 @@ impl Heap {
                 self.re_free(rexp);
                 matched
             }
-            // UVM 1.2 turns an empty glob or a lone `/` into "", and longer
-            // ones as `uvm_re_deglobbed(glob, 1)` does; one longer than it
-            // takes is returned as it is.
+            // UVM 1.2 returns a glob longer than it takes as it is, after
+            // its error, and translates any other one in full.
             ops::UVM_GLOB_TO_RE => {
                 let glob = self.string(a as Handle).to_vec();
-                if glob.is_empty() || glob == b"/" {
-                    return EMPTY_STRING as u64;
-                }
-                if glob.len() > 2040 {
+                if glob.len() > UVM_12_GLOB_LENGTH {
                     return a;
                 }
-                match deglob(&glob, true) {
-                    Ok(regex) => self.uvm_string(&regex),
-                    Err(_) => a,
-                }
+                let regex = uvm_12_glob_to_re(&glob);
+                self.uvm_string(&regex)
             }
             _ => unreachable!("UVM DPI operation {op}"),
         }
@@ -536,6 +567,38 @@ mod tests {
             heap.string(message as Handle),
             b"Invalid character class name"
         );
+    }
+
+    #[test]
+    fn uvm_12_globs_translate_in_full_at_the_length_limits() {
+        let mut heap = Heap::new();
+        let translate = |heap: &mut Heap, glob: &[u8]| -> Vec<u8> {
+            let glob = heap.intern(glob) as u64;
+            let regex = heap.call(ops::UVM_GLOB_TO_RE, glob, 0, 0);
+            heap.string(regex as Handle).to_vec()
+        };
+        // 1023 dots: a 2050-byte expression, every dot escaped, though more
+        // than UVM 1.2's 2048 that `uvm_re_match` compiles, which then
+        // fails it.
+        let regex = translate(&mut heap, &[b'.'; 1023]);
+        assert_eq!(regex.len(), 2050);
+        assert!(regex.starts_with(b"/^") && regex.ends_with(b"$/"));
+        assert_eq!(regex[2..2048], b"\\.".repeat(1023)[..]);
+        let pattern = heap.intern(&regex) as u64;
+        let dots = heap.intern(&[b'.'; 1023]) as u64;
+        assert_ne!(heap.call(ops::UVM_RE_MATCH, pattern, dots, 0), 0);
+        // 1022 dots: 2048 bytes with the brackets, which it compiles and
+        // matches.
+        let regex = translate(&mut heap, &[b'.'; 1022]);
+        assert_eq!(regex.len(), 2048);
+        let pattern = heap.intern(&regex) as u64;
+        let dots = heap.intern(&[b'.'; 1022]) as u64;
+        assert_eq!(heap.call(ops::UVM_RE_MATCH, pattern, dots, 0), 0);
+        // A glob longer than 2040 bytes comes back as it is, as UVM 1.2
+        // returns it after its error; an empty one and `/` give "".
+        assert_eq!(translate(&mut heap, &[b'a'; 2041]), vec![b'a'; 2041]);
+        assert_eq!(translate(&mut heap, b""), b"");
+        assert_eq!(translate(&mut heap, b"/"), b"");
     }
 
     #[test]
