@@ -8691,3 +8691,45 @@ fn rejects_constant_time_format_arguments_outside_their_ranges() {
     )
     .unwrap();
 }
+
+#[test]
+fn static_formals_of_package_functions_that_fork_are_rejected() {
+    // The static formals of a package function whose own body forks
+    // outlive the call, which keeps them nowhere; a function that only
+    // calls one that forks needs none of them after it returns, as UVM
+    // 1.2's `uvm_create_random_seed` (IEEE 1800-2023 13.4.4). A package
+    // task that suspends keeps its static formals as variables of the
+    // package (13.3.2).
+    let helper =
+        "bit enabled; function void helper(); if (enabled) fork $display(1); join_none endfunction";
+    for (subroutine, rejected) in [
+        (
+            "function int seed(string s); helper(); return s.len(); endfunction",
+            false,
+        ),
+        (
+            "function int seed(string s); fork $display(s); join_none return s.len(); endfunction",
+            true,
+        ),
+        ("task seed(string s); #1 $display(s); endtask", false),
+    ] {
+        let call = if subroutine.starts_with("task") {
+            "p::seed(\"abc\");"
+        } else {
+            "x = p::seed(\"abc\");"
+        };
+        let source = format!(
+            "package p; {helper} {subroutine} endpackage module Top; int x; initial begin {call} end endmodule"
+        );
+        let result = analyze_source(&source, Path::new("package_formals.sv"));
+        if rejected {
+            let error = result.unwrap_err();
+            assert!(
+                error.to_string().contains("static arguments in a package"),
+                "{subroutine}: {error}"
+            );
+        } else {
+            result.unwrap_or_else(|error| panic!("{subroutine}: {error}"));
+        }
+    }
+}
