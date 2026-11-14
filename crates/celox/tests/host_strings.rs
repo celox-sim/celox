@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_types,
+    reason = "test-only: the test reads back a flag that the observer it hands to the simulation sets"
+)]
 use celox::{SimBackend, Simulation, Simulator, SlotIo, SlotObserver};
 use std::{
     path::Path,

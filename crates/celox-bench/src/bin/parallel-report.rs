@@ -4,14 +4,19 @@ use celox::{SimBackend, Simulator};
 use clap::{Parser, ValueEnum};
 use serde_json::{Value, json};
 use std::io::Write as _;
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: the global tracing layer and filter must be Send + Sync and are called from every thread that emits celox::parallel events, sharing the capture buffer and window state"
+)]
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, AtomicU64},
+};
 use std::{
     collections::BTreeMap,
     fs,
     path::PathBuf,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::Ordering},
     time::Instant,
 };
 use tracing::{
@@ -116,6 +121,10 @@ impl Visit for Fields {
 }
 
 struct Capture {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the global tracing layer and filter must be Send + Sync and are called from every thread that emits celox::parallel events, appending captured events to this buffer"
+    )]
     events: Arc<Mutex<Vec<Value>>>,
     window: Arc<Window>,
     omit_sir: bool,
@@ -123,8 +132,20 @@ struct Capture {
 
 #[derive(Default)]
 struct Window {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the global tracing layer and filter must be Send + Sync and are called from every thread that emits celox::parallel events, reading this capture flag"
+    )]
     active: AtomicBool,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the global tracing layer and filter must be Send + Sync and are called from every thread that emits celox::parallel events, reading this run flag"
+    )]
     running: AtomicBool,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the global tracing layer and filter must be Send + Sync and are called from every thread that emits celox::parallel events, counting selection calls here"
+    )]
     calls: AtomicU64,
     after: u64,
     length: u64,
@@ -239,6 +260,10 @@ fn demo(stages: u32) -> String {
 
 type Error = Box<dyn std::error::Error>;
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: the global tracing layer and filter must be Send + Sync and are called from every thread that emits celox::parallel events, reading the capture flag this function toggles"
+)]
 fn exercise<B: SimBackend>(
     args: &Args,
     mut parallel: Simulator<B>,
@@ -436,6 +461,10 @@ fn main() -> Result<(), Error> {
     } else {
         args.outputs.clone()
     };
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the global tracing layer and filter must be Send + Sync and are called from every thread that emits celox::parallel events, sharing this capture window"
+    )]
     let window = Arc::new(Window {
         active: AtomicBool::new(true),
         after: u64::from(args.warmup),
@@ -443,6 +472,10 @@ fn main() -> Result<(), Error> {
         ..Window::default()
     });
     let active = &window.active;
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the global tracing layer and filter must be Send + Sync and are called from every thread that emits celox::parallel events, appending captured events to this buffer"
+    )]
     let events = Arc::new(Mutex::new(Vec::new()));
     let enabled = window.clone();
     tracing_subscriber::registry()
@@ -550,6 +583,10 @@ fn main() -> Result<(), Error> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_types,
+    reason = "test-only: the tests build the capture state the tracing layer shares across threads"
+)]
 mod tests {
     use super::*;
 

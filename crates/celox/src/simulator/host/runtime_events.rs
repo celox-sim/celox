@@ -95,10 +95,26 @@ pub struct RuntimeEventDrain {
     pub(super) buffer: Arc<RuntimeEventBuffer>,
     pub(super) layout: MemoryLayout,
     pub(super) sites: Vec<RuntimeEventSite>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the drain handle may run on another thread and locks the queue the simulation thread stashes events into"
+    )]
     pub(super) pending_host_events: Arc<std::sync::Mutex<PendingRuntimeEvents>>,
     pub(super) read_seq: u64,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the read sequence the drain handle advances on its thread and the simulation thread reads"
+    )]
     pub(super) shared_read_seq: Arc<AtomicU64>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the drain handle clears it on its thread when dropped and the simulation thread checks it"
+    )]
     pub(super) active: Arc<AtomicBool>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the drain handle sets it on its thread and the simulation thread reads it before each step"
+    )]
     pub(super) backpressure: Arc<AtomicBool>,
     /// Whether a site records heap handles (`sites_record_handles`).
     pub(super) handles: bool,
@@ -109,12 +125,24 @@ pub struct RuntimeEventDrain {
 /// wake each other instead of spinning while one waits for the other.
 #[derive(Default)]
 pub(crate) struct DrainPacing {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the simulation thread registers itself here and the drain thread unparks it"
+    )]
     pub(super) simulation: std::sync::Mutex<Option<std::thread::Thread>>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the drain thread registers itself here and the simulation thread unparks it"
+    )]
     pub(super) drain: std::sync::Mutex<Option<std::thread::Thread>>,
 }
 
 impl DrainPacing {
     /// Make the calling thread the one `slot` wakes.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the simulation and drain threads register themselves in each other's wake slot"
+    )]
     pub(super) fn register(slot: &std::sync::Mutex<Option<std::thread::Thread>>) {
         let current = std::thread::current();
         let mut thread = slot.lock().unwrap();
@@ -126,6 +154,10 @@ impl DrainPacing {
         }
     }
 
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the simulation and drain threads unpark each other through these wake slots"
+    )]
     pub(super) fn wake(slot: &std::sync::Mutex<Option<std::thread::Thread>>) {
         if let Some(thread) = slot.lock().unwrap().as_ref() {
             thread.unpark();

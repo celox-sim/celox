@@ -22,7 +22,12 @@ pub(super) fn compile_tasks_with<S, T: Send, E: Send>(
     state: impl Fn() -> S + Sync,
     compile: impl Fn(&mut S, usize) -> Result<T, E> + Sync,
 ) -> std::thread::Result<Result<Vec<T>, E>> {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: scoped compile worker threads share the next-task counter and the stop flag the first failing worker sets"
+    )]
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     let mut results = Vec::with_capacity(order.len());
     let mut failure = None;
     if workers <= 1 || order.len() <= 1 {
@@ -37,7 +42,15 @@ pub(super) fn compile_tasks_with<S, T: Send, E: Send>(
             }
         }
     } else {
+        #[expect(
+            clippy::disallowed_types,
+            reason = "cross-thread: scoped compile worker threads claim the next task index from this shared counter"
+        )]
         let next = AtomicUsize::new(0);
+        #[expect(
+            clippy::disallowed_types,
+            reason = "cross-thread: the first failing scoped compile worker sets it and the other workers stop taking tasks"
+        )]
         let stopped = AtomicBool::new(false);
         std::thread::scope(|scope| {
             let handles = (0..workers.min(order.len()))
@@ -355,6 +368,10 @@ fn cgroup_available(host: u64, mount: &std::path::Path, leaf: &std::path::Path) 
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_types,
+    reason = "test-only: counters the compile worker threads update while the tests check them"
+)]
 mod tests {
     use super::*;
 

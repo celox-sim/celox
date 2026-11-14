@@ -1,7 +1,13 @@
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
+
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: the scoped module-lowering worker threads in hierarchy.rs record $readmem file lookups into the one collector of their compilation"
+)]
+use std::sync::Mutex;
 
 /// An external lookup made while lowering a design.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -13,7 +19,13 @@ pub struct FileDependency {
 
 /// Compilation-owned external file tracking, explicitly passed to workers.
 #[derive(Clone, Debug, Default)]
-pub struct FileDependencyCollector(Arc<Mutex<Vec<FileDependency>>>);
+pub struct FileDependencyCollector(
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the scoped module-lowering worker threads in hierarchy.rs record $readmem file lookups into the one collector of their compilation"
+    )]
+    Arc<Mutex<Vec<FileDependency>>>,
+);
 
 impl FileDependencyCollector {
     pub fn take(&self) -> Vec<FileDependency> {

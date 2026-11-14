@@ -6,7 +6,12 @@
 //! native temporary storage. Lane 0 reuses the ordinary arena: it runs on the
 //! dispatching thread, and no sequential kernel runs during a partitioned one.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: scoped lane-task compile threads in compile_jobs claim the next job index from this shared counter"
+)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use celox_runtime::parallel::{LaneSchedule, LaneTaskRunner, LaneTaskSpec};
 use celox_sir_opt::parallel::Footprint;
@@ -341,6 +346,10 @@ fn compile_jobs<J: Sync, T: Send>(
     if workers <= 1 {
         return jobs.iter().map(&compile).collect();
     }
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: scoped lane-task compile threads in compile_jobs claim the next job index from this shared counter"
+    )]
     let next = AtomicUsize::new(0);
     let dispatcher = tracing::dispatcher::get_default(Clone::clone);
     let results = std::thread::scope(|scope| {

@@ -11,10 +11,18 @@ use crate::backend::SimBackend;
 #[derive(Default)]
 pub(crate) struct HeapRoots {
     /// Byte offsets of every handle slot in state memory.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: a cache of the state handle slots that Simulator::handle_slots fills on first use behind &self"
+    )]
     pub(super) handle_slots: std::sync::OnceLock<Arc<[(usize, celox_heap::HandleKind)]>>,
     /// Set while handles live outside state memory, where no collection
     /// may run: between the polls of concurrent testbench processes.
     pub(crate) safepoints_blocked: bool,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: a cache of the hardware-accessed state ranges that the testbench fills on first use behind &Simulator"
+    )]
     pub(crate) testbench_hardware_ranges: std::sync::OnceLock<Vec<std::ops::Range<usize>>>,
     pub(crate) process_roots: Vec<celox_heap::Root>,
 }

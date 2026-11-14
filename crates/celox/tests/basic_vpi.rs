@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_types,
+    reason = "test-only: VPI callbacks are C functions that record into statics"
+)]
 use std::{
     ffi::CStr,
     ptr,

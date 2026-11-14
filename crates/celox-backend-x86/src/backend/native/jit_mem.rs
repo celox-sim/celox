@@ -1,13 +1,19 @@
 //! JIT memory: load emitted machine code into executable memory and call it.
 
-use std::{
-    any::Any,
-    io::Write,
-    sync::{Arc, Mutex},
-};
+use std::{any::Any, io::Write, sync::Arc};
+
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: process-wide perf-map state; simulators built on different caller threads append to the same /tmp/perf-<pid>.map, which must be truncated exactly once"
+)]
+use std::sync::Mutex;
 
 use memmap2::{Mmap, MmapMut};
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: process-wide perf-map state; simulators built on different caller threads append to the same /tmp/perf-<pid>.map, which must be truncated exactly once"
+)]
 static PERF_MAP_INITIALIZED: Mutex<bool> = Mutex::new(false);
 
 #[cfg(target_arch = "x86_64")]

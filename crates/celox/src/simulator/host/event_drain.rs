@@ -4,10 +4,22 @@ use super::*;
 
 /// The reading side of the runtime-event buffer of a [`Simulator`].
 pub(crate) struct RuntimeEventStream {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the runtime-event read sequence shared by the simulation thread and a RuntimeEventDrain handle that may drain on another thread"
+    )]
     pub(super) read_seq: Arc<AtomicU64>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: a RuntimeEventDrain handle, possibly on another thread, marks itself active and the simulation thread checks it"
+    )]
     pub(super) drain_active: Arc<AtomicBool>,
     /// Set while the active drain paces the simulation
     /// ([`RuntimeEventDrain::set_backpressure`]).
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: a RuntimeEventDrain handle, possibly on another thread, turns pacing on and the simulation thread reads it before each step"
+    )]
     pub(super) backpressure: Arc<AtomicBool>,
     /// Whether a runtime-event site records heap handles
     /// (`sites_record_handles`).
@@ -19,6 +31,10 @@ pub(crate) struct RuntimeEventStream {
 }
 
 impl RuntimeEventStream {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: creates the read sequence and flags shared with a RuntimeEventDrain handle that may run on another thread"
+    )]
     pub(super) fn new(sites: &[RuntimeEventSite]) -> Self {
         Self {
             read_seq: Arc::new(AtomicU64::new(0)),

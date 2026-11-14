@@ -9,6 +9,10 @@ use std::collections::VecDeque;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::Hash;
+#[expect(
+    clippy::disallowed_types,
+    reason = "single-threaded: lazily filled per-block live-in/live-out cache behind &self; each LiveIntervals is built and queried by one register-allocation call"
+)]
 use std::sync::OnceLock;
 
 use super::FunctionAllocationFacts;
@@ -276,7 +280,15 @@ pub struct LiveIntervals<V, S = Vec<LiveSegment>> {
     intervals: BTreeMap<V, LiveInterval<V, S>>,
     // Most allocators only query intervals. Materialize the legacy block-set
     // views on demand, without making every analysis retain them twice.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: lazily filled per-block live-in/live-out cache behind &self; each LiveIntervals is built and queried by one register-allocation call"
+    )]
     live_in: Vec<OnceLock<BTreeSet<V>>>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: lazily filled per-block live-in/live-out cache behind &self; each LiveIntervals is built and queried by one register-allocation call"
+    )]
     live_out: Vec<OnceLock<BTreeSet<V>>>,
     block_exits: Vec<u64>,
 }
@@ -804,6 +816,10 @@ where
     Ok(compact)
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "single-threaded: lazily filled per-block live-in/live-out cache behind &self; each LiveIntervals is built and queried by one register-allocation call"
+)]
 fn analyze_intervals_with_storage<V, R, S>(
     facts: &FunctionAllocationFacts<V, R>,
 ) -> Result<LiveIntervals<V, S>, LiveIntervalError<V>>

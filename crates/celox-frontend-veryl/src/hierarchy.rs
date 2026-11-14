@@ -1,5 +1,10 @@
 use celox_design::ModuleId;
-use std::sync::atomic::{AtomicUsize, Ordering};
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: the scoped module-lowering worker threads claim module tasks from this shared counter"
+)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use veryl_analyzer::ir::{Component, Declaration, Module, TypeKind, VarKind};
 use veryl_analyzer::{symbol::SymbolKind, symbol_table};
 use veryl_parser::{
@@ -326,6 +331,10 @@ fn parse_external_hierarchy<'a>(
     // module lowering serial inside the wasm module.
     #[cfg(target_arch = "wasm32")]
     let worker_count = 1;
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the scoped module-lowering worker threads claim module tasks from this shared counter"
+    )]
     let next_task = AtomicUsize::new(0);
     let parsed_modules = if worker_count <= 1 {
         tasks

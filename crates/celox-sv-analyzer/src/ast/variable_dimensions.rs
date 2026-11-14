@@ -1,6 +1,10 @@
 //! A declaration's shape and its resolved semantic type. Mutable shape access
 //! invalidates the retained ID; declaration-preserving renaming keeps it.
 use super::*;
+#[expect(
+    clippy::disallowed_types,
+    reason = "single-threaded: a declaration's lazily bound semantic type, filled behind &self during one analysis; to be bound through &mut instead"
+)]
 use std::sync::Mutex;
 
 #[cfg(test)]
@@ -9,10 +13,18 @@ mod tests;
 #[derive(Debug)]
 pub(super) struct VariableDimensions {
     shape: VariableShape,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: a declaration's lazily bound semantic type, filled behind &self during one analysis; to be bound through &mut instead"
+    )]
     binding: Mutex<Option<semantic_types::RetainedType>>,
 }
 
 impl VariableDimensions {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: a declaration's lazily bound semantic type, filled behind &self during one analysis; to be bound through &mut instead"
+    )]
     pub(super) fn new(shape: VariableShape) -> Self {
         Self {
             shape,
@@ -131,6 +143,10 @@ impl VariableDimensions {
 }
 
 impl Clone for VariableDimensions {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: a declaration's lazily bound semantic type, filled behind &self during one analysis; to be bound through &mut instead"
+    )]
     fn clone(&self) -> Self {
         Self {
             shape: self.shape.clone(),
