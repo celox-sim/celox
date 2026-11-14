@@ -18,6 +18,8 @@ enum Items {
     ArrayValue {
         value: Expr,
         ty: typecheck::UnpackedArrayType,
+        /// The semantic type of the argument, where the caller binds it.
+        semantic: semantic_types::Binding,
     },
     List(Vec<Value>),
     Repeat(usize, Vec<Value>),
@@ -70,13 +72,21 @@ pub(super) fn from_array_parameter(
 ) -> Converted<BoundPattern> {
     let ty = array_compatibility::unpacked_array_type(&tree.functions, shape, dims)
         .ok_or_else(|| unsupported("array parameter argument type"))?;
+    let mut semantic = semantic_types::Binding::default();
+    if let Some(id) = shape.type_id(&mut session.types, &tree.functions, &dims.const_env) {
+        semantic.set(&session.types, id);
+    }
     let value = substitute_expr_idents(
         expression_binding::bind(root, tree, session, dims)?,
         &dims.array_parameter_values,
     );
     let value = frozen(tree, session, value, dims)?;
     Ok(BoundPattern {
-        items: Items::ArrayValue { value, ty },
+        items: Items::ArrayValue {
+            value,
+            ty,
+            semantic,
+        },
     })
 }
 
@@ -226,10 +236,26 @@ impl BoundPattern {
         dims: &PackedDimensions,
     ) -> Converted<Expr> {
         let functions = &tree.functions;
-        if let Items::ArrayValue { value, ty } = &self.items {
+        if let Items::ArrayValue {
+            value,
+            ty,
+            semantic,
+        } = &self.items
+        {
             let target = array_compatibility::unpacked_array_type(&tree.functions, shape, dims)
                 .ok_or_else(|| unsupported("unpacked array parameter supplied to a scalar"))?;
-            if !ty.is_assignment_compatible_with(&target) {
+            // The argument is assigned to the parameter (IEEE 1800-2023 7.6,
+            // 23.10): their types, the argument's as the caller bound it,
+            // decide, as the type system tells.
+            let target_type = shape.type_id(&mut session.types, functions, &dims.const_env);
+            let compatible = match (semantic.get(&session.types), target_type) {
+                (Some(actual), Some(target)) => {
+                    array_compatibility::incompatible_types(&session.types, actual, target)
+                        .is_none()
+                }
+                _ => ty.is_assignment_compatible_with(&target),
+            };
+            if !compatible {
                 return Err(AnalyzerError::IncompatibleUnpackedArray {
                     context: "module parameter override".into(),
                     actual: ty.to_string(),

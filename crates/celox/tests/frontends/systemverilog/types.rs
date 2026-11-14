@@ -674,3 +674,28 @@ sv_backends! {
         assert_eq!(u64::try_from(sim.get(two)).unwrap(), 2);
     }
 }
+
+#[test]
+fn array_parameter_overrides_take_equivalent_element_types() {
+    // IEEE 1800-2023 6.22.2, 7.6, 23.10: an unpacked array argument is
+    // assigned to the parameter, so its element type is equivalent to the
+    // parameter's. Two enumerations are not, though their typedefs share a
+    // name.
+    let source = "package pc; typedef enum logic [1:0] {X, Y} e_t; endpackage
+    module Child import pc::*; #(parameter e_t P [2] = '{X, X}) (output logic [1:0] o);
+        assign o = P[1];
+    endmodule
+    module Top(output logic [1:0] o);
+        typedef enum logic [1:0] {A, B} e_t;
+        localparam e_t L [2] = '{A, B};
+        Child #(.P(L)) child(.o(o));
+    endmodule";
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("override.sv"))], "Top")
+            .build_cranelift()
+    else {
+        panic!("an argument of another enumeration type was accepted");
+    };
+    let error = error.to_string();
+    assert!(error.contains("module parameter override"), "{error}");
+}
