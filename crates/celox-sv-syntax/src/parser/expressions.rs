@@ -684,7 +684,7 @@ impl Parser<'_> {
                                         ExprKind::Literal(token.text.clone())
                                     } else {
                                         ExprKind::Name(Name {
-                                            spelling: token.text.clone(),
+                                            spelling: system_alias(token).to_string(),
                                             origin: token.origin,
                                         })
                                     }
@@ -1781,5 +1781,15 @@ fn constant_dimension_operands(dimension: &Dimension, pending: &mut Vec<ExprId>)
         DimensionKind::Indexed { base, width, .. } => pending.extend([base, width]),
         DimensionKind::Queue(Some(value)) => pending.push(value),
         DimensionKind::Unsized | DimensionKind::Queue(None) | DimensionKind::Wildcard => {}
+    }
+}
+
+/// The name of the system function a vendor alias stands for: `$psprintf`,
+/// which simulators accept as `$sformatf` (IEEE 1800-2023 21.3.3), is taken
+/// as it (a documented deviation).
+fn system_alias(token: &crate::lexer::Token) -> &str {
+    match (token.kind, token.text.as_str()) {
+        (TokenKind::SystemIdentifier, "$psprintf") => "$sformatf",
+        (_, text) => text,
     }
 }
