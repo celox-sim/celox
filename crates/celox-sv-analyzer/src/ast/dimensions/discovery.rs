@@ -1926,6 +1926,8 @@ fn scope_inputs(input: &PackedDimensions) -> PackedDimensions {
         // name only the formats it binds (21.2.1.5).
         method_name: None,
         scope_name: None,
+        // A query discovers declarations; it reports no undeclared name.
+        declared_values: false,
         ..input.clone()
     };
     // In a class specialization, the tables of the scope around the class,

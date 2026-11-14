@@ -937,6 +937,12 @@ pub(in crate::ast) fn lower_subroutine(
                 .transpose()
         })
         .collect::<Result<Vec<_>, _>>()?;
+    // The body of a free subroutine of a package or of a compilation unit
+    // reads only names declared in it, its scope or what that imports
+    // (IEEE 1800-2023 6.6, 23.9), analyzed whether or not anything calls it.
+    // Its defaults, bound above, are left to the calls that use them
+    // (13.5.3).
+    builder.dims.declared_values = tree.declared_values && class.is_none();
     let mut lowered_params = Vec::new();
     let mut formal_types = HashMap::default();
     let defaults = this

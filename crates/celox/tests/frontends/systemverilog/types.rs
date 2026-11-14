@@ -479,6 +479,86 @@ fn enumerated_variables_take_only_values_of_their_type() {
 /// uses it (IEEE 1800-2023 3.12.1, 6.18); an unused unsupported declaration
 /// there does not stop the design.
 #[test]
+fn unused_unit_and_package_subroutines_reading_undeclared_names_are_errors() {
+    // Data are declared before they are used, and a read declares no
+    // implicit net (IEEE 1800-2023 6.6, 6.10): a subroutine of a package or
+    // of the compilation unit that reads an undeclared name is an error,
+    // whether or not anything calls it.
+    for subroutine in [
+        "function automatic int f(); return missing; endfunction",
+        "function void f(); int x; x = missing + 1; endfunction",
+        "task t(); int x; x = missing; endtask",
+        "package q; function int f(); return missing; endfunction endpackage",
+        "class C; static int s; endclass function automatic int f(); return C::missing; endfunction",
+    ] {
+        let source = format!("{subroutine}\nmodule Top(output int y); assign y = 1; endmodule\n");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("unit.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("{subroutine} is accepted"))
+        .to_string();
+        assert!(
+            error.contains("missing` is not declared"),
+            "{subroutine}: {error}"
+        );
+    }
+    // A name a package qualifies is one the package declares or exports
+    // (26.3, 26.6).
+    for subroutine in [
+        "package q; int x; endpackage function automatic int f(); return q::missing; endfunction",
+        "package q; int x; function automatic int f(); return q::missing; endfunction endpackage",
+    ] {
+        let source = format!("{subroutine}\nmodule Top(output int y); assign y = 1; endmodule\n");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("unit.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("{subroutine} is accepted"))
+        .to_string();
+        assert!(
+            error.contains("package `q` has no item `missing`"),
+            "{subroutine}: {error}"
+        );
+    }
+    // Every name such a subroutine reads that its body, its scope or an
+    // import declares (23.9).
+    let source = "package p;
+        typedef enum {A, B} e_t;
+        localparam int P = 2;
+        int pv = 3;
+        function automatic int g(int a); return a + P; endfunction
+    endpackage
+    import p::*;
+    localparam int U = 5;
+    int uv;
+    typedef enum {C0, C1} u_t;
+    class K; static int ks = 4; endclass
+    function automatic int f(int a);
+        int l = a;
+        static int s = 1;
+        for (int i = 0; i < 2; i++) l += i;
+        begin : blk int b = 1; l += b; end
+        f = l + U + uv + pv + P + C1 + B + g(a) + s + p::pv + p::P + K::ks;
+    endfunction
+    function int h(); return f(1); endfunction
+    task automatic t(output int o); o = U; endtask
+    module Top(output int y); initial y = h(); endmodule
+    ";
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("unit.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(1).unwrap();
+    let y = sim.signal("y");
+    assert_eq!(sim.get(y), num_bigint::BigUint::from(28u8));
+}
+
+#[test]
 fn unused_compilation_unit_typedefs_of_undeclared_names_are_errors() {
     for typedef in [
         "typedef some_other_type myalias;",

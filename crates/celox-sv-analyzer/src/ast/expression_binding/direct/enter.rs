@@ -589,6 +589,11 @@ fn enter_kind(
         }
         ExprKind::Member { .. } | ExprKind::Select { .. } => {
             let value = selected_value(id, native, tree, session, dimensions)?;
+            // A scoped name `C::x` that names no member of class `C` is left
+            // as the name it spells (8.23).
+            if let Expr::Ident(name) = &value {
+                expressions::check_declared(tree, name, dimensions)?;
+            }
             values.push(
                 if strings::fixed_array_element(tree, session, id, native, dimensions) {
                     strings::call(StringOp::FromHandle, vec![value])

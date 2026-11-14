@@ -402,6 +402,7 @@ fn specialize(
         package: Some(name.into()),
         timescale: timescales::for_tree(owner.timescales.clone(), &owner.tree)?,
         interface_instance: None,
+        declared_values: false,
     };
 
     let mut imports = owner.imports.clone();
