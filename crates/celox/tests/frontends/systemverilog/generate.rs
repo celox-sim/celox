@@ -201,6 +201,31 @@ fn generate_function_call_preserves_definition_site_bindings() {
     }
 }
 
+// Each iteration of a generate loop declares enumerations of its own (IEEE
+// 1800-2023 27.4), whose members are constants of that type there (6.19.3),
+// also those of an enumeration declared after another in the block.
+#[test]
+fn generate_loop_enumerations_type_their_members() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            for (genvar i = 0; i < 2; i++) begin : g
+                typedef enum logic [1:0] {A, B, C} e_t;
+                typedef enum logic [1:0] {D, E, F} f_t;
+                e_t e;
+                f_t f;
+                assign e = C;
+                assign f = E;
+                assign y[i*4 +: 4] = {f, e};
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("generate_enums.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    sim.modify(|_| {}).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x66u8.into());
+}
+
 // Members of an anonymous enum declared in a generate block are constants of
 // that block (IEEE 1800-2023 6.19, 27.5) also when the block declares no
 // typedef, read by always_ff, always_comb and continuous assignments; a
