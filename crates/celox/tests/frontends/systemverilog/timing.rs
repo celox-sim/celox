@@ -647,6 +647,38 @@ fn runtime_error_before_a_commit_leaves_no_held_writes() {
 }
 
 #[test]
+fn delays_named_by_parameters_precede_parenthesized_conditionals() {
+    // An unparenthesized delay value is an identifier, so in `#Tp (c) ? a :
+    // b` the parentheses begin the delayed conditional (IEEE 1800-2023
+    // A.2.2.3, 9.4.5), as in the OpenCores SPI clock generator.
+    let source = r#"
+        package timing; timeunit 1ns / 1ns; parameter Tp = 2; endpackage
+        module Top(output logic [7:0] q, output logic [7:0] r);
+            timeunit 1ns / 1ns;
+            parameter Tp = 2;
+            logic en = 1;
+            initial begin
+                q = 0; r = 0;
+                q <= #Tp (en && q == 0) ? 8'h11 : 8'h22;
+                r = #timing::Tp (!en) ? 8'h33 : 8'h44;
+            end
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("delay_name.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let (q, r) = (sim.signal("q"), sim.signal("r"));
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(q), BigUint::from(0u8));
+    sim.run_until(3).unwrap();
+    assert_eq!(sim.get(q), BigUint::from(0x11u8));
+    assert_eq!(sim.get(r), BigUint::from(0x44u8));
+}
+
+#[test]
 fn delayed_nonblocking_updates_survive_checkpoint_and_state_file() {
     let source = r#"
         module Top(output logic [7:0] q);
