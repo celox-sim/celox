@@ -5,7 +5,30 @@ use system_functions::{
     ContainerConcat, ContainerKind, ContainerLayout, ContainerOp, HandleProperty,
 };
 
+/// `base` with the unpacked dimensions `dims` of a declaration in
+/// `context`, bound to its semantic type there, where the declaration is
+/// (IEEE 1800-2023 6.18). Without dimensions it is `base` itself.
 pub(super) fn with_dimensions(
+    base: Type,
+    dims: &[Dimension],
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Converted<Type> {
+    if dims.is_empty() {
+        return Ok(base);
+    }
+    let mut ty = dimensioned(base, dims, tree, session, context)?;
+    semantic_types::bind_declared(
+        &mut session.types,
+        &tree.functions,
+        &mut ty,
+        &context.const_env,
+    );
+    Ok(ty)
+}
+
+fn dimensioned(
     base: Type,
     dims: &[Dimension],
     tree: &AnalysisContext<'_>,

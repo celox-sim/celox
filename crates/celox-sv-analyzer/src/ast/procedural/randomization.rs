@@ -56,6 +56,13 @@ fn lower_methods(
         .ok_or_else(|| unsupported("class randomization receiver"))?;
     let convert_type =
         |session: &mut Session, ty| crate::ast::ir_type(session, &tree.functions, ty, env);
+    // The types the methods declare are bound to their semantic types where
+    // they are made, as a declaration's are.
+    let bound = |session: &mut Session, ty| {
+        semantic_types::bound_builtin(&mut session.types, &tree.functions, ty)
+    };
+    let int = bound(session, int_type());
+    let string = bound(session, string_type());
     let mut result = Vec::new();
     for method in RANDOMIZATION_METHODS {
         if inline.is_some() && method != "randomize" {
@@ -86,6 +93,7 @@ fn lower_methods(
         // `get_randstate` has no argument but the object.
         let argument = match randomization_method_argument(method, || class.selection_type()) {
             Some((argument, argument_type)) => {
+                let argument_type = bound(builder.session, argument_type);
                 let argument = builder.declare(argument, argument_type.clone());
                 params.push(SubroutineParam {
                     name: argument.clone(),
@@ -133,7 +141,7 @@ fn lower_methods(
         let return_var = match method {
             // The state of the object's RNG (IEEE 1800-2023 18.13.4, 18.13.5).
             "get_randstate" => {
-                let state = builder.declare("get_randstate", string_type());
+                let state = builder.declare("get_randstate", string.clone());
                 body.push(Stmt::Assign {
                     lhs: LValue::Ident(state.clone()),
                     rhs: classes::object_call(
@@ -206,8 +214,8 @@ fn lower_methods(
                     let targets = ["pre_randomize", "post_randomize"]
                         .map(|hook| classes::hook_targets(&members, hook));
                     Some((
-                        builder.declare("$visits", int_type()),
-                        builder.declare("$visit", int_type()),
+                        builder.declare("$visits", int.clone()),
+                        builder.declare("$visit", int.clone()),
                         builder.declare("$visited", handle.clone()),
                         targets,
                     ))
@@ -429,7 +437,7 @@ fn lower_methods(
                                     },
                                 ));
                         }
-                        let success = builder.declare("$constraint_success", int_type());
+                        let success = builder.declare("$constraint_success", int.clone());
                         body.push(Stmt::Assign {
                             lhs: LValue::Ident(success.clone()),
                             rhs: classes::object_call(
@@ -581,7 +589,7 @@ fn lower_methods(
                         ))],
                         else_body: Vec::new(),
                     });
-                    let returned = builder.declare("randomize", int_type());
+                    let returned = builder.declare("randomize", int.clone());
                     body.push(Stmt::Assign {
                         lhs: LValue::Ident(returned.clone()),
                         rhs: Expr::Literal("32'sd1".into()),
@@ -675,9 +683,9 @@ fn lower_methods(
                     if prepare {
                         handle.clone()
                     } else if method == "get_randstate" {
-                        string_type()
+                        string.clone()
                     } else {
-                        int_type()
+                        int.clone()
                     },
                 )
             }),

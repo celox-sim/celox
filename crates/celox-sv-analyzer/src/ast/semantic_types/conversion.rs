@@ -50,6 +50,18 @@ pub(in crate::ast) fn bind_declared(
     }
 }
 
+/// `ty`, a type that names no constant or type of a scope, such as a
+/// built-in one or one with literal bounds, bound to its semantic type,
+/// which is the same in every scope.
+pub(in crate::ast) fn bound_builtin(
+    table: &mut TyTable,
+    functions: &const_functions::ConstantFunctions,
+    mut ty: Type,
+) -> Type {
+    bind_declared(table, functions, &mut ty, &ConstEnv::default());
+    ty
+}
+
 /// The semantic type of `ty` nested in a type being converted: its binding
 /// if it has one, unchecked, so that the check of [`of_type`] stays one
 /// level deep.

@@ -20,7 +20,7 @@ mod streams;
 mod tests;
 
 pub(super) use bindings::ConstantType;
-pub(super) use conversion::{bind_declared, of_shape, of_type};
+pub(super) use conversion::{bind_declared, bound_builtin, of_shape, of_type};
 
 /// The bounds of the packed dimensions of `ty`, outermost first, as the
 /// type table resolves them with the constants of `env` (an element's, for

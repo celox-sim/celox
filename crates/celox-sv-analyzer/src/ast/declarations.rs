@@ -563,11 +563,14 @@ pub(super) fn signals_from_body_item(
 
 fn substitute_signal_local_constants(signals: &mut [Signal], const_env: &ConstEnv) {
     for signal in signals {
-        for range in &mut signal.r#type.packed_ranges {
+        // The constants are those of the scope the type was bound in, so
+        // their values leave its semantic type as it is.
+        let shape = signal.r#type.shape_keeping_binding();
+        for range in &mut shape.packed_ranges {
             range.left = substitute_dimension_constants(range.left.clone(), const_env);
             range.right = substitute_dimension_constants(range.right.clone(), const_env);
         }
-        for range in &mut signal.r#type.unpacked_ranges {
+        for range in &mut shape.unpacked_ranges {
             range.left = substitute_dimension_constants(range.left.clone(), const_env);
             range.right = substitute_dimension_constants(range.right.clone(), const_env);
             range.size = range
