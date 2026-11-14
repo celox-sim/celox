@@ -1,0 +1,1 @@
+Restack onto #3733's 0b4f131f02 (newer master with #3810, #3894); fix soft dist (18.5.13): rejected with 'soft dist constraints are not supported' instead of dropping its items; renumber the object opcodes after UVM_GLOB_TO_RE
