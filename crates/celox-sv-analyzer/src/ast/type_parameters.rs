@@ -95,7 +95,7 @@ pub(super) fn resolve(
         }
     }
     let mut members = Vec::new();
-    for member in ty.members {
+    for member in std::mem::take(&mut ty.members) {
         let resolved = resolve(functions, member.r#type().clone(), env)?;
         members.push(member.with_type(|_| resolved));
     }

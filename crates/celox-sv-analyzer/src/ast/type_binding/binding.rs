@@ -346,7 +346,10 @@ fn bind_in_mode(
                             }
                             ty.enum_domain = enum_values(id, native, tree, session, context, &ty);
                             ty.packed_enum = !native.data_type(id).packed_dimensions.is_empty();
-                            ty.packed_ranges = ranges.into_iter().chain(ty.packed_ranges).collect();
+                            ty.packed_ranges = ranges
+                                .into_iter()
+                                .chain(std::mem::take(&mut ty.packed_ranges))
+                                .collect();
                             values.push(ty);
                         }
                     }
@@ -484,7 +487,7 @@ fn bind_in_mode(
                     validate_enum_initializers(id, native, tree, session, context, &ty)?;
                 }
                 let mut outer = ranges;
-                outer.extend(ty.packed_ranges);
+                outer.extend(std::mem::take(&mut ty.packed_ranges));
                 ty.packed_ranges = outer;
                 ty.is_enum = true;
                 ty.enum_domain = enum_values(id, native, tree, session, context, &ty);

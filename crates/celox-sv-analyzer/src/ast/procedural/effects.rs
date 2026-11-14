@@ -1390,7 +1390,7 @@ impl BodyBuilder<'_, '_, '_> {
             } else {
                 TypeKind::Bit
             });
-            ty.packed_ranges = vector_type(width, false).packed_ranges;
+            ty.packed_ranges = vector_type(width, false).packed_ranges.clone();
             return Ok(self.hidden(ty));
         }
         let semantic = expression_types::type_of(self.tree, self.session, id, native, &self.dims)?;

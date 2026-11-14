@@ -15,6 +15,24 @@ pub(in crate::ast) fn of_type(
     ty: &Type,
     env: &ConstEnv,
 ) -> Option<TyId> {
+    if let Some(id) = ty.binding.get(table) {
+        debug_assert_eq!(
+            Some(id),
+            convert(table, functions, ty, env),
+            "a type bound to a semantic type converts to another"
+        );
+        return Some(id);
+    }
+    convert(table, functions, ty, env)
+}
+
+/// The semantic type of `ty` as its fields tell (see [`of_type`]).
+fn convert(
+    table: &mut TyTable,
+    functions: &const_functions::ConstantFunctions,
+    ty: &Type,
+    env: &ConstEnv,
+) -> Option<TyId> {
     let parts = Parts {
         container: ty.container.as_deref(),
         class: ty.class.as_deref(),

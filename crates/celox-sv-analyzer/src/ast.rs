@@ -420,8 +420,19 @@ pub enum PortDirection {
     Unspecified,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A data type as binding resolves it: its [`TypeShape`], shared by its
+/// copies until one changes, and the semantic type it was bound to, which
+/// any change of the shape forgets. It is small, as types are held on
+/// deeply recursive binding frames.
+#[derive(Debug, Clone)]
 pub struct Type {
+    shape: Arc<TypeShape>,
+    binding: semantic_types::Binding,
+}
+
+/// What a [`Type`] is made of.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeShape {
     container: Option<Arc<ContainerType>>,
     is_enum: bool,
     /// Resolved members of a scalar enum; None if its domain is unsupported.
@@ -447,6 +458,45 @@ pub struct Type {
     /// The typedef that names an enumeration, struct or union type, and how
     /// `$typename` spells the type where its structure does not tell.
     spelling: type_names::Spelling,
+}
+
+impl PartialEq for Type {
+    fn eq(&self, other: &Self) -> bool {
+        self.shape == other.shape
+    }
+}
+
+impl Eq for Type {}
+
+impl std::hash::Hash for Type {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.shape.hash(state);
+    }
+}
+
+impl std::ops::Deref for Type {
+    type Target = TypeShape;
+
+    fn deref(&self) -> &TypeShape {
+        &self.shape
+    }
+}
+
+impl std::ops::DerefMut for Type {
+    /// A change of the shape may change its semantic type.
+    fn deref_mut(&mut self) -> &mut TypeShape {
+        self.binding.forget();
+        Arc::make_mut(&mut self.shape)
+    }
+}
+
+impl From<TypeShape> for Type {
+    fn from(shape: TypeShape) -> Self {
+        Self {
+            shape: Arc::new(shape),
+            binding: semantic_types::Binding::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
