@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794654992400,
+  "lastUpdate": 1794658257095,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -458388,6 +458388,97 @@ window.BENCHMARK_DATA = {
             "value": 3122863864,
             "range": "3076540928–3278521500",
             "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"revision\":\"8ff4b516ae271c5802ba82d5614a17815ffe9a70\",\"verylVersion\":\"0.22.0\",\"workload\":\"board-kernel-tiered-tb-v1\",\"kernel\":\"kernel-supervisor\",\"sourceSha256\":\"53e7319ad28d049d78d35c5eb1376d6bce3ca8bd84281c7ea2ef797ccaf72712\",\"frontend\":\"veryl\",\"testbenchLanguage\":\"veryl\",\"backend\":\"tiered\",\"cache\":\"cold\",\"stateModel\":\"two-state\",\"threads\":1,\"optimization\":\"default-tiered\",\"cycles\":512104,\"commits\":87837,\"runner\":\"veryl-tiered\",\"binaries\":{\"celox\":\"1fe151969bdb3cc9b30d949b479aeff7b7a66d35e70e5502bd0d6a16e7d5f58a\",\"veryl\":\"8c076dbfd6047fb76fdb536be46b894a1f2ed87a602fd96fc6a685257631e0b9\"},\"phase\":\"total\"}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "9b77af5124c181037c4dc56ba93531dbf3906931",
+          "message": "refactor(sv): bind types to their semantic types where they are declared (#3891)",
+          "timestamp": "2026-11-14T11:33:18Z",
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "url": "https://github.com/celox-sim/celox/commit/9b77af5124c181037c4dc56ba93531dbf3906931"
+        },
+        "date": 1794658257095,
+        "cpu": "Intel(R) Xeon(R) 6975P-C",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "collection-celox-tiered/collection_rica_kernel-tasks_527d3b614319_x64_total",
+            "unit": "ns",
+            "value": 2372629916,
+            "range": "2348897652–2577455186",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"revision\":\"8ff4b516ae271c5802ba82d5614a17815ffe9a70\",\"verylVersion\":\"0.22.0\",\"workload\":\"board-kernel-tiered-tb-v1\",\"kernel\":\"kernel-tasks\",\"sourceSha256\":\"aa192af3f6ddca5152df12b17da6b131d7fe6a5233b54bb8460c36d354273c1b\",\"frontend\":\"veryl\",\"testbenchLanguage\":\"veryl\",\"backend\":\"tiered\",\"cache\":\"cold\",\"stateModel\":\"two-state\",\"threads\":1,\"optimization\":\"default-tiered\",\"cycles\":94554,\"commits\":30632,\"runner\":\"celox-tiered\",\"binaries\":{\"celox\":\"90bd2ca1d097cd21af4b2c447984e8b6a12e5834fb24d1586c60ebc7817ab23b\",\"veryl\":\"61d6901bfa404d9ca1e5ac8749c621ba50671b40dff5c44408e868abb0b4fd99\"},\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_rica_kernel-tasks_527d3b614319_x64_total",
+            "unit": "ns",
+            "value": 1701642638,
+            "range": "1642309416–1702195381",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"revision\":\"8ff4b516ae271c5802ba82d5614a17815ffe9a70\",\"verylVersion\":\"0.22.0\",\"workload\":\"board-kernel-tiered-tb-v1\",\"kernel\":\"kernel-tasks\",\"sourceSha256\":\"aa192af3f6ddca5152df12b17da6b131d7fe6a5233b54bb8460c36d354273c1b\",\"frontend\":\"veryl\",\"testbenchLanguage\":\"veryl\",\"backend\":\"tiered\",\"cache\":\"cold\",\"stateModel\":\"two-state\",\"threads\":1,\"optimization\":\"default-tiered\",\"cycles\":94554,\"commits\":30632,\"runner\":\"veryl-tiered\",\"binaries\":{\"celox\":\"90bd2ca1d097cd21af4b2c447984e8b6a12e5834fb24d1586c60ebc7817ab23b\",\"veryl\":\"61d6901bfa404d9ca1e5ac8749c621ba50671b40dff5c44408e868abb0b4fd99\"},\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_rica_kernel-syscalls_7e3156100389_x64_total",
+            "unit": "ns",
+            "value": 2915615395,
+            "range": "2891528339–3024656829",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"revision\":\"8ff4b516ae271c5802ba82d5614a17815ffe9a70\",\"verylVersion\":\"0.22.0\",\"workload\":\"board-kernel-tiered-tb-v1\",\"kernel\":\"kernel-syscalls\",\"sourceSha256\":\"a857349a75f7911ac3cf4a0616524fabb8bb5619d8a5fe9c7b3b01d284265ce9\",\"frontend\":\"veryl\",\"testbenchLanguage\":\"veryl\",\"backend\":\"tiered\",\"cache\":\"cold\",\"stateModel\":\"two-state\",\"threads\":1,\"optimization\":\"default-tiered\",\"cycles\":135782,\"commits\":40719,\"runner\":\"celox-tiered\",\"binaries\":{\"celox\":\"90bd2ca1d097cd21af4b2c447984e8b6a12e5834fb24d1586c60ebc7817ab23b\",\"veryl\":\"61d6901bfa404d9ca1e5ac8749c621ba50671b40dff5c44408e868abb0b4fd99\"},\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_rica_kernel-syscalls_7e3156100389_x64_total",
+            "unit": "ns",
+            "value": 1718431930,
+            "range": "1680883336–1831948275",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"revision\":\"8ff4b516ae271c5802ba82d5614a17815ffe9a70\",\"verylVersion\":\"0.22.0\",\"workload\":\"board-kernel-tiered-tb-v1\",\"kernel\":\"kernel-syscalls\",\"sourceSha256\":\"a857349a75f7911ac3cf4a0616524fabb8bb5619d8a5fe9c7b3b01d284265ce9\",\"frontend\":\"veryl\",\"testbenchLanguage\":\"veryl\",\"backend\":\"tiered\",\"cache\":\"cold\",\"stateModel\":\"two-state\",\"threads\":1,\"optimization\":\"default-tiered\",\"cycles\":135782,\"commits\":40719,\"runner\":\"veryl-tiered\",\"binaries\":{\"celox\":\"90bd2ca1d097cd21af4b2c447984e8b6a12e5834fb24d1586c60ebc7817ab23b\",\"veryl\":\"61d6901bfa404d9ca1e5ac8749c621ba50671b40dff5c44408e868abb0b4fd99\"},\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_rica_kernel-atomics_27e53890b9de_x64_total",
+            "unit": "ns",
+            "value": 2941821386,
+            "range": "2915844442–3013653755",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"revision\":\"8ff4b516ae271c5802ba82d5614a17815ffe9a70\",\"verylVersion\":\"0.22.0\",\"workload\":\"board-kernel-tiered-tb-v1\",\"kernel\":\"kernel-atomics\",\"sourceSha256\":\"f20bbb9c24d7741124a097c79ca6d214cc2a0fca75cc266a3683b18204bd009e\",\"frontend\":\"veryl\",\"testbenchLanguage\":\"veryl\",\"backend\":\"tiered\",\"cache\":\"cold\",\"stateModel\":\"two-state\",\"threads\":1,\"optimization\":\"default-tiered\",\"cycles\":138876,\"commits\":41244,\"runner\":\"celox-tiered\",\"binaries\":{\"celox\":\"90bd2ca1d097cd21af4b2c447984e8b6a12e5834fb24d1586c60ebc7817ab23b\",\"veryl\":\"61d6901bfa404d9ca1e5ac8749c621ba50671b40dff5c44408e868abb0b4fd99\"},\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_rica_kernel-atomics_27e53890b9de_x64_total",
+            "unit": "ns",
+            "value": 1837509418,
+            "range": "1728739672–1894677891",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"revision\":\"8ff4b516ae271c5802ba82d5614a17815ffe9a70\",\"verylVersion\":\"0.22.0\",\"workload\":\"board-kernel-tiered-tb-v1\",\"kernel\":\"kernel-atomics\",\"sourceSha256\":\"f20bbb9c24d7741124a097c79ca6d214cc2a0fca75cc266a3683b18204bd009e\",\"frontend\":\"veryl\",\"testbenchLanguage\":\"veryl\",\"backend\":\"tiered\",\"cache\":\"cold\",\"stateModel\":\"two-state\",\"threads\":1,\"optimization\":\"default-tiered\",\"cycles\":138876,\"commits\":41244,\"runner\":\"veryl-tiered\",\"binaries\":{\"celox\":\"90bd2ca1d097cd21af4b2c447984e8b6a12e5834fb24d1586c60ebc7817ab23b\",\"veryl\":\"61d6901bfa404d9ca1e5ac8749c621ba50671b40dff5c44408e868abb0b4fd99\"},\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_rica_kernel-user_896d0266f736_x64_total",
+            "unit": "ns",
+            "value": 2997886803,
+            "range": "2994316558–3200511467",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"revision\":\"8ff4b516ae271c5802ba82d5614a17815ffe9a70\",\"verylVersion\":\"0.22.0\",\"workload\":\"board-kernel-tiered-tb-v1\",\"kernel\":\"kernel-user\",\"sourceSha256\":\"3fbb28c59e1bbaa8bca7e64f808e2178dda813f5c39f229096f9dd6740a01c56\",\"frontend\":\"veryl\",\"testbenchLanguage\":\"veryl\",\"backend\":\"tiered\",\"cache\":\"cold\",\"stateModel\":\"two-state\",\"threads\":1,\"optimization\":\"default-tiered\",\"cycles\":231188,\"commits\":66472,\"runner\":\"celox-tiered\",\"binaries\":{\"celox\":\"90bd2ca1d097cd21af4b2c447984e8b6a12e5834fb24d1586c60ebc7817ab23b\",\"veryl\":\"61d6901bfa404d9ca1e5ac8749c621ba50671b40dff5c44408e868abb0b4fd99\"},\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_rica_kernel-user_896d0266f736_x64_total",
+            "unit": "ns",
+            "value": 2034279058,
+            "range": "2008179746–2126151161",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"revision\":\"8ff4b516ae271c5802ba82d5614a17815ffe9a70\",\"verylVersion\":\"0.22.0\",\"workload\":\"board-kernel-tiered-tb-v1\",\"kernel\":\"kernel-user\",\"sourceSha256\":\"3fbb28c59e1bbaa8bca7e64f808e2178dda813f5c39f229096f9dd6740a01c56\",\"frontend\":\"veryl\",\"testbenchLanguage\":\"veryl\",\"backend\":\"tiered\",\"cache\":\"cold\",\"stateModel\":\"two-state\",\"threads\":1,\"optimization\":\"default-tiered\",\"cycles\":231188,\"commits\":66472,\"runner\":\"veryl-tiered\",\"binaries\":{\"celox\":\"90bd2ca1d097cd21af4b2c447984e8b6a12e5834fb24d1586c60ebc7817ab23b\",\"veryl\":\"61d6901bfa404d9ca1e5ac8749c621ba50671b40dff5c44408e868abb0b4fd99\"},\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_rica_kernel-supervisor_0e26720fbc3c_x64_total",
+            "unit": "ns",
+            "value": 4169065465,
+            "range": "4133239184–4227428622",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"revision\":\"8ff4b516ae271c5802ba82d5614a17815ffe9a70\",\"verylVersion\":\"0.22.0\",\"workload\":\"board-kernel-tiered-tb-v1\",\"kernel\":\"kernel-supervisor\",\"sourceSha256\":\"53e7319ad28d049d78d35c5eb1376d6bce3ca8bd84281c7ea2ef797ccaf72712\",\"frontend\":\"veryl\",\"testbenchLanguage\":\"veryl\",\"backend\":\"tiered\",\"cache\":\"cold\",\"stateModel\":\"two-state\",\"threads\":1,\"optimization\":\"default-tiered\",\"cycles\":512104,\"commits\":87837,\"runner\":\"celox-tiered\",\"binaries\":{\"celox\":\"90bd2ca1d097cd21af4b2c447984e8b6a12e5834fb24d1586c60ebc7817ab23b\",\"veryl\":\"61d6901bfa404d9ca1e5ac8749c621ba50671b40dff5c44408e868abb0b4fd99\"},\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_rica_kernel-supervisor_0e26720fbc3c_x64_total",
+            "unit": "ns",
+            "value": 2769366491,
+            "range": "2763280061–2842665497",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"revision\":\"8ff4b516ae271c5802ba82d5614a17815ffe9a70\",\"verylVersion\":\"0.22.0\",\"workload\":\"board-kernel-tiered-tb-v1\",\"kernel\":\"kernel-supervisor\",\"sourceSha256\":\"53e7319ad28d049d78d35c5eb1376d6bce3ca8bd84281c7ea2ef797ccaf72712\",\"frontend\":\"veryl\",\"testbenchLanguage\":\"veryl\",\"backend\":\"tiered\",\"cache\":\"cold\",\"stateModel\":\"two-state\",\"threads\":1,\"optimization\":\"default-tiered\",\"cycles\":512104,\"commits\":87837,\"runner\":\"veryl-tiered\",\"binaries\":{\"celox\":\"90bd2ca1d097cd21af4b2c447984e8b6a12e5834fb24d1586c60ebc7817ab23b\",\"veryl\":\"61d6901bfa404d9ca1e5ac8749c621ba50671b40dff5c44408e868abb0b4fd99\"},\"phase\":\"total\"}"
           }
         ]
       }
