@@ -128,6 +128,9 @@ pub enum ExprKind {
         items: Vec<PatternItem>,
     },
     Set(Vec<Dimension>),
+    /// `unique { items }` of a constraint (IEEE 1800-2023 18.5.4): its
+    /// members take pairwise different values.
+    Unique(Vec<Dimension>),
     /// `expression dist { items }` of a constraint (IEEE 1800-2023 18.5.3).
     Dist {
         expression: ExprId,
@@ -1692,6 +1695,12 @@ impl ExprKind {
                     .collect(),
             },
             ExprKind::Set(dimensions) => ExprKind::Set(
+                dimensions
+                    .iter()
+                    .map(|selected| map_dimension(selected, map))
+                    .collect(),
+            ),
+            ExprKind::Unique(dimensions) => ExprKind::Unique(
                 dimensions
                     .iter()
                     .map(|selected| map_dimension(selected, map))
