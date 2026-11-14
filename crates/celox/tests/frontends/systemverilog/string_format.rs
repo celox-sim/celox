@@ -326,6 +326,29 @@ fn check_rejected(declarations: &str, value: &str, expected: &str) {
     assert!(error.contains(expected), "{declarations} {value}: {error}");
 }
 
+// `$psprintf`, which simulators take as `$sformatf` (IEEE 1800-2023
+// 21.3.3), formats as it does, at run time and as a constant (a documented
+// deviation).
+#[test]
+fn psprintf_is_sformatf() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+            localparam string NAME = $psprintf("unit%0d", 3);
+            string s;
+            int n = 5;
+            initial begin
+                s = $psprintf("%0d-%s", n, "x");
+                $display("%s %s", s, NAME);
+            end
+        endmodule
+    "#;
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["5-x unit3"]
+    );
+}
+
 // `$sformatf` of constant expressions is a constant system function call
 // (IEEE 1800-2023 11.2.1): it gives parameters and parameter overrides
 // their values, here the instance names a design derives level by level.

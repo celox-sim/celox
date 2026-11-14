@@ -398,6 +398,9 @@ sequence 内のインスタンス、複数サイクル sequence への `disable 
   Rust の `SimulatorBuilder::legacy_empty_reductions(true)`
   （フロントエンドの `AnalysisOptions::legacy_empty_reductions`）では全ての
   空縮約がゼロを返します。そのようなツールとの互換用です。
+- **`$psprintf` は `$sformatf` です。** 多くのシミュレータや古い UVM コードが使う
+  ベンダー拡張のシステム関数 `$psprintf` を `$sformatf`（21.3.3）として受理します。
+  診断では `$sformatf` と表示します。
 - **UVM の DPI 関数は組み込みです。** UVM の `src/dpi` の C 名での import は
   ユーザー C 関数ではなく Celox の実装に束縛します。[DPI-C imports](#dpi-c-imports)を参照してください。
 
