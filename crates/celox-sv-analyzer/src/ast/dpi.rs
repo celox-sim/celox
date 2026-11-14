@@ -230,6 +230,21 @@ const BUILTINS: &[(&str, DpiBuiltin, Option<Kind>, &[(Kind, bool)])] = {
         ),
         ("uvm_glob_to_re", GlobToRe, Some(String), &[(String, false)]),
         ("uvm_dump_re_cache", DumpReCache, None, &[]),
+        // UVM 1.2's command-line regular expressions
+        // (`src/dpi/uvm_svcmd_dpi.c`).
+        (
+            "uvm_dpi_regcomp",
+            RegComp,
+            Some(Chandle),
+            &[(String, false)],
+        ),
+        (
+            "uvm_dpi_regexec",
+            ReExec,
+            Some(Int),
+            &[(Chandle, false), (String, false)],
+        ),
+        ("uvm_dpi_regfree", ReFree, None, &[(Chandle, false)]),
         ("uvm_dpi_get_tool_version_c", ToolVersion, Some(String), &[]),
         (
             "uvm_hdl_check_path",

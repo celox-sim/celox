@@ -394,3 +394,59 @@ fn uvm_12_regular_expressions() {
         check(build().build().unwrap(), four_state);
     }
 }
+
+/// UVM 1.2's command-line expressions (`src/dpi/uvm_svcmd_dpi.c`), declared
+/// as its imports: `uvm_dpi_regcomp` compiles the expression as it is
+/// written (no `/re/` brackets) or gives `null`; `uvm_dpi_regexec` gives `0`
+/// on a match and nonzero for no match or `null`; `uvm_dpi_regfree` frees,
+/// `null` too. The expression is UVM 1.2's component name check.
+const UVM_12_SVCMD_SOURCE: &str = r#"
+module Top(output int checks, output int failed);
+  import "DPI-C" function chandle uvm_dpi_regcomp(string regex);
+  import "DPI-C" function int uvm_dpi_regexec(chandle preg, string str);
+  import "DPI-C" function void uvm_dpi_regfree(chandle preg);
+  initial begin
+    static chandle names, slashed, bad;
+    checks = 0; failed = 0;
+    names = uvm_dpi_regcomp("^[][[:alnum:](){}_:-]([][[:alnum:](){} _:-]*[][[:alnum:](){}_:-])?$");
+    if (names != null) checks++; else failed |= 1;
+    if (uvm_dpi_regexec(names, "agent[0]") == 0 && uvm_dpi_regexec(names, "a b") == 0) checks++; else failed |= 2;
+    if (uvm_dpi_regexec(names, " env") != 0 && uvm_dpi_regexec(names, "a.b") != 0) checks++; else failed |= 4;
+    uvm_dpi_regfree(names);
+    slashed = uvm_dpi_regcomp("/a/");
+    if (uvm_dpi_regexec(slashed, "x/a/") == 0 && uvm_dpi_regexec(slashed, "a") != 0) checks++; else failed |= 8;
+    uvm_dpi_regfree(slashed);
+    bad = uvm_dpi_regcomp("(");
+    if (bad == null && uvm_dpi_regexec(bad, "x") != 0) checks++; else failed |= 16;
+    uvm_dpi_regfree(bad);
+  end
+endmodule
+"#;
+
+#[test]
+fn uvm_12_command_line_regular_expressions() {
+    fn check<B: celox::SimBackend>(mut sim: celox::Simulation<B>, four_state: bool) {
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("failed")),
+            0u8.into(),
+            "four_state={four_state}"
+        );
+        assert_eq!(
+            sim.get(sim.signal("checks")),
+            5u8.into(),
+            "four_state={four_state}"
+        );
+    }
+    for four_state in [false, true] {
+        let build = || {
+            celox::Simulation::from_sv_sources(
+                vec![(UVM_12_SVCMD_SOURCE, Path::new("uvm12_svcmd_dpi.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+        };
+        check(build().build_interpreter().unwrap(), four_state);
+        check(build().build().unwrap(), four_state);
+    }
+}

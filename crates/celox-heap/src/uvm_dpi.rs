@@ -330,7 +330,13 @@ impl Heap {
         } else {
             re
         };
-        let pattern = match pattern_text(&pattern) {
+        self.compile_handle(&pattern)
+    }
+
+    /// The handle of POSIX extended expression `pattern` compiled, or `0`
+    /// when it does not compile, with the reason in the buffer.
+    fn compile_handle(&mut self, pattern: &[u8]) -> u64 {
+        let pattern = match pattern_text(pattern) {
             Ok(pattern) => pattern,
             Err(message) => {
                 self.uvm.buffer = message.as_bytes().to_vec();
@@ -451,6 +457,14 @@ impl Heap {
                 let matched = self.re_exec(rexp, b as Handle);
                 self.re_free(rexp);
                 matched
+            }
+            // UVM 1.2's `uvm_dpi_regcomp` compiles `regex` as it is written
+            // (`regcomp(REG_NOSUB | REG_EXTENDED)`), without `/re/` brackets
+            // or a length limit; `uvm_dpi_regexec` and `uvm_dpi_regfree` are
+            // `uvm_re_exec` and `uvm_re_free`.
+            ops::UVM_DPI_REGCOMP => {
+                let regex = self.string(a as Handle).to_vec();
+                self.compile_handle(&regex)
             }
             // UVM 1.2 returns a glob longer than it takes as it is, after
             // its error, and translates any other one in full.
@@ -599,6 +613,46 @@ mod tests {
         assert_eq!(translate(&mut heap, &[b'a'; 2041]), vec![b'a'; 2041]);
         assert_eq!(translate(&mut heap, b""), b"");
         assert_eq!(translate(&mut heap, b"/"), b"");
+    }
+
+    #[test]
+    fn uvm_12_command_line_expressions_compile_as_written() {
+        let mut heap = Heap::new();
+        let string = |heap: &mut Heap, text: &[u8]| heap.intern(text) as u64;
+        let regcomp = |heap: &mut Heap, regex: u64| heap.call(ops::UVM_DPI_REGCOMP, regex, 0, 0);
+        let regexec =
+            |heap: &mut Heap, rexp: u64, text: u64| heap.call(ops::UVM_RE_EXEC, rexp, text, 0);
+        // UVM 1.2's component name check
+        // (`uvm_component_name_check_visitor::get_name_constraint`).
+        let names = string(
+            &mut heap,
+            b"^[][[:alnum:](){}_:-]([][[:alnum:](){} _:-]*[][[:alnum:](){}_:-])?$",
+        );
+        let rexp = regcomp(&mut heap, names);
+        assert_ne!(rexp, 0);
+        for good in [&b"env"[..], b"agent[0]", b"a b", b"x:y-z"] {
+            let good = string(&mut heap, good);
+            assert_eq!(regexec(&mut heap, rexp, good), 0);
+        }
+        for bad in [&b" env"[..], b"env ", b"a.b", b""] {
+            let bad = string(&mut heap, bad);
+            assert_eq!(regexec(&mut heap, rexp, bad), REG_NOMATCH);
+        }
+        heap.call(ops::UVM_RE_FREE, rexp, 0, 0);
+        // The expression is compiled as written: `/a/` matches the
+        // slashes, unlike `uvm_re_comp`'s `/re/`.
+        let slashed = string(&mut heap, b"/a/");
+        let rexp = regcomp(&mut heap, slashed);
+        let with = string(&mut heap, b"x/a/y");
+        let without = string(&mut heap, b"a");
+        assert_eq!(regexec(&mut heap, rexp, with), 0);
+        assert_eq!(regexec(&mut heap, rexp, without), REG_NOMATCH);
+        // An expression that does not compile gives `null`, which matches
+        // nothing and frees as nothing.
+        let bad = string(&mut heap, b"(");
+        assert_eq!(regcomp(&mut heap, bad), 0);
+        assert_eq!(regexec(&mut heap, 0, with), REG_NOMATCH);
+        heap.call(ops::UVM_RE_FREE, 0, 0, 0);
     }
 
     #[test]
