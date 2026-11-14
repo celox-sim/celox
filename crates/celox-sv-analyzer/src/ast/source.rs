@@ -144,14 +144,7 @@ impl Source {
         // A type argument of the module is a type of the analysis, whether
         // or not a source names it: interning it interns the types it is
         // made of, a chandle element of a container included.
-        for (_, ty) in bindings.types {
-            semantic_types::of_type(
-                &mut session.types,
-                &const_functions::ConstantFunctions::default(),
-                ty,
-                &ConstEnv::default(),
-            );
-        }
+        session.scope = Some(module_scope(module_name, &bindings, &mut session.types));
         let source = Self::from_indexed_syntax_module_in(
             syntax_tree,
             path,
@@ -334,5 +327,145 @@ impl Source {
             warnings::append(&mut warnings, module.constant_functions.warnings());
         }
         warnings
+    }
+}
+
+/// The elaborated scope of an analysis of module `module_name` with
+/// `bindings`, whose type arguments it interns in `table`: instances with
+/// the same parameter values and type arguments share one analysis, and so
+/// the types it declares (IEEE 1800-2023 6.22 makes them types of each
+/// instance; see the design notes). A type argument is told by its semantic
+/// type, which names its declaration, and the bindings by their names, in
+/// whatever order the instance gives them. Hierarchical signals do not
+/// change a type, so they do not tell scopes apart.
+fn module_scope(
+    module_name: &str,
+    bindings: &ModuleParameterBindings<'_>,
+    table: &mut semantic_types::TyTable,
+) -> Arc<str> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = fxhash::FxHasher::default();
+    let mut values = bindings.values.iter().collect::<Vec<_>>();
+    values.sort_by(|left, right| left.0.cmp(right.0));
+    values.hash(&mut hasher);
+    let mut types = bindings
+        .types
+        .iter()
+        .map(|(name, ty)| {
+            let id = semantic_types::of_type(
+                table,
+                &const_functions::ConstantFunctions::default(),
+                ty,
+                &ConstEnv::default(),
+            );
+            // A type without a semantic type yet is told by its fields.
+            (name, id.ok_or(ty))
+        })
+        .collect::<Vec<_>>();
+    types.sort_by(|left, right| left.0.cmp(right.0));
+    types.hash(&mut hasher);
+    let mut patterns = bindings.patterns.iter().collect::<Vec<_>>();
+    patterns.sort_by(|left, right| left.0.cmp(&right.0));
+    patterns.hash(&mut hasher);
+    format!("{module_name}#{:016x}", hasher.finish()).into()
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    /// The scope of an analysis of `Leaf` with `values` and `types`.
+    fn scope_with(
+        table: &mut semantic_types::TyTable,
+        values: &[(&str, &str)],
+        types: &[(String, Type)],
+    ) -> Arc<str> {
+        let values = values
+            .iter()
+            .map(|(name, value)| (name.to_string(), ConstExpr::Literal(value.to_string())))
+            .collect::<HashMap<_, _>>();
+        module_scope(
+            "Leaf",
+            &ModuleParameterBindings {
+                declarations_only: false,
+                values: &values,
+                types,
+                patterns: &[],
+                hierarchical: &[],
+            },
+            table,
+        )
+    }
+
+    /// `logic [1:0]` as an enumeration declared by typedef `name`.
+    fn enumeration(name: &str) -> Type {
+        let mut ty = Type::new(TypeKind::Logic);
+        ty.packed_ranges.push(PackedRange::new(
+            ConstExpr::Literal("1".into()),
+            ConstExpr::Literal("0".into()),
+        ));
+        ty.is_enum = true;
+        ty.spelling.name(
+            name.into(),
+            type_names::TypedefName::Scope(name.into()),
+            None,
+        );
+        ty
+    }
+
+    #[test]
+    fn analyses_with_the_same_parameter_values_share_a_scope() {
+        let table = &mut semantic_types::TyTable::default();
+        let mut scope = |values: &[(&str, &str)]| scope_with(table, values, &[]);
+        assert_eq!(
+            scope(&[("W", "2"), ("D", "1")]),
+            scope(&[("D", "1"), ("W", "2")])
+        );
+        assert_ne!(scope(&[("W", "2")]), scope(&[("W", "5")]));
+        assert_ne!(scope(&[]), scope(&[("W", "2")]));
+    }
+
+    #[test]
+    fn type_arguments_tell_scopes_apart_by_their_declarations() {
+        // Two enumerations of one structure are two types (6.22.1 d), so
+        // instances bound to them declare types of their own.
+        let table = &mut semantic_types::TyTable::default();
+        let first = enumeration("P::a_t");
+        let second = enumeration("P::b_t");
+        assert_eq!(first, second, "the fields do not tell them apart");
+        assert_ne!(
+            scope_with(table, &[], &[("T".into(), first.clone())]),
+            scope_with(table, &[], &[("T".into(), second)])
+        );
+        assert_eq!(
+            scope_with(table, &[], &[("T".into(), first.clone())]),
+            scope_with(table, &[], &[("T".into(), first)])
+        );
+    }
+
+    #[test]
+    fn named_type_arguments_share_a_scope_in_any_order() {
+        let table = &mut semantic_types::TyTable::default();
+        let (a, b) = (enumeration("P::a_t"), enumeration("P::b_t"));
+        assert_eq!(
+            scope_with(
+                table,
+                &[],
+                &[("S".into(), a.clone()), ("T".into(), b.clone())]
+            ),
+            scope_with(
+                table,
+                &[],
+                &[("T".into(), b.clone()), ("S".into(), a.clone())]
+            )
+        );
+        assert_ne!(
+            scope_with(
+                table,
+                &[],
+                &[("S".into(), a.clone()), ("T".into(), b.clone())]
+            ),
+            scope_with(table, &[], &[("S".into(), b), ("T".into(), a)])
+        );
     }
 }

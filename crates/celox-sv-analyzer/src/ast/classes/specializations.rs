@@ -1133,7 +1133,8 @@ fn finish_specialization(
                     let alias =
                         alias.map(|alias| instances::normalize_identifier(&alias.name.spelling));
                     if let Some(alias) = &alias {
-                        ty.name_declaration(|| {
+                        // A specialization names its typedefs apart already.
+                        ty.name_declaration(None, || {
                             (
                                 format!("{name}::{alias}"),
                                 type_names::TypedefName::Class {
