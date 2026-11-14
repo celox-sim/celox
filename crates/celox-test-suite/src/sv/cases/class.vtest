@@ -2801,6 +2801,81 @@ endmodule
   (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
   (expect_output "0\n"))
 
+; A 4-state rand property takes a 2-state value (18.3), with or without
+; constraints, also as an argument of randomize (18.11).
+(case randomize_four_state_properties
+  (source "four_state.sv" #"
+module Top(output int bad, output bit done);
+    class Item;
+        rand logic [31:0] addr;
+        rand logic [31:0] data;
+        rand integer n;
+        logic [3:0] state;
+        constraint align { addr[1:0] == 0; addr < 32'h0100_0000 - n * 4; n inside {[1:9]}; }
+        // A 4-state state value without X or Z bits is a value (18.3),
+        // also in a guard decided before solving (18.5.13).
+        constraint follow { data[3:0] == state; }
+        logic [3:0] mode = 0;
+        rand bit [7:0] picked;
+        constraint guard { if (mode == 0) picked == 1; else picked == 2; }
+    endclass
+    class Plain;
+        rand logic [7:0] a;
+        logic [7:0] b;
+    endclass
+    Item item;
+    Plain p;
+    initial begin
+        item = new;
+        p = new;
+        if (!$isunknown(item.addr) || !$isunknown(p.a)) bad++;
+        item.state = 4'h5;
+        for (int i = 0; i < 20; i++) begin
+            if (item.randomize() == 0) bad++;
+            if ($isunknown(item.addr) || $isunknown(item.data) || $isunknown(item.n)
+                || item.addr[1:0] != 0 || item.n < 1 || item.n > 9
+                || item.addr >= 32'h0100_0000 - item.n * 4 || item.data[3:0] != 4'h5
+                || item.picked != 1)
+                bad++;
+            if (p.randomize() == 0 || $isunknown(p.a) || !$isunknown(p.b)) bad++;
+            if (p.randomize(b) == 0 || $isunknown(p.b)) bad++;
+            p.b = 'x;
+        end
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (four_state)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
+; In 2-state simulation a 4-state property holds plain values (18.3).
+(case randomize_four_state_properties_two_state
+  (source "four_state_two_state.sv" #"
+module Top(output int bad, output bit done);
+    class Item;
+        rand logic [31:0] addr;
+        rand logic [7:0] data;
+        logic [3:0] state;
+        constraint c { addr[1:0] == 0; addr < 32'h100; data[3:0] == state; }
+    endclass
+    Item item;
+    initial begin
+        item = new;
+        item.state = 4'h9;
+        for (int i = 0; i < 20; i++)
+            if (item.randomize() == 0 || item.addr[1:0] != 0 || item.addr >= 32'h100
+                || item.data[3:0] != 4'h9 || item.state != 4'h9)
+                bad++;
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
 (case constrained_randomize_shifts
   (source "shifts.sv" #"
 module Top(output int bad, output bit done);

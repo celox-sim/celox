@@ -489,6 +489,10 @@ fn lower_methods(
                                 else_body: failure.clone(),
                             });
                             let mut argument_index = 0u32;
+                            // A 4-state value passes its known bits, and
+                            // after the values, the mask of its X and Z
+                            // bits (see `Program::unknown_inputs`).
+                            let mut result_masks = Vec::new();
                             for (index, call) in class.constraint_calls.iter().enumerate() {
                                 // A block a derived class overrides makes no
                                 // call; its value is never read.
@@ -526,6 +530,9 @@ fn lower_methods(
                                 }
                                 let mut ty = classes::unsigned_type(call.width as usize);
                                 ty.is_signed = call.signed;
+                                if call.four_state {
+                                    ty.kind = TypeKind::Logic;
+                                }
                                 let result =
                                     builder.declare(&format!("$constraint_call{index}"), ty);
                                 body.push(Stmt::Assign {
@@ -539,7 +546,17 @@ fn lower_methods(
                                     },
                                     nonblocking: false,
                                 });
-                                solve_inputs.push(Expr::Ident(result));
+                                if call.four_state {
+                                    let (value, mask) = classes::known_bits(Expr::Ident(result));
+                                    result_masks.push((solve_inputs.len(), mask));
+                                    solve_inputs.push(value);
+                                } else {
+                                    solve_inputs.push(Expr::Ident(result));
+                                }
+                            }
+                            for (result, mask) in result_masks {
+                                program.unknown_inputs.push((result, solve_inputs.len()));
+                                solve_inputs.push(mask);
                             }
                         }
                         let success = builder.declare("$constraint_success", int_type());

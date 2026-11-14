@@ -1522,34 +1522,73 @@ endmodule
 }
 
 #[test]
-fn randomizing_four_state_properties_is_rejected() {
-    for (body, want) in [
-        (
-            "class C; rand logic [3:0] x; endclass C c; initial begin c = new; void'(c.randomize()); end",
-            "randomization of a 4-state class property",
-        ),
-        (
-            "class C; rand bit [3:0] x; logic [3:0] y; constraint k { x < y; } endclass C c; initial begin c = new; void'(c.randomize()); end",
-            "4-state class property in a constraint",
-        ),
-        (
-            "class C; logic [3:0] x; rand bit [3:0] y; constraint k { y < 5; } endclass C c; initial begin c = new; void'(c.randomize(x)); end",
-            "randomization of a 4-state class property",
-        ),
+fn four_state_properties_randomize_to_two_state_values() {
+    // A 4-state rand property, static or not, and a 4-state property a call
+    // names take 2-state values (IEEE 1800-2023 18.3, 18.11); a constraint
+    // takes a 4-state instance property as state only while it has no X
+    // or Z bits, which a 2-state simulation never has.
+    let run = |body: &str, four_state: bool| {
+        let source = format!(
+            "module Top(output int ok); {body} initial begin c = new; ok = c.randomize(); end endmodule"
+        );
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        let ok = sim.signal("ok");
+        sim.run_until(0).map(|()| sim.get(ok))
+    };
+    for body in [
+        "class C; rand logic [3:0] x; constraint k { x > 3; } endclass C c;",
+        "class C; static rand logic [3:0] x; constraint k { x > 3; } endclass C c;",
+        "class C; rand bit [3:0] x; logic [3:0] y = 2; constraint k { x > y; } endclass C c;",
     ] {
-        let source = format!("module Top; {body} endmodule");
         for four_state in [false, true] {
-            let Err(error) =
-                Simulator::from_sv_sources(vec![(&source, Path::new("class.sv"))], "Top")
-                    .four_state(four_state)
-                    .build_cranelift()
-            else {
-                panic!("{want} is unsupported");
-            };
-            let error = error.to_string();
-            assert!(error.contains(want), "{error}");
+            assert_eq!(run(body, four_state).unwrap(), BigUint::from(1u8), "{body}");
         }
     }
+    // X and Z bits follow the 4-state semantics of each operation: only
+    // those that decide a constraint's or a guard's truth are an error
+    // (18.3). A guard that reads known bits decides what it guards, which
+    // then dereferences no null handle (18.5.13); a function's value
+    // carries the X and Z bits of its 4-state type, while a 2-state one has
+    // none (6.11).
+    let unknown = "class C; rand bit [3:0] x; logic [3:0] y; constraint k { x > y; } endclass C c;";
+    let guarded = "class D; rand bit [7:0] x; endclass class C; rand bit [3:0] x; rand D d; logic [7:0] y = 8'bxxxx_0001; constraint k { if (y[3:0] == 0) d.x == 1; x == y[3:0]; } endclass C c;";
+    let logic_call = "class C; rand bit x; logic [3:0] y; function logic f(); return y == 0; endfunction constraint k { x == f(); } endclass C c;";
+    let bit_call = "class C; rand bit x; logic [3:0] y; function bit f(); return y == 0; endfunction constraint k { x == f(); } endclass C c;";
+    for (body, error) in [
+        (unknown, true),
+        (guarded, false),
+        (logic_call, true),
+        (bit_call, false),
+    ] {
+        assert_eq!(run(body, false).unwrap(), BigUint::from(1u8), "{body}");
+        match run(body, true) {
+            Ok(ok) => assert!(!error && ok == BigUint::from(1u8), "{body}"),
+            Err(reason) => assert!(
+                error && reason.to_string().contains("X or Z bits"),
+                "{body}: {reason}"
+            ),
+        }
+    }
+    // A static 4-state property a constraint reads as state stays
+    // unsupported.
+    let source = "module Top; class C; rand bit [3:0] x; static logic [3:0] y = 2; constraint k { x > y; } endclass C c; initial begin c = new; void'(c.randomize()); end endmodule";
+    let Err(error) =
+        Simulator::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top").build_cranelift()
+    else {
+        panic!("a static 4-state property in a constraint is unsupported");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("4-state class property in a constraint"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -4856,8 +4895,9 @@ fn constraints_do_not_see_a_base_local_static_rand_property() {
 fn static_properties_are_admitted_as_instance_properties_are() {
     // The solver takes the static properties a constraint names, and the
     // static rand ones, as it takes instance properties of the type: a
-    // 4-state one in a constraint is rejected with the same diagnostic, and
-    // a rand `real` (IEEE 1800-2023 18.4) is built as an instance one is.
+    // 4-state rand one as an instance one, while a 4-state one it reads as
+    // state is rejected, and a rand `real` (IEEE 1800-2023 18.4) is built
+    // as an instance one is.
     let error = |members: &str| {
         let source = format!(
             "class C; rand int x; {members} endclass
@@ -4868,21 +4908,18 @@ fn static_properties_are_admitted_as_instance_properties_are() {
             .err()
             .map(|error| error.to_string())
     };
-    let instance = error("logic [3:0] l = 2; constraint c { x < l; }");
+    assert_eq!(error("logic [3:0] l = 2; constraint c { x < l; }"), None);
+    let shared = error("static logic [3:0] l = 2; constraint c { x < l; }");
     assert!(
-        instance
+        shared
             .as_deref()
             .is_some_and(|error| error.contains("4-state class property in a constraint")),
-        "{instance:?}"
-    );
-    assert_eq!(
-        error("static logic [3:0] l = 2; constraint c { x < l; }"),
-        instance
+        "{shared:?}"
     );
     assert_eq!(error("static rand real r;"), error("rand real r;"));
     // With a constraint the solver builds the program, which takes a rand
-    // `real` it does not name as it takes an instance one, and rejects a
-    // 4-state rand property as it rejects an instance one.
+    // `real` it does not name as it takes an instance one, and a 4-state
+    // rand property as an instance one.
     for (instance, shared) in [
         (
             "rand real r; constraint c { x > 0; }",
@@ -4897,10 +4934,7 @@ fn static_properties_are_admitted_as_instance_properties_are() {
         assert_eq!(error(shared), error(instance), "{shared}");
     }
     assert_eq!(error("static rand real r; constraint c { x > 0; }"), None);
-    assert!(
-        error("static rand logic [3:0] l;")
-            .is_some_and(|error| error.contains("randomization of a 4-state class property"))
-    );
+    assert_eq!(error("static rand logic [3:0] l;"), None);
 }
 
 #[test]

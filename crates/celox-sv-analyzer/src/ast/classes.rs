@@ -346,6 +346,9 @@ pub(super) struct ConstraintCall {
     pub arguments: Vec<(celox_heap::randomization::Expr, u32, bool)>,
     pub width: u32,
     pub signed: bool,
+    /// Whether the function's value is 4-state: its X and Z bits reach the
+    /// constraints with it (see `Program::unknown_inputs`).
+    pub four_state: bool,
     /// The constraint block that makes the call, by index among
     /// [`Class::constraints`], whose constraint mode its arguments follow.
     pub block: u32,
@@ -450,6 +453,30 @@ pub(super) struct Class {
     /// The constraint program of the class, or why it has none, built once
     /// for each class when it is laid out.
     pub program: Converted<celox_heap::randomization::Program>,
+}
+
+/// 4-state value `value` that constraints read as the solver takes it (see
+/// `Program::unknown_inputs`): its 2-state value, which has 0 for each X or
+/// Z bit, and the mask of those, as a known bit and its complement are 1
+/// once (IEEE 1800-2023 18.3).
+pub(in crate::ast) fn known_bits(value: Expr) -> (Expr, Expr) {
+    let two_state = |value: Expr| Expr::Unary {
+        op: UnaryOp::ToTwoState,
+        expr: Box::new(value),
+    };
+    let known = Expr::Binary {
+        left: Box::new(two_state(value.clone())),
+        op: BinaryOp::BitXor,
+        right: Box::new(two_state(Expr::Unary {
+            op: UnaryOp::BitNot,
+            expr: Box::new(value.clone()),
+        })),
+    };
+    let mask = Expr::Unary {
+        op: UnaryOp::BitNot,
+        expr: Box::new(known),
+    };
+    (two_state(value), mask)
 }
 
 /// An internal unsigned packed argument of a generated method.
@@ -599,9 +626,6 @@ impl Class {
                     "randc requires a 1-8 bit integer or an enum with at most 256 declared values",
                 ));
             }
-            if (property.rand || property.randc) && property.field.four_state {
-                return Err(unsupported("randomization of a 4-state class property"));
-            }
             if (property.rand || property.randc)
                 && ((property.field.handle.is_some()
                     && !property.rand_object()
@@ -616,9 +640,6 @@ impl Class {
         }
         // A static rand property is checked as an instance one.
         for slot in &self.static_slots {
-            if slot.field.four_state {
-                return Err(unsupported("randomization of a 4-state class property"));
-            }
             if slot.field.handle.is_some()
                 || slot.r#type.holds_chandle()
                 || (slot.r#type.is_enum && slot.r#type.enum_domain.is_none())

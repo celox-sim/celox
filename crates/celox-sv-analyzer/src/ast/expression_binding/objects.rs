@@ -1398,9 +1398,6 @@ pub(super) fn random_selection(
                                     "randomize argument `{name}`, a static property that is not rand"
                                 ))
                             })?;
-                        if class.static_slots[slot].field.four_state {
-                            return Err(unsupported("randomization of a 4-state class property"));
-                        }
                         bits[class.slot_bits[slot]] = '1';
                         continue;
                     }
@@ -1414,11 +1411,6 @@ pub(super) fn random_selection(
                 check_random_access(tree, session, dimensions, property)?;
                 if property.constant {
                     return Err(unsupported("randomize argument is a const property"));
-                }
-                // The constraint solver writes plain property bytes, not
-                // the planes of a 4-state value (IEEE 1800-2023 18.4).
-                if property.field.four_state {
-                    return Err(unsupported("randomization of a 4-state class property"));
                 }
                 // A selected array is random for the call, as a rand one
                 // (18.11).
@@ -1915,6 +1907,7 @@ fn scope_randomize_with(
             random: true,
             domain: Vec::new(),
             cyclic: false,
+            four_state: false,
         });
         variables.push(bind_value(id, native, tree, session, dimensions, None)?);
     }
