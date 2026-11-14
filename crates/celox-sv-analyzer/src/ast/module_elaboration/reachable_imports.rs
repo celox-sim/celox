@@ -112,14 +112,8 @@ fn lvalue_calls<'a>(lvalue: &'a LValue, calls: &mut Vec<&'a str>) {
             guards,
             ..
         } => {
-            match &**place {
-                ObjectPlace::Property { handle, .. } => expr_calls(handle, calls),
-                ObjectPlace::Element {
-                    container, index, ..
-                } => {
-                    expr_calls(container, calls);
-                    expr_calls(index, calls);
-                }
+            for expr in place.exprs() {
+                expr_calls(expr, calls);
             }
             lvalue_calls(select, calls);
             guards.iter().for_each(|guard| expr_calls(guard, calls));

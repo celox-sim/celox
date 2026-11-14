@@ -276,11 +276,10 @@ blocks in programs. Two region deviations are listed under
   and anonymous enumeration, struct, or union types as type arguments.
 - Properties that are `real`; fixed-size array properties that are
   `static` or `randc`, have more than one unpacked dimension or a
-  negative bound or one outside `int`, have members of their unpacked
-  structure elements written, are assigned or compared with an array other
-  than another such property or an array variable named by itself (or, for
-  elements of unpacked structures, such a variable at all), are sliced, or
-  are passed to a `ref`, `output` or `inout` formal; a constraint `foreach`
+  negative bound or one outside `int`, are assigned or compared with an
+  array other than another such property or an array variable named by
+  itself (or, for elements of unpacked structures, such a variable at all),
+  are sliced, or are passed to a `ref`, `output` or `inout` formal; a constraint `foreach`
   over a fixed-size array property whose range is not `[0:N-1]`; array
   locator methods on a fixed-size array property of unpacked structures
   whose range is not `[0:N-1]`; packed structure members of a property;

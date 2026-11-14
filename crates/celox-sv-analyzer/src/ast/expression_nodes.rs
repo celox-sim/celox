@@ -41,6 +41,7 @@ impl ObjectPlace {
         match self {
             ObjectPlace::Property { r#type, .. } => r#type,
             ObjectPlace::Element { element, .. } => element,
+            ObjectPlace::Member { r#type, .. } => r#type,
         }
     }
 
@@ -52,6 +53,18 @@ impl ObjectPlace {
             ObjectPlace::Element {
                 container, index, ..
             } => vec![container, index],
+            ObjectPlace::Member { outer, .. } => outer.exprs_mut(),
+        }
+    }
+
+    /// The expressions that select the place, read only.
+    pub(crate) fn exprs(&self) -> Vec<&Expr> {
+        match self {
+            ObjectPlace::Property { handle, .. } => vec![handle],
+            ObjectPlace::Element {
+                container, index, ..
+            } => vec![container, index],
+            ObjectPlace::Member { outer, .. } => outer.exprs(),
         }
     }
 
@@ -66,17 +79,70 @@ impl ObjectPlace {
                 container,
                 index,
                 layout,
+                record,
                 ..
-            } => containers::call(
-                crate::system_functions::ContainerOp::Get,
-                *layout,
-                vec![container.clone(), index.clone()],
-            ),
+            } => {
+                let get = containers::call(
+                    crate::system_functions::ContainerOp::Get,
+                    *layout,
+                    vec![container.clone(), index.clone()],
+                );
+                match record {
+                    Some(record) => classes::object_call(
+                        crate::system_functions::ObjectOp::Unbox(record.clone()),
+                        vec![get],
+                    ),
+                    None => get,
+                }
+            }
+            ObjectPlace::Member {
+                outer,
+                offset,
+                width,
+                r#type,
+                ..
+            } => Expr::Select {
+                expr: Box::new(outer.load()),
+                msb: ConstExpr::Literal((offset + width - 1).to_string()),
+                lsb: ConstExpr::Literal(offset.to_string()),
+                signed: r#type.is_signed,
+            },
         }
     }
 
     /// A write of `value` to the place.
     pub(crate) fn store(&self, value: Expr) -> Stmt {
+        if let ObjectPlace::Member {
+            outer,
+            offset,
+            width,
+            outer_width,
+            ..
+        } = self
+        {
+            // The value at `outer`, read again, with the member's bits
+            // replaced: its address has no side effects (see
+            // `save_destination`).
+            let bits = |msb: usize, lsb: usize| Expr::Select {
+                expr: Box::new(outer.load()),
+                msb: ConstExpr::Literal(msb.to_string()),
+                lsb: ConstExpr::Literal(lsb.to_string()),
+                signed: false,
+            };
+            let mut parts = Vec::new();
+            if offset + width < *outer_width {
+                parts.push(bits(outer_width - 1, offset + width));
+            }
+            parts.push(Expr::Resize {
+                expr: Box::new(value),
+                width: *width,
+                signed: false,
+            });
+            if *offset > 0 {
+                parts.push(bits(offset - 1, 0));
+            }
+            return outer.store(Expr::Concat(parts));
+        }
         Stmt::Eval(match self {
             ObjectPlace::Property { field, handle, .. } => classes::object_call(
                 crate::system_functions::ObjectOp::Store(*field),
@@ -86,12 +152,24 @@ impl ObjectPlace {
                 container,
                 index,
                 layout,
+                record,
                 ..
             } => containers::call(
                 crate::system_functions::ContainerOp::Set,
                 *layout,
-                vec![container.clone(), index.clone(), value],
+                vec![
+                    container.clone(),
+                    index.clone(),
+                    match record {
+                        Some(record) => classes::object_call(
+                            crate::system_functions::ObjectOp::Box(record.clone()),
+                            vec![value],
+                        ),
+                        None => value,
+                    },
+                ],
             ),
+            ObjectPlace::Member { .. } => unreachable!("stored above"),
         })
     }
 }
