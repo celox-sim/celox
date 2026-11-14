@@ -113,6 +113,10 @@ impl Ff<'_, '_> {
                 let glob = operand(self, 0)?;
                 Some(call(self, ops::UVM_GLOB_TO_RE, &[glob]))
             }
+            DpiBuiltin::RegComp => {
+                let regex = operand(self, 0)?;
+                Some(call(self, ops::UVM_DPI_REGCOMP, &[regex]))
+            }
             DpiBuiltin::DumpReCache => None,
             // `null`, 0 or "" (an empty string has handle 0): the facility
             // is unavailable; outputs keep their values, though their
