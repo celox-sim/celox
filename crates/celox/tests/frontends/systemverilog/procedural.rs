@@ -702,3 +702,42 @@ fn assignment_operators_check_each_part_of_a_concatenation() {
         assert!(error.contains(expected), "{body}: {error}");
     }
 }
+
+#[test]
+fn repeat_counts_are_evaluated_once() {
+    // IEEE 1800-2023 12.7.2: the count of a `repeat` is evaluated once,
+    // before the first iteration, a call or an increment in it included; a
+    // negative count runs the body zero times.
+    let source = "module Top;
+        int calls, n;
+        function automatic int count(int value); calls++; return value; endfunction
+        initial begin
+            int x = 0, y = 0, z = 0;
+            repeat (count(3)) x++;
+            repeat (count(-2)) y++;
+            repeat (count(32'd2)) y++;
+            n = 4;
+            repeat (n++) z++;
+            $display(\"%0d %0d %0d %0d %0d\", x, y, calls, z, n);
+        end
+    endmodule";
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("repeat.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        sim.run_until(0).unwrap();
+        let displayed = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8(message).unwrap())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(displayed, ["3 2 3 4 5"], "four_state={four_state}");
+    }
+}
