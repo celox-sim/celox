@@ -17,19 +17,25 @@ pub(super) fn package_warnings(
 
 /// The packages that declare variables, lowered as the modules of their one
 /// instance each, numbered from `first`.
-pub(super) fn lower_package_states(
+/// The state modules of the packages, with what lowering them reads of the
+/// analysis of the packages, so that the analysis can be released before
+/// they are lowered (see [`lower_package_states`]).
+pub(super) struct PackageStates {
+    /// Each state module in lowering order, with its time scale.
+    states: Vec<(
+        sv::ir::Module,
+        Result<celox_design::TimeScale, sv::AnalyzerError>,
+    )>,
+    global_precision: i32,
+}
+
+pub(super) fn package_states(
     packages: &sv::Packages,
     design: &sv::Design,
-    first: usize,
-    four_state: bool,
-    ff_parts: bool,
     properties: &BTreeSet<u32>,
     time_format: bool,
-    warnings: &mut Vec<crate::warning::PendingWarning>,
-    force_out_of_line: bool,
-    recursion_report: Option<&Path>,
     virtual_ids: &HashMap<String, Vec<u32>>,
-) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
+) -> PackageStates {
     let mut states = packages.specialized_state_modules(design);
     // Their initializers may reach interface instances through virtual
     // interfaces, as modules do.
@@ -72,20 +78,46 @@ pub(super) fn lower_package_states(
             width,
         ));
     }
-    let mut states = states.iter().collect::<Vec<_>>();
     states.sort_by(|left, right| left.name().cmp(right.name()));
+    PackageStates {
+        states: states
+            .into_iter()
+            .map(|module| {
+                let time_scale = scope_time_scale(packages, module.name());
+                (module, time_scale)
+            })
+            .collect(),
+        global_precision: packages.global_time_precision(),
+    }
+}
+
+pub(super) fn lower_package_states(
+    states: PackageStates,
+    first: usize,
+    four_state: bool,
+    ff_parts: bool,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+    force_out_of_line: bool,
+    recursion_report: Option<&Path>,
+) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
+    let PackageStates {
+        states,
+        global_precision,
+    } = states;
     states
         .into_iter()
         .enumerate()
-        .map(|(index, module)| {
+        .map(|(index, (module, time_scale))| {
+            let name = module.name().to_string();
             // The subroutines that the package's initializers call go out of
             // line as a module's do, recursive ones included.
             let mut calls = Some(recursion::CallGraph::new(
                 force_out_of_line,
                 recursion_report.is_some(),
             ));
+            let report_source = recursion_report.map(|_| module.clone());
             let lowered = lower_module(
-                std::borrow::Cow::Borrowed(module),
+                std::borrow::Cow::Owned(module),
                 four_state,
                 true,
                 ff_parts,
@@ -97,7 +129,9 @@ pub(super) fn lower_package_states(
                 SharedAlways::default(),
                 calls.as_mut(),
             );
-            if let (Some(graph), Some(path)) = (&calls, recursion_report) {
+            if let (Some(graph), Some(path), Some(module)) =
+                (&calls, recursion_report, &report_source)
+            {
                 recursion::append(module, graph, path);
             }
             let mut lowered = lowered?;
@@ -109,10 +143,10 @@ pub(super) fn lower_package_states(
                 );
             }
             lowered.sim_module.time_precision = Some(
-                celox_design::TimePrecision::try_from(packages.global_time_precision())
+                celox_design::TimePrecision::try_from(global_precision)
                     .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
             );
-            lowered.sim_module.time_scale = scope_time_scale(packages, module.name())?;
+            lowered.sim_module.time_scale = time_scale?;
             // Declaration initializers run before every `initial` block
             // (IEEE 1800-2023 6.8, 10.5): one that is not folded into an
             // initial value runs as a declaration initializer, and any other
@@ -124,11 +158,10 @@ pub(super) fn lower_package_states(
                 .any(|process| process.slots.kind != celox_design::ProcessKind::Initializer)
             {
                 return Err(sv::AnalyzerError::Unsupported(format!(
-                    "package variable initializer that is not constant in package `{}`",
-                    module.name()
+                    "package variable initializer that is not constant in package `{name}`"
                 )));
             }
-            Ok((module.name().to_string(), ModuleId(first + index), lowered))
+            Ok((name, ModuleId(first + index), lowered))
         })
         .collect()
 }
