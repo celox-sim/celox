@@ -12,7 +12,7 @@ use std::{
 };
 mod region;
 pub(crate) use region::RegionSource;
-use region::{BlockCode, BlockRequest};
+use region::{BlockCode, BlockRequest, RegionUses};
 
 use super::{
     SimulatorErrorCode,
@@ -164,6 +164,7 @@ impl HotspotRuntime {
             .name("celox-jit-hotspot".into())
             .spawn(move || {
                 let options = worker_options;
+                let mut uses = RegionUses::default();
                 while let Ok(request) = receiver.recv() {
                     if worker_cancel.is_cancelled() {
                         break;
@@ -199,7 +200,7 @@ impl HotspotRuntime {
                                 .map(EntryCode::Group)
                         }
                         Work::Block(block) => block
-                            .compile(&layout, &options, &worker_cancel)
+                            .compile(&layout, &options, &worker_cancel, &mut uses)
                             .map(EntryCode::Block),
                         Work::Group(units) => {
                             HotspotCode::compile(&units, &layout, &options, &worker_cancel)

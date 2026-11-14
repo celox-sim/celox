@@ -17,11 +17,6 @@ use celox_sir::{
     SIRValue,
 };
 use num_bigint::BigUint;
-#[expect(
-    clippy::disallowed_types,
-    reason = "single-threaded: lazily computed use counts and CFG analysis of a unit; only the hotspot worker thread fills and reads them, the simulation thread just holds the Arc"
-)]
-use std::sync::OnceLock;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -93,11 +88,21 @@ mod tests {
         };
         let code = BlockRequest::new(&source, BlockId(0))
             .unwrap()
-            .compile(sim.backend.layout(), &options, &CompileCancel::new())
+            .compile(
+                sim.backend.layout(),
+                &options,
+                &CompileCancel::new(),
+                &mut RegionUses::default(),
+            )
             .unwrap();
         let resumed = BlockRequest::new(&source, header)
             .unwrap()
-            .compile(sim.backend.layout(), &options, &CompileCancel::new())
+            .compile(
+                sim.backend.layout(),
+                &options,
+                &CompileCancel::new(),
+                &mut RegionUses::default(),
+            )
             .unwrap();
         let mut memory = vec![
             0;
@@ -175,7 +180,12 @@ mod tests {
             ..Default::default()
         };
         let code = request
-            .compile(&layout, &options, &CompileCancel::new())
+            .compile(
+                &layout,
+                &options,
+                &CompileCancel::new(),
+                &mut RegionUses::default(),
+            )
             .unwrap();
         assert_eq!(
             code.outputs.iter().map(|(reg, _)| *reg).collect::<Vec<_>>(),
@@ -251,17 +261,27 @@ const MAX_FRAME_BYTES: usize = 256 * 1024;
 
 pub(crate) struct RegionSource {
     unit: Arc<ExecutionUnit<RegionedAbsoluteAddr>>,
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: lazily computed use counts and CFG analysis of a unit; only the hotspot worker thread fills and reads them, the simulation thread just holds the Arc"
-    )]
-    uses: OnceLock<HashMap<RegisterId, usize>>,
     next_register: usize,
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: lazily computed use counts and CFG analysis of a unit; only the hotspot worker thread fills and reads them, the simulation thread just holds the Arc"
-    )]
-    analysis: OnceLock<Option<SourceAnalysis>>,
+}
+
+/// The use counts of the units the worker has compiled regions of, counted
+/// once per unit on the worker, which owns them.
+#[derive(Default)]
+pub(super) struct RegionUses {
+    /// By the address of the unit's source, which the entry keeps alive so
+    /// that no other source takes its address.
+    counts: HashMap<usize, (Arc<RegionSource>, HashMap<RegisterId, usize>)>,
+}
+
+impl RegionUses {
+    /// How many times each register of `source`'s unit is used.
+    fn of(&mut self, source: &Arc<RegionSource>) -> &HashMap<RegisterId, usize> {
+        &self
+            .counts
+            .entry(Arc::as_ptr(source) as usize)
+            .or_insert_with(|| (Arc::clone(source), source.uses()))
+            .1
+    }
 }
 
 struct SourceAnalysis {
@@ -270,10 +290,6 @@ struct SourceAnalysis {
 }
 
 impl RegionSource {
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: lazily computed use counts and CFG analysis of a unit; only the hotspot worker thread fills and reads them, the simulation thread just holds the Arc"
-    )]
     pub(crate) fn new(unit: Arc<ExecutionUnit<RegionedAbsoluteAddr>>) -> Self {
         let next_register = unit
             .register_map
@@ -284,75 +300,68 @@ impl RegionSource {
             .saturating_add(1);
         Self {
             unit,
-            uses: OnceLock::new(),
             next_register,
-            analysis: OnceLock::new(),
         }
     }
 
-    fn analysis(&self) -> Option<&SourceAnalysis> {
-        self.analysis
-            .get_or_init(|| {
-                let cfg = celox_sir::cfg::SirCfg::analyze_forward_structure(&self.unit).ok()?;
-                let mut definitions = HashMap::default();
-                for block in self.unit.blocks.values() {
-                    for reg in block.params.iter().copied().chain(
-                        block
-                            .instructions
-                            .iter()
-                            .filter_map(SIRInstruction::defined_register),
-                    ) {
-                        definitions
-                            .entry(reg)
-                            .and_modify(|def| *def = None)
-                            .or_insert(Some(block.id));
-                    }
-                }
-                Some(SourceAnalysis { cfg, definitions })
-            })
-            .as_ref()
+    fn analysis(&self) -> Option<SourceAnalysis> {
+        let cfg = celox_sir::cfg::SirCfg::analyze_forward_structure(&self.unit).ok()?;
+        let mut definitions = HashMap::default();
+        for block in self.unit.blocks.values() {
+            for reg in block.params.iter().copied().chain(
+                block
+                    .instructions
+                    .iter()
+                    .filter_map(SIRInstruction::defined_register),
+            ) {
+                definitions
+                    .entry(reg)
+                    .and_modify(|def| *def = None)
+                    .or_insert(Some(block.id));
+            }
+        }
+        Some(SourceAnalysis { cfg, definitions })
     }
 
-    fn uses(&self) -> &HashMap<RegisterId, usize> {
-        self.uses.get_or_init(|| {
-            let mut counts = HashMap::<RegisterId, usize>::default();
-            for block in self.unit.blocks.values() {
-                let mut count = |reg| {
-                    let total = counts.entry(reg).or_default();
-                    *total = total.saturating_add(1);
-                };
-                for inst in &block.instructions {
-                    inst.for_each_use(&mut count);
-                }
-                block.terminator.for_each_use(&mut count);
+    /// How many times each register is used, see [`RegionUses`].
+    fn uses(&self) -> HashMap<RegisterId, usize> {
+        let mut counts = HashMap::<RegisterId, usize>::default();
+        for block in self.unit.blocks.values() {
+            let mut count = |reg| {
+                let total = counts.entry(reg).or_default();
+                *total = total.saturating_add(1);
+            };
+            for inst in &block.instructions {
+                inst.for_each_use(&mut count);
             }
-            // A consumed use can run again after an exit into an inner loop,
-            // without reexecuting a definition in the preheader. Preserve
-            // cross-block values used in cyclic blocks, even when every
-            // static use was consumed by this region. Same-block SSA uses
-            // are preceded by their definition on each reentry.
-            if let Some(analysis) = self.analysis() {
-                for component in analysis.cfg.sccs.iter().filter(|scc| scc.cyclic) {
-                    for &index in &component.blocks {
-                        let id = analysis.cfg.block_ids[index];
-                        let block = &self.unit.blocks[&id];
-                        let mut retain = |reg| {
-                            if analysis.definitions.get(&reg) != Some(&Some(id)) {
-                                counts.insert(reg, usize::MAX);
-                            }
-                        };
-                        for inst in &block.instructions {
-                            inst.for_each_use(&mut retain);
+            block.terminator.for_each_use(&mut count);
+        }
+        // A consumed use can run again after an exit into an inner loop,
+        // without reexecuting a definition in the preheader. Preserve
+        // cross-block values used in cyclic blocks, even when every
+        // static use was consumed by this region. Same-block SSA uses
+        // are preceded by their definition on each reentry.
+        if let Some(analysis) = self.analysis() {
+            for component in analysis.cfg.sccs.iter().filter(|scc| scc.cyclic) {
+                for &index in &component.blocks {
+                    let id = analysis.cfg.block_ids[index];
+                    let block = &self.unit.blocks[&id];
+                    let mut retain = |reg| {
+                        if analysis.definitions.get(&reg) != Some(&Some(id)) {
+                            counts.insert(reg, usize::MAX);
                         }
-                        block.terminator.for_each_use(&mut retain);
+                    };
+                    for inst in &block.instructions {
+                        inst.for_each_use(&mut retain);
                     }
+                    block.terminator.for_each_use(&mut retain);
                 }
-            } else {
-                // Unknown control flow must only make the frame larger.
-                counts.values_mut().for_each(|count| *count = usize::MAX);
             }
-            counts
-        })
+        } else {
+            // Unknown control flow must only make the frame larger.
+            counts.values_mut().for_each(|count| *count = usize::MAX);
+        }
+        counts
     }
 }
 
@@ -474,12 +483,13 @@ impl BlockRequest {
         layout: &MemoryLayout,
         options: &SimulatorOptions,
         cancel: &CompileCancel,
+        uses: &mut RegionUses,
     ) -> Result<BlockCode, SimulatorError> {
         // Count original uses once on the worker. A definition is observable
         // after this region exactly when some use lies outside the consumed
         // bodies/jumps. In particular the final interpreted terminator counts
         // as outside, as do every cold edge and loop backedge.
-        let global = self.source.uses();
+        let global = uses.of(&self.source);
         self.outputs.retain(|reg| {
             let total = global.get(reg).copied().unwrap_or(0);
             total == usize::MAX || total > self.consumed.get(reg).copied().unwrap_or(0)
