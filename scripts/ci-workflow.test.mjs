@@ -667,22 +667,39 @@ test("sv-tests shards reuse one driver and together cover every case", () => {
   assert.match(shard, /needs: \[changes, sv-tests\]/);
   assert.match(shard, /if: \$\{\{ !cancelled\(\) && needs\.sv-tests\.result == 'success' \}\}/);
   assert.doesNotMatch(shard, /cargo |rust-cache/);
-  // Pull requests run one shard without the UVM cases; full runs shard all of them.
+  // Pull requests run one shard without the UVM cases; full runs shard the
+  // others and, one case at a time, the UVM cases.
   const [, light, full] = shard.match(
-    /shard: \$\{\{ fromJSON\(needs\.changes\.outputs\.full_validation == 'false' && '\[([\d, ]+)\]' \|\| '\[([\d, ]+)\]'\) \}\}/,
+    /include: \$\{\{ fromJSON\(needs\.changes\.outputs\.full_validation == 'false' && '(\[.*?\])' \|\| '(\[.*?\])'\) \}\}/,
   );
-  for (const list of [light, full]) {
-    const count = list.split(",").map(Number);
-    assert.deepEqual(count, count.map((_, index) => index + 1));
-  }
-  assert.ok(full.split(",").length > 1);
-  assert.match(shard, /--shard \$\{\{ matrix\.shard \}\}\/\$\{\{ strategy\.job-total \}\}\n/);
+  const sets = (matrix) => {
+    const bySet = {};
+    for (const { set, shard: index, of } of JSON.parse(matrix)) {
+      (bySet[set] ??= []).push([index, of]);
+    }
+    for (const entries of Object.values(bySet)) {
+      assert.deepEqual(
+        entries,
+        entries.map((_, index) => [index + 1, entries.length]),
+      );
+    }
+    return Object.fromEntries(Object.entries(bySet).map(([set, entries]) => [set, entries.length]));
+  };
+  assert.deepEqual(sets(light), { main: 1 });
+  const fullSets = sets(full);
+  assert.ok(fullSets.main > 1 && fullSets.library > 1);
+  assert.match(shard, /--shard \$\{\{ matrix\.shard \}\}\/\$\{\{ matrix\.of \}\}\n/);
+  assert.match(shard, /--jobs \$\{\{ matrix\.set == 'library' && 1 \|\| 4 \}\}\n/);
+  assert.match(shard, /--case-timeout \$\{\{ matrix\.set == 'library' && \d+ \|\| 78 \}\}\n/);
   assert.match(
     shard,
-    /\n\s+\$\{\{ needs\.changes\.outputs\.full_validation == 'false' && '--exclude-library-cases' \|\| '' \}\}\n/,
+    /\n\s+\$\{\{ matrix\.set == 'library' && '--only-library-cases' \|\| '--exclude-library-cases' \}\}\n/,
   );
   assert.match(shard, /fail-fast: false/);
-  assert.match(shard, /name: sv-tests-report-\$\{\{ matrix\.shard \}\}/);
+  assert.match(
+    shard,
+    /name: sv-tests-report-\$\{\{ matrix\.set == 'library' && 'uvm-' \|\| '' \}\}\$\{\{ matrix\.shard \}\}/,
+  );
 });
 
 test("sv-tests generates the pinned main corpus before running and retains its summary", () => {
