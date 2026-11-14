@@ -25,6 +25,10 @@ pub(crate) struct AnalysisContext<'a> {
     pub(super) timescale: Arc<timescales::QueryContext>,
     /// The hierarchical path of the interface instance being analyzed.
     pub(super) interface_instance: Option<Arc<str>>,
+    /// Whether the scope is a package or a compilation unit, whose free
+    /// subroutines see every value name they may read in their tables, so
+    /// that another one is undeclared (IEEE 1800-2023 6.6, 23.9).
+    pub(super) declared_values: bool,
 }
 
 impl<'a> AnalysisContext<'a> {
@@ -43,6 +47,7 @@ impl<'a> AnalysisContext<'a> {
             active_interfaces: Arc::default(),
             timescale: Arc::default(),
             interface_instance: None,
+            declared_values: false,
         }
     }
 
@@ -57,6 +62,7 @@ impl<'a> AnalysisContext<'a> {
             active_interfaces: Arc::default(),
             timescale: Arc::default(),
             interface_instance: None,
+            declared_values: false,
         }
     }
 
@@ -75,6 +81,7 @@ impl<'a> AnalysisContext<'a> {
             active_interfaces: self.active_interfaces.clone(),
             timescale: self.timescale.clone(),
             interface_instance: self.interface_instance.clone(),
+            declared_values: self.declared_values,
         }
     }
 

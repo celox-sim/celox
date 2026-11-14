@@ -563,6 +563,7 @@ fn analyze_package(
         active_interfaces: Arc::default(),
         timescale: Arc::default(),
         interface_instance: None,
+        declared_values: true,
     };
     let tree = &context;
     let timed = AnalysisContext {
