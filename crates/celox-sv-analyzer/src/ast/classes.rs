@@ -846,20 +846,15 @@ pub(super) fn declaration<'a>(
 ) -> Option<&'a celox_sv_syntax::ClassDeclaration> {
     let name = specializations::generic(session, name);
     let classes = &tree.declarations().classes;
-    let index = tree.spans().classes.get_or_init(|| ClassIndex {
-        path: tree.compilation_path().to_owned(),
-        by_name: classes
-            .iter()
-            .enumerate()
-            .rev()
-            .map(|(index, class)| (declared_name(tree, class), index))
-            .collect(),
-    });
-    // The names of `$unit` classes depend on the compilation path.
-    if index.path != tree.compilation_path() {
-        return classes
-            .iter()
-            .find(|class| declared_name(tree, class) == name);
+    let index = &tree.spans().classes;
+    // The name of a `$unit` class tells the compilation path too, which the
+    // file's index does not know.
+    if let Some(identifier) = unit_class_identifier(&name) {
+        return index
+            .unit
+            .get(identifier)
+            .map(|index| &classes[*index])
+            .filter(|class| declared_name(tree, class) == name);
     }
     index.by_name.get(&name).map(|index| &classes[*index])
 }
@@ -878,12 +873,37 @@ pub(super) fn declares_covergroup(
     })
 }
 
-/// The class declarations of a file by [`declared_name`], the first of each
-/// name, indexed once per file.
+/// The class declarations of a file, the first of each name, indexed when
+/// its arenas are built: by [`declared_name`], and those of the compilation
+/// unit, whose declared names tell the compilation path too, by their
+/// identifiers.
 #[derive(Debug)]
 pub(crate) struct ClassIndex {
-    path: std::path::PathBuf,
     by_name: HashMap<String, usize>,
+    unit: HashMap<String, usize>,
+}
+
+impl ClassIndex {
+    pub(crate) fn new(native: &celox_sv_syntax::Declarations) -> Self {
+        let mut by_name = HashMap::default();
+        let mut unit = HashMap::default();
+        for (index, class) in native.classes.iter().enumerate().rev() {
+            let name = instances::normalize_identifier(&class.name.spelling);
+            match enclosing_unit(native, class.tokens) {
+                Some(enclosing) if enclosing.kind == celox_sv_syntax::UnitKind::Package => {
+                    let package = instances::normalize_identifier(&enclosing.name.spelling);
+                    by_name.insert(format!("{package}::{name}"), index);
+                }
+                Some(_) => {
+                    by_name.insert(name, index);
+                }
+                None => {
+                    unit.insert(name, index);
+                }
+            }
+        }
+        Self { by_name, unit }
+    }
 }
 
 /// The name of class declaration `declaration`: qualified by the package

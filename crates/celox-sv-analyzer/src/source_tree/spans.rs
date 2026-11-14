@@ -137,15 +137,15 @@ pub(crate) struct Spans {
     pub net_declarations: Starts,
     pub subroutines: Starts,
     /// Facts the scope validation derives from the whole file.
-    pub validation: std::sync::OnceLock<crate::ast::validation::Facts>,
+    pub validation: crate::ast::validation::Facts,
     /// Facts the import analysis derives from the whole file.
-    pub imports: std::sync::OnceLock<crate::ast::imports::Facts>,
+    pub imports: crate::ast::imports::Facts,
     /// The class declarations by their declared names.
-    pub classes: std::sync::OnceLock<crate::ast::ClassIndex>,
+    pub classes: crate::ast::ClassIndex,
     /// The `f.v` names of subroutines' static variables the file may use
     /// (see `procedural::static_references`).
-    pub static_references: std::sync::OnceLock<Vec<crate::ast::StaticReference>>,
-    pub(super) text: std::sync::OnceLock<SourceText>,
+    pub static_references: Vec<crate::ast::StaticReference>,
+    pub(super) text: SourceText,
 }
 
 /// The expanded token text of a file, which identifies its source across
@@ -202,11 +202,13 @@ impl Spans {
             body_items: indexed(&mut native.body_items.iter().map(|node| node.tokens)),
             net_declarations: indexed(&mut native.net_declarations.iter().map(|node| node.tokens)),
             subroutines: indexed(&mut native.subroutines.iter().map(|node| node.tokens)),
-            validation: Default::default(),
-            imports: Default::default(),
-            classes: Default::default(),
-            static_references: Default::default(),
-            text: Default::default(),
+            // The facts are derived from the arenas when they are built, as
+            // every analysis of the file reads them.
+            validation: crate::ast::validation::Facts::new(native),
+            imports: crate::ast::imports::Facts::new(native),
+            classes: crate::ast::ClassIndex::new(native),
+            static_references: crate::ast::static_reference_candidates(native),
+            text: SourceText::new(native),
         }
     }
 }
