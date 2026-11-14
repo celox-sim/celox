@@ -296,10 +296,9 @@ blocks in programs. Two region deviations are listed under
 - Scope `randomize()` / `std::randomize()` (18.12): `with` constraints,
   enums with unsupported or unresolved domains, unpacked arrays, nets,
   constants, selects, and concatenation arguments.
-- `randsequence` (18.17): recursive productions, the production controls
-  `if`, `case` and `repeat`, `rand join`, `break` and `return` in code
-  blocks, productions with a result or formals, and code blocks after a
-  weight. A production of several rules picks one by their weights, 1
+- `randsequence` (18.17): recursive productions, `rand join`, `break` and
+  `return` in code blocks, productions with a result or formals, and code
+  blocks after a weight. A production of several rules picks one by their weights, 1
   unless given, from the thread's random number generator (18.14.2).
 - Class `randomize()`: 4-state and aggregate properties, static or not,
   `randc` static properties, constraints that name static properties in an
