@@ -107,15 +107,21 @@ impl ClassBase {
 }
 
 impl PackedDimensions {
-    /// Bind the completed declaration set without changing lexical map identity.
+    /// Bind each declaration of the completed set that is not bound yet.
+    /// A set whose declarations are all bound is left as it is, so its
+    /// tables stay shared with the contexts that copied them.
     pub(super) fn bind_types(
-        &self,
+        &mut self,
         table: &mut semantic_types::TyTable,
         functions: &const_functions::ConstantFunctions,
     ) {
-        for (_, shape) in self.iter() {
-            shape.bind_type(table, functions, &self.const_env);
+        if self.iter().all(|(_, shape)| shape.bound(table).is_some()) {
+            return;
         }
+        let env = self.const_env.clone();
+        self.variables.update(|shape| {
+            shape.bind_type(table, functions, &env);
+        });
     }
 
     pub(super) fn new(
