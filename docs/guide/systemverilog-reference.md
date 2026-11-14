@@ -417,6 +417,9 @@ concurrent assertions is unsupported:
 - Untimed blocking actions, report/severity tasks, and subroutine calls
   that do not suspend, perform a nonblocking assignment, start or control a
   process, or trigger an event.
+- Calls of functions without side effects (16.6) in operands, `disable iff`
+  conditions and match-item values. A function gets the sampled values of
+  its arguments, and its body reads current values (16.5.1).
 
 Unsupported in particular: procedural concurrent assertions,
 implicit/default clocking, named properties and sequences with formal
@@ -424,9 +427,13 @@ arguments or in other scopes, unbounded cycle-delay ranges (`##[1:$]`),
 repetition, the sequence operators `throughout` and `within`, `intersect`
 of sequences that never match at one tick, instances inside a
 multi-cycle sequence, `disable iff` with a multi-cycle sequence, `iff`
-with an operand over cycles or a named operand, user
-function calls in predicates and match-item values, and timed or
-nonblocking action statements.
+with an operand over cycles or a named operand, calls of functions that
+are not pure (an output, inout, ref or const ref formal of the called
+function; writes to non-local variables, kept static state,
+side-effecting system calls, or string or class method calls, directly
+or through the functions it calls), DPI import calls, function calls in
+the operand of `$past`/`$rose`/`$fell`/`$stable`/`$changed`, and timed
+or nonblocking action statements.
 
 ### System tasks, functions, and I/O
 

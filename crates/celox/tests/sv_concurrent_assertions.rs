@@ -491,3 +491,221 @@ fn sequences_with_several_ways_to_match_name_what_they_do_not_support() {
         assert!(error.contains(message), "{property}: {error}");
     }
 }
+
+/// The counts of `names` after the ten rising edges at 5, 15, ..., 95 of
+/// `source`, in two-state and four-state simulation alike.
+fn counts_after_ten_edges(source: &str, path: &'static str, names: &[&str]) -> Vec<u32> {
+    let mut results = Vec::new();
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new(path))], "Top")
+            .four_state(four_state)
+            .build()
+            .unwrap();
+        sim.run_until(100).unwrap();
+        let counts: Vec<u32> = names
+            .iter()
+            .map(|name| u32::try_from(sim.get(sim.signal(name))).unwrap())
+            .collect();
+        if four_state {
+            assert_eq!(counts, results, "four-state against two-state");
+        } else {
+            results = counts;
+        }
+    }
+    results
+}
+
+/// A function in a concurrent assertion operand is called on the sampled
+/// values of its arguments, and its body reads current values (IEEE
+/// 1800-2023 16.5.1): `cur()` reads `cnt` after the edge's update, `arg`
+/// gets `cnt` before it. Verilator 5.054 prints `f1=10 f2=0 f3=0`: it
+/// evaluates the body over sampled values too, which 16.5.1 does not.
+#[test]
+fn assertion_function_reads_current_values_on_sampled_arguments() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit clk;
+ logic [3:0] cnt = 0;
+ int f1, f2, f3;
+ always #5 clk = ~clk;
+ always_ff @(posedge clk) cnt <= cnt + 1;
+ function automatic bit cur(); return cnt[0]; endfunction
+ function automatic bit arg(input logic [3:0] v); return v[0]; endfunction
+ a1: assert property (@(posedge clk) cur() == !cnt[0]) else f1++;
+ a2: assert property (@(posedge clk) arg(cnt) == cnt[0]) else f2++;
+ a3: assert property (@(posedge clk) arg(cnt) == cur()) else f3++;
+endmodule"#;
+    assert_eq!(
+        counts_after_ten_edges(source, "assertion_function.sv", &["f1", "f2", "f3"]),
+        [0, 0, 10]
+    );
+}
+
+/// A function reading another instance's memory through a hierarchical
+/// name, in nested loops, after `|->` and `|=>`, in a cover and under
+/// `disable iff`. At 25 the memory's sampled value is still `8'h5a` and
+/// its current value 0, which the function reads (16.5.1). Verilator
+/// 5.054 prints `g1=1 g2=0 h=1 g3=1` (with `--coverage-user`, without which
+/// it runs no cover action): it reads the sampled memory.
+#[test]
+fn assertion_function_reads_hierarchical_memory_in_implications() {
+    let source = r#"`timescale 1ns/1ns
+module Sub(input logic clk, input logic clr);
+ logic [7:0] mem[4];
+ initial foreach (mem[i]) mem[i] = 8'h5a;
+ always_ff @(posedge clk) if (clr) foreach (mem[i]) mem[i] <= 0;
+endmodule
+module Top;
+ bit clk, rst;
+ logic [3:0] cnt = 0;
+ logic start, clr;
+ int g1, g2, g3, h;
+ always #5 clk = ~clk;
+ always_ff @(posedge clk) cnt <= cnt + 1;
+ assign start = cnt == 2;
+ assign clr = start;
+ Sub u(.clk(clk), .clr(clr));
+ function automatic logic all_zero();
+  for (int i = 0; i < 4; i++)
+   for (int j = 0; j < 8; j++)
+    if (u.mem[i][j]) return 1'b0;
+  return 1'b1;
+ endfunction
+ b1: assert property (@(posedge clk) $rose(start) |-> all_zero()) else g1++;
+ b2: assert property (@(posedge clk) $rose(start) |=> all_zero()) else g2++;
+ c1: cover property (@(posedge clk) $rose(start) ##1 all_zero()) h++;
+ b3: assert property (@(posedge clk) disable iff (rst) $rose(start) |-> all_zero()) else g3++;
+endmodule"#;
+    assert_eq!(
+        counts_after_ten_edges(
+            source,
+            "assertion_hierarchical.sv",
+            &["g1", "g2", "h", "g3"]
+        ),
+        [0, 0, 1, 0]
+    );
+}
+
+/// Purity is checked through the functions a function calls: static `f`
+/// and `cur`, whose locals every call assigns before reading them, keep no
+/// state (16.6) and call the pure `g`; `lsb` is an imported package
+/// function. Verilator 5.054 prints `f1=10 f2=0 f3=0 f4=0`, reading `cnt`
+/// sampled in `cur` as in the test above.
+#[test]
+fn assertion_function_calls_pure_functions() {
+    let source = r#"`timescale 1ns/1ns
+package pk;
+ function automatic bit lsb(input logic [3:0] v); return v[0]; endfunction
+endpackage
+module Top;
+ import pk::*;
+ bit clk;
+ logic [3:0] cnt = 0;
+ int f1, f2, f3, f4;
+ always #5 clk = ~clk;
+ always_ff @(posedge clk) cnt <= cnt + 1;
+ function automatic bit g(input logic [3:0] v); return v[0]; endfunction
+ function bit f(input logic [3:0] v);
+  logic [3:0] t;
+  t = v;
+  return g(t);
+ endfunction
+ function bit cur(); bit r; r = g(cnt); return r; endfunction
+ a1: assert property (@(posedge clk) cur() == !cnt[0]) else f1++;
+ a2: assert property (@(posedge clk) f(cnt) == cnt[0]) else f2++;
+ a3: assert property (@(posedge clk) f(cnt) == cur()) else f3++;
+ a4: assert property (@(posedge clk) lsb(cnt) == cnt[0]) else f4++;
+endmodule"#;
+    assert_eq!(
+        counts_after_ten_edges(source, "assertion_pure_calls.sv", &["f1", "f2", "f3", "f4"]),
+        [0, 0, 10, 0]
+    );
+}
+
+/// Functions in concurrent assertion operands that 16.6 forbids, or that
+/// Celox does not support there, are rejected by name.
+#[test]
+fn assertion_functions_that_are_not_pure_are_rejected() {
+    for (declarations, operand, expected) in [
+        (
+            "int k; function automatic bit o(output int x); x = 1; return 1; endfunction",
+            "o(k)",
+            "call `o` with an output, inout or ref argument in a concurrent assertion operand",
+        ),
+        (
+            "int k; function automatic bit c(const ref int x); return x[0]; endfunction",
+            "c(k)",
+            "call `c` with an output, inout or ref argument in a concurrent assertion operand",
+        ),
+        (
+            "int n; function automatic bit s(); n++; return 1; endfunction",
+            "s()",
+            "function `s` in a concurrent assertion operand has a side effect (writes `n`)",
+        ),
+        (
+            "function automatic bit d(); $display(\"d\"); return 1; endfunction",
+            "d()",
+            "function `d` in a concurrent assertion operand has a side effect (`$display`)",
+        ),
+        (
+            "int n; function automatic bit s(); n++; return 1; endfunction
+             function automatic bit w(); return s(); endfunction",
+            "w()",
+            "function `w` in a concurrent assertion operand has a side effect (through `s`)",
+        ),
+        (
+            "function bit p(); int k; k++; return k[0]; endfunction",
+            "p()",
+            "function `p` in a concurrent assertion operand keeps state between calls (16.6)",
+        ),
+        (
+            "import \"DPI-C\" pure function int dp(input int x);",
+            "dp(1) == 1",
+            "call of DPI import `dp` in a concurrent assertion operand",
+        ),
+        (
+            "bit a; function automatic bit cur(); return a; endfunction",
+            "$rose(cur())",
+            "`$rose` of an operand that calls a function",
+        ),
+    ] {
+        let source = format!(
+            "`timescale 1ns/1ns\nmodule Top;\n bit clk;\n {declarations}\n always #5 clk = ~clk;\n assert property (@(posedge clk) {operand});\nendmodule"
+        );
+        let error = match celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("impure_assertion_function.sv"))],
+            "Top",
+        )
+        .build()
+        {
+            Ok(_) => panic!("{operand} must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains(expected), "{operand}: {error}");
+    }
+    // A package function, called by the name its import gives it.
+    let source = "`timescale 1ns/1ns
+package pk;
+ int n;
+ function automatic bit s(); n++; return 1; endfunction
+endpackage
+module Top;
+ import pk::*;
+ bit clk;
+ always #5 clk = ~clk;
+ assert property (@(posedge clk) s());
+endmodule";
+    let error = match celox::Simulation::from_sv_sources(
+        vec![(source, Path::new("impure_package_function.sv"))],
+        "Top",
+    )
+    .build()
+    {
+        Ok(_) => panic!("the package function must be rejected"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("in a concurrent assertion operand has a side effect (writes `"),
+        "{error}"
+    );
+}

@@ -17,23 +17,50 @@ impl BodyBuilder<'_, '_, '_> {
         self.native_chandle_value(*condition)
             .map(procedural_truth_condition)
     }
-}
 
-/// Until property calls have their own sampled formal bindings, reject
-/// calls that could read/write live state behind an operand's sampled copy.
-pub(super) fn concurrent_operand(expr: &Expr) -> Result<(), AnalyzerError> {
-    let mut unsupported_call = None;
-    const_functions::visit_expr_calls(expr, &mut |callee, _| {
-        if callee.is_effectful() {
-            unsupported_call = Some(callee.to_string());
+    /// Check the calls of a concurrent assertion operand. A function is
+    /// called on the sampled values of its arguments and its body reads
+    /// current values (IEEE 1800-2023 16.5.1), so it must have no output,
+    /// inout or ref formal, keep no state and have no side effects (16.6).
+    /// The formals are checked here; the functions are recorded for
+    /// `timed_tasks::classify`, which checks their bodies once every
+    /// subroutine of the scope is known. A `const ref` formal, which 16.6
+    /// allows, would refer to the operand's hidden sampled copy, and is
+    /// not supported. Other calls with an effect, such as `$urandom` or a
+    /// class method, are rejected.
+    pub(super) fn concurrent_operand(&mut self, expr: &Expr) -> Result<(), AnalyzerError> {
+        let directions = self.state.subroutine_directions;
+        let callees = &mut self.state.assertion_callees;
+        let mut error = None;
+        const_functions::visit_expr_calls(expr, &mut |callee, _| {
+            if error.is_some() {
+                return;
+            }
+            match callee {
+                Callee::Subroutine(name) => {
+                    if directions.get(name).is_some_and(|directions| {
+                        directions
+                            .iter()
+                            .any(|direction| *direction != crate::procedural::ParamDirection::Input)
+                    }) {
+                        error = Some(format!(
+                            "call `{name}` with an output, inout or ref argument in a concurrent assertion operand"
+                        ));
+                    } else {
+                        callees.push(name.clone());
+                    }
+                }
+                callee if callee.is_effectful() => {
+                    error = Some(format!("call `{callee}` in concurrent assertion operand"));
+                }
+                _ => {}
+            }
+        });
+        match error {
+            Some(message) => Err(unsupported(message)),
+            None => Ok(()),
         }
-    });
-    if let Some(name) = unsupported_call {
-        return Err(unsupported(format!(
-            "call `{name}` in concurrent assertion operand"
-        )));
     }
-    Ok(())
 }
 
 /// Disable conditions do not infer the assertion clock (16.9.3). Only
@@ -695,7 +722,7 @@ impl BodyBuilder<'_, '_, '_> {
                 continue;
             }
             let condition = self.native_value(*expression)?;
-            concurrent_operand(&condition)?;
+            self.concurrent_operand(&condition)?;
             registers.push(SequenceRegister {
                 now: procedural_truth_condition(sampled(condition)),
                 ty: bit.clone(),
@@ -801,6 +828,7 @@ mod tests {
             "module Top(input bit clk, b, input bit [7:0] bus, input int i); \
              int g; function automatic int reads_g(); return g; endfunction \
              function automatic int twice(int v); return v * 2; endfunction \
+             function automatic int bump(); g++; return g; endfunction \
              function automatic void note(int v); endfunction bit [7:0] mem [0:3]; \
              function automatic void fill(output int v); v = 1; endfunction \
              property p; {locals} @(posedge clk) {property}; endproperty \
@@ -813,8 +841,9 @@ mod tests {
 
     /// Every value of a sequence is evaluated over the sampled values of
     /// the tick that decides it and kept for later ticks, so sampled-value
-    /// functions, `$time`, other system functions and variable selects in any
-    /// step are supported (IEEE 1800-2023 16.6, 16.10).
+    /// functions, `$time`, other system functions, variable selects and
+    /// calls of functions without side effects in any step are supported
+    /// (IEEE 1800-2023 16.6, 16.10).
     #[test]
     fn values_of_earlier_steps_are_kept_from_their_ticks() {
         for (locals, property) in [
@@ -824,6 +853,8 @@ mod tests {
             ("int x;", "(b, x = $countones(bus)) ##1 x == i"),
             ("", "b ##1 bus[i] == $countones(bus)"),
             ("", "(b, $readmemh(\"m.hex\", mem)) ##1 b"),
+            ("int x;", "(b, x = twice(i)) ##1 x == i"),
+            ("", "(b, note(reads_g())) ##1 b"),
         ] {
             if let Err(error) = analyze(locals, property) {
                 panic!("{property}: {error}");
@@ -833,8 +864,8 @@ mod tests {
 
     /// What a sequence cannot keep is rejected: a select of a local as an
     /// assignment target, a sampled-value function of a local, a select
-    /// bound reading a local assigned in its own step, and a user function,
-    /// whose reads of module variables would not be sampled.
+    /// bound reading a local assigned in its own step, and a function with a
+    /// side effect in a local's value or a call's argument (16.6).
     #[test]
     fn values_a_sequence_cannot_keep_are_rejected() {
         for (locals, property, expected) in [
@@ -853,8 +884,16 @@ mod tests {
                 "(b, x = i, x = bus[x]) ##1 x",
                 "select bound reading a local",
             ),
-            ("int x;", "(b, x = twice(i)) ##1 x == i", "call `twice`"),
-            ("", "(b, note(reads_g())) ##1 b", "call `reads_g`"),
+            (
+                "int x;",
+                "(b, x = bump()) ##1 x == i",
+                "function `bump` in a concurrent assertion operand has a side effect (writes `g`)",
+            ),
+            (
+                "",
+                "(b, note(bump())) ##1 b",
+                "function `bump` in a concurrent assertion operand has a side effect (writes `g`)",
+            ),
             (
                 "int x;",
                 "(b, x = i, fill(x)) ##1 b",

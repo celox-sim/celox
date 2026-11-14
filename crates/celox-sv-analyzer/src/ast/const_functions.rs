@@ -10,6 +10,7 @@
 mod value;
 use value::Value;
 mod runtime;
+pub(in crate::ast) use runtime::persistent_state_is_unobservable;
 pub use runtime::{RuntimeConstantFunctions, RuntimeConstantTable};
 
 use num_bigint::BigUint;
@@ -556,6 +557,7 @@ fn collect_module_constant_functions(
         explicit_statics: HashSet::default(),
         static_initializers: Vec::new(),
         constant_evaluation: true,
+        assertion_callees: Vec::new(),
     };
     let mut rejected = HashMap::default();
     let subroutines = match procedural::subroutines_with_symbolic_parameters(

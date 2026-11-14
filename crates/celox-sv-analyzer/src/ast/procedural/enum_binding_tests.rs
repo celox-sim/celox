@@ -31,6 +31,7 @@ fn local_values_hide_enum_bindings_and_scope_exit_restores_them() {
         explicit_statics: HashSet::default(),
         static_initializers: Vec::new(),
         constant_evaluation: false,
+        assertion_callees: Vec::new(),
     };
     let mut builder = BodyBuilder::new(
         &tree,

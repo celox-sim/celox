@@ -24,6 +24,7 @@ impl ScopeElaboration<'_> {
             explicit_statics: HashSet::default(),
             static_initializers: Vec::new(),
             constant_evaluation: false,
+            assertion_callees: Vec::new(),
         };
         (
             self.subroutines,
@@ -132,6 +133,7 @@ impl ScopeElaboration<'_> {
                 &self.packed_dimensions,
             )?;
         self.subroutines.extend(inline_subroutines);
+        self.assertion_callees = std::mem::take(&mut body_state.assertion_callees);
         // Static locals of the processes that keep their value are variables
         // of the module, initialized once with the declaration initializers.
         let statics: HashMap<String, Type> = body_state.statics.drain(..).collect();
@@ -275,6 +277,9 @@ impl ScopeElaboration<'_> {
             for subroutine in &mut self.subroutines {
                 *subroutine = rename.subroutine(subroutine.clone());
             }
+            for callee in &mut self.assertion_callees {
+                *callee = rename.name(callee);
+            }
             for instance in &mut self.instances {
                 for connection in &mut instance.port_connections {
                     connection.map_expressions(|expr| rename.expr(expr));
@@ -317,6 +322,13 @@ impl ScopeElaboration<'_> {
             &mut self.comb_processes,
             &mut self.ff_processes,
             &mut self.initial_processes,
+            &self.assertion_callees,
+            &self
+                .dpi_imports
+                .iter()
+                .chain(&self.imported.dpi_imports)
+                .map(crate::ir::DpiImport::name)
+                .collect(),
         )?;
         Ok(())
     }
