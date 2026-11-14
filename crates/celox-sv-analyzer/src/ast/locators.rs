@@ -80,12 +80,15 @@ impl LocalSink {
         {
             return name;
         }
-        let r#type = super::ir_type(
-            session,
+        // The local is declared where the call is (IEEE 1800-2023 6.18).
+        let mut r#type = procedural::scoped_type(r#type, &dims.const_env);
+        semantic_types::bind_declared(
+            &mut session.types,
             &tree.functions,
-            procedural::scoped_type(r#type, &dims.const_env),
+            &mut r#type,
             &dims.const_env,
         );
+        let r#type = super::ir_type(session, &tree.functions, r#type, &dims.const_env);
         session
             .locator_locals
             .entry(self.id)
