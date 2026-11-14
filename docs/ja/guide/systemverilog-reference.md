@@ -609,6 +609,9 @@ let mut sim = unsafe {
   それらの機能を利用不可と報告します。UVM 1.2 の `uvm_re_match`・`uvm_glob_to_re`・
   `uvm_dump_re_cache` も提供します。`uvm_re_match` がコンパイルできない式は一致せず、
   UVM 1.2 の `UVM/DPI/REGEX_INV` エラーは出しません。`uvm_dump_re_cache` は何もしません。
+  UVM 1.2 の `uvm_dpi_regcomp`・`uvm_dpi_regexec`・`uvm_dpi_regfree` も提供します。
+  `uvm_dpi_regcomp` がコンパイルできない式は `null` になり、UVM 1.2 の
+  `UVM/DPI/REGCOMP` エラーは出しません。
 
 ## Veryl が出力する SystemVerilog {#systemverilog-emitted-by-veryl}
 

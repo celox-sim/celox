@@ -218,12 +218,15 @@ pub const OBJECT_SET_RANDSTATE: u64 = 151;
 pub const UVM_RE_MATCH: u64 = 152;
 /// UVM 1.2's `uvm_glob_to_re(glob)`.
 pub const UVM_GLOB_TO_RE: u64 = 153;
+/// UVM 1.2's `uvm_dpi_regcomp(regex)` (see `uvm_dpi`): the handle of the
+/// expression compiled as it is written, or `0` (`null`).
+pub const UVM_DPI_REGCOMP: u64 = 154;
 
 const _: () = assert!(
     crate::containers::RSORT < UVM_RE_COMP
         && crate::streams::TRUNCATE < UVM_RE_COMP
         && UVM_TOOL_VERSION <= 0xff
-        && UVM_GLOB_TO_RE <= 0xff
+        && UVM_DPI_REGCOMP <= 0xff
 );
 
 impl Heap {
@@ -248,9 +251,10 @@ impl Heap {
             crate::containers::HANDLE_PATTERN => {
                 self.new_buffer(crate::containers::handle_pattern(a as u32 as u64))
             }
-            op @ (UVM_RE_COMP..=UVM_TOOL_VERSION | UVM_RE_MATCH | UVM_GLOB_TO_RE) => {
-                self.uvm_call(op, a, b, c)
-            }
+            op @ (UVM_RE_COMP..=UVM_TOOL_VERSION
+            | UVM_RE_MATCH
+            | UVM_GLOB_TO_RE
+            | UVM_DPI_REGCOMP) => self.uvm_call(op, a, b, c),
             op @ DPI_AREA..=DPI_FROM_C_STRING => self.dpi_call(op, a, b),
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {
