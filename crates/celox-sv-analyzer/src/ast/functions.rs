@@ -83,6 +83,7 @@ pub(super) fn native_functions(
             automatic,
             statics: Vec::new(),
             explicit_statics: HashSet::default(),
+            subroutine_statics: HashMap::default(),
             static_initializers: Vec::new(),
             constant_evaluation: false,
         };
