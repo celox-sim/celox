@@ -7,7 +7,10 @@
 //! at random by their weights (18.17.1), 1 unless given, from the thread's
 //! random number generator as `randcase` does (18.14.2, 18.16). The
 //! production controls `if`, `case` and `repeat` (18.17.2-18.17.4) become
-//! the statements of their names around their productions. In a code
+//! the statements of their names around their productions. A `rand join`
+//! (18.17.5) interleaves its productions' items at random, a loop running
+//! the next item of a production it picks each time (see `join`). In a
+//! code
 //! block, `break` outside a loop leaves the statement and `return` the
 //! production whose rule the block is in (18.17.6). Each sets a hidden flag
 //! of the activation, of the statement or of that use of the rule, and
@@ -41,12 +44,27 @@ enum Frame<'p> {
     /// `return` in its code blocks sets flag `exit`, its marker the first;
     /// once an item may have left it, `armed`, the items that follow run
     /// only while no flag is set.
+    /// With `units`, a rule of a production a `rand join` interleaves:
+    /// each item's statements are a unit of their own instead.
     Rule {
         rule: &'p RsRule,
         next: usize,
         output: Vec<Stmt>,
         exit: Option<(u64, String)>,
         armed: bool,
+        units: Option<Vec<Vec<Stmt>>>,
+    },
+    /// A `rand join` (18.17.5) of bias `bias` interleaving productions
+    /// `sequences`: the units of the rules of those before `sequence`, and
+    /// of the rules of that one before `rule`, expanded into `units`; a
+    /// `return` in a production's code blocks sets its flag of `exits`.
+    Join {
+        bias: Option<ExprId>,
+        sequences: Vec<&'p RsProduction>,
+        sequence: usize,
+        rule: usize,
+        units: Vec<Vec<Vec<Vec<Stmt>>>>,
+        exits: Vec<(u64, String)>,
     },
     /// The rules of a production one of which is picked by weights
     /// `weights` of width `width`, evaluated by `prelude`: those before
@@ -98,6 +116,9 @@ enum Step<'p> {
     Within(Frame<'p>, String),
     /// The frame is done, with these statements.
     Finish(Vec<Stmt>),
+    /// The frame of a rule a `rand join` interleaves is done, with these
+    /// units.
+    FinishUnits(Vec<Vec<Stmt>>),
 }
 
 impl BodyBuilder<'_, '_, '_> {
@@ -155,6 +176,8 @@ impl BodyBuilder<'_, '_, '_> {
         let mut frames = vec![self.enter(productions, main)?];
         // The statements of the frame last finished, for the one below.
         let mut finished: Option<Vec<Stmt>> = None;
+        // The units of the rule frame last finished, for a `rand join`.
+        let mut finished_units: Option<Vec<Vec<Stmt>>> = None;
         loop {
             let native = self.tree.declarations();
             // The `else` production an `if` expands after its `then` one.
@@ -173,6 +196,7 @@ impl BodyBuilder<'_, '_, '_> {
                     output,
                     exit,
                     armed,
+                    units,
                 }) => {
                     let rule: &'p RsRule = rule;
                     // The flags an item before the next may have set.
@@ -182,108 +206,186 @@ impl BodyBuilder<'_, '_, '_> {
                         .map(|(_, flag)| flag.clone())
                         .collect::<Vec<_>>();
                     if let Some(body) = finished.take() {
-                        output.extend(guard(body, *armed, &flags));
-                        *armed |= !flags.is_empty();
-                    }
-                    loop {
-                        let Some(item) = rule.items.get(*next) else {
-                            let mut output = std::mem::take(output);
-                            if let Some((_, flag)) = exit {
-                                output.insert(0, set(flag, false));
-                            }
-                            break Step::Finish(output);
-                        };
-                        *next += 1;
-                        match item {
-                            RsProd::Code(block) => {
-                                let (breaks, returns) = code_exits(native, *block)?;
-                                if !breaks.is_empty() && statement_exit.is_none() {
-                                    statement_exit = Some(exit_flag(self));
-                                }
-                                if !returns.is_empty() && exit.is_none() {
-                                    *exit = Some(exit_flag(self));
-                                }
-                                let markers = breaks
-                                    .iter()
-                                    .map(|id| (*id, statement_exit.clone()))
-                                    .chain(returns.iter().map(|id| (*id, exit.clone())))
-                                    .map(|(id, exit)| (id, exit.expect("allocated above")))
-                                    .collect::<Vec<_>>();
-                                self.randsequence_exits
-                                    .extend(markers.iter().map(|(id, (marker, _))| (*id, *marker)));
-                                let body = self.native_body_machine(&[*block]);
-                                for (id, _) in &markers {
-                                    self.randsequence_exits.remove(id);
-                                }
-                                let flags_of = markers
-                                    .into_iter()
-                                    .map(|(_, exit)| exit)
-                                    .collect::<HashMap<_, _>>();
-                                let body = lower_exits(body?, &flags_of, false);
-                                let flags = statement_exit
-                                    .iter()
-                                    .chain(exit.iter())
-                                    .map(|(_, flag)| flag.clone())
-                                    .collect::<Vec<_>>();
+                        match units {
+                            Some(units) => units.push(body),
+                            None => {
                                 output.extend(guard(body, *armed, &flags));
                                 *armed |= !flags.is_empty();
                             }
-                            RsProd::Item(item) => break Step::Enter(item_name(native, *item)?),
-                            // A production control (18.17.2-18.17.4) behaves
-                            // as the statement of its name around its
-                            // productions.
-                            RsProd::If {
-                                condition,
-                                then,
-                                otherwise,
-                            } => {
-                                let prelude = self.effects(&[*condition])?;
-                                let condition = self.native_chandle_value(*condition)?;
-                                let frame = Frame::If {
-                                    prelude,
+                        }
+                    }
+                    // A `rand join` interleaves its productions (18.17.5);
+                    // `check` has seen they are all production items.
+                    if *next == 0
+                        && let Some(bias) = rule.join
+                    {
+                        *next = rule.items.len();
+                        let mut sequences = Vec::new();
+                        for item in &rule.items {
+                            let RsProd::Item(item) = item else {
+                                unreachable!("rejected by `check`")
+                            };
+                            self.count_expansion()?;
+                            sequences.push(productions[&item_name(native, *item)?]);
+                        }
+                        let mut exits = Vec::new();
+                        for _ in &sequences {
+                            exits.push(exit_flag(self));
+                        }
+                        Step::Push(Frame::Join {
+                            bias,
+                            units: sequences.iter().map(|_| Vec::new()).collect(),
+                            sequences,
+                            sequence: 0,
+                            rule: 0,
+                            exits,
+                        })
+                    } else {
+                        loop {
+                            let Some(item) = rule.items.get(*next) else {
+                                if let Some(units) = units {
+                                    break Step::FinishUnits(std::mem::take(units));
+                                }
+                                let mut output = std::mem::take(output);
+                                if let Some((_, flag)) = exit {
+                                    output.insert(0, set(flag, false));
+                                }
+                                break Step::Finish(output);
+                            };
+                            *next += 1;
+                            match item {
+                                RsProd::Code(block) => {
+                                    let (breaks, returns) = code_exits(native, *block)?;
+                                    if !breaks.is_empty() && statement_exit.is_none() {
+                                        statement_exit = Some(exit_flag(self));
+                                    }
+                                    if !returns.is_empty() && exit.is_none() {
+                                        *exit = Some(exit_flag(self));
+                                    }
+                                    let markers = breaks
+                                        .iter()
+                                        .map(|id| (*id, statement_exit.clone()))
+                                        .chain(returns.iter().map(|id| (*id, exit.clone())))
+                                        .map(|(id, exit)| (id, exit.expect("allocated above")))
+                                        .collect::<Vec<_>>();
+                                    self.randsequence_exits.extend(
+                                        markers.iter().map(|(id, (marker, _))| (*id, *marker)),
+                                    );
+                                    let body = self.native_body_machine(&[*block]);
+                                    for (id, _) in &markers {
+                                        self.randsequence_exits.remove(id);
+                                    }
+                                    let flags_of = markers
+                                        .into_iter()
+                                        .map(|(_, exit)| exit)
+                                        .collect::<HashMap<_, _>>();
+                                    let body = lower_exits(body?, &flags_of, false);
+                                    if let Some(units) = units {
+                                        units.push(body);
+                                        continue;
+                                    }
+                                    let flags = statement_exit
+                                        .iter()
+                                        .chain(exit.iter())
+                                        .map(|(_, flag)| flag.clone())
+                                        .collect::<Vec<_>>();
+                                    output.extend(guard(body, *armed, &flags));
+                                    *armed |= !flags.is_empty();
+                                }
+                                RsProd::Item(item) => break Step::Enter(item_name(native, *item)?),
+                                // A production control (18.17.2-18.17.4) behaves
+                                // as the statement of its name around its
+                                // productions.
+                                RsProd::If {
                                     condition,
-                                    then_body: None,
-                                    otherwise: *otherwise,
-                                };
-                                break Step::Within(frame, item_name(native, *then)?);
-                            }
-                            // Its count is evaluated once, before the first
-                            // repetition.
-                            RsProd::Repeat { count, item } => {
-                                let mut prelude = self.effects(&[*count])?;
-                                let value = self.native_value(*count)?;
-                                let saved = self.hidden_of(*count)?.1;
-                                prelude.push(Stmt::Assign {
-                                    lhs: LValue::Ident(saved.clone()),
-                                    rhs: value,
-                                    nonblocking: false,
-                                });
-                                let frame = Frame::Repeat {
-                                    prelude,
-                                    count: Expr::Ident(saved),
-                                };
-                                break Step::Within(frame, item_name(native, *item)?);
-                            }
-                            // As the case statement is (18.17.3, 12.5).
-                            RsProd::Case { selector, items } => {
-                                let labels = items
-                                    .iter()
-                                    .flat_map(|item| item.labels.iter().copied())
-                                    .collect::<Vec<_>>();
-                                let (prelude, kind, selector, chandles) =
-                                    self.case_header("case", None, *selector, &labels)?;
-                                break Step::Push(Frame::Case {
-                                    prelude,
-                                    kind,
-                                    selector,
-                                    chandles,
-                                    items,
-                                    next: 0,
-                                    arms: Vec::new(),
-                                    default: None,
-                                });
+                                    then,
+                                    otherwise,
+                                } => {
+                                    let prelude = self.effects(&[*condition])?;
+                                    let condition = self.native_chandle_value(*condition)?;
+                                    let frame = Frame::If {
+                                        prelude,
+                                        condition,
+                                        then_body: None,
+                                        otherwise: *otherwise,
+                                    };
+                                    break Step::Within(frame, item_name(native, *then)?);
+                                }
+                                // Its count is evaluated once, before the first
+                                // repetition.
+                                RsProd::Repeat { count, item } => {
+                                    let mut prelude = self.effects(&[*count])?;
+                                    let value = self.native_value(*count)?;
+                                    let saved = self.hidden_of(*count)?.1;
+                                    prelude.push(Stmt::Assign {
+                                        lhs: LValue::Ident(saved.clone()),
+                                        rhs: value,
+                                        nonblocking: false,
+                                    });
+                                    let frame = Frame::Repeat {
+                                        prelude,
+                                        count: Expr::Ident(saved),
+                                    };
+                                    break Step::Within(frame, item_name(native, *item)?);
+                                }
+                                // As the case statement is (18.17.3, 12.5).
+                                RsProd::Case { selector, items } => {
+                                    let labels = items
+                                        .iter()
+                                        .flat_map(|item| item.labels.iter().copied())
+                                        .collect::<Vec<_>>();
+                                    let (prelude, kind, selector, chandles) =
+                                        self.case_header("case", None, *selector, &labels)?;
+                                    break Step::Push(Frame::Case {
+                                        prelude,
+                                        kind,
+                                        selector,
+                                        chandles,
+                                        items,
+                                        next: 0,
+                                        arms: Vec::new(),
+                                        default: None,
+                                    });
+                                }
                             }
                         }
+                    }
+                }
+                Some(Frame::Join {
+                    bias,
+                    sequences,
+                    sequence,
+                    rule,
+                    units,
+                    exits,
+                }) => {
+                    if let Some(done) = finished_units.take() {
+                        units[*sequence].push(done);
+                        *rule += 1;
+                    }
+                    while *sequence < sequences.len() && *rule == sequences[*sequence].rules.len() {
+                        *sequence += 1;
+                        *rule = 0;
+                    }
+                    match sequences.get(*sequence) {
+                        Some(production) => {
+                            let production: &'p RsProduction = production;
+                            Step::Push(Frame::Rule {
+                                rule: &production.rules[*rule],
+                                next: 0,
+                                output: Vec::new(),
+                                exit: Some(exits[*sequence].clone()),
+                                armed: false,
+                                units: Some(Vec::new()),
+                            })
+                        }
+                        None => Step::Finish(self.join(
+                            *bias,
+                            sequences,
+                            std::mem::take(units),
+                            exits,
+                            statement_exit.as_ref().map(|(_, flag)| flag.as_str()),
+                        )?),
                     }
                 }
                 Some(Frame::Choice {
@@ -304,6 +406,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 output: Vec::new(),
                                 exit: None,
                                 armed: false,
+                                units: None,
                             })
                         }
                         None => {
@@ -419,8 +522,303 @@ impl BodyBuilder<'_, '_, '_> {
                     frames.pop();
                     finished = Some(output);
                 }
+                Step::FinishUnits(units) => {
+                    frames.pop();
+                    finished_units = Some(units);
+                }
             }
         }
+    }
+
+    /// The statements of a `rand join` (18.17.5) of bias `bias`, interleaving
+    /// productions `sequences` whose rules have units `units`, a `return`
+    /// in a production setting its flag of `exits` and a `break` flag
+    /// `statement_exit`. Each production first picks its rule as it would
+    /// alone; then, while some have units left, one of them runs its next
+    /// unit. It is picked from the thread's random number generator
+    /// (18.14.2): with probability |2 * bias - 1| among the productions
+    /// with the fewest units left when the bias is below 0.5, or the most
+    /// when it is above, and otherwise among all with units left, each as
+    /// likely. A bias of 0.5, the default, so prefers no length, and 0.0
+    /// and 1.0 always the shortest and the longest (18.17.5 gives no
+    /// formula). The bias is taken to 1/1024.
+    fn join(
+        &mut self,
+        bias: Option<ExprId>,
+        sequences: &[&RsProduction],
+        units: Vec<Vec<Vec<Vec<Stmt>>>>,
+        exits: &[(u64, String)],
+        statement_exit: Option<&str>,
+    ) -> Converted<Vec<Stmt>> {
+        let ident = |name: &str| Expr::Ident(name.to_owned());
+        let literal = |value: i64| Expr::Literal(value.to_string());
+        let binary = |left: Expr, op: BinaryOp, right: Expr| Expr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let assign = |name: &str, rhs: Expr| Stmt::Assign {
+            lhs: LValue::Ident(name.to_owned()),
+            rhs,
+            nonblocking: false,
+        };
+        let mux = |condition: Expr, then_expr: Expr, else_expr: Expr| Expr::Mux {
+            condition: Box::new(condition),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        };
+        let draw = |max: Expr| Expr::Call {
+            callee: Callee::System(SystemFunction::UrandomRange),
+            args: vec![Some(max), Some(literal(0))],
+            arg_order: Vec::new(),
+        };
+        let mut output = Vec::new();
+        let bias_1024 = self.hidden(super::int_type()).1;
+        match bias {
+            Some(bias) => {
+                output.extend(self.effects(&[bias])?);
+                let value = self.native_value(bias)?;
+                output.push(assign(
+                    &bias_1024,
+                    Expr::Call {
+                        callee: Callee::System(SystemFunction::Rtoi),
+                        args: vec![Some(binary(
+                            value,
+                            BinaryOp::Mul,
+                            Expr::Literal("1024.0".into()),
+                        ))],
+                        arg_order: Vec::new(),
+                    },
+                ));
+            }
+            None => output.push(assign(&bias_1024, literal(512))),
+        }
+        // Each production's rule, its length and its next unit.
+        let mut picks = Vec::new();
+        for (index, production) in sequences.iter().enumerate() {
+            let [rule, length, cursor] = [(); 3].map(|_| self.hidden(super::int_type()).1);
+            output.push(set(&exits[index].1, false));
+            output.push(assign(&length, literal(0)));
+            output.push(assign(&cursor, literal(0)));
+            output.push(assign(&rule, literal(0)));
+            let lengths = units[index].iter().map(Vec::len).collect::<Vec<_>>();
+            if let [only] = production.rules.as_slice()
+                && only.weight.is_none()
+            {
+                output.push(assign(&length, literal(lengths[0] as i64)));
+            } else {
+                let weights = production
+                    .rules
+                    .iter()
+                    .map(|rule| rule.weight)
+                    .collect::<Vec<_>>();
+                let headroom = (usize::BITS - (weights.len() - 1).leading_zeros()) as usize;
+                let (prelude, weights, width) =
+                    self.randcase_weights(&weights, 32, headroom, "randsequence production")?;
+                output.extend(prelude);
+                let bodies = lengths
+                    .iter()
+                    .enumerate()
+                    .map(|(choice, units)| {
+                        vec![
+                            assign(&rule, literal(choice as i64)),
+                            assign(&length, literal(*units as i64)),
+                        ]
+                    })
+                    .collect();
+                output.extend(self.weighted_choice(weights, width, bodies));
+            }
+            picks.push((rule, length, cursor));
+        }
+        // Whether production `index` has units left, and how many.
+        let remaining = |index: usize| {
+            let (_, length, cursor) = &picks[index];
+            binary(
+                binary(ident(cursor), BinaryOp::Lt, ident(length)),
+                BinaryOp::LogicAnd,
+                Expr::Unary {
+                    op: UnaryOp::LogicNot,
+                    expr: Box::new(ident(&exits[index].1)),
+                },
+            )
+        };
+        let mut body = Vec::new();
+        let left = sequences
+            .iter()
+            .map(|_| self.hidden(super::int_type()).1)
+            .collect::<Vec<_>>();
+        let [fewest, most, target, count, nth, chosen] =
+            [(); 6].map(|_| self.hidden(super::int_type()).1);
+        body.push(assign(&fewest, literal(i64::from(i32::MAX))));
+        body.push(assign(&most, literal(0)));
+        for (index, left) in left.iter().enumerate() {
+            let (_, length, cursor) = &picks[index];
+            body.push(assign(
+                left,
+                mux(
+                    remaining(index),
+                    binary(ident(length), BinaryOp::Sub, ident(cursor)),
+                    literal(0),
+                ),
+            ));
+            body.push(Stmt::If {
+                condition: binary(
+                    binary(ident(left), BinaryOp::Gt, literal(0)),
+                    BinaryOp::LogicAnd,
+                    binary(ident(left), BinaryOp::Lt, ident(&fewest)),
+                ),
+                then_body: vec![assign(&fewest, ident(left))],
+                else_body: Vec::new(),
+            });
+            body.push(Stmt::If {
+                condition: binary(ident(left), BinaryOp::Gt, ident(&most)),
+                then_body: vec![assign(&most, ident(left))],
+                else_body: Vec::new(),
+            });
+        }
+        // 0 picks among all with units left, 1 the fewest, 2 the most.
+        let skew = binary(
+            binary(ident(&bias_1024), BinaryOp::Mul, literal(2)),
+            BinaryOp::Sub,
+            literal(1024),
+        );
+        let strength = mux(
+            binary(skew.clone(), BinaryOp::Lt, literal(0)),
+            binary(literal(0), BinaryOp::Sub, skew),
+            binary(
+                binary(ident(&bias_1024), BinaryOp::Mul, literal(2)),
+                BinaryOp::Sub,
+                literal(1024),
+            ),
+        );
+        body.push(assign(
+            &target,
+            mux(
+                binary(draw(literal(1023)), BinaryOp::Lt, strength),
+                mux(
+                    binary(ident(&bias_1024), BinaryOp::Lt, literal(512)),
+                    literal(1),
+                    literal(2),
+                ),
+                literal(0),
+            ),
+        ));
+        let member = |index: usize| {
+            let left = ident(&left[index]);
+            let is = |value: i64| binary(ident(&target), BinaryOp::Eq, literal(value));
+            binary(
+                binary(left.clone(), BinaryOp::Gt, literal(0)),
+                BinaryOp::LogicAnd,
+                binary(
+                    binary(
+                        is(0),
+                        BinaryOp::LogicOr,
+                        binary(
+                            is(1),
+                            BinaryOp::LogicAnd,
+                            binary(left.clone(), BinaryOp::Eq, ident(&fewest)),
+                        ),
+                    ),
+                    BinaryOp::LogicOr,
+                    binary(
+                        is(2),
+                        BinaryOp::LogicAnd,
+                        binary(left, BinaryOp::Eq, ident(&most)),
+                    ),
+                ),
+            )
+        };
+        body.push(assign(&count, literal(0)));
+        for index in 0..sequences.len() {
+            body.push(Stmt::If {
+                condition: member(index),
+                then_body: vec![assign(
+                    &count,
+                    binary(ident(&count), BinaryOp::Add, literal(1)),
+                )],
+                else_body: Vec::new(),
+            });
+        }
+        body.push(assign(
+            &nth,
+            draw(binary(ident(&count), BinaryOp::Sub, literal(1))),
+        ));
+        body.push(assign(&chosen, literal(0)));
+        for index in 0..sequences.len() {
+            body.push(Stmt::If {
+                condition: member(index),
+                then_body: vec![
+                    Stmt::If {
+                        condition: binary(ident(&nth), BinaryOp::Eq, literal(0)),
+                        then_body: vec![assign(&chosen, literal(index as i64))],
+                        else_body: Vec::new(),
+                    },
+                    assign(&nth, binary(ident(&nth), BinaryOp::Sub, literal(1))),
+                ],
+                else_body: Vec::new(),
+            });
+        }
+        // The chosen production's next unit of its rule.
+        let case = |selector: &str, arms: Vec<Vec<Stmt>>| Stmt::Case {
+            kind: CaseKind::Exact,
+            selector: ident(selector),
+            items: arms
+                .into_iter()
+                .enumerate()
+                .map(|(index, body)| CaseItemBase {
+                    labels: vec![CaseLabel::Value(literal(index as i64))],
+                    body,
+                })
+                .collect(),
+            default: None,
+        };
+        let arms = units
+            .into_iter()
+            .zip(&picks)
+            .map(|(rules, (rule, _, cursor))| {
+                let rules = rules
+                    .into_iter()
+                    .map(|units| vec![case(cursor, units)])
+                    .collect();
+                vec![
+                    case(rule, rules),
+                    assign(cursor, binary(ident(cursor), BinaryOp::Add, literal(1))),
+                ]
+            })
+            .collect();
+        body.push(case(&chosen, arms));
+        if let Some(flag) = statement_exit {
+            body.push(Stmt::If {
+                condition: ident(flag),
+                then_body: vec![Stmt::Break],
+                else_body: Vec::new(),
+            });
+        }
+        let condition = (0..sequences.len())
+            .map(remaining)
+            .reduce(|left, right| binary(left, BinaryOp::LogicOr, right))
+            .expect("a rand join joins two or more productions");
+        output.push(Stmt::Loop {
+            kind: LoopKind::While,
+            init: Vec::new(),
+            condition: Some(condition),
+            step: Vec::new(),
+            body,
+        });
+        Ok(output)
+    }
+
+    /// Count one more production the statement expands, rejecting more
+    /// than [`MAX_EXPANDED`]: a production of a `rand join` too, whose
+    /// rules are expanded without entering it.
+    fn count_expansion(&mut self) -> Converted<()> {
+        self.randsequence_expanded += 1;
+        if self.randsequence_expanded > MAX_EXPANDED {
+            return Err(unsupported(format!(
+                "randsequence expanding more than {MAX_EXPANDED} productions"
+            )));
+        }
+        Ok(())
     }
 
     /// The frame expanding production `name`: its rule, or its rules one of
@@ -430,12 +828,7 @@ impl BodyBuilder<'_, '_, '_> {
         productions: &HashMap<String, &'p RsProduction>,
         name: &str,
     ) -> Converted<Frame<'p>> {
-        self.randsequence_expanded += 1;
-        if self.randsequence_expanded > MAX_EXPANDED {
-            return Err(unsupported(format!(
-                "randsequence expanding more than {MAX_EXPANDED} productions"
-            )));
-        }
+        self.count_expansion()?;
         let production = productions[name];
         if let [rule] = production.rules.as_slice()
             && rule.weight.is_none()
@@ -446,6 +839,7 @@ impl BodyBuilder<'_, '_, '_> {
                 output: Vec::new(),
                 exit: None,
                 armed: false,
+                units: None,
             });
         }
         let weights = production
@@ -692,8 +1086,18 @@ fn check(
         path.insert(name.clone());
         jobs.push(Visit::Leave(name));
         for rule in &production.rules {
-            if rule.join.is_some() {
-                return Err(unsupported("randsequence rand join"));
+            // `rand join` interleaves two or more production items
+            // (A.6.12).
+            if rule.join.is_some()
+                && (rule.items.len() < 2
+                    || !rule
+                        .items
+                        .iter()
+                        .all(|item| matches!(item, RsProd::Item(_))))
+            {
+                return Err(AnalyzerError::Parse(
+                    "randsequence rand join of fewer than two production items".into(),
+                ));
             }
             if rule.weight_code.is_some() {
                 return Err(unsupported("randsequence weight code block"));
