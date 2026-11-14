@@ -115,7 +115,9 @@ impl Ff<'_, '_> {
                         // A stored value extends by its own signedness
                         // (IEEE 1800-2023 10.7).
                         ObjectOp::Store(field) => (field.width as usize, self.expr_signed(arg)),
-                        ObjectOp::Randomize(_) if index == 1 => (1, false),
+                        ObjectOp::Randomize(_) | ObjectOp::SolveArguments(_) if index == 1 => {
+                            (1, false)
+                        }
                         ObjectOp::ConstraintModeSet(_)
                         | ObjectOp::ModeSet(_)
                         | ObjectOp::ModeSelect(..) => (1, false),
@@ -138,12 +140,17 @@ impl Ff<'_, '_> {
         }
         let result = match op {
             ObjectOp::ScopeRandomize(_) => unreachable!("lowered by `scope_randomize`"),
-            ObjectOp::Randomize(program) => {
+            ObjectOp::ArgumentValue(index) => self.heap_call(
+                ops::encode(ops::OBJECT_ARGUMENT_VALUE, u64::from(*index)),
+                &[],
+            ),
+            ObjectOp::Randomize(program) | ObjectOp::SolveArguments(program) => {
+                let arguments = matches!(op, ObjectOp::SolveArguments(_));
                 let object = self.handle(&args[0])?;
                 let check = self.integer_of_width(&args[1], 1, false)?;
                 let bytes = serde_json::to_vec(program).expect("constraint program serialization");
                 let program = self.frozen_bytes(&bytes);
-                let result = if args.len() == 2 {
+                let result = if args.len() == 2 && !arguments {
                     self.heap_call(ops::OBJECT_RANDOMIZE, &[object, program, check])
                 } else {
                     let mut inputs = self.heap_call(ops::NEW, &[]);
@@ -154,9 +161,16 @@ impl Ff<'_, '_> {
                         let eight = self.constant64(8);
                         inputs = self.heap_call(ops::APPEND_BYTES, &[inputs, value, eight]);
                     }
-                    self.heap_call(ops::OBJECT_RANDOMIZE_INPUTS, &[object, program, inputs])
+                    let op = if arguments {
+                        ops::OBJECT_SOLVE_ARGUMENTS
+                    } else {
+                        ops::OBJECT_RANDOMIZE_INPUTS
+                    };
+                    self.heap_call(op, &[object, program, inputs])
                 };
-                self.properties_randomized();
+                if !arguments {
+                    self.properties_randomized();
+                }
                 result
             }
             ObjectOp::ConstraintModeGet(index) => {
@@ -441,6 +455,8 @@ impl Ff<'_, '_> {
             }),
             ObjectOp::GetRandstate => Some(celox_design::ValueKind::StrRef),
             ObjectOp::Randomize(_)
+            | ObjectOp::SolveArguments(_)
+            | ObjectOp::ArgumentValue(_)
             | ObjectOp::ScopeRandomize(_)
             | ObjectOp::RegisterProgram(..)
             | ObjectOp::RegisterStaticBlocks(..)

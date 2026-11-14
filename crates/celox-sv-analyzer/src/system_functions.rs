@@ -1327,6 +1327,13 @@ impl ContainerOp {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ObjectOp {
     Randomize(celox_heap::randomization::Program),
+    /// Solve the random variables in the arguments of the functions the
+    /// constraints of the program call, as [`ObjectOp::Randomize`] takes its
+    /// arguments, without changing the object: whether they have a solution
+    /// (IEEE 1800-2023 18.5.11).
+    SolveArguments(celox_heap::randomization::Program),
+    /// The value of argument `0` of the last [`ObjectOp::SolveArguments`].
+    ArgumentValue(u32),
     /// `std::randomize(v...) with { ... }` (IEEE 1800-2023 18.12.1): the
     /// variables in the first arguments, one field of the program each at
     /// its offset, solved in a new object and written back on success; the
@@ -1567,7 +1574,9 @@ impl ObjectOp {
             Self::Container { op, layout } => op.result_type(*layout),
             Self::Random | Self::RandomCyclic { .. } => (64, false),
             Self::ProgramRegistered(_) => (1, false),
+            Self::ArgumentValue(_) => (64, false),
             Self::Randomize(_)
+            | Self::SolveArguments(_)
             | Self::ScopeRandomize(_)
             | Self::RegisterProgram(..)
             | Self::RegisterStaticBlocks(..)
@@ -1618,6 +1627,8 @@ impl fmt::Display for ObjectOp {
             Self::Random => "object random bits",
             Self::Randomize(_) => "constrained object randomization",
             Self::ScopeRandomize(_) => "constrained scope randomization",
+            Self::SolveArguments(_) => "solve of the arguments of constraint functions",
+            Self::ArgumentValue(_) => "constraint function argument",
             Self::RegisterProgram(..) => "constraint program registration",
             Self::RegisterStaticBlocks(..) => "static constraint block registration",
             Self::ProgramRegistered(_) => "constraint program query",

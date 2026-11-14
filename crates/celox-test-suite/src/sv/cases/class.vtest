@@ -5561,3 +5561,209 @@ module Top(output int checks);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq checks 15))
+
+; A constraint calls a function of its class (IEEE 1800-2023 18.5.11): the
+; random variables in the arguments are solved first, by the constraints
+; that name only them; the function is then called as the object's class
+; calls it, an override included, with their values, and its value is state
+; to the other constraints. A random variable the function reads that is no
+; argument has its value before the call, and a call that fails changes
+; nothing.
+(case constraint_functions
+  (source "functions.sv" #"
+module Top(output int checks);
+    int scale = 5;
+    class A;
+        rand int b1, b2, b3;
+        function int F(input int d);
+            F = d;
+        endfunction
+        function int twice(int v);
+            return 2 * v + 1;
+        endfunction
+        constraint c1 { b1 == 5; }
+        constraint c2 { b2 == F(b1); }
+        constraint c3 { b3 == twice(b1 + 1); }
+    endclass
+    class Ordered;
+        rand int x, y;
+        function int same(int v); return v; endfunction
+        constraint d { y inside {[1:10]}; soft y == 2; }
+        constraint c { x == same(y); x > 5; }
+    endclass
+    class Base;
+        rand int a, b;
+        virtual function int g(int v); return v; endfunction
+        constraint c { a == 3; b == g(a); }
+    endclass
+    class Derived extends Base;
+        virtual function int g(int v); return v * 10; endfunction
+    endclass
+    class Reads;
+        rand int a, k, m;
+        int scale = 2;
+        function int h(int v); return v + k; endfunction
+        function bit [3:0] low(int v); return v; endfunction
+        function int narrow(bit [1:0] v); return v; endfunction
+        function int scaled(int v); return v * scale; endfunction
+        rand int c, n, s;
+        constraint r { a == 18; k inside {[1:9]}; m == h(a); c == low(a);
+                       n == narrow(a); s == scaled(a); }
+    endclass
+    initial begin
+        A obj = new;
+        Ordered o = new;
+        Derived d = new;
+        Base h = d;
+        Reads r = new;
+        checks = 0;
+        checks += (obj.randomize() && obj.b1 == 5 && obj.b2 == 5 && obj.b3 == 13) * 1;
+        // y is solved first, to 2, which leaves x no value.
+        o.x = 77;
+        checks += (!o.randomize() && o.x == 77) * 2;
+        checks += (d.randomize() && d.b == 30 && h.randomize() && h.b == 30) * 4;
+        r.k = 100;
+        checks += (r.randomize() && r.m == 118 && r.k != 100) * 8;
+        checks += (r.c == 2 && r.n == 2 && r.s == 36) * 16;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 31))
+
+; The calls of a block that is off or that a derived class overrides pin
+; nothing; a guard that calls a function waits for the solve of the rest; a
+; randc argument takes a value its cycle has not produced yet; an array size
+; named only in an argument is solved; a static rand argument is the
+; property (IEEE 1800-2023 18.5.11). A function that randomizes another
+; object between the two solves leaves the arguments pinned; an inherited
+; constraint calls the non-virtual method its class sees and the override
+; of a virtual one (8.20).
+(case constraint_function_phases
+  (source "function_phases.sv" #"
+module Top(output int checks);
+    class M;
+        rand int x, y;
+        function int f(int v); return v + 1; endfunction
+        constraint c1 { x == f(y); }
+        constraint c2 { x == y; x == 0; }
+    endclass
+    class N extends M;
+        constraint c1 { x >= 0; }
+    endclass
+    class G;
+        rand int x, y;
+        function int f(int v); return v; endfunction
+        constraint s { soft x == 3; }
+        constraint d { y == 1; if (f(y) > 0) disable soft x; x inside {3, 4}; }
+    endclass
+    class C;
+        randc bit [1:0] r;
+        rand int y;
+        function int id(int v); return v; endfunction
+        constraint k { y == id(r); }
+    endclass
+    class Q;
+        rand int q[];
+        rand int n;
+        function int size_of(int s); return s; endfunction
+        constraint k { n == size_of(q.size()); }
+    endclass
+    class S;
+        static rand int s;
+        rand int y;
+        function int id(int v); return v; endfunction
+        constraint k { s inside {[1:3]}; y == id(s) + 10; }
+    endclass
+    class In;
+        rand int v, w;
+        function int id(int a); return a; endfunction
+        constraint k { v inside {[1:3]}; w == id(v); }
+    endclass
+    class Out;
+        rand int a, b;
+        In inner;
+        function new(); inner = new; endfunction
+        function int pick(int s); void'(inner.randomize()); return s + 1; endfunction
+        constraint k { a inside {[0:100]}; b == pick(a); }
+    endclass
+    class B;
+        rand int x, y;
+        function int f(int v); return v + 1; endfunction
+        virtual function int g(int v); return v + 10; endfunction
+        constraint k { y == 5; x == f(y) + g(y); }
+    endclass
+    class D extends B;
+        function int f(int v); return v + 100; endfunction
+        virtual function int g(int v); return v + 1000; endfunction
+    endclass
+    initial begin
+        M m = new;
+        N nn = new;
+        G g = new;
+        C c = new;
+        Q q = new;
+        S st = new;
+        Out o = new;
+        D dd = new;
+        bit [3:0] seen;
+        int sized, pinned;
+        checks = 0;
+        m.c1.constraint_mode(0);
+        checks += (m.randomize() && m.x == 0 && m.y == 0) * 1;
+        checks += (nn.randomize() && nn.x == 0 && nn.y == 0) * 2;
+        checks += (g.randomize() && g.y == 1) * 4;
+        seen = 0;
+        repeat (4) if (c.randomize()) seen[c.r] = 1;
+        checks += (seen == 4'hf) * 8;
+        sized = 0;
+        repeat (8) if (q.randomize() && q.n == q.q.size() && q.q.size() != 0) sized++;
+        checks += (sized > 0) * 16;
+        checks += (st.randomize() && st.y == S::s + 10 && S::s inside {[1:3]}) * 32;
+        pinned = 0;
+        repeat (8) if (o.randomize() && o.b == o.a + 1 && o.inner.w == o.inner.v) pinned++;
+        checks += (pinned == 8) * 64;
+        checks += (dd.randomize() && dd.x == 6 + 1005) * 128;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 255))
+
+; uvm-1.2's uvm_sequence_base::pick_sequence: a function with no rand
+; argument is a state value, evaluated before solving (18.5.11), here of a
+; base class through a handle that may be null, in a derived object.
+(case constraint_function_pick_sequence
+  (source "pick_sequence.sv" #"
+module Top(output int bad, output bit done);
+    class Seqr;
+        int sequences[$];
+        function int num_sequences(); return sequences.size(); endfunction
+    endclass
+    class Item; endclass
+    class SeqBase extends Item;
+        Seqr m_sequencer;
+        rand int unsigned seq_kind;
+        constraint pick_sequence {
+            (num_sequences() <= 2) || (seq_kind >= 2);
+            (seq_kind <  num_sequences()) || (seq_kind == 0); }
+        function int num_sequences();
+            if (m_sequencer == null) return 0;
+            return (m_sequencer.num_sequences());
+        endfunction
+    endclass
+    class MySeq extends SeqBase; rand bit [3:0] x; endclass
+    initial begin
+        MySeq s = new;
+        Seqr r = new;
+        repeat (8) if (!s.randomize() || s.seq_kind != 0) bad++;
+        s.m_sequencer = r;
+        r.sequences = '{1, 2};
+        repeat (8) if (!s.randomize() || s.seq_kind > 1) bad++;
+        r.sequences = '{1, 2, 3, 4, 5};
+        repeat (8) if (!s.randomize() || s.seq_kind < 2 || s.seq_kind > 4) bad++;
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))

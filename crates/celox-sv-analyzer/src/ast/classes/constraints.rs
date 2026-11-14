@@ -492,6 +492,118 @@ pub(in crate::ast) fn resolve_statics(expr: &mut ConstraintExpr, first: usize) {
     }
 }
 
+/// The first input index that stands for the value of call `k` of a
+/// function the constraints of a class make (see `Class::constraint_calls`),
+/// which its randomize call places after the inputs it has.
+pub(in crate::ast) const RESULT_INPUTS: usize = 1 << 28;
+
+/// Record the call of function `callee` of the class whose constraints are
+/// being bound, with `arguments` (IEEE 1800-2023 18.5.11): its index among
+/// the class's calls, and the width and signedness of its value. A function
+/// that is not of the class, with an argument other than an input, or in
+/// inline constraints is unsupported.
+fn function_call(
+    callee: ExprId,
+    arguments: &[Typed],
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Result<(usize, u32, bool), String> {
+    use celox_sv_syntax::Direction;
+    let native = tree.declarations();
+    let ExprKind::Name(name) = &native
+        .expression(crate::ast::expression_binding::ungroup(callee, native))
+        .kind
+    else {
+        return Err("a call in a constraint other than of a function of the class".into());
+    };
+    let name = instances::normalize_identifier(&name.spelling);
+    let Some((methods, _, block)) = session.constraint_methods.last() else {
+        return Err(format!("a call of `{name}` in inline constraints"));
+    };
+    let method = methods
+        .iter()
+        .find(|method| method.name == name)
+        .cloned()
+        .ok_or_else(|| format!("a call of `{name}` in a constraint"))?;
+    let unsupported = |what: &str| format!("function `{name}` in a constraint {what}");
+    if !method.is_function || method.qualifiers.is_static {
+        return Err(unsupported("that is not a function of the object"));
+    }
+    let Some(Some(result)) = &method.result else {
+        return Err(unsupported("without a value"));
+    };
+    let (width, signed) = casts::expr_type_from_type(&tree.functions, result, env)
+        .filter(|shape| (1..=64).contains(&shape.width))
+        .map(|shape| (shape.width as u32, shape.signed))
+        .ok_or_else(|| unsupported("of a value other than an integral of at most 64 bits"))?;
+    // Its formals are inputs (18.5.11), each given.
+    let subroutine = native.subroutine(method.native);
+    let ports = match &subroutine.ports {
+        Some(ports) => ports.clone(),
+        None => subroutine
+            .port_declarations
+            .iter()
+            .flat_map(|declaration| declaration.ports.iter().cloned())
+            .collect(),
+    };
+    if ports
+        .iter()
+        .any(|port| !matches!(port.direction, None | Some(Direction::Input)))
+    {
+        return Err(unsupported("with an argument other than an input"));
+    }
+    if ports.len() != arguments.len() {
+        return Err(unsupported("called without an argument for each formal"));
+    }
+    if arguments
+        .iter()
+        .any(|argument| emit(argument.clone(), None).reads_input_from(RESULT_INPUTS))
+    {
+        return Err(unsupported("whose argument calls a function"));
+    }
+    let block = *block;
+    let call = ConstraintCall {
+        block,
+        live: true,
+        method: method.name.clone(),
+        owner: method.owner.clone(),
+        is_virtual: method.is_virtual,
+        arguments: arguments
+            .iter()
+            .map(|argument| {
+                (
+                    emit(argument.clone(), None),
+                    argument.width,
+                    argument.signed,
+                )
+            })
+            .collect(),
+        width,
+        signed,
+    };
+    let (_, calls, _) = session
+        .constraint_methods
+        .last_mut()
+        .expect("the class's methods");
+    calls.push(call);
+    let index = calls.len() - 1;
+    Ok((index, width, signed))
+}
+
+/// `expr` with each value of a call of a function (see [`RESULT_INPUTS`])
+/// the input `first + k` (see `Class::constraint_calls`).
+pub(in crate::ast) fn call_results(expr: ConstraintExpr, first: usize) -> ConstraintExpr {
+    remap_inputs(expr, &|index, width| {
+        (RESULT_INPUTS..SCOPE_FIELDS)
+            .contains(&index)
+            .then(|| ConstraintExpr::Input {
+                index: first + (index - RESULT_INPUTS),
+                width,
+            })
+    })
+}
+
 /// The first input index that stands for variable `i` of a scope randomize
 /// call while its constraints are bound (see [`scope_fields`]).
 pub(in crate::ast) const SCOPE_FIELDS: usize = 1 << 29;
@@ -499,7 +611,7 @@ pub(in crate::ast) const SCOPE_FIELDS: usize = 1 << 29;
 /// `expr` with each input that stands for a variable of a scope randomize
 /// call (see [`SCOPE_FIELDS`]) the field of the variable.
 pub(in crate::ast) fn scope_fields(expr: ConstraintExpr) -> ConstraintExpr {
-    remap_inputs(expr, &|index| {
+    remap_inputs(expr, &|index, _| {
         (index >= SCOPE_FIELDS).then(|| ConstraintExpr::Field(index - SCOPE_FIELDS))
     })
 }
@@ -508,13 +620,26 @@ pub(in crate::ast) fn scope_fields(expr: ConstraintExpr) -> ConstraintExpr {
 /// expression.
 fn remap_inputs(
     expr: ConstraintExpr,
-    remap: &dyn Fn(usize) -> Option<ConstraintExpr>,
+    remap: &dyn Fn(usize, u32) -> Option<ConstraintExpr>,
 ) -> ConstraintExpr {
     let boxed = |value: ConstraintExpr| Box::new(remap_inputs(value, remap));
     match expr {
         ConstraintExpr::Input { index, width } => {
-            remap(index).unwrap_or(ConstraintExpr::Input { index, width })
+            remap(index, width).unwrap_or(ConstraintExpr::Input { index, width })
         }
+        ConstraintExpr::Enabled { index, value } => ConstraintExpr::Enabled {
+            index,
+            value: boxed(*value),
+        },
+        ConstraintExpr::DisableSoft {
+            priority,
+            variable,
+            condition,
+        } => ConstraintExpr::DisableSoft {
+            priority,
+            variable,
+            condition: condition.map(|condition| boxed(*condition)),
+        },
         ConstraintExpr::Soft { priority, value } => ConstraintExpr::Soft {
             priority,
             value: boxed(*value),
@@ -1492,10 +1617,35 @@ pub(in crate::ast) fn bind_inputs(
                     kind: Kind::Binary(operator.clone(), Box::new(a), Box::new(b)),
                 }
             }
+            ExprKind::Call {
+                expression: callee,
+                arguments,
+            } => {
+                if !loops.is_empty() {
+                    return Err("a function call in a constraint loop".into());
+                }
+                let mut values = Vec::with_capacity(arguments.len());
+                for argument in arguments {
+                    let Some(value) = argument.value.filter(|_| argument.name.is_none()) else {
+                        return Err(
+                            "a function call in a constraint with a named or empty argument".into(),
+                        );
+                    };
+                    values.push(recurse(session, budget, value)?);
+                }
+                let (index, width, signed) = function_call(*callee, &values, tree, session, env)?;
+                Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Input {
+                        index: RESULT_INPUTS + index,
+                        width,
+                    }),
+                    width,
+                    signed,
+                }
+            }
             // Every node kind is listed, so that a new one has to say how a
             // constraint takes it.
             ExprKind::Member { .. }
-            | ExprKind::Call { .. }
             | ExprKind::Unary { .. }
             | ExprKind::Binary { .. }
             | ExprKind::MinTypMax { .. }
@@ -1832,6 +1982,23 @@ impl Class {
             constraints,
             handles,
             arrays,
+            // The arguments of the calls its live blocks make, solved first
+            // while their blocks are on (18.5.11).
+            arguments: self
+                .constraint_calls
+                .iter()
+                .filter(|call| call.live)
+                .flat_map(|call| {
+                    call.arguments.iter().map(|(argument, ..)| {
+                        let mut argument = argument.clone();
+                        resolve_statics(&mut argument, first);
+                        ConstraintExpr::Enabled {
+                            index: call.block,
+                            value: Box::new(argument),
+                        }
+                    })
+                })
+                .collect(),
         })
     }
 }

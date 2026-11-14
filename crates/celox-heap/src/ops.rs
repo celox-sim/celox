@@ -231,6 +231,13 @@ pub const UVM_DUMP_RE_CACHE: u64 = 156;
 /// string b of a block's index and the class that declares it, see
 /// [`Heap::register_static_blocks`].
 pub const OBJECT_REGISTER_STATIC_BLOCKS: u64 = 157;
+/// Solve the random variables in the arguments of the functions the
+/// constraints of object a call, as `OBJECT_RANDOMIZE_INPUTS` takes its
+/// program and inputs, without changing the object: whether they have a
+/// solution, see [`Heap::solve_arguments`].
+pub const OBJECT_SOLVE_ARGUMENTS: u64 = 158;
+/// The value of argument `parameter` of the last solve of arguments.
+pub const OBJECT_ARGUMENT_VALUE: u64 = 159;
 
 const _: () = assert!(
     crate::containers::RSORT < UVM_RE_COMP
@@ -417,14 +424,15 @@ impl Heap {
                 self.end_visits();
                 0
             }
-            op @ (OBJECT_RANDOMIZE | OBJECT_RANDOMIZE_INPUTS) => {
-                let input_bytes = (op == OBJECT_RANDOMIZE_INPUTS).then(|| self.take_buffer(c));
+            op @ (OBJECT_RANDOMIZE | OBJECT_RANDOMIZE_INPUTS | OBJECT_SOLVE_ARGUMENTS) => {
+                let buffered = op != OBJECT_RANDOMIZE;
+                let input_bytes = buffered.then(|| self.take_buffer(c));
                 let result = (|| -> Result<_, String> {
                     let program = serde_json::from_slice::<crate::randomization::Program>(
                         self.string(b as Handle),
                     )
                     .map_err(|error| error.to_string())?;
-                    let (check_only, inputs) = if op == OBJECT_RANDOMIZE_INPUTS {
+                    let (check_only, inputs) = if buffered {
                         let bytes = input_bytes.as_ref().unwrap();
                         let (&check, values) = bytes
                             .split_first()
@@ -444,12 +452,16 @@ impl Heap {
                     } else {
                         (c != 0, Vec::new())
                     };
-                    Ok(self.randomize_object_with_inputs(
-                        a as Handle,
-                        &program,
-                        check_only,
-                        &inputs,
-                    ))
+                    Ok(if op == OBJECT_SOLVE_ARGUMENTS {
+                        self.solve_arguments(a as Handle, &program, check_only, &inputs)
+                    } else {
+                        self.randomize_object_with_inputs(
+                            a as Handle,
+                            &program,
+                            check_only,
+                            &inputs,
+                        )
+                    })
                 })();
                 match result {
                     Ok(success) => u64::from(success),
@@ -460,6 +472,7 @@ impl Heap {
                     }
                 }
             }
+            OBJECT_ARGUMENT_VALUE => self.argument_value(parameter as usize),
             OBJECT_RANDOM => self.random_object(a as Handle),
             OBJECT_RANDOM_CYCLIC => self.random_cyclic_object(a as Handle, parameter as u32, b),
             OBJECT_SEED => {

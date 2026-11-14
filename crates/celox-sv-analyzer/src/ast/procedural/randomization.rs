@@ -437,7 +437,112 @@ fn lower_methods(
                                     },
                                 ));
                         }
-                        let success = builder.declare("$constraint_success", int.clone());
+                        // A call fails, changing nothing, when the
+                        // constraints have no solution.
+                        let failure = vec![
+                            Stmt::If {
+                                condition: Expr::Ident(argument.clone()),
+                                then_body: vec![Stmt::Eval(classes::object_call(
+                                    ObjectOp::ModePop,
+                                    vec![Expr::Ident(this.clone())],
+                                ))],
+                                else_body: Vec::new(),
+                            },
+                            Stmt::Return(Some(Expr::Literal("32'sd0".into()))),
+                        ];
+                        let check = Expr::Binary {
+                            left: Box::new(Expr::Ident(argument.clone())),
+                            op: BinaryOp::Eq,
+                            right: Box::new(Expr::Literal("1".into())),
+                        };
+                        let mut solve_inputs = solve_inputs;
+                        // The functions the constraints call (IEEE 1800-2023
+                        // 18.5.11): the random variables in their arguments
+                        // are solved first, by the constraints that name only
+                        // them; then each function is called, as the object's
+                        // class calls it, with the values of its arguments,
+                        // and its value is an input of the solve of the rest.
+                        if !class.constraint_calls.is_empty() {
+                            let first = solve_inputs.len();
+                            program.constraints = std::mem::take(&mut program.constraints)
+                                .into_iter()
+                                .map(|constraint| {
+                                    classes::constraints::call_results(constraint, first)
+                                })
+                                .collect();
+                            let solved = builder.declare("$arguments_solved", int_type());
+                            body.push(Stmt::Assign {
+                                lhs: LValue::Ident(solved.clone()),
+                                rhs: classes::object_call(
+                                    ObjectOp::SolveArguments(program.clone()),
+                                    [
+                                        vec![Expr::Ident(this.clone()), check.clone()],
+                                        solve_inputs.clone(),
+                                    ]
+                                    .concat(),
+                                ),
+                                nonblocking: false,
+                            });
+                            body.push(Stmt::If {
+                                condition: Expr::Ident(solved),
+                                then_body: Vec::new(),
+                                else_body: failure.clone(),
+                            });
+                            let mut argument_index = 0u32;
+                            for (index, call) in class.constraint_calls.iter().enumerate() {
+                                // A block a derived class overrides makes no
+                                // call; its value is never read.
+                                if !call.live {
+                                    solve_inputs.push(Expr::Literal("64'd0".into()));
+                                    continue;
+                                }
+                                // A virtual method runs the override of
+                                // the object's class, and another the
+                                // method the constraint's class sees (8.20).
+                                let owner = if call.is_virtual {
+                                    &class
+                                        .method(&call.method)
+                                        .ok_or_else(|| {
+                                            unsupported(format!(
+                                                "function `{}` of a constraint",
+                                                call.method
+                                            ))
+                                        })?
+                                        .owner
+                                } else {
+                                    &call.owner
+                                };
+                                let mut args = vec![Some(Expr::Ident(this.clone()))];
+                                for &(_, width, signed) in &call.arguments {
+                                    args.push(Some(Expr::Resize {
+                                        expr: Box::new(classes::object_call(
+                                            ObjectOp::ArgumentValue(argument_index),
+                                            Vec::new(),
+                                        )),
+                                        width: width as usize,
+                                        signed,
+                                    }));
+                                    argument_index += 1;
+                                }
+                                let mut ty = classes::unsigned_type(call.width as usize);
+                                ty.is_signed = call.signed;
+                                let result =
+                                    builder.declare(&format!("$constraint_call{index}"), ty);
+                                body.push(Stmt::Assign {
+                                    lhs: LValue::Ident(result.clone()),
+                                    rhs: Expr::Call {
+                                        callee: Callee::Subroutine(
+                                            classes::Class::subroutine_name(owner, &call.method),
+                                        ),
+                                        args,
+                                        arg_order: Vec::new(),
+                                    },
+                                    nonblocking: false,
+                                });
+                                solve_inputs.push(Expr::Ident(result));
+                            }
+                        }
+                        let success = builder.declare("$constraint_success", int_type());
                         body.push(Stmt::Assign {
                             lhs: LValue::Ident(success.clone()),
                             rhs: classes::object_call(
