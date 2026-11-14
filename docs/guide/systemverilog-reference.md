@@ -759,12 +759,14 @@ Supported subset; everything else is rejected:
   `uvm_dpi_get_next_arg_c` returns `celox` followed by the plusargs and
   `uvm_dpi_get_tool_name_c` returns `Celox`. The `uvm_hdl_*` and
   `uvm_polling_*` functions return 0 or `null`, so UVM reports those
-  facilities as unavailable. UVM 1.2's `uvm_re_match`, `uvm_glob_to_re` and
-  `uvm_dump_re_cache` are provided too; an expression `uvm_re_match` cannot
-  compile does not match, without UVM 1.2's `UVM/DPI/REGEX_INV` error, and
-  `uvm_dump_re_cache` does nothing. So are UVM 1.2's `uvm_dpi_regcomp`,
-  `uvm_dpi_regexec` and `uvm_dpi_regfree`; an expression `uvm_dpi_regcomp`
-  cannot compile gives `null` without UVM 1.2's `UVM/DPI/REGCOMP` error.
+  facilities as unavailable. UVM 1.2's `uvm_re_match`, `uvm_glob_to_re`,
+  `uvm_dump_re_cache`, `uvm_dpi_regcomp`, `uvm_dpi_regexec` and
+  `uvm_dpi_regfree` are provided too. Their reports (`UVM/DPI/REGEX_INV`,
+  `UVM/DPI/REGEX_MAX`, `UVM/DPI/REGCOMP` and the cache message) go through
+  the function the UVM package exports for them, `m__uvm_report_dpi`, as
+  UVM's C library makes them, so they count as UVM reports; the text after
+  `invalid glob or regular expression` is the `regex` crate's reason, not
+  `regerror`'s.
 
 ## SystemVerilog emitted by Veryl {#systemverilog-emitted-by-veryl}
 

@@ -117,7 +117,14 @@ impl Ff<'_, '_> {
                 let regex = operand(self, 0)?;
                 Some(call(self, ops::UVM_DPI_REGCOMP, &[regex]))
             }
-            DpiBuiltin::DumpReCache => None,
+            DpiBuiltin::DumpReCache => {
+                call(self, ops::UVM_DUMP_RE_CACHE, &[]);
+                None
+            }
+            DpiBuiltin::ReportInt | DpiBuiltin::ReportString => {
+                let field = operand(self, 0)?;
+                Some(call(self, ops::UVM_REPORT_FIELD, &[field]))
+            }
             // `null`, 0 or "" (an empty string has handle 0): the facility
             // is unavailable; outputs keep their values, though their
             // selectors are evaluated as for any call.

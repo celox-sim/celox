@@ -450,3 +450,90 @@ fn uvm_12_command_line_regular_expressions() {
         check(build().build().unwrap(), four_state);
     }
 }
+
+/// UVM 1.2's C functions report through the function its package exports
+/// for them, `m__uvm_report_dpi` (`base/uvm_globals.svh`), so an error they
+/// report counts as a UVM error: an invalid expression of `uvm_re_match`
+/// (`UVM/DPI/REGEX_INV`) or `uvm_dpi_regcomp` (`UVM/DPI/REGCOMP`), and
+/// `uvm_dump_re_cache`'s message. A call that does not fail reports nothing.
+const UVM_12_REPORT_SOURCE: &str = r#"
+package fake_uvm;
+  int errors, infos, verbosities, lines;
+  string ids;
+  export "DPI-C" function m__uvm_report_dpi;
+  function void m__uvm_report_dpi(int severity, string id, string message,
+                                  int verbosity, string filename, int line);
+    if (severity == 2) errors++;
+    if (severity == 0) infos++;
+    ids = {ids, id, ";"};
+    verbosities += verbosity;
+    lines += line;
+  endfunction
+  import "DPI-C" context function int uvm_re_match(string re, string str);
+  import "DPI-C" context function void uvm_dump_re_cache();
+  import "DPI-C" function chandle uvm_dpi_regcomp(string regex);
+  import "DPI-C" function int uvm_dpi_regexec(chandle preg, string str);
+  import "DPI-C" function void uvm_dpi_regfree(chandle preg);
+  function automatic int run();
+    chandle c;
+    int r = 0;
+    if (uvm_re_match("^a$", "a") == 0) r += 1;
+    if (uvm_re_match("(", "a") != 0) r += 10;
+    c = uvm_dpi_regcomp("(");
+    if (c == null) r += 100;
+    c = uvm_dpi_regcomp("^ok$");
+    if (uvm_dpi_regexec(c, "ok") == 0) r += 1000;
+    uvm_dpi_regfree(c);
+    uvm_dump_re_cache();
+    return r;
+  endfunction
+  function automatic int match_re(string re, string str);
+    return uvm_re_match(re, str);
+  endfunction
+endpackage
+module Top(output int result, output int errors, output int infos, output int sums, output bit ids_ok);
+  // Called without the package's reporting: its report goes nowhere and
+  // is no report of the package's next call, which succeeds.
+  import "DPI-C" context function int uvm_re_match(string re, string str);
+  initial begin
+    if (uvm_re_match("(", "a") == 0 || fake_uvm::match_re("^a$", "a") != 0) $finish;
+    result = fake_uvm::run();
+    errors = fake_uvm::errors;
+    infos = fake_uvm::infos;
+    sums = fake_uvm::verbosities * 1000 + fake_uvm::lines;
+    ids_ok = fake_uvm::ids == "UVM/DPI/REGEX_INV;UVM/DPI/REGCOMP;UVM/DPI/REGEX_MAX;";
+  end
+endmodule
+"#;
+
+#[test]
+fn uvm_12_functions_report_through_the_uvm_package() {
+    fn check<B: celox::SimBackend>(mut sim: celox::Simulation<B>, four_state: bool) {
+        sim.run_until(0).unwrap();
+        for (name, expected) in [
+            ("result", 1111u32),
+            ("errors", 2),
+            ("infos", 1),
+            // Verbosity LOW (100) of the cache message; lines 94, 107, 249.
+            ("sums", 100 * 1000 + 94 + 107 + 249),
+            ("ids_ok", 1),
+        ] {
+            assert_eq!(
+                sim.get(sim.signal(name)),
+                expected.into(),
+                "{name}, four_state={four_state}"
+            );
+        }
+    }
+    for four_state in [false, true] {
+        let build = || {
+            celox::Simulation::from_sv_sources(
+                vec![(UVM_12_REPORT_SOURCE, Path::new("uvm12_reports.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+        };
+        check(build().build_interpreter().unwrap(), four_state);
+        check(build().build().unwrap(), four_state);
+    }
+}
