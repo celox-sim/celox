@@ -184,6 +184,18 @@ impl<B: SimBackend> SimulationState<B> {
         process: usize,
         encoded: u64,
     ) -> Result<bool, Halt> {
+        // A function called by a declaration initializer may fork a
+        // background process only from an initial or always procedure
+        // (IEEE 1800-2023 13.4.4), checked when it forks.
+        if self.model.processes[process].kind == celox_design::ProcessKind::Initializer {
+            return Err(SimulatorErrorCode::Runtime {
+                message: "background process scheduled by a declaration initializer; IEEE \
+                          1800-2023 13.4.4 requires an initial/always process"
+                    .into(),
+                signals: Vec::new(),
+            }
+            .into());
+        }
         let first = (encoded & 0xffff) as usize;
         let count = ((encoded >> 16) & 0xffff) as usize;
         let join = match (encoded >> 32) & 0b11 {
