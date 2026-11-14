@@ -16,7 +16,11 @@ impl ScopeElaboration<'_> {
             functions
         };
         // The scope's tables are shared with the contexts that bind in it.
+        // Its classes see the constants it imports from the start, before
+        // its own are known.
+        self.const_env = self.imported.const_env.clone().into();
         self.type_aliases = type_aliases_from_scope(syntax_tree, session)?.into();
+        self.declare_class_scopes(syntax_tree, session);
         // Constant functions see the module constants known so far, by
         // their values and declaration types; they are collected again once
         // the parameters are known.
@@ -57,8 +61,10 @@ impl ScopeElaboration<'_> {
             session,
             &self.parameters,
         ));
+        self.declare_class_scopes(syntax_tree, session);
         self.type_aliases =
             type_aliases_from_scope_with_env(syntax_tree, session, &self.const_env)?.into();
+        self.declare_class_scopes(syntax_tree, session);
         self.enum_constants = enum_member_constants_from_scope(
             syntax_tree,
             session,
@@ -75,10 +81,12 @@ impl ScopeElaboration<'_> {
         }
         self.enum_constants
             .extend_missing(&self.imported.enum_constants);
+        self.declare_class_scopes(syntax_tree, session);
         // Alias ranges may themselves contain casts sized by enum members.
         // Rebuild them before assigning declared parameter widths.
         self.type_aliases =
             type_aliases_from_scope_with_env(syntax_tree, session, &self.const_env)?.into();
+        self.declare_class_scopes(syntax_tree, session);
         // Constant casts are evaluated while parameter syntax is lowered.
         // Repeat that lowering after enum constants become available so a
         // cast operand such as `byte_t'(ENUM_MEMBER)` is not permanently
@@ -110,8 +118,10 @@ impl ScopeElaboration<'_> {
             &mut self.const_env,
             &self.parameters,
         );
+        self.declare_class_scopes(syntax_tree, session);
         self.type_aliases =
             type_aliases_from_scope_with_env(syntax_tree, session, &self.const_env)?.into();
+        self.declare_class_scopes(syntax_tree, session);
         // Contract dependency analysis must see module parameter references
         // before the normal procedural lowering substitutes default literals.
         let symbolic_parameters = self
@@ -119,13 +129,6 @@ impl ScopeElaboration<'_> {
             .iter()
             .map(|parameter| parameter.name().to_string())
             .collect();
-        // Class parameter defaults are bound where the class is declared.
-        classes::specializations::declare_scopes(
-            syntax_tree,
-            session,
-            &self.const_env,
-            &self.type_aliases,
-        );
         self.declaration_subroutines =
             with_imported(const_functions::symbolic_module_constant_functions(
                 syntax_tree,
@@ -168,6 +171,7 @@ impl ScopeElaboration<'_> {
             &mut self.const_env,
             &self.parameters,
         );
+        self.declare_class_scopes(syntax_tree, session);
 
         self.array_parameters = array_parameters::array_parameters_from_scope(
             syntax_tree,
@@ -182,6 +186,7 @@ impl ScopeElaboration<'_> {
                 0,
             );
         }
+        self.declare_class_scopes(syntax_tree, session);
         if self.array_parameters.is_empty() {
             return Ok(parameterized);
         }
@@ -207,6 +212,17 @@ impl ScopeElaboration<'_> {
             &variables,
         ));
         Ok(syntax_tree.with_functions(functions))
+    }
+
+    /// Record the scope's tables as they stand as those of the classes it
+    /// declares, before anything lays one of them out.
+    fn declare_class_scopes(&self, syntax_tree: &AnalysisContext<'_>, session: &mut Session) {
+        classes::specializations::declare_scopes(
+            syntax_tree,
+            session,
+            &self.const_env,
+            &self.type_aliases,
+        );
     }
 
     /// Rejects the constructs the analysis would silently ignore. A parameter
@@ -266,6 +282,7 @@ impl ScopeElaboration<'_> {
                                     .map(|signal| (signal.name(), signal.r#type())),
                             ),
                     );
+                    self.declare_class_scopes(syntax_tree, session);
                     self.parameters = parameters_from_scope(
                         syntax_tree,
                         session,
@@ -291,9 +308,11 @@ impl ScopeElaboration<'_> {
                         &mut self.const_env,
                         &self.parameters,
                     );
+                    self.declare_class_scopes(syntax_tree, session);
                     self.type_aliases =
                         type_aliases_from_scope_with_env(syntax_tree, session, &self.const_env)?
                             .into();
+                    self.declare_class_scopes(syntax_tree, session);
                     self.array_parameters = array_parameters::array_parameters_from_scope(
                         syntax_tree,
                         session,

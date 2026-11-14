@@ -636,6 +636,7 @@ pub(super) fn constant_session(session: &Session) -> Session {
         foreign: session.foreign.clone(),
         classes: session.classes.clone(),
         class_declaration_scopes: session.class_declaration_scopes.clone(),
+        class_scope_recordings: session.class_scope_recordings,
         class_declarations_repeated: session.class_declarations_repeated.clone(),
         class_specializations: session.class_specializations.clone(),
         class_specializations_frozen: true,

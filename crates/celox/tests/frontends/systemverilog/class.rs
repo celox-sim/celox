@@ -5647,3 +5647,50 @@ fn inherited_properties_keep_the_types_their_class_declares() {
     };
     assert!(error.to_string().contains("`p::Base`"), "{error}");
 }
+
+#[test]
+fn package_classes_are_laid_out_in_the_package() {
+    // A class body names the types and constants of the scope that declares
+    // the class (IEEE 1800-2023 8.13, 8.25): `Base`'s `item_t` and `N` are
+    // the package's, though a derived specialization that first lays it out
+    // declares its own of those names.
+    let source = "package p;
+        typedef int item_t;
+        localparam int N = 12;
+        class Base; item_t x; bit [N-1:0] y; endclass
+        class Mid #(type T = int) extends Base; typedef byte item_t; localparam int N = 4; endclass
+        class Leaf #(type T = int) extends Mid#(T);
+            static function int f();
+                Mid#(T) m = new;
+                m.x = 300;
+                m.y = 12'hfff;
+                return m.x * 10000 + m.y;
+            endfunction
+        endclass
+        typedef Leaf#(byte) lb_t;
+        typedef Leaf#(shortint) ls_t;
+    endpackage
+    module Top; import p::*; initial $display(\"%0d %0d\", lb_t::f(), ls_t::f()); endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["3004095 3004095"]
+    );
+}
+
+#[test]
+fn local_classes_see_the_constants_their_module_imports() {
+    // A module's class sees the constants the module imports (IEEE 1800-2023
+    // 26.3), also when a function of the module lowers one of its static
+    // methods before the module's own constants are known.
+    let source = "package q; localparam int W = 12; endpackage
+    module Top;
+        import q::*;
+        class C;
+            bit [W-1:0] x;
+            static function int f(); C c = new; c.x = 16'hffff; return c.x; endfunction
+        endclass
+        function automatic int g(); return C::f(); endfunction
+        initial $display(\"%0d\", g());
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["4095"]);
+}

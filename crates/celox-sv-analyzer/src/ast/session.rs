@@ -15,14 +15,19 @@ pub(crate) struct Session {
     pub(super) next_call_site: usize,
     pub(super) diagnostics: Vec<warnings::AnalyzerWarning>,
     pub(super) generate_items: generate::Memo,
-    /// Classes laid out so far, by name.
-    pub(super) classes: HashMap<String, std::rc::Rc<classes::Class>>,
+    /// Classes laid out so far, by name, each with the recording of the
+    /// tables of its declaring scope it was laid out in (see
+    /// [`classes::specializations::DeclaringScope`]).
+    pub(super) classes: HashMap<String, (std::rc::Rc<classes::Class>, Option<u64>)>,
     /// The classes whose objects dispatchers and `$cast` select from, as
     /// the scope last saw them.
     pub(super) concrete_classes: Option<std::rc::Rc<classes::ConcreteClasses>>,
     /// The constants and types of the scope that declares each class, which
     /// its parameter defaults and body see (IEEE 1800-2023 8.25).
-    pub(super) class_declaration_scopes: HashMap<String, (SharedEnv, SharedAliases)>,
+    pub(super) class_declaration_scopes: HashMap<String, classes::specializations::DeclaringScope>,
+    /// How many times a scope has recorded its tables for its classes,
+    /// which numbers each recording.
+    pub(super) class_scope_recordings: u64,
     /// The specializations that class references have named, by class
     /// declaration (see [`classes::specializations`]).
     pub(super) class_specialization_names: HashMap<String, Vec<classes::specializations::Named>>,
