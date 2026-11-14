@@ -45,7 +45,16 @@ pub(in crate::ast) fn classify<'a>(
         }
     }
     for subroutine in &subroutines {
-        let is_timed = timed.contains(&subroutine.name);
+        // A task suspends through what it calls too; a function never
+        // suspends, and only a fork of its own body outlives the call with
+        // its formals: a fork that one of its callees spawns reads none of
+        // them, as UVM 1.2's `uvm_create_random_seed` reaches the fork of
+        // `uvm_component::m_set_cl_verb`.
+        let is_timed = if subroutine.is_task {
+            timed.contains(&subroutine.name)
+        } else {
+            own_effects(&subroutine.body, &definitions).0.suspends
+        };
         if !subroutine.is_task {
             let (blocking, _, calls, _) = super::final_procedures::effects(
                 subroutine.body.iter().chain(&subroutine.sensitivity_body),
