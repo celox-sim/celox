@@ -297,7 +297,9 @@ blocks in programs. Two region deviations are listed under
   locator methods on a fixed-size array property of unpacked structures
   whose range is not `[0:N-1]`; packed structure members of a property;
   selects of a member of a property of unpacked structure type; reads of
-  bit and part selects of a property not declared `[N-1:0]`; nonblocking
+  bit and part selects of a property not declared `[N-1:0]` outside
+  constraints, which take selects of any declared range (see Randomization
+  and constraints); nonblocking
   assignments to a property; properties as `output` or `inout` arguments;
   `const` dynamic container properties.
 - An unqualified static-property name in an inline `randomize() with`
@@ -336,8 +338,9 @@ blocks in programs. Two region deviations are listed under
   integers and scalar enums with up to 65536 members. Named constraint blocks
   cover only 1–64-bit two-state scalar integer properties with comparisons,
   logical and bitwise operations, addition, subtraction, and multiplication,
-  class handle properties compared with each other or `null` by `==` and
-  `!=`, and calls of functions of the class with input arguments (18.5.11);
+  bit-selects and part-selects of a property at constant positions, class
+  handle properties compared with each other or `null` by `==` and `!=`,
+  and calls of functions of the class with input arguments (18.5.11);
   a call in a constraint loop, in inline constraints, in the constraints of
   an object a rand handle reaches, or in an argument of another is
   unsupported. The elements of a random array, fixed-size or dynamic, that a
