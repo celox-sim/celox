@@ -881,3 +881,93 @@ fn interfaces_naming_packages_through_unit_imports_reach_classes() {
     sim.run_until(5).unwrap();
     assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
 }
+
+/// A member of an enumeration type keeps its type through a virtual
+/// interface: its value is assigned to a variable of that type without a
+/// cast and has the enumeration's methods (IEEE 1800-2023 6.19.3, 6.19.5),
+/// as the uvm-1.2 example `uvm_use_models_pipelined_item_done` reads
+/// `req.MRESP = MBUS.MRESP;`.
+#[test]
+fn enumeration_members_keep_their_type_through_virtual_interfaces() {
+    let source = "`timescale 1ns/1ns
+        package types_pkg;
+            typedef enum logic [2:0] {NONE, READ_VALID, WRITE_COMPLETE} resp_e;
+        endpackage
+        interface bus_if;
+            import types_pkg::*;
+            resp_e resp;
+        endinterface
+        module Top(output int code, output bit named);
+            import types_pkg::*;
+            class item;
+                resp_e resp;
+            endclass
+            bus_if bus();
+            virtual bus_if vif;
+            item it;
+            initial begin
+                it = new;
+                vif = bus;
+                bus.resp = WRITE_COMPLETE;
+                #1;
+                it.resp = vif.resp;
+                code = it.resp;
+                named = vif.resp.name() == \"WRITE_COMPLETE\";
+            end
+        endmodule";
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("vif_enum.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("code")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("named")), 1u8.into());
+}
+
+// A header port of an enumeration type keeps it too, and the bounds of an
+// enumeration type take the values of the constants where it is declared,
+// not those of a reader's constants of the same name.
+#[test]
+fn header_ports_and_package_constant_bounds_keep_their_enumeration_through_virtual_interfaces() {
+    let source = "`timescale 1ns/1ns
+        package types_pkg;
+            localparam int W = 3;
+            typedef enum logic [2:0] {NONE, READ_VALID, WRITE_COMPLETE} resp_e;
+            typedef enum logic [W-1:0] {IDLE = 0, BUSY = 5} state_e;
+        endpackage
+        interface bus_if(input types_pkg::resp_e resp);
+            types_pkg::state_e state;
+        endinterface
+        module Top(output int code, output bit named, output int width, output bit state_named);
+            import types_pkg::*;
+            localparam int W = 8;
+            class item;
+                resp_e resp;
+            endclass
+            resp_e driven;
+            bus_if bus(driven);
+            virtual bus_if vif;
+            item it;
+            initial begin
+                it = new;
+                vif = bus;
+                driven = READ_VALID;
+                bus.state = BUSY;
+                #1;
+                it.resp = vif.resp;
+                code = it.resp;
+                named = vif.resp.name() == \"READ_VALID\";
+                width = $bits(vif.state);
+                state_named = vif.state.name() == \"BUSY\";
+            end
+        endmodule";
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("vif_enum_ports.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("code")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("named")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("width")), 3u32.into());
+    assert_eq!(sim.get(sim.signal("state_named")), 1u8.into());
+}

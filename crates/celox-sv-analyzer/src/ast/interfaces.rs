@@ -34,6 +34,14 @@ pub struct InterfacePrototype {
     pub warnings: Vec<crate::ir::AnalyzerWarning>,
 }
 
+/// The prototype of an interface, with what its public form leaves out.
+pub(super) struct Prototype {
+    pub(super) prototype: InterfacePrototype,
+    /// The types of the members of an enumeration type, by name, which the
+    /// ports of the prototype's `module` do not keep.
+    pub(super) enumerations: Vec<(String, super::Type)>,
+}
+
 pub fn interface_prototypes(
     sources: &[(&str, &Path)],
 ) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
@@ -53,6 +61,19 @@ pub fn interface_prototypes_with_options(
     selected: Option<&HashSet<String>>,
     options: crate::AnalysisOptions,
 ) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
+    Ok(prototypes(sources, selected, options, true)?
+        .into_iter()
+        .map(|prototype| prototype.prototype)
+        .collect())
+}
+
+/// The prototypes of the interfaces in `selected`, analyzing the packages
+/// and compilation units their declarations need.
+pub(super) fn prototypes_with_packages(
+    sources: &[(&str, &Path)],
+    selected: Option<&HashSet<String>>,
+    options: crate::AnalysisOptions,
+) -> Result<Vec<Prototype>, AnalyzerError> {
     prototypes(sources, selected, options, true)
 }
 
@@ -66,7 +87,7 @@ pub(super) fn prototypes_without_packages(
     sources: &[(&str, &Path)],
     selected: Option<&HashSet<String>>,
     options: crate::AnalysisOptions,
-) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
+) -> Result<Vec<Prototype>, AnalyzerError> {
     prototypes(sources, selected, options, false)
 }
 
@@ -75,7 +96,7 @@ fn prototypes(
     selected: Option<&HashSet<String>>,
     options: crate::AnalysisOptions,
     analyze_packages: bool,
-) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
+) -> Result<Vec<Prototype>, AnalyzerError> {
     if selected.is_some_and(HashSet::is_empty) {
         return Ok(Vec::new());
     }
@@ -168,7 +189,7 @@ fn prototypes(
                 .cloned()
                 .unwrap_or_default();
             super::warnings::append(&mut found, warnings.iter().cloned());
-            let prototype = (|| -> Result<InterfacePrototype, AnalyzerError> {
+            let prototype = (|| -> Result<Prototype, AnalyzerError> {
                 let prefix = format!("__celox_interface_{}", interface.name);
                 let mut probe_name = prefix.clone();
                 let mut index = 0;
@@ -194,29 +215,30 @@ fn prototypes(
                     .collect::<HashSet<_>>();
                 let behavior_captures =
                     interface.captured_members(&interface.function_closure(&behavior_functions));
-                Ok(InterfacePrototype {
+                let (module, enumerations) = {
+                    let file = &files[interface.file];
+                    let scoped = file.syntax_tree.scoped(interface.scope)?;
+                    interface_ast::signature(
+                        &scoped,
+                        sources[interface.file].1,
+                        &packages,
+                        probe_name.clone(),
+                        &interface
+                            .members
+                            .iter()
+                            .map(|m| m.name.clone())
+                            .collect::<Vec<_>>(),
+                        &interface.names,
+                    )?
+                };
+                let prototype = InterfacePrototype {
                     name: interface.name.clone(),
                     warnings: warnings::components(&files[interface.file].syntax_tree)
                         .remove(&interface.name)
                         .unwrap_or_default(),
                     header_dependent_cast: interface
                         .header_dependent_cast(&files[interface.file])?,
-                    module: {
-                        let file = &files[interface.file];
-                        let scoped = file.syntax_tree.scoped(interface.scope)?;
-                        interface_ast::signature(
-                            &scoped,
-                            sources[interface.file].1,
-                            &packages,
-                            probe_name.clone(),
-                            &interface
-                                .members
-                                .iter()
-                                .map(|m| m.name.clone())
-                                .collect::<Vec<_>>(),
-                            &interface.names,
-                        )?
-                    },
+                    module,
                     time_declarations,
                     parameters: interface
                         .parameters
@@ -267,17 +289,22 @@ fn prototypes(
                             )
                         })
                         .collect(),
+                };
+                Ok(Prototype {
+                    prototype,
+                    enumerations,
                 })
             })();
             prototype
-                .map(|mut prototype| {
+                .map(|mut built| {
+                    let prototype = &mut built.prototype;
                     prototype.warnings = package_warnings.clone();
                     for warning in warnings {
                         if !prototype.warnings.contains(&warning) {
                             prototype.warnings.push(warning);
                         }
                     }
-                    prototype
+                    built
                 })
                 .map_err(|error| error.with_warnings(found.clone()))
         })
