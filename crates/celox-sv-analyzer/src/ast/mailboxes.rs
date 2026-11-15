@@ -34,7 +34,7 @@ impl Message {
     ) -> Converted<Self> {
         if !ty.unpacked_ranges.is_empty()
             || ty.container.is_some()
-            || ty.unpacked_struct().is_some()
+            || ty.is_unpacked_struct_in(table)
             || matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal)
         {
             return Err(unsupported(

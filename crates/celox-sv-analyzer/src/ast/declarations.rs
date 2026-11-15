@@ -63,7 +63,7 @@ pub(super) fn ports_from_scope(
         }
         inherited_direction = direction;
         inherited_type = base.clone();
-        let ty = type_with_unpacked_ranges(
+        let mut ty = type_with_unpacked_ranges(
             base,
             constant_binding::unpacked_ranges(
                 &native.dimensions,
@@ -73,13 +73,21 @@ pub(super) fn ports_from_scope(
                 type_aliases,
             )?,
         )?;
+        // The port is declared in this scope: its type is the one the
+        // scope's constants give it.
+        semantic_types::bind_declared(
+            &mut session.types,
+            &syntax_tree.functions,
+            &mut ty,
+            const_env,
+        );
         if ty.container.is_some() {
             return Err(unsupported("dynamic container port"));
         }
         if ty.kind() == TypeKind::Event {
             return Err(unsupported("event port"));
         }
-        if ty.unpacked_struct().is_some() {
+        if ty.is_unpacked_struct_in(&session.types) {
             // A port carries bits, not the heap handle of a container
             // member.
             if ty
@@ -539,7 +547,7 @@ pub(super) fn signals_from_body_item(
     };
     substitute_signal_local_constants(&mut declared, env);
     for signal in declared {
-        if signal.r#type.unpacked_struct().is_none() {
+        if !signal.r#type.is_unpacked_struct_in(&session.types) {
             signals.push(signal);
             continue;
         }

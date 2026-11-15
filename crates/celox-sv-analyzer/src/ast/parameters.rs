@@ -500,7 +500,7 @@ pub(super) fn parameters_from_native_with_environment(
             .is_none_or(|alias| alias.members.is_empty() && alias.unpacked_ranges.is_empty());
     if declared_alias
         .as_ref()
-        .is_some_and(|alias| alias.unpacked_struct().is_some())
+        .is_some_and(|alias| alias.is_unpacked_struct_in(&session.types))
     {
         return Err(unsupported("parameter of unpacked structure type"));
     }
@@ -2357,7 +2357,10 @@ pub(super) fn native_constant_type(
         };
         type_binding::bind(data_type, tree, session, dims).ok()??
     };
-    if ty.container.is_some() || !ty.unpacked_ranges.is_empty() || ty.unpacked_struct.is_some() {
+    if ty.container.is_some()
+        || !ty.unpacked_ranges.is_empty()
+        || ty.is_unpacked_struct_in(&session.types)
+    {
         return None;
     }
     let implicit = scalar_binding || !prefix.has_declared_type();

@@ -793,3 +793,20 @@ fn enumerations_and_packed_arrays_of_them_are_told_by_their_types() {
         ["A", "B"]
     );
 }
+
+#[test]
+fn unpacked_structures_and_fixed_size_arrays_of_them_are_told_by_their_types() {
+    // IEEE 1800-2023 7.2: an unpacked structure; 7.4.2: an element of a
+    // fixed-size array of them is one; a queue of them is a container.
+    let (table, ids) = typedefs(
+        "typedef struct {int a;} s_t;
+         typedef s_t sa_t [2];
+         typedef s_t sq_t [$];
+         typedef struct packed {int a;} p_t;",
+    );
+    let is_struct = |name: &str| table.is_unpacked_struct(table.fixed_element(ids[name]));
+    assert!(is_struct("s_t"));
+    assert!(is_struct("sa_t"));
+    assert!(!is_struct("sq_t"));
+    assert!(!is_struct("p_t"));
+}

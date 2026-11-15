@@ -227,7 +227,7 @@ pub(super) fn selected_value(
             objects::property(tree, session, base, native, dimensions)?
         && property.field.handle.is_none()
         && property.r#type.container.is_none()
-        && property.r#type.unpacked_struct().is_none()
+        && !property.r#type.is_unpacked_struct_in(&session.types)
     {
         // The value has the positions of a `[N-1:0]` vector.
         if !zero_based_vector(&property.r#type, tree, dimensions) {
@@ -255,7 +255,7 @@ pub(super) fn selected_value(
             .get(&instances::normalize_identifier(&name.spelling))
             .is_none()
         && let Some((container, handle)) = locators::record_iterator(base, native, dimensions)
-        && container.element.unpacked_struct().is_none()
+        && !container.element_is_unpacked_struct(&session.types)
     {
         if !zero_based_vector(&container.element, tree, dimensions) {
             return Err(unsupported(
@@ -286,7 +286,7 @@ pub(super) fn selected_value(
         }
         if suffix.len() > levels
             && container.record.is_some()
-            && container.element.unpacked_struct().is_none()
+            && !container.element_is_unpacked_struct(&session.types)
         {
             return Err(unsupported(
                 "bit-select or part-select of a container element wider than 64 bits",
@@ -336,7 +336,8 @@ pub(super) fn selected_value(
                     }
                     _ => false,
                 };
-                if !zero_based || ty.unpacked_struct().is_some() || !ty.members.is_empty() {
+                if !zero_based || ty.is_unpacked_struct_in(&session.types) || !ty.members.is_empty()
+                {
                     return Err(unsupported(
                         "select of a container element member that is not declared [N-1:0]",
                     ));
@@ -639,7 +640,7 @@ pub(in crate::ast) fn object_place(
         objects::property(tree, session, base, native, dimensions)?
         && property.field.handle.is_none()
         && property.r#type.container.is_none()
-        && property.r#type.unpacked_struct().is_none()
+        && !property.r#type.is_unpacked_struct_in(&session.types)
     {
         let place = property_place(property, receiver, native, tree, session, dimensions)?;
         (place, base)

@@ -351,6 +351,16 @@ impl ContainerType {
         Self::part_class(self.key.as_ref()?, self.key_id(table), table)
     }
 
+    /// Whether the container's elements are of an unpacked structure type
+    /// (7.2), from their semantic type.
+    pub(super) fn element_is_unpacked_struct(&self, table: &semantic_types::TyTable) -> bool {
+        unpacked_structs::is_struct(
+            self.element_id(table),
+            table,
+            self.element.unpacked_struct.is_some(),
+        )
+    }
+
     /// The enumeration of the container's elements (6.19), from their
     /// semantic type.
     pub(super) fn element_enumeration(
@@ -723,7 +733,7 @@ pub(super) fn assignment(
             Some(id)
                 if let Some(value) = default_only_pattern(id, native)
                     && target.element.container.is_none()
-                    && target.element.unpacked_struct().is_none() =>
+                    && !target.element_is_unpacked_struct(&session.types) =>
             {
                 let value = element_value(value, tree, session, dims, target)?;
                 call(ContainerOp::WithDefault, target.layout, vec![value])
@@ -1259,7 +1269,7 @@ fn element_value(
             || "container element assignment".into(),
         )?;
     }
-    if target.element.unpacked_struct().is_some() {
+    if target.element_is_unpacked_struct(&session.types) {
         let structure = unpacked_structs::type_id(&target.element, tree, session, dims)?;
         unpacked_structs::check_value(structure, id, native, tree, session, dims)?;
     }
@@ -1738,7 +1748,7 @@ pub(super) fn value(
                         _ => ContainerOp::Rsort,
                     };
                     if matches!(op, ContainerOp::Sort | ContainerOp::Rsort)
-                        && target.element.unpacked_struct().is_some()
+                        && target.element_is_unpacked_struct(&session.types)
                     {
                         return Err(unsupported(
                             "sorting unpacked structures requires a with expression",
@@ -1977,7 +1987,7 @@ fn query(
                     // packed dimensions; a structure has none.
                     + if innermost.layout.handle.is_some()
                         && (innermost.record.is_none()
-                            || innermost.element.unpacked_struct().is_some())
+                            || innermost.element_is_unpacked_struct(&session.types))
                         || innermost.element.is_chandle()
                     {
                         0
@@ -2066,7 +2076,7 @@ pub(super) fn selected_element(
             if ty.container.is_some()
                 || target.element_class(&session.types).is_some()
                 || ty.is_chandle()
-                || ty.unpacked_struct().is_some()
+                || ty.is_unpacked_struct_in(&session.types)
                 || !ty.unpacked_ranges.is_empty()
                 || target.layout.handle.is_some()
                 || target.record.is_some()
@@ -2194,7 +2204,7 @@ pub(super) fn struct_element_place(
     let Some(target) = native_type(*container, native, tree, session, dims)? else {
         return Ok(None);
     };
-    if target.element.unpacked_struct().is_none() {
+    if !target.element_is_unpacked_struct(&session.types) {
         return Ok(None);
     }
     let Some((container_value, index)) = element_address(
@@ -2702,7 +2712,7 @@ fn struct_element(
     let Some(target) = native_type(base, native, tree, session, dims)? else {
         return Ok(None);
     };
-    if target.element.unpacked_struct().is_none() {
+    if !target.element_is_unpacked_struct(&session.types) {
         return Ok(None);
     }
     let Some(value) = value(id, native, tree, session, dims, false)? else {
@@ -2805,6 +2815,17 @@ pub(super) fn element_member(
     if !packed.is_empty() && member_type.members.is_empty() {
         return Ok(None);
     }
+    // The member has its type in the element's semantic type (7.2).
+    let mut member_type = member_type;
+    if member_type.binding.get(&session.types).is_none()
+        && let Some(id) = target.element_id(&session.types).and_then(|id| {
+            names
+                .iter()
+                .try_fold(id, |id, name| session.types.member(id, name))
+        })
+    {
+        member_type.binding.set(&session.types, id);
+    }
     let leaves_in_order = aggregate.leaves();
     let parts = leaves
         .iter()
@@ -2833,7 +2854,7 @@ pub(super) fn element_member(
             "structure member with several members of an element read with a side effect",
         ));
     }
-    let value = if member_type.unpacked_struct().is_some() {
+    let value = if member_type.is_unpacked_struct_in(&session.types) {
         Expr::Concat(parts)
     } else {
         parts.into_iter().next().expect("one leaf")

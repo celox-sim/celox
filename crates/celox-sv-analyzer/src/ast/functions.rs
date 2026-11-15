@@ -290,7 +290,7 @@ fn native_signature(
                 !ty.members.is_empty()
                     || !ty.unpacked_ranges.is_empty()
                     || ty.packed_ranges.len() > 1
-                    || ty.unpacked_struct.is_some()
+                    || ty.is_unpacked_struct_in(&session.types)
             })
             .and_then(|ty| {
                 ty.pattern_target(&const_functions::Environment {

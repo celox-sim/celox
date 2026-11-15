@@ -257,3 +257,58 @@ fn closed_shapes_share_their_type_across_declarations() {
     assert_width(&table, five, 5);
     assert_width(&table, eleven, 11);
 }
+
+#[test]
+fn declarator_dimensions_are_in_the_type_a_shape_is_bound_to() {
+    // 7.4: `int a[2]`, its unpacked range from the declarator, is an array
+    // of `int`. A type whose dimensions change is bound afresh.
+    let mut table = TyTable::default();
+    let functions = const_functions::ConstantFunctions::default();
+    let mut base = Type::new(TypeKind::Bit);
+    base.packed_ranges.push(PackedRange::new(
+        ConstExpr::Literal("31".into()),
+        ConstExpr::Literal("0".into()),
+    ));
+    semantic_types::bind_declared(&mut table, &functions, &mut base, &ConstEnv::default());
+    let scalar = base
+        .binding
+        .get(&table)
+        .expect("the semantic type of the base");
+    let array = types::type_with_unpacked_ranges(
+        base.clone(),
+        vec![UnpackedRange::new(
+            ConstExpr::Literal("0".into()),
+            ConstExpr::Literal("1".into()),
+        )],
+    )
+    .unwrap();
+    assert!(array.binding.get(&table).is_none());
+    let mut shape = procedural::dimensions_from_type(&array);
+    let id = shape
+        .bind_type(&mut table, &functions, &ConstEnv::default())
+        .unwrap();
+    assert!(matches!(
+        table.data(id),
+        TyData::Array { element, .. } if *element == scalar
+    ));
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "a shape is bound to a type with its unpacked dimensions")]
+fn a_shape_bound_to_its_base_type_is_caught() {
+    let mut table = TyTable::default();
+    let functions = const_functions::ConstantFunctions::default();
+    let mut base = Type::new(TypeKind::Bit);
+    semantic_types::bind_declared(&mut table, &functions, &mut base, &ConstEnv::default());
+    let mut array = base.clone();
+    array
+        .shape_keeping_binding()
+        .unpacked_ranges
+        .push(UnpackedRange::new(
+            ConstExpr::Literal("0".into()),
+            ConstExpr::Literal("1".into()),
+        ));
+    // A change that keeps the binding but adds a dimension.
+    procedural::dimensions_from_type(&array).bound(&table);
+}

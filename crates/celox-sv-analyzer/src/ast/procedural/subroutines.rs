@@ -938,7 +938,7 @@ pub(in crate::ast) fn lower_subroutine(
                     // The default of a container input is a container value;
                     // that of a chandle, a chandle.
                     let shape = (ty.tagged_identity().is_some()
-                        || ty.unpacked_struct().is_some()
+                        || ty.is_unpacked_struct_in(&builder.session.types)
                         || ty.is_chandle() && ty.unpacked_ranges.is_empty()
                         || ty.container.is_some() && *direction == ParamDirection::Input)
                         .then(|| dimensions_from_type(ty));
@@ -989,7 +989,7 @@ pub(in crate::ast) fn lower_subroutine(
                 unique
             }
         };
-        if r#type.unpacked_struct().is_some() {
+        if r#type.is_unpacked_struct_in(&builder.session.types) {
             aggregate_formals.push((lowered_params.len(), r#type.clone()));
         }
         if direction.is_reference() {
@@ -1028,7 +1028,7 @@ pub(in crate::ast) fn lower_subroutine(
     let mut result_leaves = None;
     if dispatch.is_none()
         && let (Some(result), Some(r#type)) = (&return_var, &return_type)
-        && r#type.unpacked_struct().is_some()
+        && r#type.is_unpacked_struct_in(&builder.session.types)
         && !constructor
     {
         let leaves = builder
