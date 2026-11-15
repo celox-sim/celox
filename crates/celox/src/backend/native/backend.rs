@@ -4,7 +4,12 @@
 //! ISel → scalar MIR → regalloc → host emission instead of Cranelift.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: scoped compile worker threads in compile_program claim the next FF/process task from this shared counter"
+)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use bit_set::BitSet;

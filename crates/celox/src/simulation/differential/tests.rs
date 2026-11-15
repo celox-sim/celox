@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_types,
+    reason = "test-only: watchdog flags shared with the thread that runs the simulation"
+)]
 use std::path::Path;
 
 use crate::{SchedulerMode, Simulation};

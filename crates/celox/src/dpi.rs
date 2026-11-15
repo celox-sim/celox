@@ -140,8 +140,17 @@ impl DpiSymbols {
 #[cfg(feature = "host-runtime")]
 fn library_symbol(path: &std::path::Path, name: &str) -> Result<Option<usize>, DpiError> {
     use crate::HashMap;
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::LazyLock;
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: process-wide cache of leaked DPI-C libraries, loaded from whichever host thread builds a simulator"
+    )]
+    use std::sync::Mutex;
 
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: process-wide cache of leaked DPI-C libraries, loaded from whichever host thread builds a simulator"
+    )]
     static LIBRARIES: LazyLock<Mutex<HashMap<PathBuf, &'static libloading::Library>>> =
         LazyLock::new(|| Mutex::new(HashMap::default()));
 

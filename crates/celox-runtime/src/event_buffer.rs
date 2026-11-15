@@ -1,7 +1,20 @@
+#[expect(
+    clippy::disallowed_types,
+    reason = "FFI/JIT: JIT-compiled and interpreted kernels write runtime event words through the raw pointer from as_mut_ptr while the host reads them with atomic loads"
+)]
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[expect(
+    clippy::disallowed_types,
+    reason = "FFI/JIT: JIT-compiled and interpreted kernels write runtime event words through the raw pointer from as_mut_ptr while the host reads them with atomic loads"
+)]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 pub struct RuntimeEventBuffer {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "FFI/JIT: JIT-compiled and interpreted kernels write runtime event words through the raw pointer from as_mut_ptr while the host reads them with atomic loads"
+    )]
     words: Box<[UnsafeCell<u64>]>,
     byte_size: usize,
 }
@@ -12,6 +25,10 @@ unsafe impl Sync for RuntimeEventBuffer {}
 impl RuntimeEventBuffer {
     pub fn new(byte_size: usize) -> Self {
         let word_count = byte_size.div_ceil(8);
+        #[expect(
+            clippy::disallowed_types,
+            reason = "FFI/JIT: JIT-compiled and interpreted kernels write runtime event words through the raw pointer from as_mut_ptr while the host reads them with atomic loads"
+        )]
         let words = (0..word_count)
             .map(|_| UnsafeCell::new(0u64))
             .collect::<Vec<_>>()
@@ -36,6 +53,10 @@ impl RuntimeEventBuffer {
         assert!(byte_offset + 8 <= self.byte_size);
         let word = byte_offset / 8;
         unsafe {
+            #[expect(
+                clippy::disallowed_types,
+                reason = "FFI/JIT: JIT-compiled and interpreted kernels write runtime event words through the raw pointer from as_mut_ptr while the host reads them with atomic loads"
+            )]
             let ptr = self.words[word].get() as *const AtomicU64;
             (*ptr).load(ordering)
         }

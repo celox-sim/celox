@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_types,
+    reason = "test-only: the tests pass the pass's lazily filled caches"
+)]
 use super::*;
 use crate::ir::{InstanceId, SIRValue};
 use celox_design::StateObjectId as VarId;

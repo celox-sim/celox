@@ -74,6 +74,10 @@ fn std_source(path: &str) -> String {
 /// otherwise catalogue declaration order). Filter by category or name in the
 /// host test runner; nothing is silently skipped by the suite itself.
 pub fn cases() -> impl Iterator<Item = &'static TestCase> {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "immutable static: the Veryl test case catalogue, loaded on first use and then only read"
+    )]
     static CASES: std::sync::OnceLock<Vec<&'static TestCase>> = std::sync::OnceLock::new();
     CASES
         .get_or_init(|| {

@@ -103,6 +103,10 @@ impl From<&celox::OptimizeOptions> for SirOptimizationCacheKey {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: the process-global JIT cache is shared by every JS thread (main and Node worker_threads) that loads the addon in one process"
+)]
 pub(super) static JIT_CACHE: std::sync::LazyLock<Mutex<HashMap<CacheKey, Arc<CachedBuild>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::default()));
 
