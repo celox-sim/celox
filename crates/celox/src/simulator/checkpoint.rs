@@ -254,9 +254,7 @@ impl<B: SimBackend> Simulator<B> {
     /// Identity of the checkpointable state layout. Simulators with equal
     /// fingerprints can exchange checkpoints.
     pub fn state_fingerprint(&self) -> u64 {
-        *self
-            .checkpoint_fingerprint
-            .get_or_init(|| crate::ir::state_fingerprint(self.backend.layout(), &self.program))
+        self.checkpoint_fingerprint
     }
 }
 

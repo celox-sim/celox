@@ -203,37 +203,7 @@ fn private_testbench_range<B: SimBackend>(sim: &Simulator<B>, offset: usize, len
     if !sim.components.is_empty() || sim.schedule.timed {
         return false;
     }
-    let ranges = sim.heap.testbench_hardware_ranges.get_or_init(|| {
-        let layout = sim.backend.layout();
-        let mut ranges: Vec<_> = sim
-            .program
-            .rtl_accesses
-            .iter()
-            .chain(sim.backend.id_to_addr_slice())
-            .filter_map(|addr| {
-                let start = *layout.offsets.get(addr)?;
-                let planes =
-                    if layout.four_state && layout.is_4states.get(addr).copied().unwrap_or(false) {
-                        2
-                    } else {
-                        1
-                    };
-                Some(start..start + layout.plane_size(addr) * planes)
-            })
-            .collect();
-        ranges.sort_unstable_by_key(|range| (range.start, range.end));
-        let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
-        for range in ranges {
-            if let Some(last) = merged.last_mut()
-                && range.start <= last.end
-            {
-                last.end = last.end.max(range.end);
-            } else {
-                merged.push(range);
-            }
-        }
-        merged
-    });
+    let ranges = &sim.heap.testbench_hardware_ranges;
     let first = ranges.partition_point(|range| range.end <= offset);
     ranges
         .get(first)
