@@ -472,6 +472,113 @@ endmodule"#;
     }
 }
 
+/// `disable iff` of a sequence over cycles disables each attempt in progress
+/// whenever its condition is true, also between the ticks of the clock,
+/// and the attempt that starts at a tick where it is true: a disabled
+/// attempt neither passes nor fails, and the attempts that start later
+/// are not affected (IEEE 1800-2023 16.12). The condition is read with the
+/// current values of its variables, not sampled ones. Verilator 5.054
+/// prints the same lines.
+#[test]
+fn disable_iff_disables_attempts_of_sequences_over_cycles() {
+    let cases = [
+        // An implication with `|=>`: the attempt of tick 25 is disabled at
+        // its second tick, that of tick 65 by a pulse between two ticks.
+        (
+            r#"`timescale 1ns/1ns
+module top;
+  logic clk = 0, rst = 0, a = 0, b = 0;
+  always #5 clk = ~clk;
+  // a at edge n requires b at edge n+1
+  assert property (@(posedge clk) disable iff (rst) a |=> b)
+    $display("%0t pass", $time); else $display("%0t fail", $time);
+  initial begin
+    // attempt at 5 (a), b missing at 15 -> fail at 15
+    a = 1; #10 a = 0;            // t=10
+    #10;                          // t=20
+    // attempt at 25 (a), rst during the attempt at edge 35 -> disabled
+    a = 1; #10 a = 0; rst = 1;    // t=30
+    #10 rst = 0;                  // t=40
+    // attempt at 45, b at 55 -> pass
+    #2 a = 1; #10 a = 0; b = 1; #10 b = 0;  // t=62
+    // attempt at 65 (a), rst pulse between edges 65 and 75 only -> disabled per LRM
+    #1 a = 1; #4 a = 0; #2 rst = 1; #1 rst = 0;   // a sampled at 65; rst 70..71
+    #20 $finish;
+  end
+endmodule"#,
+            &[
+                "15 fail", "15 pass", "55 pass", "55 pass", "75 pass", "85 pass",
+            ][..],
+        ),
+        // Several ways to match: the attempt of tick 45 is disabled before
+        // it decides.
+        (
+            r#"`timescale 1ns/1ns
+module top;
+  logic clk = 0, rst = 1, a = 0, b = 0;
+  always #5 clk = ~clk;
+  // Alternatives: b one or two ticks after a.
+  assert property (@(posedge clk) disable iff (rst) a ##[1:2] b)
+    $display("%0t pass", $time); else $display("%0t fail", $time);
+  initial begin
+    #12 rst = 0; a = 1;        // t=12: attempt at 15 (a)
+    #10 a = 0;                  // t=22
+    #10 b = 1;                  // t=32: b at 35 -> pass at 35 (two ticks after 15)
+    #10 b = 0; a = 1;           // t=42: attempt at 45
+    #10 a = 0; rst = 1;         // t=52: rst at 55 -> attempt 45 disabled, 55 disabled
+    #10 rst = 0;                // t=62
+    #20 $finish;                // t=82
+  end
+endmodule"#,
+            &["25 fail", "35 pass", "35 fail", "65 fail", "75 fail"][..],
+        ),
+        // Attempts one tick apart: those of ticks 65 and 75 are disabled,
+        // that of tick 85 fails.
+        (
+            r#"`timescale 1ns/1ns
+module top;
+  logic clk = 0, rst = 0, a = 0, b = 0, c = 0;
+  always #5 clk = ~clk;
+  // a, then b one tick later and c the tick after.
+  assert property (@(posedge clk) disable iff (rst) a |=> b ##1 c)
+    else $display("%0t fail", $time);
+  initial begin
+    a = 1;                      // attempts at 5, 15, 25, 35 (a high)
+    #40 a = 0;                  // t=40
+    // b never rises: attempt 5 fails at 15 (b), 15 at 25, 25 at 35, 35 at 45
+    #20 a = 1;                  // t=60: attempts at 65, 75, 85
+    #10 rst = 1;                // t=70: rst at 75 aborts 65 and 75
+    #10 rst = 0;                // t=80
+    #10 a = 0;                  // t=90: attempt 85 fails at 95 (b)
+    #20 $finish;                // t=110
+  end
+endmodule"#,
+            &["15 fail", "25 fail", "35 fail", "45 fail", "95 fail"][..],
+        ),
+    ];
+    for (source, expected) in cases {
+        for four_state in [false, true] {
+            let mut sim =
+                celox::Simulation::from_sv_sources(vec![(source, Path::new("disable.sv"))], "top")
+                    .four_state(four_state)
+                    .build()
+                    .unwrap();
+            sim.run_until(200).unwrap();
+            let lines: Vec<_> = sim
+                .drain_runtime_events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    celox::RuntimeEvent::Display { message } => {
+                        Some(String::from_utf8_lossy(&message).into_owned())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(lines, expected, "four_state={four_state}\n{source}");
+        }
+    }
+}
+
 #[test]
 fn sequences_with_several_ways_to_match_name_what_they_do_not_support() {
     let long = vec!["a"; 1025].join(" ##0 ");
