@@ -416,7 +416,7 @@ fn named_function_result(name: &str, dims: &PackedDimensions) -> Option<TyId> {
 
 /// Self-determined selection types, independent of an assignment context
 /// (IEEE 1800-2023 7.4.5, 7.4.6 and 11.5.1).
-fn select(
+pub(super) fn select(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     base: TyId,
