@@ -13,7 +13,7 @@ use typecheck::UnpackedArrayType;
 /// The identity of the element type of `shape` when it is not described by
 /// its width, state count and signedness alone (IEEE 1800-2023 6.22.2): a
 /// named type is equivalent only to itself.
-fn element_identity(shape: &VariableDimensions) -> Option<String> {
+fn element_identity(shape: &VariableDimensions, table: &semantic_types::TyTable) -> Option<String> {
     if let Some(class) = &shape.class {
         return Some(format!("class {class}"));
     }
@@ -23,10 +23,23 @@ fn element_identity(shape: &VariableDimensions) -> Option<String> {
     if shape.real {
         return Some("real".into());
     }
-    // The modport is part of the type (25.9).
-    if let Some(interface) = &shape.virtual_interface {
-        return Some(interface.spelling());
+    // The modport is part of the type (25.9), which the semantic type of
+    // the array's element tells.
+    let mut element = shape.bound(table);
+    while let Some(semantic_types::TyData::Array { element: inner, .. }) =
+        element.map(|id| table.data(id))
+    {
+        element = Some(*inner);
     }
+    if let Some(id) = element
+        && let semantic_types::TyData::VirtualInterface { .. } = table.data(id)
+    {
+        return Some(table.spell(id));
+    }
+    debug_assert!(
+        shape.virtual_interface.is_none(),
+        "an array of virtual interfaces is told by its semantic type"
+    );
     if let Some(aggregate) = &shape.unpacked_struct {
         return Some(format!("struct {}", aggregate.identity()));
     }
@@ -51,6 +64,20 @@ fn element_identity(shape: &VariableDimensions) -> Option<String> {
 /// unpacked array or its type cannot be resolved.
 pub(super) fn unpacked_array_type(
     functions: &const_functions::ConstantFunctions,
+    table: &semantic_types::TyTable,
+    shape: &VariableDimensions,
+    dims: &PackedDimensions,
+) -> Option<UnpackedArrayType> {
+    Some(UnpackedArrayType {
+        element: element_identity(shape, table),
+        ..unpacked_array_sizes(functions, shape, dims)?
+    })
+}
+
+/// [`unpacked_array_type`] without the identity of its element, for a reader
+/// of its sizes only.
+pub(super) fn unpacked_array_sizes(
+    functions: &const_functions::ConstantFunctions,
     shape: &VariableDimensions,
     dims: &PackedDimensions,
 ) -> Option<UnpackedArrayType> {
@@ -72,7 +99,7 @@ pub(super) fn unpacked_array_type(
         })?,
         signed: shape.signed,
         four_state: !shape.is_2state,
-        element: element_identity(shape),
+        element: None,
     })
 }
 
@@ -204,6 +231,11 @@ pub(super) fn native_unpacked_shape(
 ) -> Option<VariableDimensions> {
     let (path, indices, slice) = native_selection(id, tree, session, dims)?;
     let mut shape = selected_unpacked_shape(&path, indices, dims)?;
+    // The selection has the type of the selected array (or of a slice of
+    // it), which binds its shape.
+    if let Some(ty) = native_unpacked_type(id, tree, session, dims) {
+        shape.bind_to(&session.types, ty);
+    }
     if let Some(count) = slice {
         let count = ConstExpr::Literal(count.to_string());
         shape.unpacked[0] = UnpackedDimension {

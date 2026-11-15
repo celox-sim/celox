@@ -286,6 +286,12 @@ impl Binding {
     pub(super) fn set(&mut self, table: &TyTable, id: TyId) {
         self.0 = Some(table.retain(id));
     }
+
+    /// The retained semantic type, for a holder of the same type, such as
+    /// the shape of a variable declared with it.
+    pub(super) fn retained(&self) -> Option<RetainedType> {
+        self.0.clone()
+    }
 }
 
 /// A declaration's ID together with its immutable interned node. A cloned
