@@ -147,7 +147,7 @@ pub(in crate::ast::expression_binding) fn path(
     }
     parts.reverse();
     if qualified.is_none() {
-        unpacked_structs::collapse(&mut parts, dimensions);
+        unpacked_structs::collapse(&mut parts, &session.types, dimensions);
     }
     if qualified.is_none()
         && let Some(name) =
@@ -264,7 +264,7 @@ pub(super) fn selected_value(
         }
         let steps = value_selects::steps(root, base, native).ok_or_else(disagreement)?;
         return value_selects::read(
-            containers::element_read(&container, handle),
+            containers::element_read(&container, &session.types, handle),
             &container.element,
             &steps,
             native,
@@ -412,9 +412,9 @@ pub(super) fn selected_value(
             }
         }
         return if let Some(range) = range {
-            selects::indexed_parameter_range(tree, name, indices, range, dimensions)
+            selects::indexed_parameter_range(tree, &session.types, name, indices, range, dimensions)
         } else {
-            selects::indexed_parameter_indices(tree, name, indices, dimensions)
+            selects::indexed_parameter_indices(tree, &session.types, name, indices, dimensions)
         };
     }
     for dimension in &suffix {
@@ -428,7 +428,7 @@ pub(super) fn selected_value(
         }
     }
     let lvalue = selected_lvalue(root, native, tree, session, dimensions, false)?;
-    let value = expr_from_lvalue(tree, &lvalue, dimensions);
+    let value = expr_from_lvalue(tree, &session.types, &lvalue, dimensions);
     if let Expr::Ident(name) = &value
         && let Some(value) = unpacked_structs::whole(name, dimensions)
     {

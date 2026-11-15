@@ -657,7 +657,7 @@ fn enter_kind(
                         .into(),
                 ));
             };
-            let receiver = streams::receiver(shape, &tree.functions, dimensions)?;
+            let receiver = streams::receiver(shape, &session.types, &tree.functions, dimensions)?;
             values.push(streams::pack(
                 id,
                 Some(receiver),
@@ -835,7 +835,7 @@ fn enter_stream_cast(
             None => shape.container.is_some() || shape.string || !shape.unpacked.is_empty(),
         })
     {
-        let receiver = streams::cast_receiver(&shape, &tree.functions, dimensions)?;
+        let receiver = streams::cast_receiver(&shape, &session.types, &tree.functions, dimensions)?;
         values.push(streams::pack(
             *expression,
             Some(receiver),

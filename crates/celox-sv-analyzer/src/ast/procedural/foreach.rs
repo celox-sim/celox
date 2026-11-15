@@ -175,11 +175,9 @@ impl BodyBuilder<'_, '_, '_> {
             process.clone()
         } else if string {
             type_binding::builtin_type("string", None).expect("string is a builtin type")
-        } else if let Some(key) = container
-            .key
-            .as_ref()
-            .filter(|key| !key.members.is_empty() || key.is_enum)
-        {
+        } else if let Some(key) = container.key.as_ref().filter(|key| {
+            !key.members.is_empty() || container.key_enumeration(&self.session.types).enumeration
+        }) {
             // A packed structure or enumeration index keeps its type, so the
             // body may select its members or call its methods (IEEE
             // 1800-2023 12.7.3, 6.19.5).

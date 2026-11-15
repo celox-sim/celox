@@ -5941,3 +5941,60 @@ fn randomize_arguments_take_containers_of_enumerations() {
         );
     }
 }
+
+/// A randc enumeration property cycles through its members (IEEE 1800-2023
+/// 18.4.2), and a rand handle makes `randomize` solve the object it refers
+/// to (18.4): both told by the property's type.
+#[test]
+fn randc_enumerations_and_rand_handles_are_told_by_their_types() {
+    let source = "module Top;
+        typedef enum {A, B, C} e_t;
+        class Inner;
+            rand bit [3:0] x;
+            constraint k { x == 5; }
+        endclass
+        class Outer;
+            randc e_t e;
+            rand Inner inner;
+            function new(); inner = new; endfunction
+        endclass
+        initial begin
+            Outer o = new;
+            int seen = 0;
+            repeat (3) begin
+                void'(o.randomize());
+                seen |= 1 << int'(o.e);
+            end
+            $display(\"%0d %0d\", seen, o.inner.x);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["7 5"]);
+}
+
+/// A stream fills no class handle (6.24.3), and a scope randomize with
+/// constraints takes integral variables only, as their types tell.
+#[test]
+fn streams_into_handles_and_constrained_scope_randomize_of_enums_are_unsupported() {
+    for (items, expected) in [
+        (
+            "class C; endclass C c; bit [63:0] b; initial {>>{c}} = b;",
+            "class handle",
+        ),
+        (
+            "typedef enum {A, B} e_t; e_t e; initial void'(std::randomize(e) with { e == A; });",
+            "scope randomize",
+        ),
+    ] {
+        let source = format!("module Top; {items} endmodule");
+        let error = match celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("rejected.sv"))],
+            "Top",
+        )
+        .build()
+        {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("`{items}` must be rejected"),
+        };
+        assert!(error.contains(expected), "{items}: {error}");
+    }
+}

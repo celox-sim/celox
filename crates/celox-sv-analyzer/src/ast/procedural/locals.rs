@@ -197,7 +197,7 @@ impl BodyBuilder<'_, '_, '_> {
             let implicit_event = assignment.value.is_none() && init.is_some();
             // An array of structures was replaced by its storage above,
             // which has no semantic type.
-            if signal.r#type().unpacked_struct().is_some()
+            if signal.r#type().is_unpacked_struct_in(&self.session.types)
                 && signal.r#type().unpacked_ranges.is_empty()
             {
                 let explicit = native.lifetime.as_deref() == Some("static");

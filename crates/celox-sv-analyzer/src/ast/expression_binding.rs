@@ -131,7 +131,7 @@ pub(super) fn expression(
     // shape, or a selection aligned to the left.
     if streams::is_stream(root, native) {
         let receiver = match shape {
-            Some(shape) => streams::receiver(shape, &tree.functions, dimensions)?,
+            Some(shape) => streams::receiver(shape, &session.types, &tree.functions, dimensions)?,
             None => streams::selection_receiver(
                 lhs,
                 lvalue_expr_type(&tree.functions, lhs, dimensions)

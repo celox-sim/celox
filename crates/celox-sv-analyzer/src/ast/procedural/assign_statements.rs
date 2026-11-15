@@ -208,7 +208,14 @@ impl BodyBuilder<'_, '_, '_> {
                 let read = Expr::Concat(
                     parts
                         .iter()
-                        .map(|part| statements::expr_from_lvalue(self.tree, part, &self.dims))
+                        .map(|part| {
+                            statements::expr_from_lvalue(
+                                self.tree,
+                                &self.session.types,
+                                part,
+                                &self.dims,
+                            )
+                        })
                         .collect(),
                 );
                 statements::assignment_op_value(
@@ -450,7 +457,12 @@ impl BodyBuilder<'_, '_, '_> {
             // before `B`, into a local of the target's type.
             let read = if place {
                 let (source, unique) = self.hidden_of(left)?;
-                let mut value = statements::expr_from_lvalue(self.tree, &written, &self.dims);
+                let mut value = statements::expr_from_lvalue(
+                    self.tree,
+                    &self.session.types,
+                    &written,
+                    &self.dims,
+                );
                 self.rename_expr(&mut value);
                 prelude.push(Stmt::Assign {
                     lhs: LValue::Ident(unique),

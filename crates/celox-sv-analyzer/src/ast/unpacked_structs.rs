@@ -432,11 +432,15 @@ pub(in crate::ast) fn targets(name: &str, dims: &PackedDimensions) -> Option<Vec
 
 /// Join the leading names of a member path that select within a variable of
 /// unpacked structure type: they name one of its member variables.
-pub(in crate::ast) fn collapse(parts: &mut Vec<String>, dims: &PackedDimensions) {
+pub(in crate::ast) fn collapse(
+    parts: &mut Vec<String>,
+    table: &semantic_types::TyTable,
+    dims: &PackedDimensions,
+) {
     if parts.len() < 2
         || !dims
             .get(&parts[0])
-            .is_some_and(|shape| shape.unpacked_struct.is_some())
+            .is_some_and(|shape| shape.is_unpacked_struct_in(table))
     {
         return;
     }
@@ -513,7 +517,7 @@ pub(in crate::ast) fn native_struct(
     Ok(match &native.expression(id).kind {
         ExprKind::Name(_) | ExprKind::Member { .. } => match member_path(id, native)
             .map(|mut parts| {
-                collapse(&mut parts, dims);
+                collapse(&mut parts, &session.types, dims);
                 parts
             })
             .filter(|parts| parts.len() == 1)
@@ -629,13 +633,14 @@ fn member_path(mut id: ExprId, native: &celox_sv_syntax::Declarations) -> Option
 pub(in crate::ast) fn native_member(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
+    table: &semantic_types::TyTable,
     dims: &PackedDimensions,
 ) -> Option<String> {
     let mut parts = member_path(id, native)?;
     if parts.len() < 2 {
         return None;
     }
-    collapse(&mut parts, dims);
+    collapse(&mut parts, table, dims);
     (parts.len() == 1).then(|| parts.pop().expect("one part"))
 }
 

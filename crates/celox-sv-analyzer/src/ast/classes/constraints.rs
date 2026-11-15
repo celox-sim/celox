@@ -50,8 +50,8 @@ fn randc_member(
     let Some(class) = properties
         .iter()
         .rev()
-        .find(|property| property.field.offset == handle && property.r#type.class().is_some())
-        .and_then(|property| property.r#type.class())
+        .filter(|property| property.field.offset == handle)
+        .find_map(|property| property.r#type.class_in(&session.types))
     else {
         return Ok(false);
     };
@@ -65,11 +65,11 @@ fn randc_member(
     if session
         .constraint_owners
         .last()
-        .is_some_and(|(owner, _)| owner == class)
+        .is_some_and(|(owner, _)| **owner == *class)
     {
         return Ok(randc(properties));
     }
-    let class = super::class(tree, session, class, env, &TypeAliases::default())
+    let class = super::class(tree, session, &class, env, &TypeAliases::default())
         .map_err(|_| format!("class `{class}`"))?;
     Ok(randc(&class.properties))
 }
@@ -2262,7 +2262,7 @@ fn random_member(
         .iter()
         .rev()
         .find(|property| property.name == handle)
-        .filter(|property| separator == "." && property.rand_object())
+        .filter(|property| separator == "." && property.rand_object(&session.types))
     else {
         return Ok(false);
     };
@@ -2332,7 +2332,7 @@ impl Class {
             if property.randc && property.r#type.class_in(&session.types).is_some() {
                 return Err(unsupported("a randc object handle"));
             }
-            if property.rand_object() {
+            if property.rand_object(&session.types) {
                 handles.push(property.field.offset);
                 continue;
             }
@@ -2352,7 +2352,7 @@ impl Class {
             }
             // A randc property draws from the cycle of its whole domain
             // (IEEE 1800-2023 18.4.2), kept for at most 65536 values.
-            if property.randc && property.cyclic_domain_size().is_none() {
+            if property.randc && property.cyclic_domain_size(&session.types).is_none() {
                 return Err(unsupported(
                     "constraints on a randc property of more than 65536 values",
                 ));
