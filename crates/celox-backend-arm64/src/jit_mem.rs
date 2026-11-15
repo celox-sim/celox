@@ -2,8 +2,17 @@
 
 use dynasmrt::mmap::MutableBuffer;
 use dynasmrt::{AssemblyOffset, ExecutableBuffer};
-use std::{io::Write, sync::Mutex};
+use std::io::Write;
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: process-wide perf-map state; simulators built on different caller threads append to the same /tmp/perf-<pid>.map, which must be truncated exactly once"
+)]
+use std::sync::Mutex;
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: process-wide perf-map state; simulators built on different caller threads append to the same /tmp/perf-<pid>.map, which must be truncated exactly once"
+)]
 static PERF_MAP_INITIALIZED: Mutex<bool> = Mutex::new(false);
 
 /// Optional subrange symbol retained for parity with the native runtime API.

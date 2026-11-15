@@ -90,6 +90,10 @@ pub(super) const KNOWN_ISSUES: &[KnownIssue] = &[
 // Explicitly reviewed case IDs, never diagnostic patterns or the latest run's
 // failures. A new case or an unlisted tool still executes and can fail CI.
 fn limitations() -> &'static [Value] {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "immutable static: the checked-in Veryl verification limitations table, parsed on first use and then only read"
+    )]
     static LIMITATIONS: std::sync::OnceLock<Vec<Value>> = std::sync::OnceLock::new();
     LIMITATIONS.get_or_init(|| {
         serde_json::from_str(include_str!("limitations.json"))

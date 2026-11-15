@@ -27,7 +27,12 @@ use num_bigint::BigUint;
 use num_traits::{ToPrimitive as _, Zero as _};
 use rand::{RngExt as _, SeedableRng as _};
 use rand_pcg::Pcg64;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[expect(
+    clippy::disallowed_types,
+    reason = "FFI/JIT: accesses sequence words of the runtime-event ring buffer that JIT-compiled code also writes and a drain thread reads"
+)]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::task::Poll;
 
 mod components;
@@ -916,10 +921,18 @@ fn write_u64_volatile(base: *mut u8, byte_offset: usize, value: u64) {
     }
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "FFI/JIT: acquire-loads a sequence word of the runtime-event ring buffer that JIT-compiled code also writes"
+)]
 fn load_u64_acquire(base: *const u8, byte_offset: usize) -> u64 {
     unsafe { (*(base.add(byte_offset) as *const AtomicU64)).load(Ordering::Acquire) }
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "FFI/JIT: release-stores a sequence word of the runtime-event ring buffer that JIT-compiled code also writes and a drain thread reads"
+)]
 fn store_u64_release(base: *mut u8, byte_offset: usize, value: u64) {
     unsafe {
         (*(base.add(byte_offset) as *const AtomicU64)).store(value, Ordering::Release);

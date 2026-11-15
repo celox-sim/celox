@@ -1,4 +1,8 @@
 //! SystemVerilog DPI-C imports: calls from `always_ff` into C functions.
+#![allow(
+    clippy::disallowed_types,
+    reason = "test-only: DPI imports are C functions that record into statics"
+)]
 
 use std::path::Path;
 use std::sync::Mutex;
