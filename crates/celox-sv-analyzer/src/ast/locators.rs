@@ -118,13 +118,30 @@ impl LocalSink {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Iterator {
     source: String,
-    /// The name of the index querying method (7.12.4).
-    method: String,
+    /// The name of the index querying method (7.12.4), if the iterator has
+    /// one.
+    method: Option<String>,
     /// The local holding the index.
     index: String,
     /// For elements of unpacked structure type kept as records, the
     /// container and the local holding the record of the element.
     record: Option<(Arc<ContainerType>, String)>,
+}
+
+impl Iterator {
+    /// The iterator `source` of the `with` expression of an ordering method
+    /// over elements kept as records of `container`, whose record handle
+    /// local `handle` holds (see [`record_iterator`]). Like the iterator of
+    /// one over other elements, it has no index querying method, so that
+    /// `item.index` of an element with an `index` member reads that member.
+    pub(super) fn record(source: String, container: Arc<ContainerType>, handle: String) -> Self {
+        Self {
+            source,
+            method: None,
+            index: String::new(),
+            record: Some((container, handle)),
+        }
+    }
 }
 
 /// The array a locator method searches.
@@ -544,7 +561,7 @@ pub(super) fn bind(
             }
             Arc::make_mut(&mut scope.locator_iterators).push(Iterator {
                 source: call.iterator.clone(),
-                method: call.index_method.clone(),
+                method: Some(call.index_method.clone()),
                 index: index.clone(),
                 record: record
                     .clone()
@@ -758,7 +775,7 @@ pub(super) fn index(
     else {
         return Ok(None);
     };
-    if separator != "." || name.spelling != iterator.method {
+    if separator != "." || iterator.method.as_deref() != Some(name.spelling.as_str()) {
         return Ok(None);
     }
     let arguments = match arguments {
