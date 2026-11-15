@@ -186,3 +186,49 @@ endmodule
         assert_eq!(displays(&mut sim), ["8 15"], "four_state={four_state}");
     }
 }
+
+/// The usual UVM layout: the bus functional model imports the package of
+/// its driver, whose class holds the model through a virtual interface and
+/// passes it the package's items.
+#[test]
+fn bus_functional_models_import_the_package_of_their_driver() {
+    let source = r#"`timescale 1ns / 1ns
+package agent;
+  class item;
+    logic [7:0] data;
+  endclass
+  class driver;
+    virtual bfm vif;
+    task send(logic [7:0] data);
+      item req = new;
+      req.data = data;
+      vif.drive(req);
+    endtask
+  endclass
+endpackage
+interface bfm(input logic clk, output logic [7:0] bus);
+  import agent::*;
+  task drive(item req);
+    @(posedge clk);
+    bus <= req.data;
+  endtask
+endinterface
+module top;
+  logic clk = 0;
+  logic [7:0] bus;
+  bfm i(clk, bus);
+  initial forever #5 clk = ~clk;
+  initial begin
+    agent::driver d = new;
+    d.vif = i;
+    d.send(8'd9);
+    #1 $display("bus %0d at %0t", bus, $time);
+  end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("agent.sv"))], "top")
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    sim.run_until(100).unwrap();
+    assert_eq!(displays(&mut sim), ["bus 9 at 6"]);
+}
