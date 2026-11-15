@@ -754,21 +754,24 @@ pub(super) fn enclose_aliased_packed_type(
     mut r#type: Type,
     direct_ranges: Vec<PackedRange>,
 ) -> Type {
+    // Without use-site dimensions the type is the aliased one, which keeps
+    // its semantic type.
+    if direct_ranges.is_empty() {
+        return r#type;
+    }
     // Use-site dimensions enclose the aliased packed type. The packed
     // array they form is unsigned, whatever its elements (IEEE 1800-2023
     // 7.4.1); a type name takes no signing of its own.
-    if !direct_ranges.is_empty() {
-        r#type.packed_enum |= r#type.is_enum;
-        r#type.enum_domain = None;
-        r#type.signed_element_depth = if r#type.is_signed {
-            Some(direct_ranges.len())
-        } else {
-            r#type
-                .signed_element_depth
-                .map(|depth| depth + direct_ranges.len())
-        };
-        r#type.is_signed = false;
-    }
+    r#type.packed_enum |= r#type.is_enum;
+    r#type.enum_domain = None;
+    r#type.signed_element_depth = if r#type.is_signed {
+        Some(direct_ranges.len())
+    } else {
+        r#type
+            .signed_element_depth
+            .map(|depth| depth + direct_ranges.len())
+    };
+    r#type.is_signed = false;
     let mut ranges = direct_ranges;
     ranges.extend(std::mem::take(&mut r#type.packed_ranges));
     r#type.packed_ranges = ranges;
@@ -818,8 +821,9 @@ pub(super) fn type_with_unpacked_ranges(
         ));
     }
     let mut unpacked_ranges = ranges;
-    unpacked_ranges.extend(std::mem::take(&mut r#type.unpacked_ranges));
-    r#type.unpacked_ranges = unpacked_ranges;
+    let declared = r#type.unpacked_ranges_mut();
+    unpacked_ranges.extend(std::mem::take(declared));
+    *declared = unpacked_ranges;
     Ok(r#type)
 }
 

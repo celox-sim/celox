@@ -1072,13 +1072,13 @@ pub(super) fn resolve_imports(
     // Every scope may reach the interface instances through virtual
     // interfaces (IEEE 1800-2023 25.9), but those of an interface would be
     // bound into each instance of it.
-    if let Some(declarations) = &packages.virtual_interfaces
+    if packages.virtual_interfaces.is_some()
         && !tree
             .root_unit()
             .is_ok_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Interface)
     {
         let symbols = &mut resolved.symbols;
-        for signal in virtual_interfaces::member_signals(declarations) {
+        for signal in packages.virtual_interface_signals.iter().cloned() {
             if !symbols
                 .state_signals
                 .iter()
