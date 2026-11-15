@@ -604,18 +604,18 @@ Clause 4.7 がどちらの順序も許すケースで、Celox は決定的です
   `$fatal` はシミュレーションも終えます。
 - **トップレベルモジュール。** シミュレーションは指定したトップモジュールを
   実行します。テストベンチの `hdl_top` と `hvl_top` のように複数のトップレベル
-  モジュール（23.3.1）を持つデザインは、Rust の `SimulatorBuilder::tops` で
-  それらを指定すると一緒に実行します。各トップは `$root` の下に自身の名前の
+  モジュール（23.3.1）を持つデザインは、Rust の `SimulatorBuilder::tops` や
+  繰り返した `celox run --top` でそれらを指定すると一緒に実行します。各トップは `$root` の下に自身の名前の
   インスタンスとして置かれ、ポートは未接続です。このとき階層名・`%m`・波形の
   スコープ・VPI とリフレクションの階層はトップから始まります（`hdl_top.dut`、
   `$root.hdl_top.dut`）。各トップはルートスコープとなり、
-  `vpi_iterate(vpiModule, NULL)` はそれらを返します。信号には
-  `child_signal(&[("hdl_top", 0)], "clk")` のようにトップを経由して到達し、
-  force する信号もトップから名指します。デザインのトップは選んだモジュールです。
-  `PreserveTopPorts` は各トップのポートを保ち、`named_signals()` は各トップの信号を
-  そのトップから名付け（`hdl_top.clk`）、`named_hierarchies()` は各トップの階層を、
-  `named_hierarchy()` はトップを子に持つ `$root` を返します。複数トップは SystemVerilog のソースのみに
-  対応し、パラメータの上書きは受け付けません。
+  `vpi_iterate(vpiModule, NULL)` はそれらを返します。信号は
+  `signal("hdl_top.clk")` や `child_signal(&[("hdl_top", 0)], "clk")` のように
+  トップから名指し、force・live 指定の信号も同じです。デザインのトップは選んだ
+  モジュールです。`PreserveTopPorts` は各トップのポートを保ち、`named_signals()` は
+  各トップの信号をそのトップから名付け（`hdl_top.clk`）、`named_hierarchies()` は
+  各トップの階層を、`named_hierarchy()` はトップを子に持つ `$root` を返します。
+  複数トップは SystemVerilog のソースのみに対応し、パラメータの上書きは受け付けません。
 - **観測できる名前。** interface は使用モジュールへ展開します。interface
   インスタンス `h` のメンバ `m` は信号 `h$m` となり、トップの interface ポートは
   `bus$data` のようなポートとなり、汎用 `interface` ポートを持つモジュールは
