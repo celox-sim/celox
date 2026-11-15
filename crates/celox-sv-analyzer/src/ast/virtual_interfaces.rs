@@ -1415,7 +1415,7 @@ pub(super) fn event_block(mut stmts: Vec<Stmt>) -> Stmt {
 }
 
 /// Whether `stmt` is an [`event_block`].
-fn is_event_block(stmt: &Stmt) -> bool {
+pub(in crate::ast) fn is_event_block(stmt: &Stmt) -> bool {
     matches!(
         stmt,
         Stmt::Loop {
