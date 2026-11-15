@@ -2122,6 +2122,27 @@ fn caller_inputs(
                     instances::normalize_identifier(&name.spelling),
                 ))
             }
+            // A dotted name whose first identifier does not resolve into
+            // the class, as one a restricted block does not list, resolves
+            // in the caller's scope (IEEE 1800-2023 18.7), whose members
+            // constraints do not read.
+            ExprKind::Member {
+                expression,
+                separator,
+                ..
+            } if separator == "."
+                && matches!(
+                    &native.expression(ungroup(*expression, native)).kind,
+                    ExprKind::Name(root) if !matches!(root.spelling.as_str(), "this" | "super") && {
+                        let root = instances::normalize_identifier(&root.spelling);
+                        !loops.contains(&root) && !owned(&root)
+                    }
+                ) =>
+            {
+                return Err(unsupported(
+                    "a member of a variable of the caller in inline constraints",
+                ));
+            }
             ExprKind::Group(id) | ExprKind::Unary { expression: id, .. } => {
                 pending.push((*id, loops));
                 None
@@ -2325,6 +2346,7 @@ pub(super) fn randomize_with(
     session: &mut Session,
     expression: ExprId,
     constraints: Option<&[ExprId]>,
+    restricted: Option<&[celox_sv_syntax::Name]>,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
@@ -2341,6 +2363,15 @@ pub(super) fn randomize_with(
         native,
         dimensions,
     )? {
+        // A scope randomize has no object class to restrict names to
+        // (18.7).
+        if restricted.is_some() {
+            return Err(AnalyzerError::Parse(
+                "a restricted constraint block `with (...)` in a scope randomize call \
+                 (IEEE 1800-2023 18.7)"
+                    .into(),
+            ));
+        }
         return Ok(call);
     }
     let (method_name, _, receiver) = call_method(tree, session, expression, native, dimensions)?
@@ -2357,6 +2388,27 @@ pub(super) fn randomize_with(
     let first_input = class.static_inputs.len();
     let mut input_types = Vec::new();
     let mut input_values = Vec::new();
+    // In a restricted constraint block, only the names it lists resolve
+    // into the class; the others resolve in the caller's scope (18.7).
+    let listed = restricted.map(|names| {
+        names
+            .iter()
+            .map(|name| instances::normalize_identifier(&name.spelling))
+            .collect::<HashSet<_>>()
+    });
+    // A listed name resolves into the class, so one the class does not
+    // declare is an error, never a name of the caller (18.7).
+    if let Some(missing) = restricted.into_iter().flatten().find(|name| {
+        class
+            .member(&instances::normalize_identifier(&name.spelling))
+            .is_none()
+    }) {
+        return Err(AnalyzerError::Parse(format!(
+            "`{}` in the restricted constraint block `with (...)` is not a member of class \
+             `{owner}` (IEEE 1800-2023 18.7)",
+            missing.spelling
+        )));
+    }
     caller_inputs(
         tree,
         session,
@@ -2365,7 +2417,10 @@ pub(super) fn randomize_with(
         constraint_ids,
         // A member of the class, also a static property: an input or a
         // solver variable of the program (see `classes::StaticInput`).
-        &|name| class.member(name).is_some(),
+        &|name| {
+            class.member(name).is_some()
+                && listed.as_ref().is_none_or(|listed| listed.contains(name))
+        },
         false,
         &mut inputs,
         first_input,

@@ -1153,6 +1153,21 @@ pub(in crate::ast) fn bind_inputs(
                     signed: true,
                 }
             }
+            // A name of the caller of inline constraints, also one of a
+            // member that a restricted block does not list (18.7).
+            ExprKind::Name(name)
+                if inputs.contains_key(&instances::normalize_identifier(&name.spelling)) =>
+            {
+                let input = &inputs[&instances::normalize_identifier(&name.spelling)];
+                Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Input {
+                        index: input.index,
+                        width: input.width,
+                    }),
+                    width: input.width,
+                    signed: input.signed,
+                }
+            }
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
                 let member = super::member(
