@@ -254,6 +254,18 @@ impl Value {
 }
 
 impl Parser<'_> {
+    /// Whether `left` is a call of `randomize`, or names it.
+    fn calls_randomize(&self, left: ExprId) -> bool {
+        let callee = match &self.expressions[left.0].kind {
+            ExprKind::Call { expression, .. } => *expression,
+            _ => left,
+        };
+        match &self.expressions[callee.0].kind {
+            ExprKind::Name(name) | ExprKind::Member { name, .. } => name.value() == "randomize",
+            _ => false,
+        }
+    }
+
     pub(super) fn variable_lvalue(&self, root: ExprId) -> bool {
         let mut pending = vec![root];
         while let Some(id) = pending.pop() {
@@ -387,6 +399,7 @@ impl Parser<'_> {
                 ExprKind::RandomizeWith {
                     expression,
                     constraints,
+                    ..
                 } => {
                     pending.push(*expression);
                     pending.extend(constraints.iter().flatten());
@@ -806,21 +819,34 @@ impl Parser<'_> {
                         });
                         jobs.push(Job::Arguments);
                     }
-                    "with" if self.nth(1) == "{" => {
-                        let callee = match &self.expressions[left.0].kind {
-                            ExprKind::Call { expression, .. } => *expression,
-                            _ => left,
-                        };
-                        let is_randomize = match &self.expressions[callee.0].kind {
-                            ExprKind::Name(name) | ExprKind::Member { name, .. } => {
-                                name.value() == "randomize"
-                            }
-                            _ => false,
-                        };
-                        if !is_randomize {
+                    "with"
+                        if self.nth(1) == "{"
+                            || self.nth(1) == "(" && self.calls_randomize(left) =>
+                    {
+                        if !self.calls_randomize(left) {
                             return Err(self.error("constraint with block requires randomize"));
                         }
                         self.at += 1;
+                        // A restricted constraint block lists the names
+                        // that resolve into the object's class (18.7).
+                        let restricted = if self.eat("(") {
+                            let mut names = Vec::new();
+                            if !self.eat(")") {
+                                loop {
+                                    names.push(self.name()?);
+                                    if self.eat(")") {
+                                        break;
+                                    }
+                                    self.expect(",")?;
+                                }
+                            }
+                            if self.peek() != "{" {
+                                return Err(self.error("a constraint block after `with (...)`"));
+                            }
+                            Some(names)
+                        } else {
+                            None
+                        };
                         if self.inline_constraint_depth != 0 {
                             return Err(self.unsupported("inline constraint nesting limit"));
                         }
@@ -835,6 +861,7 @@ impl Parser<'_> {
                             ExprKind::RandomizeWith {
                                 expression: left,
                                 constraints,
+                                restricted,
                             },
                         )?;
                     }

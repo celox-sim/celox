@@ -98,6 +98,7 @@ fn operands(kind: &ExprKind) -> Vec<ExprId> {
         ExprKind::RandomizeWith {
             expression,
             constraints,
+            ..
         } => {
             operands.push(*expression);
             operands.extend(constraints.iter().flatten());
