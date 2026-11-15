@@ -21,6 +21,48 @@ impl VariableDimensions {
         }
     }
 
+    /// `shape`, of a type bound to `binding`: its semantic type.
+    pub(super) fn bound_to(shape: VariableShape, binding: &semantic_types::Binding) -> Self {
+        Self {
+            shape,
+            binding: binding.retained(),
+        }
+    }
+
+    /// The shape of an element of this unpacked array, bound to the element
+    /// type of its semantic type. Selecting an unpacked dimension keeps the
+    /// declaration of its element type, including the nominal structure
+    /// identity and the class of a handle element.
+    pub(super) fn unpacked_element(&self, table: &semantic_types::TyTable) -> VariableDimensions {
+        let mut element = VariableDimensions::new(VariableShape {
+            container: None,
+            real: false,
+            unpacked: self.shape.unpacked[1..].to_vec(),
+            ..self.clone_shape()
+        });
+        if let Some(id) = self.bound_element(table) {
+            element.bind_to(table, id);
+        }
+        element
+    }
+
+    /// The semantic type of an element of the unpacked array this shape is
+    /// bound to.
+    pub(super) fn bound_element(
+        &self,
+        table: &semantic_types::TyTable,
+    ) -> Option<semantic_types::TyId> {
+        match table.data(self.bound(table)?) {
+            semantic_types::TyData::Array { element, .. } => Some(*element),
+            _ => None,
+        }
+    }
+
+    /// Bind the shape to type `id` of `table`, which it was made to have.
+    pub(super) fn bind_to(&mut self, table: &semantic_types::TyTable, id: semantic_types::TyId) {
+        self.binding = Some(table.retain(id));
+    }
+
     pub(super) fn clone_shape(&self) -> VariableShape {
         self.shape.clone()
     }
@@ -155,7 +197,8 @@ pub(super) struct VariableShape {
     pub(super) string: bool,
     /// The class of an object handle variable.
     pub(super) class: Option<String>,
-    /// The interface of a virtual interface variable.
+    /// The interface of a virtual interface variable, which only the
+    /// conversion to its semantic type reads (see `TypeShape`).
     pub(super) virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
     pub(super) packed: Vec<PackedDimension>,
     pub(super) unpacked: Vec<UnpackedDimension>,

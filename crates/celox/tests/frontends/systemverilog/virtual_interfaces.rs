@@ -54,6 +54,62 @@ fn event_waits_through_task_arguments() {
     assert_eq!(sim.get(seen), num_bigint::BigUint::from(15u8));
 }
 
+/// An assignment pattern of handles gives each element of an array of
+/// virtual interfaces its handle (10.9.1, 25.9), in a declaration and in a
+/// procedural assignment.
+#[test]
+fn assignment_patterns_fill_arrays_of_virtual_interfaces() {
+    let source = "`timescale 1ns/1ns
+        interface bus_if; logic [7:0] data; endinterface
+        module top(output logic [7:0] seen);
+            bus_if a();
+            bus_if b();
+            virtual bus_if v = a;
+            virtual bus_if dst[2] = '{v, v};
+            virtual bus_if later[2];
+            initial begin
+                a.data = 8'd3;
+                b.data = 8'd7;
+                later = '{b, a};
+                #1 seen = dst[1].data * 16 + later[0].data;
+            end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build()
+        .unwrap();
+    let seen = sim.signal("seen");
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(seen), num_bigint::BigUint::from(0x37u8));
+}
+
+/// An assignment pattern connected to an input port that is an array of
+/// virtual interfaces fills its elements with the handles (10.9.1, 23.3.3).
+#[test]
+fn assignment_patterns_connect_ports_that_are_arrays_of_virtual_interfaces() {
+    let source = "`timescale 1ns/1ns
+        interface bus_if; logic [7:0] data; endinterface
+        module sink(input virtual bus_if dst[2], output logic [7:0] seen);
+            initial #1 seen = dst[0].data * 16 + dst[1].data;
+        endmodule
+        module top(output logic [7:0] seen);
+            bus_if a();
+            bus_if b();
+            virtual bus_if v = a;
+            virtual bus_if w = b;
+            sink s(.dst('{w, v}), .seen(seen));
+            initial begin
+                a.data = 8'd3;
+                b.data = 8'd7;
+            end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build()
+        .unwrap();
+    let seen = sim.signal("seen");
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(seen), num_bigint::BigUint::from(0x73u8));
+}
+
 /// An output argument copies the formal out to the actual (13.5.1): the
 /// actual handle takes the instance the task chose, and receives no value
 /// of the formal's type on the way in.

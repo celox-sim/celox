@@ -289,11 +289,12 @@ pub(in crate::ast) fn request(
         )));
     }
     let index = {
+        let table = &session.types;
         let registry = &mut session.foreign;
         let requests = registry.requests.entry(owner_name.clone()).or_default();
         match requests
             .iter()
-            .position(|r| r.generic == generic && r.arguments == arguments)
+            .position(|r| r.generic == generic && r.arguments.same(&arguments, table))
         {
             Some(index) => index,
             None => {
@@ -350,10 +351,11 @@ fn build_inner(session: &mut Session, name: &str, caller: Option<&ScopeSymbols>)
     session.types = scope.types;
     session.next_call_site = scope.next_call_site;
     let mut symbols = result?;
+    let table = &session.types;
     let registry = &mut session.foreign;
     for request in registry.requests.get_mut(name).unwrap() {
         if let Some((_, _, bound)) = scope.foreign_names.iter().find(|(generic, arguments, _)| {
-            generic == &request.generic && arguments == &request.arguments
+            generic == &request.generic && arguments.same(&request.arguments, table)
         }) {
             request.name = Some(bound.clone());
         }

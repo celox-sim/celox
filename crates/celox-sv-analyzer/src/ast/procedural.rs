@@ -442,39 +442,43 @@ impl Names {
     }
 }
 
-/// The packed and unpacked shape of a declared type, as selects see it.
+/// The packed and unpacked shape of a declared type, as selects see it,
+/// bound to the semantic type the type was bound to.
 pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
-    VariableDimensions::new(VariableShape {
-        chandle: r#type.is_chandle(),
-        container: r#type.container.clone(),
-        randomizable: r#type.container.is_none()
-            && !r#type.holds_chandle()
-            && (!r#type.is_enum || r#type.enum_domain.is_some()),
-        enum_domain: r#type.enum_domain.clone(),
-        packed_enum: r#type.packed_enum,
-        real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
-        string: matches!(r#type.kind(), TypeKind::String),
-        class: r#type.class().map(str::to_owned),
-        virtual_interface: r#type.virtual_interface.clone(),
-        packed: dimensions::signal_packed_dimension_widths(r#type.packed_ranges()),
-        unpacked: unpacked_dimension_widths(r#type.unpacked_ranges()),
-        signed: r#type.is_signed(),
-        is_2state: matches!(
-            r#type.kind(),
-            TypeKind::Bit
-                | TypeKind::Chandle
-                | TypeKind::Real
-                | TypeKind::Shortreal
-                | TypeKind::String
-                | TypeKind::Object
-                | TypeKind::Process
-                | TypeKind::Event
-        ),
-        members: r#type.members.clone(),
-        signed_element_depth: r#type.signed_element_depth,
-        unpacked_struct: r#type.unpacked_struct.clone(),
-        declared: type_names::Declared::new(r#type),
-    })
+    VariableDimensions::bound_to(
+        VariableShape {
+            chandle: r#type.is_chandle(),
+            container: r#type.container.clone(),
+            randomizable: r#type.container.is_none()
+                && !r#type.holds_chandle()
+                && (!r#type.is_enum || r#type.enum_domain.is_some()),
+            enum_domain: r#type.enum_domain.clone(),
+            packed_enum: r#type.packed_enum,
+            real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
+            string: matches!(r#type.kind(), TypeKind::String),
+            class: r#type.class().map(str::to_owned),
+            virtual_interface: r#type.virtual_interface.clone(),
+            packed: dimensions::signal_packed_dimension_widths(r#type.packed_ranges()),
+            unpacked: unpacked_dimension_widths(r#type.unpacked_ranges()),
+            signed: r#type.is_signed(),
+            is_2state: matches!(
+                r#type.kind(),
+                TypeKind::Bit
+                    | TypeKind::Chandle
+                    | TypeKind::Real
+                    | TypeKind::Shortreal
+                    | TypeKind::String
+                    | TypeKind::Object
+                    | TypeKind::Process
+                    | TypeKind::Event
+            ),
+            members: r#type.members.clone(),
+            signed_element_depth: r#type.signed_element_depth,
+            unpacked_struct: r#type.unpacked_struct.clone(),
+            declared: type_names::Declared::new(r#type),
+        },
+        &r#type.binding,
+    )
 }
 
 /// A declaration whose type can be resolved in its own lexical environment.

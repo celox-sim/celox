@@ -70,7 +70,7 @@ pub(super) fn from_array_parameter(
     dims: &PackedDimensions,
     shape: &VariableDimensions,
 ) -> Converted<BoundPattern> {
-    let ty = array_compatibility::unpacked_array_type(&tree.functions, shape, dims)
+    let ty = array_compatibility::unpacked_array_type(&tree.functions, &session.types, shape, dims)
         .ok_or_else(|| unsupported("array parameter argument type"))?;
     let mut semantic = semantic_types::Binding::default();
     if let Some(id) = shape.type_id(&mut session.types, &tree.functions, &dims.const_env) {
@@ -242,8 +242,9 @@ impl BoundPattern {
             semantic,
         } = &self.items
         {
-            let target = array_compatibility::unpacked_array_type(&tree.functions, shape, dims)
-                .ok_or_else(|| unsupported("unpacked array parameter supplied to a scalar"))?;
+            let target =
+                array_compatibility::unpacked_array_type(functions, &session.types, shape, dims)
+                    .ok_or_else(|| unsupported("unpacked array parameter supplied to a scalar"))?;
             // The argument is assigned to the parameter (IEEE 1800-2023 7.6,
             // 23.10): their types, the argument's as the caller bound it,
             // decide, as the type system tells.
@@ -279,18 +280,21 @@ impl BoundPattern {
             let right = eval(&dim.right)?;
             let count = usize::try_from(left.abs_diff(right) + 1)
                 .map_err(|_| unsupported("assignment pattern target size"))?;
-            shapes = vec![
-                VariableDimensions::new(VariableShape {
-                    declared: type_names::Declared::default(),
-                    container: None,
-                    real: false,
-                    string: false,
-                    class: None,
-                    unpacked: rest.to_vec(),
-                    ..shape.clone_shape()
-                });
-                count
-            ];
+            let mut element = VariableDimensions::new(VariableShape {
+                declared: type_names::Declared::default(),
+                container: None,
+                real: false,
+                string: false,
+                class: None,
+                unpacked: rest.to_vec(),
+                ..shape.clone_shape()
+            });
+            // An element has the element type of the array (7.4), which
+            // tells a virtual interface apart by its semantic type.
+            if let Some(id) = shape.bound_element(&session.types) {
+                element.bind_to(&session.types, id);
+            }
+            shapes = vec![element; count];
             keys = (0..count)
                 .map(|i| {
                     Key::Index(if left <= right {
