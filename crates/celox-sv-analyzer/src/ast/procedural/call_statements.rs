@@ -320,6 +320,9 @@ impl BodyBuilder<'_, '_, '_> {
             self.rename_expr(&mut value);
             return Ok(vec![Stmt::Eval(value)]);
         }
+        if let Some(stmts) = self.fixed_ordering_statement(root)? {
+            return Ok(stmts);
+        }
         if let celox_sv_syntax::ExprKind::Call {
             expression,
             arguments,
