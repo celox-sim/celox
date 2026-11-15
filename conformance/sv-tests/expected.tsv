@@ -331,8 +331,8 @@ chapter-16/16.12--property-uvm.sv	2state	pass
 chapter-16/16.12--property-uvm.sv	4state	pass
 chapter-16/16.12--property.sv	2state	pass
 chapter-16/16.12--property.sv	4state	pass
-chapter-16/16.13--sequence-multiclock-uvm.sv	2state	fail
-chapter-16/16.13--sequence-multiclock-uvm.sv	4state	fail
+chapter-16/16.13--sequence-multiclock-uvm.sv	2state	pass
+chapter-16/16.13--sequence-multiclock-uvm.sv	4state	pass
 chapter-16/16.14--assume-property-uvm.sv	2state	pass
 chapter-16/16.14--assume-property-uvm.sv	4state	pass
 chapter-16/16.14--assume-property.sv	2state	pass
