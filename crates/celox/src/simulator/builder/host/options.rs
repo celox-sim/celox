@@ -94,6 +94,10 @@ pub struct SimulatorOptions {
     /// The loop that runs the time slots of a [`crate::Simulation`].
     #[doc(hidden)]
     pub scheduler: crate::SchedulerMode,
+    /// The top-level modules of a SystemVerilog design simulated together,
+    /// when there are several (IEEE 1800-2023 23.3.1); empty for the one
+    /// top the builder names. See [`crate::SimulatorBuilder::tops`].
+    pub top_level_modules: Vec<String>,
 }
 
 impl Default for SimulatorOptions {
@@ -134,6 +138,7 @@ impl Default for SimulatorOptions {
             file_system: Default::default(),
             defer_initialization: false,
             scheduler: crate::SchedulerMode::default(),
+            top_level_modules: Vec::new(),
         }
     }
 }

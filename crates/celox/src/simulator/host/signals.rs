@@ -187,14 +187,31 @@ impl<B: SimBackend> Simulator<B> {
         self.backend.layout()
     }
 
-    /// Returns all ports of the top-level module with their resolved signal references.
+    /// Returns all signals of the top-level module with their resolved
+    /// signal references. With several top-level modules (see
+    /// [`crate::SimulatorBuilder::tops`]) they are the signals of each, named
+    /// from it (`hdl_top.clk`).
     pub fn named_signals(&self) -> Vec<NamedSignal> {
-        let top_instance = self
-            .program
-            .design
-            .root_instance()
-            .expect("top-level instance not found");
-        self.build_signals_for_instance(top_instance.id)
+        let design = &self.program.design;
+        if !design.hidden_root {
+            let top_instance = design
+                .root_instance()
+                .expect("top-level instance not found");
+            return self.build_signals_for_instance(top_instance.id);
+        }
+        design
+            .top_instances()
+            .into_iter()
+            .flat_map(|top| {
+                let name = top.path.0[0].0.clone();
+                self.build_signals_for_instance(top.id)
+                    .into_iter()
+                    .map(move |signal| NamedSignal {
+                        name: format!("{name}.{}", signal.name),
+                        ..signal
+                    })
+            })
+            .collect()
     }
 
     /// Returns all signals for the instance at the given hierarchical path.
@@ -222,11 +239,7 @@ impl<B: SimBackend> Simulator<B> {
         instance_id: crate::ir::InstanceId,
     ) -> Vec<NamedSignal> {
         let instance = self.program.design.instance(instance_id).unwrap();
-        let in_root = self
-            .program
-            .design
-            .root_instance()
-            .is_some_and(|root| root.id == instance.id);
+        let in_root = self.program.design.is_top_instance(instance.id);
 
         let mut result = Vec::new();
         for address in instance.state_addresses() {
@@ -320,8 +333,9 @@ impl<B: SimBackend> Simulator<B> {
         let in_root = self
             .program
             .design
-            .root_instance()
-            .is_some_and(|root| root.state_addresses().contains(&addr));
+            .top_instances()
+            .iter()
+            .any(|top| top.state_addresses().contains(&addr));
         if !self.observable_under_dead_store_policy(addr, in_root) {
             let path = instance_path
                 .iter()
@@ -334,8 +348,9 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     /// Whether the dead store elimination policy guarantees that `addr`
-    /// stays current. `in_root` says whether it belongs to the top
-    /// instance, whose ports `PreserveTopPorts` keeps.
+    /// stays current. `in_root` says whether it belongs to a top instance
+    /// (see [`crate::ir::RuntimeDesign::top_instances`]), whose ports
+    /// `PreserveTopPorts` keeps.
     pub(super) fn observable_under_dead_store_policy(
         &self,
         addr: crate::ir::AbsoluteAddr,
@@ -364,8 +379,34 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     /// Returns the full instance hierarchy starting from the top module.
+    /// With several top-level modules (see [`crate::SimulatorBuilder::tops`])
+    /// it is `$root`, which holds no signals, with the tops as its children
+    /// (IEEE 1800-2023 23.3.1); [`Self::named_hierarchies`] gives each.
     pub fn named_hierarchy(&self) -> InstanceHierarchy {
-        self.build_hierarchy(&[])
+        let mut hierarchy = self.build_hierarchy(&[]);
+        if self.program.design.hidden_root {
+            hierarchy.module_name = "$root".to_string();
+            hierarchy.signals.clear();
+        }
+        hierarchy
+    }
+
+    /// The instance hierarchy of each top-level module, by its name: one
+    /// for a design of one top.
+    pub fn named_hierarchies(&self) -> Vec<(String, InstanceHierarchy)> {
+        self.program
+            .design
+            .top_instances()
+            .into_iter()
+            .map(|top| {
+                let name = top
+                    .path
+                    .0
+                    .first()
+                    .map_or_else(|| top.module_name.clone(), |(name, _)| name.clone());
+                (name, self.build_hierarchy(&top.path.0))
+            })
+            .collect()
     }
 
     pub(super) fn build_hierarchy(&self, current_path: &[(String, usize)]) -> InstanceHierarchy {

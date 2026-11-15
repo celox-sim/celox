@@ -226,6 +226,8 @@ mod tagged_unions;
 #[path = "frontends/systemverilog/references.rs"]
 mod references;
 
+#[path = "frontends/systemverilog/top_level_modules.rs"]
+mod top_level_modules;
 #[path = "frontends/systemverilog/virtual_interfaces.rs"]
 mod virtual_interfaces;
 

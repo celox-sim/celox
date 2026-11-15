@@ -107,6 +107,9 @@ pub(super) struct HierarchicalReference {
 /// The specialized hierarchy, for following names through it.
 pub(super) struct Hierarchy<'a> {
     root: (&'a LoweredSvModuleKey, ModuleId),
+    /// The root is the generated root of several top-level modules, which
+    /// stands for `$root` (23.3.1).
+    hidden_root: bool,
     keys: &'a HashMap<ModuleId, &'a LoweredSvModuleKey>,
     module_ids: &'a HashMap<LoweredSvModuleKey, ModuleId>,
     elaborated: &'a HashMap<ModuleId, ElaboratedModule>,
@@ -176,6 +179,7 @@ impl Found {
 impl<'a> Hierarchy<'a> {
     pub(super) fn new(
         root: (&'a LoweredSvModuleKey, ModuleId),
+        hidden_root: bool,
         keys: &'a HashMap<ModuleId, &'a LoweredSvModuleKey>,
         module_ids: &'a HashMap<LoweredSvModuleKey, ModuleId>,
         elaborated: &'a HashMap<ModuleId, ElaboratedModule>,
@@ -194,6 +198,7 @@ impl<'a> Hierarchy<'a> {
         }
         Self {
             root,
+            hidden_root,
             keys,
             module_ids,
             elaborated,
@@ -461,12 +466,18 @@ pub(super) fn resolve_name(
 ) -> Result<bool, sv::AnalyzerError> {
     let elaborated = &hierarchy.elaborated[&module];
     let resolved = if components[0] == "$root" {
-        // `$root.top. ...` (IEEE 1800-2023 23.3.1).
-        if components.get(1) != Some(&hierarchy.root.0.name) {
+        // `$root.top. ...` (IEEE 1800-2023 23.3.1). The root of several
+        // top-level modules stands for `$root`, and its instances are the
+        // tops.
+        let start = if hierarchy.hidden_root {
+            1
+        } else if components.get(1) == Some(&hierarchy.root.0.name) {
+            2
+        } else {
             return Ok(false);
-        }
+        };
         hierarchy
-            .walk(hierarchy.root.1, components, 2)?
+            .walk(hierarchy.root.1, components, start)?
             .map(|found| (HierarchicalStart::Root, found))
     } else if starts_at_instance(elaborated, components)
         || components[0] == hierarchy.authored_name(module)

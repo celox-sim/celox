@@ -130,7 +130,12 @@ impl ParsedSource {
                     .map(|name| name.spelling.clone()),
             );
         }
+        // Spelled as the declarations are named: `\foo ` is `foo`
+        // (IEEE 1800-2023 5.6.1).
         references
+            .into_iter()
+            .map(|name| ast::normalize_identifier(&name))
+            .collect()
     }
 
     /// Analyze the packages declared in `sources`, each once, after the

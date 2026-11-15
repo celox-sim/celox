@@ -553,7 +553,7 @@ pub(super) fn expr_ident_name(expr: &Expr) -> Option<String> {
 /// An escaped identifier is the same identifier as its text without the
 /// backslash (IEEE 1800-2023 5.6.1): `\a` names `a`. One that cannot be written
 /// without escaping, such as `\a.b`, keeps its backslash.
-pub(crate) fn normalize_identifier(text: &str) -> String {
+pub fn normalize_identifier(text: &str) -> String {
     match text.strip_prefix('\\') {
         Some(name)
             if name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
