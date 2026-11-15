@@ -1017,6 +1017,37 @@ sv_backends! {
     }
 }
 
+sv_backends! {
+    fn structures_holding_containers_index_associative_arrays_by_value(sim) {
+        @setup {
+            // A structure with a container member is a legal associative
+            // array index (IEEE 1800-2023 7.8.5): equal values name one entry,
+            // and the stored index is a copy the variable no longer changes.
+            let source = r#"module Top(output int value);
+                typedef struct { byte b; int items[*]; } key_t;
+                int map[key_t];
+                key_t a, b, c;
+                initial begin
+                    a.b = 1;
+                    a.items[3] = 7;
+                    b = a;
+                    c.b = 1;
+                    c.items[3] = 8;
+                    map[a] = 10;
+                    map[c] = 20;
+                    map[b] += 5;
+                    a.items[3] = 9;
+                    value = map.num() * 10000 + map.exists(a) * 1000 + map[b] * 10 + map[c] / 10;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("structure_indices.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(20_152u32));
+    }
+}
+
 #[test]
 fn container_members_of_container_elements_are_read_only() {
     // Equal elements of a container may share the record that holds their
