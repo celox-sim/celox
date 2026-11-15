@@ -8,11 +8,26 @@ mod settles;
 use super::*;
 
 /// The combinational slicer of a plan, built when a phase first needs it.
-#[expect(
-    clippy::disallowed_types,
-    reason = "single-threaded: the combinational slicer a plan builds on first use, borrowed only by the phases of one Plan::new call"
-)]
-type Slicer<'a, F> = std::cell::LazyCell<CombSlicer<'a>, F>;
+struct Slicer<'a, F> {
+    make: Option<F>,
+    built: Option<CombSlicer<'a>>,
+}
+
+impl<'a, F: FnOnce() -> CombSlicer<'a>> Slicer<'a, F> {
+    fn new(make: F) -> Self {
+        Self {
+            make: Some(make),
+            built: None,
+        }
+    }
+
+    /// The slicer, built on the first call.
+    fn get(&mut self) -> &CombSlicer<'a> {
+        let make = &mut self.make;
+        self.built
+            .get_or_insert_with(|| make.take().expect("the slicer is built once")())
+    }
+}
 
 /// The state [`Plan::new`] builds a plan in: the design, and what the phases
 /// found of it so far. The phases run in the order `Plan::new` calls them.
@@ -274,12 +289,7 @@ impl Plan {
         // All dependency and settle slices inspect the same immutable units.
         // Index their definitions and control dependencies only once per plan,
         // and only if one of these consumers actually needs a slice.
-        #[expect(
-            clippy::disallowed_types,
-            reason = "single-threaded: the combinational slicer is built on first use by the phases of this one Plan::new call"
-        )]
-        let comb_slicer =
-            std::cell::LazyCell::new(|| CombSlicer::new(&sir.eval_comb, shared.clone()));
+        let mut comb_slicer = Slicer::new(|| CombSlicer::new(&sir.eval_comb, shared.clone()));
         let mut builder = PlanBuilder {
             program,
             slots,
@@ -293,20 +303,20 @@ impl Plan {
             found: Found::default(),
         };
         builder.events()?;
-        let wait_slicer = builder.observers(&comb_slicer);
+        let wait_slicer = builder.observers(&mut comb_slicer);
         builder.host_clocks()?;
         builder.services();
         builder.delaying_kernels();
         builder.waiting_kernels();
         builder.wait_feedback(wait_slicer)?;
         builder.settle_inputs();
-        builder.deferred_settles(&comb_slicer);
-        builder.incremental_settle(&comb_slicer);
+        builder.deferred_settles(&mut comb_slicer);
+        builder.incremental_settle(&mut comb_slicer);
         let mut plan = builder.plan()?;
         builder.derived_clocks(&plan);
         builder.active_ordering(&plan)?;
-        builder.stable_events(&plan, &comb_slicer);
-        builder.orphan_clocks(&plan, &comb_slicer);
+        builder.stable_events(&plan, &mut comb_slicer);
+        builder.orphan_clocks(&plan, &mut comb_slicer);
         builder.ordered_waves(&mut plan);
         builder.finish(&mut plan)?;
         Ok(plan)
