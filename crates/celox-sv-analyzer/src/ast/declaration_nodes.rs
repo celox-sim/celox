@@ -239,8 +239,8 @@ impl Signal {
 
     /// A variable of unpacked structure type, which only names its leaf
     /// variables.
-    pub(crate) fn is_aggregate(&self) -> bool {
-        self.r#type.unpacked_struct.is_some()
+    pub(in crate::ast) fn is_aggregate(&self, table: &semantic_types::TyTable) -> bool {
+        self.r#type.is_unpacked_struct_in(table)
     }
 
     pub fn r#type(&self) -> &Type {

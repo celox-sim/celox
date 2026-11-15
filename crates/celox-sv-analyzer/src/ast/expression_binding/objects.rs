@@ -1020,7 +1020,7 @@ pub(in crate::ast) fn method_of(
             ));
         }
         if method_name == "randomize" {
-            class.check_randomize()?;
+            class.check_randomize(&session.types)?;
         }
         // `get_randstate` has no argument but the object (IEEE 1800-2023
         // 18.13.4).
@@ -1457,7 +1457,7 @@ pub(super) fn random_selection(
                 if (property.field.handle.is_some() && !array)
                     || property.r#type.holds_chandle()
                     || property.r#type.enumeration_in(&session.types).unresolved()
-                    || (property.randc && property.cyclic_domain_size().is_none())
+                    || (property.randc && property.cyclic_domain_size(&session.types).is_none())
                 {
                     return Err(unsupported(
                         "randomize arguments require integral properties with a supported enum domain",
@@ -1480,13 +1480,13 @@ pub(super) fn random_selection(
     // it.
     if unsolvable
         && (inline
-            || class.solved()
+            || class.solved(&session.types)
             || classes::visible_classes(tree, session)
                 .into_iter()
                 .filter(|name| *name != class.name)
                 .any(|name| {
                     self::class(tree, session, dimensions, &name).is_ok_and(|derived| {
-                        derived.solved()
+                        derived.solved(&session.types)
                             && derived.derives_from(
                                 tree,
                                 session,
@@ -1914,10 +1914,10 @@ fn scope_randomize_with(
                     || variable.string
                     || variable.chandle
                     || !variable.randomizable
-                    || variable.class.is_some()
+                    || variable.class_in(&session.types).is_some()
                     || variable.container.is_some()
                     || !variable.unpacked.is_empty()
-                    || variable.enum_domain.is_some()
+                    || variable.enumeration_in(&session.types).enumeration
                 {
                     return Err(unsupported(
                         "scope randomize with constraints of other than an integral variable",

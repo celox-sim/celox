@@ -149,7 +149,6 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                     container: port.r#type().container.clone(),
                     randomizable: port.r#type().container.is_none()
                         && !port.r#type().holds_chandle()
-                        && (!port.r#type().is_enum || port.r#type().enum_domain.is_some())
                         && port.randomizable,
                     enum_domain: port.r#type().enum_domain.clone(),
                     packed_enum: port.r#type().packed_enum,
@@ -203,7 +202,6 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                     container: signal.r#type().container.clone(),
                     randomizable: signal.r#type().container.is_none()
                         && !signal.r#type().holds_chandle()
-                        && (!signal.r#type().is_enum || signal.r#type().enum_domain.is_some())
                         && !signal.is_net()
                         && !signal.is_const,
                     enum_domain: signal.r#type().enum_domain.clone(),

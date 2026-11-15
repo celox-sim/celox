@@ -85,6 +85,7 @@ impl ScopeElaboration<'_> {
         };
         net_delays::lower(
             syntax_tree,
+            &session.types,
             &mut self.packed_dimensions,
             &self.ports,
             &self.instances,
@@ -99,6 +100,7 @@ impl ScopeElaboration<'_> {
         );
         continuous_delays::lower(
             syntax_tree,
+            &session.types,
             &self.packed_dimensions,
             &mut self.signals,
             &mut self.comb_processes,

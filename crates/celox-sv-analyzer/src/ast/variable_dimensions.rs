@@ -294,6 +294,10 @@ impl DerefMut for VariableDimensions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct VariableShape {
     pub(super) container: Option<Arc<ContainerType>>,
+    /// Whether a scope randomize may write the variable: no container, no
+    /// chandle, no net or constant (18.12). Whether its type is an
+    /// enumeration whose members are not resolved its semantic type tells
+    /// (see [`VariableDimensions::enumeration_in`]).
     pub(super) randomizable: bool,
     pub(super) enum_domain: Option<Arc<enums::EnumDomain>>,
     /// See [`Type::packed_enum`].

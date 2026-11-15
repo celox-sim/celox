@@ -115,7 +115,7 @@ impl BodyBuilder<'_, '_, '_> {
             else {
                 continue;
             };
-            if r#type.unpacked_struct().is_some() {
+            if r#type.is_unpacked_struct_in(&self.session.types) {
                 continue;
             }
             let source = format!("{subroutine}.{variable}");
