@@ -167,7 +167,8 @@ Recoverable errors support relaxation only when the compiler defines a fallback.
 consistent explicit time units and precisions. Its default is `error`. With `warn`
 or `allow`, undeclared settings use Celox's defaults (1ns unit, 1ps precision),
 explicit settings remain effective, and the global precision includes default
-scopes. Syntax errors, unsupported constructs and invalid precision declarations
+scopes. The error names the design elements without a unit or precision, and
+`warn` reports one warning for each, naming it. Syntax errors, unsupported constructs and invalid precision declarations
 remain errors.
 
 `interface_array_query` defaults to `error`. Set it to `warn` or `allow` to enable

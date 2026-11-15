@@ -384,7 +384,6 @@ sequence 内のインスタンス、
   未使用パラメータや関数本体など、書かれた場所によらず名前付きで報告します。
 - `string` 値への `%t`。選択したインスタンス配列要素や
   generate パスへの時刻照会（`$timeunit`、`$timeprecision`、`$printtimescale`）。
-  明示・継承した時間尺度と処理系既定値の混在（3.14.2.3）。
 - 組み合わせプロセスや継続代入からの実行時 I/O 呼び出し
   （`$fopen`、ファイル向け `$display`、`$system`、plusargs など）と
   `$sformatf` 系呼び出し。WebAssembly ホストでの `$system`。
@@ -443,6 +442,16 @@ sequence 内のインスタンス、
   Rust の `SimulatorBuilder::legacy_empty_reductions(true)`
   （フロントエンドの `AnalysisOptions::legacy_empty_reductions`）では全ての
   空縮約がゼロを返します。そのようなツールとの互換用です。
+- **時間尺度のない設計要素に既定値を使う（オプトイン）。** IEEE 1800-2023
+  3.14.2.3 は、時間単位と精度（宣言・継承・`` `timescale `` によるもの）を
+  持つ設計要素と持たない設計要素が混在する設計をエラーとします。Celox も既定では
+  これを拒否し、持たない設計要素の名前を示します。
+  [`[diagnostics]` テーブル](./celox-toml.md#diagnostics)で
+  `mixed_timescale = "warn"` または `"allow"` を指定すると（JavaScript
+  パッケージもこのテーブルを読みます。コマンドラインの `--diagnostic
+  mixed_timescale=warn` や Rust の `SimulatorBuilder::diagnostic_policy` でも同じ）、
+  そうした設計要素は既定の時間単位と精度を使います。`warn` では他のシミュレータと
+  同様に、設計要素ごとにその名前を示す `mixed_timescale` 警告を出します。
 - **`$psprintf` は `$sformatf` です。** 多くのシミュレータや古い UVM コードが使う
   ベンダー拡張のシステム関数 `$psprintf` を `$sformatf`（21.3.3）として受理します。
   診断では `$sformatf` と表示します。

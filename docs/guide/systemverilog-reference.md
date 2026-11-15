@@ -505,8 +505,7 @@ nonblocking action statements.
   an unused parameter and in a function body.
 - `%t` of a `string` value; time queries
   (`$timeunit`, `$timeprecision`, `$printtimescale`) of selected instance
-  array elements and generate paths; designs mixing explicitly specified
-  or inherited time scales with implementation defaults (3.14.2.3).
+  array elements and generate paths.
 - Runtime I/O calls (`$fopen`, `$display` to files, `$system`, plusargs, …)
   from combinational processes and continuous assignments; `$sformatf`
   family calls from combinational processes and continuous assignments;
@@ -578,6 +577,16 @@ Code that must stay portable should avoid relying on them.
   `SimulatorBuilder::legacy_empty_reductions(true)` (or the frontend's
   `AnalysisOptions::legacy_empty_reductions`) instead returns zero for all
   empty reductions, for compatibility with tools that do so.
+- **Opt-in default time scales for elements without one.** IEEE 1800-2023
+  3.14.2.3 makes a design an error when some design elements have a time
+  unit and precision (declared, inherited or from `` `timescale ``) and
+  others do not, and Celox rejects it by default, naming the elements
+  without one. With `mixed_timescale = "warn"` or `"allow"` in the
+  [`[diagnostics]` table](./celox-toml.md#diagnostics), which the
+  JavaScript package also reads (or `--diagnostic mixed_timescale=warn` on
+  the command line, or `SimulatorBuilder::diagnostic_policy` in Rust), each such element takes the default time unit and precision
+  instead, and `warn` reports one `mixed_timescale` warning naming each, as
+  other simulators do.
 - **`$psprintf` is `$sformatf`.** The vendor system function `$psprintf`,
   which many simulators and older UVM code use, is accepted as `$sformatf`
   (21.3.3); diagnostics name it `$sformatf`.
