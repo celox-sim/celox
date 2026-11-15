@@ -292,6 +292,15 @@ impl Parser<'_> {
             .expression_machine(Job::Expression(minimum))?
             .expression())
     }
+    /// The delay value of a delay control or cycle delay, parenthesized or
+    /// not, or the event name of an event control, without the
+    /// parenthesized expression that may follow it.
+    pub(super) fn timing_operand(&mut self) -> Result<ExprId> {
+        let outer = self.timing_operand_start.replace(self.at);
+        let value = self.expression(14);
+        self.timing_operand_start = outer;
+        value
+    }
     /// Resume an ordinary expression after an event group proved to contain
     /// only an expression. This resolves parentheses without token rescanning.
     pub(super) fn event_group_expression(&mut self, start: usize, inner: ExprId) -> Result<ExprId> {
@@ -812,7 +821,13 @@ impl Parser<'_> {
                             },
                         )?;
                     }
-                    "(" | "#" => {
+                    // A delay value or event name takes no call arguments: in
+                    // `#1 (a | b)`, `#(1) (a | b)` and `@e (a | b)` the
+                    // parentheses begin the controlled expression (IEEE
+                    // 1800-2023 A.6.5, A.2.2.3).
+                    "(" | "#"
+                        if !(self.peek() == "(" && self.timing_operand_start == Some(start)) =>
+                    {
                         let parameterized = self.eat("#");
                         jobs.push(Job::Call {
                             start,

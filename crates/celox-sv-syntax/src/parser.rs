@@ -127,6 +127,7 @@ impl Declarations {
             inline_constraint_depth: 0,
             sequence_operands: 0,
             sequence_depth: 0,
+            timing_operand_start: None,
             keyword_versions: Vec::new(),
             source_items: Vec::new(),
             expressions: Vec::new(),
@@ -400,6 +401,10 @@ struct Parser<'a> {
     sequence_operands: usize,
     /// The groups and clocked subsequences the sequence being parsed is in.
     sequence_depth: usize,
+    /// Where the delay value or event name of the timing control being
+    /// parsed starts. A parenthesis after it begins the controlled
+    /// expression or statement, not call arguments.
+    timing_operand_start: Option<usize>,
     keyword_versions: Vec<keywords::KeywordVersion>,
     source_items: Vec<SourceItem>,
     expressions: Vec<Expr>,
