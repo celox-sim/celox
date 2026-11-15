@@ -347,7 +347,7 @@ impl BoundPattern {
                 aggregate
                     .members()
                     .iter()
-                    .map(|member| procedural::dimensions_from_type(&member.r#type)),
+                    .map(|member| shape.member_shape(&session.types, &member.name, &member.r#type)),
             );
         } else if !shape.members.is_empty() {
             if shape
@@ -367,7 +367,7 @@ impl BoundPattern {
                 shape
                     .members
                     .iter()
-                    .map(|m| procedural::dimensions_from_type(m.r#type())),
+                    .map(|m| shape.member_shape(&session.types, m.name(), m.r#type())),
             );
         } else {
             let width = patterns::shape_width(&tree.functions, shape, dims)

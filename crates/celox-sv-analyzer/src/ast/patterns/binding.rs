@@ -183,7 +183,9 @@ fn select<'a>(
         && shape.unpacked.is_empty()
     {
         return Ok((
-            unpacked_struct_items(tree, session, functions, &aggregate, kind, bindings, dims)?,
+            unpacked_struct_items(
+                tree, session, functions, &shape, &aggregate, kind, bindings, dims,
+            )?,
             false,
             true,
         ));
@@ -353,7 +355,11 @@ fn select<'a>(
                 .zip(values)
                 .map(|(member, (value, default))| Selected {
                     value,
-                    shape: Shape::Owned(Rc::new(procedural::dimensions_from_type(member.r#type()))),
+                    shape: Shape::Owned(Rc::new(shape.member_shape(
+                        &session.types,
+                        member.name(),
+                        member.r#type(),
+                    ))),
                     default,
                     check: false,
                 })
@@ -597,7 +603,9 @@ pub(in crate::ast) fn bind_native(
                         jobs.extend(members.iter().rev().map(|member| {
                             Job::Value(Selected {
                                 value: id,
-                                shape: Shape::Owned(Rc::new(procedural::dimensions_from_type(
+                                shape: Shape::Owned(Rc::new(shape.member_shape(
+                                    &session.types,
+                                    &member.name,
                                     &member.r#type,
                                 ))),
                                 default: true,
@@ -752,6 +760,7 @@ fn unpacked_struct_items<'a>(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     functions: &const_functions::ConstantFunctions,
+    parent: &VariableDimensions,
     aggregate: &unpacked_structs::UnpackedStruct,
     kind: NativeKind,
     bindings: Vec<Pair>,
@@ -833,7 +842,11 @@ fn unpacked_struct_items<'a>(
         .zip(values)
         .map(|(member, (value, default))| Selected {
             value,
-            shape: Shape::Owned(Rc::new(procedural::dimensions_from_type(&member.r#type))),
+            shape: Shape::Owned(Rc::new(parent.member_shape(
+                &session.types,
+                &member.name,
+                &member.r#type,
+            ))),
             default,
             check: false,
         })

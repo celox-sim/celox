@@ -150,6 +150,8 @@ pub(in crate::ast) fn member_default(
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
+    // A member's type is read while its structure is bound, before the
+    // member has a semantic type of its own.
     if ty.is_enum
         || ty.unpacked_struct().is_some()
         || ty.class_in(&session.types).is_some()

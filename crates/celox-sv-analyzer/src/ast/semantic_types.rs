@@ -474,17 +474,24 @@ impl TyTable {
 
     /// The class of handle type `id`, or of the elements of a fixed-size
     /// unpacked array of handles (IEEE 1800-2023 8.4, 7.4.2).
-    pub fn handle_class(&self, mut id: TyId) -> Option<&Arc<str>> {
-        loop {
-            match self.data(id) {
-                TyData::Class(Decl::Class(name)) => return Some(name),
-                TyData::Array {
-                    kind: ArrayKind::Fixed(_),
-                    element,
-                } => id = *element,
-                _ => return None,
-            }
+    pub fn handle_class(&self, id: TyId) -> Option<&Arc<str>> {
+        match self.data(self.fixed_element(id)) {
+            TyData::Class(Decl::Class(name)) => Some(name),
+            _ => None,
         }
+    }
+
+    /// The element of `id` if it is a fixed-size unpacked array, through
+    /// every dimension, else `id` (7.4.2).
+    pub fn fixed_element(&self, mut id: TyId) -> TyId {
+        while let TyData::Array {
+            kind: ArrayKind::Fixed(_),
+            element,
+        } = self.data(id)
+        {
+            id = *element;
+        }
+        id
     }
 
     /// Whether `a` and `b` are matching types (IEEE 1800-2023 6.22.1).

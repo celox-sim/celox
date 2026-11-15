@@ -652,8 +652,10 @@ fn lower_methods(
                             }
                             if property.constant
                                 || property.field.handle.is_some()
-                                || (property.r#type.is_enum
-                                    && property.r#type.enum_domain.is_none())
+                                || property
+                                    .r#type
+                                    .enumeration_in(&builder.session.types)
+                                    .unresolved()
                             {
                                 continue;
                             }

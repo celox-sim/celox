@@ -246,6 +246,7 @@ const MAX_FIXED_PROPERTY_ELEMENTS: u128 = 1 << 24;
 /// 1800-2023 7.4).
 pub(super) fn fixed_storage(
     ty: &Type,
+    table: &semantic_types::TyTable,
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
 ) -> Converted<Arc<ContainerType>> {
@@ -285,6 +286,12 @@ pub(super) fn fixed_storage(
     }
     let mut element = ty.clone();
     element.unpacked_ranges.clear();
+    // The element has the element type of the array (7.4).
+    if let Some(semantic_types::TyData::Array { element: id, .. }) =
+        ty.binding.get(table).map(|id| table.data(id))
+    {
+        element.binding.set(table, *id);
+    }
     // A container does not give its elements the initial values of their
     // members (see `unpacked_structs::record`).
     if element
@@ -307,41 +314,71 @@ pub(super) fn fixed_storage(
 }
 
 impl ContainerType {
+    /// The semantic type of the container's elements: the element's own
+    /// binding, else the element of the container's semantic type.
+    fn element_id(&self, table: &semantic_types::TyTable) -> Option<semantic_types::TyId> {
+        self.element.binding.get(table).or_else(|| {
+            match self.binding.get(table).map(|id| table.data(id)) {
+                Some(semantic_types::TyData::Array { element, .. }) => Some(*element),
+                _ => None,
+            }
+        })
+    }
+
+    /// The semantic type of the index of an associative array, as
+    /// [`Self::element_id`] tells that of its elements.
+    fn key_id(&self, table: &semantic_types::TyTable) -> Option<semantic_types::TyId> {
+        self.key.as_ref()?.binding.get(table).or_else(|| {
+            match self.binding.get(table).map(|id| table.data(id)) {
+                Some(semantic_types::TyData::Array {
+                    kind: semantic_types::ArrayKind::Associative { key },
+                    ..
+                }) => Some(*key),
+                _ => None,
+            }
+        })
+    }
+
     /// The class of the elements of a container of handles (IEEE 1800-2023
-    /// 8.4): from the element's semantic type, or from the container's where
-    /// the element has no binding of its own.
+    /// 8.4), from their semantic type.
     pub(super) fn element_class(&self, table: &semantic_types::TyTable) -> Option<Arc<str>> {
-        let element = match self.binding.get(table).map(|id| table.data(id)) {
-            Some(semantic_types::TyData::Array { element, .. }) => Some(*element),
-            _ => None,
-        };
-        Self::part_class(&self.element, element, table)
+        Self::part_class(&self.element, self.element_id(table), table)
     }
 
     /// The class of the index of an associative array with a class index
-    /// (7.8.5), as [`Self::element_class`] tells that of its elements.
+    /// (7.8.5), from its semantic type.
     pub(super) fn key_class(&self, table: &semantic_types::TyTable) -> Option<Arc<str>> {
-        let key = self.key.as_ref()?;
-        let id = match self.binding.get(table).map(|id| table.data(id)) {
-            Some(semantic_types::TyData::Array {
-                kind: semantic_types::ArrayKind::Associative { key },
-                ..
-            }) => Some(*key),
-            _ => None,
-        };
-        Self::part_class(key, id, table)
+        Self::part_class(self.key.as_ref()?, self.key_id(table), table)
+    }
+
+    /// The enumeration of the container's elements (6.19), from their
+    /// semantic type.
+    pub(super) fn element_enumeration(
+        &self,
+        table: &semantic_types::TyTable,
+    ) -> enums::Enumeration {
+        enums::Enumeration::of(
+            self.element_id(table),
+            table,
+            self.element.enumeration_fields(),
+        )
+    }
+
+    /// The enumeration of the index of an associative array (7.8.4), from
+    /// its semantic type; none without an index.
+    pub(super) fn key_enumeration(&self, table: &semantic_types::TyTable) -> enums::Enumeration {
+        self.key.as_ref().map_or_else(Default::default, |key| {
+            enums::Enumeration::of(self.key_id(table), table, key.enumeration_fields())
+        })
     }
 
     /// The class of `part`, the element or index type of the container,
-    /// whose semantic type in the container's is `id`.
+    /// whose semantic type is `id`.
     fn part_class(
         part: &Type,
         id: Option<semantic_types::TyId>,
         table: &semantic_types::TyTable,
     ) -> Option<Arc<str>> {
-        if part.binding.get(table).is_some() {
-            return part.class_in(table);
-        }
         let class = id.and_then(|id| table.handle_class(id)).cloned();
         debug_assert_eq!(
             class.as_deref(),

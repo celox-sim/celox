@@ -993,7 +993,7 @@ fn solver_element(
 ) -> bool {
     container.layout.handle.is_none()
         && container.record.is_none()
-        && !(container.element.is_enum && container.element.enum_domain.is_none())
+        && !container.element_enumeration(&session.types).unresolved()
         && solver_type(&container.element, tree, session, env).is_ok()
 }
 
@@ -2052,7 +2052,8 @@ impl Class {
             let mask = u64::MAX >> (64 - property.field.width);
             let domain = property
                 .r#type
-                .enum_domain
+                .enumeration_in(&session.types)
+                .domain
                 .as_ref()
                 // `randomize(e)` makes any property random; the solver
                 // applies the domain only while the property is.
@@ -2092,7 +2093,8 @@ impl Class {
                 random: true,
                 domain: slot
                     .r#type
-                    .enum_domain
+                    .enumeration_in(&session.types)
+                    .domain
                     .as_ref()
                     .map(|domain| {
                         domain
@@ -2231,8 +2233,8 @@ pub(in crate::ast) fn array(
         width: layout.width,
         random,
         domain: container
-            .element
-            .enum_domain
+            .element_enumeration(&session.types)
+            .domain
             .as_ref()
             .map(|domain| {
                 domain

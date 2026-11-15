@@ -5897,3 +5897,47 @@ fn immediate_assertions_run_casts_and_updates_of_their_expression() {
         ["5 6 6 14"]
     );
 }
+
+/// A queue, dynamic or fixed-size array of enumeration values named in
+/// `randomize` is random for the call (IEEE 1800-2023 18.11); its elements take only the
+/// values of their enumeration (18.3).
+#[test]
+fn randomize_arguments_take_containers_of_enumerations() {
+    for (declaration, fill) in [
+        ("kind_e kinds[$];", "kinds = '{A, A, A};"),
+        ("kind_e kinds[];", "kinds = new[3];"),
+        ("rand kind_e kinds[];", "kinds = new[3];"),
+        ("kind_e kinds[3];", "kinds = '{A, A, A};"),
+    ] {
+        let source = format!(
+            "module Top(output int seen);
+                typedef enum {{A, B, C}} kind_e;
+                class Gen;
+                    {declaration}
+                    function new();
+                        {fill}
+                    endfunction
+                endclass
+                initial begin
+                    Gen g = new;
+                    void'(g.randomize(kinds));
+                    seen = 1;
+                    foreach (g.kinds[i]) if (!(g.kinds[i] inside {{A, B, C}})) seen = 0;
+                end
+            endmodule"
+        );
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("kinds.sv"))],
+            "Top",
+        )
+        .build()
+        .unwrap_or_else(|error| panic!("{declaration}: {error}"));
+        let seen = sim.signal("seen");
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            sim.get(seen),
+            num_bigint::BigUint::from(1u8),
+            "{declaration}"
+        );
+    }
+}

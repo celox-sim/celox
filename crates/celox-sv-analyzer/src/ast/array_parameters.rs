@@ -188,10 +188,12 @@ pub(super) fn packed_pattern_value(
     let ty = declared_type(native, tree, session, &dims.const_env, &dims.type_aliases)
         .ok()
         .flatten()?;
-    let shape = procedural::dimensions_from_type(&ty);
+    // A parameter of the scope: its type in the scope's constants.
+    let mut shape = procedural::dimensions_from_type(&ty);
+    shape.bind_in(&mut session.types, &tree.functions, &dims.const_env);
     if shape.packed.is_empty()
         || !shape
-            .type_id(&mut session.types, &tree.functions, &dims.const_env)
+            .bound(&session.types)
             .is_some_and(|ty| session.types.is_integral(ty))
     {
         return None;
@@ -388,7 +390,9 @@ impl ArrayParameter {
         dims: &PackedDimensions,
     ) -> Result<InitialProcess, AnalyzerError> {
         let name = self.signal.name().to_string();
-        let shape = procedural::dimensions_from_type(self.signal.r#type());
+        // A parameter of the scope: its type in the scope's constants.
+        let mut shape = procedural::dimensions_from_type(self.signal.r#type());
+        shape.bind_in(&mut session.types, &tree.functions, &dims.const_env);
         let value = if let Some(bound) = &self.bound {
             bound.lower(tree, session, &shape, dims)?
         } else {
