@@ -17,11 +17,7 @@
 //! runtime events) are delegated to the [`InterpMachine`] trait so the
 //! interpreter stays independent of backend storage details.
 
-#[expect(
-    clippy::disallowed_types,
-    reason = "single-threaded: lazily materialized SIRValue of a small interpreter register, filled behind &self by as_sir on the interpreting thread"
-)]
-use std::cell::OnceCell;
+use std::borrow::Cow;
 use std::fmt;
 
 use celox_sir::extern_abi::ExternValue;
@@ -494,7 +490,7 @@ fn run_activations<'u, A, M: InterpMachine<A>>(
                 // edge, keeping tier migration control-flow identical.
                 let holds = match regs.get_small(*cond)? {
                     Some(cond) => cond != 0,
-                    None => branch_condition_holds(regs.get(*cond)?),
+                    None => branch_condition_holds(&*regs.get(*cond)?),
                 };
                 let target = if holds { true_block } else { false_block };
                 transfer(regs, running, target.0, &target.1)?;
@@ -656,7 +652,7 @@ fn exec_instruction<'u, A, M: InterpMachine<A>>(
                 .map_err(|_| InterpError::Machine("frame base out of range".to_string()))?;
             let args = args
                 .iter()
-                .map(|&(slot, arg)| Ok((slot, regs.get(arg)?.clone())))
+                .map(|&(slot, arg)| Ok((slot, regs.get(arg)?.into_owned())))
                 .collect::<Result<Vec<_>, InterpError>>()?;
             return Ok(Some(CallRequest {
                 function: callee,
@@ -700,8 +696,8 @@ fn exec_instruction<'u, A, M: InterpMachine<A>>(
                 regs.set_small(*dst, out);
                 return Ok(None);
             }
-            let lhs_value = regs.get(*lhs)?.clone();
-            let rhs_value = regs.get(*rhs)?.clone();
+            let lhs_value = regs.get(*lhs)?.into_owned();
+            let rhs_value = regs.get(*rhs)?.into_owned();
             let dst_width = regs.width(*dst);
             let out = alu_binary(
                 op,
@@ -730,7 +726,7 @@ fn exec_instruction<'u, A, M: InterpMachine<A>>(
                 regs.set_small(*dst, out);
                 return Ok(None);
             }
-            let src_value = regs.get(*src)?.clone();
+            let src_value = regs.get(*src)?.into_owned();
             let out = alu_unary(
                 op,
                 &src_value,
@@ -747,7 +743,8 @@ fn exec_instruction<'u, A, M: InterpMachine<A>>(
             regs.set(*dst, truncate(out, regs.width(*dst)));
         }
         SIRInstruction::Load(dst, addr, offset, bits) => {
-            let access = resolve_access(offset, regs)?;
+            let dynamics = DynamicValues::of(offset, regs)?;
+            let access = dynamics.access();
             if regs.accepts_small(*dst) && *bits <= 64 {
                 let value = machine.load_u64(addr, access, *bits)?;
                 regs.set_small(*dst, value);
@@ -765,7 +762,8 @@ fn exec_instruction<'u, A, M: InterpMachine<A>>(
                 }
                 return Ok(None);
             }
-            let access = resolve_access(offset, regs)?;
+            let dynamics = DynamicValues::of(offset, regs)?;
+            let access = dynamics.access();
             machine.prepare_store(addr, access, *bits)?;
             let before = if sites.is_empty() {
                 None
@@ -777,22 +775,26 @@ fn exec_instruction<'u, A, M: InterpMachine<A>>(
             {
                 machine.store_u64(addr, access, *bits, value)?;
             } else {
-                machine.store(addr, access, *bits, regs.get(*src)?)?;
+                machine.store(addr, access, *bits, &*regs.get(*src)?)?;
             }
             if !triggers.is_empty() {
-                let access = resolve_access(offset, regs)?;
+                let dynamics = DynamicValues::of(offset, regs)?;
+                let access = dynamics.access();
                 machine.notify_triggers(addr, access, *bits, triggers)?;
             }
             if let Some(before) = before {
-                let access = resolve_access(offset, regs)?;
+                let dynamics = DynamicValues::of(offset, regs)?;
+                let access = dynamics.access();
                 machine.enable_comb_captures(addr, access, *bits, &before, sites)?;
             }
         }
         SIRInstruction::Commit(src, dst, offset, bits, triggers) => {
-            let access = resolve_access(offset, regs)?;
+            let dynamics = DynamicValues::of(offset, regs)?;
+            let access = dynamics.access();
             machine.commit(src, dst, access, *bits)?;
             if !triggers.is_empty() {
-                let access = resolve_access(offset, regs)?;
+                let dynamics = DynamicValues::of(offset, regs)?;
+                let access = dynamics.access();
                 machine.notify_triggers(dst, access, *bits, triggers)?;
             }
         }
@@ -867,9 +869,9 @@ fn exec_instruction<'u, A, M: InterpMachine<A>>(
                 return Ok(None);
             }
             let cond_width = regs.width(*cond);
-            let cond = regs.get(*cond)?.clone();
-            let then_value = regs.get(*then_value)?.clone();
-            let else_value = regs.get(*else_value)?.clone();
+            let cond = regs.get(*cond)?.into_owned();
+            let then_value = regs.get(*then_value)?.into_owned();
+            let else_value = regs.get(*else_value)?.into_owned();
             // Evaluate the condition in its own width; shape the selected
             // arms to the destination width.
             let out = eval_mux(
@@ -900,8 +902,8 @@ fn exec_instruction<'u, A, M: InterpMachine<A>>(
             )?;
         }
         SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
-            let old = regs.get(*old)?.clone();
-            let new = regs.get(*new)?.clone();
+            let old = regs.get(*old)?.into_owned();
+            let new = regs.get(*new)?.into_owned();
             machine.enable_comb_capture_if_changed(&old, &new, sites)?;
         }
         SIRInstruction::ExternCall { dst, func, args } => {
@@ -936,21 +938,36 @@ fn extern_result(regs: &Registers, dst: RegisterId, raw: u64, four_state: bool) 
     SIRValue::new_four_state(value, if four_state { mask } else { 0 })
 }
 
-fn resolve_access<'a>(
+/// The values of the dynamic registers of an access, which a
+/// [`ResolvedAccess`] of it borrows.
+struct DynamicValues<'a> {
     offset: &'a SIROffset,
-    regs: &'a Registers,
-) -> Result<ResolvedAccess<'a>, InterpError> {
-    let mut dynamics = [None, None];
-    for (slot, register) in offset.dynamic_registers().into_iter().enumerate() {
-        if let Some(register) = register {
-            dynamics[slot] = Some(regs.get(register)?);
+    values: [Option<Cow<'a, SIRValue>>; 2],
+}
+
+impl<'a> DynamicValues<'a> {
+    fn of(offset: &'a SIROffset, regs: &'a Registers) -> Result<Self, InterpError> {
+        let mut values = [None, None];
+        for (slot, register) in offset.dynamic_registers().into_iter().enumerate() {
+            if let Some(register) = register {
+                values[slot] = Some(regs.get(register)?);
+            }
+        }
+        Ok(Self { offset, values })
+    }
+
+    fn access(&self) -> ResolvedAccess<'_> {
+        ResolvedAccess {
+            offset: self.offset,
+            dynamics: [self.values[0].as_deref(), self.values[1].as_deref()],
         }
     }
-    Ok(ResolvedAccess { offset, dynamics })
 }
 
 fn resolve_args(args: &[RegisterId], regs: &Registers) -> Result<Vec<SIRValue>, InterpError> {
-    args.iter().map(|arg| regs.get(*arg).cloned()).collect()
+    args.iter()
+        .map(|arg| regs.get(*arg).map(Cow::into_owned))
+        .collect()
 }
 
 // ── Value helpers ─────────────────────────────────────────────────────
@@ -1878,46 +1895,28 @@ struct RegisterSlot {
 
 #[derive(Clone)]
 enum RegisterValue {
-    /// Fully-known two-state value. The materialized SIR value is populated
-    /// only when a cold generic interface (dynamic access or runtime event)
-    /// needs it.
-    Small {
-        value: u64,
-        #[expect(
-            clippy::disallowed_types,
-            reason = "single-threaded: lazily materialized SIRValue of a small interpreter register, filled behind &self by as_sir on the interpreting thread"
-        )]
-        materialized: OnceCell<SIRValue>,
-    },
+    /// Fully-known two-state value. A SIR value of it is made only when a
+    /// cold generic interface (dynamic access or runtime event) asks.
+    Small(u64),
     Wide(SIRValue),
 }
 
 impl RegisterValue {
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: lazily materialized SIRValue of a small interpreter register, filled behind &self by as_sir on the interpreting thread"
-    )]
     fn small(value: u64) -> Self {
-        Self::Small {
-            value,
-            materialized: OnceCell::new(),
-        }
+        Self::Small(value)
     }
 
     fn as_small(&self) -> Option<u64> {
         match self {
-            Self::Small { value, .. } => Some(*value),
+            Self::Small(value) => Some(*value),
             Self::Wide(_) => None,
         }
     }
 
-    fn as_sir(&self) -> &SIRValue {
+    fn as_sir(&self) -> Cow<'_, SIRValue> {
         match self {
-            Self::Small {
-                value,
-                materialized,
-            } => materialized.get_or_init(|| SIRValue::new(*value)),
-            Self::Wide(value) => value,
+            Self::Small(value) => Cow::Owned(SIRValue::new(*value)),
+            Self::Wide(value) => Cow::Borrowed(value),
         }
     }
 }
@@ -1960,13 +1959,15 @@ impl Registers {
         })
     }
 
-    pub(crate) fn get(&self, id: RegisterId) -> Result<&SIRValue, InterpError> {
+    pub(crate) fn get(&self, id: RegisterId) -> Result<Cow<'_, SIRValue>, InterpError> {
         self.initialized_value(id)
             .map(RegisterValue::as_sir)
             .ok_or(InterpError::MissingRegister(id))
     }
 
-    fn get_small(&self, id: RegisterId) -> Result<Option<u64>, InterpError> {
+    /// The value of register `id` if it is a fully known two-state value
+    /// of at most 64 bits, kept without a SIR value.
+    pub(crate) fn get_small(&self, id: RegisterId) -> Result<Option<u64>, InterpError> {
         self.initialized_value(id)
             .map(RegisterValue::as_small)
             .ok_or(InterpError::MissingRegister(id))
