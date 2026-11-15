@@ -2018,6 +2018,7 @@ fn scope_randomize_with(
         constraint_ids,
         &|_| false,
         true,
+        None,
         &mut inputs,
         0,
         &mut input_types,
@@ -2043,6 +2044,7 @@ fn scope_randomize_with(
                     statics: &[],
                     inputs: &[],
                     slots: &[],
+                    receiver: None,
                 },
                 &dimensions.const_env,
                 &inputs,
@@ -2089,6 +2091,7 @@ fn caller_inputs(
     constraint_ids: &[ExprId],
     owned: &dyn Fn(&str) -> bool,
     this_is_caller: bool,
+    receiver: Option<&str>,
     inputs: &mut HashMap<String, classes::constraints::CallerInput>,
     first_input: usize,
     input_types: &mut Vec<Type>,
@@ -2122,7 +2125,8 @@ fn caller_inputs(
             // A dotted name whose first identifier does not resolve into
             // the class, as one a restricted block does not list, resolves
             // in the caller's scope (IEEE 1800-2023 18.7), whose members
-            // constraints do not read.
+            // constraints do not read, unless it is the variable that holds
+            // the object the call randomizes (see `Names::receiver`).
             ExprKind::Member {
                 expression,
                 separator,
@@ -2132,7 +2136,7 @@ fn caller_inputs(
                     &native.expression(ungroup(*expression, native)).kind,
                     ExprKind::Name(root) if !matches!(root.spelling.as_str(), "this" | "super") && {
                         let root = instances::normalize_identifier(&root.spelling);
-                        !loops.contains(&root) && !owned(&root)
+                        !loops.contains(&root) && !owned(&root) && receiver != Some(root.as_str())
                     }
                 ) =>
             {
@@ -2389,8 +2393,11 @@ pub(super) fn randomize_with(
     let first_input = class.static_inputs.len();
     let mut input_types = Vec::new();
     let mut input_values = Vec::new();
-    // In a restricted constraint block, only the names it lists resolve
-    // into the class; the others resolve in the caller's scope (18.7).
+    // A name resolves into the class of the object first, in a restricted
+    // constraint block only one it lists, and otherwise in the caller's
+    // scope (18.7): a member of the class, also a static property, is an
+    // input or a solver variable of the program (see
+    // `classes::StaticInput`), a name of the caller an input.
     let listed = restricted.map(|names| {
         names
             .iter()
@@ -2410,19 +2417,30 @@ pub(super) fn randomize_with(
             missing.spelling
         )));
     }
+    let owned = |name: &str| {
+        class.member(name).is_some() && listed.as_ref().is_none_or(|listed| listed.contains(name))
+    };
+    // The caller's variable through which the call names its object, as
+    // `h` of `h.randomize() with {...}`, when its name resolves in the
+    // caller's scope: read once as the call starts, it names that object
+    // in the constraints (see `Names::receiver`).
+    let receiver_name = match receiver {
+        Receiver::Handle(handle) => match &native.expression(ungroup(handle, native)).kind {
+            ExprKind::Name(name) => Some(instances::normalize_identifier(&name.spelling)),
+            _ => None,
+        },
+        Receiver::This | Receiver::Static => None,
+    }
+    .filter(|name| !owned(name));
     caller_inputs(
         tree,
         session,
         native,
         dimensions,
         constraint_ids,
-        // A member of the class, also a static property: an input or a
-        // solver variable of the program (see `classes::StaticInput`).
-        &|name| {
-            class.member(name).is_some()
-                && listed.as_ref().is_none_or(|listed| listed.contains(name))
-        },
+        &owned,
         false,
+        receiver_name.as_deref(),
         &mut inputs,
         first_input,
         &mut input_types,
@@ -2450,6 +2468,7 @@ pub(super) fn randomize_with(
                     statics: &class.statics,
                     inputs: &class.static_inputs,
                     slots: &class.static_slots,
+                    receiver: receiver_name.as_deref(),
                 },
                 &dimensions.const_env,
                 &inputs,
