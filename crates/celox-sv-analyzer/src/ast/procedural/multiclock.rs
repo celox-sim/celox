@@ -133,6 +133,36 @@ fn sampled_history(condition: &Expr) -> Converted<()> {
     Ok(())
 }
 
+/// The events of `wait`, the statements that wait for the clocking event of
+/// a subsequence as a procedural event control does, which the monitor
+/// waits for too: those of a member selected through a virtual interface
+/// are the writes of the member and the changes of the handle (see
+/// `virtual_event_control`). A handle the wait would copy when it begins
+/// has no variable the monitor could watch.
+fn clock_events(wait: &[Stmt]) -> Converted<Vec<EventItemBase<Expr>>> {
+    let other =
+        || unsupported("multiclocked sequence with a clocking event other than value changes");
+    match wait {
+        [Stmt::WaitEvent(items)] => Ok(items.clone()),
+        [block @ Stmt::Loop { body, .. }] if virtual_interfaces::is_event_block(block) => {
+            if body.iter().any(|stmt| matches!(stmt, Stmt::Local { .. })) {
+                return Err(unsupported(
+                    "multiclocked sequence clocked by a member through a virtual interface handle that no variable of the design holds",
+                ));
+            }
+            let mut events = body.iter().filter_map(|stmt| match stmt {
+                Stmt::WaitEvent(items) => Some(items.clone()),
+                _ => None,
+            });
+            match (events.next(), events.next()) {
+                (Some(items), None) => Ok(items),
+                _ => Err(other()),
+            }
+        }
+        _ => Err(other()),
+    }
+}
+
 fn int(value: u32) -> Expr {
     Expr::Literal(format!("32'sd{value}"))
 }
@@ -203,9 +233,11 @@ impl BodyBuilder<'_, '_, '_> {
         }
         // A process for each distinct clock counts the occurrences of its
         // clocking event, waiting for it as an event control does: the
-        // edges of 4-state values and an `iff` judged when the event occurs
-        // (IEEE 1800-2023 9.4.2). In the Observed region the monitor tells
-        // which clocks ticked from the counts it has not handled yet.
+        // edges of 4-state values, an `iff` judged when the event occurs
+        // (IEEE 1800-2023 9.4.2), and members selected through virtual
+        // interfaces. The monitor wakes on the same events, and in the
+        // Observed region tells which clocks ticked from the counts it has
+        // not handled yet.
         let mut observed = Vec::new();
         let mut clocks: Vec<(TimingControlId, String)> = Vec::new();
         let mut wakes = Vec::new();
@@ -216,13 +248,8 @@ impl BodyBuilder<'_, '_, '_> {
             if clocks.iter().any(|(clock, _)| *clock == segment.clock) {
                 continue;
             }
-            let wait = self.native_timing_control(segment.clock)?;
-            let Stmt::WaitEvent(items) = &wait else {
-                return Err(unsupported(
-                    "multiclocked sequence with a clocking event other than value changes",
-                ));
-            };
-            wakes.extend(items.iter().cloned());
+            let mut wait = self.timing_control_statements(segment.clock)?;
+            wakes.extend(clock_events(&wait)?);
             let tick = self.declare("tick@multiclock", int_type());
             let handled = self.declare("handled@multiclock", int_type());
             let ticked = self.declare("ticked@multiclock", bit.clone());
@@ -231,7 +258,10 @@ impl BodyBuilder<'_, '_, '_> {
                 init: Vec::new(),
                 condition: None,
                 step: Vec::new(),
-                body: vec![wait, assign(&tick, add(Expr::Ident(tick.clone()), int(1)))],
+                body: {
+                    wait.push(assign(&tick, add(Expr::Ident(tick.clone()), int(1))));
+                    wait
+                },
             }]);
             let unhandled = not_equal(Expr::Ident(tick.clone()), Expr::Ident(handled.clone()));
             observed.push(assign(&ticked, unhandled.clone()));

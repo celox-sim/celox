@@ -91,11 +91,7 @@ impl BodyBuilder<'_, '_, '_> {
             rhs,
             nonblocking: false,
         });
-        let waits = if let Some(stmts) = self.virtual_event_control(control)? {
-            stmts
-        } else {
-            vec![self.native_timing_control(control)?]
-        };
+        let waits = self.timing_control_statements(control)?;
         if let Some(count) = repeat_count {
             output.extend(self.effects(&[count])?);
             let count_shape =

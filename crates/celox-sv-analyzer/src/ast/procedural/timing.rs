@@ -133,6 +133,20 @@ impl BodyBuilder<'_, '_, '_> {
     /// which checks the handles after every wake and so reports the access
     /// through `null` rather than an edge of the selection it ends. A handle that an automatic
     /// variable, an argument or a class property holds is read when the wait begins.
+    /// The statements that wait for the event control or delay `id` as a
+    /// procedural timing control does: through
+    /// [`Self::virtual_event_control`] when it reads members through virtual
+    /// interfaces.
+    pub(super) fn timing_control_statements(
+        &mut self,
+        id: TimingControlId,
+    ) -> Result<Vec<Stmt>, AnalyzerError> {
+        if let Some(stmts) = self.virtual_event_control(id)? {
+            return Ok(stmts);
+        }
+        Ok(vec![self.native_timing_control(id)?])
+    }
+
     pub(super) fn virtual_event_control(
         &mut self,
         id: TimingControlId,

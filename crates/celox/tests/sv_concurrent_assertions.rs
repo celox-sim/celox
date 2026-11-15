@@ -756,6 +756,45 @@ endmodule"#;
     }
 }
 
+/// The clock of a subsequence that selects a member through a virtual
+/// interface ticks as an event control on it does: at writes of the member
+/// of the instance the handle denotes (IEEE 1800-2023 9.4.2, 25.9).
+#[test]
+fn multiclocked_sequences_tick_on_members_through_virtual_interfaces() {
+    // As in `multiclocked_sequences_hand_attempts_to_the_next_clock`, with
+    // clk1 in an interface instance, and an instance whose clock never ticks
+    // selected for the attempts that do not pass.
+    let source = r#"`timescale 1ns/1ns
+interface ifc;
+ bit clk;
+endinterface
+module Top;
+ ifc i(), idle();
+ virtual ifc vif = i;
+ virtual ifc stuck = idle;
+ bit clk0, out0, out1;
+ int passed, failed, s_passed, s_failed;
+ always @(posedge clk0) out0 <= 1;
+ always @(posedge i.clk) out1 <= 1;
+ assert property (@(posedge clk0) ##1 out0 ##1 @(posedge vif.clk) out1) passed++; else failed++;
+ assert property (@(posedge clk0) ##1 out0 ##1 @(posedge stuck.clk) out1) s_passed++; else s_failed++;
+ initial forever begin #50 clk0 = ~clk0; #150 i.clk = ~i.clk; end
+endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("multiclock.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(2000).unwrap();
+    for (name, expected) in [
+        ("passed", 4u32),
+        ("failed", 0),
+        ("s_passed", 0),
+        ("s_failed", 0),
+    ] {
+        assert_eq!(sim.get(sim.signal(name)), expected.into(), "{name}");
+    }
+}
+
 /// `$assertoff` keeps the first clock of a multiclocked sequence from
 /// starting attempts, and those it started go on over the next clock to
 /// their end (IEEE 1800-2023 20.11).
