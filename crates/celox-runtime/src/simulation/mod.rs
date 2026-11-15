@@ -208,6 +208,12 @@ pub struct SimulationState<B: SimBackend> {
     /// it, which runs again right away with the results the request wrote
     /// (see `restore_parked_result`).
     continued: Option<usize>,
+    /// The children that processes released when they blocked, those of the
+    /// latest first, which run before the other processes ready in their
+    /// region (see `SimulationState::next_spawned`). Transient: it is empty
+    /// between steps unless a halt cut a region short, a checkpoint leaves
+    /// it out, and a restore clears it.
+    spawned: std::collections::VecDeque<usize>,
     /// Names of the processes for diagnostics, by index.
     process_names: Vec<String>,
     /// The loop that runs time slots, and the slots each loop ran.
@@ -308,6 +314,7 @@ impl<B: SimBackend> SimulationState<B> {
             slot_passes: 0,
             slot_resumed: std::collections::VecDeque::new(),
             continued: None,
+            spawned: std::collections::VecDeque::new(),
             process_names: Vec::new(),
             stats: SchedulerStats::default(),
             observed_events: Default::default(),

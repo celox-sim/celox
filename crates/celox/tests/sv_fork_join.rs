@@ -344,3 +344,49 @@ endmodule"#,
         check(build().build_wasm().unwrap(), expected);
     }
 }
+
+/// What the runs of `sim` since the last call displayed.
+fn displayed<B: SimBackend>(sim: &mut Simulation<B>) -> Vec<String> {
+    sim.drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn restore_forgets_the_children_a_stop_left_unstarted() {
+    // A `$stop` in the first child of the fork at 7 leaves its siblings to
+    // start; restoring the checkpoint at 3 forgets them, so that none of
+    // them, whose activations the earlier children `k1` and `k2` held, runs
+    // ahead of the processes ready with `k1` and `k2` at 6.
+    let source = r#"`timescale 1ns/1ns
+module Top(input bit halt);
+ initial begin #1; fork begin #5 $display("k1"); end begin #5 $display("k2"); end join_none end
+ initial begin #6 $display("static"); end
+ initial begin
+  #7;
+  fork
+   begin $display("c1"); if (halt) $stop; end
+   begin $display("c2"); end
+   begin $display("c3"); end
+  join_none
+ end
+endmodule"#;
+    let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("fork.sv"))], "Top")
+        .build_native()
+        .unwrap();
+    let halt = sim.signal("halt");
+    sim.modify(|io| io.set(halt, 1u8)).unwrap();
+    sim.run_until(3).unwrap();
+    let saved = sim.checkpoint().unwrap();
+    sim.run_until(10).unwrap();
+    assert!(sim.is_stopped());
+    let first = displayed(&mut sim);
+    assert_eq!(first.last().map(String::as_str), Some("c1"));
+    sim.restore(&saved).unwrap();
+    sim.run_until(6).unwrap();
+    assert_eq!(displayed(&mut sim), first[..first.len() - 1]);
+}
