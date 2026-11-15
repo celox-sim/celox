@@ -42,7 +42,13 @@ mod layout;
 
 use fxhash::FxHashMap as HashMap;
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: the process-global JIT cache is shared by every JS thread (main and Node worker_threads) that loads the addon in one process"
+)]
+use std::sync::Mutex;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;

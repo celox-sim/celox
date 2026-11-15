@@ -442,6 +442,10 @@ fn plan_internal(
         s_entry: vec![LogicalSet::new(); func.blocks.len()],
         s_exit: vec![LogicalSet::new(); func.blocks.len()],
     };
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: local lazily built logical-value key list, created only when a block's spill sets are first frozen"
+    )]
     let logical_keys = std::cell::OnceCell::<std::sync::Arc<[LogicalValue]>>::new();
     for block in 0..func.blocks.len() {
         let entry = if let Some(region) = next_use.region_at_entry(block) {

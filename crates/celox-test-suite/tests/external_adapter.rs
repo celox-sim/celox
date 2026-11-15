@@ -1,4 +1,8 @@
 //! This integration test is an external consumer: it has no Celox dependency.
+#![allow(
+    clippy::disallowed_types,
+    reason = "test-only: the counting testbench is shared with the suite's runner threads"
+)]
 use celox_test_suite::veryl::{case, cases};
 use celox_test_suite::{
     Backend, BigUint, Category, CompilationRejected, Result, Scalar, SignalPath, Simulator, TestTag,

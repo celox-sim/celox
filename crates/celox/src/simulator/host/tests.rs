@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_types,
+    reason = "test-only: reads generated-code state through atomics, as the runtime does"
+)]
 use super::*;
 
 const GATED_COUNTER: &str = "module Top (clk: input clock, en: input logic, count: output logic<8>, plain: output logic<8>) {

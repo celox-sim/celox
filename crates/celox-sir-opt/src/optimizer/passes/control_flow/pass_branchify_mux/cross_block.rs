@@ -19,6 +19,10 @@ pub(super) fn find_cross_block_priority_chain_plans(
             continue;
         }
         let block = &eu.blocks[&block_id];
+        #[expect(
+            clippy::disallowed_types,
+            reason = "single-threaded: local lazily computed per-block live-through chunk table, filled on the first Mux of this block scan"
+        )]
         let suffix_chunks = std::cell::OnceCell::new();
         for first_mux_idx in 0..block.instructions.len() {
             let SIRInstruction::Mux(dst, cond, true_val, false_val) =
@@ -448,6 +452,10 @@ pub(super) fn find_cross_block_branchify_plans(
             continue;
         }
         let block = &eu.blocks[&block_id];
+        #[expect(
+            clippy::disallowed_types,
+            reason = "single-threaded: local lazily computed per-block live-through chunk table, filled on the first Mux of this block scan"
+        )]
         let suffix_chunks = std::cell::OnceCell::new();
         for (mux_idx, inst) in block.instructions.iter().enumerate() {
             let SIRInstruction::Mux(dst, cond, true_val, false_val) = inst else {

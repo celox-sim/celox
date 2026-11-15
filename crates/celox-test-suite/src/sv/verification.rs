@@ -221,6 +221,10 @@ impl Frontend for SvFrontend {
 
 /// The reviewed exclusion of `case` for `tool`, if any.
 pub fn known_issue(tool: &str, case: &str) -> Option<serde_json::Value> {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "immutable static: the checked-in SystemVerilog verification limitations table, parsed on first use and then only read"
+    )]
     static LIMITATIONS: std::sync::OnceLock<Vec<serde_json::Value>> = std::sync::OnceLock::new();
     let limitations = LIMITATIONS.get_or_init(|| {
         serde_json::from_str(include_str!("../../verification/sv/limitations.json"))

@@ -12,7 +12,12 @@ use crate::HashMap;
 use crate::component::host::{HostContext, HostValue, METHOD_RET_WORDS};
 use crate::component::loader::{ComponentBackend, ComponentError};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: process-wide cache of compiled wasm component modules, filled from whichever host thread builds a simulator"
+)]
+use std::sync::Mutex;
+use std::sync::{Arc, LazyLock};
 use veryl_component_sys as sys;
 use veryl_component_sys::wasm32::{VALUE_SIZE, VrlValue32};
 use wasmtime::{Caller, Engine, Extern, Linker, Memory, Module, Store, TypedFunc};
@@ -101,6 +106,10 @@ pub struct WasmLibrary {
 }
 
 pub fn get_wasm_library(path: &Path) -> Result<Arc<WasmLibrary>, ComponentError> {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: process-wide cache of compiled wasm component modules, filled from whichever host thread builds a simulator"
+    )]
     static LIBRARIES: LazyLock<Mutex<HashMap<PathBuf, Arc<WasmLibrary>>>> =
         LazyLock::new(|| Mutex::new(HashMap::default()));
 

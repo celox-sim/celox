@@ -3,9 +3,22 @@
 
 #[cfg(unix)]
 mod unix {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: flags shared with the SIGUSR1 signal handler"
+    )]
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
 
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the SIGUSR1 handler sets it asynchronously and the CLI main thread polls it between time steps"
+    )]
     static REQUESTED: AtomicBool = AtomicBool::new(false);
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: a process-wide guard against installing the SIGUSR1 handler twice, touched only by the CLI main thread"
+    )]
     static INSTALLED: AtomicBool = AtomicBool::new(false);
 
     extern "C" fn request_state(_signal: libc::c_int) {

@@ -1,4 +1,8 @@
 #![cfg(feature = "host-runtime")]
+#![allow(
+    clippy::disallowed_types,
+    reason = "test-only: component callbacks are C functions that count into statics"
+)]
 
 use std::ffi::c_void;
 use std::sync::Once;
