@@ -679,6 +679,54 @@ fn delays_named_by_parameters_precede_parenthesized_conditionals() {
 }
 
 #[test]
+fn timing_controls_precede_parenthesized_expressions() {
+    // A delay value or event name takes no arguments, so in `#1 (a | b)`,
+    // `#(2) (a | b)` and `@e (a | b)` the parentheses begin the controlled
+    // expression (IEEE 1800-2023 A.2.2.3, A.6.5), as in the OpenCores GPIO
+    // `rgpio_ints <= #1 (rgpio_ints | ...)`. Each right side is evaluated
+    // when the statement runs and assigned after the control (9.4.5).
+    let source = r#"
+        module Top(output logic [3:0] q, r, s, t);
+            timeunit 1ns / 1ns;
+            event e;
+            logic [3:0] a = 4'h1, b = 4'h2;
+            initial begin
+                q = 0; r = 0; s = 0; t = 0;
+                q <= #1 (a | b);
+                r <= #(2) (a | b) & 4'h3;
+                t = #1 ((a | 4'h8));
+                s = @e (a | b);
+            end
+            initial begin #2 a = 4'h4; #2 -> e; end
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("delay_paren.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let (q, r, s, t) = (
+        sim.signal("q"),
+        sim.signal("r"),
+        sim.signal("s"),
+        sim.signal("t"),
+    );
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(q), BigUint::from(0u8));
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(q), BigUint::from(3u8));
+    assert_eq!(sim.get(r), BigUint::from(0u8));
+    assert_eq!(sim.get(t), BigUint::from(9u8));
+    sim.run_until(3).unwrap();
+    assert_eq!(sim.get(r), BigUint::from(3u8));
+    assert_eq!(sim.get(s), BigUint::from(0u8));
+    sim.run_until(5).unwrap();
+    // `s` took `a | b` at 1 ns, before `a` changed at 3 ns.
+    assert_eq!(sim.get(s), BigUint::from(3u8));
+}
+
+#[test]
 fn delayed_nonblocking_updates_survive_checkpoint_and_state_file() {
     let source = r#"
         module Top(output logic [7:0] q);

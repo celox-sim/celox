@@ -3497,6 +3497,33 @@ fn identifier_delays_leave_parentheses_to_the_delayed_expression() {
 }
 
 #[test]
+fn timing_controls_leave_parentheses_to_the_controlled_expression() {
+    // `#1 (a | b)`, `#(1) (a | b)` and `@e (a | b)`: a delay value or event
+    // name takes no arguments (IEEE 1800-2023 A.2.2.3, A.6.5).
+    let syntax = parse(
+        "module M; bit [3:0] a, b, q; event e;
+         initial q <= #1 (a | b);
+         initial q = #(1) (a | b) & 4'h3;
+         initial q = @e (a | b);
+         initial q = #1 f(a);
+         endmodule",
+    );
+    for (index, control) in ["#1", "#(1)", "@e", "#1"].into_iter().enumerate() {
+        let StatementKind::Assignment {
+            timing_control: Some(id),
+            right,
+            ..
+        } = syntax.statement(syntax.procedures[index].body).kind
+        else {
+            panic!()
+        };
+        assert_eq!(syntax.token_text(syntax.timing_control(id).tokens), control);
+        let call = matches!(syntax.expression(right).kind, ExprKind::Call { .. });
+        assert_eq!(call, index == 3);
+    }
+}
+
+#[test]
 fn clocked_overlapped_implication_retains_both_boolean_operands() {
     let syntax = parse(
         "module M; p: assert property (@(posedge clk) disable iff (reset) (a && ready) |-> b == 3) else $error; endmodule",
