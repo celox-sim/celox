@@ -105,9 +105,14 @@ pub(super) fn signature(
     name: String,
     members: &[String],
     names: &HashSet<String>,
+    members_only: bool,
 ) -> Converted<(crate::ir::Module, Vec<(String, Type)>)> {
     let session = &mut Session::default();
-    let projected_tree = interface_binding::declaration_view(tree)?;
+    let projected_tree = if members_only {
+        interface_binding::member_declaration_view(tree)?
+    } else {
+        interface_binding::declaration_view(tree)?
+    };
     let context = AnalysisContext::unspecialized(&projected_tree);
     let tree = &context;
     let imported = imports::imported_symbols(tree, packages, packages.unit(path))?;

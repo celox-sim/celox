@@ -32,6 +32,13 @@ const PLACEHOLDER_PREFIX: &str = "$vifany$";
 /// The prefix of the signal that stands for the id of that instance:
 /// `$vifinstance$<interface>`.
 const INSTANCE_PREFIX: &str = "$vifinstance$";
+/// The prefix of the signal that stands for static variable `<name>` of a
+/// subroutine of whichever instance of interface `<interface>` a call
+/// through a virtual interface selects: `$vifstatic$<interface>$<name>`.
+const STATIC_PLACEHOLDER_PREFIX: &str = "$vifstatic$";
+/// The prefix of that variable of interface instance `<id>`:
+/// `$vifstaticof$<id>$<name>`.
+const STATIC_PREFIX: &str = "$vifstaticof$";
 
 /// A virtual interface type: an interface, with a modport if one is
 /// selected (IEEE 1800-2023 25.9).
@@ -77,6 +84,14 @@ pub struct VirtualInterfaceDeclaration {
     pub modports: HashMap<String, Vec<(String, String)>>,
     /// The interface has parameters, whose values are part of the type.
     pub parameterized: bool,
+    /// The names of the formals of each task and function the interface
+    /// declares, which a virtual interface calls (25.9).
+    pub subroutines: HashMap<String, Vec<String>>,
+    /// The DPI functions and tasks the interface imports (35.5).
+    pub dpi_imports: HashSet<String>,
+    /// The subroutines each modport imports (25.7), which a virtual
+    /// interface of its type may call.
+    pub modport_imports: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +171,20 @@ impl VirtualInterfaces {
                     })
                 })
                 .collect();
+            let modport_imports = prototype
+                .modports
+                .iter()
+                .map(|(name, items)| {
+                    (
+                        name.clone(),
+                        items
+                            .iter()
+                            .filter(|(_, direction)| direction == "import")
+                            .map(|(item, _)| item.clone())
+                            .collect(),
+                    )
+                })
+                .collect();
             let modports = prototype
                 .modports
                 .iter()
@@ -176,8 +205,26 @@ impl VirtualInterfaces {
                     members,
                     modports,
                     parameterized: !prototype.parameters.is_empty(),
+                    subroutines: HashMap::default(),
+                    dpi_imports: HashSet::default(),
+                    modport_imports,
                 },
             );
+        }
+        for source in parsed {
+            for (interface, subroutine, formals) in source.interface_subroutine_formals(&names) {
+                let Some(declaration) = declarations.interfaces.get_mut(&interface) else {
+                    continue;
+                };
+                match formals {
+                    Some(formals) => {
+                        declaration.subroutines.insert(subroutine, formals);
+                    }
+                    None => {
+                        declaration.dpi_imports.insert(subroutine);
+                    }
+                }
+            }
         }
         Ok(Some(Arc::new(declarations)))
     }
@@ -234,11 +281,37 @@ pub enum VirtualInterfaceSignal {
     Placeholder { interface: String, member: String },
     /// The id of that instance, which the access compares its handle with.
     Instance { interface: String },
+    /// Static variable `name` of a subroutine of the instance of interface
+    /// `interface` that a call through a virtual interface selects, which
+    /// the frontend repeats for every instance, as a member.
+    StaticPlaceholder { interface: String, name: String },
+    /// Static variable `name` of a subroutine of interface instance `id`,
+    /// called through a virtual interface (13.3.2, 25.9): one per instance,
+    /// held by the scope that makes the call.
+    Static { id: u32, name: String },
 }
 
 impl VirtualInterfaceSignal {
     /// The kind of a signal named `name`, if the frontend binds it.
     pub fn of(name: &str) -> Option<Self> {
+        if let Some((interface, name)) = name
+            .strip_prefix(STATIC_PLACEHOLDER_PREFIX)
+            .and_then(|rest| rest.split_once('$'))
+        {
+            return Some(Self::StaticPlaceholder {
+                interface: interface.to_owned(),
+                name: name.to_owned(),
+            });
+        }
+        if let Some((id, name)) = name
+            .strip_prefix(STATIC_PREFIX)
+            .and_then(|rest| rest.split_once('$'))
+        {
+            return Some(Self::Static {
+                id: id.parse().ok()?,
+                name: name.to_owned(),
+            });
+        }
         if let Some((interface, member)) = name
             .strip_prefix(PLACEHOLDER_PREFIX)
             .and_then(|rest| rest.split_once('$'))
@@ -285,6 +358,10 @@ impl VirtualInterfaceSignal {
                 format!("{PLACEHOLDER_PREFIX}{interface}${member}")
             }
             Self::Instance { interface } => format!("{INSTANCE_PREFIX}{interface}"),
+            Self::StaticPlaceholder { interface, name } => {
+                format!("{STATIC_PLACEHOLDER_PREFIX}{interface}${name}")
+            }
+            Self::Static { id, name } => format!("{STATIC_PREFIX}{id}${name}"),
         }
     }
 }
@@ -554,6 +631,58 @@ pub(super) fn rename(expr: Expr, from: &str, to: &str) -> Expr {
         Expr::Ident(name) if name == from => Expr::Ident(to.to_owned()),
         expr => map_children(expr, &mut |child| rename(child, from, to)),
     }
+}
+
+/// The name of the subroutine that runs task or function `subroutine` of
+/// interface `interface` for the instance a virtual interface denotes,
+/// which it takes as its first argument.
+pub(crate) fn subroutine_name(interface: &str, subroutine: &str) -> String {
+    format!("{interface}$vif${subroutine}")
+}
+
+/// The subroutine that calls task or function `name` of the interface that
+/// virtual interface `handle` denotes (IEEE 1800-2023 25.9), with the names
+/// of its formals after the handle; `None` if `handle` is no virtual
+/// interface or its interface declares no such subroutine. Through a
+/// modport, only a subroutine the modport imports may be called (25.7).
+pub(super) fn method(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    handle: celox_sv_syntax::ExprId,
+    name: &str,
+    native: &celox_sv_syntax::Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(String, Vec<Option<String>>)>> {
+    let Some(ty) = native_type(tree, session, handle, native, dimensions) else {
+        return Ok(None);
+    };
+    let Some(declaration) =
+        declarations(session).and_then(|declarations| declarations.interfaces.get(&ty.interface))
+    else {
+        return Ok(None);
+    };
+    if declaration.dpi_imports.contains(name) {
+        return Err(unsupported(format!(
+            "DPI import `{name}` of interface `{}` called through a virtual interface",
+            ty.interface
+        )));
+    }
+    let Some(formals) = declaration.subroutines.get(name) else {
+        return Ok(None);
+    };
+    if let Some(modport) = &ty.modport
+        && !declaration
+            .modport_imports
+            .get(modport)
+            .is_some_and(|imports| imports.iter().any(|import| import == name))
+    {
+        return Err(unsupported(format!(
+            "call of `{name}` through virtual interface type `{}`, whose modport does not import it",
+            ty.spelling()
+        )));
+    }
+    let formals = formals.iter().cloned().map(Some).collect();
+    Ok(Some((subroutine_name(&ty.interface, name), formals)))
 }
 
 /// The virtual interface type of native expression `id`: a variable, a
@@ -1677,6 +1806,7 @@ pub(super) fn map_children(expr: Expr, map: &mut dyn FnMut(Expr) -> Expr) -> Exp
 pub(crate) fn placeholder_interface(name: &str) -> Option<String> {
     match VirtualInterfaceSignal::of(name)? {
         VirtualInterfaceSignal::Placeholder { interface, .. }
+        | VirtualInterfaceSignal::StaticPlaceholder { interface, .. }
         | VirtualInterfaceSignal::Instance { interface } => Some(interface),
         _ => None,
     }

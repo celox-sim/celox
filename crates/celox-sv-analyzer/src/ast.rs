@@ -98,6 +98,7 @@ pub(crate) mod type_parameters;
 mod types;
 mod unpacked_structs;
 pub(crate) mod validation;
+mod virtual_interface_calls;
 pub mod virtual_interfaces;
 pub(crate) mod warnings;
 
