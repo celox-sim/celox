@@ -114,13 +114,13 @@ impl VirtualInterfaces {
         let prototypes =
             interfaces::prototypes_without_packages(sources, Some(&names), options.clone())
                 .or_else(|_| {
-                    interfaces::interface_prototypes_with_options(
-                        sources,
-                        Some(&names),
-                        options.clone(),
-                    )
+                    interfaces::prototypes_with_packages(sources, Some(&names), options.clone())
                 })?;
-        for prototype in prototypes {
+        for interfaces::Prototype {
+            prototype,
+            enumerations,
+        } in prototypes
+        {
             let module = &prototype.module;
             // Member bounds may name the interface's constants.
             let constants = module
@@ -140,9 +140,18 @@ impl VirtualInterfaces {
                     Some((name, port.r#type(), port.is_net()))
                 })
                 .filter_map(|(name, r#type, is_net)| {
+                    // A member of an enumeration type keeps it (IEEE
+                    // 1800-2023 6.19.3).
+                    let enumeration = enumerations
+                        .iter()
+                        .find(|(member, _)| member == name)
+                        .map(|(_, r#type)| r#type.clone());
                     Some(VirtualInterfaceMember {
                         name: name.to_string(),
-                        r#type: resolved_type(r#type, &constants)?,
+                        r#type: match enumeration {
+                            Some(r#type) => r#type,
+                            None => resolved_type(r#type, &constants)?,
+                        },
                         is_net,
                     })
                 })
