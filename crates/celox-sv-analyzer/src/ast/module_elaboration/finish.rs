@@ -20,6 +20,7 @@ impl ScopeElaboration<'_> {
         (self.is_package || self.export_symbols).then(|| scope::ScopeSymbols {
             unit: None,
             package_scopes: self.imported.package_scopes.clone(),
+            design_subroutines: self.imported.design_subroutines.clone(),
             classes: classes::scope_classes(syntax_tree, session, &self.const_env)
                 .into_iter()
                 .map(Arc::new)
@@ -98,8 +99,12 @@ impl ScopeElaboration<'_> {
                         .or_insert(subroutine);
                 }
             }
-            let reachable = self.reachable_imports(&imported);
-            let missing = self
+            // The subroutines of packages the scope does not import, which
+            // a specialization it has may call (see
+            // `Packages::build_design_subroutines`).
+            let design = self.imported.design_subroutines.0.clone();
+            let reachable = self.reachable_imports(&imported, design.as_deref(), &known);
+            let mut missing = self
                 .imported
                 .subroutines
                 .iter()
@@ -109,19 +114,63 @@ impl ScopeElaboration<'_> {
                 })
                 .map(|subroutine| (**subroutine).clone())
                 .collect::<Vec<_>>();
+            let mut foreign_locals = Vec::new();
+            if let Some(design) = &design {
+                let mut names: Vec<_> = reachable
+                    .iter()
+                    .filter(|name| known.insert(name))
+                    .copied()
+                    .collect();
+                names.sort_unstable();
+                // What the reached subroutines name of their packages, which
+                // the scope does not import: the packages' variables and
+                // DPI imports, as an importing scope declares them.
+                let mut named = HashSet::default();
+                for name in names {
+                    let subroutine = &design.subroutines[name];
+                    foreign_locals.extend(subroutine_locals(subroutine));
+                    subroutine_names(subroutine, &mut named);
+                    missing.push((**subroutine).clone());
+                }
+                foreign_locals.retain(|local| design.locals.contains_key(local));
+                let mut named: Vec<String> = named.into_iter().collect();
+                named.sort_unstable();
+                for name in &named {
+                    if let Some(signal) = design.state_signals.get(name)
+                        && !self.signals.iter().any(|known| known.name == *name)
+                    {
+                        self.signals.push(signal.clone());
+                    }
+                    if let Some(import) = design.dpi_imports.get(name)
+                        && !self
+                            .dpi_imports
+                            .iter()
+                            .any(|known| known.name() == import.name())
+                    {
+                        self.dpi_imports.push(import.clone());
+                    }
+                }
+            }
             self.subroutines.extend(missing);
             let mut known: HashSet<&str> = self
                 .locals
                 .iter()
                 .map(|local| local.name.as_str())
                 .collect();
-            let missing = self
+            let mut missing = self
                 .imported
                 .locals
                 .iter()
                 .filter(|local| known.insert(local.name.as_str()))
                 .map(|local| (**local).clone())
                 .collect::<Vec<_>>();
+            if let Some(design) = &design {
+                for name in &foreign_locals {
+                    if known.insert(name.as_str()) {
+                        missing.push((*design.locals[name]).clone());
+                    }
+                }
+            }
             self.locals.extend(missing);
         }
         for import in &self.imported.dpi_imports {
@@ -457,4 +506,64 @@ fn ast_type_of(r#type: &crate::ir::Type) -> Option<Type> {
         )];
     }
     Some(ast)
+}
+
+/// The names of the locals of `subroutine`: its formals, its result and the
+/// variables it declares.
+fn subroutine_locals(subroutine: &Subroutine) -> Vec<String> {
+    let mut names: Vec<String> = subroutine
+        .params
+        .iter()
+        .map(|param| param.name.clone())
+        .chain(subroutine.return_var.clone())
+        .chain(subroutine.automatic_locals.iter().cloned())
+        .chain(subroutine.persistent_locals.iter().cloned())
+        .collect();
+    for stmt in &subroutine.body {
+        stmt.walk(&mut |stmt| {
+            if let crate::procedural::StmtBase::Local { name, .. } = stmt {
+                names.push(name.clone());
+            }
+        });
+    }
+    names
+}
+
+/// Add to `names` every name the body of `subroutine` reads, writes or
+/// calls.
+fn subroutine_names(subroutine: &Subroutine, names: &mut HashSet<String>) {
+    fn expr_names(expr: &Expr, names: &mut HashSet<String>) {
+        match expr {
+            Expr::Ident(name)
+            | Expr::Call {
+                callee: Callee::Subroutine(name),
+                ..
+            } => {
+                names.insert(name.clone());
+            }
+            _ => {}
+        }
+        for child in virtual_interfaces::children(expr) {
+            expr_names(child, names);
+        }
+    }
+    for stmt in &subroutine.body {
+        let mut exprs = Vec::new();
+        let mut written = Vec::new();
+        let mut called = Vec::new();
+        stmt.visit(
+            &mut |expr| exprs.push(expr),
+            &mut |lvalue| {
+                if let LValue::Ident(name) | LValue::Select { name, .. } = lvalue {
+                    written.push(name);
+                }
+            },
+            &mut |name| called.push(name),
+        );
+        for expr in exprs {
+            expr_names(expr, names);
+        }
+        names.extend(written.into_iter().cloned());
+        names.extend(called.into_iter().map(str::to_owned));
+    }
 }
