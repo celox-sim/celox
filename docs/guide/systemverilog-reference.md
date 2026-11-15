@@ -457,7 +457,9 @@ concurrent assertions is unsupported:
   virtual interface that a variable of the design holds), not a named
   event. After `##1` the next subsequence starts at the nearest tick
   of its clock strictly after the end of the one before, after `##0` also at
-  it. Not with `disable iff`, in an implication, or with local variables or
+  it. A clocking event in parentheses clocks the rest of its group, and the
+  clock around the group resumes after it (16.13.3), as in
+  `@(posedge c0) a ##1 (@(posedge c1) b) ##1 c`. Not with `disable iff`, in an implication, or with local variables or
   match items; other operators across a clock change are rejected, and so
   are `$past`, `$rose`, `$fell`, `$stable` and `$changed` in any
   subsequence (`$sampled` is accepted). A sequence nests at most 64 groups

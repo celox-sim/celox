@@ -756,6 +756,46 @@ endmodule"#;
     }
 }
 
+/// A clocking event in parentheses clocks only the rest of its group: the
+/// clock around the group resumes after it (IEEE 1800-2023 16.13.3).
+#[test]
+fn multiclocked_sequences_resume_the_clock_around_a_group() {
+    // clk0 rises at 50, 450, 850, ...; clk1 at 200, 600, 1000, .... x is
+    // set at each clk0 tick and cleared at each clk1 tick, so it is sampled
+    // 0 at clk0 ticks and 1 at clk1 ticks. In the group form the attempt of
+    // clk0 tick t checks !x at the clk0 tick t + 400 and passes; written
+    // without parentheses clk1 clocks it, at t + 550, and it fails.
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit clk0, clk1, x, a = 1;
+ int g_passed, g_failed, f_passed, f_failed, l_passed, l_failed;
+ always @(posedge clk0) x <= 1;
+ always @(posedge clk1) x <= 0;
+ assert property (@(posedge clk0) a ##1 (@(posedge clk1) a) ##1 !x) g_passed++; else g_failed++;
+ assert property (@(posedge clk0) a ##1 @(posedge clk1) a ##1 !x) f_passed++; else f_failed++;
+ assert property (@(posedge clk0) (@(posedge clk1) a ##1 x) ##1 !x) l_passed++; else l_failed++;
+ initial forever begin #50 clk0 = ~clk0; #150 clk1 = ~clk1; end
+endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("multiclock.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(2000).unwrap();
+    for (name, expected) in [
+        ("g_passed", 4u32),
+        ("g_failed", 0),
+        ("f_passed", 0),
+        ("f_failed", 4),
+        // A group that leads the sequence starts it at its own clock: the
+        // attempt of clk1 tick t checks x at t + 400 and !x at the clk0
+        // tick t + 650, those of 200, 600 and 1000 by 2000.
+        ("l_passed", 3),
+        ("l_failed", 0),
+    ] {
+        assert_eq!(sim.get(sim.signal(name)), expected.into(), "{name}");
+    }
+}
+
 /// The clock of a subsequence that selects a member through a virtual
 /// interface ticks as an event control on it does: at writes of the member
 /// of the instance the handle denotes (IEEE 1800-2023 9.4.2, 25.9).

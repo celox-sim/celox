@@ -57,47 +57,64 @@ fn other_operator() -> AnalyzerError {
 }
 
 /// The singly clocked subsequences of `expr`, clocked by `clock` until a
-/// clocking event of its own.
+/// clocking event of its own. A clocking event clocks the rest of the group
+/// it is written in, and does not flow out of the group's parentheses: the
+/// clock around the group resumes after it (IEEE 1800-2023 16.13.3). The
+/// parser nests the rest of a group in the node of its clocking event, so
+/// the clocks follow the tree.
 fn segments(expr: &SequenceExpr, clock: TimingControlId) -> Converted<Vec<Segment>> {
     match expr {
-        SequenceExpr::Concat { left, delay, right }
-            if matches!(right.as_ref(), SequenceExpr::Clocked { .. }) =>
-        {
-            let SequenceExpr::Clocked {
-                clock: next,
-                sequence,
-            } = right.as_ref()
-            else {
-                unreachable!("a clocked subsequence");
-            };
-            if delay.min != delay.max || delay.min > 1 {
-                return Err(unsupported(
-                    "multiclocked sequence with a cycle delay other than ##0 or ##1 at a clock change (IEEE 1800-2023 16.13.1)",
-                ));
-            }
-            // A subsequence before a clock change matches a nonempty word.
-            let Some(left) = left else {
-                return Err(unsupported(
-                    "multiclocked sequence whose subsequence before a clock change is empty (IEEE 1800-2023 16.13.1)",
-                ));
-            };
-            if clocked(left) {
-                return Err(other_operator());
-            }
-            let mut found = vec![Segment {
-                clock,
-                expr: left.as_ref().clone(),
-                delay: 0,
-            }];
-            let mut rest = segments(sequence, *next)?;
-            rest[0].delay = delay.min;
-            found.extend(rest);
-            Ok(found)
-        }
         SequenceExpr::Clocked {
             clock: next,
             sequence,
         } => segments(sequence, *next),
+        SequenceExpr::Concat { left, delay, right } if clocked(expr) => {
+            let mut found = match left {
+                Some(left) => segments(left, clock)?,
+                None => Vec::new(),
+            };
+            let mut rest = segments(right, clock)?.into_iter();
+            let first = rest.next().expect("a sequence has a subsequence");
+            match found.last_mut() {
+                // Both sides end and start at one clock: one subsequence.
+                Some(last) if last.clock == first.clock => {
+                    let joined = SequenceExpr::Concat {
+                        left: Some(Box::new(last.expr.clone())),
+                        delay: *delay,
+                        right: Box::new(first.expr),
+                    };
+                    last.expr = joined;
+                }
+                Some(_) => {
+                    if delay.min != delay.max || delay.min > 1 {
+                        return Err(unsupported(
+                            "multiclocked sequence with a cycle delay other than ##0 or ##1 at a clock change (IEEE 1800-2023 16.13.1)",
+                        ));
+                    }
+                    found.push(Segment {
+                        delay: delay.min,
+                        ..first
+                    });
+                }
+                // `##n s` whose `s` starts at the clock around it.
+                None if first.clock == clock => found.push(Segment {
+                    expr: SequenceExpr::Concat {
+                        left: None,
+                        delay: *delay,
+                        right: Box::new(first.expr),
+                    },
+                    ..first
+                }),
+                // A subsequence before a clock change matches a nonempty word.
+                None => {
+                    return Err(unsupported(
+                        "multiclocked sequence whose subsequence before a clock change is empty (IEEE 1800-2023 16.13.1)",
+                    ));
+                }
+            }
+            found.extend(rest);
+            Ok(found)
+        }
         expr if clocked(expr) => Err(other_operator()),
         expr => Ok(vec![Segment {
             clock,
