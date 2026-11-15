@@ -154,7 +154,7 @@ fn expression_connection(
         return Ok(connection);
     }
     let expr = expression_binding::value(root, native, tree, session, dims)?;
-    let actual = unpacked_structs::native_member(root, native, dims)
+    let actual = unpacked_structs::native_member(root, native, &session.types, dims)
         .or_else(|| match &native.expression(root).kind {
             celox_sv_syntax::ExprKind::Name(name)
                 if dims

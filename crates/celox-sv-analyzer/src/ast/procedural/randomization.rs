@@ -68,7 +68,7 @@ fn lower_methods(
         if inline.is_some() && method != "randomize" {
             continue;
         }
-        if method == "randomize" && class.check_randomize().is_err() {
+        if method == "randomize" && class.check_randomize(&session.types).is_err() {
             continue;
         }
         let mut builder = BodyBuilder::new(
@@ -208,7 +208,7 @@ fn lower_methods(
                 // the objects visited. post_randomize runs on the objects the
                 // solve took, begun right after it, before any hook can
                 // change a handle.
-                let visits = if class.has_rand_objects() {
+                let visits = if class.has_rand_objects(&builder.session.types) {
                     let members =
                         classes::rand_member_classes(tree, builder.session, class, env, &aliases)?;
                     let targets = ["pre_randomize", "post_randomize"]
@@ -411,7 +411,7 @@ fn lower_methods(
                         .map(|input| Expr::Ident(input.variable.clone()))
                         .chain(input_values.iter().cloned())
                         .collect::<Vec<_>>();
-                    if class.solved() || inline.is_some() {
+                    if class.solved(&builder.session.types) || inline.is_some() {
                         let mut program = class.constraint_program()?;
                         if let Some(inline) = inline {
                             // The inline constraints were bound for the class
@@ -752,7 +752,8 @@ fn lower_methods(
                     continue;
                 }
                 if (inline.is_some() && derived.check_constraint_program().is_err())
-                    || (method == "randomize" && derived.check_randomize().is_err())
+                    || (method == "randomize"
+                        && derived.check_randomize(&builder.session.types).is_err())
                     || !derived.derives_from(tree, builder.session, &class.name, env, &aliases)
                 {
                     continue;
@@ -876,7 +877,7 @@ fn random_property(
 ) -> Vec<Stmt> {
     let cycle = property.randc.then(|| {
         property
-            .cyclic_domain_size()
+            .cyclic_domain_size(&builder.session.types)
             .expect("validated randc domain")
     });
     random_field(builder, property.field, &property.r#type, cycle, this)
@@ -905,7 +906,12 @@ fn random_field(
         classes::object_call(op, vec![Expr::Ident(this.into())])
     };
     let mut body = Vec::new();
-    let value = if let Some(values) = ty.enum_domain.as_ref().map(|domain| domain.values()) {
+    let value = if let Some(values) = ty
+        .enumeration_in(&builder.session.types)
+        .domain
+        .as_ref()
+        .map(|domain| domain.values())
+    {
         let count = values.len() as u64;
         let threshold = count.wrapping_neg() % count;
         let draw = builder.declare("$enum_draw", classes::unsigned_type(64));
@@ -1017,7 +1023,7 @@ pub(in crate::ast) fn inline_subroutines(
             };
             if !class.is_abstract
                 && !class.is_interface
-                && class.check_randomize().is_ok()
+                && class.check_randomize(&session.types).is_ok()
                 && class.check_constraint_program().is_ok()
                 && class.derives_from(
                     tree,

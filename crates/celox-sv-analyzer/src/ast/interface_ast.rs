@@ -155,7 +155,8 @@ pub(super) fn signature(
                 .map(|signal| (signal.name(), signal.r#type())),
         )
         .filter(|(name, ty)| {
-            members.iter().any(|member| member == name) && ty.is_enum && ty.enum_domain.is_some()
+            members.iter().any(|member| member == name)
+                && ty.enumeration_in(&session.types).domain.is_some()
         })
         .map(|(name, ty)| (name.to_owned(), ty.clone()))
         .collect::<Vec<_>>();

@@ -34,6 +34,7 @@ pub(super) fn ticks(
 
 pub(super) fn lower(
     tree: &AnalysisContext<'_>,
+    table: &semantic_types::TyTable,
     dimensions: &PackedDimensions,
     signals: &mut Vec<Signal>,
     processes: &mut [CombProcess],
@@ -68,11 +69,11 @@ pub(super) fn lower(
             .ok_or_else(|| unsupported("delayed continuous assignment target"))?;
         if shape.string
             || shape.real
-            || shape.class.is_some()
+            || shape.class_in(table).is_some()
             || shape.chandle
             || shape.container.is_some()
             || !shape.unpacked.is_empty()
-            || shape.unpacked_struct.is_some()
+            || shape.is_unpacked_struct_in(table)
         {
             return Err(unsupported(
                 "nonintegral or unpacked delayed continuous assignment",

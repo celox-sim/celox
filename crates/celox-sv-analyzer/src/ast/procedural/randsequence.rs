@@ -215,10 +215,10 @@ impl BodyBuilder<'_, '_, '_> {
     fn signature(&mut self, name: &str, production: &RsProduction) -> Converted<Signature> {
         let native = self.tree.declarations();
         // A variable holds each formal and the value, as a whole.
-        let plain = |ty: &Type| {
+        let plain = |ty: &Type, table: &semantic_types::TyTable| {
             ty.unpacked_ranges.is_empty()
                 && ty.container.is_none()
-                && ty.unpacked_struct().is_none()
+                && !ty.is_unpacked_struct_in(table)
                 && !events::is_event(ty)
         };
         let mut formals = Vec::new();
@@ -236,7 +236,7 @@ impl BodyBuilder<'_, '_, '_> {
                         "randsequence production `{name}` formal `{formal}` that is not an input"
                     )));
                 }
-                if !plain(&ty) {
+                if !plain(&ty, &self.session.types) {
                     return Err(unsupported(format!(
                         "randsequence production `{name}` formal `{formal}` of an unpacked, \
                          dynamically sized or event type"
@@ -257,7 +257,7 @@ impl BodyBuilder<'_, '_, '_> {
                     .ok_or_else(|| {
                         unsupported(format!("randsequence production `{name}` value type"))
                     })?;
-                if !plain(&ty) {
+                if !plain(&ty, &self.session.types) {
                     return Err(unsupported(format!(
                         "randsequence production `{name}` of an unpacked, dynamically sized or \
                          event type"

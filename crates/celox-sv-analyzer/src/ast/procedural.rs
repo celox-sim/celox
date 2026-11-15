@@ -451,9 +451,7 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
         VariableShape {
             chandle: r#type.is_chandle(),
             container: r#type.container.clone(),
-            randomizable: r#type.container.is_none()
-                && !r#type.holds_chandle()
-                && (!r#type.is_enum || r#type.enum_domain.is_some()),
+            randomizable: r#type.container.is_none() && !r#type.holds_chandle(),
             enum_domain: r#type.enum_domain.clone(),
             packed_enum: r#type.packed_enum,
             real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),

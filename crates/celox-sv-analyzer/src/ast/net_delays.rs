@@ -3,6 +3,7 @@ use super::*;
 
 pub(super) fn lower(
     tree: &AnalysisContext<'_>,
+    table: &semantic_types::TyTable,
     dimensions: &mut PackedDimensions,
     ports: &[Port],
     instances: &[Instance],
@@ -59,11 +60,11 @@ pub(super) fn lower(
         })?;
         if shape.string
             || shape.real
-            || shape.class.is_some()
+            || shape.class_in(table).is_some()
             || shape.chandle
             || shape.container.is_some()
             || !shape.unpacked.is_empty()
-            || shape.unpacked_struct.is_some()
+            || shape.is_unpacked_struct_in(table)
         {
             return Err(unsupported(
                 "delayed continuous assignment: nonintegral or unpacked net delay",
@@ -193,7 +194,7 @@ pub(super) fn lower(
                 is_2state: shape.is_2state,
             };
             let lhs = select(name.into());
-            let rhs = expr_from_lvalue(tree, &select(raw.clone()), dimensions);
+            let rhs = expr_from_lvalue(tree, table, &select(raw.clone()), dimensions);
             let mut process = CombProcess::new(
                 CombProcessKind::ContinuousAssign,
                 delay.condition.clone(),

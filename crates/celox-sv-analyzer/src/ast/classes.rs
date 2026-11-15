@@ -155,9 +155,9 @@ impl Property {
         (self.rand || self.randc) && (self.sequence() || self.storage.is_some())
     }
 
-    pub fn rand_object(&self) -> bool {
+    pub fn rand_object(&self, table: &semantic_types::TyTable) -> bool {
         self.rand
-            && self.r#type.class().is_some()
+            && self.r#type.class_in(table).is_some()
             && self.r#type.container.is_none()
             && self.r#type.unpacked_ranges.is_empty()
     }
@@ -167,12 +167,13 @@ impl Property {
     /// may limit the size of a randc variable to no less than 8 bits
     /// (IEEE 1800-2023 18.4.2); Celox keeps cycles of up to 16 bits, as
     /// UVM's `uvm_sequence_library::select_randc` (`bit [15:0]`) needs.
-    pub fn cyclic_domain_size(&self) -> Option<u32> {
+    pub fn cyclic_domain_size(&self, table: &semantic_types::TyTable) -> Option<u32> {
         if self.field.handle.is_some() {
             return None;
         }
-        if self.r#type.is_enum {
-            self.r#type.enum_domain.as_ref().and_then(|domain| {
+        let enumeration = self.r#type.enumeration_in(table);
+        if enumeration.enumeration {
+            enumeration.domain.as_ref().and_then(|domain| {
                 let values = &domain.members;
                 (1..=MAX_CYCLE)
                     .contains(&values.len())
@@ -501,7 +502,7 @@ impl Class {
     /// those are is known only at run time (IEEE 1800-2023 18.4). A class
     /// with nothing random registers nothing; one the solver cannot take
     /// registers why, which faults only when such an object is reached.
-    pub fn program_registration(&self) -> Option<Stmt> {
+    pub fn program_registration(&self, table: &semantic_types::TyTable) -> Option<Stmt> {
         use celox_heap::randomization::Registered;
         if !self.has_constraints
             && !self.properties.iter().any(|p| p.rand || p.randc)
@@ -510,7 +511,7 @@ impl Class {
             return None;
         }
         let program = match self
-            .check_randomize()
+            .check_randomize(table)
             .and_then(|()| self.constraint_program())
         {
             // The static properties of the class are read and written by
@@ -563,27 +564,29 @@ impl Class {
 
     /// Whether a rand object handle of the class makes `randomize` solve the
     /// objects it refers to (IEEE 1800-2023 18.4).
-    pub fn has_rand_objects(&self) -> bool {
-        self.properties.iter().any(Property::rand_object)
+    pub fn has_rand_objects(&self, table: &semantic_types::TyTable) -> bool {
+        self.properties
+            .iter()
+            .any(|property| property.rand_object(table))
     }
 
     /// Whether `randomize` solves the class's constraint program: it has
     /// constraints, rand object handles or rand arrays. Otherwise each
     /// random property, and each static rand one in its slot (see
     /// `Class::static_slots`), is drawn on its own.
-    pub fn solved(&self) -> bool {
+    pub fn solved(&self, table: &semantic_types::TyTable) -> bool {
         self.has_constraints
-            || self.has_rand_objects()
+            || self.has_rand_objects(table)
             || self.properties.iter().any(Property::rand_array)
     }
 
     /// Validate the supported unconstrained subset before binding a call.
-    pub fn check_randomize(&self) -> Converted<()> {
-        if self.solved() {
+    pub fn check_randomize(&self, table: &semantic_types::TyTable) -> Converted<()> {
+        if self.solved(table) {
             self.check_constraint_program()?;
         }
         for property in &self.properties {
-            if property.randc && property.cyclic_domain_size().is_none() {
+            if property.randc && property.cyclic_domain_size(table).is_none() {
                 return Err(unsupported(
                     "randc requires a 1-16 bit integer or an enum with at most 65536 declared values",
                 ));
@@ -593,10 +596,10 @@ impl Class {
             }
             if (property.rand || property.randc)
                 && ((property.field.handle.is_some()
-                    && !property.rand_object()
+                    && !property.rand_object(table)
                     && !property.rand_array())
                     || property.r#type.holds_chandle()
-                    || (property.r#type.is_enum && property.r#type.enum_domain.is_none()))
+                    || property.r#type.enumeration_in(table).unresolved())
             {
                 return Err(unsupported(
                     "class randomize requires integral rand properties with a supported enum domain",
@@ -610,7 +613,7 @@ impl Class {
             }
             if slot.field.handle.is_some()
                 || slot.r#type.holds_chandle()
-                || (slot.r#type.is_enum && slot.r#type.enum_domain.is_none())
+                || slot.r#type.enumeration_in(table).unresolved()
             {
                 return Err(unsupported(
                     "class randomize requires integral rand properties with a supported enum domain",
@@ -2325,7 +2328,7 @@ pub(super) fn rand_member_classes(
         class
             .properties
             .iter()
-            .filter(|property| property.rand_object())
+            .filter(|property| property.rand_object(table))
             .filter_map(|property| {
                 property
                     .r#type

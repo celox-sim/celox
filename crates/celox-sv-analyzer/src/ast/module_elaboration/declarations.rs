@@ -370,7 +370,7 @@ impl ScopeElaboration<'_> {
         let aggregates: HashSet<&str> = self
             .signals
             .iter()
-            .filter(|signal| signal.is_aggregate())
+            .filter(|signal| signal.is_aggregate(&session.types))
             .map(Signal::name)
             .collect();
         let scope_heads: HashSet<&str> = self

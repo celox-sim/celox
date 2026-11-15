@@ -106,7 +106,7 @@ fn chandle() -> AnalyzerError {
 }
 
 /// Reject the kinds of data a fixed-size stream cannot hold.
-fn check_fixed(shape: &VariableDimensions) -> Converted<()> {
+fn check_fixed(shape: &VariableDimensions, table: &semantic_types::TyTable) -> Converted<()> {
     if shape.container.is_some() {
         return Err(unsupported(
             "streaming concatenation of a dynamically sized array",
@@ -122,7 +122,7 @@ fn check_fixed(shape: &VariableDimensions) -> Converted<()> {
     if chandles::holds_chandle(shape) {
         return Err(chandle());
     }
-    if shape.class.is_some() {
+    if shape.class_in(table).is_some() {
         return Err(unsupported("streaming concatenation of a class handle"));
     }
     Ok(())
@@ -152,10 +152,11 @@ pub(in crate::ast) enum Receiver {
 /// integral: a fixed-size one takes exactly its own width (6.24.3).
 pub(in crate::ast) fn cast_receiver(
     shape: &VariableDimensions,
+    table: &semantic_types::TyTable,
     functions: &const_functions::ConstantFunctions,
     dims: &PackedDimensions,
 ) -> Converted<Receiver> {
-    Ok(match receiver(shape, functions, dims)? {
+    Ok(match receiver(shape, table, functions, dims)? {
         Receiver::Fixed(target) => Receiver::CastFixed(target),
         receiver => receiver,
     })
@@ -193,6 +194,7 @@ fn stream_container(container: &ContainerType) -> Converted<ContainerLayout> {
 /// The receiver of a variable of `shape` of bit-stream type.
 pub(in crate::ast) fn receiver(
     shape: &VariableDimensions,
+    table: &semantic_types::TyTable,
     functions: &const_functions::ConstantFunctions,
     dims: &PackedDimensions,
 ) -> Converted<Receiver> {
@@ -210,10 +212,10 @@ pub(in crate::ast) fn receiver(
     if chandles::holds_chandle(shape) {
         return Err(chandle());
     }
-    if shape.class.is_some() {
+    if shape.class_in(table).is_some() {
         return Err(unsupported("streaming concatenation into a class handle"));
     }
-    if shape.unpacked_struct.is_some() {
+    if shape.is_unpacked_struct_in(table) {
         return Err(unsupported(
             "streaming concatenation into an unpacked structure",
         ));
@@ -357,11 +359,14 @@ enum Item {
 /// The field of the one-field record that holds each integral element
 /// wider than 64 bits of `container`, which a stream reads as the
 /// element's bits.
-fn wide_field(container: &ContainerType) -> Option<system_functions::ObjectField> {
+fn wide_field(
+    container: &ContainerType,
+    table: &semantic_types::TyTable,
+) -> Option<system_functions::ObjectField> {
     match &container.record {
         Some(record)
-            if container.element.unpacked_struct().is_none()
-                && container.element.class.is_none()
+            if !container.element_is_unpacked_struct(table)
+                && container.element_class(table).is_none()
                 && container.element.container.is_none()
                 && record.fields.len() == 1
                 && record.fields[0].offset == 0
@@ -376,8 +381,12 @@ fn wide_field(container: &ContainerType) -> Option<system_functions::ObjectField
 
 /// The stream items of all elements of `value`, a container of type
 /// `container`.
-fn container_items(value: Expr, container: &ContainerType) -> Converted<Vec<Item>> {
-    if let Some(field) = wide_field(container) {
+fn container_items(
+    value: Expr,
+    container: &ContainerType,
+    table: &semantic_types::TyTable,
+) -> Converted<Vec<Item>> {
+    if let Some(field) = wide_field(container, table) {
         return Ok(vec![Item::Dynamic(
             StreamItem::WideContainer {
                 width: field.width,
@@ -437,9 +446,9 @@ fn operand(
         }
         let value = bind_value(id, native, tree, session, dims, None)?;
         let Some(range) = range else {
-            return container_items(value, &container);
+            return container_items(value, &container, &session.types);
         };
-        if wide_field(&container).is_some() {
+        if wide_field(&container, &session.types).is_some() {
             return Err(unsupported(
                 "streaming concatenation with range of elements wider than 64 bits",
             ));
@@ -466,7 +475,7 @@ fn operand(
     if let Some(shape) = &shape
         && !shape.string
     {
-        check_fixed(shape)?;
+        check_fixed(shape, &session.types)?;
     }
     let value = bind_value(id, native, tree, session, dims, None)?;
     if real_value(&value, dims) {
@@ -498,7 +507,7 @@ fn operand(
             let leaf = dims
                 .get(name)
                 .ok_or_else(|| unsupported("streaming concatenation of an unpacked structure"))?;
-            check_fixed(leaf)?;
+            check_fixed(leaf, &session.types)?;
             if !leaf.unpacked.is_empty() {
                 return Err(unsupported(
                     "streaming concatenation of an unpacked structure with array members",
@@ -771,13 +780,14 @@ pub(in crate::ast) fn fixed_from_container(
         || virtual_interfaces::holds_virtual_interface(target, tree, session, dims)
         || chandles::holds_chandle(target)
     {
-        return element_reads(value, container, target, tree, dims)?.ok_or_else(elements);
+        return element_reads(value, container, target, tree, &session.types, dims)?
+            .ok_or_else(elements);
     }
     if chandles::type_holds_chandle(&container.element) {
         return Err(chandle());
     }
     let (element, count) = fixed_array(target, &tree.functions, dims)?.ok_or_else(elements)?;
-    let items = container_items(value, container)?;
+    let items = container_items(value, container, &session.types)?;
     Ok(convert(
         heap_stream(items, None, false, None),
         Receiver::Assignment(StreamArg {
@@ -798,6 +808,7 @@ fn element_reads(
     container: &ContainerType,
     target: &VariableDimensions,
     tree: &AnalysisContext<'_>,
+    table: &semantic_types::TyTable,
     dims: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
     if target.unpacked.len() != 1 {
@@ -814,6 +825,7 @@ fn element_reads(
         .map(|at| {
             containers::element_read(
                 container,
+                table,
                 containers::call(
                     ContainerOp::Get,
                     container.layout,
@@ -1030,8 +1042,9 @@ pub(in crate::ast) fn unpack(
             && element == ungroup(id, native)
         {
             let shape = procedural::dimensions_from_type(&target.element);
-            check_fixed(&shape)?;
-            let Receiver::Fixed(target) = receiver(&shape, &tree.functions, dims)? else {
+            check_fixed(&shape, &session.types)?;
+            let Receiver::Fixed(target) = receiver(&shape, &session.types, &tree.functions, dims)?
+            else {
                 unreachable!("a fixed-size variable receives fixed-size data");
             };
             takes.push(Take::Fixed(target));
@@ -1078,7 +1091,7 @@ pub(in crate::ast) fn unpack(
             lvalues.push(variable_lvalue(id, native, tree, session, dims, false)?);
             continue;
         }
-        check_fixed(&shape)?;
+        check_fixed(&shape, &session.types)?;
         if let ExprKind::Name(name) = &native.expression(ungroup(id, native)).kind
             && let Some(leaves) =
                 unpacked_structs::targets(&instances::normalize_identifier(&name.spelling), dims)
@@ -1087,7 +1100,7 @@ pub(in crate::ast) fn unpack(
                 let leaf_shape = dims
                     .get(leaf.name())
                     .ok_or_else(|| unsupported("streaming concatenation unpack target"))?;
-                check_fixed(leaf_shape)?;
+                check_fixed(leaf_shape, &session.types)?;
                 if !leaf_shape.unpacked.is_empty() {
                     return Err(unsupported(
                         "streaming concatenation into an unpacked structure with array members",
@@ -1107,7 +1120,8 @@ pub(in crate::ast) fn unpack(
                 "streaming concatenation into an unpacked structure member",
             ));
         }
-        let Receiver::Fixed(target) = receiver(&shape, &tree.functions, dims)? else {
+        let Receiver::Fixed(target) = receiver(&shape, &session.types, &tree.functions, dims)?
+        else {
             unreachable!("a fixed-size variable receives fixed-size data");
         };
         takes.push(Take::Fixed(target));

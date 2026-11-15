@@ -494,8 +494,7 @@ impl BodyBuilder<'_, '_, '_> {
         if domain.is_none()
             && dimensions::operand_shape(destination, self.tree, self.session, &self.dims)?
                 .as_ref()
-                .and_then(type_names::declared_type)
-                .is_some_and(|ty| ty.is_enum || ty.packed_enum)
+                .is_some_and(|shape| shape.enumeration_in(&self.session.types).enumeration)
         {
             return Ok(None);
         }
@@ -1262,7 +1261,7 @@ impl BodyBuilder<'_, '_, '_> {
         }
         if !matches!(current, Expr::Ident(_))
             && shape.as_ref().is_some_and(|shape| {
-                shape.enum_domain.is_some()
+                shape.enumeration_in(&self.session.types).domain.is_some()
                     || expression_binding::objects::shape_class(
                         shape,
                         self.tree,
