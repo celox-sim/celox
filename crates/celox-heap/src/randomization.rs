@@ -99,12 +99,15 @@ pub enum Expr {
     Sum(usize),
     /// The `width`-bit property at byte offset `member` of the object the
     /// handle at byte offset `handle` of the object refers to (IEEE
-    /// 1800-2023 18.5.9): its solver variable when the call solves that
-    /// object, its value otherwise.
+    /// 1800-2023 18.5.9), or with `input`, the handle that input of the call
+    /// holds, as a static handle property's: its solver variable when the
+    /// call solves that object, its value otherwise.
     Member {
         handle: u32,
         member: u32,
         width: u32,
+        #[serde(default)]
+        input: Option<usize>,
     },
     /// Element `index` of array `array` of the program, of `width` bits,
     /// outside a loop over it (IEEE 1800-2023 18.4, 18.5.8): its solver
@@ -723,7 +726,9 @@ impl Expr {
 
     /// Whether the expression reads an input from index `first` on.
     pub fn reads_input_from(&self, first: usize) -> bool {
-        self.any(&mut |expr| matches!(expr, Self::Input { index, .. } if *index >= first))
+        self.any(&mut |expr| {
+            matches!(expr, Self::Input { index, .. } | Self::Member { input: Some(index), .. } if *index >= first)
+        })
     }
 
     /// Whether the expression names the size of array `index`, a guard of
@@ -1419,11 +1424,15 @@ impl Heap {
                 handle,
                 member,
                 width,
+                input,
             } => {
                 if !(1..=64).contains(width) {
                     return Err("invalid constraint member width".into());
                 }
-                let target = self.load(object, *handle as usize, crate::HANDLE_BYTES) as Handle;
+                let target = match input {
+                    Some(input) => *inputs.get(*input).ok_or("missing constraint input")? as Handle,
+                    None => self.load(object, *handle as usize, crate::HANDLE_BYTES) as Handle,
+                };
                 if target == crate::objects::NULL {
                     return Err("a null object handle in a constraint".into());
                 }
