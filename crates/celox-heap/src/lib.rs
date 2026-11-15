@@ -122,15 +122,24 @@ pub struct Heap {
     /// each one of every object of the class (IEEE 1800-2023 18.5.11).
     #[serde(default)]
     static_modes: HashMap<u64, bool>,
+    /// The solutions of the arguments of the functions the constraints of
+    /// the randomize calls in progress call, innermost last, each of which
+    /// the solve of the rest of its call keeps (see
+    /// [`Heap::solve_arguments`]). A function may randomize another object
+    /// between the two solves of a call.
+    #[serde(default)]
+    arguments: Vec<randomization::Arguments>,
     /// The objects each randomize call in progress runs the hooks of, see
     /// [`Heap::begin_visits`].
     #[serde(default)]
     visits: Vec<randomization::Visits>,
     /// The rand object members whose pre_randomize ran, by the object whose
-    /// randomize call ran them, for the solve that follows, see
-    /// [`Heap::end_visits`].
+    /// randomize call ran them, for the solves of that call, innermost call
+    /// last, see [`Heap::end_visits`]: each call keeps its own for every
+    /// solve, also while a function its constraints call randomizes
+    /// another object.
     #[serde(default)]
-    prepared: Option<(Handle, Vec<Handle>)>,
+    prepared: Vec<(Handle, Vec<Handle>)>,
     /// The rand object members the last successful randomize solve took,
     /// whose post_randomize runs, see [`Heap::begin_solved_visits`].
     #[serde(default)]
@@ -180,8 +189,9 @@ impl Heap {
             programs: HashMap::default(),
             static_blocks: HashMap::default(),
             static_modes: HashMap::default(),
+            arguments: Vec::new(),
             visits: Vec::new(),
-            prepared: None,
+            prepared: Vec::new(),
             solved: Vec::new(),
             edges: HashMap::default(),
             dpi: dpi::CallArea::default(),
@@ -244,6 +254,7 @@ impl Heap {
             && self.programs == other.programs
             && self.static_blocks == other.static_blocks
             && self.static_modes == other.static_modes
+            && self.arguments == other.arguments
             // The occurrences of watched properties decide the waits.
             && self.edges == other.edges
     }
