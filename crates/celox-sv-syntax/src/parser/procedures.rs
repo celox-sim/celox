@@ -560,7 +560,7 @@ impl Parser<'_> {
                         }
                         value
                     } else {
-                        self.expression(14)?
+                        self.timing_operand()?
                     };
                 TimingControlKind::Delay {
                     value,
@@ -585,7 +585,7 @@ impl Parser<'_> {
                 } else if self.eat("(") {
                     EventControl::Items(self.event_items()?)
                 } else {
-                    EventControl::Named(self.expression(14)?)
+                    EventControl::Named(self.timing_operand()?)
                 };
                 TimingControlKind::Event(event)
             }
@@ -836,7 +836,7 @@ impl Parser<'_> {
         if self.peek() == "(" {
             self.parentheses()?;
         } else {
-            self.expression(14)?;
+            self.timing_operand()?;
         }
         Ok(())
     }

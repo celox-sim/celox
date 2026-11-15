@@ -131,7 +131,7 @@ impl Parser<'_> {
                     self.expect(",")?;
                 }
             } else {
-                values.push(self.expression(14)?);
+                values.push(self.timing_operand()?);
             }
             Some(AssignmentDelay {
                 values,
