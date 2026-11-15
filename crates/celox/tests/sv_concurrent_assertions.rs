@@ -889,6 +889,14 @@ fn multiclocked_sequences_name_what_they_do_not_support() {
             "@(posedge c0) a |-> ##1 @(posedge c1) b",
             "implication of multiclocked sequences",
         ),
+        (
+            "@(posedge c0) a ##1 @(posedge c1) $past(b)",
+            "sampled value function other than $sampled in a multiclocked sequence",
+        ),
+        (
+            "@(posedge c0) $rose(a) ##1 @(posedge c1) b",
+            "sampled value function other than $sampled in a multiclocked sequence",
+        ),
     ] {
         let source =
             format!("module Top; bit c0, c1, a, b; assert property ({property}); endmodule");

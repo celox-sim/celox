@@ -351,7 +351,8 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
   プロセスを起こすのと同じく 4 値のエッジで刻み、`iff` はイベント発生時に評価します）。`##1` では次の部分
   sequence が前の部分 sequence の終了より厳密に後の最も近いクロックのティックで、`##0` では
   終了と同じティックも含めて始まります。`disable iff`、含意、ローカル変数や match 項目とは
-  併用できず、クロックの切り替わりをまたぐその他の演算子は拒否します。sequence が入れ子にできる
+  併用できず、クロックの切り替わりをまたぐその他の演算子と、いずれかの部分 sequence 中の `$past`・
+  `$rose`・`$fell`・`$stable`・`$changed` は拒否します（`$sampled` は使えます）。sequence が入れ子にできる
   グループとクロック付き部分 sequence は 64 段までです。
 - 2 つの Boolean 式の `p iff q`。`|->` の後件にも書けます（`a |-> b iff c` は `a |-> (b iff c)`）。
 - プロセスや task 内の明示クロック付き `expect (property_spec) action_block`（16.17）。

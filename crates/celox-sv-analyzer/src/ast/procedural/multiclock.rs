@@ -107,6 +107,32 @@ fn segments(expr: &SequenceExpr, clock: TimingControlId) -> Converted<Vec<Segmen
     }
 }
 
+/// Reject a sampled value function with a history in `condition`. Its
+/// clock would be the subsequence's (IEEE 1800-2023 16.9.3, 16.13.3), but
+/// the monitor waits for any of the clocks, and histories advance only with
+/// a process of one clock.
+fn sampled_history(condition: &Expr) -> Converted<()> {
+    let mut found = false;
+    crate::ast::const_functions::visit_expr_calls(condition, &mut |callee, _| {
+        found |= matches!(
+            callee,
+            Callee::System(
+                SystemFunction::Past
+                    | SystemFunction::Rose
+                    | SystemFunction::Fell
+                    | SystemFunction::Stable
+                    | SystemFunction::Changed
+            )
+        );
+    });
+    if found {
+        return Err(unsupported(
+            "sampled value function other than $sampled in a multiclocked sequence",
+        ));
+    }
+    Ok(())
+}
+
 fn int(value: u32) -> Expr {
     Expr::Literal(format!("32'sd{value}"))
 }
@@ -302,6 +328,7 @@ impl BodyBuilder<'_, '_, '_> {
                     .map(|(_, expression)| {
                         let condition = self.native_value(*expression)?;
                         assertions::concurrent_operand(&condition)?;
+                        sampled_history(&condition)?;
                         Ok(procedural_truth_condition(assertions::sampled(condition)))
                     })
                     .collect::<Converted<Vec<_>>>()?;
