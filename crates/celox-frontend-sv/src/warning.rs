@@ -32,14 +32,32 @@ impl PartialEq for FrontendWarning {
 
 impl Eq for FrontendWarning {}
 
+/// What a [`FrontendWarningKind::MixedTimescale`] element lacks.
+fn defaulted_parts(unit: bool, precision: bool) -> &'static str {
+    match (unit, precision) {
+        (true, true) => "unit or precision",
+        (true, false) => "unit",
+        _ => "precision",
+    }
+}
+
 /// What a [`FrontendWarning`] reports.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, thiserror::Error)]
 pub enum FrontendWarningKind {
     #[error("latch inference inside always_comb: assignments retain their previous values")]
     InferredLatch,
-    /// IEEE 1800-2023 3.14.2.3 requires consistent explicit timing declarations.
-    #[error("mixed explicit and default time units or precisions across design elements")]
-    MixedTimescale,
+    /// Design element `element` takes the default time unit (`unit`) or
+    /// precision (`precision`) while others declare theirs. IEEE 1800-2023
+    /// 3.14.2.3 makes that an error; relaxed, the defaults apply.
+    #[error(
+        "design element `{element}` declares no time {} while others do; it takes the default",
+        defaulted_parts(*.unit, *.precision)
+    )]
+    MixedTimescale {
+        element: String,
+        unit: bool,
+        precision: bool,
+    },
     /// A design declares a module more than once and uses the first.
     #[error("module `{name}` is declared more than once; the first declaration is used")]
     DuplicateModule { name: String },
@@ -131,9 +149,18 @@ pub(crate) fn analyzer_warnings(
             },
             site.clone(),
         ),
-        celox_sv_analyzer::ir::AnalyzerWarning::MixedTimescale => {
-            (FrontendWarningKind::MixedTimescale, None)
-        }
+        celox_sv_analyzer::ir::AnalyzerWarning::MixedTimescale {
+            element,
+            unit,
+            precision,
+        } => (
+            FrontendWarningKind::MixedTimescale {
+                element: element.clone(),
+                unit: *unit,
+                precision: *precision,
+            },
+            None,
+        ),
         celox_sv_analyzer::ir::AnalyzerWarning::DuplicateModule { name } => (
             FrontendWarningKind::DuplicateModule { name: name.clone() },
             None,
@@ -187,7 +214,7 @@ pub(crate) fn append_unique_warnings(
 impl miette::Diagnostic for FrontendWarning {
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self.kind {
-            FrontendWarningKind::MixedTimescale => "mixed_timescale",
+            FrontendWarningKind::MixedTimescale { .. } => "mixed_timescale",
             FrontendWarningKind::DuplicateModule { .. } => "duplicate_module",
             FrontendWarningKind::InterfaceArrayQuery => "interface_array_query",
             FrontendWarningKind::InterfaceArrayParameter { .. } => "interface_array_parameter",
@@ -215,8 +242,8 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::InterfaceArrayParameter { .. } => {
                 "IEEE 1800-2023 23.6 requires an instance select before a member; set interface_array_parameter=warn or allow to use the first declared element"
             }
-            FrontendWarningKind::MixedTimescale => {
-                "declare timeunit/timeprecision consistently; undeclared scopes use 1ns/1ps when this check is relaxed"
+            FrontendWarningKind::MixedTimescale { .. } => {
+                "IEEE 1800-2023 3.14.2.3 makes this an error, relaxed by mixed_timescale=warn or allow; declare timeunit/timeprecision (or `timescale) in every design element to keep the standard's semantics"
             }
             FrontendWarningKind::DuplicateModule { .. } => {
                 "a language deviation enabled by duplicate_module=warn or allow; remove the other declarations to keep IEEE 1800-2023 semantics"

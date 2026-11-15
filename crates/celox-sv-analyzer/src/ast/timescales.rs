@@ -87,6 +87,17 @@ struct Scope {
     time_items_end: usize,
     specified: (bool, bool),
     instances: HashMap<String, String>,
+    /// Celox generated the source that declares the scope (see
+    /// [`generated_source`]).
+    generated: bool,
+}
+
+/// Whether Celox generated the source at `path`, such as the wrapper of an
+/// SV interface a Veryl module instantiates: such paths are written in
+/// angle brackets, as `<sv-interface-behavior>`.
+fn generated_source(path: &Path) -> bool {
+    path.to_str()
+        .is_some_and(|path| path.starts_with('<') && path.ends_with('>'))
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +254,7 @@ fn scope_node(unit: &celox_sv_syntax::Unit, native: &celox_sv_syntax::Declaratio
             .find(|item| !matches!(item.kind, celox_sv_syntax::BodyItemKind::Time(_)))
             .map_or(unit.body.end, |item| item.tokens.start),
         specified: (false, false),
+        generated: false,
         instances: HashMap::default(),
     }
 }
@@ -445,6 +457,62 @@ impl Timescales {
         self.specified.contains(&3)
     }
 
+    /// The design elements that take the default time unit or precision
+    /// while others declare theirs (IEEE 1800-2023 3.14.2.3), by name, with
+    /// whether the unit and whether the precision is the default.
+    pub(super) fn defaulted_elements(&self) -> Vec<(String, bool, bool)> {
+        let [unit, precision] = self.specified.map(|specified| specified == 3);
+        let mut elements: Vec<_> = self
+            .definitions
+            .values()
+            .chain(self.packages.values())
+            // A module Celox generates, such as the wrapper of an SV
+            // interface a Veryl module instantiates, copies the time
+            // declarations of the element it stands for, which is named.
+            .filter(|scope| !scope.generated)
+            .map(|scope| {
+                (
+                    scope.name.clone(),
+                    unit && !scope.specified.0,
+                    precision && !scope.specified.1,
+                )
+            })
+            .filter(|(_, unit, precision)| *unit || *precision)
+            .collect();
+        elements.sort();
+        elements.dedup();
+        elements
+    }
+
+    /// The error of a design that mixes declared and default time units or
+    /// precisions, unless its analysis allows that.
+    fn check_mixed(&self) -> Converted<()> {
+        if !self.has_mixed_timescales() || self.options.allow_mixed_timescales {
+            return Ok(());
+        }
+        const SHOWN: usize = 8;
+        let elements = self.defaulted_elements();
+        let mut names = elements
+            .iter()
+            .take(SHOWN)
+            .map(|(name, unit, precision)| {
+                let missing = match (unit, precision) {
+                    (true, true) => "unit or precision",
+                    (true, false) => "unit",
+                    _ => "precision",
+                };
+                format!("`{name}` declares no time {missing}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if elements.len() > SHOWN {
+            names.push_str(&format!(" and {} more", elements.len() - SHOWN));
+        }
+        Err(unsupported(format!(
+            "mixed explicit and default time units or precisions across design elements: {names}"
+        )))
+    }
+
     pub(super) fn scope_scale(&self, name: &str) -> Option<(i32, i32)> {
         let scope = self
             .definitions
@@ -462,11 +530,6 @@ impl Timescales {
             self.specified[0] | local.specified[0],
             self.specified[1] | local.specified[1],
         ];
-        if specified.contains(&3) && !self.options.allow_mixed_timescales {
-            return Err(unsupported(
-                "mixed explicit and default time units or precisions across design elements",
-            ));
-        }
         let mut design = self.clone();
         design.specified = specified;
         design.precision = self.precision.into_iter().chain(local.precision).min();
@@ -474,6 +537,7 @@ impl Timescales {
         design.definitions.extend(local.definitions);
         design.packages.extend(local.packages);
         design.instantiated.extend(local.instantiated);
+        design.check_mixed()?;
         // Explicit simulator roots remain authoritative; otherwise the merged
         // instantiation set determines inferred roots across all sources.
         Ok(design)
@@ -545,11 +609,15 @@ impl Timescales {
         // Each bit records whether a design element uses a default (1) or an
         // explicit/inherited setting (2), independently for unit and precision.
         let mut specified = [0u8; 2];
-        for (tree, _) in trees {
+        for (tree, path) in trees {
             let native = tree.declarations();
+            let generated = generated_source(path);
             let mut scopes: Vec<_> = native
                 .all_units()
-                .map(|unit| scope_node(unit, native))
+                .map(|unit| Scope {
+                    generated,
+                    ..scope_node(unit, native)
+                })
                 .collect();
             scopes.sort_by_key(|s| s.start);
             let parents = scope_parents(&scopes);
@@ -692,12 +760,8 @@ impl Timescales {
                 }),
             );
         }
-        if specified.contains(&3) && !options.allow_mixed_timescales {
-            return Err(unsupported(
-                "mixed explicit and default time units or precisions across design elements",
-            ));
-        }
         design.specified = specified;
+        design.check_mixed()?;
         Ok(design)
     }
 

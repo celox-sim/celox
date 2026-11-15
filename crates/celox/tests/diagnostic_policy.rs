@@ -130,6 +130,106 @@ mod sv {
         assert!(error.warnings().is_empty(), "{error}");
     }
 
+    /// A rendered diagnostic's text without the line wrapping of its frame.
+    fn unwrapped(text: String) -> String {
+        text.split_whitespace()
+            .filter(|word| *word != "│")
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    // IEEE 1800-2023 3.14.2.3: an error if some design elements declare a
+    // time unit and precision and others do not. The error names the
+    // elements without them; relaxed, each takes the default with a warning
+    // that names it, as other simulators do.
+    #[test]
+    fn mixed_timescales_name_each_element_that_takes_the_default() {
+        let package = "package P; localparam int N = 1; endpackage";
+        let child = "module Child(output int t); initial #1 t = $time; endmodule";
+        let top = "module Top(output int t, c); timeunit 10ns / 1ns; Child child(c); initial #1 t = $time; endmodule";
+        let builder = || {
+            celox::Simulation::from_sv_sources(
+                vec![
+                    (package, Path::new("p.sv")),
+                    (child, Path::new("child.sv")),
+                    (top, Path::new("top.sv")),
+                ],
+                "Top",
+            )
+        };
+        let error = unwrapped(builder().build().err().unwrap().to_string());
+        assert!(
+            error.contains("mixed explicit and default")
+                && error.contains(
+                    "`Child` declares no time unit or precision, `P` declares no time unit or precision"
+                ),
+            "{error}"
+        );
+        let mut sim = builder()
+            .diagnostic_policy(policy("mixed_timescale", DiagnosticLevel::Warn))
+            .build()
+            .unwrap();
+        let named: Vec<_> = sim
+            .warnings()
+            .iter()
+            .filter_map(|warning| match warning {
+                celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
+                    kind:
+                        celox::SvFrontendWarningKind::MixedTimescale {
+                            element,
+                            unit,
+                            precision,
+                        },
+                    ..
+                }) => Some((element.clone(), *unit, *precision, warning.to_string())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            named
+                .iter()
+                .map(|(e, u, p, _)| (e.as_str(), *u, *p))
+                .collect::<Vec<_>>(),
+            [("Child", true, true), ("P", true, true)]
+        );
+        assert!(
+            named[0]
+                .3
+                .contains("design element `Child` declares no time unit or precision"),
+            "{}",
+            named[0].3
+        );
+        // The child's default 1 ns unit waits 1 ns; the top's 10 ns unit 10 ns,
+        // both counted in the 1 ps global precision of the default.
+        sim.run_until(1_000).unwrap();
+        assert_eq!(sim.get(sim.signal("c")), 1u32.into());
+        sim.run_until(10_000).unwrap();
+        assert_eq!(sim.get(sim.signal("t")), 1u32.into());
+    }
+
+    // The error says which part each element lacks, and names an authored
+    // element whatever its name.
+    #[test]
+    fn mixed_timescale_errors_name_what_each_element_lacks() {
+        let error = Simulator::from_sv_sources(
+            vec![(
+                "module __celox_mine; timeunit 1ns; endmodule
+                 module Top; timeunit 1ns / 1ps; __celox_mine m(); endmodule",
+                Path::new("top.sv"),
+            )],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap()
+        .to_string();
+        let error = unwrapped(error);
+        assert!(
+            error.contains("`__celox_mine` declares no time precision"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn mixed_language_interface_probes_use_the_same_policy() {
         let veryl = "module Top(a: input logic<8>, y: output logic<8>) { inst bus: $sv::Bus; assign bus.req = a; assign y = bus.rsp; }";
@@ -152,7 +252,7 @@ mod sv {
                 .filter(|warning| matches!(
                     warning,
                     celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
-                        kind: celox::SvFrontendWarningKind::MixedTimescale,
+                        kind: celox::SvFrontendWarningKind::MixedTimescale { .. },
                         ..
                     })
                 ))
