@@ -137,6 +137,7 @@ impl Ff<'_, '_> {
             }
         }
         let result = match op {
+            ObjectOp::ScopeRandomize(_) => unreachable!("lowered by `scope_randomize`"),
             ObjectOp::Randomize(program) => {
                 let object = self.handle(&args[0])?;
                 let check = self.integer_of_width(&args[1], 1, false)?;
@@ -440,6 +441,7 @@ impl Ff<'_, '_> {
             }),
             ObjectOp::GetRandstate => Some(celox_design::ValueKind::StrRef),
             ObjectOp::Randomize(_)
+            | ObjectOp::ScopeRandomize(_)
             | ObjectOp::RegisterProgram(..)
             | ObjectOp::RegisterStaticBlocks(..)
             | ObjectOp::ProgramRegistered(_)
@@ -472,6 +474,88 @@ impl Ff<'_, '_> {
         }
         self.store(temp, SIROffset::Static(0), width, value);
         Ok(sv::ir::Expr::Ident(name))
+    }
+
+    /// `std::randomize(v...) with { ... }` (IEEE 1800-2023 18.12.1): the
+    /// variables in the first arguments are solved in the fields of a new
+    /// object, at their offsets in `program`, and each takes its field's
+    /// value when the call succeeds; the values the constraints read
+    /// follow. The call's value is whether it succeeded.
+    pub(super) fn scope_randomize(
+        &mut self,
+        program: &celox_heap::randomization::Program,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{Callee, Expr, ObjectField, ObjectOp};
+        let count = program.fields.len();
+        let object = self.object_call(
+            &ObjectOp::New {
+                class: celox_heap::SCOPE_RANDOMIZE_CLASS,
+                size: 8 * count as u32,
+                handles: Vec::new(),
+            },
+            &[],
+        )?;
+        let solved = Expr::Call {
+            callee: Callee::Object(Box::new(ObjectOp::Randomize(program.clone()))),
+            args: [Some(object.clone()), Some(Expr::Literal("1'b0".into()))]
+                .into_iter()
+                .chain(args[count..].iter().cloned())
+                .collect(),
+            arg_order: Vec::new(),
+        };
+        let solved = self.hoist(&solved)?;
+        for (field, variable) in program.fields.iter().zip(&args[..count]) {
+            let Some(variable) = variable else {
+                return Err(unsupported("scope randomize variable"));
+            };
+            let value = Expr::Call {
+                callee: Callee::Object(Box::new(ObjectOp::Load(ObjectField {
+                    offset: field.offset,
+                    width: field.width,
+                    signed: false,
+                    handle: None,
+                    four_state: false,
+                    nullable: false,
+                    real: false,
+                    key: Default::default(),
+                }))),
+                args: vec![Some(object.clone())],
+                arg_order: Vec::new(),
+            };
+            let value = self.hoist(&value)?;
+            let value = Expr::Mux {
+                condition: Box::new(solved.clone()),
+                then_expr: Box::new(value),
+                else_expr: Box::new(variable.clone()),
+            };
+            match variable {
+                Expr::Ident(name) => self.assign(&sv::ir::LValue::Ident(name.clone()), &value)?,
+                // A property of the object of the calling method, read
+                // through a handle without effects (`this`).
+                Expr::Call {
+                    callee: Callee::Object(op),
+                    args,
+                    ..
+                } if matches!(**op, ObjectOp::Load(_)) && args.len() == 1 => {
+                    let ObjectOp::Load(property) = **op else {
+                        unreachable!("a load")
+                    };
+                    self.hoist(&Expr::Call {
+                        callee: Callee::Object(Box::new(ObjectOp::Store(property))),
+                        args: vec![args[0].clone(), Some(value)],
+                        arg_order: Vec::new(),
+                    })?;
+                }
+                _ => return Err(unsupported("scope randomize variable")),
+            }
+        }
+        // The call returns an `int` (IEEE 1800-2023 18.12).
+        Ok(Expr::Resize {
+            expr: Box::new(solved),
+            width: 32,
+            signed: true,
+        })
     }
 
     /// The value of `field` of the object in 64-bit `object`: a register of

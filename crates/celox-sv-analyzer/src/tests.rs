@@ -6456,7 +6456,26 @@ fn scope_randomize_validates_variable_arguments() {
         ("string value;", "randomize(value)"),
         ("class C; endclass C value;", "randomize(value)"),
         ("enum bit [1:0] {A=3, B} value;", "randomize(value)"),
-        ("bit value;", "std::randomize(value) with {value == 1;}"),
+        // Inline constraints take integral variables (18.12.1).
+        ("real value;", "std::randomize(value) with {value > 1;}"),
+        ("wire value;", "std::randomize(value) with {value == 1;}"),
+        (
+            "const bit value = 1;",
+            "std::randomize(value) with {value == 1;}",
+        ),
+        (
+            "localparam value = 1;",
+            "std::randomize(value) with {value == 1;}",
+        ),
+        (
+            "enum bit [1:0] {A, B} value;",
+            "std::randomize(value) with {value == A;}",
+        ),
+        (
+            "logic [64:0] value;",
+            "std::randomize(value) with {value == 1;}",
+        ),
+        ("bit value;", "std::randomize(value[0]) with {value == 1;}"),
     ] {
         let source = format!("module Top; {declaration} bit ok; initial ok = {call}; endmodule");
         assert!(
