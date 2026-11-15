@@ -113,6 +113,7 @@ enum Job {
         assertion: celox_design::AssertionSite,
         span: Option<crate::procedural::SourceSpan>,
         failure: Option<StatementId>,
+        prelude: Vec<Stmt>,
         start: usize,
     },
     AssertionFinish {
@@ -123,6 +124,7 @@ enum Job {
         then_body: Vec<Stmt>,
         assertion: celox_design::AssertionSite,
         default_failure: Option<(String, Option<crate::procedural::SourceSpan>)>,
+        prelude: Vec<Stmt>,
         start: usize,
     },
 }
@@ -603,12 +605,27 @@ impl BodyBuilder<'_, '_, '_> {
                     } => {
                         let mut stages = None;
                         let mut expect = None;
+                        let mut prelude = Vec::new();
                         let (condition, deferred, concurrent) = match header {
-                            celox_sv_syntax::AssertionHeader::Immediate { deferred, .. } => (
-                                self.native_assertion_condition(keyword, header)?,
+                            celox_sv_syntax::AssertionHeader::Immediate {
                                 deferred,
-                                None,
-                            ),
+                                condition,
+                                ..
+                            } => {
+                                // The expression is evaluated as the
+                                // condition of an `if` is, when the
+                                // statement runs, a deferred one's too
+                                // (IEEE 1800-2023 16.3, 16.4): its
+                                // assignments and `$cast`s run first, and
+                                // not at all while assertions are off,
+                                // which start no attempt (20.11).
+                                prelude = self.effects(&[*condition])?;
+                                (
+                                    self.native_assertion_condition(keyword, header)?,
+                                    deferred,
+                                    None,
+                                )
+                            }
                             celox_sv_syntax::AssertionHeader::Concurrent { property, .. }
                                 if keyword == "expect" =>
                             {
@@ -755,6 +772,7 @@ impl BodyBuilder<'_, '_, '_> {
                             },
                             span: super::source_span(statement.tokens, self.tree),
                             failure: *failure,
+                            prelude,
                             start: output.len(),
                         });
                         if let Some(success) = success {
@@ -886,6 +904,7 @@ impl BodyBuilder<'_, '_, '_> {
                     assertion,
                     span,
                     failure,
+                    prelude,
                     start,
                 } => {
                     let then_body = output.split_off(start);
@@ -901,6 +920,7 @@ impl BodyBuilder<'_, '_, '_> {
                         } else {
                             None
                         },
+                        prelude,
                         start: output.len(),
                     });
                     if let Some(failure) = failure {
@@ -915,6 +935,7 @@ impl BodyBuilder<'_, '_, '_> {
                     mut then_body,
                     assertion,
                     default_failure,
+                    prelude,
                     start,
                 } => {
                     let mut else_body = output.split_off(start);
@@ -1043,11 +1064,13 @@ impl BodyBuilder<'_, '_, '_> {
                     } else {
                         decision
                     };
-                    output.push(if controlled {
-                        assertion_control::checked(vec![decision])
+                    let mut attempt = prelude;
+                    attempt.push(decision);
+                    if controlled {
+                        output.push(assertion_control::checked(attempt));
                     } else {
-                        decision
-                    });
+                        output.extend(attempt);
+                    }
                 }
                 Job::IfNext(state) => {
                     let StatementKind::Conditional {
