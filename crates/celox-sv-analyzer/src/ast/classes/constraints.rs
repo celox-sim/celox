@@ -28,40 +28,12 @@ fn typed_reads(value: &Typed, variable: &mut impl FnMut(&ConstraintExpr) -> bool
 
 /// Whether `expr` reads a variable that `variable` tells.
 fn reads(expr: &ConstraintExpr, variable: &mut impl FnMut(&ConstraintExpr) -> bool) -> bool {
-    match expr {
-        ConstraintExpr::Field(_) | ConstraintExpr::Member { .. } => variable(expr),
-        ConstraintExpr::Enabled { value, .. }
-        | ConstraintExpr::Soft { value, .. }
-        | ConstraintExpr::Resize { value, .. }
-        | ConstraintExpr::Unary { value, .. } => reads(value, variable),
-        ConstraintExpr::Foreach { body, .. } => reads(body, variable),
-        ConstraintExpr::DisableSoft {
-            variable: disabled,
-            condition,
-            ..
-        } => reads(disabled, variable) || condition.as_ref().is_some_and(|c| reads(c, variable)),
-        ConstraintExpr::Binary { left, right, .. } => {
-            reads(left, variable) || reads(right, variable)
-        }
-        ConstraintExpr::Dist {
-            membership,
-            choices,
-        } => {
-            reads(membership, variable)
-                || choices
-                    .iter()
-                    .any(|choice| reads(&choice.predicate, variable))
-        }
-        ConstraintExpr::Literal(..)
-        | ConstraintExpr::Handle(_)
-        | ConstraintExpr::Size(_)
-        | ConstraintExpr::Index { .. }
-        | ConstraintExpr::Static(_)
-        | ConstraintExpr::Solved(_)
-        | ConstraintExpr::Element { .. }
-        | ConstraintExpr::Sum(_)
-        | ConstraintExpr::Input { .. } => false,
-    }
+    expr.any(&mut |expr| {
+        matches!(
+            expr,
+            ConstraintExpr::Field(_) | ConstraintExpr::Member { .. }
+        ) && variable(expr)
+    })
 }
 
 /// Whether the member at byte offset `member` of the object the handle
@@ -535,47 +507,79 @@ fn instance<'p>(
 /// Name static rand property `n` of constraint `expr` as field `first + n`
 /// of its program (see `ConstraintExpr::Static`).
 pub(in crate::ast) fn resolve_statics(expr: &mut ConstraintExpr, first: usize) {
-    match expr {
-        ConstraintExpr::Static(slot) => *expr = ConstraintExpr::Field(first + *slot),
-        ConstraintExpr::Enabled { value, .. }
-        | ConstraintExpr::Soft { value, .. }
-        | ConstraintExpr::Resize { value, .. }
-        | ConstraintExpr::Unary { value, .. } => resolve_statics(value, first),
-        ConstraintExpr::DisableSoft {
-            variable,
-            condition,
-            ..
+    expr.rewrite(&mut |expr| {
+        if let ConstraintExpr::Static(slot) = expr {
+            *expr = ConstraintExpr::Field(first + *slot);
+        }
+    });
+}
+
+/// A value of the caller that a randomize call supplies to its inline
+/// constraints (IEEE 1800-2023 18.7), input `index` of the program, or a
+/// variable of a scope randomize call (18.12) with an index from
+/// [`SCOPE_FIELDS`] on: `width` bits, `signed`, of semantic type `ty` when
+/// known.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::ast) struct CallerInput {
+    pub index: usize,
+    pub width: u32,
+    pub signed: bool,
+    pub ty: Option<semantic_types::TyId>,
+}
+
+/// The key of the caller's value that constraint expression `id` names, as
+/// a randomize call supplies it (see [`CallerInput`]): a name, `local::`
+/// one (18.7), or with `this_is_caller`, as in a scope randomize call
+/// inside a method, `this.` or `super.` one, a member of the caller's
+/// object. One resolution for the call's collection and the binding.
+pub(in crate::ast) fn caller_key(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    this_is_caller: bool,
+) -> Option<String> {
+    match &native.expression(id).kind {
+        ExprKind::Name(name) if name.spelling != "$" => {
+            Some(instances::normalize_identifier(&name.spelling))
+        }
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
         } => {
-            resolve_statics(variable, first);
-            if let Some(condition) = condition {
-                resolve_statics(condition, first);
+            let ExprKind::Name(root) = &native
+                .expression(expression_binding::ungroup(*expression, native))
+                .kind
+            else {
+                return None;
+            };
+            let name = instances::normalize_identifier(&name.spelling);
+            match (separator.as_str(), root.spelling.as_str()) {
+                ("::", "local") => Some(format!("local::{name}")),
+                (".", root @ ("this" | "super")) if this_is_caller => {
+                    Some(format!("{root}.{name}"))
+                }
+                _ => None,
             }
         }
-        ConstraintExpr::Foreach { body, .. } => resolve_statics(body, first),
-        ConstraintExpr::Binary { left, right, .. } => {
-            resolve_statics(left, first);
-            resolve_statics(right, first);
-        }
-        ConstraintExpr::Dist {
-            membership,
-            choices,
-        } => {
-            resolve_statics(membership, first);
-            for choice in choices {
-                resolve_statics(&mut choice.predicate, first);
-            }
-        }
-        ConstraintExpr::Literal(..)
-        | ConstraintExpr::Field(_)
-        | ConstraintExpr::Handle(_)
-        | ConstraintExpr::Input { .. }
-        | ConstraintExpr::Size(_)
-        | ConstraintExpr::Sum(_)
-        | ConstraintExpr::Index { .. }
-        | ConstraintExpr::Solved(_)
-        | ConstraintExpr::Member { .. }
-        | ConstraintExpr::Element { .. } => {}
+        _ => None,
     }
+}
+
+/// The first input index that stands for variable `i` of a scope randomize
+/// call while its constraints are bound (see [`scope_fields`]).
+pub(in crate::ast) const SCOPE_FIELDS: usize = 1 << 29;
+
+/// `expr` with each input that stands for a variable of a scope randomize
+/// call (see [`SCOPE_FIELDS`]) the field of the variable.
+pub(in crate::ast) fn scope_fields(mut expr: ConstraintExpr) -> ConstraintExpr {
+    expr.rewrite(&mut |expr| {
+        if let ConstraintExpr::Input { index, .. } = *expr
+            && index >= SCOPE_FIELDS
+        {
+            *expr = ConstraintExpr::Field(index - SCOPE_FIELDS);
+        }
+    });
+    expr
 }
 
 /// The class handle `id` names in a constraint, `null` or a handle
@@ -813,7 +817,7 @@ pub(in crate::ast) fn bind_inputs(
     properties: &[Property],
     names: &Names<'_>,
     env: &ConstEnv,
-    inputs: &HashMap<String, (usize, u32, bool)>,
+    inputs: &HashMap<String, CallerInput>,
 ) -> Result<ConstraintExpr, String> {
     #[allow(clippy::too_many_arguments)]
     fn expression(
@@ -823,7 +827,7 @@ pub(in crate::ast) fn bind_inputs(
         properties: &[Property],
         names: &Names<'_>,
         env: &ConstEnv,
-        inputs: &HashMap<String, (usize, u32, bool)>,
+        inputs: &HashMap<String, CallerInput>,
         loops: &[Loop],
         depth: usize,
         budget: &mut usize,
@@ -1027,11 +1031,14 @@ pub(in crate::ast) fn bind_inputs(
                         width: property.field.width,
                         signed: property.field.signed,
                     }
-                } else if let Some(&(index, width, signed)) = inputs.get(&name) {
+                } else if let Some(input) = inputs.get(&name) {
                     Typed {
-                        kind: Kind::Leaf(ConstraintExpr::Input { index, width }),
-                        width,
-                        signed,
+                        kind: Kind::Leaf(ConstraintExpr::Input {
+                            index: input.index,
+                            width: input.width,
+                        }),
+                        width: input.width,
+                        signed: input.signed,
                     }
                 } else if let Some(&value) = env.get(&name)
                     && let Some(&width) = env.get(&dimensions::parameter_width_marker(&name))
@@ -1075,20 +1082,30 @@ pub(in crate::ast) fn bind_inputs(
                 let (array, method) = array_method(id, native, properties, names).unwrap();
                 return array_value(array, &method, properties, names, tree, session, env);
             }
+            // A value of the caller the call supplies by a path: `local::`
+            // (18.7), or a member of the caller's object in a scope
+            // randomize call (18.12).
+            ExprKind::Member { .. }
+                if caller_key(id, native, true).is_some_and(|key| inputs.contains_key(&key)) =>
+            {
+                let input = inputs[&caller_key(id, native, true).unwrap()];
+                Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Input {
+                        index: input.index,
+                        width: input.width,
+                    }),
+                    width: input.width,
+                    signed: input.signed,
+                }
+            }
             ExprKind::Member {
                 expression,
                 separator,
-                name,
+                ..
             } if separator == "::"
                 && matches!(&native.expression(*expression).kind, ExprKind::Name(root) if root.spelling == "local") =>
             {
-                let key = format!("local::{}", instances::normalize_identifier(&name.spelling));
-                let &(index, width, signed) = inputs.get(&key).ok_or("inline local variable")?;
-                Typed {
-                    kind: Kind::Leaf(ConstraintExpr::Input { index, width }),
-                    width,
-                    signed,
-                }
+                return Err("inline local variable".into());
             }
             // A member of the object a handle property of the class refers
             // to (IEEE 1800-2023 18.5.9): a variable of that object, solved
@@ -1245,31 +1262,40 @@ pub(in crate::ast) fn bind_inputs(
                                 .into(),
                         );
                     };
-                    let Some(property) = properties.iter().rev().find(|property| {
-                        property.name == instances::normalize_identifier(&name.spelling)
-                    }) else {
-                        return Err(
-                            "a uniqueness constraint member other than a property of the class"
-                                .into(),
-                        );
-                    };
-                    if property.randc {
-                        return Err(
-                            "a randc variable in a uniqueness constraint (IEEE 1800-2023 18.5.4)"
-                                .into(),
-                        );
-                    }
-                    if property.r#type.container.is_some()
-                        || !property.r#type.unpacked_ranges.is_empty()
+                    let name = instances::normalize_identifier(&name.spelling);
+                    // A property of the class, or a variable the call
+                    // supplies, such as one a scope randomize call solves
+                    // (18.12): the name binds as anywhere else.
+                    if let Some(property) = properties
+                        .iter()
+                        .rev()
+                        .find(|property| property.name == name)
                     {
-                        return Err("an array in a uniqueness constraint".into());
+                        if property.randc {
+                            return Err(
+                                "a randc variable in a uniqueness constraint (IEEE 1800-2023 18.5.4)"
+                                    .into(),
+                            );
+                        }
+                        if property.r#type.container.is_some()
+                            || !property.r#type.unpacked_ranges.is_empty()
+                        {
+                            return Err("an array in a uniqueness constraint".into());
+                        }
+                        types.push(semantic_types::of_type(
+                            &mut session.types,
+                            &tree.functions,
+                            &property.r#type,
+                            env,
+                        ));
+                    } else if let Some(input) = inputs.get(&name) {
+                        types.push(input.ty);
+                    } else {
+                        return Err(
+                            "a uniqueness constraint member other than a variable of the class or the call"
+                                .into(),
+                        );
                     }
-                    types.push(semantic_types::of_type(
-                        &mut session.types,
-                        &tree.functions,
-                        &property.r#type,
-                        env,
-                    ));
                     members.push(recurse(session, budget, id)?);
                 }
                 // Members of equivalent types (6.22.2), as the type table
@@ -1644,29 +1670,13 @@ fn soft_dist(expression: ExprId, tree: &AnalysisContext<'_>) -> bool {
 
 /// Whether constraint `expr` names a randc property of `properties`.
 fn names_randc(expr: &ConstraintExpr, properties: &[Property]) -> bool {
-    match expr {
-        ConstraintExpr::Field(field) => properties
+    expr.any(&mut |expr| {
+        matches!(expr, ConstraintExpr::Field(field) if properties
             .iter()
             .filter(|property| constrainable(property))
             .nth(*field)
-            .is_some_and(|property| property.randc),
-        ConstraintExpr::Resize { value, .. } | ConstraintExpr::Unary { value, .. } => {
-            names_randc(value, properties)
-        }
-        ConstraintExpr::Binary { left, right, .. } => {
-            names_randc(left, properties) || names_randc(right, properties)
-        }
-        ConstraintExpr::Dist {
-            membership,
-            choices,
-        } => {
-            names_randc(membership, properties)
-                || choices
-                    .iter()
-                    .any(|choice| names_randc(&choice.predicate, properties))
-        }
-        _ => false,
-    }
+            .is_some_and(|property| property.randc))
+    })
 }
 
 /// Whether `id` names a rand member, not randc, of the object a rand handle

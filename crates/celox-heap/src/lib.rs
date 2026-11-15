@@ -27,7 +27,8 @@ mod uvm_dpi;
 pub use uvm_dpi::deglob as uvm_deglob;
 
 pub use objects::{
-    BOX_CLASS, FIRST_RESERVED_CLASS, Fault, NULL, RECORD_CLASS, SCHEDULER_CLASS, class_identifier,
+    BOX_CLASS, FIRST_RESERVED_CLASS, Fault, NULL, RECORD_CLASS, SCHEDULER_CLASS,
+    SCOPE_RANDOMIZE_CLASS, class_identifier,
 };
 
 /// A reference to a heap entry, as stored in state memory.

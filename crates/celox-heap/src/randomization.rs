@@ -406,92 +406,108 @@ fn boolean(value: Term) -> Term {
 }
 
 impl Expr {
-    /// Whether the expression reads the solver variable of an object the
-    /// call solves.
-    fn mentions_solved(&self) -> bool {
-        match self {
-            Self::Solved(_) => true,
-            Self::Foreach { body, .. } => body.mentions_solved(),
+    /// The expressions directly under this one, in order: the one traversal
+    /// of the shape of a constraint, which every pass that treats each
+    /// subexpression alike goes through, so that none misses a variant.
+    pub fn children(&self) -> impl Iterator<Item = &Expr> {
+        let (first, second, choices): (Option<&Expr>, Option<&Expr>, &[DistChoice]) = match self {
             Self::Enabled { value, .. }
             | Self::Soft { value, .. }
             | Self::Resize { value, .. }
-            | Self::Unary { value, .. } => value.mentions_solved(),
-            Self::Binary { left, right, .. } => left.mentions_solved() || right.mentions_solved(),
+            | Self::Unary { value, .. } => (Some(value), None, &[]),
+            Self::Foreach { body, .. } => (Some(body), None, &[]),
             Self::DisableSoft {
                 variable,
                 condition,
                 ..
-            } => {
-                variable.mentions_solved()
-                    || condition
-                        .as_ref()
-                        .is_some_and(|condition| condition.mentions_solved())
-            }
+            } => (Some(variable), condition.as_deref(), &[]),
+            Self::Binary { left, right, .. } => (Some(left), Some(right), &[]),
             Self::Dist {
                 membership,
                 choices,
-            } => {
-                membership.mentions_solved()
-                    || choices
-                        .iter()
-                        .any(|choice| choice.predicate.mentions_solved())
-            }
+            } => (Some(membership), None, choices),
             Self::Literal(..)
             | Self::Field(_)
-            | Self::Static(_)
-            | Self::Size(_)
-            | Self::Sum(_)
-            | Self::Input { .. }
-            | Self::Index { .. }
-            | Self::Member { .. }
             | Self::Handle(_)
-            | Self::Element { .. } => false,
+            | Self::Size(_)
+            | Self::Index { .. }
+            | Self::Static(_)
+            | Self::Solved(_)
+            | Self::Element { .. }
+            | Self::Sum(_)
+            | Self::Member { .. }
+            | Self::Input { .. } => (None, None, &[]),
+        };
+        first
+            .into_iter()
+            .chain(second)
+            .chain(choices.iter().map(|choice| &choice.predicate))
+    }
+
+    /// The expressions directly under this one, in order, to change (see
+    /// [`Expr::children`]).
+    pub fn children_mut(&mut self) -> impl Iterator<Item = &mut Expr> {
+        let (first, second, choices): (Option<&mut Expr>, Option<&mut Expr>, &mut [DistChoice]) =
+            match self {
+                Self::Enabled { value, .. }
+                | Self::Soft { value, .. }
+                | Self::Resize { value, .. }
+                | Self::Unary { value, .. } => (Some(value), None, &mut []),
+                Self::Foreach { body, .. } => (Some(body), None, &mut []),
+                Self::DisableSoft {
+                    variable,
+                    condition,
+                    ..
+                } => (Some(variable), condition.as_deref_mut(), &mut []),
+                Self::Binary { left, right, .. } => (Some(left), Some(right), &mut []),
+                Self::Dist {
+                    membership,
+                    choices,
+                } => (Some(membership), None, choices),
+                Self::Literal(..)
+                | Self::Field(_)
+                | Self::Handle(_)
+                | Self::Size(_)
+                | Self::Index { .. }
+                | Self::Static(_)
+                | Self::Solved(_)
+                | Self::Element { .. }
+                | Self::Sum(_)
+                | Self::Member { .. }
+                | Self::Input { .. } => (None, None, &mut []),
+            };
+        first
+            .into_iter()
+            .chain(second)
+            .chain(choices.iter_mut().map(|choice| &mut choice.predicate))
+    }
+
+    /// Whether this expression or one under it satisfies `test`.
+    pub fn any(&self, test: &mut impl FnMut(&Expr) -> bool) -> bool {
+        test(self) || self.children().any(|child| child.any(test))
+    }
+
+    /// Apply `change` to this expression and then to each under what it
+    /// leaves.
+    pub fn rewrite(&mut self, change: &mut impl FnMut(&mut Expr)) {
+        change(self);
+        for child in self.children_mut() {
+            child.rewrite(change);
         }
+    }
+
+    /// Whether the expression reads the solver variable of an object the
+    /// call solves.
+    fn mentions_solved(&self) -> bool {
+        self.any(&mut |expr| matches!(expr, Self::Solved(_)))
     }
 
     /// Whether the expression names the elements of array `index`: a loop
     /// over it or its sum.
     fn names_elements(&self, index: usize) -> bool {
-        match self {
-            Self::Sum(array) => *array == index,
-            Self::Foreach { array, body } => *array == index || body.names_elements(index),
-            Self::Enabled { value, .. }
-            | Self::Soft { value, .. }
-            | Self::Resize { value, .. }
-            | Self::Unary { value, .. } => value.names_elements(index),
-            Self::DisableSoft {
-                variable,
-                condition,
-                ..
-            } => {
-                variable.names_elements(index)
-                    || condition
-                        .as_ref()
-                        .is_some_and(|condition| condition.names_elements(index))
-            }
-            Self::Binary { left, right, .. } => {
-                left.names_elements(index) || right.names_elements(index)
-            }
-            Self::Dist {
-                membership,
-                choices,
-            } => {
-                membership.names_elements(index)
-                    || choices
-                        .iter()
-                        .any(|choice| choice.predicate.names_elements(index))
-            }
-            Self::Literal(..)
-            | Self::Field(_)
-            | Self::Handle(_)
-            | Self::Size(_)
-            | Self::Input { .. }
-            | Self::Index { .. }
-            | Self::Static(_)
-            | Self::Solved(_)
-            | Self::Member { .. }
-            | Self::Element { .. } => false,
-        }
+        self.any(&mut |expr| {
+            matches!(expr, Self::Sum(array) | Self::Foreach { array, .. } if *array == index)
+        })
     }
 
     /// The solver variables that appear in the unrolled expression of the
@@ -526,47 +542,10 @@ impl Expr {
         }
     }
 
-    /// Whether the expression names the size of array `index`.
+    /// Whether the expression names the size of array `index`, a guard of
+    /// `disable soft` among what it reads, as any guard.
     fn names_size(&self, index: usize) -> bool {
-        match self {
-            Self::Size(array) => *array == index,
-            Self::Enabled { value, .. }
-            | Self::Soft { value, .. }
-            | Self::Resize { value, .. }
-            | Self::Unary { value, .. } => value.names_size(index),
-            // A guard of `disable soft` names what it reads, as any guard.
-            Self::DisableSoft {
-                variable,
-                condition,
-                ..
-            } => {
-                variable.names_size(index)
-                    || condition
-                        .as_ref()
-                        .is_some_and(|condition| condition.names_size(index))
-            }
-            Self::Binary { left, right, .. } => left.names_size(index) || right.names_size(index),
-            Self::Foreach { body, .. } => body.names_size(index),
-            Self::Sum(_) => false,
-            Self::Dist {
-                membership,
-                choices,
-            } => {
-                membership.names_size(index)
-                    || choices
-                        .iter()
-                        .any(|choice| choice.predicate.names_size(index))
-            }
-            Self::Literal(..)
-            | Self::Field(_)
-            | Self::Handle(_)
-            | Self::Input { .. }
-            | Self::Index { .. }
-            | Self::Static(_)
-            | Self::Solved(_)
-            | Self::Member { .. }
-            | Self::Element { .. } => false,
-        }
+        self.any(&mut |expr| matches!(expr, Self::Size(array) if *array == index))
     }
 
     /// The term of the constraint of the object whose fields are those of

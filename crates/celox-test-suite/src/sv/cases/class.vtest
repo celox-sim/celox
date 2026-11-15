@@ -5530,3 +5530,209 @@ module Top(output int checks);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq checks 1023))
+
+; `std::randomize(v...) with { ... }` solves the variables with the
+; constraints, which also read other variables of the scope, and writes them
+; only when it succeeds (IEEE 1800-2023 18.12.1).
+(case scope_randomize_with
+  (source "scope_with.sv" #"
+module Top(output int checks);
+    class A;
+        function int pick(int y, output int got);
+            int x, success;
+            success = std::randomize(x) with { x > 0; x < y; };
+            got = x;
+            return success;
+        endfunction
+    endclass
+    int a, b, limit = 10;
+    bit [3:0] nibble;
+    initial begin
+        A obj = new;
+        int got;
+        checks = 0;
+        checks += (obj.pick(3, got) == 1 && got > 0 && got < 3) * 1;
+        checks += (std::randomize(a, b) with { a + b == limit; a > 3; b > 3; }
+                   && a + b == 10 && a > 3 && b > 3) * 2;
+        a = 77;
+        checks += (std::randomize(a) with { a > 5; a < 5; } == 0 && a == 77) * 4;
+        checks += (std::randomize(nibble) with { nibble == 4'hf; soft nibble == 1; } && nibble == 15) * 8;
+        // A distribution names the variables as any other constraint.
+        checks += (std::randomize(a) with { a dist { 3 := 1, [7:8] :/ 1 }; }
+                   && (a == 3 || a == 7 || a == 8)) * 16;
+        checks += (std::randomize(a, b) with { a dist { 2 := 1, 4 := 1 }; b == a + limit; }
+                   && (a == 2 || a == 4) && b == a + 10) * 32;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 63))
+
+; The names of a scope randomize call's constraints bind as those of inline
+; constraints do (IEEE 1800-2023 18.7, 18.12): a member of the class of the
+; caller's method, also through `this` or `super`, is a value of the call; a
+; parameter or an enumeration constant is a constant; `unique` takes the
+; call's variables.
+(case scope_randomize_caller_names
+  (source "scope_names.sv" #"
+module Top(output int checks);
+    parameter int LIMIT = 6;
+    localparam bit [3:0] LOW = 2;
+    typedef enum bit [1:0] { RED, GREEN, BLUE } color_t;
+    class Base;
+        int floor = 30;
+    endclass
+    class A extends Base;
+        int limit = 9;
+        static int top = 20;
+        function int pick(output int got);
+            int x, success;
+            success = std::randomize(x) with { x > limit; x < this.limit + 2; };
+            got = x;
+            return success;
+        endfunction
+        function int pick_static(output int got);
+            int x, success;
+            success = std::randomize(x) with { x == top - 1; };
+            got = x;
+            return success;
+        endfunction
+        function int pick_super(output int got);
+            int x, success;
+            success = std::randomize(x) with { x == super.floor + LIMIT; };
+            got = x;
+            return success;
+        endfunction
+    endclass
+    // Inline constraints of a class randomize call bind them alike.
+    class C;
+        rand int v;
+    endclass
+    class Driver;
+        int offset = 5;
+        function int drive(C c);
+            return c.randomize() with { v == offset + LIMIT; };
+        endfunction
+    endclass
+    int a;
+    bit [7:0] n;
+    bit [1:0] u, v, w;
+    initial begin
+        A obj = new;
+        int got;
+        checks = 0;
+        checks += (obj.pick(got) == 1 && got == 10) * 1;
+        checks += (obj.pick_static(got) == 1 && got == 19) * 2;
+        checks += (obj.pick_super(got) == 1 && got == 36) * 4;
+        // `LOW` is unsigned, so is `n > LOW` (11.8.1).
+        checks += (std::randomize(n) with { n > LOW; n < LIMIT; n != 3; n != 5; } && n == 4) * 8;
+        checks += (std::randomize(u, v) with { unique {u, v}; u == 1; v < 2; } && u == 1 && v == 0) * 16;
+        w = 2;
+        checks += (std::randomize(u) with { unique {u, w}; u > 1; } && u == 3) * 32;
+        checks += (std::randomize(a) with { a > RED; a < BLUE; } && a == GREEN) * 64;
+        begin
+            C c = new;
+            Driver d = new;
+            checks += (d.drive(c) == 1 && c.v == 11) * 128;
+            checks += (c.randomize() with { v == LIMIT + GREEN; } && c.v == 7) * 256;
+        end
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 511))
+
+; A variable of a scope randomize call inside a method resolves as the
+; name does there (IEEE 1800-2023 18.12): a local, else a property of the
+; class, inherited or static ones included, which the call writes when it
+; succeeds; `this.` and `super.` name the same variable in the constraints.
+(case scope_randomize_class_properties
+  (source "scope_properties.sv" #"
+module Top(output int checks);
+    class Base;
+        int inherited;
+    endclass
+    class Packet extends Base;
+        bit [7:0] pkt_size;
+        static int count;
+        function int fill();
+            return std::randomize(pkt_size) with { pkt_size inside {[10:50]}; this.pkt_size != 10; };
+        endfunction
+        function int fill_inherited();
+            return std::randomize(inherited) with { super.inherited == 7; };
+        endfunction
+        function int fill_static();
+            return std::randomize(count) with { count == 3; };
+        endfunction
+        function int unsatisfiable();
+            return std::randomize(pkt_size) with { pkt_size > 200; pkt_size < 100; };
+        endfunction
+        function int shadowed(output bit [7:0] got);
+            bit [7:0] pkt_size;
+            int success = std::randomize(pkt_size) with { pkt_size == 5; this.pkt_size == 77; };
+            got = pkt_size;
+            return success;
+        endfunction
+    endclass
+    initial begin
+        Packet p = new;
+        bit [7:0] got;
+        checks = 0;
+        checks += (p.fill() == 1 && p.pkt_size > 10 && p.pkt_size <= 50) * 1;
+        checks += (p.fill_inherited() == 1 && p.inherited == 7) * 2;
+        checks += (p.fill_static() == 1 && Packet::count == 3) * 4;
+        p.pkt_size = 77;
+        checks += (p.unsatisfiable() == 0 && p.pkt_size == 77) * 8;
+        checks += (p.shadowed(got) == 1 && got == 5 && p.pkt_size == 77) * 16;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 31))
+
+; `std::randomize` returns an `int` (IEEE 1800-2023 18.12); without
+; variables it checks its constraints and changes nothing.
+(case scope_randomize_check_only_and_result
+  (source "scope_check.sv" #"
+module Top(output int checks);
+    int a = 4, b;
+    initial begin
+        checks = 0;
+        checks += (std::randomize(b) with { b == 1; } > -1) * 1;
+        checks += ($signed(std::randomize(b) with { b == 1; }) == 1 && b == 1) * 2;
+        checks += (std::randomize() with { a == 4; } == 1 && a == 4) * 4;
+        checks += (std::randomize() with { a > 4; } == 0 && a == 4) * 8;
+        checks += (randomize() with { a < 5; a > 3; } == 1 && a == 4) * 16;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 31))
+
+; Each activation of a process draws its scope randomize calls from the
+; process's RNG where the previous left it (IEEE 1800-2023 18.14), and
+; seeding the process repeats them.
+(case scope_randomize_process_rng
+  (source "scope_rng.sv" #"
+module Top(output int checks);
+    int x, first, second, third, seeded;
+    process current;
+    initial begin
+        checks = 0;
+        void'(std::randomize(x) with { x >= 0; });
+        first = x;
+        #1;
+        void'(std::randomize(x) with { x >= 0; });
+        second = x;
+        #1;
+        void'(std::randomize(x) with { x >= 0; });
+        third = x;
+        checks += (first != second && second != third && first != third) * 1;
+        current = process::self();
+        current.srandom(7);
+        void'(std::randomize(x) with { x >= 0; });
+        seeded = x;
+        #1;
+        current.srandom(7);
+        void'(std::randomize(x) with { x >= 0; });
+        checks += (x == seeded) * 2;
+    end
+endmodule
+"#)
+  (top Top) (run_until 4) (assert_eq checks 3))

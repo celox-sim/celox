@@ -478,6 +478,7 @@ impl Ff<'_, '_> {
                 sv::ir::ObjectOp::Pattern(pattern) => self.aggregate_pattern(*pattern, args)?,
                 sv::ir::ObjectOp::Concat(concat) => self.container_concat(concat, args)?,
                 sv::ir::ObjectOp::Stream(op) => self.stream_call(op, args)?,
+                sv::ir::ObjectOp::ScopeRandomize(program) => self.scope_randomize(program, args)?,
                 _ => self.object_call(op, args)?,
             },
             Expr::Call {
