@@ -88,6 +88,33 @@ fn append_member_dimensions(
     session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<()> {
+    // A dynamic array, queue or associative array member (7.2.1, 7.4): the
+    // member is a container, which the structure's flat value holds by its
+    // handle. An associative array is indexed by `*` or by a type: a data
+    // type, a type name or a class (7.8).
+    let container = match dimensions.first().map(|dimension| &dimension.kind) {
+        Some(DimensionKind::Unsized | DimensionKind::Queue(_) | DimensionKind::Wildcard) => true,
+        Some(DimensionKind::Index(id)) => match &native.expression(*id).kind {
+            celox_sv_syntax::ExprKind::Type(_) => true,
+            celox_sv_syntax::ExprKind::Name(name) => {
+                let name = instances::normalize_identifier(&name.spelling);
+                context.type_aliases.contains_key(&name)
+                    || context.get(&name).is_none()
+                        && super::super::classes::resolve(tree, session, &name).is_some()
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    if container {
+        let ty = values
+            .pop()
+            .ok_or_else(|| unsupported("structure member type"))?;
+        values.push(containers::with_dimensions(
+            ty, dimensions, tree, session, context,
+        )?);
+        return Ok(());
+    }
     let mut bound = |id| {
         constant_binding::expression(
             id,

@@ -414,6 +414,19 @@ pub(super) fn native_type(
     {
         return Ok(shape.container.clone());
     }
+    // A member of a variable of unpacked structure type, which is a leaf
+    // variable of its own (see `unpacked_structs`).
+    if let Some(name) = unpacked_structs::native_member(id, native, dims)
+        && let Some(shape) = dims.get(&name)
+    {
+        return Ok(shape.container.clone());
+    }
+    // A container member of a container element, `q[i].m`.
+    if matches!(native.expression(ungrouped).kind, ExprKind::Member { .. })
+        && let Some((member, _)) = element_member(id, native, tree, session, dims)?
+    {
+        return Ok(member.container.clone());
+    }
     // A hierarchical name, or the name of a member of an interface, is
     // bound to a local variable of the type of the object it denotes.
     if matches!(native.expression(ungrouped).kind, ExprKind::Member { .. })
@@ -1224,6 +1237,10 @@ fn index_value(
 /// method that changes the array names, may write the fixed-size array
 /// property it is or selects into: every write of the elements of one is a
 /// write of the property (IEEE 1800-2023 8.19), as a write of it whole is.
+/// A container member of a structure element of a container, `q[i].m`, is
+/// written in place by such a write, but equal elements may share the
+/// record that holds it (see `unpacked_structs::record`): the write stays
+/// unsupported rather than change the other elements too.
 pub(super) fn check_written_storage(
     mut id: ExprId,
     tree: &AnalysisContext<'_>,
@@ -1233,6 +1250,14 @@ pub(super) fn check_written_storage(
     let native = tree.declarations();
     loop {
         id = expression_binding::ungroup(id, native);
+        if matches!(native.expression(id).kind, ExprKind::Member { .. })
+            && element_member(id, native, tree, session, dims)?
+                .is_some_and(|(member, _)| member.container.is_some())
+        {
+            return Err(unsupported(
+                "update of a container member of a structure element of a container",
+            ));
+        }
         if let Some((property, _)) =
             expression_binding::object_property(tree, session, id, native, dims)?
             && property.storage.is_some()
