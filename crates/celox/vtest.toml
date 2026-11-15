@@ -858,6 +858,13 @@ add = ["native-image"]
 [sv.cases."aggregate_regressions::wide_unpacked_ff_array_masks"]
 add = ["interpreter"]
 
+# The initial process's wasm function needs about 103,000 locals, over the
+# 50,000 per function that wasmtime accepts: the wasm backend never reuses a
+# local (#4036).
+[sv.cases."class::constrained_randomize_selects"]
+ignore = ["wasm"]
+reason = "the wasm backend's process function exceeds wasmtime's 50,000 locals (#4036)"
+
 [sv.cases."concurrent_assertions::sampled_history_gates_and_indices"]
 add = ["native-image"]
 
