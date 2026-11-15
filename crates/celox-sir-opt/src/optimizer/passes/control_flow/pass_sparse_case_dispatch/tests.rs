@@ -1,7 +1,3 @@
-#![allow(
-    clippy::disallowed_types,
-    reason = "test-only: the tests pass the pass's lazily filled caches"
-)]
 use super::*;
 use crate::ir::{InstanceId, SIRValue};
 use celox_design::StateObjectId as VarId;
@@ -183,25 +179,25 @@ fn cached_dominance_matches_path_removal_on_branching_and_looping_cfgs() {
                 },
             );
         }
-        let cache = OnceCell::new();
+        let mut cache = None;
         for dominator in 0..5 {
             for target in 0..5 {
                 let (dominator, target) = (BlockId(dominator * 7), BlockId(target * 7));
                 assert_eq!(
-                    cached_block_dominates(&eu, dominator, target, &cache),
+                    cached_block_dominates(&eu, dominator, target, &mut cache),
                     block_dominates(&eu, dominator, target)
                 );
             }
         }
-        assert!(cache.get().unwrap().is_some());
+        assert!(cache.unwrap().is_some());
         eu.blocks.get_mut(&BlockId(0)).unwrap().terminator =
             SIRTerminator::Jump(BlockId(99), Vec::new());
-        let invalid = OnceCell::new();
+        let mut invalid = None;
         assert_eq!(
-            cached_block_dominates(&eu, BlockId(7), BlockId(14), &invalid),
+            cached_block_dominates(&eu, BlockId(7), BlockId(14), &mut invalid),
             block_dominates(&eu, BlockId(7), BlockId(14))
         );
-        assert!(invalid.get().unwrap().is_none());
+        assert!(invalid.unwrap().is_none());
     }
 }
 
