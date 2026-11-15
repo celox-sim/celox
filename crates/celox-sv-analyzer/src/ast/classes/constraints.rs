@@ -565,6 +565,193 @@ pub(in crate::ast) fn caller_key(
     }
 }
 
+/// The first input index that stands for the value of call `k` of a
+/// function the constraints of a class make (see `Class::constraint_calls`),
+/// which its randomize call places after the inputs it has.
+pub(in crate::ast) const RESULT_INPUTS: usize = 1 << 28;
+
+/// Record the call of function `callee` of the class whose constraints are
+/// being bound, with `arguments` (IEEE 1800-2023 18.5.11): its index among
+/// the class's calls, and the width and signedness of its value. A function
+/// that is not of the class, with an argument other than an input, or in
+/// inline constraints is unsupported.
+fn function_call(
+    callee: ExprId,
+    actuals: &[celox_sv_syntax::Argument],
+    bind: &mut dyn FnMut(&mut Session, ExprId) -> Result<Typed, String>,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Result<(usize, u32, bool), String> {
+    use celox_sv_syntax::Direction;
+    let native = tree.declarations();
+    let ungroup = |id| crate::ast::expression_binding::ungroup(id, native);
+    // A method of the class, also qualified by `this`, or by `super`, which
+    // names the one its base class sees, called as such (IEEE 1800-2023
+    // 8.11, 8.15).
+    let (name, through_super) = match &native.expression(ungroup(callee)).kind {
+        ExprKind::Name(name) => (instances::normalize_identifier(&name.spelling), false),
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "."
+            && matches!(
+                &native.expression(ungroup(*expression)).kind,
+                ExprKind::Name(root) if matches!(root.spelling.as_str(), "this" | "super")
+            ) =>
+        {
+            let ExprKind::Name(root) = &native.expression(ungroup(*expression)).kind else {
+                unreachable!("a qualifier");
+            };
+            (
+                instances::normalize_identifier(&name.spelling),
+                root.spelling == "super",
+            )
+        }
+        _ => return Err("a call in a constraint other than of a function of the class".into()),
+    };
+    let Some((methods, _, block)) = session.constraint_methods.last() else {
+        return Err(format!("a call of `{name}` in inline constraints"));
+    };
+    let block = *block;
+    let method = if through_super {
+        let base = session
+            .constraint_owners
+            .last()
+            .and_then(|(_, base)| base.clone())
+            .ok_or("`super` in a class without a base class")?;
+        super::class(tree, session, &base, env, &TypeAliases::default())
+            .map_err(|_| format!("class `{base}`"))?
+            .method(&name)
+            .cloned()
+            .map(|mut method| {
+                method.is_virtual = false;
+                method
+            })
+    } else {
+        methods.iter().find(|method| method.name == name).cloned()
+    }
+    .ok_or_else(|| format!("a call of `{name}` in a constraint"))?;
+    let unsupported = |what: &str| format!("function `{name}` in a constraint {what}");
+    if !method.is_function || method.qualifiers.is_static {
+        return Err(unsupported("that is not a function of the object"));
+    }
+    let Some(Some(result)) = &method.result else {
+        return Err(unsupported("without a value"));
+    };
+    let (width, signed) = casts::expr_type_from_type(&tree.functions, result, env)
+        .filter(|shape| (1..=64).contains(&shape.width))
+        .map(|shape| (shape.width as u32, shape.signed))
+        .ok_or_else(|| unsupported("of a value other than an integral of at most 64 bits"))?;
+    // Its formals are inputs (18.5.11), each given.
+    let subroutine = native.subroutine(method.native);
+    let ports = match &subroutine.ports {
+        Some(ports) => ports.clone(),
+        None => subroutine
+            .port_declarations
+            .iter()
+            .flat_map(|declaration| declaration.ports.iter().cloned())
+            .collect(),
+    };
+    if ports
+        .iter()
+        .any(|port| !matches!(port.direction, None | Some(Direction::Input)))
+    {
+        return Err(unsupported("with an argument other than an input"));
+    }
+    // The actuals of the formals, bound as in any call (13.5.4): an omitted
+    // one with a default takes it (13.5.3).
+    let formals = ports
+        .iter()
+        .map(|port| {
+            port.name
+                .as_ref()
+                .map(|name| instances::normalize_identifier(&name.spelling))
+        })
+        .collect::<Vec<_>>();
+    let (bound, _) = expression_binding::formal_arguments(&name, actuals, &formals)
+        .map_err(|error| error.to_string())?;
+    let mut arguments = Vec::with_capacity(bound.len());
+    for (actual, port) in bound.into_iter().zip(&ports) {
+        arguments.push(match actual {
+            Some(actual) => Some(bind(session, actual)?),
+            None if port.default.is_some() => None,
+            None => {
+                return Err(unsupported(
+                    "called without an argument for a formal without a default",
+                ));
+            }
+        });
+    }
+    if arguments
+        .iter()
+        .flatten()
+        .any(|argument| emit(argument.clone(), None).reads_input_from(RESULT_INPUTS))
+    {
+        return Err(unsupported("whose argument calls a function"));
+    }
+    // The guards it is made under, all of which must hold.
+    let guard = session
+        .constraint_guards
+        .iter()
+        .cloned()
+        .reduce(|left, right| ConstraintExpr::Binary {
+            op: "&&".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+            signed: false,
+        });
+    if guard
+        .as_ref()
+        .is_some_and(|guard| guard.reads_input_from(RESULT_INPUTS))
+    {
+        return Err(unsupported("under a guard that calls a function"));
+    }
+    let call = ConstraintCall {
+        block,
+        live: true,
+        method: method.name.clone(),
+        owner: method.owner.clone(),
+        is_virtual: method.is_virtual,
+        arguments: arguments
+            .into_iter()
+            .map(|argument| {
+                argument.map(|argument| {
+                    let (width, signed) = (argument.width, argument.signed);
+                    (emit(argument, None), width, signed)
+                })
+            })
+            .collect(),
+        guard,
+        width,
+        signed,
+    };
+    let (_, calls, _) = session
+        .constraint_methods
+        .last_mut()
+        .expect("the class's methods");
+    calls.push(call);
+    let index = calls.len() - 1;
+    Ok((index, width, signed))
+}
+
+/// `expr` with each value of a call of a function (see [`RESULT_INPUTS`])
+/// the input `first + k` (see `Class::constraint_calls`).
+pub(in crate::ast) fn call_results(mut expr: ConstraintExpr, first: usize) -> ConstraintExpr {
+    expr.rewrite(&mut |expr| {
+        if let ConstraintExpr::Input { index, width } = *expr
+            && (RESULT_INPUTS..SCOPE_FIELDS).contains(&index)
+        {
+            *expr = ConstraintExpr::Input {
+                index: first + (index - RESULT_INPUTS),
+                width,
+            };
+        }
+    });
+    expr
+}
+
 /// The first input index that stands for variable `i` of a scope randomize
 /// call while its constraints are bound (see [`scope_fields`]).
 pub(in crate::ast) const SCOPE_FIELDS: usize = 1 << 29;
@@ -1546,10 +1733,27 @@ pub(in crate::ast) fn bind_inputs(
             ) =>
             {
                 let a = recurse(session, budget, *left)?;
-                let b = recurse(session, budget, *right)?;
+                let logical = matches!(operator.as_str(), "&&" | "||");
+                // The right operand of `&&` and `||` is a guarded one: a
+                // call in it runs only while the left operand lets it.
+                if logical {
+                    let guard = emit(a.clone(), None);
+                    session.constraint_guards.push(if operator == "||" {
+                        ConstraintExpr::Unary {
+                            op: "!".into(),
+                            value: Box::new(guard),
+                        }
+                    } else {
+                        guard
+                    });
+                }
+                let b = recurse(session, budget, *right);
+                if logical {
+                    session.constraint_guards.pop();
+                }
+                let b = b?;
                 let width = a.width.max(b.width);
                 let signed = a.signed && b.signed;
-                let logical = matches!(operator.as_str(), "&&" | "||");
                 let comparison =
                     logical || matches!(operator.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=");
                 Typed {
@@ -1558,10 +1762,33 @@ pub(in crate::ast) fn bind_inputs(
                     kind: Kind::Binary(operator.clone(), Box::new(a), Box::new(b)),
                 }
             }
+            ExprKind::Call {
+                expression: callee,
+                arguments,
+            } => {
+                if !loops.is_empty() {
+                    return Err("a function call in a constraint loop".into());
+                }
+                let (index, width, signed) = function_call(
+                    *callee,
+                    arguments,
+                    &mut |session: &mut Session, value: ExprId| recurse(session, budget, value),
+                    tree,
+                    session,
+                    env,
+                )?;
+                Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Input {
+                        index: RESULT_INPUTS + index,
+                        width,
+                    }),
+                    width,
+                    signed,
+                }
+            }
             // Every node kind is listed, so that a new one has to say how a
             // constraint takes it.
             ExprKind::Member { .. }
-            | ExprKind::Call { .. }
             | ExprKind::Unary { .. }
             | ExprKind::Binary { .. }
             | ExprKind::MinTypMax { .. }
@@ -1882,6 +2109,45 @@ impl Class {
             constraints,
             handles,
             arrays,
+            // The arguments of the calls its live blocks make, solved first
+            // while their blocks are on (18.5.11).
+            // A guarded call's arguments are followed by its flag, the
+            // value of its guard, which the call reads: nonzero while the
+            // guard holds (see `Program::argument_guards`).
+            arguments: self
+                .constraint_calls
+                .iter()
+                .filter(|call| call.live)
+                .flat_map(|call| {
+                    call.arguments
+                        .iter()
+                        .flatten()
+                        .map(|(argument, ..)| argument.clone())
+                        .chain(call.guard.clone())
+                        .map(|mut argument| {
+                            resolve_statics(&mut argument, first);
+                            ConstraintExpr::Enabled {
+                                index: call.block,
+                                value: Box::new(argument),
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+            argument_guards: self
+                .constraint_calls
+                .iter()
+                .filter(|call| call.live)
+                .flat_map(|call| {
+                    let count =
+                        call.arguments.iter().flatten().count() + usize::from(call.guard.is_some());
+                    let guard = call.guard.clone().map(|mut guard| {
+                        resolve_statics(&mut guard, first);
+                        guard
+                    });
+                    std::iter::repeat_n(guard, count)
+                })
+                .collect(),
         })
     }
 }
