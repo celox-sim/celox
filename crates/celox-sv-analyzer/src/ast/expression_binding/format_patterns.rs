@@ -256,8 +256,7 @@ pub(in crate::ast) fn pattern(
                         return Err(unsupported("%p of an enum value"));
                     }
                     if !shape.members.is_empty()
-                        || unpacked_structs::shape_struct(shape, tree, session, dimensions)
-                            .is_some()
+                        || unpacked_structs::holds_struct(shape, tree, session, dimensions)
                     {
                         return Err(unsupported("%p of a structure or unpacked array"));
                     }
@@ -302,7 +301,7 @@ pub(in crate::ast) fn pattern(
         return checked(
             shape.enum_domain.is_some() || shape.packed_enum,
             !shape.members.is_empty()
-                || unpacked_structs::shape_struct(shape, tree, session, dimensions).is_some()
+                || unpacked_structs::holds_struct(shape, tree, session, dimensions)
                 || !shape.unpacked.is_empty(),
         );
     }
