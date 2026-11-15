@@ -80,6 +80,11 @@ pub struct VirtualInterfaceDeclaration {
     /// The names of the formals of each task and function the interface
     /// declares, which a virtual interface calls (25.9).
     pub subroutines: HashMap<String, Vec<String>>,
+    /// The DPI functions and tasks the interface imports (35.5).
+    pub dpi_imports: HashSet<String>,
+    /// The subroutines each modport imports (25.7), which a virtual
+    /// interface of its type may call.
+    pub modport_imports: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +164,20 @@ impl VirtualInterfaces {
                     })
                 })
                 .collect();
+            let modport_imports = prototype
+                .modports
+                .iter()
+                .map(|(name, items)| {
+                    (
+                        name.clone(),
+                        items
+                            .iter()
+                            .filter(|(_, direction)| direction == "import")
+                            .map(|(item, _)| item.clone())
+                            .collect(),
+                    )
+                })
+                .collect();
             let modports = prototype
                 .modports
                 .iter()
@@ -180,13 +199,23 @@ impl VirtualInterfaces {
                     modports,
                     parameterized: !prototype.parameters.is_empty(),
                     subroutines: HashMap::default(),
+                    dpi_imports: HashSet::default(),
+                    modport_imports,
                 },
             );
         }
         for source in parsed {
             for (interface, subroutine, formals) in source.interface_subroutine_formals(&names) {
-                if let Some(declaration) = declarations.interfaces.get_mut(&interface) {
-                    declaration.subroutines.insert(subroutine, formals);
+                let Some(declaration) = declarations.interfaces.get_mut(&interface) else {
+                    continue;
+                };
+                match formals {
+                    Some(formals) => {
+                        declaration.subroutines.insert(subroutine, formals);
+                    }
+                    None => {
+                        declaration.dpi_imports.insert(subroutine);
+                    }
                 }
             }
         }
@@ -577,7 +606,8 @@ pub(crate) fn subroutine_name(interface: &str, subroutine: &str) -> String {
 /// The subroutine that calls task or function `name` of the interface that
 /// virtual interface `handle` denotes (IEEE 1800-2023 25.9), with the names
 /// of its formals after the handle; `None` if `handle` is no virtual
-/// interface or its interface declares no such subroutine.
+/// interface or its interface declares no such subroutine. Through a
+/// modport, only a subroutine the modport imports may be called (25.7).
 pub(super) fn method(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -585,18 +615,37 @@ pub(super) fn method(
     name: &str,
     native: &celox_sv_syntax::Declarations,
     dimensions: &PackedDimensions,
-) -> Option<(String, Vec<Option<String>>)> {
-    let ty = native_type(tree, session, handle, native, dimensions)?;
-    let formals = declarations(session)?
-        .interfaces
-        .get(&ty.interface)?
-        .subroutines
-        .get(name)?
-        .iter()
-        .cloned()
-        .map(Some)
-        .collect();
-    Some((subroutine_name(&ty.interface, name), formals))
+) -> Converted<Option<(String, Vec<Option<String>>)>> {
+    let Some(ty) = native_type(tree, session, handle, native, dimensions) else {
+        return Ok(None);
+    };
+    let Some(declaration) =
+        declarations(session).and_then(|declarations| declarations.interfaces.get(&ty.interface))
+    else {
+        return Ok(None);
+    };
+    if declaration.dpi_imports.contains(name) {
+        return Err(unsupported(format!(
+            "DPI import `{name}` of interface `{}` called through a virtual interface",
+            ty.interface
+        )));
+    }
+    let Some(formals) = declaration.subroutines.get(name) else {
+        return Ok(None);
+    };
+    if let Some(modport) = &ty.modport
+        && !declaration
+            .modport_imports
+            .get(modport)
+            .is_some_and(|imports| imports.iter().any(|import| import == name))
+    {
+        return Err(unsupported(format!(
+            "call of `{name}` through virtual interface type `{}`, whose modport does not import it",
+            ty.spelling()
+        )));
+    }
+    let formals = formals.iter().cloned().map(Some).collect();
+    Ok(Some((subroutine_name(&ty.interface, name), formals)))
 }
 
 /// The virtual interface type of native expression `id`: a variable, a

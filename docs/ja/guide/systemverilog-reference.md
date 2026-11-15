@@ -100,7 +100,9 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 - virtual interface <a id="virtual-interfaces"></a>: 自動変数・引数・クラスプロパティに保持した
   virtual interface 越しの `wait` 文。パラメータ付き interface の virtual interface。
   virtual interface 越しに到達する interface の clocking ブロック・入れ子インスタンス。
-  virtual interface 越しのネットへの書き込み。
+  virtual interface 越しのネットへの書き込み。package・クラス内での、virtual
+  interface 越しの interface 関数呼び出しへの `$bits`（その解析は interface の
+  サブルーチンより先に行われます。モジュール内では関数の幅になります。[#4056](https://github.com/celox-sim/celox/issues/4056)）。
 - 既定の寿命（`interface automatic`）が、使用先モジュールと異なる interface。
 
 ### program {#programs}

@@ -960,7 +960,7 @@ fn method_named(
                     &instances::normalize_identifier(&name.spelling),
                     native,
                     dimensions,
-                )
+                )?
                 .map(|(name, formals)| (name, formals, Receiver::Handle(*expression))));
             }
         },

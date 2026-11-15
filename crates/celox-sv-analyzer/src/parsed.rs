@@ -101,11 +101,12 @@ impl ParsedSource {
     }
 
     /// The subroutines that each interface in `interfaces` declares, with
-    /// the names of their formals in order (IEEE 1800-2023 13.3, 13.4).
+    /// the names of their formals in order (IEEE 1800-2023 13.3, 13.4), or
+    /// `None` for a DPI import (35.5).
     pub(crate) fn interface_subroutine_formals(
         &self,
         interfaces: &fxhash::FxHashSet<String>,
-    ) -> Vec<(String, String, Vec<String>)> {
+    ) -> Vec<(String, String, Option<Vec<String>>)> {
         let native = self.declarations();
         let mut found = Vec::new();
         for unit in native.all_units() {
@@ -114,6 +115,19 @@ impl ParsedSource {
                 continue;
             }
             for item in &unit.items {
+                // A DPI import has no formal names to call it with here; a
+                // call through a virtual interface is rejected by name.
+                if let celox_sv_syntax::BodyItemKind::Dpi(id) = native.body_item(*item).kind {
+                    let dpi = native.dpi_declaration(id);
+                    if dpi.import {
+                        found.push((
+                            name.clone(),
+                            ast::instances::normalize_identifier(&dpi.name.spelling),
+                            None,
+                        ));
+                    }
+                    continue;
+                }
                 let celox_sv_syntax::BodyItemKind::Subroutine(id) = native.body_item(*item).kind
                 else {
                     continue;
@@ -135,7 +149,7 @@ impl ParsedSource {
                 found.push((
                     name.clone(),
                     ast::instances::normalize_identifier(&subroutine.name.spelling),
-                    formals,
+                    Some(formals),
                 ));
             }
         }

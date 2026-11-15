@@ -30,6 +30,9 @@ pub(crate) struct Subroutines {
     pub(super) shapes: HashMap<String, Arc<Vec<VariableDimensions>>>,
     /// Their formals and variables, which a scope declares with them.
     pub(super) locals: Vec<Arc<LocalVariable>>,
+    /// The result types of the functions among them, published as those of
+    /// any function (see [`scope::ScopeSymbols::function_return_types`]).
+    pub(super) function_return_types: HashMap<String, FunctionReturnMetadata>,
 }
 
 /// The subroutines of the interfaces in `declarations`, built with the
@@ -64,6 +67,9 @@ pub(super) fn build(
                 built.subroutines.extend(found.subroutines);
                 built.shapes.extend(found.shapes);
                 built.locals.extend(found.locals);
+                built
+                    .function_return_types
+                    .extend(found.function_return_types);
             }
         }
     }
@@ -139,6 +145,11 @@ fn interface_subroutines(
         built
             .shapes
             .insert(subroutine.name.clone(), Arc::new(shapes));
+        if let Some(metadata) = bound.function_return_types.get(&subroutine.name) {
+            built
+                .function_return_types
+                .insert(subroutine.name.clone(), metadata.clone());
+        }
         // Each subroutine names its handle apart from the others', which
         // the handle of a call of another one reads.
         let handle = format!("{}$$handle", subroutine.name);
@@ -192,21 +203,42 @@ fn dispatching(
     }
     subroutine.automatic = true;
     subroutine.automatic_locals = automatic_locals;
+    let instance = VirtualInterfaceSignal::Instance {
+        interface: interface.to_string(),
+    }
+    .name();
+    // A default is evaluated where the subroutine is declared (13.5.3): one
+    // that reads a member reads it of the instance the handle denotes.
+    for param in &mut subroutine.params {
+        if let Some(default) = param.default.take() {
+            param.default = Some(if reads_member(&default) {
+                Expr::Mux {
+                    condition: Box::new(Expr::Binary {
+                        left: Box::new(value.clone()),
+                        op: BinaryOp::Eq,
+                        right: Box::new(Expr::Ident(instance.clone())),
+                    }),
+                    then_expr: Box::new(default),
+                    else_expr: Box::new(virtual_interfaces::null_access(&value, 1, false)),
+                }
+            } else {
+                default
+            });
+        }
+    }
+    // The handle is the receiver of the call, which the defaults that read
+    // it read as a method's defaults read its object.
     subroutine.params.insert(
         0,
         SubroutineParam {
             name: handle.to_string(),
-            source_name: handle.to_string(),
+            source_name: "this".to_string(),
             direction: crate::procedural::ParamDirection::Input,
             r#type: ty.clone(),
             default: None,
             leaves: Vec::new(),
         },
     );
-    let instance = VirtualInterfaceSignal::Instance {
-        interface: interface.to_string(),
-    }
-    .name();
     subroutine.body = vec![Stmt::Case {
         kind: crate::procedural::CaseKind::Exact,
         selector: value.clone(),
@@ -219,6 +251,19 @@ fn dispatching(
         ))]),
     }];
     subroutine
+}
+
+/// Whether `expr` reads a member of an interface through its placeholder.
+fn reads_member(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident(name) => matches!(
+            VirtualInterfaceSignal::of(name),
+            Some(VirtualInterfaceSignal::Placeholder { .. })
+        ),
+        expr => virtual_interfaces::children(expr)
+            .into_iter()
+            .any(reads_member),
+    }
 }
 
 /// The names of the variables `stmt` declares.

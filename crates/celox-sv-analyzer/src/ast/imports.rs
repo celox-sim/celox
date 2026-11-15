@@ -1115,6 +1115,12 @@ pub(super) fn resolve_imports(
             }
             symbols.subroutines.push(subroutine.clone());
         }
+        for (name, metadata) in &packages.virtual_interface_calls.function_return_types {
+            symbols
+                .function_return_types
+                .entry(name.clone())
+                .or_insert_with(|| metadata.clone());
+        }
         for local in &packages.virtual_interface_calls.locals {
             if !symbols.locals.iter().any(|known| known.name == local.name) {
                 symbols.locals.push(local.clone());

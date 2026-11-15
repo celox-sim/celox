@@ -125,7 +125,11 @@ constructs without a dedicated issue point to the frontend roadmap,
   through a virtual interface held by an automatic variable, an argument,
   or a class property; virtual interfaces of parameterized interfaces;
   clocking blocks and nested interface instances reached through a virtual
-  interface; writes to nets through a virtual interface.
+  interface; writes to nets through a virtual interface; `$bits` of a call
+  of an interface function through a virtual interface in a package or
+  class, whose analysis precedes the interface's subroutines (in a module
+  it is the function's width;
+  [#4056](https://github.com/celox-sim/celox/issues/4056)).
 - An interface whose default lifetime (`interface automatic`) differs from
   that of the module it is used in.
 

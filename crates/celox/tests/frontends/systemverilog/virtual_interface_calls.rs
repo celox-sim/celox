@@ -232,3 +232,104 @@ endmodule
     sim.run_until(100).unwrap();
     assert_eq!(displays(&mut sim), ["bus 9 at 6"]);
 }
+
+/// A default that reads a member of the interface reads it of the instance
+/// the handle denotes, where the subroutine is declared (13.5.3), and a
+/// function's result type is published: `$bits` of a call is its width.
+#[test]
+fn defaults_and_result_types_of_calls_through_virtual_interfaces() {
+    let source = r#"`timescale 1ns / 1ns
+interface bfm;
+  logic [11:0] data = 12'd7;
+  function automatic logic [11:0] shifted(input logic [11:0] by = data);
+    return data + by;
+  endfunction
+endinterface
+package p;
+  class c;
+    virtual bfm b;
+    function void show();
+      $display("class %0d %0d", b.shifted(), b.shifted(1));
+    endfunction
+  endclass
+endpackage
+module top;
+  bfm x(), y();
+  virtual bfm v;
+  initial begin
+    p::c o = new;
+    y.data = 12'd100;
+    o.b = y;
+    v = x;
+    o.show();
+    $display("module %0d %0d bits %0d", v.shifted(), v.shifted(1), $bits(v.shifted()));
+  end
+endmodule
+"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("defaults.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap_or_else(|error| panic!("{error}"));
+        sim.run_until(10).unwrap();
+        assert_eq!(
+            displays(&mut sim),
+            ["class 200 101", "module 14 8 bits 12"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// Through a modport, only the subroutines it imports may be called
+/// (25.7); a DPI import of an interface is not called through a virtual
+/// interface (an interface that declares one is rejected).
+#[test]
+fn calls_through_virtual_interfaces_that_are_rejected() {
+    for (dpi, body, expected) in [
+        (
+            "",
+            "virtual regs.reader m; initial begin m = i; $display(\"%0d\", m.hidden()); end",
+            &["whose modport does not import it"][..],
+        ),
+        (
+            "import \"DPI-C\" function int external();",
+            "virtual regs v; initial begin v = i; $display(\"%0d\", v.external()); end",
+            &[
+                "DPI import `external` of interface `regs` called through a virtual interface",
+                "nested declaration in interface `regs`",
+            ],
+        ),
+    ] {
+        let source = format!(
+            r#"interface regs;
+  logic [7:0] r = 8'd4;
+  function automatic logic [7:0] scaled(); return r * 2; endfunction
+  function automatic logic [7:0] hidden(); return r; endfunction
+  {dpi}
+  modport reader(import scaled);
+endinterface
+module top;
+  regs i();
+  {body}
+endmodule
+"#
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("rejected.sv"))],
+            "top",
+        )
+        .build()
+        .err()
+        .unwrap()
+        .to_string()
+        .split_whitespace()
+        .filter(|word| *word != "│")
+        .collect::<Vec<_>>()
+        .join(" ");
+        assert!(
+            expected.iter().any(|expected| error.contains(expected)),
+            "{body}: {error}"
+        );
+    }
+}
