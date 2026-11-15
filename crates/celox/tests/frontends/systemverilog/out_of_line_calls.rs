@@ -3082,6 +3082,73 @@ endmodule
 }
 
 #[test]
+fn forks_after_the_writes_of_an_array_go_out_of_line() {
+    // `fill` writes its array `items` only before the loop whose fork reads
+    // it, so each child, which starts in a copy of the frame (IEEE 1800-2023
+    // 9.3.2), reads what the parent does: the task goes out of line as
+    // uvm-1.2's mbus_pipelined_check_seq::body must, which is recursive
+    // through `uvm_sequence_base::start` and cannot be inlined. `refill`
+    // writes its array in the loop of its fork, so the children would have
+    // to share it: it stays inlined. Both pass an element of a class
+    // handle array to a task, as the UVM sequence does.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    class item;
+        int v;
+    endclass
+    int sum, pending;
+    task automatic check(item it, int i);
+        #1;
+        sum += it.v * 10 + i;
+        pending--;
+    endtask
+    task automatic fill();
+        item items[4];
+        for (int i = 0; i < 4; i++) begin
+            items[i] = new;
+            items[i].v = i + 1;
+        end
+        pending = 4;
+        for (int i = 0; i < 4; i++) begin
+            items[i].v = items[i].v * 2;
+            fork
+                check(items[i], i);
+            join_none
+            #2;
+        end
+        wait (pending == 0);
+    endtask
+    task automatic refill();
+        item items[2];
+        pending = 2;
+        for (int i = 0; i < 2; i++) begin
+            items[i] = new;
+            items[i].v = i + 5;
+            fork
+                check(items[i], i);
+            join_none
+            #2;
+        end
+        wait (pending == 0);
+    endtask
+    initial begin
+        fill();
+        a = sum;
+        b = pending;
+        refill();
+        c = sum;
+    end
+endmodule
+"#;
+    // `fill`, `check` and the constructor of `item`.
+    same_as_inlined(source, 3, 20, &["a", "b", "c"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 20, &["a", "b", "c"]),
+        Ok(vec![value(206), value(0), value(317)])
+    );
+}
+
+#[test]
 fn forks_in_a_loop_give_each_child_its_own_variable() {
     // Each execution of the fork's declaration makes a new `k`, which the
     // child started then keeps.
