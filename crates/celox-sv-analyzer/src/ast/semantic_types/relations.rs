@@ -79,7 +79,7 @@ impl TyTable {
             return None;
         };
         match decl {
-            Decl::AnonymousEnum(domain) => Some(domain),
+            Decl::AnonymousEnum { domain, .. } => domain.as_ref(),
             Decl::Named(decl) => self.decl(*decl).domain.as_ref(),
             _ => None,
         }

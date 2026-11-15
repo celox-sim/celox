@@ -119,9 +119,14 @@ pub(super) struct DeclData {
 pub(super) enum Decl {
     /// An enumeration declared by a typedef.
     Named(DeclId),
-    /// An enumeration whose declaration is not recorded, identified by its
-    /// members.
-    AnonymousEnum(Arc<super::enums::EnumDomain>),
+    /// An enumeration no typedef names: identified by its declaration, the
+    /// source position of the `enum` (IEEE 1800-2023 6.22.1 c), where the
+    /// type records it, else by its members. The members are `None` where
+    /// they are not resolved or the type is a packed array of it.
+    AnonymousEnum {
+        decl: Option<DeclId>,
+        domain: Option<Arc<super::enums::EnumDomain>>,
+    },
     /// A structure or union declaration, identified by its typedef or its
     /// source position together with the types of its members as its scope
     /// gives them (7.2, 7.3): each specialization of a parameterized scope

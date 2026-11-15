@@ -78,7 +78,10 @@ impl TyTable {
         match decl {
             Decl::Named(decl) | Decl::Aggregate { decl, .. } => self.decl(*decl).name.to_string(),
             Decl::Class(name) | Decl::Interface(name) => name.to_string(),
-            Decl::AnonymousEnum(domain) => format!(
+            Decl::AnonymousEnum {
+                domain: Some(domain),
+                ..
+            } => format!(
                 "{{{}}}",
                 domain
                     .members
@@ -87,6 +90,7 @@ impl TyTable {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            Decl::AnonymousEnum { domain: None, .. } => "enum".into(),
         }
     }
 }
