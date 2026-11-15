@@ -229,6 +229,9 @@ mod references;
 #[path = "frontends/systemverilog/virtual_interfaces.rs"]
 mod virtual_interfaces;
 
+#[path = "frontends/systemverilog/virtual_interface_calls.rs"]
+mod virtual_interface_calls;
+
 #[path = "frontends/systemverilog/wide_container_elements.rs"]
 mod wide_container_elements;
 

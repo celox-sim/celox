@@ -121,11 +121,11 @@ constructs without a dedicated issue point to the frontend roadmap,
   names, or escaped identifiers that are not simple identifiers; expansion
   reserves `$` for generated names.
 - Variable declaration initializers of members of an interface array.
-- Virtual interfaces <a id="virtual-interfaces"></a>: waiting through a virtual
-  interface held by an automatic variable, an argument, or a class
-  property; virtual interfaces of parameterized interfaces; interface
-  tasks, functions, clocking blocks, and nested interface instances reached
-  through a virtual interface; writes to nets through a virtual interface.
+- Virtual interfaces <a id="virtual-interfaces"></a>: a `wait` statement
+  through a virtual interface held by an automatic variable, an argument,
+  or a class property; virtual interfaces of parameterized interfaces;
+  clocking blocks and nested interface instances reached through a virtual
+  interface; writes to nets through a virtual interface.
 - An interface whose default lifetime (`interface automatic`) differs from
   that of the module it is used in.
 
@@ -587,6 +587,14 @@ Code that must stay portable should avoid relying on them.
   the command line, or `SimulatorBuilder::diagnostic_policy` in Rust), each such element takes the default time unit and precision
   instead, and `warn` reports one `mixed_timescale` warning naming each, as
   other simulators do.
+- **Interface subroutines called through a virtual interface are
+  automatic.** A task or function of an interface called through a virtual
+  interface (`vif.drive(req)`, 25.9) runs for the instance the handle
+  denotes, but its formals and variables belong to each call, also when
+  the subroutine is static or declares them `static`, where 13.3.2 gives a
+  static subroutine's to each instance. Calls through an interface instance
+  or port keep the static storage described under
+  [Interfaces](#interface-restrictions).
 - **`$psprintf` is `$sformatf`.** The vendor system function `$psprintf`,
   which many simulators and older UVM code use, is accepted as `$sformatf`
   (21.3.3); diagnostics name it `$sformatf`.

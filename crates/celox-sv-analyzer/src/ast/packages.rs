@@ -45,6 +45,9 @@ pub struct Packages {
     /// The virtual interfaces of the design, which the modules that use the
     /// packages are analyzed with.
     pub(crate) virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
+    /// The subroutines that call the tasks and functions of interfaces
+    /// through virtual interfaces (see [`Self::build_virtual_interface_calls`]).
+    pub(super) virtual_interface_calls: Arc<virtual_interface_calls::Subroutines>,
     /// The assertion control state of the design, when a source calls
     /// `$asserton` or `$assertoff` (IEEE 1800-2023 20.11): the state module
     /// of a package no source declares, whose variable every module shares.
@@ -229,6 +232,18 @@ impl Packages {
                     .map(|(_, error)| error)
                     .find(|error| !error.is_unsupported())
             })
+    }
+
+    /// Build the subroutines through which classes and modules call the
+    /// tasks and functions of the interfaces virtual interfaces name, with
+    /// the analyzed packages (IEEE 1800-2023 25.9); every scope analyzed
+    /// with the packages imports them.
+    pub(crate) fn build_virtual_interface_calls(&mut self) -> Result<(), AnalyzerError> {
+        if let Some(declarations) = self.virtual_interfaces.clone() {
+            self.virtual_interface_calls =
+                Arc::new(virtual_interface_calls::build(self, &declarations)?);
+        }
+        Ok(())
     }
 
     /// Analyze each interface of `trees` that no source instantiates or

@@ -568,7 +568,7 @@ fn binding_names(
     binding_names_with_prefix(module, symbols, handle, handle, imported)
 }
 
-fn binding_names_with_prefix(
+pub(super) fn binding_names_with_prefix(
     module: &Module,
     symbols: &scope::ScopeSymbols,
     handle: &str,

@@ -98,9 +98,9 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
   単純識別子でないエスケープ識別子も使えません。展開が `$` を生成名用に予約します。
 - interface 配列のメンバに対する変数宣言初期化子。
 - virtual interface <a id="virtual-interfaces"></a>: 自動変数・引数・クラスプロパティに保持した
-  virtual interface 越しの待ち。パラメータ付き interface の virtual interface。
-  virtual interface 越しに到達する interface の task・関数・clocking ブロック・
-  入れ子インスタンス。virtual interface 越しのネットへの書き込み。
+  virtual interface 越しの `wait` 文。パラメータ付き interface の virtual interface。
+  virtual interface 越しに到達する interface の clocking ブロック・入れ子インスタンス。
+  virtual interface 越しのネットへの書き込み。
 - 既定の寿命（`interface automatic`）が、使用先モジュールと異なる interface。
 
 ### program {#programs}
@@ -452,6 +452,13 @@ sequence 内のインスタンス、
   mixed_timescale=warn` や Rust の `SimulatorBuilder::diagnostic_policy` でも同じ）、
   そうした設計要素は既定の時間単位と精度を使います。`warn` では他のシミュレータと
   同様に、設計要素ごとにその名前を示す `mixed_timescale` 警告を出します。
+- **virtual interface 越しに呼ぶ interface のサブルーチンは automatic です。**
+  virtual interface 越しに呼んだ interface の task・関数（`vif.drive(req)`、25.9）は
+  ハンドルが指すインスタンスについて実行しますが、仮引数と変数は呼び出しごとに
+  持ちます。サブルーチンが static の場合や変数を `static` と宣言した場合も同じで、
+  13.3.2 は static なサブルーチンのものをインスタンスごとに持たせます。interface
+  インスタンスやポート経由の呼び出しは[interface](#interface-restrictions)に記した
+  static な記憶域を保ちます。
 - **`$psprintf` は `$sformatf` です。** 多くのシミュレータや古い UVM コードが使う
   ベンダー拡張のシステム関数 `$psprintf` を `$sformatf`（21.3.3）として受理します。
   診断では `$sformatf` と表示します。

@@ -1086,6 +1086,40 @@ pub(super) fn resolve_imports(
                 symbols.state_signals.push(signal);
             }
         }
+        // The subroutines that call interface tasks and functions through
+        // virtual interfaces, which a scope copies when it calls them.
+        for subroutine in &packages.virtual_interface_calls.subroutines {
+            if symbols
+                .subroutines
+                .iter()
+                .any(|known| known.name == subroutine.name)
+            {
+                continue;
+            }
+            symbols.subroutine_params.insert(
+                subroutine.name.clone(),
+                subroutine
+                    .params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect(),
+            );
+            if let Some(shapes) = packages
+                .virtual_interface_calls
+                .shapes
+                .get(&subroutine.name)
+            {
+                symbols
+                    .subroutine_shapes
+                    .insert(subroutine.name.clone(), shapes.clone());
+            }
+            symbols.subroutines.push(subroutine.clone());
+        }
+        for local in &packages.virtual_interface_calls.locals {
+            if !symbols.locals.iter().any(|known| known.name == local.name) {
+                symbols.locals.push(local.clone());
+            }
+        }
     }
     Ok(resolved)
 }

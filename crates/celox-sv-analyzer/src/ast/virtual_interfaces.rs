@@ -77,6 +77,9 @@ pub struct VirtualInterfaceDeclaration {
     pub modports: HashMap<String, Vec<(String, String)>>,
     /// The interface has parameters, whose values are part of the type.
     pub parameterized: bool,
+    /// The names of the formals of each task and function the interface
+    /// declares, which a virtual interface calls (25.9).
+    pub subroutines: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,8 +179,16 @@ impl VirtualInterfaces {
                     members,
                     modports,
                     parameterized: !prototype.parameters.is_empty(),
+                    subroutines: HashMap::default(),
                 },
             );
+        }
+        for source in parsed {
+            for (interface, subroutine, formals) in source.interface_subroutine_formals(&names) {
+                if let Some(declaration) = declarations.interfaces.get_mut(&interface) {
+                    declaration.subroutines.insert(subroutine, formals);
+                }
+            }
         }
         Ok(Some(Arc::new(declarations)))
     }
@@ -554,6 +565,38 @@ pub(super) fn rename(expr: Expr, from: &str, to: &str) -> Expr {
         Expr::Ident(name) if name == from => Expr::Ident(to.to_owned()),
         expr => map_children(expr, &mut |child| rename(child, from, to)),
     }
+}
+
+/// The name of the subroutine that runs task or function `subroutine` of
+/// interface `interface` for the instance a virtual interface denotes,
+/// which it takes as its first argument.
+pub(crate) fn subroutine_name(interface: &str, subroutine: &str) -> String {
+    format!("{interface}$vif${subroutine}")
+}
+
+/// The subroutine that calls task or function `name` of the interface that
+/// virtual interface `handle` denotes (IEEE 1800-2023 25.9), with the names
+/// of its formals after the handle; `None` if `handle` is no virtual
+/// interface or its interface declares no such subroutine.
+pub(super) fn method(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    handle: celox_sv_syntax::ExprId,
+    name: &str,
+    native: &celox_sv_syntax::Declarations,
+    dimensions: &PackedDimensions,
+) -> Option<(String, Vec<Option<String>>)> {
+    let ty = native_type(tree, session, handle, native, dimensions)?;
+    let formals = declarations(session)?
+        .interfaces
+        .get(&ty.interface)?
+        .subroutines
+        .get(name)?
+        .iter()
+        .cloned()
+        .map(Some)
+        .collect();
+    Some((subroutine_name(&ty.interface, name), formals))
 }
 
 /// The virtual interface type of native expression `id`: a variable, a
