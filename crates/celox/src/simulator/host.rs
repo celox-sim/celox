@@ -24,7 +24,12 @@ mod waveform;
 use super::*;
 pub(crate) use monitor::MonitorState;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: the runtime-event read sequence and flags shared between the simulation thread and a RuntimeEventDrain handle on another thread"
+)]
+use std::sync::atomic::{AtomicBool, AtomicU64};
 pub(crate) use strobe::StrobeCall;
 
 use crate::backend::RuntimeEventBuffer;
@@ -72,6 +77,10 @@ pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     pub(super) file_io: celox_runtime::file_io::FileIo,
     /// What native process code asks of its host.
     pub(crate) native: NativeHost,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the simulation thread stashes runtime events here and a RuntimeEventDrain handle on another thread drains them"
+    )]
     pending_host_events: Arc<std::sync::Mutex<PendingRuntimeEvents>>,
     pub(crate) program: RuntimeProgram,
     /// The program's scheduling facts.
@@ -103,8 +112,16 @@ pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     /// Some report site reads the time it issues its report at.
     pub(crate) timestamped_reports: bool,
     /// Identity of the state layout, computed on first checkpoint use.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: a cached state-layout fingerprint filled on first checkpoint use behind &self"
+    )]
     pub(super) checkpoint_fingerprint: std::sync::OnceLock<u64>,
     /// State objects as state files name them, built on first use.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: a cached state-file schema filled on first use behind &self"
+    )]
     pub(super) state_schema: std::sync::OnceLock<Arc<state_file::StateSchema>>,
     pub(crate) diagnostics: crate::RuntimeDiagnostics,
     pub(crate) plusargs: celox_runtime::plusargs::Plusargs,
@@ -214,6 +231,10 @@ impl<B: SimBackend> Simulator<B> {
         let runtime_events = RuntimeEventStream::new(sites);
         let native = NativeHost::new(&backend, &program);
         let observation = SlotObservation::new(&program.runtime_schema);
+        #[expect(
+            clippy::disallowed_types,
+            reason = "cross-thread: creates the pending-event queue shared with a RuntimeEventDrain thread, and the single-threaded lazily filled caches"
+        )]
         let mut sim = Self {
             backend,
             program,

@@ -8,6 +8,10 @@ mod settles;
 use super::*;
 
 /// The combinational slicer of a plan, built when a phase first needs it.
+#[expect(
+    clippy::disallowed_types,
+    reason = "single-threaded: the combinational slicer a plan builds on first use, borrowed only by the phases of one Plan::new call"
+)]
 type Slicer<'a, F> = std::cell::LazyCell<CombSlicer<'a>, F>;
 
 /// The state [`Plan::new`] builds a plan in: the design, and what the phases
@@ -270,6 +274,10 @@ impl Plan {
         // All dependency and settle slices inspect the same immutable units.
         // Index their definitions and control dependencies only once per plan,
         // and only if one of these consumers actually needs a slice.
+        #[expect(
+            clippy::disallowed_types,
+            reason = "single-threaded: the combinational slicer is built on first use by the phases of this one Plan::new call"
+        )]
         let comb_slicer =
             std::cell::LazyCell::new(|| CombSlicer::new(&sir.eval_comb, shared.clone()));
         let mut builder = PlanBuilder {

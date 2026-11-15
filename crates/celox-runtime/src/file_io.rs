@@ -6,7 +6,12 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[expect(
+    clippy::disallowed_types,
+    reason = "single-threaded: shares one simulation's file system backend between its descriptor manager and open file handles, all used on that simulation's thread; Mutex only keeps FileIo Send"
+)]
+use std::sync::Mutex;
 
 use celox_testbench::{DisplayFormatArg, FieldSpec, format_sv_display_arg};
 
@@ -14,6 +19,10 @@ const FD_FLAG: u32 = 0x8000_0000;
 
 #[derive(Debug)]
 pub struct FileIo {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: shares one simulation's file system backend between its descriptor manager and open file handles, all used on that simulation's thread; Mutex only keeps FileIo Send"
+    )]
     backend: Arc<Mutex<Box<dyn FileSystem>>>,
     channels: BTreeMap<u32, BackendFile>,
     descriptors: BTreeMap<u32, InputFile>,
@@ -58,6 +67,10 @@ impl Default for FileIo {
 }
 
 impl FileIo {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: shares one simulation's file system backend between its descriptor manager and open file handles, all used on that simulation's thread; Mutex only keeps FileIo Send"
+    )]
     pub fn new(backend: Box<dyn FileSystem>) -> Self {
         Self {
             backend: Arc::new(Mutex::new(backend)),
@@ -659,6 +672,10 @@ pub struct FileIoSnapshot {
 struct BackendFile {
     id: u64,
     closed: bool,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: shares one simulation's file system backend between its descriptor manager and open file handles, all used on that simulation's thread; Mutex only keeps FileIo Send"
+    )]
     backend: Arc<Mutex<Box<dyn FileSystem>>>,
 }
 impl BackendFile {
@@ -697,7 +714,13 @@ impl Drop for BackendFile {
             .close(self.id);
     }
 }
-struct BackendStdin<'a>(&'a Arc<Mutex<Box<dyn FileSystem>>>);
+struct BackendStdin<'a>(
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: shares one simulation's file system backend between its descriptor manager and open file handles, all used on that simulation's thread; Mutex only keeps FileIo Send"
+    )]
+    &'a Arc<Mutex<Box<dyn FileSystem>>>,
+);
 impl Read for BackendStdin<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         self.0.lock().unwrap().read_stdin(buffer)

@@ -9,15 +9,28 @@
 //! so the caller keeps whatever partial results it already collected.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: the simulation thread cancels it and the background compile worker threads (celox-jit-compile, celox-jit-hotspot) poll it between compile units"
+)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 /// Shared cancellation flag for a compilation pipeline.
 #[derive(Clone)]
 pub(crate) struct CompileCancel {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the simulation thread cancels it and the background compile worker threads (celox-jit-compile, celox-jit-hotspot) poll it between compile units"
+    )]
     flag: Arc<AtomicBool>,
 }
 
 impl CompileCancel {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the simulation thread cancels it and the background compile worker threads (celox-jit-compile, celox-jit-hotspot) poll it between compile units"
+    )]
     pub(crate) fn new() -> Self {
         Self {
             flag: Arc::new(AtomicBool::new(false)),

@@ -1,4 +1,8 @@
 #![cfg(feature = "host-runtime")]
+#![allow(
+    clippy::disallowed_types,
+    reason = "test-only: injected components are Send and record through shared logs"
+)]
 
 use std::sync::{Arc, Mutex};
 
