@@ -168,6 +168,7 @@ pub(super) fn enter_call(
                 .ok_or_else(|| unsupported("scope randomize variable"))?;
             if !shape.unpacked.is_empty()
                 || !shape.randomizable
+                || shape.enumeration_in(&session.types).unresolved()
                 || shape.real
                 || shape.string
                 || objects::shape_class(shape, tree, session, dimensions).is_some()
@@ -176,7 +177,7 @@ pub(super) fn enter_call(
                     "scope randomize requires a packed variable with a supported enum domain",
                 ));
             }
-            domains.push(shape.enum_domain.clone());
+            domains.push(shape.enumeration_in(&session.types).domain);
             if !expressions::query_actual_is_writable(&Expr::Ident(name), dimensions) {
                 return Err(unsupported("scope randomize argument is not writable"));
             }

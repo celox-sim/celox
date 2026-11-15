@@ -267,7 +267,12 @@ impl BodyBuilder<'_, '_, '_> {
             let receiver = (op == StringOp::Putc).then(|| {
                 expression_binding::string_call(
                     StringOp::FromHandle,
-                    vec![expr_from_lvalue(self.tree, &written, &self.dims)],
+                    vec![expr_from_lvalue(
+                        self.tree,
+                        &self.session.types,
+                        &written,
+                        &self.dims,
+                    )],
                 )
             });
             let rhs =

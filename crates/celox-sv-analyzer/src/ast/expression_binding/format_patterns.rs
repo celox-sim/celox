@@ -197,7 +197,7 @@ pub(in crate::ast) fn pattern(
         return Ok(Pattern::Handle(Some(container.layout)));
     }
     if objects::native_class(tree, session, id, native, dimensions).is_some()
-        || handle_value(value, dimensions)
+        || handle_value(value, &session.types, dimensions)
         || matches!(expression, ExprKind::Call { expression, .. }
             if direct::call_name(tree, *expression, native)
                 .is_some_and(|name| returns_handle(&name, dimensions)))
@@ -793,16 +793,22 @@ impl Text {
 /// Whether bound `value` is a class handle: a handle variable or property,
 /// an element of a container of handles, a call of a function that returns
 /// one, or a conditional with such an operand.
-fn handle_value(value: &Expr, dimensions: &PackedDimensions) -> bool {
+fn handle_value(
+    value: &Expr,
+    table: &semantic_types::TyTable,
+    dimensions: &PackedDimensions,
+) -> bool {
     match value {
         Expr::Ident(name) => dimensions
             .get(name)
-            .is_some_and(|shape| shape.class.is_some() && shape.unpacked.is_empty()),
+            .is_some_and(|shape| shape.class_in(table).is_some() && shape.unpacked.is_empty()),
         Expr::Mux {
             then_expr,
             else_expr,
             ..
-        } => handle_value(then_expr, dimensions) || handle_value(else_expr, dimensions),
+        } => {
+            handle_value(then_expr, table, dimensions) || handle_value(else_expr, table, dimensions)
+        }
         Expr::Call {
             callee: Callee::Subroutine(name),
             ..

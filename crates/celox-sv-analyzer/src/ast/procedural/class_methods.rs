@@ -130,7 +130,7 @@ impl BodyBuilder<'_, '_, '_> {
             rhs: Expr::Ident(this.to_owned()),
             nonblocking: false,
         }];
-        body.extend(class.program_registration());
+        body.extend(class.program_registration(&self.session.types));
         if let Some(base) = &class.base {
             let base = classes::class(
                 self.tree,

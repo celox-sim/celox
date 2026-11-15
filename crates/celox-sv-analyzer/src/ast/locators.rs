@@ -674,6 +674,7 @@ pub(super) fn bind(
                 },
                 containers::element_read(
                     storage,
+                    &session.types,
                     containers::call(ContainerOp::Get, storage.layout, vec![receiver, position]),
                 ),
             )
@@ -697,7 +698,7 @@ pub(super) fn bind(
                     left: *left,
                     right: *right,
                 },
-                statements::expr_from_lvalue(tree, &lvalue, dims),
+                statements::expr_from_lvalue(tree, &session.types, &lvalue, dims),
             )
         }
     };
@@ -748,7 +749,11 @@ pub(super) fn index(
     }
     // The whole value of an element kept as a record.
     if let Some((container, handle)) = record_iterator(id, native, dims) {
-        return Ok(Some(containers::element_read(&container, handle)));
+        return Ok(Some(containers::element_read(
+            &container,
+            &session.types,
+            handle,
+        )));
     }
     let (member, arguments) = match &native.expression(id).kind {
         ExprKind::Call {

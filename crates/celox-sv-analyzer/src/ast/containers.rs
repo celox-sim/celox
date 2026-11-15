@@ -507,7 +507,7 @@ pub(super) fn native_type(
     }
     // A member of a variable of unpacked structure type, which is a leaf
     // variable of its own (see `unpacked_structs`).
-    if let Some(name) = unpacked_structs::native_member(id, native, dims)
+    if let Some(name) = unpacked_structs::native_member(id, native, &session.types, dims)
         && let Some(shape) = dims.get(&name)
     {
         return Ok(shape.container.clone());
@@ -971,7 +971,7 @@ pub(super) fn fixed_assignment(
                     target,
                     "fixed-size array class property",
                 )?;
-                return fixed_array_literal(root, tree, dims, target);
+                return fixed_array_literal(root, tree, &session.types, dims, target);
             }
             Some(_) => {
                 return Err(unsupported(
@@ -989,6 +989,7 @@ pub(super) fn fixed_assignment(
 fn fixed_array_literal(
     id: ExprId,
     tree: &AnalysisContext<'_>,
+    table: &semantic_types::TyTable,
     dims: &PackedDimensions,
     target: &ContainerType,
 ) -> Converted<Expr> {
@@ -1028,7 +1029,7 @@ fn fixed_array_literal(
             vec![ConstExpr::Literal(index.to_string())],
             dims,
         )?;
-        values.push(statements::expr_from_lvalue(tree, &lvalue, dims));
+        values.push(statements::expr_from_lvalue(tree, table, &lvalue, dims));
     }
     Ok(call(ContainerOp::Literal, target.layout, values))
 }
@@ -1571,7 +1572,13 @@ pub(super) fn value(
                         ));
                     }
                     None => {
-                        other = Some(fixed_array_literal(*right, tree, dims, &target)?);
+                        other = Some(fixed_array_literal(
+                            *right,
+                            tree,
+                            &session.types,
+                            dims,
+                            &target,
+                        )?);
                         target.clone()
                     }
                 }
@@ -1670,31 +1677,23 @@ pub(super) fn value(
                 }
                 _ => return Err(unsupported("dynamic container slice")),
             };
-            Ok(Some(element_read(
-                &target,
-                call(
-                    ContainerOp::Get,
-                    target.layout,
-                    vec![
-                        expression_binding::value(*expression, native, tree, session, dims)?,
-                        match index {
-                            Some(index) => {
-                                index_value(index, *expression, tree, session, dims, &target)?
-                            }
-                            None => last_index(
-                                &target,
-                                expression_binding::value(
-                                    *expression,
-                                    native,
-                                    tree,
-                                    session,
-                                    dims,
-                                )?,
-                            )?,
-                        },
-                    ],
-                ),
-            )))
+            let get = call(
+                ContainerOp::Get,
+                target.layout,
+                vec![
+                    expression_binding::value(*expression, native, tree, session, dims)?,
+                    match index {
+                        Some(index) => {
+                            index_value(index, *expression, tree, session, dims, &target)?
+                        }
+                        None => last_index(
+                            &target,
+                            expression_binding::value(*expression, native, tree, session, dims)?,
+                        )?,
+                    },
+                ],
+            );
+            Ok(Some(element_read(&target, &session.types, get)))
         }
         ExprKind::Call { .. } | ExprKind::Member { .. } => {
             // No-argument built-in methods also permit the bare member form,
@@ -1905,7 +1904,7 @@ pub(super) fn value(
             let value = call(op, target.layout, args);
             Ok(Some(
                 if matches!(op, ContainerOp::PopFront | ContainerOp::PopBack) {
-                    element_read(&target, value)
+                    element_read(&target, &session.types, value)
                 } else {
                     value
                 },
@@ -2328,6 +2327,7 @@ fn compound_value(
     };
     let current = element_read(
         target,
+        &session.types,
         call(
             ContainerOp::Get,
             target.layout,
@@ -2668,10 +2668,14 @@ mod method_call_tests {
 
 /// An element that `get` reads, as a whole value: the flat structure value
 /// of a record element.
-pub(super) fn element_read(target: &ContainerType, get: Expr) -> Expr {
+pub(super) fn element_read(
+    target: &ContainerType,
+    table: &semantic_types::TyTable,
+    get: Expr,
+) -> Expr {
     match &target.record {
         // An integral element keeps its signedness.
-        Some(record) if target.element.unpacked_struct().is_none() => {
+        Some(record) if !target.element_is_unpacked_struct(table) => {
             classes::object_call(ObjectOp::Load(record.fields[0]), vec![get])
         }
         Some(record) => classes::object_call(ObjectOp::Unbox(record.clone()), vec![get]),

@@ -161,6 +161,12 @@ pub(in crate::ast) fn read(
             "tagged union member of a value read with a side effect",
         ));
     }
-    let read = statements::expr_from_selection(tree, value, &selection.lvalue, &selection.scope);
+    let read = statements::expr_from_selection(
+        tree,
+        &session.types,
+        value,
+        &selection.lvalue,
+        &selection.scope,
+    );
     packed_structs::checked_value(selection.guards, read, tree, &selection.scope)
 }
