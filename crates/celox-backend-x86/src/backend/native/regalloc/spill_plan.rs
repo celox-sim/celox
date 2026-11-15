@@ -442,11 +442,8 @@ fn plan_internal(
         s_entry: vec![LogicalSet::new(); func.blocks.len()],
         s_exit: vec![LogicalSet::new(); func.blocks.len()],
     };
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: local lazily built logical-value key list, created only when a block's spill sets are first frozen"
-    )]
-    let logical_keys = std::cell::OnceCell::<std::sync::Arc<[LogicalValue]>>::new();
+    // Built when a block's spill sets are first frozen.
+    let mut logical_keys: Option<std::sync::Arc<[LogicalValue]>> = None;
     for block in 0..func.blocks.len() {
         let entry = if let Some(region) = next_use.region_at_entry(block) {
             init_loop_region(func, next_use, &result, block, region, registers)?
@@ -559,8 +556,8 @@ fn plan_internal(
         result.w_exit[block] = transition.w_exit;
         result.s_exit[block] = transition.s_exit;
         if result.s_entry[block].len() >= 64 || result.s_exit[block].len() >= 64 {
-            let logical_keys =
-                logical_keys.get_or_init(|| (0..result.logical.count).map(LogicalValue).collect());
+            let logical_keys = logical_keys
+                .get_or_insert_with(|| (0..result.logical.count).map(LogicalValue).collect());
             let same_spilled = result.s_entry[block] == result.s_exit[block];
             result.s_entry[block].freeze(logical_keys);
             if same_spilled && matches!(result.s_entry[block], LogicalSet::Frozen(_)) {
