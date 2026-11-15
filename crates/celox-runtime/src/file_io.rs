@@ -6,12 +6,6 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::Arc;
-#[expect(
-    clippy::disallowed_types,
-    reason = "single-threaded: shares one simulation's file system backend between its descriptor manager and open file handles, all used on that simulation's thread; Mutex only keeps FileIo Send"
-)]
-use std::sync::Mutex;
 
 use celox_testbench::{DisplayFormatArg, FieldSpec, format_sv_display_arg};
 
@@ -19,12 +13,9 @@ const FD_FLAG: u32 = 0x8000_0000;
 
 #[derive(Debug)]
 pub struct FileIo {
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: shares one simulation's file system backend between its descriptor manager and open file handles, all used on that simulation's thread; Mutex only keeps FileIo Send"
-    )]
-    backend: Arc<Mutex<Box<dyn FileSystem>>>,
-    channels: BTreeMap<u32, BackendFile>,
+    backend: Box<dyn FileSystem>,
+    /// The backend handles of the open MCD channels.
+    channels: BTreeMap<u32, u64>,
     descriptors: BTreeMap<u32, InputFile>,
     stdin_input: InputState,
     stdin_open: bool,
@@ -55,9 +46,24 @@ struct InputState {
 
 #[derive(Debug)]
 struct InputFile {
-    file: BackendFile,
+    /// The backend handle of the file.
+    id: u64,
     readable: bool,
     input: InputState,
+}
+
+/// A dropped manager closes the files it still has open, ignoring errors.
+impl Drop for FileIo {
+    fn drop(&mut self) {
+        let open = self
+            .channels
+            .values()
+            .copied()
+            .chain(self.descriptors.values().map(|file| file.id));
+        for id in open {
+            let _ = self.backend.close(id);
+        }
+    }
 }
 
 impl Default for FileIo {
@@ -67,13 +73,9 @@ impl Default for FileIo {
 }
 
 impl FileIo {
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: shares one simulation's file system backend between its descriptor manager and open file handles, all used on that simulation's thread; Mutex only keeps FileIo Send"
-    )]
     pub fn new(backend: Box<dyn FileSystem>) -> Self {
         Self {
-            backend: Arc::new(Mutex::new(backend)),
+            backend,
             channels: BTreeMap::new(),
             descriptors: BTreeMap::new(),
             stdin_input: InputState::default(),
@@ -87,7 +89,7 @@ impl FileIo {
     /// Capture Celox's bookkeeping and the backend's opaque state. Unsupported
     /// backend capture is retained as a restore error, allowing inspection.
     pub fn snapshot(&self) -> FileIoSnapshot {
-        let backend = self.backend.lock().unwrap();
+        let backend = &self.backend;
         let state = backend
             .snapshot()
             .and_then(|bytes| {
@@ -101,15 +103,11 @@ impl FileIo {
             .map_err(|error| error.to_string());
         FileIoSnapshot {
             state,
-            channels: self
-                .channels
-                .iter()
-                .map(|(&key, file)| (key, file.id))
-                .collect(),
+            channels: self.channels.iter().map(|(&key, &id)| (key, id)).collect(),
             descriptors: self
                 .descriptors
                 .iter()
-                .map(|(&key, file)| (key, file.file.id, file.readable, file.input.clone()))
+                .map(|(&key, file)| (key, file.id, file.readable, file.input.clone()))
                 .collect(),
             stdin_input: self.stdin_input.clone(),
             standard_open: [self.stdin_open, self.stdout_open, self.stderr_open],
@@ -135,7 +133,7 @@ impl FileIo {
             .state
             .as_ref()
             .map_err(|error| io::Error::other(error.clone()))?;
-        let backend = self.backend.lock().unwrap();
+        let backend = &self.backend;
         if backend.snapshot_format() != format {
             return Err(io::Error::other(
                 "file I/O snapshot backend format mismatch",
@@ -149,24 +147,13 @@ impl FileIo {
         }
         let mut manager = Self::new(restored);
         for &(key, id) in &snapshot.channels {
-            manager.channels.insert(
-                key,
-                BackendFile {
-                    id,
-                    closed: false,
-                    backend: manager.backend.clone(),
-                },
-            );
+            manager.channels.insert(key, id);
         }
         for (key, id, readable, input) in &snapshot.descriptors {
             manager.descriptors.insert(
                 *key,
                 InputFile {
-                    file: BackendFile {
-                        id: *id,
-                        closed: false,
-                        backend: manager.backend.clone(),
-                    },
+                    id: *id,
                     readable: *readable,
                     input: input.clone(),
                 },
@@ -215,29 +202,27 @@ impl FileIo {
             };
             key
         };
-        let id = self.backend.lock().unwrap().open(path, options)?;
-        let mut file = BackendFile {
-            id,
-            closed: false,
-            backend: self.backend.clone(),
-        };
+        let id = self.backend.open(path, options)?;
         if let Some(mode) = mode {
             // Table 21-6 places the initial position at EOF for append modes,
             // including the read position of update streams (a+).
-            if mode.starts_with('a') {
-                file.seek(SeekFrom::End(0))?;
+            if mode.starts_with('a')
+                && let Err(error) = self.file(id).seek(SeekFrom::End(0))
+            {
+                let _ = self.backend.close(id);
+                return Err(error);
             }
             self.descriptors.insert(
                 key,
                 InputFile {
-                    file,
+                    id,
                     readable: mode.starts_with('r') || mode.contains('+'),
                     input: InputState::default(),
                 },
             );
             Ok(key | FD_FLAG)
         } else {
-            self.channels.insert(key, file);
+            self.channels.insert(key, id);
             Ok(key)
         }
     }
@@ -270,7 +255,7 @@ impl FileIo {
             let Some(file) = self.descriptors.remove(&key) else {
                 return Err(invalid_descriptor());
             };
-            return file.file.close();
+            return self.backend.close(file.id);
         }
         let mut error = None;
         if descriptor & 1 != 0 && !std::mem::replace(&mut self.stdout_open, false) {
@@ -280,8 +265,8 @@ impl FileIo {
             let key = 1u32 << bit;
             if descriptor & key != 0 {
                 match self.channels.remove(&key) {
-                    Some(file) => {
-                        if let Err(err) = file.close() {
+                    Some(id) => {
+                        if let Err(err) = self.backend.close(id) {
                             error = Some(err);
                         }
                     }
@@ -311,15 +296,16 @@ impl FileIo {
                 )),
                 1 if self.stdout_open => Ok(true),
                 2 if self.stderr_open => {
-                    self.backend.lock().unwrap().write_stderr(bytes)?;
+                    self.backend.write_stderr(bytes)?;
                     Ok(false)
                 }
                 key => {
-                    self.descriptors
-                        .get_mut(&key)
+                    let id = self
+                        .descriptors
+                        .get(&key)
                         .ok_or_else(invalid_descriptor)?
-                        .file
-                        .write_all(bytes)?;
+                        .id;
+                    self.file(id).write_all(bytes)?;
                     Ok(false)
                 }
             };
@@ -330,9 +316,10 @@ impl FileIo {
             if descriptor & key != 0 {
                 let result = self
                     .channels
-                    .get_mut(&key)
+                    .get(&key)
+                    .copied()
                     .ok_or_else(invalid_descriptor)
-                    .and_then(|file| file.write_all(bytes));
+                    .and_then(|id| self.file(id).write_all(bytes));
                 if let Err(err) = result {
                     error = Some(err);
                 }
@@ -361,10 +348,13 @@ impl FileIo {
 
     fn read_byte_inner(&mut self, descriptor: u32) -> io::Result<Option<u8>> {
         if descriptor == FD_FLAG && self.stdin_open {
-            return read_input_byte(&mut BackendStdin(&self.backend), &mut self.stdin_input);
+            return read_input_byte(
+                &mut BackendStdin(self.backend.as_mut()),
+                &mut self.stdin_input,
+            );
         }
-        let file = self.readable_file(descriptor)?;
-        read_input_byte(&mut file.file, &mut file.input)
+        let (mut file, input) = self.readable_file(descriptor)?;
+        read_input_byte(&mut file, input)
     }
 
     /// Push back one character without changing the file. One byte is
@@ -379,7 +369,7 @@ impl FileIo {
         let input = if descriptor == FD_FLAG && self.stdin_open {
             &mut self.stdin_input
         } else {
-            &mut self.readable_file(descriptor)?.input
+            self.readable_file(descriptor)?.1
         };
         if input.pushed.is_some() {
             return Err(io::Error::new(
@@ -401,7 +391,7 @@ impl FileIo {
         if descriptor == FD_FLAG && self.stdin_open {
             return Ok(self.stdin_input.eof);
         }
-        Ok(self.readable_file(descriptor)?.input.eof)
+        Ok(self.readable_file(descriptor)?.1.eof)
     }
 
     /// Byte position of the next read/write, accounting for pushback.
@@ -410,10 +400,9 @@ impl FileIo {
     }
 
     fn tell_inner(&mut self, descriptor: u32) -> io::Result<u64> {
-        let file = self.positioned_file(descriptor)?;
-        file.file
-            .stream_position()?
-            .checked_sub(u64::from(file.input.pushed.is_some()))
+        let (mut file, input) = self.positioned_file(descriptor)?;
+        file.stream_position()?
+            .checked_sub(u64::from(input.pushed.is_some()))
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -431,16 +420,15 @@ impl FileIo {
     }
 
     fn seek_inner(&mut self, descriptor: u32, offset: i64, operation: i32) -> io::Result<()> {
-        let file = self.positioned_file(descriptor)?;
+        let (mut file, input) = self.positioned_file(descriptor)?;
         let position = match operation {
             0 => SeekFrom::Start(u64::try_from(offset).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidInput, "negative file position")
             })?),
             1 => {
                 let current = file
-                    .file
                     .stream_position()?
-                    .checked_sub(u64::from(file.input.pushed.is_some()))
+                    .checked_sub(u64::from(input.pushed.is_some()))
                     .ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -460,8 +448,8 @@ impl FileIo {
                 ));
             }
         };
-        file.file.seek(position)?;
-        file.input = InputState::default();
+        file.seek(position)?;
+        *input = InputState::default();
         Ok(())
     }
 
@@ -501,9 +489,9 @@ impl FileIo {
             if descriptor & FD_FLAG != 0 {
                 return match descriptor & !FD_FLAG {
                     0 if self.stdin_open => Ok(()),
-                    1 if self.stdout_open => self.backend.lock().unwrap().flush_stdout(),
-                    2 if self.stderr_open => self.backend.lock().unwrap().flush_stderr(),
-                    _ => self.positioned_file(descriptor)?.file.flush(),
+                    1 if self.stdout_open => self.backend.flush_stdout(),
+                    2 if self.stderr_open => self.backend.flush_stderr(),
+                    _ => self.positioned_file(descriptor)?.0.flush(),
                 };
             }
         }
@@ -515,27 +503,33 @@ impl FileIo {
         };
         if descriptor.is_none() || descriptor.is_some_and(|bits| bits & 1 != 0) {
             if self.stdout_open {
-                attempt(self.backend.lock().unwrap().flush_stdout());
+                attempt(self.backend.flush_stdout());
             } else if descriptor.is_some() {
                 attempt(Err(invalid_descriptor()));
             }
         }
         if descriptor.is_none() && self.stderr_open {
-            attempt(self.backend.lock().unwrap().flush_stderr());
+            attempt(self.backend.flush_stderr());
         }
         for bit in 1..31 {
             let key = 1u32 << bit;
             if descriptor.is_none() || descriptor.is_some_and(|bits| bits & key != 0) {
-                match self.channels.get_mut(&key) {
-                    Some(file) => attempt(file.flush()),
+                match self.channels.get(&key).copied() {
+                    Some(id) => attempt(self.file(id).flush()),
                     None if descriptor.is_some() => attempt(Err(invalid_descriptor())),
                     None => {}
                 }
             }
         }
         if descriptor.is_none() {
-            for file in self.descriptors.values_mut() {
-                attempt(file.file.flush());
+            for file in self.descriptors.values() {
+                attempt(
+                    BackendFile {
+                        backend: self.backend.as_mut(),
+                        id: file.id,
+                    }
+                    .flush(),
+                );
             }
         }
         error.map_or(Ok(()), Err)
@@ -586,24 +580,49 @@ impl FileIo {
         }
     }
 
-    fn positioned_file(&mut self, descriptor: u32) -> io::Result<&mut InputFile> {
+    /// Open file `id` of the backend.
+    fn file(&mut self, id: u64) -> BackendFile<'_> {
+        BackendFile {
+            backend: self.backend.as_mut(),
+            id,
+        }
+    }
+
+    /// The file of FD `descriptor` and its input state.
+    fn positioned_file(
+        &mut self,
+        descriptor: u32,
+    ) -> io::Result<(BackendFile<'_>, &mut InputState)> {
         if descriptor & FD_FLAG == 0 {
             return Err(invalid_descriptor());
         }
-        self.descriptors
+        let file = self
+            .descriptors
             .get_mut(&(descriptor & !FD_FLAG))
-            .ok_or_else(invalid_descriptor)
+            .ok_or_else(invalid_descriptor)?;
+        Ok((
+            BackendFile {
+                backend: self.backend.as_mut(),
+                id: file.id,
+            },
+            &mut file.input,
+        ))
     }
 
-    fn readable_file(&mut self, descriptor: u32) -> io::Result<&mut InputFile> {
-        let file = self.positioned_file(descriptor)?;
-        if !file.readable {
+    /// [`Self::positioned_file`] for an FD open for reading.
+    fn readable_file(&mut self, descriptor: u32) -> io::Result<(BackendFile<'_>, &mut InputState)> {
+        if self
+            .descriptors
+            .get(&(descriptor & !FD_FLAG))
+            .is_some_and(|file| !file.readable)
+            && descriptor & FD_FLAG != 0
+        {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "file is not open for reading",
             ));
         }
-        Ok(file)
+        self.positioned_file(descriptor)
     }
 
     /// Write memory through the injected backend, including its snapshot policy.
@@ -615,16 +634,10 @@ impl FileIo {
     ) -> io::Result<()> {
         let id = self
             .backend
-            .lock()
-            .unwrap()
             .open(path.as_ref(), FileMode::parse("w").unwrap())?;
-        let mut file = BackendFile {
-            id,
-            closed: false,
-            backend: self.backend.clone(),
-        };
-        write_memory_words(&mut file, binary, words)?;
-        file.close()
+        let written = write_memory_words(&mut self.file(id), binary, words);
+        let closed = self.backend.close(id);
+        written.and(closed)
     }
 
     /// Write a static unpacked memory snapshot, without address specifiers
@@ -668,62 +681,34 @@ pub struct FileIoSnapshot {
     errors: BTreeMap<u32, FileError>,
 }
 
-#[derive(Debug)]
-struct BackendFile {
+/// An open file of a backend, for one operation of the manager that owns
+/// both.
+struct BackendFile<'a> {
+    backend: &'a mut dyn FileSystem,
     id: u64,
-    closed: bool,
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: shares one simulation's file system backend between its descriptor manager and open file handles, all used on that simulation's thread; Mutex only keeps FileIo Send"
-    )]
-    backend: Arc<Mutex<Box<dyn FileSystem>>>,
 }
-impl BackendFile {
-    fn close(mut self) -> io::Result<()> {
-        self.closed = true;
-        self.backend.lock().unwrap().close(self.id)
-    }
-}
-impl Read for BackendFile {
+impl Read for BackendFile<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.backend.lock().unwrap().read(self.id, buffer)
+        self.backend.read(self.id, buffer)
     }
 }
-impl Write for BackendFile {
+impl Write for BackendFile<'_> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.backend.lock().unwrap().write(self.id, buffer)
+        self.backend.write(self.id, buffer)
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.backend.lock().unwrap().flush(self.id)
+        self.backend.flush(self.id)
     }
 }
-impl Seek for BackendFile {
+impl Seek for BackendFile<'_> {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
-        self.backend.lock().unwrap().seek(self.id, position)
+        self.backend.seek(self.id, position)
     }
 }
-impl Drop for BackendFile {
-    fn drop(&mut self) {
-        if self.closed {
-            return;
-        }
-        let _ = self
-            .backend
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .close(self.id);
-    }
-}
-struct BackendStdin<'a>(
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: shares one simulation's file system backend between its descriptor manager and open file handles, all used on that simulation's thread; Mutex only keeps FileIo Send"
-    )]
-    &'a Arc<Mutex<Box<dyn FileSystem>>>,
-);
+struct BackendStdin<'a>(&'a mut dyn FileSystem);
 impl Read for BackendStdin<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().read_stdin(buffer)
+        self.0.read_stdin(buffer)
     }
 }
 
