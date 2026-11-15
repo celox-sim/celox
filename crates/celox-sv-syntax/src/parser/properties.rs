@@ -46,6 +46,12 @@ const TEMPORAL: &[&str] = &[
     "var",
 ];
 
+/// The sequence operators `or`, `and`, `intersect` and `throughout`
+/// (16.9.5 to 16.9.7, 16.9.9), and the clocking event of a subsequence
+/// (16.13): with a cycle delay, the words that make a sequence of what would
+/// otherwise be a Boolean expression.
+const SEQUENCE_WORDS: &[&str] = &["or", "and", "intersect", "throughout", "@"];
+
 /// The most Boolean operands of one property specification.
 const MAX_SEQUENCE_OPERANDS: usize = 1024;
 
@@ -101,10 +107,7 @@ impl Parser<'_> {
                     || (self.nth(offset + 1) == "["
                         && self.nth(offset + 2).starts_with(|c: char| c.is_ascii_digit()))))
             && word != "|=>"
-            // The sequence operators `or`, `and`, `intersect` and
-            // `throughout` (16.9.5 to 16.9.7, 16.9.9), and the clocking
-            // event of a subsequence (16.13).
-            && !matches!(word, "or" | "and" | "intersect" | "throughout" | "@")
+            && !SEQUENCE_WORDS.contains(&word)
     }
 
     /// `[clocking_event] [disable iff (expression)] sequence [|-> sequence]`
@@ -391,8 +394,11 @@ impl Parser<'_> {
                     }
                 }
                 // At any depth: a Boolean expression has no sequence
-                // operator, also in its own parentheses, as `((a or b))`.
-                "##" | "or" | "and" | "intersect" | "throughout" if depth >= 1 => return true,
+                // operator or clocking event, also in its own parentheses,
+                // as `((a or b))` or `(@(posedge c) b)`.
+                word if depth >= 1 && (word == "##" || SEQUENCE_WORDS.contains(&word)) => {
+                    return true;
+                }
                 _ => {}
             }
             offset += 1;

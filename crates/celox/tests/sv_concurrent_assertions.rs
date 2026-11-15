@@ -726,13 +726,15 @@ endmodule"#;
     // ca and cb rise together, at 5, 15, ..., 95, when cnt is sampled 0 to
     // 9. With `##0` an attempt of an even cnt checks the second subsequence
     // at its own tick and passes; with `##1` at the next one, of an odd cnt,
-    // and fails.
+    // and fails. A clocked subsequence in parentheses of its own is the
+    // same sequence, and `$sampled` is the sampled value it reads anyway.
     let source = r#"`timescale 1ns/1ns
 module Top;
  bit ca, cb;
- int cnt, z_passed, z_failed, o_passed, o_failed;
+ int cnt, z_passed, z_failed, o_passed, o_failed, g_passed, g_failed;
  always @(posedge ca) cnt <= cnt + 1;
  assert property (@(posedge ca) cnt % 2 == 0 ##0 @(posedge cb) cnt % 2 == 0) z_passed++; else z_failed++;
+ assert property (@(posedge ca) cnt % 2 == 0 ##0 (@(posedge cb) $sampled(cnt) % 2 == 0)) g_passed++; else g_failed++;
  assert property (@(posedge ca) cnt % 2 == 0 ##1 @(posedge cb) cnt % 2 == 0) o_passed++; else o_failed++;
  initial forever begin #5 ca = 1; cb = 1; #5 ca = 0; cb = 0; end
 endmodule"#;
@@ -744,6 +746,8 @@ endmodule"#;
     for (name, expected) in [
         ("z_passed", 5u32),
         ("z_failed", 5),
+        ("g_passed", 5),
+        ("g_failed", 5),
         ("o_passed", 0),
         // The attempt of cnt 8 checks cnt 9 at 95; that of 9 fails at once.
         ("o_failed", 10),

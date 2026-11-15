@@ -3795,6 +3795,17 @@ fn sequences_keep_their_operators() {
         shown("module M; assert property (@(posedge c0) a ##1 @(posedge c0) b); endmodule"),
         "(a ##[1:1] b)"
     );
+    // A clocked subsequence in parentheses of its own is a sequence too.
+    assert_eq!(
+        shown("module M; assert property (@(posedge c0) a ##1 (@(posedge c1) b)); endmodule"),
+        "(a ##[1:1] (@(posedge c1) b))"
+    );
+    assert_eq!(
+        shown(
+            "module M; assert property (@(posedge c0) a ##1 ((@(posedge c1) b ##1 c))); endmodule"
+        ),
+        "(a ##[1:1] (@(posedge c1) (b ##[1:1] c)))"
+    );
     // A named sequence in a sequence is its body, clocked as the assertion
     // or leading it with its clock (16.8, 16.16.1).
     assert_eq!(
