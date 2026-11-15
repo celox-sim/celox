@@ -449,7 +449,7 @@ impl Packages {
         if let Some(roots) = roots {
             timescales.select_roots(roots);
         }
-        let mixed_timescales = timescales.has_mixed_timescales();
+        let defaulted_timescales = timescales.defaulted_elements();
         let timescales = Arc::new(timescales);
         let session = &mut Session {
             virtual_interfaces: options.virtual_interfaces.clone(),
@@ -464,11 +464,19 @@ impl Packages {
         {
             packages.assertion_control = Some(assertion_control::state());
         }
-        if mixed_timescales {
-            packages
-                .warnings
-                .push(super::warnings::AnalyzerWarning::MixedTimescale);
-        }
+        packages
+            .warnings
+            .extend(
+                defaulted_timescales
+                    .into_iter()
+                    .map(|(element, unit, precision)| {
+                        super::warnings::AnalyzerWarning::MixedTimescale {
+                            element,
+                            unit,
+                            precision,
+                        }
+                    }),
+            );
         let units: Vec<_> = trees
             .iter()
             .map(|(tree, path)| (tree.compilation_scope(), *path))
