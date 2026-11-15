@@ -927,8 +927,23 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         id
     }
 
-    fn declare_as(&mut self, source: &str, r#type: Type, unique: String, owned: bool) -> String {
+    fn declare_as(
+        &mut self,
+        source: &str,
+        mut r#type: Type,
+        unique: String,
+        owned: bool,
+    ) -> String {
         *self.state.counter += 1;
+        // The local is declared in the scope the body binds in, which a
+        // type made for it, such as a hidden temporary's or a `foreach`
+        // index's, names (IEEE 1800-2023 6.18).
+        semantic_types::bind_declared(
+            &mut self.session.types,
+            &self.tree.functions,
+            &mut r#type,
+            &self.dims.const_env,
+        );
         self.bind_as(source, &r#type, &unique);
         self.state.locals.push(LocalVariable {
             name: unique.clone(),
