@@ -125,9 +125,8 @@ fn resolve(
         shape.type_id(&mut session.types, &tree.functions, &dims.const_env)
     };
     let class = |session: &mut Session, name: &str| {
-        session
-            .types
-            .intern(TyData::Class(Decl::Class(name.into())))
+        let decl = session.types.class(name);
+        session.types.intern(TyData::Class(decl))
     };
     let id = ungroup(id, native);
     // An iterator over a container whose elements are kept as records has
@@ -606,7 +605,7 @@ pub(super) fn cast_type(
 /// The class of a handle of type `id`.
 pub(super) fn class_name(table: &semantic_types::TyTable, id: TyId) -> Option<String> {
     match table.data(id) {
-        TyData::Class(Decl::Class(name)) => Some(name.to_string()),
+        TyData::Class(Decl::Class(decl)) => Some(table.decl(*decl).name.to_string()),
         _ => None,
     }
 }
@@ -703,6 +702,7 @@ fn member_of(
     else {
         return None;
     };
+    let interface = session.types.decl(interface).name.clone();
     let ty = session
         .virtual_interfaces
         .as_ref()?

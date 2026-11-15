@@ -51,8 +51,9 @@ pub struct VirtualInterface {
 impl VirtualInterface {
     /// The semantic type of a virtual interface of this type.
     pub(super) fn type_id(&self, table: &mut semantic_types::TyTable) -> semantic_types::TyId {
+        let interface = table.interface(&self.interface);
         table.intern(semantic_types::TyData::VirtualInterface {
-            interface: semantic_types::Decl::Interface(self.interface.as_str().into()),
+            interface,
             modport: self.modport.as_deref().map(Into::into),
         })
     }
@@ -713,7 +714,7 @@ pub(super) fn of_type(
         return None;
     };
     Some(Arc::new(VirtualInterface {
-        interface: interface.to_string(),
+        interface: types.decl(*interface).name.to_string(),
         modport: modport.as_deref().map(str::to_owned),
     }))
 }
