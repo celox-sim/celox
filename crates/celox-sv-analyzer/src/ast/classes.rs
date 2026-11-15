@@ -162,24 +162,33 @@ impl Property {
             && self.r#type.unpacked_ranges.is_empty()
     }
 
-    pub fn cyclic_domain_size(&self) -> Option<u16> {
+    /// The number of values of the cycle of a randc property: the members
+    /// of its enumeration, or every value of its width. Implementations
+    /// may limit the size of a randc variable to no less than 8 bits
+    /// (IEEE 1800-2023 18.4.2); Celox keeps cycles of up to 16 bits, as
+    /// UVM's `uvm_sequence_library::select_randc` (`bit [15:0]`) needs.
+    pub fn cyclic_domain_size(&self) -> Option<u32> {
         if self.field.handle.is_some() {
             return None;
         }
         if self.r#type.is_enum {
             self.r#type.enum_domain.as_ref().and_then(|domain| {
                 let values = &domain.members;
-                (1..=256)
+                (1..=MAX_CYCLE)
                     .contains(&values.len())
-                    .then_some(values.len() as u16)
+                    .then_some(values.len() as u32)
             })
         } else {
-            (1..=8)
+            (1..=16)
                 .contains(&self.field.width)
-                .then(|| 1u16 << self.field.width)
+                .then(|| 1u32 << self.field.width)
         }
     }
 }
+
+/// The most values the cycle of a randc property holds (see
+/// [`Property::cyclic_domain_size`]).
+const MAX_CYCLE: usize = 1 << 16;
 
 /// A property of unpacked structure type, or a member of one that is itself
 /// an unpacked structure. It is not laid out: its leaf members are
@@ -562,7 +571,7 @@ impl Class {
         for property in &self.properties {
             if property.randc && property.cyclic_domain_size().is_none() {
                 return Err(unsupported(
-                    "randc requires a 1-8 bit integer or an enum with at most 256 declared values",
+                    "randc requires a 1-16 bit integer or an enum with at most 65536 declared values",
                 ));
             }
             if (property.rand || property.randc) && property.field.four_state {

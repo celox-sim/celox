@@ -694,6 +694,7 @@ dependencies = [
  "fxhash",
  "imbl",
  "num-bigint",
+ "postcard",
  "regex",
  "serde",
  "serde_json",
