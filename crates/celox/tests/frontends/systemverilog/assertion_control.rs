@@ -361,3 +361,41 @@ sv_backends! {
         assert_eq!(display_lines(&mut sim), ["fail 3", "fail 5"]);
     }
 }
+
+/// An assertion that is off starts no attempt (IEEE 1800-2023 20.11), so the
+/// updates and `$cast`s of its expression do not run either; once assertions
+/// are on again they do.
+const OFF_EFFECTS: &str = r#"module top;
+  class B; endclass
+  class D extends B; endclass
+  initial begin
+    int n = 0;
+    B b;
+    D d;
+    D from = new;
+    $assertoff;
+    assert (n++ == 0);
+    assert ($cast(d, from));
+    $display("off %0d %0d", n, d == null);
+    $asserton;
+    assert (n++ == 0);
+    assert ($cast(d, from));
+    $display("on %0d %0d", n, d == null);
+  end
+endmodule"#;
+
+sv_backends! {
+    fn assertions_that_are_off_run_no_effects_of_their_expression(sim) {
+        @setup {}
+        @build celox::Simulation::from_sv_sources(vec![(OFF_EFFECTS, Path::new("off_effects.sv"))], "top");
+        sim.run_until(0).unwrap();
+        assert_eq!(display_lines(&mut sim), ["off 0 1", "on 1 0"]);
+    }
+    fn four_state_assertions_that_are_off_run_no_effects_of_their_expression(sim) {
+        @setup {}
+        @build celox::Simulation::from_sv_sources(vec![(OFF_EFFECTS, Path::new("off_effects.sv"))], "top")
+            .four_state(true);
+        sim.run_until(0).unwrap();
+        assert_eq!(display_lines(&mut sim), ["off 0 1", "on 1 0"]);
+    }
+}
