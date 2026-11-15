@@ -91,7 +91,7 @@ pub(super) fn ports_from_scope(
             // A port carries bits, not the heap handle of a container
             // member.
             if ty
-                .unpacked_struct()
+                .unpacked_struct_in(&session.types)
                 .is_some_and(|aggregate| aggregate.holds_container())
             {
                 return Err(unsupported(
@@ -99,14 +99,17 @@ pub(super) fn ports_from_scope(
                 ));
             }
             if ty
-                .unpacked_struct()
+                .unpacked_struct_in(&session.types)
                 .is_some_and(|aggregate| aggregate.has_array_members())
             {
                 return Err(unsupported("unpacked structure array members on a port"));
             }
-            if ty.unpacked_struct().is_some_and(|aggregate| {
-                aggregate.leaves().iter().any(|leaf| leaf.default.is_some())
-            }) {
+            if ty
+                .unpacked_struct_in(&session.types)
+                .is_some_and(|aggregate| {
+                    aggregate.leaves().iter().any(|leaf| leaf.default.is_some())
+                })
+            {
                 return Err(unsupported(
                     "unpacked structure member initial values on a port",
                 ));
@@ -570,7 +573,7 @@ pub(super) fn signals_from_body_item(
         // variables; they are not storage (see `unpacked_structs`).
         let leaves = signal
             .r#type
-            .unpacked_struct()
+            .unpacked_struct_in(&session.types)
             .expect("checked above")
             .leaves();
         for (name, r#type) in unpacked_structs::aggregates(&signal.name, &signal.r#type) {

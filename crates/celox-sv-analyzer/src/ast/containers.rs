@@ -295,7 +295,7 @@ pub(super) fn fixed_storage(
     // A container does not give its elements the initial values of their
     // members (see `unpacked_structs::record`).
     if element
-        .unpacked_struct()
+        .unpacked_struct_in(table)
         .is_some_and(|aggregate| aggregate.leaves().iter().any(|leaf| leaf.default.is_some()))
     {
         return Err(unsupported(
@@ -358,6 +358,19 @@ impl ContainerType {
             self.element_id(table),
             table,
             self.element.unpacked_struct.is_some(),
+        )
+    }
+
+    /// The declaration of the unpacked structure type of the container's
+    /// elements (7.2), from their semantic type.
+    pub(super) fn element_struct<'a>(
+        &'a self,
+        table: &'a semantic_types::TyTable,
+    ) -> Option<&'a Arc<unpacked_structs::UnpackedStruct>> {
+        unpacked_structs::declaration_of(
+            self.element_id(table),
+            table,
+            self.element.unpacked_struct.as_ref(),
         )
     }
 
@@ -2747,7 +2760,7 @@ pub(super) fn native_struct_element(
 ) -> Converted<Option<Arc<unpacked_structs::UnpackedStruct>>> {
     let id = expression_binding::ungroup(id, native);
     if let Some((target, _)) = locators::record_iterator(id, native, dims) {
-        return Ok(target.element.unpacked_struct().cloned());
+        return Ok(target.element_struct(&session.types).cloned());
     }
     let base = match &native.expression(id).kind {
         ExprKind::Select { expression, .. } => *expression,
@@ -2763,7 +2776,7 @@ pub(super) fn native_struct_element(
         _ => return Ok(None),
     };
     Ok(native_type(base, native, tree, session, dims)?
-        .and_then(|target| target.element.unpacked_struct().cloned()))
+        .and_then(|target| target.element_struct(&session.types).cloned()))
 }
 
 /// A member `e.m` (or `e.m.n`) of a container element `e` of unpacked
@@ -2800,8 +2813,7 @@ pub(super) fn element_member(
         return Ok(None);
     };
     let aggregate = target
-        .element
-        .unpacked_struct()
+        .element_struct(&session.types)
         .expect("a structure element")
         .clone();
     // A path into a packed structure member selects its bits; a path

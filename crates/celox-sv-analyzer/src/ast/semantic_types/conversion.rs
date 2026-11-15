@@ -130,7 +130,7 @@ fn convert(
         container: ty.container.as_deref(),
         class: ty.class.as_deref(),
         virtual_interface: ty.virtual_interface.as_deref(),
-        unpacked_struct: ty.unpacked_struct.as_deref(),
+        unpacked_struct: ty.unpacked_struct.as_ref(),
         kind: ty.kind,
         enumeration: ty.is_enum || ty.packed_enum,
         packed_enum: ty.packed_enum,
@@ -180,7 +180,7 @@ pub(in crate::ast) fn of_shape(
         container: shape.container.as_deref(),
         class: shape.class.as_deref(),
         virtual_interface: shape.virtual_interface.as_deref(),
-        unpacked_struct: shape.unpacked_struct.as_deref(),
+        unpacked_struct: shape.unpacked_struct.as_ref(),
         kind,
         enumeration: shape.enum_domain.is_some()
             || shape.packed_enum
@@ -212,7 +212,7 @@ struct Parts<'a> {
     container: Option<&'a ContainerType>,
     class: Option<&'a str>,
     virtual_interface: Option<&'a VirtualInterface>,
-    unpacked_struct: Option<&'a UnpackedStruct>,
+    unpacked_struct: Option<&'a Arc<UnpackedStruct>>,
     kind: TypeKind,
     /// An enumeration or a packed array of one.
     enumeration: bool,
@@ -249,6 +249,11 @@ impl Parts<'_> {
         };
         let element = self.element(table, functions, env, &range)?;
         let mut id = table.intern(element);
+        if let Some(aggregate) = self.unpacked_struct
+            && table.is_unpacked_struct(id)
+        {
+            table.record_struct(id, aggregate);
+        }
         for (left, right) in unpacked.rev() {
             id = table.intern(TyData::Array {
                 kind: ArrayKind::Fixed(range(left, right)?),

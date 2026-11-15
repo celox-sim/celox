@@ -328,7 +328,7 @@ pub(in crate::ast) fn aggregate_text(
     if let Some(container) = containers::native_type(id, native, tree, session, dimensions)? {
         let element = &container.element;
         let enumeration = container.element_enumeration(&session.types);
-        let element = if let Some(aggregate) = element.unpacked_struct() {
+        let element = if let Some(aggregate) = container.element_struct(&session.types) {
             Element::Structure(aggregate.clone())
         } else if let Some(domain) = &enumeration.domain
             && element.unpacked_ranges.is_empty()

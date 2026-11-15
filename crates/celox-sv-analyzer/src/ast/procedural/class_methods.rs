@@ -300,7 +300,7 @@ impl BodyBuilder<'_, '_, '_> {
             }) {
                 let structure = aggregate
                     .r#type
-                    .unpacked_struct()
+                    .unpacked_struct_in(&self.session.types)
                     .expect("an aggregate property");
                 for leaf in structure.leaves() {
                     let Some(value) = &leaf.default else { continue };

@@ -434,19 +434,31 @@ fn bind_in_mode(
                         }
                         let token = &native.tokens[data.tokens.start];
                         let span = token.origin.spelling;
-                        let owner = Arc::from(format!(
+                        let scope = types::declaring_scope(
+                            classes::enclosing_unit(native, data.tokens),
+                            native,
+                            data.tokens,
+                            session,
+                        );
+                        // The declaration, in the elaborated scope that
+                        // declares it: the identity its semantic type's
+                        // declaration has too, so that the instances and
+                        // class specializations that declare a type apart
+                        // also name it apart (IEEE 1800-2023 6.22, 8.25).
+                        let position = format!(
                             "{}:{}:{}:{}",
                             tree.syntax_tree.root_name().unwrap_or_default(),
                             native.sources.file(span.file).path.display(),
                             span.start,
                             data.tokens.start
-                        ));
+                        );
+                        let owner = Arc::from(match &scope {
+                            Some(scope) => format!("{scope}/{position}"),
+                            None => position,
+                        });
                         jobs.push(Job::Aggregate {
                             owner,
-                            scope: types::unit_scope(
-                                classes::enclosing_unit(native, data.tokens),
-                                session,
-                            ),
+                            scope,
                             union: *union,
                             soft: *soft,
                             tagged: *tagged,

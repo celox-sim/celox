@@ -546,7 +546,12 @@ fn enter_kind(
                 objects::aggregate_property(tree, session, id, native, dimensions)?
                     .expect("checked by the guard");
             let handle = objects::receiver(tree, session, receiver, native, dimensions)?;
-            values.push(objects::aggregate_load(&aggregate, &class, &handle)?);
+            values.push(objects::aggregate_load(
+                &aggregate,
+                &class,
+                &handle,
+                &session.types,
+            )?);
             return Ok(());
         }
         ExprKind::Member { .. }
@@ -732,6 +737,7 @@ fn enter_name(
             &aggregate,
             &class,
             &objects::this(),
+            &session.types,
         )?);
         return Ok(());
     }

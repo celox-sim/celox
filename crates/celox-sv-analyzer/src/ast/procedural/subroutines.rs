@@ -799,7 +799,7 @@ pub(in crate::ast) fn lower_subroutine(
         .as_ref()
         .into_iter()
         .chain(params.iter().map(|(_, _, ty, _)| ty))
-        .filter_map(|ty| ty.unpacked_struct())
+        .filter_map(|ty| ty.unpacked_struct_in(&session.types))
         .any(|aggregate| aggregate.leaves().iter().any(|leaf| leaf.default.is_some()))
     {
         return Err(unsupported(
@@ -810,7 +810,7 @@ pub(in crate::ast) fn lower_subroutine(
         .as_ref()
         .into_iter()
         .chain(params.iter().map(|(_, _, ty, _)| ty))
-        .filter_map(|ty| ty.unpacked_struct())
+        .filter_map(|ty| ty.unpacked_struct_in(&session.types))
         .any(|aggregate| aggregate.has_array_members())
     {
         return Err(unsupported(
