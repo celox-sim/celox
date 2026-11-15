@@ -393,18 +393,22 @@ fn declared_scope(
     aliases: &TypeAliases,
     signals: &[Signal],
 ) -> Box<PackedDimensions> {
+    // Each variable is bound where it is declared, here.
     let variables: HashMap<_, _> = signals
         .iter()
         .map(|signal| {
             (
                 signal.name().to_string(),
-                procedural::dimensions_from_type(signal.r#type()),
+                procedural::bound_dimensions_from_type(
+                    signal.r#type(),
+                    &tree.functions,
+                    &mut session.types,
+                    env,
+                ),
             )
         })
         .collect();
-    let scope = PackedDimensions::new(variables, env, aliases);
-    scope.bind_types(&mut session.types, &tree.functions);
-    Box::new(scope)
+    Box::new(PackedDimensions::new(variables, env, aliases))
 }
 
 pub(super) fn signals_from_body_item(

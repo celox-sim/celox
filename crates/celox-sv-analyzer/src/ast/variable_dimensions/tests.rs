@@ -31,7 +31,7 @@ fn assert_width(table: &TyTable, id: TyId, width: u128) {
 fn declarations_keep_their_type_when_a_caller_shadows_a_parameter() {
     // 7.4: a declaration's bounds, not the referencing scope's names,
     // determine its array type. Preserve symbolic metadata for lowering.
-    let shape = symbolic_shape();
+    let mut shape = symbolic_shape();
     let mut table = TyTable::default();
     let functions = const_functions::ConstantFunctions::default();
     let id = shape.bind_type(&mut table, &functions, &env(5)).unwrap();
@@ -41,7 +41,7 @@ fn declarations_keep_their_type_when_a_caller_shadows_a_parameter() {
     assert!(matches!(shape.packed[0].left, ConstExpr::Binary { .. }));
 
     // A new specialization constructs a new declaration from the same syntax.
-    let specialized = VariableDimensions::new(shape.clone_shape());
+    let mut specialized = VariableDimensions::new(shape.clone_shape());
     let specialized_id = specialized
         .bind_type(&mut table, &functions, &env(11))
         .unwrap();
@@ -51,7 +51,7 @@ fn declarations_keep_their_type_when_a_caller_shadows_a_parameter() {
 
 #[test]
 fn unresolved_shapes_are_not_frozen_by_provisional_queries() {
-    let shape = symbolic_shape();
+    let mut shape = symbolic_shape();
     let mut table = TyTable::default();
     let functions = const_functions::ConstantFunctions::default();
     assert!(
@@ -69,7 +69,7 @@ fn unresolved_shapes_are_not_frozen_by_provisional_queries() {
 
 #[test]
 fn editing_a_cloned_shape_invalidates_only_its_own_binding() {
-    let shape = symbolic_shape();
+    let mut shape = symbolic_shape();
     let mut table = TyTable::default();
     let functions = const_functions::ConstantFunctions::default();
     let original = shape.bind_type(&mut table, &functions, &env(5)).unwrap();
@@ -106,7 +106,7 @@ fn class_identity_changes_cannot_reuse_a_previous_binding() {
 
 #[test]
 fn renaming_references_preserves_the_evaluated_declaration_type() {
-    let shape = symbolic_shape();
+    let mut shape = symbolic_shape();
     let mut table = TyTable::default();
     let functions = const_functions::ConstantFunctions::default();
     let id = shape.bind_type(&mut table, &functions, &env(5)).unwrap();
@@ -122,7 +122,7 @@ fn table_prefix_clones_share_bindings_but_independent_appends_do_not() {
     let functions = const_functions::ConstantFunctions::default();
     let mut original = TyTable::default();
     let mut independent = original.clone();
-    let shape = symbolic_shape();
+    let mut shape = symbolic_shape();
     let id = shape.bind_type(&mut original, &functions, &env(5)).unwrap();
     let mut prefix = original.clone();
     assert_eq!(shape.type_id(&mut prefix, &functions, &env(11)), Some(id));
@@ -185,12 +185,12 @@ fn formal_publication_observes_changed_bindings_with_identical_symbolic_ranges()
 fn many_declarations_share_interned_type_nodes() {
     let functions = const_functions::ConstantFunctions::default();
     let mut table = TyTable::default();
-    let shapes = (0..1024).map(|_| symbolic_shape()).collect::<Vec<_>>();
+    let mut shapes = (0..1024).map(|_| symbolic_shape()).collect::<Vec<_>>();
     let first = shapes[0]
         .bind_type(&mut table, &functions, &env(5))
         .unwrap();
     let count = table.len();
-    for shape in &shapes {
+    for shape in &mut shapes {
         assert_eq!(
             shape.bind_type(&mut table, &functions, &env(5)),
             Some(first)
