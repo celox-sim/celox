@@ -2742,13 +2742,22 @@ fn distributions_constrain_values_and_weigh_their_items() {
     );
     // However the operand names the randc property, or reads it among other
     // operands, also as a member of an object a rand handle refers to
-    // (18.5.9).
-    for operand in ["b", "(b)", "b + 4'd1", "h.b", "h.b + 4'd1"] {
+    // (18.5.9), or a static handle does, which may alias such an object.
+    for operand in [
+        "b",
+        "(b)",
+        "b + 4'd1",
+        "h.b",
+        "h.b + 4'd1",
+        "s.b",
+        "s.b + 4'd1",
+    ] {
         let source = format!(
             "class D; randc bit [3:0] b; endclass
             class C;
                 randc bit [3:0] b;
                 rand D h;
+                static D s;
                 constraint c {{ {operand} dist {{3 := 0, 10 := 5}}; }}
                 function new; h = new; endfunction
             endclass
