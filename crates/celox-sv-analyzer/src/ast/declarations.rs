@@ -80,6 +80,16 @@ pub(super) fn ports_from_scope(
             return Err(unsupported("event port"));
         }
         if ty.unpacked_struct().is_some() {
+            // A port carries bits, not the heap handle of a container
+            // member.
+            if ty
+                .unpacked_struct()
+                .is_some_and(|aggregate| aggregate.holds_container())
+            {
+                return Err(unsupported(
+                    "unpacked structure with a dynamic array, queue or associative array member on a port",
+                ));
+            }
             if ty
                 .unpacked_struct()
                 .is_some_and(|aggregate| aggregate.has_array_members())

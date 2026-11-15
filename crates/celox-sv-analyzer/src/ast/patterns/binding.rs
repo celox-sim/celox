@@ -537,6 +537,15 @@ pub(in crate::ast) fn bind_native(
                 while let ExprKind::Group(inner) = native.expression(id).kind {
                     id = inner;
                 }
+                // A container member or element receives its item as a
+                // container variable is assigned (10.9, 7.5-7.10): a
+                // pattern, a concatenation or a container value.
+                if let Some(container) = shape.container.clone()
+                    && shape.unpacked.is_empty()
+                {
+                    values.push(containers::assignment(id, tree, session, dims, &container)?);
+                    continue;
+                }
                 let pattern = matches!(native.expression(id).kind, ExprKind::Pattern { .. });
                 if default
                     && let Some((dim, rest)) = shape.unpacked.split_first()
