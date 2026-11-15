@@ -14,7 +14,7 @@ use typecheck::UnpackedArrayType;
 /// its width, state count and signedness alone (IEEE 1800-2023 6.22.2): a
 /// named type is equivalent only to itself.
 fn element_identity(shape: &VariableDimensions, table: &semantic_types::TyTable) -> Option<String> {
-    if let Some(class) = &shape.class {
+    if let Some(class) = shape.class_in(table) {
         return Some(format!("class {class}"));
     }
     if shape.string {

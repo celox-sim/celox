@@ -142,7 +142,8 @@ fn export(
     let aliases = item.type_aliases(type_aliases);
     let context = PackedDimensions::new(HashMap::default(), &item.env, &*aliases);
     let mut class_handle = |id| -> Result<bool, AnalyzerError> {
-        Ok(type_binding::bind(id, tree, session, &context)?.is_some_and(|ty| ty.class().is_some()))
+        Ok(type_binding::bind(id, tree, session, &context)?
+            .is_some_and(|ty| ty.class_in(&session.types).is_some()))
     };
     let ports = subroutine.ports.iter().flatten().chain(
         subroutine

@@ -335,7 +335,9 @@ impl BodyBuilder<'_, '_, '_> {
                                 _ => None,
                             };
                             handles.push(named.map(|label| {
-                                let handle = self.hidden(classes::handle(processes::CLASS)).1;
+                                let handle =
+                                    classes::handle(&mut self.session.types, processes::CLASS);
+                                let handle = self.hidden(handle).1;
                                 let armed = self.hidden(unsigned_type(1)).1;
                                 self.fork_blocks.push((
                                     label,

@@ -522,7 +522,8 @@ impl BodyBuilder<'_, '_, '_> {
             nonblocking: false,
         });
         let handle = if inlining::calls_subroutine(&handle) {
-            let receiver = self.declare("$receiver", classes::handle(&class.name));
+            let receiver = classes::handle(&mut self.session.types, &class.name);
+            let receiver = self.declare("$receiver", receiver);
             body.push(Stmt::Local {
                 name: receiver.clone(),
                 init: None,

@@ -246,7 +246,8 @@ fn bind_in_mode(
                                 else {
                                     return Ok(None);
                                 };
-                                values.push(super::super::classes::handle(&name));
+                                values
+                                    .push(super::super::classes::handle(&mut session.types, &name));
                                 continue;
                             }
                         }
@@ -311,7 +312,7 @@ fn bind_in_mode(
                                     return Ok(None);
                                 };
                                 values.push(types::enclose_aliased_packed_type(
-                                    super::super::classes::handle(&name),
+                                    super::super::classes::handle(&mut session.types, &name),
                                     ranges,
                                 ));
                                 continue;
@@ -870,7 +871,7 @@ fn class_scope_named(
                     .get(&super::super::classes::specializations::scope_key(&class))
             })
             .or_else(|| context.type_aliases.get(&name))
-            .and_then(|ty| ty.class().map(str::to_owned))
+            .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
     {
         return Ok(Some(class));
     }

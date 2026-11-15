@@ -373,7 +373,7 @@ fn operand_type(
         }
         celox_sv_syntax::ExprKind::Parameterized { .. } => {
             expression_binding::named_class(tree, session, argument, native, context)?
-                .map(|class| classes::handle(&class))
+                .map(|class| classes::handle(&mut session.types, &class))
                 .ok_or_else(|| unsupported_operand("this class"))
         }
         _ => Err(unsupported_operand(
@@ -396,7 +396,7 @@ fn class_operand(
     // (8.25).
     if classes::is_parameterized(tree, session, &class) {
         let class = classes::specializations::specialize(tree, session, &class, &[], context)?;
-        return Ok(Some(classes::handle(&class)));
+        return Ok(Some(classes::handle(&mut session.types, &class)));
     }
     Ok(classes::handle_type(tree, session, &class))
 }
@@ -468,8 +468,11 @@ fn element_name(
     range: &dyn Fn(&ConstExpr, &ConstExpr) -> Converted<String>,
 ) -> Converted<String> {
     // An event is a handle of a built-in class that has no class name.
-    if let Some(class) = r#type.class().filter(|_| r#type.kind != TypeKind::Event) {
-        return class_name(class, tree, session, env);
+    if let Some(class) = r#type
+        .class_in(&session.types)
+        .filter(|_| r#type.kind != TypeKind::Event)
+    {
+        return class_name(&class, tree, session, env);
     }
     match r#type.kind {
         TypeKind::Chandle => return Ok("chandle".to_owned()),

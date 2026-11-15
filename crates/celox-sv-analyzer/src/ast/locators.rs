@@ -414,7 +414,7 @@ fn array(
         type_binding::builtin_type("string", None).expect("string is a builtin type")
     } else if let Some(class) = expression_binding::objects::shape_class(shape, tree, session, dims)
     {
-        classes::handle(&class)
+        classes::handle(&mut session.types, &class)
     } else {
         let mut ty = Type::new(if shape.is_2state {
             TypeKind::Bit
@@ -626,7 +626,7 @@ pub(super) fn bind(
                 {
                     return Err(min_max_chandles());
                 }
-                _ if element.class().is_some()
+                _ if element.class_in(&session.types).is_some()
                     || element.unpacked_struct().is_some()
                     || element.container.is_some() =>
                 {
