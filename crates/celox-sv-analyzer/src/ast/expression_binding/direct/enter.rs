@@ -250,11 +250,11 @@ fn check_received(
     }
     // An argument, result or other value received as an unpacked
     // structure is a pattern or a value of its type (6.22.3).
-    if let Some(structure) = target
-        .as_deref()
-        .filter(|shape| shape.unpacked.is_empty())
-        .and_then(|shape| unpacked_structs::shape_struct(shape, tree, session, dimensions))
-    {
+    let structure = match target.as_deref().filter(|shape| shape.unpacked.is_empty()) {
+        Some(shape) => unpacked_structs::shape_struct(shape, tree, session, dimensions)?,
+        None => None,
+    };
+    if let Some(structure) = structure {
         unpacked_structs::check_value(structure, id, native, tree, session, dimensions)?;
     } else if target.as_deref().is_some_and(|shape| {
         shape.unpacked.is_empty() && !containers::holds_container(shape, tree, session, dimensions)

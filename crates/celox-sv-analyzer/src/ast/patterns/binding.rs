@@ -577,7 +577,7 @@ pub(in crate::ast) fn bind_native(
                 if pattern
                     && shape.unpacked.is_empty()
                     && let Some(structure) =
-                        unpacked_structs::shape_struct(&shape, tree, session, dims)
+                        unpacked_structs::shape_struct(&shape, tree, session, dims)?
                 {
                     unpacked_structs::check_value(structure, id, native, tree, session, dims)?;
                 }
@@ -589,7 +589,7 @@ pub(in crate::ast) fn bind_native(
                     // applies to each of its members (IEEE 1800-2023 10.9.2).
                     if default
                         && !unpacked_structs::value_struct(id, native, tree, session, dims)
-                            .zip(unpacked_structs::shape_struct(&shape, tree, session, dims))
+                            .zip(unpacked_structs::shape_struct(&shape, tree, session, dims)?)
                             .is_some_and(|(value, target)| session.types.matches(value, target))
                     {
                         let members = aggregate.members();
