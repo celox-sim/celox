@@ -14,9 +14,12 @@
 //! ([`crate::ir::Module::expand_virtual_interface_instances`]), as it does
 //! for any other access through a virtual interface.
 //!
-//! One subroutine serves every instance, so it runs as an automatic one:
-//! its formals and variables belong to each call, where those of a static
-//! subroutine of an interface would belong to each instance (13.3.2).
+//! One subroutine serves every instance. Its formals belong to each call,
+//! as the call binds them before it knows the instance; its static
+//! variables belong to each instance (13.3.2): they are placeholders
+//! (`$vifstatic$I$v`) that the expansion repeats for every instance, held
+//! by the scope that makes the call, as the static storage of a subroutine
+//! called through an interface port is held by the calling module.
 
 use super::*;
 use virtual_interfaces::{VirtualInterface, VirtualInterfaceSignal};
@@ -33,6 +36,10 @@ pub(crate) struct Subroutines {
     /// The result types of the functions among them, published as those of
     /// any function (see [`scope::ScopeSymbols::function_return_types`]).
     pub(super) function_return_types: HashMap<String, FunctionReturnMetadata>,
+    /// Their static variables, as placeholders for each instance.
+    pub(super) statics: Vec<Signal>,
+    /// The initializer of those static variables.
+    pub(super) static_initializer: Option<InitialProcess>,
 }
 
 /// The subroutines of the interfaces in `declarations`, built with the
@@ -70,6 +77,13 @@ pub(super) fn build(
                 built
                     .function_return_types
                     .extend(found.function_return_types);
+                built.statics.extend(found.statics);
+                if let Some(process) = found.static_initializer {
+                    match &mut built.static_initializer {
+                        Some(initializer) => initializer.body.extend(process.body),
+                        None => built.static_initializer = Some(process),
+                    }
+                }
             }
         }
     }
@@ -118,7 +132,66 @@ fn interface_subroutines(
             .name(),
         );
     }
+    // Every task and function the interface declares is renamed to the
+    // subroutine that calls it through a virtual interface, whatever else
+    // the binding names cover.
+    for name in declaration.subroutines.keys() {
+        names.insert(
+            name.clone(),
+            virtual_interfaces::subroutine_name(interface, name),
+        );
+    }
+    // The static variables of the subroutines belong to each instance.
+    for subroutine in &symbols.subroutines {
+        for name in &subroutine.persistent_locals {
+            names.insert(
+                name.clone(),
+                VirtualInterfaceSignal::StaticPlaceholder {
+                    interface: interface.to_string(),
+                    name: name.clone(),
+                }
+                .name(),
+            );
+        }
+    }
     let bound = symbols.renamed(&names);
+    let is_static = |name: &str| {
+        matches!(
+            VirtualInterfaceSignal::of(name),
+            Some(VirtualInterfaceSignal::StaticPlaceholder { .. })
+        )
+    };
+    built.statics.extend(
+        bound
+            .signals
+            .iter()
+            .filter(|signal| is_static(&signal.name))
+            .cloned(),
+    );
+    for process in bound
+        .initial_processes
+        .iter()
+        .filter(|p| p.is_initializer())
+    {
+        let body: Vec<_> = process
+            .body
+            .iter()
+            .filter(|stmt| matches!(stmt, Stmt::Assign { lhs, .. } if is_static(lhs.name())))
+            .cloned()
+            .collect();
+        if body.is_empty() {
+            continue;
+        }
+        match &mut built.static_initializer {
+            Some(initializer) => initializer.body.extend(body),
+            None => {
+                let mut initializer = process.clone();
+                initializer.body = body;
+                initializer.validation_body = Vec::new();
+                built.static_initializer = Some(initializer);
+            }
+        }
+    }
     let own: HashSet<String> = declaration
         .subroutines
         .keys()
@@ -186,9 +259,14 @@ fn dispatching(
     let mut subroutine = subroutine.clone();
     let value = Expr::Ident(handle.to_string());
     // A call of another subroutine of the interface runs it for the same
-    // instance.
+    // instance, also one in a default.
     for stmt in &mut subroutine.body {
         pass_handle(stmt, &value, own);
+    }
+    for param in &mut subroutine.params {
+        if let Some(default) = &mut param.default {
+            pass_handle_expr(default, &value, own);
+        }
     }
     let mut automatic_locals = vec![handle.to_string()];
     automatic_locals.extend(subroutine.params.iter().map(|param| param.name.clone()));
@@ -197,7 +275,7 @@ fn dispatching(
         .into_iter()
         .chain(subroutine.body.iter().flat_map(declared_locals))
     {
-        if !automatic_locals.contains(&name) {
+        if !automatic_locals.contains(&name) && !subroutine.persistent_locals.contains(&name) {
             automatic_locals.push(name);
         }
     }
@@ -253,6 +331,16 @@ fn dispatching(
     subroutine
 }
 
+/// The order of the actuals of a call, by formal position, once the handle
+/// is the first: it comes first, and the others' positions move by one.
+fn receiver_first(arg_order: &mut Vec<usize>) {
+    if !arg_order.is_empty() {
+        *arg_order = std::iter::once(0)
+            .chain(arg_order.iter().map(|position| position + 1))
+            .collect();
+    }
+}
+
 /// Whether `expr` reads a member of an interface through its placeholder.
 fn reads_member(expr: &Expr) -> bool {
     match expr {
@@ -280,10 +368,15 @@ fn declared_locals(stmt: &Stmt) -> Vec<String> {
 /// `stmt` with `handle` passed first to each call of a subroutine in `own`.
 fn pass_handle(stmt: &mut Stmt, handle: &Expr, own: &HashSet<String>) {
     stmt.walk_mut(&mut |stmt| {
-        if let Stmt::Call { name, args, .. } = stmt
+        if let Stmt::Call {
+            name,
+            args,
+            arg_order,
+        } = stmt
             && own.contains(name)
         {
             args.insert(0, Some(handle.clone()));
+            receiver_first(arg_order);
         }
     });
     stmt.visit_mut(
@@ -308,6 +401,8 @@ fn map_call_args(expr: Expr, handle: &Expr, own: &HashSet<String>) -> Expr {
             arg_order,
         } if own.contains(&name) => {
             args.insert(0, Some(handle.clone()));
+            let mut arg_order = arg_order;
+            receiver_first(&mut arg_order);
             Expr::Call {
                 callee: Callee::Subroutine(name),
                 args,

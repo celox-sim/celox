@@ -591,14 +591,14 @@ Code that must stay portable should avoid relying on them.
   the command line, or `SimulatorBuilder::diagnostic_policy` in Rust), each such element takes the default time unit and precision
   instead, and `warn` reports one `mixed_timescale` warning naming each, as
   other simulators do.
-- **Interface subroutines called through a virtual interface are
-  automatic.** A task or function of an interface called through a virtual
-  interface (`vif.drive(req)`, 25.9) runs for the instance the handle
-  denotes, but its formals and variables belong to each call, also when
-  the subroutine is static or declares them `static`, where 13.3.2 gives a
-  static subroutine's to each instance. Calls through an interface instance
-  or port keep the static storage described under
-  [Interfaces](#interface-restrictions).
+- **Storage of interface subroutines called through a virtual interface.**
+  A task or function of an interface called through a virtual interface
+  (`vif.drive(req)`, 25.9) runs for the instance the handle denotes. Its
+  static variables belong to that instance (13.3.2, 6.21), but are held by
+  each scope that makes such calls, as the static storage of a subroutine
+  called through an interface port is (see
+  [Interfaces](#interface-restrictions)). Its formals belong to each call,
+  also those of a static subroutine.
 - **`$psprintf` is `$sformatf`.** The vendor system function `$psprintf`,
   which many simulators and older UVM code use, is accepted as `$sformatf`
   (21.3.3); diagnostics name it `$sformatf`.

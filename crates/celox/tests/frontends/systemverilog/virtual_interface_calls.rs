@@ -333,3 +333,95 @@ endmodule
         );
     }
 }
+
+/// A static variable of an interface subroutine belongs to the instance
+/// (13.3.2, 6.21): calls through a virtual interface keep it for the
+/// instance the handle denotes, across calls, from its initializer on.
+#[test]
+fn static_variables_of_interface_subroutines_belong_to_each_instance() {
+    let source = r#"`timescale 1ns / 1ns
+interface bfm;
+  task automatic count(output int n);
+    static int calls = 10;
+    calls++;
+    n = calls;
+  endtask
+  function int next();
+    int k = 0;
+    k++;
+    return k;
+  endfunction
+endinterface
+module top;
+  bfm a(), b();
+  virtual bfm v, w;
+  int n, m, o;
+  initial begin
+    v = a;
+    w = b;
+    v.count(n);
+    v.count(m);
+    w.count(o);
+    $display("count %0d %0d %0d", n, m, o);
+    n = v.next();
+    m = v.next();
+    o = w.next();
+    $display("next %0d %0d %0d", n, m, o);
+  end
+endmodule
+"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("statics.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap_or_else(|error| panic!("{error}"));
+        sim.run_until(10).unwrap();
+        assert_eq!(
+            displays(&mut sim),
+            ["count 11 12 11", "next 1 2 1"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// A call of another subroutine of the interface, in a default or with
+/// named actuals in another order, runs it for the same instance.
+#[test]
+fn interface_subroutines_call_each_other_in_defaults_and_by_name() {
+    let source = r#"`timescale 1ns / 1ns
+interface regs;
+  logic [7:0] r = 8'd3;
+  function automatic logic [7:0] base();
+    return r;
+  endfunction
+  function automatic logic [7:0] add(input logic [7:0] x = base(), input logic [7:0] y = 1);
+    return x + y;
+  endfunction
+  function automatic logic [7:0] sub(input logic [7:0] left, input logic [7:0] right);
+    return left - right;
+  endfunction
+  function automatic logic [7:0] both();
+    return sub(.right(r), .left(8'd10));
+  endfunction
+endinterface
+module top;
+  regs a(), b();
+  virtual regs v;
+  initial begin
+    b.r = 8'd5;
+    v = b;
+    $display("%0d %0d %0d", v.add(), v.add(.y(2)), v.both());
+  end
+endmodule
+"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap_or_else(|error| panic!("{error}"));
+        sim.run_until(10).unwrap();
+        assert_eq!(displays(&mut sim), ["6 7 5"], "four_state={four_state}");
+    }
+}

@@ -1121,6 +1121,18 @@ pub(super) fn resolve_imports(
                 .entry(name.clone())
                 .or_insert_with(|| metadata.clone());
         }
+        for signal in &packages.virtual_interface_calls.statics {
+            if !symbols
+                .state_signals
+                .iter()
+                .any(|known| known.name == signal.name)
+            {
+                symbols.state_signals.push(signal.clone());
+            }
+        }
+        if let Some(initializer) = &packages.virtual_interface_calls.static_initializer {
+            symbols.initial_processes.push(initializer.clone());
+        }
         for local in &packages.virtual_interface_calls.locals {
             if !symbols.locals.iter().any(|known| known.name == local.name) {
                 symbols.locals.push(local.clone());

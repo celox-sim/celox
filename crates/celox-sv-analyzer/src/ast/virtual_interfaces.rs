@@ -32,6 +32,13 @@ const PLACEHOLDER_PREFIX: &str = "$vifany$";
 /// The prefix of the signal that stands for the id of that instance:
 /// `$vifinstance$<interface>`.
 const INSTANCE_PREFIX: &str = "$vifinstance$";
+/// The prefix of the signal that stands for static variable `<name>` of a
+/// subroutine of whichever instance of interface `<interface>` a call
+/// through a virtual interface selects: `$vifstatic$<interface>$<name>`.
+const STATIC_PLACEHOLDER_PREFIX: &str = "$vifstatic$";
+/// The prefix of that variable of interface instance `<id>`:
+/// `$vifstaticof$<id>$<name>`.
+const STATIC_PREFIX: &str = "$vifstaticof$";
 
 /// A virtual interface type: an interface, with a modport if one is
 /// selected (IEEE 1800-2023 25.9).
@@ -274,11 +281,37 @@ pub enum VirtualInterfaceSignal {
     Placeholder { interface: String, member: String },
     /// The id of that instance, which the access compares its handle with.
     Instance { interface: String },
+    /// Static variable `name` of a subroutine of the instance of interface
+    /// `interface` that a call through a virtual interface selects, which
+    /// the frontend repeats for every instance, as a member.
+    StaticPlaceholder { interface: String, name: String },
+    /// Static variable `name` of a subroutine of interface instance `id`,
+    /// called through a virtual interface (13.3.2, 25.9): one per instance,
+    /// held by the scope that makes the call.
+    Static { id: u32, name: String },
 }
 
 impl VirtualInterfaceSignal {
     /// The kind of a signal named `name`, if the frontend binds it.
     pub fn of(name: &str) -> Option<Self> {
+        if let Some((interface, name)) = name
+            .strip_prefix(STATIC_PLACEHOLDER_PREFIX)
+            .and_then(|rest| rest.split_once('$'))
+        {
+            return Some(Self::StaticPlaceholder {
+                interface: interface.to_owned(),
+                name: name.to_owned(),
+            });
+        }
+        if let Some((id, name)) = name
+            .strip_prefix(STATIC_PREFIX)
+            .and_then(|rest| rest.split_once('$'))
+        {
+            return Some(Self::Static {
+                id: id.parse().ok()?,
+                name: name.to_owned(),
+            });
+        }
         if let Some((interface, member)) = name
             .strip_prefix(PLACEHOLDER_PREFIX)
             .and_then(|rest| rest.split_once('$'))
@@ -325,6 +358,10 @@ impl VirtualInterfaceSignal {
                 format!("{PLACEHOLDER_PREFIX}{interface}${member}")
             }
             Self::Instance { interface } => format!("{INSTANCE_PREFIX}{interface}"),
+            Self::StaticPlaceholder { interface, name } => {
+                format!("{STATIC_PLACEHOLDER_PREFIX}{interface}${name}")
+            }
+            Self::Static { id, name } => format!("{STATIC_PREFIX}{id}${name}"),
         }
     }
 }
@@ -1769,6 +1806,7 @@ pub(super) fn map_children(expr: Expr, map: &mut dyn FnMut(Expr) -> Expr) -> Exp
 pub(crate) fn placeholder_interface(name: &str) -> Option<String> {
     match VirtualInterfaceSignal::of(name)? {
         VirtualInterfaceSignal::Placeholder { interface, .. }
+        | VirtualInterfaceSignal::StaticPlaceholder { interface, .. }
         | VirtualInterfaceSignal::Instance { interface } => Some(interface),
         _ => None,
     }
