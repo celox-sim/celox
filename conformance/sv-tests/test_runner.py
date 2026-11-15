@@ -3,6 +3,7 @@
 import csv
 import importlib.util
 import json
+import shutil
 import os
 from pathlib import Path
 import tempfile
@@ -275,6 +276,20 @@ sys.exit(code)
         self.assertEqual(runner.read_expected(expected), {
             **stale, **{(name, mode): "pass" for name in ("plain.sv", "prefix.sv") for mode in runner.MODES},
         })
+        # Only the library cases: the others are neither run, compared nor
+        # replaced, the library case's stale row is compared and replaced.
+        shutil.rmtree(self.out)
+        others = {(name, mode): "fail" for name in ("plain.sv", "prefix.sv") for mode in runner.MODES}
+        runner.write_expected(expected, {**stale, **others})
+        self.assertEqual(runner.main(args + ["--only-library-cases"]), 1)
+        self.assertFalse((self.out / "2state/plain.sv").exists())
+        self.assertTrue((self.out / "2state/library.sv").exists())
+        self.assertEqual(runner.main(args + ["--only-library-cases", "--update"]), 0)
+        self.assertEqual(runner.read_expected(expected), {
+            **others, **{("library.sv", mode): "pass" for mode in runner.MODES},
+        })
+        with self.assertRaises(SystemExit):
+            runner.main(args + ["--only-library-cases", "--exclude-library-cases"])
 
     def test_parallel_collection_is_deterministic_and_isolated(self):
         self.case(":type: simulation\n", "// OUTPUT: :assert: True")
