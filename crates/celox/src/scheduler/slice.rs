@@ -23,9 +23,16 @@ enum Definition {
     Parameter(BlockId, usize),
 }
 
-struct StabilityAnalysis {
+struct StabilityAnalysis<'c> {
     partition_flags: Option<AbsoluteAddr>,
+    completed: &'c mut CompletedControl,
 }
+
+/// The control dependencies of each unit's blocks on completed branches
+/// only, which the stability analyses of a slicer's [`CombSlicer::stateless_cone`]
+/// calls share: computed for a unit when one first needs them.
+#[derive(Default)]
+pub(crate) struct CompletedControl(HashMap<usize, HashMap<BlockId, Vec<(BlockId, RegisterId)>>>);
 
 struct Indexed {
     definitions: HashMap<RegisterId, Definition>,
@@ -33,11 +40,6 @@ struct Indexed {
     incoming: HashMap<BlockId, Vec<(BlockId, Vec<RegisterId>)>>,
     /// Immediate controlling branch/switch blocks and their selectors.
     control: HashMap<BlockId, Vec<(BlockId, RegisterId)>>,
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: a lazily computed index of completed-only control dependencies, filled behind &self by the slicer that owns it"
-    )]
-    completed_control: std::cell::OnceCell<HashMap<BlockId, Vec<(BlockId, RegisterId)>>>,
 }
 
 /// Selected instruction positions and pruned control flow. Keep the original
@@ -216,10 +218,6 @@ fn post_dominators(unit: &Unit, completed_only: bool) -> HashMap<BlockId, Option
         .collect()
 }
 
-#[expect(
-    clippy::disallowed_types,
-    reason = "single-threaded: creates the empty lazily filled completed-control index of a slicer"
-)]
 fn index(unit: &Unit) -> Indexed {
     let mut definitions = HashMap::default();
     let mut incoming: HashMap<BlockId, Vec<(BlockId, Vec<RegisterId>)>> = HashMap::default();
@@ -243,7 +241,6 @@ fn index(unit: &Unit) -> Indexed {
         definitions,
         incoming,
         control: control_dependencies(unit, false),
-        completed_control: std::cell::OnceCell::new(),
     }
 }
 
@@ -424,6 +421,7 @@ impl<'a> CombSlicer<'a> {
         &self,
         signal: AbsoluteAddr,
         partition_flags: Option<AbsoluteAddr>,
+        completed: &mut CompletedControl,
     ) -> Option<(HashSet<AbsoluteAddr>, HashSet<AbsoluteAddr>)> {
         let signal = self.representative(signal);
         if !self.stores.contains_key(&signal) {
@@ -436,7 +434,10 @@ impl<'a> CombSlicer<'a> {
             &mut seen,
             &mut kept,
             None,
-            Some(&StabilityAnalysis { partition_flags }),
+            Some(&mut StabilityAnalysis {
+                partition_flags,
+                completed,
+            }),
         );
         let units: Vec<_> = self
             .build(&kept, &seen, partition_flags)
@@ -541,7 +542,7 @@ impl<'a> CombSlicer<'a> {
         seen: &mut HashSet<Need>,
         kept: &mut [HashSet<(BlockId, usize)>],
         allowed: Option<&HashSet<AbsoluteAddr>>,
-        stability: Option<&StabilityAnalysis>,
+        mut stability: Option<&mut StabilityAnalysis<'_>>,
     ) {
         while let Some(need) = work.pop() {
             if !seen.insert(need) {
@@ -551,6 +552,7 @@ impl<'a> CombSlicer<'a> {
                 Need::Storage(address) => {
                     if allowed.is_some_and(|allowed| !allowed.contains(&address))
                         || stability
+                            .as_ref()
                             .is_some_and(|analysis| analysis.partition_flags == Some(address))
                     {
                         continue;
@@ -589,10 +591,12 @@ impl<'a> CombSlicer<'a> {
                     }
                 }
                 Need::Block(unit, block) => {
-                    let control = if stability.is_some() {
-                        self.indexed[unit]
-                            .completed_control
-                            .get_or_init(|| control_dependencies(&self.units[unit], true))
+                    let control = if let Some(analysis) = stability.as_deref_mut() {
+                        &*analysis
+                            .completed
+                            .0
+                            .entry(unit)
+                            .or_insert_with(|| control_dependencies(&self.units[unit], true))
                     } else {
                         &self.indexed[unit].control
                     };

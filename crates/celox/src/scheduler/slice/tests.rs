@@ -124,12 +124,18 @@ fn slices_keep_calls_by_their_effects() {
         affected,
         HashSet::from_iter([address(1), address(2), address(5)])
     );
-    let (writes, inputs) = slicer.stateless_cone(address(4), None).unwrap();
+    let (writes, inputs) = slicer
+        .stateless_cone(address(4), None, &mut CompletedControl::default())
+        .unwrap();
     assert_eq!(writes, HashSet::from_iter([address(4)]));
     assert_eq!(inputs, HashSet::from_iter([address(3)]));
     // 5 is computed from 1, which the call need not write on every path:
     // its load may read what the last settle left.
-    assert!(slicer.stateless_cone(address(5), None).is_none());
+    assert!(
+        slicer
+            .stateless_cone(address(5), None, &mut CompletedControl::default())
+            .is_none()
+    );
 }
 
 #[test]
@@ -202,8 +208,18 @@ fn partition_caches_do_not_make_a_constant_alias_stateful() {
     }];
     units[0].verify();
     let slicer = CombSlicer::new(&units, HashMap::default());
-    assert!(slicer.stateless_cone(address(2), None).is_none());
-    let (writes, inputs) = slicer.stateless_cone(address(2), Some(address(0))).unwrap();
+    assert!(
+        slicer
+            .stateless_cone(address(2), None, &mut CompletedControl::default())
+            .is_none()
+    );
+    let (writes, inputs) = slicer
+        .stateless_cone(
+            address(2),
+            Some(address(0)),
+            &mut CompletedControl::default(),
+        )
+        .unwrap();
     assert_eq!(writes, HashSet::from_iter([address(1), address(2)]));
     assert_eq!(inputs, HashSet::from_iter([address(0)]));
 }
@@ -251,7 +267,9 @@ fn stability_analysis_excludes_unrelated_error_control() {
         register_map,
     }];
     let slicer = CombSlicer::new(&units, HashMap::default());
-    let (writes, inputs) = slicer.stateless_cone(address(1), None).unwrap();
+    let (writes, inputs) = slicer
+        .stateless_cone(address(1), None, &mut CompletedControl::default())
+        .unwrap();
     assert_eq!(writes, HashSet::from_iter([address(1)]));
     assert_eq!(inputs, HashSet::from_iter([address(0)]));
     let executable = slicer.slice([address(1)]);
@@ -265,7 +283,10 @@ fn stability_analysis_excludes_unrelated_error_control() {
     let units = [settle()];
     let slicer = CombSlicer::new(&units, HashMap::default());
     assert_eq!(
-        slicer.stateless_cone(address(2), None).unwrap().1,
+        slicer
+            .stateless_cone(address(2), None, &mut CompletedControl::default())
+            .unwrap()
+            .1,
         HashSet::from_iter([address(0), address(1)])
     );
 }
