@@ -771,6 +771,7 @@ fn function_call(
     let Some(Some(result)) = &method.result else {
         return Err(unsupported("without a value"));
     };
+    let four_state = !matches!(result.kind(), TypeKind::Bit | TypeKind::Chandle);
     let (width, signed) = casts::expr_type_from_type(&tree.functions, result, env)
         .filter(|shape| (1..=64).contains(&shape.width))
         .map(|shape| (shape.width as u32, shape.signed))
@@ -857,6 +858,7 @@ fn function_call(
         guard,
         width,
         signed,
+        four_state,
     };
     let (_, calls, _) = session
         .constraint_methods
@@ -1081,6 +1083,19 @@ pub(in crate::ast) fn solver_holds(
     solver_type(&property.r#type, tree, session, env)
 }
 
+/// Whether the solver holds instance property `property` of the class as a
+/// field of its program: as [`solver_holds`], or a 4-state integral one of
+/// at most 64 bits, which the solver gives a 2-state value and takes while
+/// it has no X or Z bits (IEEE 1800-2023 18.3; see `Field::four_state`).
+fn solver_field(
+    property: &Property,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Result<(), String> {
+    field_type(&property.r#type, true, tree, session, env)
+}
+
 /// Whether the solver holds a value of type `ty`, by its semantic type: a
 /// 2-state integral one of at most 64 bits. Every other kind of type is
 /// named here, so that a new one has to say whether the solver holds it.
@@ -1090,11 +1105,22 @@ pub(in crate::ast) fn solver_type(
     session: &mut Session,
     env: &ConstEnv,
 ) -> Result<(), String> {
+    field_type(ty, false, tree, session, env)
+}
+
+/// [`solver_type`], also of a 4-state integral type with `four_state`.
+fn field_type(
+    ty: &Type,
+    four_state: bool,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Result<(), String> {
     use super::super::semantic_types::{TyData, of_type};
     let id = of_type(&mut session.types, &tree.functions, ty, env)
         .ok_or("a value of a type a constraint does not take")?;
     match session.types.data(id) {
-        TyData::Packed(packed) if packed.four_state => {
+        TyData::Packed(packed) if packed.four_state && !four_state => {
             Err("4-state class property in a constraint".into())
         }
         TyData::Packed(packed) if packed.bits() <= 64 => Ok(()),
@@ -1155,7 +1181,9 @@ fn class_member(
                 session,
                 env,
             )?;
-            solver_type(&property.r#type, tree, session, env)?;
+            // A rand one is a field of the program, which may be 4-state as
+            // an instance one (see `solver_field`).
+            field_type(&property.r#type, property.rand, tree, session, env)?;
             Ok(Some(if property.rand {
                 let slot = names
                     .slots
@@ -1187,7 +1215,7 @@ fn class_member(
         Some(super::Member::Instance(index)) => {
             let property = &properties[index];
             visible(property, tree, session, env)?;
-            solver_holds(property, tree, session, env)?;
+            solver_field(property, tree, session, env)?;
             // The field of the property among those of the program.
             let field = properties[..index]
                 .iter()
@@ -2380,6 +2408,7 @@ impl Class {
                 random: property.rand || property.randc,
                 domain,
                 cyclic: property.randc,
+                four_state: property.field.four_state,
             });
         }
         // The slots of the static rand properties follow (see
@@ -2414,6 +2443,7 @@ impl Class {
                     })
                     .unwrap_or_default(),
                 cyclic: false,
+                four_state: slot.field.four_state,
             });
         }
         let mut constraints = Vec::new();
@@ -2477,6 +2507,8 @@ impl Class {
                     std::iter::repeat_n(guard, count)
                 })
                 .collect(),
+            // A call with 4-state values names them (see `Program::unknown_inputs`).
+            unknown_inputs: Vec::new(),
         })
     }
 }
