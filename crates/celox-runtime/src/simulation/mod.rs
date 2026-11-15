@@ -204,6 +204,10 @@ pub struct SimulationState<B: SimBackend> {
     /// The processes the current time slot ran, most recent last, up to
     /// [`RESUMED_PROCESSES`]: the ones a slot that does not settle reports.
     slot_resumed: std::collections::VecDeque<usize>,
+    /// The activation whose process request was just served without parking
+    /// it, which runs again right away with the results the request wrote
+    /// (see `restore_parked_result`).
+    continued: Option<usize>,
     /// Names of the processes for diagnostics, by index.
     process_names: Vec<String>,
     /// The loop that runs time slots, and the slots each loop ran.
@@ -303,6 +307,7 @@ impl<B: SimBackend> SimulationState<B> {
             return_budget: SLOT_RETURN_BUDGET,
             slot_passes: 0,
             slot_resumed: std::collections::VecDeque::new(),
+            continued: None,
             process_names: Vec::new(),
             stats: SchedulerStats::default(),
             observed_events: Default::default(),

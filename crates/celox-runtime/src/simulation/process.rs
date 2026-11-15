@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use celox_design::{HostRequestKind, ProcessStatus};
+use celox_design::{HostRequestKind, ProcessOp, ProcessStatus};
 
 use super::host::SimulationExecutor;
 use super::round::Round;
@@ -136,6 +136,7 @@ impl<B: SimBackend> SimulationState<B> {
             activation.control.level_wait = false;
         }
         self.restore_call_stack(executor.backend_mut(), process);
+        self.restore_parked_result(executor.backend_mut(), process);
         let result = self.run_activation(executor, current_time, process, kernel, returns);
         self.save_call_stack(executor.backend_mut(), process);
         self.save_activation(executor.backend(), process);
@@ -153,6 +154,56 @@ impl<B: SimBackend> SimulationState<B> {
         }
         self.retire_activation(process);
         result
+    }
+
+    /// Give `process`, resumed after a process request parked it, the result
+    /// that the park gave: a status of 0 for a blocking mailbox method, which
+    /// calls it again to collect what a later operation left for it (see
+    /// `SimulationState::mailbox_request`), and 1 for an event wait, which
+    /// tells it that it resumed from the wait. A request of a function unit
+    /// passes its results through staging variables that every activation of
+    /// its site shares (see `Ff::request_host` in `celox-frontend-sv`), which
+    /// the requests of other processes may have written since. The site is
+    /// the one its own status and delay slots still name; a process that a
+    /// request did not park runs again right away with the results it wrote.
+    ///
+    /// This covers every result read after a park: those of the other
+    /// requests that park (a semaphore's `get`, `await`, `suspend`) are
+    /// ignored, and other host requests never park. If a new kind of request
+    /// that parks a process comes with a result, keep the staging of each
+    /// request in the frame slots of its activation instead, so that
+    /// activations cannot overwrite each other's results. That needs a
+    /// frame-relative form of the host request values in `celox-design` (a
+    /// breaking change), the frame layout of each site from the frontend, and
+    /// the translation in the runtime, also for checkpoints of saved call
+    /// stacks: about 400 to 800 lines.
+    fn restore_parked_result(&mut self, backend: &mut B, process: usize) {
+        if self.continued.take() == Some(process) {
+            return;
+        }
+        let slots = &self.model.processes[process];
+        let status: u8 = backend.get_as(slots.status);
+        if ProcessStatus::from_code(status) != Some(ProcessStatus::HostRequest) {
+            return;
+        }
+        let Some((HostRequestKind::Process, index)) =
+            HostRequestKind::decode(backend.get_as(slots.delay))
+        else {
+            return;
+        };
+        let Some(site) =
+            celox_design::host_request_site(&slots.host_requests, HostRequestKind::Process, index)
+        else {
+            return;
+        };
+        let parked = match ProcessOp::from_code(site.operation & 0xff) {
+            Some(ProcessOp::MailboxPut | ProcessOp::MailboxGet | ProcessOp::MailboxPeek) => 0u32,
+            Some(ProcessOp::WaitEvent | ProcessOp::WaitTriggered) => 1,
+            _ => return,
+        };
+        if let Some(result) = site.results.first() {
+            backend.set(result.id, parked);
+        }
     }
 
     fn run_activation<E>(
@@ -267,7 +318,12 @@ impl<B: SimBackend> SimulationState<B> {
                         let request = request.clone();
                         *returns += 1;
                         self.charge(*returns, Some(process))?;
-                        return self.process_request(executor, current_time, process, &request);
+                        let continued =
+                            self.process_request(executor, current_time, process, &request)?;
+                        if continued {
+                            self.continued = Some(process);
+                        }
+                        return Ok(continued);
                     }
                     executor.enter_deferred_assertion_process(process);
                     let result = executor.host_request(request, current_time);
