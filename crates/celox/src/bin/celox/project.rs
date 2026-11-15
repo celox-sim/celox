@@ -87,9 +87,11 @@ pub(super) struct DesignArgs {
         value_name = "NAME=VALUE"
     )]
     parameters: Vec<String>,
-    /// Top-level module; overrides the selected target.
+    /// Top-level module; overrides the selected target. Repeat it to
+    /// simulate several SystemVerilog top-level modules together, each an
+    /// instance of its own name (IEEE 1800-2023 23.3.1).
     #[arg(long)]
-    top: Option<String>,
+    top: Vec<String>,
     #[arg(skip)]
     input_order: Vec<Input>,
     /// The command-line positions of `sources`, once plusargs are taken out
@@ -183,11 +185,21 @@ pub(super) struct Design {
     pub parameters: BTreeMap<String, u64>,
     sv_parameters: BTreeMap<String, String>,
     pub top: String,
+    /// Every top-level module when `--top` names several; empty otherwise.
+    pub tops: Vec<String>,
     pub opt_level: Option<celox::OptLevel>,
     pub four_state: Option<bool>,
     pub timescale: Option<celox::SvTimescale>,
     pub signal_access: celox::SignalAccessOptions,
     pub max_steps: Option<u64>,
+}
+
+impl Design {
+    /// The top that hierarchical signal names may start with, which they
+    /// leave out; none when several tops each begin their names.
+    pub fn signal_root(&self) -> &str {
+        if self.tops.is_empty() { &self.top } else { "" }
+    }
 }
 
 impl DesignArgs {
@@ -472,8 +484,11 @@ impl DesignArgs {
                 .ok_or_else(|| format!("invalid parameter `{parameter}`: expected NAME=VALUE"))?;
             design.set_parameter_text(name, value, false)?;
         }
-        if let Some(top) = self.top {
-            design.top = top;
+        if let Some(top) = self.top.first() {
+            design.top.clone_from(top);
+        }
+        if self.top.len() > 1 {
+            design.tops = self.top;
         }
         if design.sources.is_empty() && !image_input {
             return Err(

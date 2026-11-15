@@ -151,8 +151,9 @@ endmodule
         .tops(["hdl_top", "hvl_top"])
         .build()
         .unwrap_or_else(|error| panic!("{error}"));
-    let hdl = sim.child_signal(&[("hdl_top", 0)], "at");
+    let hdl = sim.signal("hdl_top.at");
     let hvl = sim.child_signal(&[("hvl_top", 0)], "at");
+    assert_eq!(hvl, sim.signal("hvl_top.at"));
     sim.run_until(3_000).unwrap();
     assert_eq!(sim.get(hdl), 1u32.into());
     assert_eq!(sim.get(hvl), 0u32.into());
@@ -378,4 +379,103 @@ endmodule
             ("b".to_string(), "b".to_string())
         ]
     );
+}
+
+/// A time scale query names an instance below another top (20.4.1).
+#[test]
+fn top_level_modules_answer_time_scale_queries_of_other_tops() {
+    let source = r#"
+`timescale 1ms / 1us
+module top; initial $printtimescale(mod0.m); endmodule
+`timescale 1us / 1ns
+module mod0; mod1 m(); endmodule
+`timescale 1ns / 1ps
+module mod1; endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("scale.sv"))], "")
+        .tops(["mod0", "top"])
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    sim.run_until(1).unwrap();
+    assert_eq!(displays(&mut sim), ["Time scale of (mod0.m) is 1ns / 1ps"]);
+}
+
+/// A top whose name is a keyword, declared by its escaped spelling
+/// (`\module `, 5.6.1), is found and instantiated as any top.
+#[test]
+fn tops_named_by_escaped_keywords_are_found_and_run() {
+    let source = "`timescale 1ns / 1ns
+module \\module ; initial #1 $display(\"%m keyword\"); endmodule
+module b; initial #1 $display(\"%m b\"); endmodule";
+    let path = Path::new("keyword.sv");
+    let tops = celox_frontend_sv::top_level_modules(&[(source, path)], false).unwrap();
+    // `\\module` names `module` (5.6.1); the generated root escapes it.
+    assert_eq!(tops, ["b", "module"]);
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, path)], "")
+        .tops(tops)
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    sim.run_until(2).unwrap();
+    let mut lines = displays(&mut sim);
+    lines.sort();
+    assert_eq!(lines, ["b b", "module keyword"]);
+}
+
+/// An escaped reference names the module a `begin_keywords` region declares
+/// without escaping (5.6.1, 22.14): under 1364-2005 `checker` is not a
+/// keyword, so `\checker` instantiates it and it is no top.
+#[test]
+fn escaped_references_name_modules_of_older_keyword_versions() {
+    let source = "`timescale 1ns / 1ns
+`begin_keywords \"1364-2005\"
+module checker; initial #1 $display(\"%m checker\"); endmodule
+`end_keywords
+module a; \\checker c (); endmodule
+module b; initial #1 $display(\"%m b\"); endmodule";
+    let path = Path::new("keywords.sv");
+    let tops = celox_frontend_sv::top_level_modules(&[(source, path)], false).unwrap();
+    assert_eq!(tops, ["a", "b"]);
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, path)], "")
+        .tops(tops)
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    sim.run_until(2).unwrap();
+    let mut lines = displays(&mut sim);
+    lines.sort();
+    assert_eq!(lines, ["a.c checker", "b b"]);
+}
+
+/// A module declared by an escaped name is the module of its simple name
+/// (5.6.1), as a top and as an instance.
+#[test]
+fn escaped_module_declarations_are_named_by_their_simple_spelling() {
+    let source = "`timescale 1ns / 1ns
+module \\foo ; initial #1 $display(\"%m foo\"); endmodule
+module top; foo f (); endmodule";
+    let path = Path::new("escaped.sv");
+    let tops = celox_frontend_sv::top_level_modules(&[(source, path)], false).unwrap();
+    assert_eq!(tops, ["top"]);
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, path)], "top")
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    sim.run_until(2).unwrap();
+    assert_eq!(displays(&mut sim), ["top.f foo"]);
+}
+
+/// A path names a signal from a top only when it starts with a top's name; a
+/// package variable whose escaped package name holds a dot is found whole.
+#[test]
+fn signal_paths_split_only_at_a_top() {
+    let source = "package \\p.q ; logic [7:0] v = 8'd5; endpackage
+module a; logic [7:0] x; initial x = \\p.q ::v; endmodule
+module b; logic [7:0] y = 8'd7; endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("paths.sv"))], "")
+        .tops(["a", "b"])
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    sim.run_until(1).unwrap();
+    let v = sim.signal("\\p.q::v");
+    assert_eq!(sim.get(v), 5u8.into());
+    let y = sim.signal("b.y");
+    assert_eq!(sim.get(y), 7u8.into());
 }

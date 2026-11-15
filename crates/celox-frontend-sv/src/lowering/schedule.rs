@@ -319,7 +319,17 @@ fn schedule_sources_collecting(
     }
     // The root generated for several tops (23.3.1), which no name includes.
     let hidden_root = analysis_options.generated_root;
-    let analyzed = analyze_sources(sources, &[top], analysis_options.clone())?;
+    // The tops below it are roots of the design too, which timescale
+    // queries such as `$printtimescale(top.u)` name.
+    let tops = if hidden_root {
+        crate::generated_root_tops(sources, top)
+    } else {
+        Vec::new()
+    };
+    let roots: Vec<&str> = std::iter::once(top)
+        .chain(tops.iter().map(String::as_str))
+        .collect();
+    let analyzed = analyze_sources(sources, &roots, analysis_options.clone())?;
     checkpoint!("analyze_sources");
     package_warnings(&analyzed, warnings);
     // The specializations that the modules request of package class
