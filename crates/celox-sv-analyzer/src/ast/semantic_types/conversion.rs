@@ -137,6 +137,8 @@ fn convert(
         enum_domain: ty.enum_domain.as_ref(),
         members: &ty.members,
         declaration: ty.declaration_name(),
+        typename: ty.spelling.name_of(),
+        aggregate: ty.spelling.aggregate_of(),
         anonymous: ty.spelling.anonymous(),
         scope: ty.declaration_scope(),
         signed: ty.is_signed,
@@ -190,6 +192,8 @@ pub(in crate::ast) fn of_shape(
         enum_domain: shape.enum_domain.as_ref(),
         members: &shape.members,
         declaration: type_names::declared_type(shape).and_then(Type::declaration_name),
+        typename: type_names::declared_type(shape).and_then(|ty| ty.spelling.name_of()),
+        aggregate: type_names::declared_type(shape).and_then(|ty| ty.spelling.aggregate_of()),
         anonymous: type_names::declared_type(shape).and_then(|ty| ty.spelling.anonymous()),
         scope: type_names::declared_type(shape).and_then(Type::declaration_scope),
         signed: shape.signed,
@@ -223,6 +227,11 @@ struct Parts<'a> {
     members: &'a [PackedMember],
     /// The typedef that names an enumeration, structure or union type.
     declaration: Option<&'a str>,
+    /// How `$typename` names that typedef.
+    typename: Option<&'a type_names::TypedefName>,
+    /// `struct` or `union` of a structure or union type other than a soft
+    /// or tagged union.
+    aggregate: Option<&'static str>,
     /// The source position of an enumeration no typedef names.
     anonymous: Option<&'a str>,
     /// The elaborated scope that declares the enumeration, structure or
@@ -348,8 +357,11 @@ impl Parts<'_> {
             .declaration
             .filter(|_| self.enumeration)
             .map(|declaration| table.declare(declaration, self.scope));
-        if let (Some(decl), Some(domain)) = (named, self.enum_domain) {
-            table.record_enum_domain(decl, domain);
+        if let Some(decl) = named {
+            table.record_spelling(decl, self.typename, None);
+            if let Some(domain) = self.enum_domain {
+                table.record_enum_domain(decl, domain);
+            }
         }
         let element = if self.enumeration
             && let Some(decl) = named.map(Decl::Named).or(anonymous)
@@ -408,10 +420,10 @@ impl Parts<'_> {
         owner: &str,
         members: Arc<[(Arc<str>, TyId)]>,
     ) -> Decl {
-        Decl::Aggregate {
-            decl: table.declare(self.declaration.unwrap_or(owner), self.scope),
-            members,
-        }
+        let decl = table.declare(self.declaration.unwrap_or(owner), self.scope);
+        let typename = self.declaration.and(self.typename);
+        table.record_spelling(decl, typename, self.aggregate);
+        Decl::Aggregate { decl, members }
     }
 }
 

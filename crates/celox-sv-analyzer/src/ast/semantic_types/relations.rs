@@ -88,6 +88,35 @@ impl TyTable {
     /// Record the members of the enumeration declaration `decl` declares
     /// (6.19). A declaration is one per elaborated scope, which its
     /// parameters belong to, so it has one set of members.
+    /// Record how `$typename` names declaration `decl`: the `typename` of
+    /// its typedef and the `aggregate` keyword of a structure or union.
+    pub(in crate::ast) fn record_spelling(
+        &mut self,
+        decl: super::DeclId,
+        typename: Option<&super::super::type_names::TypedefName>,
+        aggregate: Option<&'static str>,
+    ) {
+        let data = &mut self.decls[decl.0 as usize];
+        if let Some(typename) = typename {
+            let recorded = data.typename.get_or_insert_with(|| typename.clone());
+            debug_assert!(
+                recorded == typename,
+                "declaration `{}` of scope {:?} named {recorded:?} and {typename:?}",
+                data.name,
+                data.scope
+            );
+        }
+        if let Some(aggregate) = aggregate {
+            let recorded = data.aggregate.get_or_insert(aggregate);
+            debug_assert!(
+                *recorded == aggregate,
+                "declaration `{}` of scope {:?} is both a {recorded} and a {aggregate}",
+                data.name,
+                data.scope
+            );
+        }
+    }
+
     pub(in crate::ast) fn record_enum_domain(
         &mut self,
         decl: super::DeclId,

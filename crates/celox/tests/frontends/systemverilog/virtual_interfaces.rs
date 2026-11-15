@@ -1027,3 +1027,47 @@ fn header_ports_and_package_constant_bounds_keep_their_enumeration_through_virtu
     assert_eq!(sim.get(sim.signal("width")), 3u32.into());
     assert_eq!(sim.get(sim.signal("state_named")), 1u8.into());
 }
+
+/// `$typename` writes a virtual interface type as it is declared (IEEE
+/// 1800-2023 25.9; 20.6.1 has no rule for one), not as the bits that hold
+/// it, so `%m` in a method of a class specialized with one (21.2.1.5) tells
+/// it apart from the specialization with a vector of those bits.
+#[test]
+fn typename_writes_virtual_interface_types_as_declared() {
+    let source = "interface bus_if(input logic clk); modport mp(input clk); endinterface
+        module Top;
+            class Db #(type T = int);
+                static function void show(); $display(\"[%m]\"); endfunction
+            endclass
+            logic clk = 0;
+            bus_if bus(clk);
+            virtual bus_if v;
+            virtual bus_if.mp m;
+            initial begin
+                $display(\"%s %s\", $typename(v), $typename(m));
+                Db#(virtual bus_if)::show();
+                Db#(bit [31:0])::show();
+            end
+        endmodule";
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("vif_typename.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(1).unwrap();
+    // Before, both were `bit[31:0]`, and both specializations were named
+    // `Db#(bit[31:0])`.
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: b"virtual bus_if virtual bus_if.mp".to_vec()
+            },
+            celox::RuntimeEvent::Display {
+                message: b"[Top.Db#(virtual bus_if)::show]".to_vec()
+            },
+            celox::RuntimeEvent::Display {
+                message: b"[Top.Db#(bit[31:0])::show]".to_vec()
+            },
+        ]
+    );
+}
