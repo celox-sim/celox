@@ -196,12 +196,14 @@ impl Parser<'_> {
                         continue;
                     }
                     jobs.push(Job::Block(solve));
+                    let start = self.at;
                     if solve && self.eat("solve") {
-                        supported = false;
-                        self.constraint_primary_list()?;
+                        let before = self.constraint_primary_list()?;
                         self.expect("before")?;
-                        self.constraint_primary_list()?;
+                        let after = self.constraint_primary_list()?;
                         self.expect(";")?;
+                        expressions
+                            .push(self.node(start, ExprKind::SolveBefore { before, after })?);
                     } else {
                         jobs.push(Job::Expression);
                     }
@@ -526,17 +528,28 @@ impl Parser<'_> {
         }
     }
 
-    fn constraint_primary_list(&mut self) -> Result<()> {
-        self.constraint_primary()?;
+    fn constraint_primary_list(&mut self) -> Result<Vec<ExprId>> {
+        let mut primaries = vec![self.constraint_primary()?];
         while self.eat(",") {
-            self.constraint_primary()?;
+            primaries.push(self.constraint_primary()?);
         }
-        Ok(())
+        Ok(primaries)
     }
 
     fn constraint_primary(&mut self) -> Result<ExprId> {
         let primary = self.expression(14)?;
         let mut id = primary;
+        // Parentheses follow only an array method such as `size()`
+        // (Syntax 18-8).
+        if let ExprKind::Call {
+            expression,
+            arguments,
+        } = &self.expressions[id.0].kind
+            && arguments.is_empty()
+            && matches!(&self.expressions[expression.0].kind, ExprKind::Member { name, .. } if name.spelling == "size")
+        {
+            id = *expression;
+        }
         let mut receiver = false;
         loop {
             match &self.expressions[id.0].kind {

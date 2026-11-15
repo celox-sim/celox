@@ -421,6 +421,9 @@ impl Parser<'_> {
                     pending.push(*variable);
                     pending.extend(*condition);
                 }
+                ExprKind::SolveBefore { before, after } => {
+                    pending.extend(before.iter().chain(after));
+                }
                 ExprKind::Call { .. }
                 | ExprKind::Parameterized { .. }
                 | ExprKind::Type(_)
