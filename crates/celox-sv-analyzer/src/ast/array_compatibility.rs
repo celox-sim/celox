@@ -40,7 +40,7 @@ fn element_identity(shape: &VariableDimensions, table: &semantic_types::TyTable)
         shape.virtual_interface.is_none(),
         "an array of virtual interfaces is told by its semantic type"
     );
-    if let Some(aggregate) = &shape.unpacked_struct {
+    if let Some(aggregate) = shape.unpacked_struct_in(table) {
         return Some(format!("struct {}", aggregate.identity()));
     }
     let domain = shape.enumeration_in(table).domain?;

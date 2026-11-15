@@ -521,8 +521,10 @@ pub(super) fn bind_alias(
     // type is named before container dimensions hold it as their element.
     freeze_bounds(&mut base, &syntax_tree.functions, const_env);
     base.name_declaration(
-        unit_scope(
+        declaring_scope(
             classes::enclosing_unit(syntax_tree.declarations(), alias.tokens),
+            syntax_tree.declarations(),
+            alias.tokens,
             session,
         ),
         name,
@@ -587,6 +589,57 @@ pub(super) fn unit_scope(
 ) -> Option<Arc<str>> {
     unit.filter(|unit| !matches!(unit.kind, celox_sv_syntax::UnitKind::Package))
         .and(session.scope.clone())
+}
+
+/// A class being laid out or specialized (see [`declaring_scope`]).
+#[derive(Debug, Clone)]
+pub(super) struct ClassScope {
+    /// The class or specialization, such as `C#(P=1)`.
+    pub name: Arc<str>,
+    /// The declarations the class is declared in, by address.
+    pub declarations: usize,
+    pub tokens: celox_sv_syntax::TokenRange,
+}
+
+impl ClassScope {
+    pub(super) fn new(
+        name: &str,
+        declarations: &celox_sv_syntax::Declarations,
+        tokens: celox_sv_syntax::TokenRange,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            declarations: std::ptr::from_ref(declarations) as usize,
+            tokens,
+        }
+    }
+}
+
+/// The elaborated scope that declares the type at `tokens` of
+/// `declarations`, in `unit`: that of the unit (see [`unit_scope`]), and
+/// in it the innermost class specialization being laid out whose
+/// declaration holds the type, as each specialization of a parameterized
+/// class declares types of its own (IEEE 1800-2023 8.25), with member
+/// initial values of its parameters (7.2.2).
+pub(super) fn declaring_scope(
+    unit: Option<&celox_sv_syntax::Unit>,
+    declarations: &celox_sv_syntax::Declarations,
+    tokens: celox_sv_syntax::TokenRange,
+    session: &Session,
+) -> Option<Arc<str>> {
+    let scope = unit_scope(unit, session);
+    let address = std::ptr::from_ref(declarations) as usize;
+    let Some(class) = session.class_scopes.iter().rev().find(|class| {
+        class.declarations == address
+            && class.tokens.start <= tokens.start
+            && tokens.end <= class.tokens.end
+    }) else {
+        return scope;
+    };
+    Some(match scope {
+        Some(scope) => format!("{scope}::{}", class.name).into(),
+        None => class.name.clone(),
+    })
 }
 
 pub(super) fn declaration_name(

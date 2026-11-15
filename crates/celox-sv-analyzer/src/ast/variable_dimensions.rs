@@ -173,6 +173,16 @@ impl VariableDimensions {
         unpacked_structs::is_struct(self.bound(table), table, self.unpacked_struct.is_some())
     }
 
+    /// The declaration of the variable's unpacked structure type, or of the
+    /// elements of a fixed-size array of them, as its semantic type in
+    /// `table` tells.
+    pub(super) fn unpacked_struct_in<'a>(
+        &'a self,
+        table: &'a semantic_types::TyTable,
+    ) -> Option<&'a Arc<unpacked_structs::UnpackedStruct>> {
+        unpacked_structs::declaration_of(self.bound(table), table, self.unpacked_struct.as_ref())
+    }
+
     /// What the variable's type is of an enumeration, as its semantic type
     /// in `table` tells (see [`enums::Enumeration::of`]).
     pub(super) fn enumeration_in(&self, table: &semantic_types::TyTable) -> enums::Enumeration {

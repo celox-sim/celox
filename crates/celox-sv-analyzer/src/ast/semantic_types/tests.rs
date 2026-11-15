@@ -810,3 +810,36 @@ fn unpacked_structures_and_fixed_size_arrays_of_them_are_told_by_their_types() {
     assert!(!is_struct("sq_t"));
     assert!(!is_struct("p_t"));
 }
+
+#[test]
+fn unpacked_structure_types_name_their_declarations() {
+    // IEEE 1800-2023 7.2: the members, defaults and layout of an unpacked
+    // structure type; 7.4.2: those of the elements of a fixed-size array of
+    // them. A queue of them is a container (whose elements take no member
+    // defaults), and a packed structure has no
+    // leaves of its own.
+    let (table, ids) = typedefs(
+        "typedef struct {int a; bit [3:0] b = 4'd5;} s_t;
+         typedef s_t sa_t [2];
+         typedef struct {int c;} t_t;
+         typedef t_t tq_t [$];
+         typedef struct packed {int a;} p_t;",
+    );
+    let declaration = |name: &str| table.unpacked_struct(ids[name]);
+    let aggregate = declaration("s_t").expect("the declaration of `s_t`");
+    assert_eq!(
+        aggregate
+            .members()
+            .iter()
+            .map(|member| (member.name.as_str(), member.width, member.default.is_some()))
+            .collect::<Vec<_>>(),
+        [("a", 32, false), ("b", 4, true)]
+    );
+    assert!(Arc::ptr_eq(
+        declaration("sa_t").expect("the declaration of the elements of `sa_t`"),
+        aggregate
+    ));
+    assert!(declaration("t_t").is_some());
+    assert!(declaration("tq_t").is_none());
+    assert!(declaration("p_t").is_none());
+}

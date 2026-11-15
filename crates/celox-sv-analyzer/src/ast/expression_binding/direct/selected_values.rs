@@ -546,8 +546,7 @@ fn struct_member_place(
         id = ungroup(next, native);
     };
     let aggregate = target
-        .element
-        .unpacked_struct()
+        .element_struct(&session.types)
         .expect("an element of unpacked structure type")
         .clone();
     // The members that name the place, from the element up.
@@ -564,7 +563,7 @@ fn struct_member_place(
         };
         names.push(name);
         member = Some(id);
-        match declared.r#type.unpacked_struct() {
+        match declared.r#type.unpacked_struct_in(&session.types) {
             Some(inner) if declared.r#type.unpacked_ranges.is_empty() => current = inner,
             _ => break,
         }

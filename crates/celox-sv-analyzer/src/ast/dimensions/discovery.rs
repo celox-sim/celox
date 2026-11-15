@@ -462,8 +462,10 @@ fn declaration(
                 // of its elaborated scope.
                 if top {
                     ty.name_declaration(
-                        types::unit_scope(
+                        types::declaring_scope(
                             classes::enclosing_unit(tree.declarations(), alias.tokens),
+                            tree.declarations(),
+                            alias.tokens,
                             session,
                         ),
                         || types::declaration_name(tree, alias, None),

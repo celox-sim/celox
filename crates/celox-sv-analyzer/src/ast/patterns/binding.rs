@@ -179,7 +179,7 @@ fn select<'a>(
     shape: Shape<'a>,
     dims: &PackedDimensions,
 ) -> Converted<(Vec<Selected<'a>>, bool, bool)> {
-    if let Some(aggregate) = shape.unpacked_struct.clone()
+    if let Some(aggregate) = shape.unpacked_struct_in(&session.types).cloned()
         && shape.unpacked.is_empty()
     {
         return Ok((
@@ -583,7 +583,7 @@ pub(in crate::ast) fn bind_native(
                 {
                     unpacked_structs::check_value(structure, id, native, tree, session, dims)?;
                 }
-                if let Some(aggregate) = shape.unpacked_struct.clone()
+                if let Some(aggregate) = shape.unpacked_struct_in(&session.types).cloned()
                     && shape.unpacked.is_empty()
                     && !pattern
                 {

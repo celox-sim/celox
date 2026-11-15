@@ -713,10 +713,11 @@ pub(in crate::ast) fn aggregate_load(
     aggregate: &classes::AggregateProperty,
     class: &Class,
     handle: &Expr,
+    table: &semantic_types::TyTable,
 ) -> Converted<Expr> {
     let leaves = aggregate
         .r#type
-        .unpacked_struct()
+        .unpacked_struct_in(table)
         .expect("an unpacked structure property")
         .leaves();
     // Each member is read through the receiver, so it must not change: a
