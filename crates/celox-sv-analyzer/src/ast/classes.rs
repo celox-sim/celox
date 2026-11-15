@@ -1295,9 +1295,8 @@ pub(super) fn handle_type_id(
     table: &mut semantic_types::TyTable,
     name: &str,
 ) -> semantic_types::TyId {
-    table.intern(semantic_types::TyData::Class(semantic_types::Decl::Class(
-        name.into(),
-    )))
+    let decl = table.class(name);
+    table.intern(semantic_types::TyData::Class(decl))
 }
 
 /// The handle type of class `name`, if it is a class.

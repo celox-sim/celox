@@ -117,6 +117,22 @@ impl TyTable {
         }
     }
 
+    /// Record the parameter values `arguments` of class specialization
+    /// `decl`.
+    pub(in crate::ast) fn record_class_arguments(
+        &mut self,
+        decl: super::DeclId,
+        arguments: Arc<[super::ClassArgument]>,
+    ) {
+        let data = &mut self.decls[decl.0 as usize];
+        let recorded = data.arguments.get_or_insert_with(|| arguments.clone());
+        debug_assert!(
+            *recorded == arguments,
+            "class `{}` specialized with {recorded:?} and {arguments:?}",
+            data.name
+        );
+    }
+
     pub(in crate::ast) fn record_enum_domain(
         &mut self,
         decl: super::DeclId,

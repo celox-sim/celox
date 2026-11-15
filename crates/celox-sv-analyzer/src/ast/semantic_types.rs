@@ -95,8 +95,10 @@ impl Range {
     }
 }
 
-/// A declaration of a named enumeration, structure or union type, as the
-/// table interns it ([`TyTable::declare`]).
+/// A declaration of a named enumeration, structure or union type
+/// ([`TyTable::declare`]), of a class or class specialization
+/// ([`TyTable::class`]) or of an interface ([`TyTable::interface`]), as the
+/// table interns it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct DeclId(u32);
 
@@ -119,6 +121,19 @@ pub(super) struct DeclData {
     /// `struct` or `union` of a structure or union type other than a soft
     /// or tagged union, which `$typename` writes.
     pub aggregate: Option<&'static str>,
+    /// The parameter values of a class specialization, in the order of its
+    /// parameter port list, which `$typename` writes (20.6.1, 8.25), once
+    /// they have been recorded.
+    pub arguments: Option<Arc<[ClassArgument]>>,
+}
+
+/// A parameter value of a class specialization (8.25).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) enum ClassArgument {
+    Type(TyId),
+    /// The value of a value parameter, or `None` for one without an
+    /// integral value.
+    Value(Option<i128>),
 }
 
 /// The identity of the declaration of a named type.
@@ -142,10 +157,11 @@ pub(super) enum Decl {
         decl: DeclId,
         members: Arc<[(Arc<str>, TyId)]>,
     },
-    /// A class, or a specialization of a parameterized class.
-    Class(Arc<str>),
+    /// A class, or a specialization of a parameterized class, by the name
+    /// the analysis gives it (`DeclData::name`).
+    Class(DeclId),
     /// An interface.
-    Interface(Arc<str>),
+    Interface(DeclId),
 }
 
 /// What the bits of a packed type are made of.
@@ -250,6 +266,10 @@ pub(super) struct TyTable {
     /// elaborated scope is called): a lookup allocates nothing, as types
     /// are converted at every reference.
     decl_ids: HashMap<Arc<str>, HashMap<Arc<str>, DeclId>>,
+    /// The classes and class specializations by name.
+    class_ids: HashMap<Arc<str>, DeclId>,
+    /// The interfaces by name.
+    interface_ids: HashMap<Arc<str>, DeclId>,
     /// How many times a reader resolved a type that was not bound where it
     /// was declared, which tests check producers against.
     #[cfg(test)]
@@ -442,12 +462,49 @@ impl TyTable {
             domain: None,
             typename: None,
             aggregate: None,
+            arguments: None,
         };
         self.decl_ids
             .entry(data.name.clone())
             .or_default()
             .insert(data.scope.clone().unwrap_or_else(|| "".into()), id);
         self.decls.push(data);
+        id
+    }
+
+    /// The declaration of class or class specialization `name`.
+    pub fn class(&mut self, name: &str) -> Decl {
+        Decl::Class(Self::named_decl(&mut self.decls, &mut self.class_ids, name))
+    }
+
+    /// The declaration of interface `name`.
+    pub fn interface(&mut self, name: &str) -> Decl {
+        Decl::Interface(Self::named_decl(
+            &mut self.decls,
+            &mut self.interface_ids,
+            name,
+        ))
+    }
+
+    fn named_decl(
+        decls: &mut Vec<DeclData>,
+        ids: &mut HashMap<Arc<str>, DeclId>,
+        name: &str,
+    ) -> DeclId {
+        if let Some(&id) = ids.get(name) {
+            return id;
+        }
+        let id = DeclId(decls.len() as u32);
+        let name: Arc<str> = name.into();
+        decls.push(DeclData {
+            name: name.clone(),
+            scope: None,
+            domain: None,
+            typename: None,
+            aggregate: None,
+            arguments: None,
+        });
+        ids.insert(name, id);
         id
     }
 
@@ -525,7 +582,7 @@ impl TyTable {
     /// unpacked array of handles (IEEE 1800-2023 8.4, 7.4.2).
     pub fn handle_class(&self, id: TyId) -> Option<&Arc<str>> {
         match self.data(self.fixed_element(id)) {
-            TyData::Class(Decl::Class(name)) => Some(name),
+            TyData::Class(Decl::Class(decl)) => Some(&self.decl(*decl).name),
             _ => None,
         }
     }

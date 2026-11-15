@@ -1421,7 +1421,8 @@ impl BodyBuilder<'_, '_, '_> {
             semantic_types::TyData::String => {
                 type_binding::builtin_type("string", None).expect("a builtin type")
             }
-            semantic_types::TyData::Class(semantic_types::Decl::Class(class)) => {
+            semantic_types::TyData::Class(semantic_types::Decl::Class(decl)) => {
+                let class = self.session.types.decl(decl).name.clone();
                 classes::handle_type(self.tree, self.session, &class)
                     .ok_or_else(|| unsupported(format!("class `{class}`")))?
             }

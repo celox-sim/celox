@@ -144,8 +144,9 @@ pub(super) fn result(
             }
         }
         // 9.7: get_randstate returns the process random state as a string.
-        TyData::Class(Decl::Class(name))
-            if name.as_ref() == processes::CLASS && method == "get_randstate" =>
+        TyData::Class(Decl::Class(decl))
+            if session.types.decl(decl).name.as_ref() == processes::CLASS
+                && method == "get_randstate" =>
         {
             Some(session.types.intern(TyData::String))
         }

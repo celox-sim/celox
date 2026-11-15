@@ -389,8 +389,9 @@ fn virtual_interfaces_take_their_interface_without_or_with_their_modport() {
     // interface with no modport or with its own modport.
     let mut table = TyTable::default();
     let mut vif = |interface: &str, modport: Option<&str>| {
+        let interface = table.interface(interface);
         table.intern(TyData::VirtualInterface {
-            interface: Decl::Interface(interface.into()),
+            interface,
             modport: modport.map(Into::into),
         })
     };
@@ -425,7 +426,10 @@ fn class_handles_assign_to_their_classes_bases_and_interfaces() {
     // IEEE 1800-2023 8.16: `class E extends C`; 8.26.5: `class Fifo extends
     // Base implements PutImp`; 6.11.1: `null` to any handle.
     let mut table = TyTable::default();
-    let mut class = |name: &str| table.intern(TyData::Class(Decl::Class(name.into())));
+    let mut class = |name: &str| {
+        let decl = table.class(name);
+        table.intern(TyData::Class(decl))
+    };
     let (c, e, base, fifo, put, other) = (
         class("C"),
         class("E"),
@@ -557,7 +561,10 @@ fn class_casts_check_derived_targets_at_run_time() {
     // IEEE 1800-2023 8.16: `$cast` to a derived class's handle checks the
     // object; to an unrelated class it cannot succeed.
     let mut table = TyTable::default();
-    let mut class = |name: &str| table.intern(TyData::Class(Decl::Class(name.into())));
+    let mut class = |name: &str| {
+        let decl = table.class(name);
+        table.intern(TyData::Class(decl))
+    };
     let (base, derived, other, interface) = (class("B"), class("D"), class("O"), class("I"));
     let supertypes = |base: Option<TyId>, interface: bool| Supertypes {
         base,
@@ -733,7 +740,8 @@ fn handles_and_fixed_size_arrays_of_them_name_their_class() {
     // unpacked array of handles is one (7.4.2). A dynamic array is a
     // container, whose elements its type does not name.
     let mut table = TyTable::default();
-    let class = table.intern(TyData::Class(Decl::Class("C".into())));
+    let decl = table.class("C");
+    let class = table.intern(TyData::Class(decl));
     let fixed = |element| TyData::Array {
         kind: ArrayKind::Fixed(Range { left: 0, right: 1 }),
         element,
@@ -842,4 +850,35 @@ fn unpacked_structure_types_name_their_declarations() {
     assert!(declaration("t_t").is_some());
     assert!(declaration("tq_t").is_none());
     assert!(declaration("p_t").is_none());
+}
+
+#[test]
+fn classes_and_interfaces_are_declarations_of_their_own() {
+    // IEEE 1800-2023 8.4, 25.9: a handle names its class and a virtual
+    // interface its interface, each one declaration however often a type
+    // names it, apart from a typedef or an interface of the same name.
+    let mut table = TyTable::default();
+    let class = table.class("C");
+    assert_eq!(table.class("C"), class);
+    let interface = table.interface("C");
+    assert_ne!(interface, class);
+    let typedef = table.declare("C", None);
+    let (Decl::Class(class), Decl::Interface(interface)) = (class, interface) else {
+        panic!("a class and an interface declaration");
+    };
+    assert!(typedef != class && typedef != interface);
+    assert_eq!(table.decl(class).name.as_ref(), "C");
+    // 8.25: the parameter values of a specialization, recorded once.
+    let int = table.intern(TyData::Packed(Packed {
+        element: PackedElement::Bits,
+        four_state: false,
+        signed: true,
+        signed_element_depth: None,
+        dims: Box::new([Range { left: 31, right: 0 }]),
+        keyword: Some("int"),
+    }));
+    let arguments: Arc<[ClassArgument]> =
+        Arc::from([ClassArgument::Type(int), ClassArgument::Value(Some(3))]);
+    table.record_class_arguments(class, arguments.clone());
+    assert_eq!(table.decl(class).arguments.as_ref(), Some(&arguments));
 }
