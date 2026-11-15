@@ -694,3 +694,35 @@ fn types_keep_their_semantic_types_when_their_bounds_take_values() {
         assert_eq!(ty.binding.get(&session.types), Some(declared));
     }
 }
+
+#[test]
+fn a_container_alone_has_the_type_of_its_declaration() {
+    // IEEE 1800-2023 6.18, 7.10: a queue declared where `W` is 4 has
+    // `logic [3:0]` elements. A reader that has only the container, not the
+    // type that holds it, takes the type it was bound to instead of
+    // resolving it again, also where `W` is not known.
+    let session = &mut Session::default();
+    let source = "module M; class C; logic [W-1:0] q [$]; endclass endmodule";
+    let tree =
+        crate::source_tree::parse_scope_fixture(source, Path::new("semantic_types.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let declaring = ConstEnv::from_iter([("W".into(), 4)]);
+    let class =
+        crate::ast::classes::class(&tree, session, "C", &declaring, &TypeAliases::default())
+            .unwrap();
+    let ty = &class.properties[0].r#type;
+    let declared = of_type(&mut session.types, &tree.functions, ty, &declaring).unwrap();
+    let container = ty.container.as_deref().unwrap().clone();
+    let alone = crate::ast::containers::of(container);
+    let unbound = session.types.unbound_reads;
+    assert_eq!(
+        of_type(
+            &mut session.types,
+            &tree.functions,
+            &alone,
+            &ConstEnv::default()
+        ),
+        Some(declared)
+    );
+    assert_eq!(session.types.unbound_reads, unbound);
+}
