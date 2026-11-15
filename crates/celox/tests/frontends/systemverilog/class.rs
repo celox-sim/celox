@@ -5180,6 +5180,64 @@ fn fixed_size_array_properties_hold_their_elements() {
 }
 
 #[test]
+fn fixed_size_array_properties_take_unpacked_array_concatenations() {
+    // An unpacked array concatenation of one value for each element (IEEE
+    // 1800-2023 10.10) initializes and assigns a fixed-size array property,
+    // as sv-tests 18.14--random-stability_1 declares `int tab1[5] = {...}`.
+    let source = "class C;
+        int tab[5] = { 1, 2, 3, 4, 5 };
+        byte down[3:1] = { 8'd30, 8'd20, 8'd10 };
+    endclass
+    module Top;
+        C c;
+        int x = 6;
+        initial begin
+            c = new;
+            $display(\"%p %0d %0d\", c.tab, c.down[3], c.down[1]);
+            c.tab = { x, x + 1, 8, 9, 10 };
+            $display(\"%p %0d\", c.tab, c.tab.sum());
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["'{1, 2, 3, 4, 5} 30 10", "'{6, 7, 8, 9, 10} 40"]
+    );
+    // One of another size is no array of the property's type (7.6); one with
+    // an array among its items stays unsupported.
+    for (items, message) in [
+        (
+            "{ 1, 2, 3 }",
+            "an unpacked array concatenation of 3 elements",
+        ),
+        (
+            "{ q, 1, 2, 3, 4 }",
+            "an array in a concatenation for a fixed-size array class property",
+        ),
+        // A fixed-size array item stands for its elements too, so it is no
+        // single element of the five (10.10).
+        (
+            "{ f, 1, 2, 3, 4 }",
+            "an array in a concatenation for a fixed-size array class property",
+        ),
+    ] {
+        let source = format!(
+            "class C; int tab[5]; endclass
+            module Top; C c; int q[$]; int f[2]; initial begin c = new; c.tab = {items}; end endmodule"
+        );
+        let error = match celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        {
+            Err(error) => format!("{error:?}"),
+            Ok(_) => panic!("{items} accepted"),
+        };
+        assert!(error.contains(message), "{items}: {error}");
+    }
+}
+
+#[test]
 fn queries_of_fixed_size_array_properties_are_constants() {
     // However an object holds them, the properties are of fixed-size array
     // types (IEEE 1800-2023 20.7): their queries are constants, and size

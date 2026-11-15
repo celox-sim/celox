@@ -764,9 +764,9 @@ pub(super) fn assignment(
 
 /// The value received by the container `target` holds of a fixed-size
 /// unpacked array class property (see `classes::Property::storage`): an
-/// assignment pattern of one value for each element (IEEE 1800-2023
-/// 10.9.1), or a fixed-size array property of as many elements, whose
-/// elements it copies (7.6).
+/// assignment pattern or an unpacked array concatenation of one value for
+/// each element (IEEE 1800-2023 10.9.1, 10.10), or a fixed-size array
+/// property of as many elements, whose elements it copies (7.6).
 pub(super) fn fixed_assignment(
     root: ExprId,
     tree: &AnalysisContext<'_>,
@@ -801,9 +801,31 @@ pub(super) fn fixed_assignment(
                 )));
             }
         }
-        ExprKind::Pattern { .. } | ExprKind::Concatenation(_) => {
+        // An unpacked array concatenation of one value for each element
+        // (10.10); one with an array among its items, of whatever kind,
+        // stays unsupported, since such an item stands for its elements.
+        ExprKind::Concatenation(items) => {
+            for &item in items {
+                let array = native_type(item, native, tree, session, dims)?.is_some()
+                    || expression_types::type_of(tree, session, item, native, dims).is_ok_and(
+                        |ty| matches!(session.types.data(ty), semantic_types::TyData::Array { .. }),
+                    );
+                if array {
+                    return Err(unsupported(
+                        "an array in a concatenation for a fixed-size array class property",
+                    ));
+                }
+            }
+            if items.len() as u64 != size {
+                return Err(mismatch(format!(
+                    "an unpacked array concatenation of {} elements",
+                    items.len()
+                )));
+            }
+        }
+        ExprKind::Pattern { .. } => {
             return Err(unsupported(
-                "keyed assignment pattern or concatenation for a fixed-size array class property",
+                "keyed assignment pattern for a fixed-size array class property",
             ));
         }
         _ => match native_type(root, native, tree, session, dims)? {
