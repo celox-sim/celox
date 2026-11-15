@@ -1283,6 +1283,23 @@ fn generate_scopes_declare_loop_body_names_and_keep_inner_imports() {
 /// A generate block can import a type or subroutine that is another
 /// declaration than the one its module sees under that name (#1206).
 #[test]
+fn a_generate_block_signal_has_the_width_its_block_imports_give() {
+    // `v` is declared in `g`, where `f` is `p::f`: ten bits, not the three
+    // that the module's `q::f` would give it (IEEE 1800-2023 26.3).
+    assert_eq!(
+        output(
+            "package p; function automatic int f(int a); return a * 10; endfunction endpackage
+             package q; function automatic int f(int b); return b * 3; endfunction endpackage
+             module Top(output logic [7:0] y); import q::*; logic [7:0] a;
+               if (1) begin : g import p::*; logic [f(1)-1:0] v; assign v = '1; assign a = v; end
+               assign y = a + f(0);
+             endmodule"
+        ),
+        255
+    );
+}
+
+#[test]
 fn generate_block_imports_bind_their_own_subroutines() {
     // `f` takes its formals in another order in each package.
     let functions = "package p; function automatic int f(int a, int b = 0); return a * 10 + b; endfunction

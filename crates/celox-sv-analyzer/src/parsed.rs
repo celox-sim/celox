@@ -453,7 +453,7 @@ impl ParsedSource {
             packages,
             design,
         )?;
-        analyze::analyze_source(source)
+        analyze::analyze_source_in(source, design)
     }
 
     /// Analyze without rewriting the source, retaining literal override
@@ -537,7 +537,7 @@ impl ParsedSource {
                 packages,
                 design,
             )?;
-            analyze::analyze_source(source)
+            analyze::analyze_source_in(source, design)
         })();
         crate::finish_analysis(ir, warnings)
     }
