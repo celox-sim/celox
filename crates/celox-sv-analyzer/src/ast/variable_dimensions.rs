@@ -58,6 +58,39 @@ impl VariableDimensions {
         }
     }
 
+    /// The shape of member `name`, of type `ty`, of the structure this shape
+    /// is (7.2): bound to the member's type in the structure's semantic type
+    /// where `ty` has no binding of its own.
+    pub(super) fn member_shape(
+        &self,
+        table: &semantic_types::TyTable,
+        name: &str,
+        ty: &Type,
+    ) -> VariableDimensions {
+        let mut member = procedural::dimensions_from_type(ty);
+        if member.bound(table).is_none()
+            && let Some(id) = self.bound(table).and_then(|id| table.member(id, name))
+        {
+            member.bind_to(table, id);
+        }
+        member
+    }
+
+    /// Bind the shape, if it has no binding, to its semantic type in `env`,
+    /// the constants of the scope that declares it.
+    pub(super) fn bind_in(
+        &mut self,
+        table: &mut semantic_types::TyTable,
+        functions: &const_functions::ConstantFunctions,
+        env: &ConstEnv,
+    ) {
+        if self.bound(table).is_none()
+            && let Some(id) = self.type_id(table, functions, env)
+        {
+            self.bind_to(table, id);
+        }
+    }
+
     /// Bind the shape to type `id` of `table`, which it was made to have.
     pub(super) fn bind_to(&mut self, table: &semantic_types::TyTable, id: semantic_types::TyId) {
         self.binding = Some(table.retain(id));
@@ -97,6 +130,19 @@ impl VariableDimensions {
     /// The semantic type the declaration was bound to, if it was.
     pub(super) fn bound(&self, table: &semantic_types::TyTable) -> Option<semantic_types::TyId> {
         self.binding.as_ref()?.in_table(table)
+    }
+
+    /// What the variable's type is of an enumeration, as its semantic type
+    /// in `table` tells (see [`enums::Enumeration::of`]).
+    pub(super) fn enumeration_in(&self, table: &semantic_types::TyTable) -> enums::Enumeration {
+        let fields = enums::Enumeration {
+            enumeration: self.enum_domain.is_some()
+                || self.packed_enum
+                || type_names::declared_type(self).is_some_and(|ty| ty.is_enum),
+            packed: self.packed_enum,
+            domain: self.enum_domain.clone(),
+        };
+        enums::Enumeration::of(self.bound(table), table, fields)
     }
 
     /// The class of a variable of object handle type, or of the elements of

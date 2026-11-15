@@ -176,7 +176,7 @@ fn selects_packed_enum_element(
         {
             (
                 shape.unpacked.len(),
-                shape.container.is_none() && shape.packed_enum,
+                shape.container.is_none() && shape.enumeration_in(&session.types).packed,
             )
         }
         // A static property or a package variable.
@@ -188,14 +188,15 @@ fn selects_packed_enum_element(
         {
             (
                 shape.unpacked.len(),
-                shape.container.is_none() && shape.packed_enum,
+                shape.container.is_none() && shape.enumeration_in(&session.types).packed,
             )
         }
         ExprKind::Name(_) | ExprKind::Member { .. } => {
             match objects::property(tree, session, root, native, dimensions)? {
                 Some((property, _)) => (
                     property.r#type.unpacked_ranges.len(),
-                    property.r#type.container.is_none() && property.r#type.packed_enum,
+                    property.r#type.container.is_none()
+                        && property.r#type.enumeration_in(&session.types).packed,
                 ),
                 None => return Ok(false),
             }

@@ -1542,6 +1542,7 @@ pub(super) fn shared_class(
                 // Its element type keeps its meaning outside the class too.
                 Some(containers::fixed_storage(
                     &procedural::scoped_type(ty.clone(), env),
+                    &session.types,
                     tree,
                     &context,
                 )?)
@@ -1581,7 +1582,18 @@ pub(super) fn shared_class(
                         position: properties.len(),
                     });
                 }
-                for leaf in aggregate.leaves() {
+                for mut leaf in aggregate.leaves() {
+                    // A leaf has the type of its member in the structure's
+                    // semantic type (7.2).
+                    if leaf.r#type.binding.get(&session.types).is_none()
+                        && let Some(id) = ty.binding.get(&session.types).and_then(|id| {
+                            leaf.path
+                                .iter()
+                                .try_fold(id, |id, member| session.types.member(id, member))
+                        })
+                    {
+                        leaf.r#type.binding.set(&session.types, id);
+                    }
                     let mut field = field(&tree.functions, &leaf.r#type, env, size)?;
                     size = field.offset + field.storage();
                     let leaf_name = leaf.name(&property_name);
