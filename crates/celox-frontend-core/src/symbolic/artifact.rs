@@ -370,6 +370,9 @@ pub struct SymbolicRtl {
     pub modules: HashMap<ModuleId, SimModule>,
     pub module_names: HashMap<ModuleId, String>,
     pub root_id: ModuleId,
+    /// The root module is one the frontend generated to instantiate several
+    /// top-level modules (see [`celox_design::ElaboratedDesign::hidden_root`]).
+    pub hidden_root: bool,
     /// Modules holding the variables of a package, by package name. Each is
     /// instantiated once, outside the instance hierarchy, and the
     /// [`SimModule::package_bindings`] of other modules refer to its

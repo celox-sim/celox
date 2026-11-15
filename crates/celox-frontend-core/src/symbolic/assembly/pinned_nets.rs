@@ -17,7 +17,7 @@ pub(super) struct PinnedUnits<'a> {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn pinned_nets(
     policy: celox_design::DeadStorePolicy,
-    root: InstanceId,
+    tops: &HashSet<InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
     bindings: &PackageBindings,
@@ -95,7 +95,7 @@ pub(super) fn pinned_nets(
             let port = variable.kind.is_port()
                 && match policy {
                     celox_design::DeadStorePolicy::PreserveAllPorts => true,
-                    celox_design::DeadStorePolicy::PreserveTopPorts => instance == root,
+                    celox_design::DeadStorePolicy::PreserveTopPorts => tops.contains(&instance),
                     celox_design::DeadStorePolicy::PreserveListedSignals
                     | celox_design::DeadStorePolicy::Off => false,
                 };

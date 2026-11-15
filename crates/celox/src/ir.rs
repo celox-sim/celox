@@ -334,6 +334,33 @@ impl RuntimeDesign {
         self.instance_at_path(&InstancePath(Vec::new()))
     }
 
+    /// The instances of the design's top-level modules, by name: the root
+    /// instance, or the instances below a root generated for several
+    /// top-level modules (IEEE 1800-2023 23.3.1, see
+    /// [`celox_design::ElaboratedDesign::hidden_root`]). What the user calls
+    /// the design's top is one of these, never the generated root.
+    pub fn top_instances(&self) -> Vec<&RuntimeInstance> {
+        if !self.hidden_root {
+            return self.root_instance().into_iter().collect();
+        }
+        let mut tops: Vec<_> = self
+            .instances
+            .values()
+            .filter(|instance| {
+                instance.path.0.len() == 1 && !self.package_instances.contains(&instance.id)
+            })
+            .collect();
+        tops.sort_by(|left, right| left.path.0.cmp(&right.path.0));
+        tops
+    }
+
+    /// Whether instance `id` is one of the [`Self::top_instances`].
+    pub fn is_top_instance(&self, id: InstanceId) -> bool {
+        self.top_instances()
+            .iter()
+            .any(|instance| instance.id == id)
+    }
+
     pub fn variable(&self, address: &AbsoluteAddr) -> Option<&RuntimeVariable> {
         self.variables.get(address)
     }
@@ -1094,11 +1121,26 @@ impl RuntimeProgram {
             .expect("top-level instance exists")
             .module_name
             .clone();
+        // The root of several top-level modules is not a scope: each top is
+        // a root scope of its own, as `vpi_iterate(vpiModule, NULL)` expects
+        // (IEEE 1800-2023 23.3.1, 37.10).
+        let hidden_root = self.design.hidden_root;
+        // The full name of the scope at `segments` below the root; `None` for
+        // the hidden root.
+        let qualified = |segments: &[String]| -> Option<String> {
+            if hidden_root {
+                (!segments.is_empty()).then(|| segments.join("."))
+            } else if segments.is_empty() {
+                Some(root_name.clone())
+            } else {
+                Some(format!("{root_name}.{}", segments.join(".")))
+            }
+        };
 
         let mut scope_sources = self
             .design
             .instances()
-            .map(|instance| {
+            .filter_map(|instance| {
                 let segments = self
                     .design
                     .reflection_instance_paths
@@ -1108,26 +1150,18 @@ impl RuntimeProgram {
                     .last()
                     .cloned()
                     .unwrap_or_else(|| root_name.clone());
-                let full_name = if segments.is_empty() {
-                    root_name.clone()
-                } else {
-                    format!("{root_name}.{}", segments.join("."))
-                };
-                let parent_name = (!segments.is_empty()).then(|| {
-                    if segments.len() == 1 {
-                        root_name.clone()
-                    } else {
-                        format!("{root_name}.{}", segments[..segments.len() - 1].join("."))
-                    }
-                });
-                ScopeSource {
+                let full_name = qualified(segments)?;
+                let parent_name = segments
+                    .split_last()
+                    .and_then(|(_, parents)| qualified(parents));
+                Some(ScopeSource {
                     is_instance: true,
                     instance_id: instance.id,
                     name,
                     full_name,
                     parent_name,
                     module_name: instance.module_name.clone(),
-                }
+                })
             })
             .collect::<Vec<_>>();
         // A module instance can own structured variables (interface members,
@@ -1149,16 +1183,12 @@ impl RuntimeProgram {
         for segments in self.design.reflection_instance_paths.values() {
             let mut owner = root_instance;
             for depth in 1..segments.len() {
-                let full_name = format!("{root_name}.{}", segments[..depth].join("."));
+                let full_name = qualified(&segments[..depth]).expect("a scope below the root");
                 if let Some(&instance) = real_scopes.get(&full_name) {
                     owner = instance;
                     continue;
                 }
-                let parent_name = if depth == 1 {
-                    root_name.clone()
-                } else {
-                    format!("{root_name}.{}", segments[..depth - 1].join("."))
-                };
+                let parent_name = qualified(&segments[..depth - 1]);
                 member_scopes
                     .entry(full_name.clone())
                     .or_insert_with(|| ScopeSource {
@@ -1166,7 +1196,7 @@ impl RuntimeProgram {
                         instance_id: owner,
                         name: segments[depth - 1].clone(),
                         full_name,
-                        parent_name: Some(parent_name),
+                        parent_name,
                         module_name: String::new(),
                     });
             }
@@ -1234,6 +1264,7 @@ impl RuntimeProgram {
                 parent: scope.parent_name.as_ref().map(|parent| scope_ids[parent]),
                 children: Vec::new(),
                 signals: Vec::new(),
+                package: scope.is_instance && self.design.is_package_instance(scope.instance_id),
             })
             .collect::<Vec<_>>();
         let child_parents = scopes
@@ -1415,7 +1446,10 @@ impl RuntimeProgram {
         let root = &self.design.root_instance()?.module_name;
         let mut found = None;
         for instance in self.design.instances() {
-            let prefix = if instance.display_path.is_empty() {
+            // Paths begin at a top, not at the root of several (23.3.1).
+            let prefix = if self.design.hidden_root {
+                instance.display_path.join(".")
+            } else if instance.display_path.is_empty() {
                 root.clone()
             } else {
                 format!("{root}.{}", instance.display_path.join("."))

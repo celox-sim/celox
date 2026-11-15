@@ -24,7 +24,11 @@ pub(super) fn elaborated_scope_name(
             }
         })
         .collect::<Vec<_>>();
-    if segments.is_empty() {
+    if root_name.is_empty() {
+        // Names begin at a top-level module, not at the hidden root that
+        // holds several of them (IEEE 1800-2023 23.3.1).
+        segments.join(".")
+    } else if segments.is_empty() {
         root_name.to_string()
     } else {
         format!("{root_name}.{}", segments.join("."))

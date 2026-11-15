@@ -317,6 +317,8 @@ fn schedule_sources_collecting(
             }
         };
     }
+    // The root generated for several tops (23.3.1), which no name includes.
+    let hidden_root = analysis_options.generated_root;
     let analyzed = analyze_sources(sources, &[top], analysis_options.clone())?;
     checkpoint!("analyze_sources");
     package_warnings(&analyzed, warnings);
@@ -329,9 +331,17 @@ fn schedule_sources_collecting(
     let top = top.to_string();
     let root_key = LoweredSvModuleKey {
         name: top.clone(),
+        // A path starts at the top, or below the root of several tops at
+        // one of them.
         force_signals: force_signals
             .iter()
-            .filter_map(|path| path.strip_prefix(&format!("{top}.")))
+            .filter_map(|path| {
+                if hidden_root {
+                    Some(path.as_str())
+                } else {
+                    path.strip_prefix(&format!("{top}."))
+                }
+            })
             .map(str::to_string)
             .collect(),
         parameter_overrides: parameter_overrides
@@ -454,6 +464,7 @@ fn schedule_sources_collecting(
         module_ids.iter().map(|(key, &id)| (id, key)).collect();
     let hierarchy = hierarchy::Hierarchy::new(
         (&root_key, root_id),
+        hidden_root,
         &keys,
         &module_ids,
         &elaborated,
@@ -759,6 +770,7 @@ fn schedule_sources_collecting(
             modules,
             module_names,
             root_id,
+            hidden_root,
             packages,
             instance_values,
         };

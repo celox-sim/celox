@@ -59,6 +59,64 @@ pub fn component_references(
     }
     Ok(references)
 }
+/// The top-level modules of `sources`: the modules that no source
+/// instantiates (IEEE 1800-2023 23.3.1), in name order. Instantiations in
+/// generate branches count whether or not they are taken.
+pub fn top_level_modules(
+    sources: &[(&str, &std::path::Path)],
+    first_modules: bool,
+) -> Result<Vec<String>, AnalyzerError> {
+    let parsed = parse_sources(sources, first_modules)?;
+    let referenced: fxhash::FxHashSet<_> = parsed
+        .iter()
+        .flat_map(|source| source.component_references())
+        .collect();
+    // Declarations and references name a module alike, `\\foo ` as `foo`
+    // (IEEE 1800-2023 5.6.1).
+    let mut tops: Vec<_> = parsed
+        .iter()
+        .flat_map(|source| source.module_names())
+        .map(|name| celox_sv_analyzer::normalize_identifier(name))
+        .filter(|name| !referenced.contains(name))
+        .collect();
+    tops.sort();
+    tops.dedup();
+    Ok(tops)
+}
+
+/// The name and the source of a module that instantiates each of `tops`
+/// under its own name (IEEE 1800-2023 23.3.1), with the time unit and
+/// precision of those tops (see
+/// [`celox_sv_analyzer::generated_time_declarations_with_options`]): the
+/// root of a design of several top-level modules, which stands for `$root`.
+/// Its name is an escaped identifier no module of `sources` declares; the
+/// analysis that elaborates it is told it is generated
+/// ([`AnalysisOptions::generated_root`]), never by its name.
+pub fn top_level_root_source(
+    sources: &[(&str, &std::path::Path)],
+    tops: &[&str],
+    options: AnalysisOptions,
+) -> Result<(String, String), AnalyzerError> {
+    const BASE: &str = "\\$root";
+    let declared = if sources.iter().any(|(code, _)| code.contains(BASE)) {
+        component_names(sources, options.first_duplicate_module)?
+    } else {
+        fxhash::FxHashSet::default()
+    };
+    let name = std::iter::once(BASE.to_string())
+        .chain((1..).map(|index| format!("{BASE}_{index}")))
+        .find(|name| !declared.contains(name))
+        .expect("an unbounded sequence of names");
+    let time =
+        celox_sv_analyzer::generated_time_declarations_with_options(sources, Some(tops), options)?;
+    let mut source = format!("{time}module {name} ;\n");
+    for top in tops {
+        source.push_str(&format!("  {top} {top} ();\n"));
+    }
+    source.push_str("endmodule\n");
+    Ok((name, source))
+}
+
 pub fn component_names(
     sources: &[(&str, &std::path::Path)],
     first_modules: bool,

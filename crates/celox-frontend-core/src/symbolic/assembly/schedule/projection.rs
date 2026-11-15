@@ -34,6 +34,7 @@ pub(super) fn project_design(
 ) -> Result<ScheduledRtlOutput, ParserError> {
     let Design {
         module_names,
+        hidden_root,
         time_precision,
         expanded,
         instance_modules,
@@ -243,6 +244,7 @@ pub(super) fn project_design(
             state_objects,
             events,
             initial_state,
+            hidden_root,
         },
         frontend_lookup: FrontendLookup {
             instance_ids: expanded,
@@ -552,6 +554,7 @@ fn event_watches(
         state_objects: state_objects.clone(),
         events: events.clone(),
         initial_state: Vec::new(),
+        hidden_root: false,
     }
     .event_kinds();
     counted

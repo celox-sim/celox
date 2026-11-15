@@ -2204,6 +2204,11 @@ pub struct ElaboratedDesign<A> {
     pub state_objects: HashMap<A, VariableMetadata>,
     pub events: EventTopology<A>,
     pub initial_state: Vec<InitialStateValue<A>>,
+    /// The root instance is the module a frontend generated to instantiate
+    /// several top-level modules (IEEE 1800-2023 23.3.1). It stands for
+    /// `$root`: no name, `%m` path, waveform or reflection scope includes it.
+    #[serde(default)]
+    pub hidden_root: bool,
 }
 
 impl<A> Default for ElaboratedDesign<A> {
@@ -2214,6 +2219,7 @@ impl<A> Default for ElaboratedDesign<A> {
             state_objects: HashMap::default(),
             events: EventTopology::default(),
             initial_state: Vec::new(),
+            hidden_root: false,
         }
     }
 }
