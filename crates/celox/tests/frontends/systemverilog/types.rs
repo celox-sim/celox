@@ -221,6 +221,67 @@ fn local_enumerations_of_one_name_are_distinct_types() {
     assert!(error.contains("assignment"), "{error}");
 }
 
+/// Each anonymous enumeration declares a type of its own, which matches
+/// only the variables of its own declaration (IEEE 1800-2023 6.22.1 c): a
+/// variable of another, even with the same members, is assigned to one only
+/// by a cast (6.19.3, 6.22.3).
+#[test]
+fn anonymous_enumerations_with_the_same_members_are_distinct_types() {
+    let build = |assignment: &str| {
+        let source = format!(
+            "package p; enum {{A, B}} v; endpackage
+            module Top(output int seen);
+                enum {{A, B}} x, y;
+                initial begin
+                    p::v = p::B;
+                    y = B;
+                    x = y;
+                    {assignment}
+                    seen = x;
+                end
+            endmodule"
+        );
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("enums.sv"))], "Top")
+            .build()
+    };
+    let Err(error) = build("x = p::v;") else {
+        panic!("a variable of another anonymous enumeration needs a cast");
+    };
+    let error = error.to_string();
+    assert!(error.contains("is not assignment"), "{error}");
+    let mut sim = build("void'($cast(x, p::v));").unwrap();
+    let seen = sim.signal("seen");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(seen), BigUint::from(1u8));
+}
+
+/// An unpacked array of one anonymous enumeration takes only an array of
+/// the same one, by the rule for its elements (IEEE 1800-2023 7.6, 6.22.1
+/// c).
+#[test]
+fn arrays_of_anonymous_enumerations_with_the_same_members_are_incompatible() {
+    let build = |assignment: &str| {
+        let source = format!(
+            "package p; enum {{A, B}} pa [2]; endpackage
+            module Top(output int seen);
+                enum {{A, B}} xa [2], ya [2];
+                initial begin
+                    xa = ya;
+                    {assignment}
+                    seen = xa[1];
+                end
+            endmodule"
+        );
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("enums.sv"))], "Top")
+            .build()
+    };
+    build("").unwrap();
+    let Err(error) = build("xa = p::pa;") else {
+        panic!("an array of another anonymous enumeration is not compatible");
+    };
+    assert!(error.to_string().contains("compatible"), "{error}");
+}
+
 /// A member of a local enumeration is a member of that enumeration, also
 /// where a typedef of the module has a member of its name and value, so its
 /// methods are those of the local enumeration (IEEE 1800-2023 6.19.5).

@@ -391,6 +391,7 @@ fn bind_in_mode(
                             }
                             ty.enum_domain = enum_values(id, native, tree, session, context, &ty);
                             ty.packed_enum = !native.data_type(id).packed_dimensions.is_empty();
+                            declare_enum(&mut ty, id, native, tree, session);
                             ty.packed_ranges = ranges
                                 .into_iter()
                                 .chain(std::mem::take(&mut ty.packed_ranges))
@@ -432,8 +433,6 @@ fn bind_in_mode(
                             voids.push(is_void);
                             names.push(name);
                         }
-                        let token = &native.tokens[data.tokens.start];
-                        let span = token.origin.spelling;
                         let scope = types::declaring_scope(
                             classes::enclosing_unit(native, data.tokens),
                             native,
@@ -445,17 +444,11 @@ fn bind_in_mode(
                         // declaration has too, so that the instances and
                         // class specializations that declare a type apart
                         // also name it apart (IEEE 1800-2023 6.22, 8.25).
-                        let position = format!(
-                            "{}:{}:{}:{}",
-                            tree.syntax_tree.root_name().unwrap_or_default(),
-                            native.sources.file(span.file).path.display(),
-                            span.start,
-                            data.tokens.start
-                        );
-                        let owner = Arc::from(match &scope {
-                            Some(scope) => format!("{scope}/{position}"),
+                        let position = declaration_position(tree, native, data);
+                        let owner = match &scope {
+                            Some(scope) => Arc::from(format!("{scope}/{position}")),
                             None => position,
-                        });
+                        };
                         jobs.push(Job::Aggregate {
                             owner,
                             scope,
@@ -549,6 +542,7 @@ fn bind_in_mode(
                 ty.is_enum = true;
                 ty.enum_domain = enum_values(id, native, tree, session, context, &ty);
                 ty.packed_enum = !native.data_type(id).packed_dimensions.is_empty();
+                declare_enum(&mut ty, id, native, tree, session);
                 values.push(ty);
             }
             Job::Aggregate {
@@ -680,6 +674,46 @@ pub(in crate::ast) fn packed_ranges(
     all.sort_by_key(|dimension| dimension.tokens.start);
     all.dedup_by_key(|dimension| dimension.tokens);
     bind_ranges(&all, tree, session, context)
+}
+
+/// The source position of the declaration of anonymous type `data`, which
+/// tells it apart from another of the same structure (IEEE 1800-2023
+/// 6.22.1 c).
+fn declaration_position(
+    tree: &AnalysisContext<'_>,
+    native: &celox_sv_syntax::Declarations,
+    data: &celox_sv_syntax::DataType,
+) -> Arc<str> {
+    let token = &native.tokens[data.tokens.start];
+    let span = token.origin.spelling;
+    Arc::from(format!(
+        "{}:{}:{}:{}",
+        tree.syntax_tree.root_name().unwrap_or_default(),
+        native.sources.file(span.file).path.display(),
+        span.start,
+        data.tokens.start
+    ))
+}
+
+/// Record the declaration of enumeration `id` in its type `ty`: a typedef
+/// of it names it later, else it is an anonymous type of its own (6.22.1
+/// c), declared in the elaborated scope around it.
+fn declare_enum(
+    ty: &mut Type,
+    id: TypeId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &Session,
+) {
+    let data = native.data_type(id);
+    let scope = types::declaring_scope(
+        classes::enclosing_unit(native, data.tokens),
+        native,
+        data.tokens,
+        session,
+    );
+    ty.spelling
+        .anonymous_enum(declaration_position(tree, native, data), scope);
 }
 
 fn bind_ranges(
