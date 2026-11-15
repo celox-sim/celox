@@ -424,7 +424,7 @@ impl BoundPattern {
                 }
                 let structure = shape.unpacked.is_empty()
                     && shape.packed.len() <= 1
-                    && (!shape.members.is_empty() || shape.unpacked_struct.is_some());
+                    && (!shape.members.is_empty() || shape.is_unpacked_struct_in(&session.types));
                 let items = items
                     .iter()
                     .map(|(key, value)| {
@@ -505,10 +505,12 @@ impl BoundPattern {
         if unpacked {
             parts.reverse();
         }
-        Ok(if parts.len() == 1 && shape.unpacked_struct.is_none() {
-            parts.remove(0)
-        } else {
-            Expr::Concat(parts)
-        })
+        Ok(
+            if parts.len() == 1 && !shape.is_unpacked_struct_in(&session.types) {
+                parts.remove(0)
+            } else {
+                Expr::Concat(parts)
+            },
+        )
     }
 }

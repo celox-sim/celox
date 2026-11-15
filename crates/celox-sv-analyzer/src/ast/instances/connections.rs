@@ -159,7 +159,7 @@ fn expression_connection(
             celox_sv_syntax::ExprKind::Name(name)
                 if dims
                     .get(&normalize_identifier(&name.spelling))
-                    .is_some_and(|ty| ty.unpacked_struct.is_some()) =>
+                    .is_some_and(|ty| ty.is_unpacked_struct_in(&session.types)) =>
             {
                 Some(normalize_identifier(&name.spelling))
             }

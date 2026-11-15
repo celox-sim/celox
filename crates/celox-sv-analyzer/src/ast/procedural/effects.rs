@@ -1361,7 +1361,7 @@ impl BodyBuilder<'_, '_, '_> {
         // of its declared range (`q[i].m[8]` of `bit [15:8] m`).
         if let Some((ty, _)) =
             containers::element_member(id, native, self.tree, self.session, &self.dims)?
-            && ty.unpacked_struct().is_none()
+            && !ty.is_unpacked_struct_in(&self.session.types)
         {
             return Ok(self.hidden(ty));
         }

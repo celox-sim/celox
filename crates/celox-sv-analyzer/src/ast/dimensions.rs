@@ -142,38 +142,42 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
     for port in ports {
         dimensions.insert(
             port.name().to_string(),
-            VariableDimensions::new(VariableShape {
-                declared: type_names::Declared::new(port.r#type()),
-                chandle: port.r#type().is_chandle(),
-                container: port.r#type().container.clone(),
-                randomizable: port.r#type().container.is_none()
-                    && !port.r#type().holds_chandle()
-                    && (!port.r#type().is_enum || port.r#type().enum_domain.is_some())
-                    && port.randomizable,
-                enum_domain: port.r#type().enum_domain.clone(),
-                packed_enum: port.r#type().packed_enum,
-                real: matches!(port.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
-                string: matches!(port.r#type().kind(), TypeKind::String),
-                class: port.r#type().class().map(str::to_owned),
-                virtual_interface: port.r#type().virtual_interface.clone(),
-                packed: signal_packed_dimension_widths(port.r#type().packed_ranges()),
-                unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
-                signed: port.r#type().is_signed(),
-                is_2state: matches!(
-                    port.r#type().kind(),
-                    TypeKind::Bit
-                        | TypeKind::Chandle
-                        | TypeKind::Real
-                        | TypeKind::Shortreal
-                        | TypeKind::String
-                        | TypeKind::Object
-                        | TypeKind::Process
-                        | TypeKind::Event
-                ),
-                members: port.r#type().members.clone(),
-                signed_element_depth: port.r#type().signed_element_depth,
-                unpacked_struct: port.r#type().unpacked_struct.clone(),
-            }),
+            VariableDimensions::bound_to(
+                VariableShape {
+                    declared: type_names::Declared::new(port.r#type()),
+                    chandle: port.r#type().is_chandle(),
+                    container: port.r#type().container.clone(),
+                    randomizable: port.r#type().container.is_none()
+                        && !port.r#type().holds_chandle()
+                        && (!port.r#type().is_enum || port.r#type().enum_domain.is_some())
+                        && port.randomizable,
+                    enum_domain: port.r#type().enum_domain.clone(),
+                    packed_enum: port.r#type().packed_enum,
+                    real: matches!(port.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
+                    string: matches!(port.r#type().kind(), TypeKind::String),
+                    class: port.r#type().class().map(str::to_owned),
+                    virtual_interface: port.r#type().virtual_interface.clone(),
+                    packed: signal_packed_dimension_widths(port.r#type().packed_ranges()),
+                    unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
+                    signed: port.r#type().is_signed(),
+                    is_2state: matches!(
+                        port.r#type().kind(),
+                        TypeKind::Bit
+                            | TypeKind::Chandle
+                            | TypeKind::Real
+                            | TypeKind::Shortreal
+                            | TypeKind::String
+                            | TypeKind::Object
+                            | TypeKind::Process
+                            | TypeKind::Event
+                    ),
+                    members: port.r#type().members.clone(),
+                    signed_element_depth: port.r#type().signed_element_depth,
+                    unpacked_struct: port.r#type().unpacked_struct.clone(),
+                },
+                // The shape has the type the port was declared with.
+                &port.r#type().binding,
+            ),
         );
     }
     for port in ports {
@@ -192,39 +196,43 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
     for signal in signals {
         dimensions.insert(
             signal.name().to_string(),
-            VariableDimensions::new(VariableShape {
-                declared: type_names::Declared::new(signal.r#type()),
-                chandle: signal.r#type().is_chandle(),
-                container: signal.r#type().container.clone(),
-                randomizable: signal.r#type().container.is_none()
-                    && !signal.r#type().holds_chandle()
-                    && (!signal.r#type().is_enum || signal.r#type().enum_domain.is_some())
-                    && !signal.is_net()
-                    && !signal.is_const,
-                enum_domain: signal.r#type().enum_domain.clone(),
-                packed_enum: signal.r#type().packed_enum,
-                real: matches!(signal.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
-                string: matches!(signal.r#type().kind(), TypeKind::String),
-                class: signal.r#type().class().map(str::to_owned),
-                virtual_interface: signal.r#type().virtual_interface.clone(),
-                packed: signal_packed_dimension_widths(signal.r#type().packed_ranges()),
-                unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
-                signed: signal.r#type().is_signed(),
-                is_2state: matches!(
-                    signal.r#type().kind(),
-                    TypeKind::Bit
-                        | TypeKind::Chandle
-                        | TypeKind::Real
-                        | TypeKind::Shortreal
-                        | TypeKind::String
-                        | TypeKind::Object
-                        | TypeKind::Process
-                        | TypeKind::Event
-                ),
-                members: signal.r#type().members.clone(),
-                signed_element_depth: signal.r#type().signed_element_depth,
-                unpacked_struct: signal.r#type().unpacked_struct.clone(),
-            }),
+            VariableDimensions::bound_to(
+                VariableShape {
+                    declared: type_names::Declared::new(signal.r#type()),
+                    chandle: signal.r#type().is_chandle(),
+                    container: signal.r#type().container.clone(),
+                    randomizable: signal.r#type().container.is_none()
+                        && !signal.r#type().holds_chandle()
+                        && (!signal.r#type().is_enum || signal.r#type().enum_domain.is_some())
+                        && !signal.is_net()
+                        && !signal.is_const,
+                    enum_domain: signal.r#type().enum_domain.clone(),
+                    packed_enum: signal.r#type().packed_enum,
+                    real: matches!(signal.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
+                    string: matches!(signal.r#type().kind(), TypeKind::String),
+                    class: signal.r#type().class().map(str::to_owned),
+                    virtual_interface: signal.r#type().virtual_interface.clone(),
+                    packed: signal_packed_dimension_widths(signal.r#type().packed_ranges()),
+                    unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
+                    signed: signal.r#type().is_signed(),
+                    is_2state: matches!(
+                        signal.r#type().kind(),
+                        TypeKind::Bit
+                            | TypeKind::Chandle
+                            | TypeKind::Real
+                            | TypeKind::Shortreal
+                            | TypeKind::String
+                            | TypeKind::Object
+                            | TypeKind::Process
+                            | TypeKind::Event
+                    ),
+                    members: signal.r#type().members.clone(),
+                    signed_element_depth: signal.r#type().signed_element_depth,
+                    unpacked_struct: signal.r#type().unpacked_struct.clone(),
+                },
+                // The shape has the type the signal was declared with.
+                &signal.r#type().binding,
+            ),
         );
     }
     PackedDimensions::new(dimensions, const_env, type_aliases)

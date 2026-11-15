@@ -1133,3 +1133,28 @@ fn structures_holding_containers_are_no_ports() {
         );
     }
 }
+
+// Unpacked dimensions on the declarator make the variable an unpacked array
+// (IEEE 1800-2023 7.4): `int a[2]` and `s_t s[2]` are arrays, of `int` and
+// of the structure, assignable to arrays of the same shape (7.6).
+#[test]
+fn declarator_dimensions_make_arrays_of_scalars_and_structures() {
+    let source = "module Top;
+        typedef struct {int x; int y;} s_t;
+        int a[2], b[2];
+        s_t s[2], t[2];
+        initial begin
+            a = '{3, 4};
+            b = a;
+            s[0] = '{x: 1, y: 2};
+            s[1].x = b[1];
+            s[1].y = $size(s);
+            t = s;
+            $display(\"%0d %0d %0d %0d %0d\", b[0], $size(b), t[0].y, t[1].x, t[1].y);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["3 2 2 4 2"]
+    );
+}

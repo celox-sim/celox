@@ -682,7 +682,7 @@ impl BodyBuilder<'_, '_, '_> {
         // (`expression_binding::object_place`).
         if property.field.handle.is_none()
             && property.r#type.container.is_none()
-            && property.r#type.unpacked_struct().is_none()
+            && !property.r#type.is_unpacked_struct_in(&self.session.types)
         {
             return Ok(None);
         }

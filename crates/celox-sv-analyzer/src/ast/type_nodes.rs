@@ -134,6 +134,16 @@ impl Type {
         class.cloned()
     }
 
+    /// Whether the type is an unpacked structure type, or a fixed-size array
+    /// of them, as its semantic type in `table` tells (IEEE 1800-2023 7.2).
+    pub(in crate::ast) fn is_unpacked_struct_in(&self, table: &semantic_types::TyTable) -> bool {
+        unpacked_structs::is_struct(
+            self.binding.get(table),
+            table,
+            self.unpacked_struct.is_some(),
+        )
+    }
+
     /// What the type is of an enumeration, as its semantic type in `table`
     /// tells (see [`enums::Enumeration::of`]).
     pub(in crate::ast) fn enumeration_in(

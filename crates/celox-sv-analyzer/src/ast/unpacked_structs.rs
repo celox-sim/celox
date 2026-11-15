@@ -918,6 +918,28 @@ pub(in crate::ast) fn member_leaves(
     Some((ty, leaves))
 }
 
+/// Whether a type whose semantic type in `table` is `id`, and whose
+/// conversion input field tells `field`, is an unpacked structure type or
+/// a fixed-size unpacked array of them (7.2, 7.4.2). Without a semantic
+/// type, as the field tells.
+pub(super) fn is_struct(
+    id: Option<semantic_types::TyId>,
+    table: &semantic_types::TyTable,
+    field: bool,
+) -> bool {
+    // A type that cannot be formed in its scope has no semantic type; its
+    // metadata tells (see `struct_of`).
+    let Some(id) = id else {
+        return field;
+    };
+    let is_struct = table.is_unpacked_struct(table.fixed_element(id));
+    debug_assert_eq!(
+        is_struct, field,
+        "the semantic type of an unpacked structure type"
+    );
+    is_struct
+}
+
 #[cfg(test)]
 mod shape_struct_tests {
     use super::*;
