@@ -381,8 +381,8 @@ chapter-16/16.7--sequence-intersect-uvm.sv	2state	pass
 chapter-16/16.7--sequence-intersect-uvm.sv	4state	pass
 chapter-16/16.7--sequence-or-uvm.sv	2state	pass
 chapter-16/16.7--sequence-or-uvm.sv	4state	pass
-chapter-16/16.7--sequence-throughout-uvm.sv	2state	fail
-chapter-16/16.7--sequence-throughout-uvm.sv	4state	fail
+chapter-16/16.7--sequence-throughout-uvm.sv	2state	pass
+chapter-16/16.7--sequence-throughout-uvm.sv	4state	pass
 chapter-16/16.7--sequence-uvm.sv	2state	pass
 chapter-16/16.7--sequence-uvm.sv	4state	pass
 chapter-16/16.7--sequence.sv	2state	pass
@@ -445,8 +445,8 @@ chapter-18/18.13.5--set_randstate_0.sv	2state	pass
 chapter-18/18.13.5--set_randstate_0.sv	4state	pass
 chapter-18/18.14--random-stability_0.sv	2state	pass
 chapter-18/18.14--random-stability_0.sv	4state	pass
-chapter-18/18.14--random-stability_1.sv	2state	fail
-chapter-18/18.14--random-stability_1.sv	4state	fail
+chapter-18/18.14--random-stability_1.sv	2state	pass
+chapter-18/18.14--random-stability_1.sv	4state	pass
 chapter-18/18.14--random-stability_2.sv	2state	pass
 chapter-18/18.14--random-stability_2.sv	4state	pass
 chapter-18/18.14--random-stability_3.sv	2state	pass
