@@ -1417,3 +1417,17 @@ fn require_compiled_accepts_hotspot_execution_and_rejects_cold_runs() {
         "{hot:?}"
     );
 }
+
+#[test]
+fn repeated_tops_run_together() {
+    // `--top` repeated names several top-level modules (IEEE 1800-2023
+    // 23.3.1), each an instance of its own name.
+    let source = r#"
+        package shared; int value; endpackage
+        module Top; initial begin shared::value = 7; $display("%m set"); end endmodule
+        module Other; initial #1 begin $display("%m read %0d", shared::value); $finish; end endmodule
+    "#;
+    let output = run(&[("tops.sv", source)], &["--top", "Other"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"Top set\nOther read 7\n");
+}

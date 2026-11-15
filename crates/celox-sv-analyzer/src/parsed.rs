@@ -169,7 +169,7 @@ impl ParsedSource {
                 ) && !unit.external
                     && unit.port_style != celox_sv_syntax::PortStyle::Wildcard
             })
-            .map(|unit| unit.name.spelling.clone())
+            .map(|unit| ast::normalize_identifier(&unit.name.spelling))
             .collect()
     }
 

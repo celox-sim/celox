@@ -180,7 +180,9 @@ impl SourceTree {
             .ok_or_else(|| AnalyzerError::Parse("explicit native unit scope is required".into()))
     }
     pub(crate) fn root_name(&self) -> Result<String, AnalyzerError> {
-        Ok(self.root_unit()?.name.spelling.clone())
+        Ok(crate::ast::normalize_identifier(
+            &self.root_unit()?.name.spelling,
+        ))
     }
     pub(crate) fn scope_start(&self) -> Result<usize, AnalyzerError> {
         Ok(self

@@ -117,7 +117,24 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     /// Try to resolve a signal path. Returns `Err` if the path is not found or ambiguous.
+    ///
+    /// In a design of several top-level modules (see
+    /// [`crate::SimulatorBuilder::tops`]) a path starts at a top:
+    /// `signal("hdl_top.clk")` is the `signal("clk")` of a design whose
+    /// top is `hdl_top`. A path that starts with no top's name, such as the
+    /// package variable `\p.q::v` of an escaped package name, is looked up
+    /// as a whole.
     pub fn try_signal(&self, path: &str) -> Result<SignalRef, crate::ir::AddrLookupError> {
+        let design = &self.program.design;
+        if design.hidden_root
+            && let Some((top, rest)) = design.top_instances().into_iter().find_map(|top| {
+                let name = top.path.0[0].0.as_str();
+                let rest = path.strip_prefix(name)?.strip_prefix('.')?;
+                Some((name, rest))
+            })
+        {
+            return self.try_child_signal(&[(top, 0)], rest);
+        }
         self.try_child_signal(&[], path)
     }
 

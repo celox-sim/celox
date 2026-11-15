@@ -110,11 +110,36 @@ pub fn top_level_root_source(
     let time =
         celox_sv_analyzer::generated_time_declarations_with_options(sources, Some(tops), options)?;
     let mut source = format!("{time}module {name} ;\n");
+    // Each top by its escaped spelling, which names the same module as its
+    // simple one (IEEE 1800-2023 5.6.1) and is also a name a keyword can be
+    // (`\\module `); an escaped name keeps its own.
     for top in tops {
-        source.push_str(&format!("  {top} {top} ();\n"));
+        let spelling = if top.starts_with('\\') {
+            top.to_string()
+        } else {
+            format!("\\{top}")
+        };
+        source.push_str(&format!("  {spelling} {spelling} ();\n"));
     }
     source.push_str("endmodule\n");
     Ok((name, source))
+}
+
+/// The tops that the [`top_level_root_source`] named `root` among `sources`
+/// instantiates.
+fn generated_root_tops(sources: &[(&str, &std::path::Path)], root: &str) -> Vec<String> {
+    let header = format!("module {root} ;\n");
+    sources
+        .iter()
+        .find_map(|(code, _)| code.split_once(header.as_str()).map(|(_, body)| body))
+        .map(|body| {
+            body.lines()
+                .take_while(|line| *line != "endmodule")
+                .filter_map(|line| line.split_whitespace().next())
+                .map(celox_sv_analyzer::normalize_identifier)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn component_names(

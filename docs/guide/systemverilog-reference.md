@@ -776,17 +776,19 @@ which designs need the timed `Simulation` API and what the host can observe.
   run; `$fatal` also ends the simulation.
 - **Top-level modules.** A simulation runs the top module it names. A design
   with several top-level modules (23.3.1), such as a testbench's `hdl_top` and
-  `hvl_top`, runs them together when Rust's `SimulatorBuilder::tops` names them,
+  `hvl_top`, runs them together when Rust's `SimulatorBuilder::tops` or a
+  repeated `celox run --top` names them,
   each as an instance of its own name under `$root`, with its ports
   unconnected. Hierarchical names, `%m`, waveform scopes and the VPI and
   reflection hierarchy then start at a top (`hdl_top.dut`, `$root.hdl_top.dut`):
   each top is a root scope, as `vpi_iterate(vpiModule, NULL)` returns them.
-  Signals are reached through a top, such as
-  `child_signal(&[("hdl_top", 0)], "clk")`, and forced signals are named
-  from a top. The design's tops are the selected modules: `PreserveTopPorts`
+  Signals are named from a top, as `signal("hdl_top.clk")` or
+  `child_signal(&[("hdl_top", 0)], "clk")`, and so are forced and live
+  signals. The design's tops are the selected modules: `PreserveTopPorts`
   keeps the ports of each, `named_signals()` names each top's signals from
   it (`hdl_top.clk`), `named_hierarchies()` gives each top's hierarchy, and
-  `named_hierarchy()` is `$root` with the tops as its children. Several tops require SystemVerilog sources only and take no
+  `named_hierarchy()` is `$root` with the tops as its children. Several tops
+  require SystemVerilog sources only and take no
   parameter overrides.
 - **Observable names.** Interfaces are expanded into the modules that use
   them: a member `m` of interface instance `h` becomes the signal `h$m`, an

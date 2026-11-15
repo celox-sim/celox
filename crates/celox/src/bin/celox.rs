@@ -254,6 +254,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .map(|(text, path)| (text.as_str(), path.as_path()))
         .collect();
     let builder = celox::Simulation::from_sv_sources(source_refs, &arguments.design.top)
+        .tops(arguments.design.tops.clone())
         .diagnostics_from_env()
         .four_state(arguments.design.four_state.unwrap_or(false))
         .hotspot_jit(hotspot)
@@ -330,12 +331,12 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
             };
             let mut saves = StateSaves::new(
                 &simulation,
-                &arguments.design.top,
+                arguments.design.signal_root(),
                 &arguments.save_state,
                 signal,
             )?;
             if let Some(progress) = progress {
-                saves.restore_progress(&simulation, &arguments.design.top, progress)?;
+                saves.restore_progress(&simulation, arguments.design.signal_root(), progress)?;
             }
             let execute_start = std::time::Instant::now();
             let result = simulate_sv(
@@ -1083,7 +1084,7 @@ fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> 
         // when that builder discovers a process.
         let simulation = configure_sv(
             design,
-            celox::Simulation::from_sv_sources(refs, &design.top),
+            celox::Simulation::from_sv_sources(refs, &design.top).tops(design.tops.clone()),
         )
         .compile_native()
         .map_err(|error| format!("compilation failed:\n{error}"))?;
