@@ -283,7 +283,8 @@ blocks in programs. Two region deviations are listed under
   negative bound or one outside `int`, are assigned or compared with an
   array other than another such property or an array variable named by
   itself (or, for elements of unpacked structures, such a variable at all),
-  are sliced, or are passed to a `ref`, `output` or `inout` formal; a constraint `foreach`
+  are assigned a keyed assignment pattern or an unpacked array
+  concatenation with an array among its items, are sliced, or are passed to a `ref`, `output` or `inout` formal; a constraint `foreach`
   over a fixed-size array property whose range is not `[0:N-1]`; array
   locator methods on a fixed-size array property of unpacked structures
   whose range is not `[0:N-1]`; packed structure members of a property;
