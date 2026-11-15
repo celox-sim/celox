@@ -516,6 +516,37 @@ fn fixed_size_arrays_of_other_elements_check_dynamic_array_sizes() {
 }
 
 #[test]
+fn casts_to_containers_assigned_to_fixed_size_arrays_are_unsupported() {
+    // A cast to a queue type is a queue value (6.24.1, 6.24.3), which a
+    // fixed-size array takes element by element (7.6). That assignment reads
+    // the elements of a container variable only; a cast value is rejected,
+    // not lowered as some other assignment.
+    for body in [
+        "typedef int queue_t [$]; int q [$]; int f [2]; initial f = queue_t'(q);",
+        "typedef bit queue_t [$]; bit [7:0] a; bit f [8]; initial f = queue_t'(a);",
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("casts.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("a cast to a container was assigned to a fixed-size array: {body}");
+        };
+        let error = error
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            error.contains("assignment of an array that is not dynamically sized"),
+            "{body}: {error}"
+        );
+    }
+}
+
+#[test]
 fn fixed_size_arrays_of_container_typedefs_are_unsupported() {
     // A fixed-size array whose elements are queues, dynamic or associative
     // arrays has no lowering yet; declared through a typedef it is rejected
