@@ -28,6 +28,7 @@ impl Message {
     /// The message type of `mailbox #(ty)`.
     fn of(
         functions: &const_functions::ConstantFunctions,
+        table: &semantic_types::TyTable,
         ty: &Type,
         env: &ConstEnv,
     ) -> Converted<Self> {
@@ -62,7 +63,7 @@ impl Message {
                     TypeKind::Bit | TypeKind::Chandle | TypeKind::Process | TypeKind::Event
                 ),
             handle,
-            class: ty.class().map(str::to_owned),
+            class: ty.class_in(table).map(|class| class.to_string()),
         })
     }
 
@@ -158,9 +159,14 @@ pub(super) fn named_type(
     else {
         return Ok(None);
     };
-    let name = Message::of(&tree.functions, &message, &context.const_env)?
-        .class_name(&message, &session.types);
-    Ok(Some(Box::new(classes::handle(&name))))
+    let name = Message::of(
+        &tree.functions,
+        &session.types,
+        &message,
+        &context.const_env,
+    )?
+    .class_name(&message, &session.types);
+    Ok(Some(Box::new(classes::handle(&mut session.types, &name))))
 }
 
 /// `new(bound)` of mailbox class `class` (15.4.1).

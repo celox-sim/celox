@@ -921,14 +921,17 @@ pub(in crate::ast) fn lower_subroutine(
                     )?;
                     // That of a class handle formal, a handle its class
                     // takes (8.16).
-                    if let Some(class) = ty.class().filter(|_| ty.unpacked_ranges.is_empty()) {
+                    if let Some(class) = ty
+                        .class_in(&builder.session.types)
+                        .filter(|_| ty.unpacked_ranges.is_empty())
+                    {
                         expression_binding::check_handle_assignment(
                             tree,
                             builder.session,
                             root,
                             tree.declarations(),
                             &builder.dims,
-                            class,
+                            &class,
                             || format!("default of `{formal}`"),
                         )?;
                     }

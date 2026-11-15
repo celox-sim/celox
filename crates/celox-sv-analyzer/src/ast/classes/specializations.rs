@@ -960,7 +960,7 @@ fn bind_bases(
     let mut bases = Vec::new();
     for id in inherited {
         if let Some(base) = type_binding::procedural_type(id, native, tree, session, env, aliases)?
-            .and_then(|ty| ty.class().map(str::to_owned))
+            .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
         {
             bases.push(base);
         }
@@ -1050,7 +1050,7 @@ fn finish_specialization(
             .iter()
             .map(|(key, ty)| (key.clone(), ty.clone())),
     );
-    aliases.insert(scope_key(generic), super::handle(&name));
+    aliases.insert(scope_key(generic), super::handle(&mut session.types, &name));
     // The body parameters, typedefs and properties of an enumeration type it
     // declares in place, in the order the body declares them.
     let mut body = declaration
@@ -1323,7 +1323,7 @@ impl Parameters {
                         | TypeKind::Reg
                         | TypeKind::Implicit
                 ) && ty.container.is_none()
-                    && ty.class().is_none()
+                    && ty.class_in(&session.types).is_none()
                     && ty.unpacked_ranges.is_empty()
             });
         let name = instances::normalize_identifier(&parameter.name.spelling);
@@ -1551,10 +1551,12 @@ pub(in crate::ast) fn type_argument(
                 Some(ty) => Some(ty.clone()),
                 None => match super::resolve(tree, session, &name) {
                     // A built-in class such as `process` has no declaration.
-                    Some(name) if super::builtin(&name) => Some(super::handle(&name)),
+                    Some(name) if super::builtin(&name) => {
+                        Some(super::handle(&mut session.types, &name))
+                    }
                     Some(name) => {
                         let name = specialize(tree, session, &name, &[], context)?;
-                        Some(super::handle(&name))
+                        Some(super::handle(&mut session.types, &name))
                     }
                     None => None,
                 },
@@ -1586,7 +1588,7 @@ pub(in crate::ast) fn type_argument(
             match super::super::mailboxes::named_type(&path, tree, session, context)? {
                 Some(ty) => Some(*ty),
                 None => expression_binding::named_class(tree, session, id, native, context)?
-                    .map(|name| super::handle(&name)),
+                    .map(|name| super::handle(&mut session.types, &name)),
             }
         }
         ExprKind::Member { separator, .. } if separator == "::" => {
@@ -1628,7 +1630,7 @@ pub(in crate::ast) fn scoped_type(
                     .type_aliases
                     .get(&scope_key(&scope))
                     .or_else(|| context.type_aliases.get(&scope_key(&class)))
-                    .and_then(|ty| ty.class().map(str::to_owned))
+                    .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
                 {
                     Some(specialization) => Some(specialization),
                     None if super::is_declared(tree, session, &class) => {
@@ -1640,8 +1642,14 @@ pub(in crate::ast) fn scoped_type(
                 let qualified = scope::qualified_name(tree, &scope, &member);
                 return Ok(context.type_aliases.get(&qualified).cloned().or_else(
                     || match qualified.as_str() {
-                        "std::process" => Some(super::handle(super::super::processes::CLASS)),
-                        "std::semaphore" => Some(super::handle(super::super::semaphores::CLASS)),
+                        "std::process" => Some(super::handle(
+                            &mut session.types,
+                            super::super::processes::CLASS,
+                        )),
+                        "std::semaphore" => Some(super::handle(
+                            &mut session.types,
+                            super::super::semaphores::CLASS,
+                        )),
                         _ => None,
                     },
                 ));
@@ -1750,7 +1758,7 @@ fn literal_parameter(
         .type_aliases
         .iter()
         .filter(|(key, _)| key.ends_with("::"))
-        .filter_map(|(_, ty)| lookup(session, ty.class()?))
+        .filter_map(|(_, ty)| lookup(session, &ty.class_in(&session.types)?))
         .find_map(|specialization| {
             if !specialization.hidden.iter().any(|hidden| hidden == name) {
                 return None;
@@ -1783,6 +1791,16 @@ fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::
             || ty.container.is_some(),
         "a virtual interface type is spelled from its semantic type"
     );
+    // A handle type is its class (8.4), which a container element without
+    // a binding of its own takes from the container's semantic type.
+    let class = id
+        .and_then(|id| table.handle_class(id))
+        .map(|class| &**class);
+    debug_assert_eq!(
+        class,
+        ty.class(),
+        "a handle type is spelled from its semantic type"
+    );
     let mut spelled = if let Some(container) = &ty.container {
         // The element and key types of a container are those of its
         // semantic type, where they are not bound themselves.
@@ -1808,7 +1826,7 @@ fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::
                 .unwrap_or_default()
         )
     } else {
-        match (ty.class(), ty.kind()) {
+        match (class, ty.kind()) {
             (Some(class), _) => class.to_owned(),
             (None, TypeKind::Real) => "real".to_owned(),
             (None, TypeKind::Shortreal) => "shortreal".to_owned(),
@@ -1823,7 +1841,7 @@ fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::
         }
     };
     let integral = ty.container.is_none()
-        && ty.class().is_none()
+        && class.is_none()
         && !matches!(
             ty.kind(),
             TypeKind::Real

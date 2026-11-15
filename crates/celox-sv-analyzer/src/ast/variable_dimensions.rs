@@ -99,6 +99,25 @@ impl VariableDimensions {
         self.binding.as_ref()?.in_table(table)
     }
 
+    /// The class of a variable of object handle type, or of the elements of
+    /// a fixed-size array of them, as its semantic type in `table` tells.
+    pub(super) fn class_in(&self, table: &semantic_types::TyTable) -> Option<Arc<str>> {
+        let Some(id) = self.bound(table) else {
+            debug_assert!(
+                self.class.is_none(),
+                "a variable of class handle type is told by its semantic type"
+            );
+            return None;
+        };
+        let class = table.handle_class(id).cloned();
+        debug_assert_eq!(
+            class.as_deref(),
+            self.class.as_deref(),
+            "the semantic type of a variable of handle type"
+        );
+        class
+    }
+
     /// A bound declaration keeps its type when a caller shadows its parameter
     /// names. Temporary or edited shapes still resolve in the supplied context.
     pub(super) fn type_id(

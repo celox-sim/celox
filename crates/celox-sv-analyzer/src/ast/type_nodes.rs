@@ -108,9 +108,30 @@ impl Type {
         })
     }
 
-    /// The class of an object handle type.
+    /// The class of an object handle type, or of the elements of an array
+    /// of them. Conversions of the type read it, and the readers that have
+    /// no type table; the others ask `class_in`.
     pub fn class(&self) -> Option<&str> {
         self.class.as_deref()
+    }
+
+    /// The class of an object handle type, or of the elements of a
+    /// fixed-size array of them, as its semantic type in `table` tells.
+    pub(in crate::ast) fn class_in(&self, table: &semantic_types::TyTable) -> Option<Arc<str>> {
+        let Some(id) = self.binding.get(table) else {
+            debug_assert!(
+                self.class.is_none(),
+                "a class handle type is told by its semantic type"
+            );
+            return None;
+        };
+        let class = table.handle_class(id);
+        debug_assert_eq!(
+            class.map(|class| &**class),
+            self.class(),
+            "the semantic type of a handle type"
+        );
+        class.cloned()
     }
 
     /// The interface of a virtual interface type.

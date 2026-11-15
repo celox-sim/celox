@@ -256,12 +256,12 @@ pub(in crate::ast) fn request(
     };
     // Module-local class names do not yet carry instance identity. They
     // cannot safely key a design-wide package specialization (8.25).
-    fn module_class<'a>(
+    fn module_class(
         tree: &AnalysisContext<'_>,
         session: &mut Session,
-        ty: &'a Type,
-    ) -> Option<&'a str> {
-        ty.class()
+        ty: &Type,
+    ) -> Option<Arc<str>> {
+        ty.class_in(&session.types)
             .filter(|class| {
                 !class.contains("::")
                     || super::declaration(tree, session, class).is_some_and(|declaration| {
