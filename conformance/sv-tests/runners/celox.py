@@ -19,7 +19,7 @@ def known_missing_include(path, params):
     if not issue or params["should_fail"] != "0":
         return False
     root = Path(os.environ["TESTS_DIR"]).resolve().parent
-    paths = issue.get("missing_includes") or [issue["missing_include"]]
+    paths = issue.get("missing_includes") or ([issue["missing_include"]] if "missing_include" in issue else [])
     if path not in {root / relative for relative in paths}:
         return False
     revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
