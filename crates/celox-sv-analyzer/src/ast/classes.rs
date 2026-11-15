@@ -466,6 +466,29 @@ pub(in crate::ast) fn known_bits(value: Expr) -> (Expr, Expr) {
     (two_state(value), mask)
 }
 
+/// The identifier that declares each class of `lineage`, whose names are
+/// canonical, as `pkg::Base`: a class scope names the class by it, as
+/// `Base::f` in the classes of its package (IEEE 1800-2023 8.23).
+pub(in crate::ast) fn scope_identifiers(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    lineage: &[String],
+) -> Vec<String> {
+    lineage
+        .iter()
+        .map(|class| {
+            let generic = specializations::lookup(session, class).map_or_else(
+                || class.clone(),
+                |specialization| specialization.generic.clone(),
+            );
+            match declaration(tree, session, &generic) {
+                Some(declaration) => instances::normalize_identifier(&declaration.name.spelling),
+                None => generic.rsplit("::").next().unwrap_or(&generic).to_owned(),
+            }
+        })
+        .collect()
+}
+
 /// An internal unsigned packed argument of a generated method.
 pub(super) fn unsigned_type(width: usize) -> Type {
     let mut ty = procedural::int_type();
@@ -1829,8 +1852,10 @@ pub(super) fn shared_class(
         session,
         env,
     );
+    let scopes = scope_identifiers(tree, session, &lineage);
     let names = constraints::Names {
         lineage: &lineage,
+        scopes: &scopes,
         aggregates: &aggregates,
         statics: &statics,
         inputs: &static_inputs,

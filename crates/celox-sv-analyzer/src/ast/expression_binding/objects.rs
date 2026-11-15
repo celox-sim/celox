@@ -2037,6 +2037,7 @@ fn scope_randomize_with(
                 &[],
                 &classes::constraints::Names {
                     lineage: &[],
+                    scopes: &[],
                     aggregates: &[],
                     statics: &[],
                     inputs: &[],
@@ -2426,6 +2427,7 @@ pub(super) fn randomize_with(
         &mut input_types,
         &mut input_values,
     )?;
+    let scopes = classes::scope_identifiers(tree, session, &class.lineage);
     // Inline constraints access members as the caller's class does (18.7).
     let scope = scope_class(dimensions);
     session
@@ -2442,6 +2444,7 @@ pub(super) fn randomize_with(
                 &class.properties,
                 &classes::constraints::Names {
                     lineage: &class.lineage,
+                    scopes: &scopes,
                     aggregates: &class.aggregates,
                     statics: &class.statics,
                     inputs: &class.static_inputs,

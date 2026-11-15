@@ -140,6 +140,18 @@ pub struct Heap {
     /// another object.
     #[serde(default)]
     prepared: Vec<(Handle, Vec<Handle>)>,
+    /// The sizes solves of sizes gave the random arrays of the randomize
+    /// calls in progress whose size and elements constraints name, for the
+    /// solves that follow them, innermost last (see `randomization::Staged`):
+    /// a function a constraint calls may randomize another object between
+    /// the solves of a call. They last only within their calls.
+    #[serde(skip)]
+    staged: Vec<randomization::Staged>,
+    /// The sizes a solve of sizes may not give again, each set of them
+    /// one with which the solve of the rest had no solution (see
+    /// `randomization::SIZE_ATTEMPTS`).
+    #[serde(skip)]
+    rejected_sizes: Vec<fxhash::FxHashMap<(Handle, usize), usize>>,
     /// The rand object members the last successful randomize solve took,
     /// whose post_randomize runs, see [`Heap::begin_solved_visits`].
     #[serde(default)]
@@ -192,6 +204,8 @@ impl Heap {
             arguments: Vec::new(),
             visits: Vec::new(),
             prepared: Vec::new(),
+            staged: Vec::new(),
+            rejected_sizes: Vec::new(),
             solved: Vec::new(),
             edges: HashMap::default(),
             dpi: dpi::CallArea::default(),
