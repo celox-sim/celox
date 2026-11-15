@@ -15,6 +15,7 @@ pub(super) fn expand_design(
         mut modules,
         module_names,
         root_id,
+        hidden_root,
         packages,
         instance_values,
     } = symbolic;
@@ -145,6 +146,7 @@ pub(super) fn expand_design(
             modules,
             module_names,
             root_id,
+            hidden_root,
             time_precision,
             expanded,
             instance_modules,
@@ -213,7 +215,12 @@ pub(super) fn relocate_design(
             expanded,
             instance_modules,
             modules,
-            &module_names[&root_id],
+            // The hidden root names no scope (see `elaborated_scope_name`).
+            if design.hidden_root {
+                ""
+            } else {
+                &module_names[&root_id]
+            },
             indexed_instances,
             global_boundaries,
             unpacked_element_widths,

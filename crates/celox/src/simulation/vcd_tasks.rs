@@ -99,6 +99,19 @@ impl<B: SimBackend> Simulator<B> {
                     .find(|instance| instance.path.0.is_empty())
                     .map(|instance| instance.module_name.clone())
                     .unwrap_or_else(|| "top".into());
+                // The root of several top-level modules is no scope: each top
+                // is a scope of its own (IEEE 1800-2023 23.3.1).
+                let hidden_root = self.program.design.hidden_root;
+                let tops: Vec<_> = if hidden_root {
+                    self.program
+                        .design
+                        .instances()
+                        .filter(|instance| instance.path.0.len() == 1)
+                        .map(|instance| DumpComponent::name(instance.path.0[0].0.clone()))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let top = DumpComponent::name(top_name.clone());
                 let owner_components = instance_dump_components(owner, &top);
                 let targets = if site.strings.is_empty() {
@@ -113,14 +126,17 @@ impl<B: SimBackend> Simulator<B> {
                 } else {
                     site.strings
                         .iter()
-                        .map(|name| decode_dump_target(name, &top, &owner_components))
+                        .map(|name| decode_dump_target(name, &top, &tops, &owner_components))
                         .collect::<Result<Vec<_>, _>>()?
                 };
                 let mut descs = Vec::new();
                 for instance in self.program.design.instances() {
                     let package = self.program.design.is_package_instance(instance.id);
                     let path = instance.display_path.join(".");
-                    let scope = if package {
+                    if hidden_root && !package && path.is_empty() {
+                        continue;
+                    }
+                    let scope = if package || hidden_root {
                         path.clone()
                     } else if path.is_empty() {
                         top_name.clone()
@@ -182,7 +198,10 @@ impl<B: SimBackend> Simulator<B> {
                 let mut external = Vec::new();
                 for (index, mut desc) in self.components.trace_descriptors().into_iter().enumerate()
                 {
-                    if desc.scope != top_name && !desc.scope.starts_with(&format!("{top_name}.")) {
+                    if !hidden_root
+                        && desc.scope != top_name
+                        && !desc.scope.starts_with(&format!("{top_name}."))
+                    {
                         desc.scope = format!("{top_name}.{}", desc.scope);
                     }
                     if dump_target_matches(
@@ -411,9 +430,13 @@ fn instance_dump_components(
     components
 }
 
+/// The target of a `$dumpvars` argument `text` in the scope `owner`, below
+/// the root `top`; `tops` are the top-level modules a hidden root of several
+/// holds, which absolute names and names that start at a top begin with.
 fn decode_dump_target(
     text: &str,
     top: &DumpComponent,
+    tops: &[DumpComponent],
     owner: &[DumpComponent],
 ) -> Result<DumpTarget, String> {
     let mut fields = text.split('\0');
@@ -455,7 +478,12 @@ fn decode_dump_target(
     if components.is_empty() {
         return Err("$dumpvars selection is empty".into());
     }
-    if kind == "local" || (kind == "relative" && components.first() != Some(top)) {
+    if !tops.is_empty()
+        && (kind == "absolute"
+            || kind == "relative" && components.first().is_some_and(|first| tops.contains(first)))
+    {
+        components.insert(0, top.clone());
+    } else if kind == "local" || (kind == "relative" && components.first() != Some(top)) {
         let mut qualified = owner.to_vec();
         qualified.extend(components);
         components = qualified;

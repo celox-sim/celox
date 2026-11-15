@@ -1989,6 +1989,7 @@ pub fn lower_frontend_artifact(
             .into_iter()
             .collect(),
         root_id: module_id,
+        hidden_root: false,
         packages: Vec::new(),
         instance_values: Vec::new(),
     };

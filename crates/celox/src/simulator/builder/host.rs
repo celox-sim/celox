@@ -208,6 +208,19 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
+    /// Simulate the SystemVerilog top-level modules `tops` together, each as
+    /// an instance of its own name under `$root` (IEEE 1800-2023 23.3.1), as
+    /// a testbench's `hdl_top` and `hvl_top`; this replaces the builder's
+    /// top. [`celox_frontend_sv::top_level_modules`] lists the modules no
+    /// source instantiates. With several tops, names and `%m` paths start
+    /// at a top (`hdl_top.dut`), and signals are reached through it, as
+    /// [`crate::Simulator::child_signal`] does. One top is the same as
+    /// naming it as the builder's top.
+    pub fn tops(mut self, tops: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.options.top_level_modules = tops.into_iter().map(Into::into).collect();
+        self
+    }
+
     pub fn four_state(mut self, enable: bool) -> Self {
         self.options.four_state = enable;
         self

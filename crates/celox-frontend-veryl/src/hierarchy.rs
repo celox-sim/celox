@@ -475,6 +475,7 @@ fn parse_external_hierarchy<'a>(
             modules,
             module_names,
             root_id,
+            hidden_root: false,
             packages: external
                 .packages
                 .iter()

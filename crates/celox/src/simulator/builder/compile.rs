@@ -506,6 +506,7 @@ pub fn compile_sv_to_sir(
         false,
         &[],
         &[],
+        &[],
     );
     let policy = crate::DiagnosticPolicy::default();
     let (program, mut warnings) = result.map_err(|error| error.apply_diagnostic_policy(&policy))?;
@@ -542,6 +543,7 @@ pub(super) fn compile_sv_to_sir_with_layout_mode(
     _allow_inferred_latches: bool,
     force_signals: &[String],
     sv_param_literals: &[(String, String)],
+    tops: &[String],
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let mut parameters = param_overrides
         .iter()
@@ -591,6 +593,7 @@ pub(super) fn compile_sv_to_sir_with_layout_mode(
         component_file_base,
         &mut sv_warnings,
         force_signals,
+        tops,
     );
     let warnings = sv_warnings
         .into_iter()
@@ -849,7 +852,19 @@ pub(super) fn compile_hdl_to_sir_with_layout_mode(
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
     force_signals: &[String],
     sv_param_literals: &[(String, String)],
+    tops: &[String],
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    if tops.len() > 1 && (!sources.is_empty() || sv_sources.is_empty()) {
+        return Err(crate::CodegenError::message(
+            "several top-level modules require pure SystemVerilog sources",
+        )
+        .into());
+    }
+    // One top named with `tops` replaces the builder's in every language.
+    let top = match tops {
+        [one] => one.as_str(),
+        _ => top,
+    };
     if !sv_param_literals.is_empty() && (!sources.is_empty() || sv_sources.is_empty()) {
         return Err(crate::CodegenError::message(
             "parameter literals require pure SystemVerilog sources",
@@ -908,6 +923,7 @@ pub(super) fn compile_hdl_to_sir_with_layout_mode(
             allow_inferred_latches,
             force_signals,
             sv_param_literals,
+            tops,
         ),
         (false, false) => compile_mixed_to_sir_with_layout_mode(
             sources,

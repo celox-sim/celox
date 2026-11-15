@@ -431,6 +431,7 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
                 &self.file_dependencies,
                 &self.options.signal_access.force_signals,
                 &self.sv_param_literals,
+                &self.options.top_level_modules,
             )
         };
         #[cfg_attr(not(test), allow(unused_mut))]
@@ -1210,6 +1211,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 &self.file_dependencies,
                 &self.options.signal_access.force_signals,
                 &self.sv_param_literals,
+                &self.options.top_level_modules,
             )
         };
 
@@ -1402,9 +1404,9 @@ pub(super) fn run_dead_store_elimination(
     program.runtime.runtime_schema.dead_store_policy = options.dead_store_policy;
     program.runtime.runtime_schema.live_signals = listed;
 
-    // PreserveTopPorts: auto-collect top module port addresses
+    // PreserveTopPorts: auto-collect the port addresses of every top module
     if options.dead_store_policy == DeadStorePolicy::PreserveTopPorts {
-        if let Some(instance) = program.design.root_instance() {
+        for instance in program.design.top_instances() {
             for address in instance.state_addresses() {
                 if program.design.variable(address).unwrap().var_kind.is_port() {
                     externally_live.insert(*address);

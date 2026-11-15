@@ -36,6 +36,8 @@ struct Design {
     modules: HashMap<ModuleId, SimModule>,
     module_names: HashMap<ModuleId, String>,
     root_id: ModuleId,
+    /// See [`SymbolicRtl::hidden_root`].
+    hidden_root: bool,
     time_precision: celox_design::TimePrecision,
     expanded: HashMap<InstancePath, InstanceId>,
     instance_modules: HashMap<InstanceId, ModuleId>,
@@ -51,6 +53,29 @@ struct Design {
     clock_domains: HashMap<AbsoluteAddr, AbsoluteAddr>,
     /// The readiness bit gated `always_comb` units read, if any is gated.
     startup_ready: Option<AbsoluteAddr>,
+}
+
+impl Design {
+    /// The instances of the design's top-level modules: the root, or the
+    /// instances below a root generated for several of them (IEEE 1800-2023
+    /// 23.3.1), whose ports `PreserveTopPorts` keeps.
+    fn top_instances(&self) -> HashSet<InstanceId> {
+        let root = InstancePath(Vec::new());
+        if !self.hidden_root {
+            return self.expanded.get(&root).copied().into_iter().collect();
+        }
+        self.expanded
+            .iter()
+            .filter(|(path, id)| {
+                path.0.len() == 1
+                    && !self
+                        .package_instances
+                        .values()
+                        .any(|package| package == *id)
+            })
+            .map(|(_, id)| *id)
+            .collect()
+    }
 }
 
 /// The combinational logic of the relocated design while it is symbolic.

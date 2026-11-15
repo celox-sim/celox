@@ -1199,7 +1199,19 @@ pub unsafe extern "C" fn vpi_iterate(kind: i32, reference: VpiHandle) -> VpiHand
     let objects = with_runtime(|runtime| {
         let reflection = runtime.reflection();
         match (kind, reference) {
-            (VPI_MODULE | VPI_INSTANCE, None) => vec![ObjectRef::Scope(ReflectionScopeId(0))],
+            // Every top-level module (IEEE 1800-2023 23.3.1, 37.10); a
+            // package (`p::`) is no module.
+            (VPI_MODULE | VPI_INSTANCE, None) => reflection
+                .scopes()
+                .iter()
+                .enumerate()
+                .filter(|(_, scope)| scope.parent.is_none() && !scope.package)
+                .map(|(index, _)| {
+                    ObjectRef::Scope(ReflectionScopeId(
+                        u32::try_from(index).expect("scope count exceeds u32"),
+                    ))
+                })
+                .collect(),
             (VPI_MODULE | VPI_INTERNAL_SCOPE, Some(ObjectRef::Scope(id))) => reflection
                 .scope(id)
                 .map(|scope| {
@@ -1365,7 +1377,16 @@ pub unsafe extern "C" fn vpi_get(property: i32, reference: VpiHandle) -> i32 {
             }
         })
         .unwrap_or(0),
-        VPI_TOP_MODULE => i32::from(object == ObjectRef::Scope(ReflectionScopeId(0))),
+        VPI_TOP_MODULE => match object {
+            ObjectRef::Scope(id) => with_runtime(|runtime| {
+                runtime
+                    .reflection()
+                    .scope(id)
+                    .is_some_and(|scope| scope.parent.is_none() && !scope.package)
+            })
+            .map_or(0, i32::from),
+            _ => 0,
+        },
         VPI_SIZE | VPI_SCALAR | VPI_VECTOR | VPI_DIRECTION | VPI_SIGNED => {
             with_runtime(|runtime| {
                 let ObjectRef::Signal(id) = object else {

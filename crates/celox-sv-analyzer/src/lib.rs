@@ -29,6 +29,9 @@ pub mod system_functions;
 pub mod typecheck;
 
 pub use ast::const_functions::{RuntimeConstantFunctions, RuntimeConstantTable};
+/// The name an identifier denotes: an escaped identifier that is a simple
+/// one, `\\foo `, denotes `foo` (IEEE 1800-2023 5.6.1).
+pub use ast::instances::normalize_identifier;
 pub use ast::interfaces::{
     InterfaceMemberPath, InterfaceMemberPaths, NativeInterfacePlan, plan_interfaces,
     plan_interfaces_of_first_modules, plan_interfaces_with_member_paths,
@@ -71,6 +74,10 @@ pub struct AnalysisOptions {
     /// Compatibility mode: return zero for every empty array reduction,
     /// rather than the product/bitwise-AND identity. Disabled by default.
     pub legacy_empty_reductions: bool,
+    /// The selected top is a module the frontend generated to instantiate
+    /// several top-level modules (IEEE 1800-2023 23.3.1), see
+    /// `celox_frontend_sv::top_level_root_source`. It stands for `$root`.
+    pub generated_root: bool,
     /// Treat a variable that only several `always @*` blocks write, each
     /// before it reads it, and that nothing else reads, as a temporary of
     /// each block, instead of a variable whose writes wake the other blocks

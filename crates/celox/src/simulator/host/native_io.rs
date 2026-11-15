@@ -116,6 +116,8 @@ impl Metadata {
                             .design
                             .root_instance()
                             .map(|root| root.module_name.as_str())
+                            // The root of several tops is not part of a name.
+                            .filter(|_| !program.design.hidden_root)
                             .unwrap_or("");
                         std::iter::once(top)
                             .chain(instance.display_path.iter().map(String::as_str))

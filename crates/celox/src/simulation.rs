@@ -1573,6 +1573,12 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.named_hierarchy()
     }
 
+    /// The instance hierarchy of each top-level module, by its name (see
+    /// [`Simulator::named_hierarchies`]).
+    pub fn named_hierarchies(&self) -> Vec<(String, InstanceHierarchy)> {
+        self.simulator.named_hierarchies()
+    }
+
     /// Returns all signals for the instance at the given hierarchical path.
     pub fn instance_signals(&self, instance_path: &[(&str, usize)]) -> Vec<NamedSignal> {
         self.simulator.instance_signals(instance_path)

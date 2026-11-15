@@ -340,7 +340,6 @@ pub(super) fn inline_unobserved_nets(
     declaration_probes: &[(VarAtomBase<AbsoluteAddr>, AbsoluteAddr)],
 ) -> Result<Vec<AbsoluteAddr>, ParserError> {
     let Design {
-        expanded,
         instance_modules,
         modules,
         bindings,
@@ -378,7 +377,7 @@ pub(super) fn inline_unobserved_nets(
     {
         let pinned = pinned_nets(
             parallel.unobserved_nets,
-            expanded[&InstancePath(Vec::new())],
+            &design.top_instances(),
             instance_modules,
             modules,
             bindings,
