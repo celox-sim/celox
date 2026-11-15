@@ -865,6 +865,12 @@ add = ["interpreter"]
 ignore = ["wasm"]
 reason = "the wasm backend's process function exceeds wasmtime's 50,000 locals (#4036)"
 
+# The initial process's wasm function needs about 119,000 locals (see
+# above, #4036).
+[sv.cases."class::constrained_randomize_solve_before"]
+ignore = ["wasm"]
+reason = "the wasm backend's process function exceeds wasmtime's 50,000 locals (#4036)"
+
 # The initial process's wasm function needs about 246,000 locals (see
 # above, #4036).
 [sv.cases."class::randomize_four_state_properties"]
