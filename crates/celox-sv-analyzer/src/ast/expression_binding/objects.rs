@@ -949,7 +949,20 @@ fn method_named(
                 (class, name, Receiver::This)
             }
             Some(class) => (class, name, Receiver::Handle(*expression)),
-            None => return Ok(None),
+            // A task or function of the interface instance a virtual
+            // interface denotes (IEEE 1800-2023 25.9), which takes the
+            // handle as a method takes its object.
+            None => {
+                return Ok(virtual_interfaces::method(
+                    tree,
+                    session,
+                    *expression,
+                    &instances::normalize_identifier(&name.spelling),
+                    native,
+                    dimensions,
+                )?
+                .map(|(name, formals)| (name, formals, Receiver::Handle(*expression))));
+            }
         },
         ExprKind::Member {
             expression,

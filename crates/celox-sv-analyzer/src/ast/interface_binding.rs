@@ -373,6 +373,18 @@ pub(super) fn declaration_view(tree: &SyntaxTree) -> Converted<SyntaxTree> {
     })
 }
 
+/// [`declaration_view`] without the subroutines, package imports and DPI
+/// declarations: the declarations of the members alone.
+pub(super) fn member_declaration_view(tree: &SyntaxTree) -> Converted<SyntaxTree> {
+    retain_body(tree, |id| {
+        use celox_sv_syntax::BodyItemKind::*;
+        Ok(matches!(
+            tree.declarations().body_item(id).kind,
+            Data(_) | Net(_) | Parameter(_) | TypeAlias(_) | Unconverted { .. }
+        ))
+    })
+}
+
 fn formal_dimensions(
     port_name: &str,
     tree: &AnalysisContext<'_>,
@@ -568,7 +580,7 @@ fn binding_names(
     binding_names_with_prefix(module, symbols, handle, handle, imported)
 }
 
-fn binding_names_with_prefix(
+pub(super) fn binding_names_with_prefix(
     module: &Module,
     symbols: &scope::ScopeSymbols,
     handle: &str,

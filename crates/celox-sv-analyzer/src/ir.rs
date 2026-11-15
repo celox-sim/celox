@@ -3037,7 +3037,57 @@ mod virtual_instances {
                 interface: of,
                 member,
             } if of == interface => Some(VirtualInterfaceSignal::Member { id, member }.name()),
+            VirtualInterfaceSignal::StaticPlaceholder {
+                interface: of,
+                name,
+            } if of == interface => Some(VirtualInterfaceSignal::Static { id, name }.name()),
             _ => None,
+        }
+    }
+
+    /// The interface of the static variable placeholder `stmt` assigns, as
+    /// an initializer of a static variable of an interface subroutine
+    /// called through a virtual interface does.
+    pub(super) fn assigned_static(stmt: &Stmt) -> Option<String> {
+        let Stmt::Assign { lhs, .. } = stmt else {
+            return None;
+        };
+        match VirtualInterfaceSignal::of(lhs.name())? {
+            VirtualInterfaceSignal::StaticPlaceholder { interface, .. } => Some(interface),
+            _ => None,
+        }
+    }
+
+    /// `stmt` for instance `id` of interface `interface`.
+    pub(super) fn for_each_instance(
+        stmt: &Stmt,
+        interface: &str,
+        ids: &HashMap<String, Vec<u32>>,
+    ) -> Vec<Stmt> {
+        ids.get(interface)
+            .into_iter()
+            .flatten()
+            .map(|&id| stmt_for_instance(stmt.clone(), interface, id))
+            .collect()
+    }
+
+    /// The names of static variable placeholder `name` for each instance of
+    /// its interface in `ids`, or `name` itself.
+    pub(super) fn static_names(name: &str, ids: &HashMap<String, Vec<u32>>) -> Vec<String> {
+        match VirtualInterfaceSignal::of(name) {
+            Some(VirtualInterfaceSignal::StaticPlaceholder { interface, name }) => ids
+                .get(&interface)
+                .into_iter()
+                .flatten()
+                .map(|&id| {
+                    VirtualInterfaceSignal::Static {
+                        id,
+                        name: name.clone(),
+                    }
+                    .name()
+                })
+                .collect(),
+            _ => vec![name.to_string()],
         }
     }
 
@@ -3202,6 +3252,21 @@ mod virtual_instances {
     ) -> Vec<Signal> {
         let mut found = Vec::new();
         for signal in signals {
+            // A static variable of an interface subroutine is the calling
+            // scope's own, one for each instance.
+            if let Some(VirtualInterfaceSignal::StaticPlaceholder { .. }) =
+                VirtualInterfaceSignal::of(&signal.name)
+            {
+                found.extend(
+                    static_names(&signal.name, ids)
+                        .into_iter()
+                        .map(|name| Signal {
+                            name,
+                            ..signal.clone()
+                        }),
+                );
+                continue;
+            }
             let Some(VirtualInterfaceSignal::Placeholder { interface, member }) =
                 VirtualInterfaceSignal::of(&signal.name)
             else {
@@ -3252,6 +3317,16 @@ impl Module {
         }
         for process in &mut self.initial_processes {
             expand_stmts(&mut process.body, ids);
+            // The initializers of the static variables of interface
+            // subroutines called through virtual interfaces, for each
+            // instance.
+            process.body = std::mem::take(&mut process.body)
+                .into_iter()
+                .flat_map(|stmt| match virtual_instances::assigned_static(&stmt) {
+                    Some(interface) => virtual_instances::for_each_instance(&stmt, &interface, ids),
+                    None => vec![stmt],
+                })
+                .collect();
         }
         for subroutine in self
             .subroutines
@@ -3260,6 +3335,10 @@ impl Module {
         {
             expand_stmts(&mut subroutine.body, ids);
             expand_stmts(&mut subroutine.sensitivity_body, ids);
+            subroutine.persistent_locals = std::mem::take(&mut subroutine.persistent_locals)
+                .iter()
+                .flat_map(|name| virtual_instances::static_names(name, ids))
+                .collect();
             for param in &mut subroutine.params {
                 if let Some(default) = &mut param.default {
                     expand(default);

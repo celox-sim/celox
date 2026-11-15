@@ -121,11 +121,15 @@ constructs without a dedicated issue point to the frontend roadmap,
   names, or escaped identifiers that are not simple identifiers; expansion
   reserves `$` for generated names.
 - Variable declaration initializers of members of an interface array.
-- Virtual interfaces <a id="virtual-interfaces"></a>: waiting through a virtual
-  interface held by an automatic variable, an argument, or a class
-  property; virtual interfaces of parameterized interfaces; interface
-  tasks, functions, clocking blocks, and nested interface instances reached
-  through a virtual interface; writes to nets through a virtual interface.
+- Virtual interfaces <a id="virtual-interfaces"></a>: a `wait` statement
+  through a virtual interface held by an automatic variable, an argument,
+  or a class property; virtual interfaces of parameterized interfaces;
+  clocking blocks and nested interface instances reached through a virtual
+  interface; writes to nets through a virtual interface; `$bits` of a call
+  of an interface function through a virtual interface in a package or
+  class, whose analysis precedes the interface's subroutines (in a module
+  it is the function's width;
+  [#4056](https://github.com/celox-sim/celox/issues/4056)).
 - An interface whose default lifetime (`interface automatic`) differs from
   that of the module it is used in.
 
@@ -592,6 +596,14 @@ Code that must stay portable should avoid relying on them.
   the command line, or `SimulatorBuilder::diagnostic_policy` in Rust), each such element takes the default time unit and precision
   instead, and `warn` reports one `mixed_timescale` warning naming each, as
   other simulators do.
+- **Storage of interface subroutines called through a virtual interface.**
+  A task or function of an interface called through a virtual interface
+  (`vif.drive(req)`, 25.9) runs for the instance the handle denotes. Its
+  static variables belong to that instance (13.3.2, 6.21), but are held by
+  each scope that makes such calls, as the static storage of a subroutine
+  called through an interface port is (see
+  [Interfaces](#interface-restrictions)). Its formals belong to each call,
+  also those of a static subroutine.
 - **`$psprintf` is `$sformatf`.** The vendor system function `$psprintf`,
   which many simulators and older UVM code use, is accepted as `$sformatf`
   (21.3.3); diagnostics name it `$sformatf`.

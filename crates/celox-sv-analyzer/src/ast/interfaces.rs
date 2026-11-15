@@ -218,18 +218,35 @@ fn prototypes(
                 let (module, enumerations) = {
                     let file = &files[interface.file];
                     let scoped = file.syntax_tree.scoped(interface.scope)?;
-                    interface_ast::signature(
-                        &scoped,
-                        sources[interface.file].1,
-                        &packages,
-                        probe_name.clone(),
-                        &interface
-                            .members
-                            .iter()
-                            .map(|m| m.name.clone())
-                            .collect::<Vec<_>>(),
-                        &interface.names,
-                    )?
+                    let members = interface
+                        .members
+                        .iter()
+                        .map(|m| m.name.clone())
+                        .collect::<Vec<_>>();
+                    let signature = |members_only| {
+                        interface_ast::signature(
+                            &scoped,
+                            sources[interface.file].1,
+                            &packages,
+                            probe_name.clone(),
+                            &members,
+                            &interface.names,
+                            members_only,
+                        )
+                    };
+                    match signature(false) {
+                        // Without the packages, an interface whose
+                        // subroutines or imports name a package, as a bus
+                        // functional model names the classes of the package
+                        // whose driver holds it through a virtual interface,
+                        // has the members of its declarations alone; one
+                        // whose members need a package fails again.
+                        Err(
+                            AnalyzerError::UnknownPackage { .. }
+                            | AnalyzerError::UnknownPackageItem { .. },
+                        ) if !analyze_packages => signature(true),
+                        result => result,
+                    }?
                 };
                 let prototype = InterfacePrototype {
                     name: interface.name.clone(),

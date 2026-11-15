@@ -100,6 +100,62 @@ impl ParsedSource {
             .collect()
     }
 
+    /// The subroutines that each interface in `interfaces` declares, with
+    /// the names of their formals in order (IEEE 1800-2023 13.3, 13.4), or
+    /// `None` for a DPI import (35.5).
+    pub(crate) fn interface_subroutine_formals(
+        &self,
+        interfaces: &fxhash::FxHashSet<String>,
+    ) -> Vec<(String, String, Option<Vec<String>>)> {
+        let native = self.declarations();
+        let mut found = Vec::new();
+        for unit in native.all_units() {
+            let name = ast::instances::normalize_identifier(&unit.name.spelling);
+            if unit.kind != celox_sv_syntax::UnitKind::Interface || !interfaces.contains(&name) {
+                continue;
+            }
+            for item in &unit.items {
+                // A DPI import has no formal names to call it with here; a
+                // call through a virtual interface is rejected by name.
+                if let celox_sv_syntax::BodyItemKind::Dpi(id) = native.body_item(*item).kind {
+                    let dpi = native.dpi_declaration(id);
+                    if dpi.import {
+                        found.push((
+                            name.clone(),
+                            ast::instances::normalize_identifier(&dpi.name.spelling),
+                            None,
+                        ));
+                    }
+                    continue;
+                }
+                let celox_sv_syntax::BodyItemKind::Subroutine(id) = native.body_item(*item).kind
+                else {
+                    continue;
+                };
+                let subroutine = native.subroutine(id);
+                let formals = subroutine
+                    .ports
+                    .iter()
+                    .flatten()
+                    .chain(
+                        subroutine
+                            .port_declarations
+                            .iter()
+                            .flat_map(|declaration| &declaration.ports),
+                    )
+                    .filter_map(|port| port.name.as_ref())
+                    .map(|name| ast::instances::normalize_identifier(&name.spelling))
+                    .collect();
+                found.push((
+                    name.clone(),
+                    ast::instances::normalize_identifier(&subroutine.name.spelling),
+                    Some(formals),
+                ));
+            }
+        }
+        found
+    }
+
     /// Module and interface declarations share the SV design-element namespace.
     pub fn component_names(&self) -> fxhash::FxHashSet<String> {
         self.declarations()
@@ -256,6 +312,7 @@ impl ParsedSource {
                     .0,
                 );
             }
+            packages.build_virtual_interface_calls()?;
             packages.check_unreferenced_interfaces(&trees)?;
             Ok(packages)
         })();
