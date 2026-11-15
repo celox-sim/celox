@@ -43,7 +43,7 @@ fn element_identity(shape: &VariableDimensions, table: &semantic_types::TyTable)
     if let Some(aggregate) = &shape.unpacked_struct {
         return Some(format!("struct {}", aggregate.identity()));
     }
-    let domain = shape.enum_domain.as_ref()?;
+    let domain = shape.enumeration_in(table).domain?;
     // A named enumeration is its typedef; an anonymous one is told apart by
     // its members.
     Some(match type_names::declaration_of(shape) {

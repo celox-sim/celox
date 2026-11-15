@@ -103,6 +103,18 @@ impl TyTable {
         );
     }
 
+    /// Whether `id` is an enumerated type (`Some(false)`) or a packed array
+    /// of one (`Some(true)`), which tells its enumeration (6.19, 7.4.1).
+    pub fn enumeration(&self, id: TyId) -> Option<bool> {
+        match self.data(id) {
+            TyData::Packed(Packed {
+                element: PackedElement::Enum { array, .. },
+                ..
+            }) => Some(*array),
+            _ => None,
+        }
+    }
+
     /// Whether `id` is an enumerated type, not a packed array of one (6.19).
     pub fn is_enum(&self, id: TyId) -> bool {
         matches!(self.data(id), TyData::Packed(packed) if scalar_enum(packed))

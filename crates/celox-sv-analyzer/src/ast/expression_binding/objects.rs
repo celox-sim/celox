@@ -1456,7 +1456,7 @@ pub(super) fn random_selection(
                 );
                 if (property.field.handle.is_some() && !array)
                     || property.r#type.holds_chandle()
-                    || (property.r#type.is_enum && property.r#type.enum_domain.is_none())
+                    || property.r#type.enumeration_in(&session.types).unresolved()
                     || (property.randc && property.cyclic_domain_size().is_none())
                 {
                     return Err(unsupported(

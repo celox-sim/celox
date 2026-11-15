@@ -222,7 +222,7 @@ pub(super) fn assignment_value(
                             value,
                             signed,
                             value_type,
-                            &procedural::dimensions_from_type(&member.r#type),
+                            &shape.member_shape(&session.types, &member.name, &member.r#type),
                             dims,
                             true,
                         )
@@ -254,7 +254,7 @@ pub(super) fn assignment_value(
                             value,
                             signed,
                             value_type,
-                            &procedural::dimensions_from_type(member.r#type()),
+                            &shape.member_shape(&session.types, member.name(), member.r#type()),
                             dims,
                             true,
                         )

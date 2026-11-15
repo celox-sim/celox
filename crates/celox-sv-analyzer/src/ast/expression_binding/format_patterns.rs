@@ -168,7 +168,7 @@ pub(in crate::ast) fn pattern(
     }
     if let Some(container) = containers::native_type(id, native, tree, session, dimensions)? {
         let element = &container.element;
-        if element.is_enum || element.packed_enum {
+        if container.element_enumeration(&session.types).enumeration {
             return Err(unsupported("%p of a container of enum values"));
         }
         if matches!(element.kind, TypeKind::Real | TypeKind::Shortreal) {
@@ -186,11 +186,7 @@ pub(in crate::ast) fn pattern(
                 "%p of a container of elements wider than 64 bits",
             ));
         }
-        if container
-            .key
-            .as_ref()
-            .is_some_and(|key| key.is_enum || key.packed_enum)
-        {
+        if container.key_enumeration(&session.types).enumeration {
             return Err(unsupported("%p of an associative array with enum keys"));
         }
         if container.key_class(&session.types).is_some() {
@@ -226,7 +222,7 @@ pub(in crate::ast) fn pattern(
     if let Some(base) = base {
         if let Some(container) = containers::native_type(base, native, tree, session, dimensions)? {
             let element = &container.element;
-            if element.is_enum || element.enum_domain.is_some() || element.packed_enum {
+            if container.element_enumeration(&session.types).enumeration {
                 return Err(unsupported("%p of an enum value"));
             }
             if container.element_class(&session.types).is_some() {
@@ -248,7 +244,8 @@ pub(in crate::ast) fn pattern(
             match indices {
                 Some(indices) if indices > shape.unpacked.len() => {}
                 Some(indices) if indices == shape.unpacked.len() => {
-                    if shape.enum_domain.is_some() || shape.packed_enum {
+                    let enumeration = shape.enumeration_in(&session.types);
+                    if enumeration.domain.is_some() || enumeration.packed {
                         return Err(unsupported("%p of an enum value"));
                     }
                     if !shape.members.is_empty()
@@ -294,8 +291,9 @@ pub(in crate::ast) fn pattern(
     if let ExprKind::Name(name) = expression
         && let Some(shape) = dimensions.get(&instances::normalize_identifier(&name.spelling))
     {
+        let enumeration = shape.enumeration_in(&session.types);
         return checked(
-            shape.enum_domain.is_some() || shape.packed_enum,
+            enumeration.domain.is_some() || enumeration.packed,
             !shape.members.is_empty()
                 || unpacked_structs::holds_struct(shape, tree, session, dimensions)
                 || !shape.unpacked.is_empty(),
@@ -304,7 +302,7 @@ pub(in crate::ast) fn pattern(
     if let Some((property, _)) = objects::property(tree, session, id, native, dimensions)? {
         let ty = &property.r#type;
         return checked(
-            ty.is_enum || ty.enum_domain.is_some() || ty.packed_enum,
+            ty.enumeration_in(&session.types).enumeration,
             !ty.members.is_empty()
                 || ty.unpacked_struct.is_some()
                 || !ty.unpacked_ranges.is_empty(),
@@ -329,22 +327,20 @@ pub(in crate::ast) fn aggregate_text(
 ) -> Converted<Option<Expr>> {
     if let Some(container) = containers::native_type(id, native, tree, session, dimensions)? {
         let element = &container.element;
+        let enumeration = container.element_enumeration(&session.types);
         let element = if let Some(aggregate) = element.unpacked_struct() {
             Element::Structure(aggregate.clone())
-        } else if let Some(domain) = &element.enum_domain
+        } else if let Some(domain) = &enumeration.domain
             && element.unpacked_ranges.is_empty()
             && element.container.is_none()
         {
             Element::Enum(domain.clone())
-        } else if container
-            .key
-            .as_ref()
-            .is_some_and(|key| key.enum_domain.is_some())
+        } else if container.key_enumeration(&session.types).domain.is_some()
             && element.members.is_empty()
             && element.unpacked_ranges.is_empty()
             && element.container.is_none()
             && container.element_class(&session.types).is_none()
-            && !element.packed_enum
+            && !enumeration.packed
             && matches!(
                 element.kind,
                 TypeKind::Bit
@@ -493,7 +489,9 @@ fn container_text(
         unsupported("%p of a container of structures or enum values outside a procedural body")
     })?;
     let key = container.key.as_ref();
-    if key.is_some_and(|key| (key.is_enum && key.enum_domain.is_none()) || key.packed_enum)
+    let key_enumeration = container.key_enumeration(&session.types);
+    if (key_enumeration.enumeration && key_enumeration.domain.is_none())
+        || key_enumeration.packed
         || container.key_class(&session.types).is_some()
     {
         return Err(unsupported(
@@ -578,7 +576,7 @@ fn container_text(
                 text_so_far.template.extend_from_slice(b"\"%s\":");
                 text_so_far.args.push(Expr::Ident(index.clone()));
             }
-            Some(key) if let Some(domain) = &key.enum_domain => {
+            Some(_) if let Some(domain) = &key_enumeration.domain => {
                 text_so_far.template.extend_from_slice(b"%s:");
                 text_so_far
                     .args

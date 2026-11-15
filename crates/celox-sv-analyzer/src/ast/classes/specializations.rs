@@ -1877,6 +1877,8 @@ fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::
             bound(&range.right)
         ));
     }
+    // The spelling hashes the whole shape of the type, which stays its
+    // spelling until specializations are named by their semantic types.
     if ty.is_enum || !ty.members.is_empty() {
         // An aggregate is told apart by its whole structure.
         use std::hash::{Hash, Hasher};

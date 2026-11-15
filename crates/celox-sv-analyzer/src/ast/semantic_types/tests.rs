@@ -763,3 +763,33 @@ fn class_handle_types_are_bound_where_they_are_made() {
     assert_eq!(handle.class_in(&table).as_deref(), Some("C"));
     assert_eq!(table.unbound_reads, 0);
 }
+
+#[test]
+fn enumerations_and_packed_arrays_of_them_are_told_by_their_types() {
+    // IEEE 1800-2023 6.19: an enumerated type; 7.4.1: a packed array of
+    // one; 7.4.2: an unpacked array of one, whose elements are of it.
+    let (table, ids) = typedefs(
+        "typedef enum logic [1:0] {A, B} e_t;
+         typedef e_t [1:0] pa_t;
+         typedef e_t ua_t [2];
+         typedef logic [1:0] v_t;",
+    );
+    let enumeration = |name: &str| table.enumeration(ids[name]);
+    assert_eq!(enumeration("e_t"), Some(false));
+    assert_eq!(enumeration("pa_t"), Some(true));
+    assert_eq!(enumeration("ua_t"), None);
+    assert_eq!(
+        table.enumeration(table.fixed_element(ids["ua_t"])),
+        Some(false)
+    );
+    assert_eq!(enumeration("v_t"), None);
+    let domain = table.enum_domain(ids["e_t"]).expect("the members of e_t");
+    assert_eq!(
+        domain
+            .members
+            .iter()
+            .map(|member| &*member.name)
+            .collect::<Vec<_>>(),
+        ["A", "B"]
+    );
+}

@@ -177,3 +177,70 @@ mod tests {
         assert_eq!(minus.bits(), u128::MAX - 1);
     }
 }
+
+/// What a type is of an enumeration (IEEE 1800-2023 6.19), as its semantic
+/// type tells.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct Enumeration {
+    /// The type is an enumerated type or a packed array of one.
+    pub(super) enumeration: bool,
+    /// The type is a packed array of an enumerated type, whose elements'
+    /// methods are not supported.
+    pub(super) packed: bool,
+    /// The members of an enumerated type that is no array, if resolved.
+    pub(super) domain: Option<std::sync::Arc<EnumDomain>>,
+}
+
+impl Enumeration {
+    /// The type is an enumeration whose members are not resolved, or a
+    /// packed array of one, whose values are not supported where its
+    /// members are needed.
+    pub(super) fn unresolved(&self) -> bool {
+        self.enumeration && self.domain.is_none()
+    }
+
+    /// The enumeration of a type, or of the elements of a fixed-size
+    /// unpacked array of it, whose semantic type in `table` is `id`, and
+    /// whose conversion input fields tell `fields`.
+    pub(super) fn of(
+        id: Option<super::semantic_types::TyId>,
+        table: &super::semantic_types::TyTable,
+        fields: Self,
+    ) -> Self {
+        let Some(id) = id else {
+            debug_assert_eq!(
+                fields,
+                Self::default(),
+                "an enumeration type is told by its semantic type"
+            );
+            return Self::default();
+        };
+        let id = table.fixed_element(id);
+        match table.enumeration(id) {
+            Some(array) => {
+                let facts = Self {
+                    enumeration: true,
+                    packed: array,
+                    domain: table.enum_domain(id).filter(|_| !array).cloned(),
+                };
+                debug_assert_eq!(facts, fields, "the semantic type of an enumeration type");
+                facts
+            }
+            // An anonymous enumeration whose members are not resolved, or a
+            // packed array of one, converts to bits: nothing identifies it
+            // until anonymous enumerations are told by their declarations.
+            None if fields.enumeration && table.is_integral(id) => {
+                debug_assert!(fields.domain.is_none());
+                fields
+            }
+            None => {
+                debug_assert_eq!(
+                    fields,
+                    Self::default(),
+                    "the semantic type of a type that is no enumeration"
+                );
+                Self::default()
+            }
+        }
+    }
+}

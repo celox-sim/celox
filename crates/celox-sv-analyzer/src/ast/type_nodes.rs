@@ -134,6 +134,24 @@ impl Type {
         class.cloned()
     }
 
+    /// What the type is of an enumeration, as its semantic type in `table`
+    /// tells (see [`enums::Enumeration::of`]).
+    pub(in crate::ast) fn enumeration_in(
+        &self,
+        table: &semantic_types::TyTable,
+    ) -> enums::Enumeration {
+        enums::Enumeration::of(self.binding.get(table), table, self.enumeration_fields())
+    }
+
+    /// The enumeration the conversion input fields of the type tell.
+    pub(in crate::ast) fn enumeration_fields(&self) -> enums::Enumeration {
+        enums::Enumeration {
+            enumeration: self.is_enum || self.packed_enum,
+            packed: self.packed_enum,
+            domain: self.enum_domain.clone(),
+        }
+    }
+
     /// The interface of a virtual interface type.
     pub fn virtual_interface(&self) -> Option<&virtual_interfaces::VirtualInterface> {
         self.virtual_interface.as_deref()
