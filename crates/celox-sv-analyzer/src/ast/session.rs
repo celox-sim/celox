@@ -6,6 +6,9 @@ use super::*;
 /// their inputs and what it reports. Analysis passes it down as `&mut`.
 #[derive(Default)]
 pub(crate) struct Session {
+    /// Packages analyzed for their declarations alone, no executable body
+    /// (see `Packages::analyze_needed`).
+    pub(super) declarations_only: bool,
     pub(super) foreign: classes::foreign::Registry,
     pub(super) foreign_arguments: Vec<(String, classes::specializations::BoundArguments)>,
     pub(super) foreign_names: Vec<(String, classes::specializations::BoundArguments, String)>,

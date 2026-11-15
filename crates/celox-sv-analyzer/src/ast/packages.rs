@@ -425,7 +425,7 @@ impl Packages {
         for (tree, _) in trees {
             super::warnings::append(&mut warnings, super::warnings::packages(tree));
         }
-        match Self::analyze_with_roots_impl(trees, roots, None, options) {
+        match Self::analyze_with_roots_impl(trees, roots, None, options, false) {
             Ok(packages) => Ok(packages.with_warnings(warnings)),
             Err(error) => Err(error.with_warnings(warnings)),
         }
@@ -438,17 +438,27 @@ impl Packages {
     /// `interfaces::interface_prototypes_with_options`). The other packages
     /// and units, whose classes may use those types or import packages not
     /// analyzed, are not analyzed.
+    ///
+    /// With `declarations_only`, the packages' declarations are analyzed, but
+    /// no executable body: no subroutine, class method or process.
     pub(crate) fn analyze_needed(
         trees: &[(&SyntaxTree, &Path)],
         needed: &HashSet<String>,
         units: &HashSet<std::path::PathBuf>,
         options: crate::AnalysisOptions,
+        declarations_only: bool,
     ) -> Result<Self, AnalyzerError> {
         let mut warnings = Vec::new();
         for (tree, _) in trees {
             super::warnings::append(&mut warnings, super::warnings::packages(tree));
         }
-        match Self::analyze_with_roots_impl(trees, None, Some((needed, units)), options) {
+        match Self::analyze_with_roots_impl(
+            trees,
+            None,
+            Some((needed, units)),
+            options,
+            declarations_only,
+        ) {
             Ok(packages) => Ok(packages.with_warnings(warnings)),
             Err(error) => Err(error.with_warnings(warnings)),
         }
@@ -459,6 +469,7 @@ impl Packages {
         roots: Option<&[&str]>,
         needed: Option<(&HashSet<String>, &HashSet<std::path::PathBuf>)>,
         options: crate::AnalysisOptions,
+        declarations_only: bool,
     ) -> Result<Self, AnalyzerError> {
         let mut timescales = timescales::Timescales::collect_with_options(trees, options.clone())?;
         if let Some(roots) = roots {
@@ -468,6 +479,7 @@ impl Packages {
         let timescales = Arc::new(timescales);
         let session = &mut Session {
             virtual_interfaces: options.virtual_interfaces.clone(),
+            declarations_only,
             ..Session::default()
         };
         let mut packages =
@@ -973,9 +985,10 @@ fn analyze_package_scope(
     own_items: Option<&ScopeSymbols>,
 ) -> Result<Package, AnalyzerError> {
     let imports::ResolvedImports {
-        symbols: imported,
+        symbols: mut imported,
         exports,
     } = imports::resolve_imports(tree, packages, None)?;
+    imported.declarations_only |= session.declarations_only;
     if own_items.is_none() && name != UNIT {
         session.foreign.register(
             name,

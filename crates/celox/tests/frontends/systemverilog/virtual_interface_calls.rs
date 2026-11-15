@@ -425,3 +425,345 @@ endmodule
         assert_eq!(displays(&mut sim), ["6 7 5"], "four_state={four_state}");
     }
 }
+
+/// A class stores itself in a class handle the interface declares, through a
+/// virtual interface, and the interface calls it back (8.4, 25.9), as a bus
+/// functional model's proxy does: the handle's class is that of a package
+/// the interface imports, also the package that holds the virtual interface.
+#[test]
+fn interfaces_call_back_classes_stored_through_virtual_interfaces() {
+    for (layout, source) in [
+        (
+            "driver package",
+            r#"`timescale 1ns / 1ns
+package agent;
+  class monitor;
+    virtual bfm b;
+    int seen;
+    function void notify(int v);
+      seen = v;
+      $display("notified %0d at %0t", v, $time);
+    endfunction
+    task run();
+      b.proxy = this;
+    endtask
+  endclass
+endpackage
+interface bfm(input logic clk);
+  import agent::*;
+  monitor proxy;
+  int n = 0;
+  always @(posedge clk) begin
+    n++;
+    if (proxy != null) proxy.notify(n);
+  end
+endinterface
+module top;
+  logic clk = 0;
+  bfm i(clk);
+  initial forever #5 clk = ~clk;
+  initial begin
+    agent::monitor m = new;
+    m.b = i;
+    m.run();
+    #22 $display("seen %0d", m.seen);
+  end
+endmodule
+"#,
+        ),
+        (
+            "base package",
+            r#"`timescale 1ns / 1ns
+package items;
+  class monitor_base;
+    int seen;
+    virtual function void notify(int v);
+    endfunction
+  endclass
+endpackage
+interface bfm(input logic clk);
+  items::monitor_base proxy;
+  int n = 0;
+  always @(posedge clk) begin
+    n++;
+    if (proxy != null) proxy.notify(n);
+  end
+endinterface
+package agent;
+  class monitor extends items::monitor_base;
+    virtual bfm b;
+    virtual function void notify(int v);
+      seen = v;
+      $display("notified %0d at %0t", v, $time);
+    endfunction
+    task run();
+      b.proxy = this;
+    endtask
+  endclass
+endpackage
+module top;
+  logic clk = 0;
+  bfm i(clk);
+  initial forever #5 clk = ~clk;
+  initial begin
+    agent::monitor m = new;
+    m.b = i;
+    m.run();
+    #22 $display("seen %0d", m.seen);
+  end
+endmodule
+"#,
+        ),
+        (
+            "header port",
+            r#"`timescale 1ns / 1ns
+package agent;
+  class monitor;
+    virtual bfm b;
+    int seen;
+    function void notify(int v);
+      seen = v;
+      $display("notified %0d at %0t", v, $time);
+    endfunction
+  endclass
+endpackage
+interface bfm(input logic clk, input agent::monitor proxy);
+  int n = 0;
+  always @(posedge clk) begin
+    n++;
+    if (proxy != null) proxy.notify(n);
+  end
+endinterface
+module top;
+  logic clk = 0;
+  agent::monitor pm;
+  bfm i(clk, pm);
+  initial forever #5 clk = ~clk;
+  initial begin
+    agent::monitor m = new;
+    m.b = i;
+    pm = m;
+    #22 $display("seen %0d", m.seen);
+  end
+endmodule
+"#,
+        ),
+    ] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("proxy.sv"))], "top")
+                .build()
+                .unwrap_or_else(|error| panic!("{layout}: {error}"));
+        sim.run_until(22).unwrap();
+        assert_eq!(
+            displays(&mut sim),
+            ["notified 1 at 5", "notified 2 at 15", "seen 2"],
+            "{layout}"
+        );
+    }
+}
+
+#[test]
+fn interface_members_name_the_class_of_their_driver_through_any_import() {
+    // The interface imports the package whose class holds the virtual
+    // interface, so the members resolve while that package is analyzed.
+    let template = r#"`timescale 1ns / 1ns
+BEFORE
+package agent;
+  class monitor;
+    virtual bfm b;
+    int seen;
+    function void notify(int v);
+      seen = v;
+      $display("notified %0d at %0t", v, $time);
+    endfunction
+    task run();
+      b.proxy = this;
+    endtask
+  endclass
+endpackage
+AFTER
+interface bfm HEADER(input logic clk);
+ITEMS
+  int n = 0;
+  always @(posedge clk) begin
+    n++;
+    if (proxy != null) proxy.notify(n);
+  end
+endinterface
+module top;
+  logic clk = 0;
+  bfm i(clk);
+  initial forever #5 clk = ~clk;
+  initial begin
+    agent::monitor m = new;
+    m.b = i;
+    m.run();
+    #22 $display("seen %0d", m.seen);
+  end
+endmodule
+"#;
+    for (shape, before, after, header, items) in [
+        (
+            "typedef alias",
+            "",
+            "",
+            "",
+            "  import agent::*;\n  typedef monitor monitor_t;\n  monitor_t proxy;",
+        ),
+        (
+            "header import",
+            "",
+            "",
+            "import agent::*;",
+            "  monitor proxy;",
+        ),
+        (
+            "duplicate imports",
+            "",
+            "",
+            "",
+            "  import agent::*;\n  import agent::monitor;\n  monitor proxy;",
+        ),
+        (
+            "explicit over wildcard",
+            "package other;\n  class monitor;\n    int unused;\n  endclass\nendpackage",
+            "",
+            "",
+            "  import other::*;\n  import agent::monitor;\n  monitor proxy;",
+        ),
+        (
+            "explicit export",
+            "",
+            "package api;\n  import agent::*;\n  export agent::monitor;\nendpackage",
+            "",
+            "  import api::*;\n  monitor proxy;",
+        ),
+        (
+            "wildcard export of a referenced class",
+            "",
+            "package api;\n  import agent::*;\n  export agent::*;\n  typedef monitor monitor_t;\nendpackage",
+            "",
+            "  import api::*;\n  monitor proxy;",
+        ),
+    ] {
+        let source = template
+            .replace("BEFORE", before)
+            .replace("AFTER", after)
+            .replace("HEADER", header)
+            .replace("ITEMS", items);
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("proxy.sv"))],
+            "top",
+        )
+        .build()
+        .unwrap_or_else(|error| panic!("{shape}: {error}"));
+        sim.run_until(22).unwrap();
+        assert_eq!(
+            displays(&mut sim),
+            ["notified 1 at 5", "notified 2 at 15", "seen 2"],
+            "{shape}"
+        );
+    }
+}
+
+#[test]
+fn interface_members_typed_by_package_types_next_to_a_cyclic_interface() {
+    // `bfm` is typed by the package that holds its virtual interface; `paint`
+    // takes an enumeration from an unrelated package; `bfm`'s state port is
+    // an enumeration of the driver's package.
+    let source = r#"`timescale 1ns / 1ns
+package colors;
+  typedef enum logic [1:0] {RED, GREEN, BLUE} color_e;
+endpackage
+package agent;
+  typedef enum logic [1:0] {IDLE, BUSY, DONE} state_e;
+  class monitor;
+    virtual bfm b;
+    virtual paint p;
+    task run();
+      b.proxy = this;
+      p.c = colors::BLUE;
+      #1 $display("color %s state %s", p.c.name(), b.s.name());
+    endtask
+  endclass
+endpackage
+interface bfm(input logic clk, input agent::state_e s);
+  import agent::*;
+  monitor proxy;
+endinterface
+interface paint;
+  import colors::*;
+  color_e c = RED;
+endinterface
+module top;
+  logic clk = 0;
+  agent::state_e st = agent::BUSY;
+  bfm i(clk, st);
+  paint pt();
+  initial begin
+    agent::monitor m = new;
+    m.b = i;
+    m.p = pt;
+    m.run();
+  end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("mixed.sv"))], "top")
+        .build()
+        .unwrap();
+    sim.run_until(2).unwrap();
+    assert_eq!(displays(&mut sim), ["color BLUE state BUSY"]);
+}
+
+#[test]
+fn interface_tasks_call_methods_on_results_of_package_functions() {
+    // The interface's subroutines are analyzed with the types the package's
+    // declarations interned, as UVM's report macros call a method on the
+    // result of `uvm_get_report_object()`.
+    let source = r#"`timescale 1ns / 1ns
+package agent;
+  typedef enum {LOW, HIGH} level_e;
+  class a1; int x; endclass
+  class a2; int y; endclass
+  class reporter;
+    int n = 4;
+    function reporter self_();
+      return this;
+    endfunction
+  endclass
+  reporter the_reporter = new;
+  function reporter get_reporter();
+    return the_reporter;
+  endfunction
+  class driver;
+    virtual bfm b;
+    task run();
+      b.drive();
+    endtask
+  endclass
+endpackage
+interface bfm;
+  import agent::*;
+  int n;
+  task drive();
+    reporter o;
+    o = get_reporter().self_();
+    n = o.n;
+    $display("drove %0d", n);
+  endtask
+endinterface
+module top;
+  bfm i();
+  initial begin
+    agent::driver d = new;
+    d.b = i;
+    d.run();
+  end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("chain.sv"))], "top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(displays(&mut sim), ["drove 4"]);
+}
