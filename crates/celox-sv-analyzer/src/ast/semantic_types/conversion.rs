@@ -137,6 +137,7 @@ fn convert(
         enum_domain: ty.enum_domain.as_ref(),
         members: &ty.members,
         declaration: ty.declaration_name(),
+        anonymous: ty.spelling.anonymous(),
         scope: ty.declaration_scope(),
         signed: ty.is_signed,
         signed_element_depth: ty.signed_element_depth,
@@ -189,6 +190,7 @@ pub(in crate::ast) fn of_shape(
         enum_domain: shape.enum_domain.as_ref(),
         members: &shape.members,
         declaration: type_names::declared_type(shape).and_then(Type::declaration_name),
+        anonymous: type_names::declared_type(shape).and_then(|ty| ty.spelling.anonymous()),
         scope: type_names::declared_type(shape).and_then(Type::declaration_scope),
         signed: shape.signed,
         signed_element_depth: shape.signed_element_depth,
@@ -221,6 +223,8 @@ struct Parts<'a> {
     members: &'a [PackedMember],
     /// The typedef that names an enumeration, structure or union type.
     declaration: Option<&'a str>,
+    /// The source position of an enumeration no typedef names.
+    anonymous: Option<&'a str>,
     /// The elaborated scope that declares the enumeration, structure or
     /// union type, if not a package or compilation unit.
     scope: Option<&'a str>,
@@ -327,9 +331,19 @@ impl Parts<'_> {
             // `reg` is `logic` (6.11.2), as is an implicit type.
             TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => true,
         };
-        let anonymous = self
-            .enum_domain
-            .map(|domain| Decl::AnonymousEnum(domain.clone()));
+        // An anonymous enumeration matches only itself (6.22.1 c): its
+        // declaration tells it apart from another of the same members.
+        let anonymous = match (self.anonymous, self.enum_domain) {
+            (Some(declaration), domain) => Some(Decl::AnonymousEnum {
+                decl: Some(table.declare(declaration, self.scope)),
+                domain: domain.cloned(),
+            }),
+            (None, Some(domain)) => Some(Decl::AnonymousEnum {
+                decl: None,
+                domain: Some(domain.clone()),
+            }),
+            (None, None) => None,
+        };
         let named = self
             .declaration
             .filter(|_| self.enumeration)
@@ -345,8 +359,9 @@ impl Parts<'_> {
                 array: self.packed_enum,
             }
         } else if self.enumeration {
-            // A packed array of an anonymous enumeration keeps neither its
-            // declaration nor its members, so only its bits tell it apart.
+            // An enumeration that records neither its declaration nor its
+            // members, such as one made for a select, is told apart by its
+            // bits only.
             PackedElement::Bits
         } else if let Some(member) = self.members.first() {
             let owner = member.owner().clone();
