@@ -1285,6 +1285,12 @@ pub enum SequenceExpr {
     /// `left intersect right` (16.9.6): both start at one tick and match at
     /// one tick.
     Intersect(Box<SequenceExpr>, Box<SequenceExpr>),
+    /// `condition throughout sequence` (16.9.9): `condition` holds at each
+    /// tick from the start of `sequence` to its match.
+    Throughout {
+        condition: SequenceBoolean,
+        sequence: Box<SequenceExpr>,
+    },
 }
 
 impl SequenceExpr {
@@ -1306,6 +1312,13 @@ impl SequenceExpr {
                 | SequenceExpr::Intersect(left, right) => {
                     pending.push(right);
                     pending.push(left);
+                }
+                SequenceExpr::Throughout {
+                    condition,
+                    sequence,
+                } => {
+                    found.push(condition);
+                    pending.push(sequence);
                 }
             }
         }
