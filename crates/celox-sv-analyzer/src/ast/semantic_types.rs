@@ -112,6 +112,13 @@ pub(super) struct DeclData {
     /// The members of an enumeration the declaration declares (6.19),
     /// once a type of it has been converted with them.
     pub domain: Option<Arc<super::enums::EnumDomain>>,
+    /// The name `$typename` gives the typedef that declares the type, with
+    /// the scope that declares it (20.6.1 rule f), once a type of it has
+    /// been converted with it. `None` for an anonymous type.
+    pub typename: Option<super::type_names::TypedefName>,
+    /// `struct` or `union` of a structure or union type other than a soft
+    /// or tagged union, which `$typename` writes.
+    pub aggregate: Option<&'static str>,
 }
 
 /// The identity of the declaration of a named type.
@@ -433,6 +440,8 @@ impl TyTable {
             name: name.into(),
             scope: scope.map(Into::into),
             domain: None,
+            typename: None,
+            aggregate: None,
         };
         self.decl_ids
             .entry(data.name.clone())

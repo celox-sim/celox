@@ -164,6 +164,8 @@ blocks in programs. Two region deviations are listed under
   structures with unpacked array members, packed arrays of enumerations or
   of signed typedefs, classes with non-integral value parameters, and
   operands other than names and data types, such as `$typename(a + b)`.
+  A virtual interface type, which 20.6.1 has no rule for, is written as
+  it is declared: `virtual bus_if` or `virtual bus_if.mp`.
 - Parameters of unpacked array type hold their value from the start of the
   simulation and cannot be used where an elaboration-time constant is
   required. A member of a packed-structure parameter is such a constant
