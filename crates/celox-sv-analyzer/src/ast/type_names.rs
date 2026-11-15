@@ -508,8 +508,13 @@ fn element_name(
         TyData::String => Ok("string".to_owned()),
         TyData::Chandle => Ok("chandle".to_owned()),
         // An event is a handle of a built-in class that has no class name.
-        TyData::Class(Decl::Class(class)) if &*class == events::CLASS => Ok("event".to_owned()),
-        TyData::Class(Decl::Class(class)) => class_name(&class, tree, session, env),
+        TyData::Class(Decl::Class(decl)) => {
+            let class = session.types.decl(decl).name.clone();
+            if &*class == events::CLASS {
+                return Ok("event".to_owned());
+            }
+            class_name(&class, tree, session, env)
+        }
         TyData::UnpackedStruct(Decl::Aggregate { decl, members }) => {
             unpacked_struct_name(decl, &members, tree, session, env)
         }
@@ -518,9 +523,9 @@ fn element_name(
         TyData::VirtualInterface {
             interface: Decl::Interface(interface),
             modport,
-        } => Ok(match modport {
-            Some(modport) => format!("virtual {interface}.{modport}"),
-            None => format!("virtual {interface}"),
+        } => Ok(match (&session.types.decl(interface).name, modport) {
+            (interface, Some(modport)) => format!("virtual {interface}.{modport}"),
+            (interface, None) => format!("virtual {interface}"),
         }),
         TyData::Null
         | TyData::Class(_)
@@ -802,16 +807,13 @@ fn class_name(
         None => class != generic,
     };
     if parameterized {
-        let specialization = specialization.ok_or_else(|| {
-            unsupported_operand(format!("class `{class}` without its parameters"))
-        })?;
-        let arguments = specialization
-            .arguments
+        let arguments = class_arguments(class, specialization, tree, session, env)?;
+        let arguments = arguments
             .iter()
             .map(|argument| match argument {
-                ClassArgument::Type(r#type) => type_name(r#type, tree, session, env),
-                ClassArgument::Value(Some(value)) => Ok(value.to_string()),
-                ClassArgument::Value(None) => Err(unsupported_operand(format!(
+                semantic_types::ClassArgument::Type(id) => name_of(*id, tree, session, env),
+                semantic_types::ClassArgument::Value(Some(value)) => Ok(value.to_string()),
+                semantic_types::ClassArgument::Value(None) => Err(unsupported_operand(format!(
                     "class `{name}` with a parameter value that is not integral"
                 ))),
             })
@@ -819,4 +821,41 @@ fn class_name(
         name.push_str(&format!("#({})", arguments.join(",")));
     }
     Ok(name)
+}
+
+/// The parameter values of class specialization `class`, which its
+/// declaration records the first time they are asked for: the types
+/// [`specializations::Specialization::arguments`] gives, in the constants
+/// of `env` where they are not bound.
+fn class_arguments(
+    class: &str,
+    specialization: Option<std::rc::Rc<classes::specializations::Specialization>>,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Converted<Arc<[semantic_types::ClassArgument]>> {
+    let Decl::Class(decl) = session.types.class(class) else {
+        unreachable!("a class declares a class");
+    };
+    if let Some(arguments) = &session.types.decl(decl).arguments {
+        return Ok(arguments.clone());
+    }
+    let specialization = specialization
+        .ok_or_else(|| unsupported_operand(format!("class `{class}` without its parameters")))?;
+    let arguments = specialization
+        .arguments
+        .iter()
+        .map(|argument| match argument {
+            ClassArgument::Type(r#type) => {
+                semantic_types::of_declared(&mut session.types, &tree.functions, r#type, env)
+                    .map(semantic_types::ClassArgument::Type)
+                    .ok_or_else(|| unsupported_operand("a type with a range that is not constant"))
+            }
+            ClassArgument::Value(value) => Ok(semantic_types::ClassArgument::Value(*value)),
+        })
+        .collect::<Converted<Arc<[_]>>>()?;
+    session
+        .types
+        .record_class_arguments(decl, arguments.clone());
+    Ok(arguments)
 }

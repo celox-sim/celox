@@ -77,7 +77,7 @@ impl TyTable {
     fn spell_decl(&self, decl: &Decl) -> String {
         match decl {
             Decl::Named(decl) | Decl::Aggregate { decl, .. } => self.decl(*decl).name.to_string(),
-            Decl::Class(name) | Decl::Interface(name) => name.to_string(),
+            Decl::Class(decl) | Decl::Interface(decl) => self.decl(*decl).name.to_string(),
             Decl::AnonymousEnum {
                 domain: Some(domain),
                 ..

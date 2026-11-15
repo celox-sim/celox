@@ -100,7 +100,7 @@ fn class_identity_changes_cannot_reuse_a_previous_binding() {
         .unwrap();
     assert_ne!(first, second);
     assert!(
-        matches!(table.data(second), TyData::Class(semantic_types::Decl::Class(name)) if name.as_ref()=="D")
+        matches!(table.data(second), TyData::Class(semantic_types::Decl::Class(decl)) if table.decl(*decl).name.as_ref() == "D")
     );
 }
 

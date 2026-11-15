@@ -302,11 +302,11 @@ impl Parts<'_> {
         }
         // Events and processes are handles of built-in classes.
         if let Some(class) = self.class {
-            return Some(TyData::Class(Decl::Class(class.into())));
+            return Some(TyData::Class(table.class(class)));
         }
         if let Some(interface) = self.virtual_interface {
             return Some(TyData::VirtualInterface {
-                interface: Decl::Interface(interface.interface.as_str().into()),
+                interface: table.interface(&interface.interface),
                 modport: interface.modport.as_deref().map(Into::into),
             });
         }
