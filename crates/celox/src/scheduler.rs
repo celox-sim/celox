@@ -52,7 +52,7 @@ mod wait_checks;
 mod waits;
 mod waves;
 
-use slice::CombSlicer;
+use slice::{CombSlicer, CompletedControl};
 
 use units::*;
 use wait_checks::*;

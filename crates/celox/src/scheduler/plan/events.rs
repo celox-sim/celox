@@ -116,7 +116,7 @@ impl<'a> PlanBuilder<'a> {
     /// slicer of combinational logic when a wait reads anything.
     pub(super) fn observers<'s, F: FnOnce() -> CombSlicer<'a>>(
         &mut self,
-        comb_slicer: &'s Slicer<'a, F>,
+        comb_slicer: &'s mut Slicer<'a, F>,
     ) -> Option<&'s CombSlicer<'a>> {
         let schema = self.schema;
         let model = self.model;
@@ -178,7 +178,11 @@ impl<'a> PlanBuilder<'a> {
             .copied()
             .chain(events.iter().map(|event| storage(event.signal)))
             .collect();
-        let wait_slicer = (!wait_reads.is_empty()).then(|| &**comb_slicer);
+        let wait_slicer = if wait_reads.is_empty() {
+            None
+        } else {
+            Some(comb_slicer.get())
+        };
         let observed_inputs = wait_slicer
             .as_ref()
             .map(|slicer| slicer.input_signals(wait_reads.iter().copied()))
