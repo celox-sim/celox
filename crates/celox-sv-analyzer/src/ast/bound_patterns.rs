@@ -337,7 +337,7 @@ impl BoundPattern {
                     })
                 })
                 .collect();
-        } else if let Some(aggregate) = &shape.unpacked_struct {
+        } else if let Some(aggregate) = shape.unpacked_struct_in(&session.types) {
             keys = aggregate
                 .members()
                 .iter()

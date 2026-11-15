@@ -45,6 +45,11 @@ pub(crate) struct Session {
     /// The class specializations being made, which their own declarations
     /// may name before they are complete.
     pub(super) class_specializations_building: Vec<String>,
+    /// The classes being laid out or specialized, one inside another, each
+    /// with the declarations and the tokens of its declaration: a type
+    /// declared in one belongs to that specialization (see
+    /// [`types::declaring_scope`]).
+    pub(super) class_scopes: Vec<types::ClassScope>,
     /// The classes whose constraints are being bound, one inside another,
     /// each with its base.
     pub(super) constraint_owners: Vec<(String, Option<String>)>,

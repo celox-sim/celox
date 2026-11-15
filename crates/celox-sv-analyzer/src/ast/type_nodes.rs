@@ -144,6 +144,19 @@ impl Type {
         )
     }
 
+    /// The declaration of an unpacked structure type, or of the elements of
+    /// a fixed-size array of them, as its semantic type in `table` tells.
+    pub(in crate::ast) fn unpacked_struct_in<'a>(
+        &'a self,
+        table: &'a semantic_types::TyTable,
+    ) -> Option<&'a Arc<unpacked_structs::UnpackedStruct>> {
+        unpacked_structs::declaration_of(
+            self.binding.get(table),
+            table,
+            self.unpacked_struct.as_ref(),
+        )
+    }
+
     /// What the type is of an enumeration, as its semantic type in `table`
     /// tells (see [`enums::Enumeration::of`]).
     pub(in crate::ast) fn enumeration_in(

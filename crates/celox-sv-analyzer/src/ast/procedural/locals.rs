@@ -274,7 +274,7 @@ impl BodyBuilder<'_, '_, '_> {
         // keeps its part of the initializer, which is hoisted with it.
         let aggregate = signal
             .r#type()
-            .unpacked_struct()
+            .unpacked_struct_in(&self.session.types)
             .expect("an unpacked structure local")
             .clone();
         let mut init = init;
@@ -361,7 +361,7 @@ impl BodyBuilder<'_, '_, '_> {
                 .push(entry);
         }
         let aggregate = r#type
-            .unpacked_struct()
+            .unpacked_struct_in(&self.session.types)
             .expect("an unpacked structure type")
             .clone();
         Ok(aggregate

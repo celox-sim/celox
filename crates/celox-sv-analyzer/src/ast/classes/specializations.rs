@@ -662,10 +662,34 @@ fn bind_nested_specialization(
     session
         .class_specializations_building
         .push(pending.name.clone());
+    let scoped = push_class_scope(tree, session, generic, &pending.name);
     let name = bind_bases(tree, session, generic, &pending.env, &pending.aliases)
         .and_then(|bases| finish_specialization(tree, session, generic, pending, bases));
+    if scoped {
+        session.class_scopes.pop();
+    }
     session.class_specializations_building.pop();
     name.map(Binding::Ready)
+}
+
+/// Record that specialization `name` of class `generic` is being made, so
+/// that the types its declaration declares are its own (see
+/// [`types::declaring_scope`]); whether the class is declared in `tree`.
+fn push_class_scope(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    generic: &str,
+    name: &str,
+) -> bool {
+    let Some(tokens) =
+        super::declaration(tree, session, generic).map(|declaration| declaration.tokens)
+    else {
+        return false;
+    };
+    session
+        .class_scopes
+        .push(types::ClassScope::new(name, tree.declarations(), tokens));
+    true
 }
 
 struct PendingSpecialization {
@@ -1922,8 +1946,12 @@ pub(in crate::ast) fn collect(
         session
             .class_specializations_building
             .push(pending.name.clone());
+        let scoped = push_class_scope(tree, session, &generic, &pending.name);
         let result = bind_bases(tree, session, &generic, &pending.env, &pending.aliases)
             .and_then(|bases| finish_specialization(tree, session, &generic, pending, bases));
+        if scoped {
+            session.class_scopes.pop();
+        }
         session.class_specializations_building.pop();
         match result {
             Ok(name) => session.foreign_names.push((generic, arguments, name)),

@@ -1411,6 +1411,27 @@ pub(super) fn shared_class(
     if let Some(class) = laid_out(session, name) {
         return Ok(class);
     }
+    // The types the class declares are those of this specialization.
+    let Some(tokens) = declaration(tree, session, name).map(|declaration| declaration.tokens)
+    else {
+        return lay_out_shared_class(tree, name, env, aliases, session);
+    };
+    session
+        .class_scopes
+        .push(types::ClassScope::new(name, tree.declarations(), tokens));
+    let class = lay_out_shared_class(tree, name, env, aliases, session);
+    session.class_scopes.pop();
+    class
+}
+
+/// [`shared_class`] of a class not laid out yet.
+fn lay_out_shared_class(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    env: &SharedEnv,
+    aliases: &SharedAliases,
+    session: &mut Session,
+) -> Converted<Rc<Class>> {
     // A class of another scope is laid out in its own scope, where the
     // names it uses are declared.
     let declaration = declaration(tree, session, name).filter(|declaration| {
@@ -1598,7 +1619,11 @@ pub(super) fn shared_class(
                 return Err(unsupported("const dynamic container class property"));
             }
             let property_name = instances::normalize_identifier(&variable.name.spelling);
-            if let Some(aggregate) = ty.unpacked_struct().filter(|_| storage.is_none()) {
+            if let Some(aggregate) = ty
+                .unpacked_struct_in(&session.types)
+                .filter(|_| storage.is_none())
+                .cloned()
+            {
                 if property.qualifiers.is_static {
                     return Err(unsupported(
                         "static class property of unpacked structure type",

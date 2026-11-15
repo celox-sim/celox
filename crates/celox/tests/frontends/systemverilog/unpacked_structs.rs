@@ -1158,3 +1158,105 @@ fn declarator_dimensions_make_arrays_of_scalars_and_structures() {
         ["3 2 2 4 2"]
     );
 }
+
+#[test]
+fn structure_properties_of_class_specializations_take_their_own_member_defaults() {
+    // IEEE 1800-2023 8.25: each specialization of a parameterized class
+    // declares its own types, so a member default that reads a parameter
+    // (7.2.2) has that specialization's value.
+    let source = "module Top;
+        class C #(int P = 0);
+            struct {int a = P; int b = P + 1;} s;
+            typedef struct {int a = P * 10;} t_t;
+            t_t t;
+        endclass
+        initial begin
+            C #(1) one;
+            C #(2) two;
+            C #(2)::t_t x;
+            one = new;
+            two = new;
+            x = two.t;
+            $display(\"%0d %0d %0d %0d %0d %0d %0d\", one.s.a, one.s.b, one.t.a, two.s.a, two.s.b, two.t.a, x.a);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1 2 10 2 3 20 20"]
+    );
+}
+
+#[test]
+fn structure_types_of_distinct_class_specializations_do_not_match() {
+    // IEEE 1800-2023 6.22.1 d: a typedef of a structure matches only within
+    // the scope of its identifier, and each specialization of a
+    // parameterized class is a scope of its own (8.25); unpacked structures
+    // that do not match are not equivalent (6.22.2) and so not assignment
+    // compatible (6.22.3), nor is a port connected to one (23.3.3.7).
+    // `d_t` has the same members in every specialization; only the
+    // specialization tells its types apart.
+    let package = "package p;
+        class C #(int W = 1);
+            typedef struct {bit [W-1:0] a;} t_t;
+            typedef struct {int a;} d_t;
+        endclass
+    endpackage
+    ";
+    for ty in ["t_t", "d_t"] {
+        let assignment = format!(
+            "{package}module Top;
+                p::C#(4)::{ty} x;
+                p::C#(8)::{ty} y;
+                initial y = x;
+            endmodule"
+        );
+        let connection = format!(
+            "{package}module Sub(input p::C#(8)::{ty} i);
+            endmodule
+            module Top;
+                p::C#(4)::{ty} x;
+                Sub s(.i(x));
+            endmodule"
+        );
+        for (source, expected) in [
+            (
+                assignment,
+                format!(
+                    "`struct p::C#(W=4)::{ty}` is not assignment compatible with `struct p::C#(W=8)::{ty}`"
+                ),
+            ),
+            (
+                connection,
+                "port `i` requires a variable of the same unpacked structure type".to_owned(),
+            ),
+        ] {
+            let result = Simulator::from_sv_sources(vec![(&source, Path::new("spec.sv"))], "Top")
+                .build_cranelift();
+            let Err(error) = result else {
+                panic!("a structure of another specialization accepted: {source}")
+            };
+            assert!(
+                format!("{error:?}").contains(&expected),
+                "{source}: {error:?}"
+            );
+        }
+    }
+    // A specialization's own type matches itself across the hierarchy.
+    let same = format!(
+        "{package}module Sub(input p::C#(4)::t_t i, input p::C#(4)::d_t d, output int o);
+            assign o = i.a * 100 + d.a;
+        endmodule
+        module Top;
+            p::C#(4)::t_t x;
+            p::C#(4)::d_t d;
+            int o;
+            Sub s(.i(x), .d(d), .o(o));
+            initial begin
+                x.a = 4'd9;
+                d.a = 4;
+                #1 $display(\"%0d\", o);
+            end
+        endmodule"
+    );
+    assert_eq!(super::hierarchical_references::displayed(&same), ["904"]);
+}

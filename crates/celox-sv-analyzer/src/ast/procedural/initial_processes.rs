@@ -106,7 +106,7 @@ pub(in crate::ast) fn initial_processes_from_scope(
                 let Some(native) = native else {
                     if let Some(aggregate) = item_dimensions
                         .get(&name)
-                        .and_then(|shape| shape.unpacked_struct.as_ref())
+                        .and_then(|shape| shape.unpacked_struct_in(&session.types))
                     {
                         body.extend(aggregate.leaves().into_iter().filter_map(|leaf| {
                             let target = leaf.name(&name);

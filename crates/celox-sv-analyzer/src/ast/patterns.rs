@@ -155,11 +155,11 @@ pub(super) fn assignment_value(
     // value. Preserve its leaf expressions instead of resizing the handles
     // and state bits together as an integral vector (10.9.2).
     if shape.unpacked.is_empty()
-        && let Some(target) = &shape.unpacked_struct
+        && let Some(target) = shape.unpacked_struct_in(&session.types)
         && value_type.is_some_and(|ty| {
             ty.unpacked_ranges().is_empty()
                 && ty
-                    .unpacked_struct()
+                    .unpacked_struct_in(&session.types)
                     .is_some_and(|actual| actual.same_type(target))
         })
     {
@@ -210,7 +210,7 @@ pub(super) fn assignment_value(
                 count
             ]));
         }
-        if let Some(aggregate) = &shape.unpacked_struct {
+        if let Some(aggregate) = shape.unpacked_struct_in(&session.types).cloned() {
             return Ok(Expr::Concat(
                 aggregate
                     .members()

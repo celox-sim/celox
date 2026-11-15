@@ -228,6 +228,10 @@ pub(super) struct TyTable {
     closed_shapes: HashMap<u64, Vec<(crate::ast::variable_dimensions::VariableShape, TyId)>>,
     /// Whether a `chandle` type has been interned (6.14).
     chandle: bool,
+    /// The members, defaults and layout of each unpacked structure type
+    /// (7.2), as the declaration of the first value converted to it gives
+    /// them.
+    structs: HashMap<TyId, Arc<super::unpacked_structs::UnpackedStruct>>,
     /// The declarations the types of the table name.
     decls: Vec<DeclData>,
     /// The declarations by name, then by scope (`""` for none, which no
@@ -471,6 +475,36 @@ impl TyTable {
     /// The type `id` names.
     pub fn data(&self, id: TyId) -> &TyData {
         &self.types[id.0 as usize].0
+    }
+
+    /// Record the declaration `aggregate` of unpacked structure type `id`.
+    pub(super) fn record_struct(
+        &mut self,
+        id: TyId,
+        aggregate: &Arc<super::unpacked_structs::UnpackedStruct>,
+    ) {
+        let Some(known) = self.structs.get(&id) else {
+            self.structs.insert(id, aggregate.clone());
+            return;
+        };
+        debug_assert!(
+            known.same_layout(aggregate),
+            "one declaration of unpacked structure type {:?}: {known:?} and {aggregate:?}",
+            match self.data(id) {
+                TyData::UnpackedStruct(Decl::Aggregate { decl, .. }) => Some(self.decl(*decl)),
+                _ => None,
+            }
+        );
+    }
+
+    /// The declaration of unpacked structure type `id`, or of the elements
+    /// of a fixed-size unpacked array of them (7.2, 7.4.2), once a value of
+    /// it has been converted.
+    pub(super) fn unpacked_struct(
+        &self,
+        id: TyId,
+    ) -> Option<&Arc<super::unpacked_structs::UnpackedStruct>> {
+        self.structs.get(&self.fixed_element(id))
     }
 
     /// The class of handle type `id`, or of the elements of a fixed-size

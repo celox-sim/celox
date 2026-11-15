@@ -383,7 +383,7 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(None);
         };
         let Some(structure) = ty
-            .unpacked_struct()
+            .unpacked_struct_in(&self.session.types)
             .filter(|_| ty.unpacked_ranges.is_empty())
         else {
             return Ok(None);
@@ -483,7 +483,7 @@ impl BodyBuilder<'_, '_, '_> {
         let native = self.tree.declarations();
         let structure = aggregate
             .r#type
-            .unpacked_struct()
+            .unpacked_struct_in(&self.session.types)
             .expect("an unpacked structure property")
             .clone();
         let structure_type =
