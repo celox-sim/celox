@@ -234,6 +234,15 @@ impl VirtualInterfaces {
 /// `r#type` of a member of a non-parameterized interface, whose bounds are
 /// constants, possibly the interface's `constants`.
 fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> Option<Type> {
+    // A handle of a class object, such as the proxy through which a bus
+    // functional model calls back the class that drives it (8.4).
+    if r#type.kind() == crate::ir::TypeKind::Object
+        && let Some(class) = r#type.class()
+        && r#type.unpacked_ranges().is_empty()
+        && r#type.container().is_none()
+    {
+        return Some(classes::handle_shape(class));
+    }
     let kind = match r#type.kind() {
         crate::ir::TypeKind::Bit => TypeKind::Bit,
         crate::ir::TypeKind::Logic => TypeKind::Logic,

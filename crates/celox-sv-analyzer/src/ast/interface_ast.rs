@@ -98,21 +98,34 @@ pub(super) fn analyze(
     Ok(module)
 }
 
+/// The signature of the interface `tree` declares, analyzed with the types,
+/// specializations and call sites of `design`, the design of `packages`,
+/// which the declarations it imports refer to.
 pub(super) fn signature(
+    tree: &SyntaxTree,
+    path: &Path,
+    packages: &packages::Packages,
+    design: &mut packages::Design,
+    name: String,
+    members: &[String],
+    names: &HashSet<String>,
+) -> Converted<(crate::ir::Module, Vec<(String, Type)>)> {
+    let mut session = Session::with_packages(packages, design);
+    let signature = signature_in(&mut session, tree, path, packages, name, members, names);
+    session.restore(design);
+    signature
+}
+
+fn signature_in(
+    session: &mut Session,
     tree: &SyntaxTree,
     path: &Path,
     packages: &packages::Packages,
     name: String,
     members: &[String],
     names: &HashSet<String>,
-    members_only: bool,
 ) -> Converted<(crate::ir::Module, Vec<(String, Type)>)> {
-    let session = &mut Session::default();
-    let projected_tree = if members_only {
-        interface_binding::member_declaration_view(tree)?
-    } else {
-        interface_binding::declaration_view(tree)?
-    };
+    let projected_tree = interface_binding::declaration_view(tree)?;
     let context = AnalysisContext::unspecialized(&projected_tree);
     let tree = &context;
     let imported = imports::imported_symbols(tree, packages, packages.unit(path))?;
