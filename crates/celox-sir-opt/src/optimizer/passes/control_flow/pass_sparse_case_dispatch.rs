@@ -9,11 +9,6 @@ use crate::ir::{
 use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
-#[expect(
-    clippy::disallowed_types,
-    reason = "single-threaded: lazy dominance and ID-limit caches local to one sequential discovery call"
-)]
-use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Turns a prioritized chain of exact, same-selector muxes into one sparse
@@ -248,19 +243,11 @@ fn find_sparse_case_plans(
     block_ids.sort_unstable();
     let mut planned_blocks = HashSet::default();
     let mut plans = Vec::new();
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: lazily built dominator tree shared by the candidates of one sequential discovery call"
-    )]
-    let dominance = OnceCell::<Option<SirCfg>>::new();
+    let mut dominance = None;
     // Discovery borrows the EU immutably. All candidates therefore share the
     // same ID limits; compute them only if a profitable candidate needs them.
     // A new discovery call after applying plans gets a fresh cache.
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: lazily computed register/block ID limits shared by the candidates of one sequential discovery call"
-    )]
-    let max_ids = OnceCell::<(usize, usize)>::new();
+    let mut max_ids = None;
 
     // The first sweep plans only maximal same-selector spines.  This avoids
     // repeating global-use cloning, local DCE, and arm-DAG collection for all
@@ -304,8 +291,8 @@ fn find_sparse_case_plans(
                     &def_sites,
                     &use_counts,
                     stable_alias_class,
-                    &dominance,
-                    &max_ids,
+                    &mut dominance,
+                    &mut max_ids,
                     &initially_unused,
                 ) else {
                     continue;
@@ -512,10 +499,6 @@ fn dense_constant_lookup_mux_indices(
     protected
 }
 
-#[expect(
-    clippy::disallowed_types,
-    reason = "single-threaded: borrows the discovery call's lazy dominance and ID-limit caches"
-)]
 fn recognize_sparse_case_chain(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     block: &BasicBlock<RegionedAbsoluteAddr>,
@@ -524,8 +507,8 @@ fn recognize_sparse_case_chain(
     def_sites: &HashMap<RegisterId, DefSite>,
     use_counts: &HashMap<RegisterId, usize>,
     stable_alias_class: &HashMap<AbsoluteAddr, AbsoluteAddr>,
-    dominance: &OnceCell<Option<SirCfg>>,
-    max_ids: &OnceCell<(usize, usize)>,
+    dominance: &mut Option<Option<SirCfg>>,
+    max_ids: &mut Option<(usize, usize)>,
     initially_unused: &[RegisterId],
 ) -> Option<SparseCasePlan> {
     let SIRInstruction::Mux(result, _, _, _) = &block.instructions[root_index] else {
@@ -760,7 +743,7 @@ fn recognize_sparse_case_chain(
     } else {
         boundaries.len().checked_mul(2)?
     };
-    let &(max_block, max_register) = max_ids.get_or_init(|| {
+    let &mut (max_block, max_register) = max_ids.get_or_insert_with(|| {
         (
             eu.blocks.keys().map(|id| id.0).max().unwrap_or(0),
             eu.register_map.keys().map(|id| id.0).max().unwrap_or(0),
@@ -1370,10 +1353,6 @@ fn dead_defs_after_rewrite(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[expect(
-    clippy::disallowed_types,
-    reason = "single-threaded: borrows the discovery call's lazy dominator-tree cache"
-)]
 fn cross_block_exact_dead_defs_after_rewrite(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     block: &BasicBlock<RegionedAbsoluteAddr>,
@@ -1384,7 +1363,7 @@ fn cross_block_exact_dead_defs_after_rewrite(
     reachable_arms: &[usize],
     use_counts: &HashMap<RegisterId, usize>,
     def_sites: &HashMap<RegisterId, DefSite>,
-    dominance: &OnceCell<Option<SirCfg>>,
+    dominance: &mut Option<Option<SirCfg>>,
 ) -> Option<HashSet<DefSite>> {
     // Matching proves the shape of every condition, but the definitions can
     // live in a predecessor after an earlier CFG rewrite.  Restrict the
@@ -1507,18 +1486,14 @@ fn is_exact_condition_dag_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr
 /// Build the forward dominator tree only if a cross-block proof is needed.
 /// Discovery leaves the CFG unchanged, so all candidates share this linear-
 /// space analysis. Invalid CFGs retain the conservative original path proof.
-#[expect(
-    clippy::disallowed_types,
-    reason = "single-threaded: fills the discovery call's lazy dominator-tree cache on first use"
-)]
 fn cached_block_dominates(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     dominator: BlockId,
     target: BlockId,
-    cache: &OnceCell<Option<SirCfg>>,
+    cache: &mut Option<Option<SirCfg>>,
 ) -> bool {
     cache
-        .get_or_init(|| SirCfg::analyze_forward_structure(eu).ok())
+        .get_or_insert_with(|| SirCfg::analyze_forward_structure(eu).ok())
         .as_ref()
         .map_or_else(
             || block_dominates(eu, dominator, target),
