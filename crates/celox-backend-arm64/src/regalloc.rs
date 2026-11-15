@@ -257,7 +257,7 @@ pub(crate) fn values_live_across_calls(
         {
             continue;
         }
-        let mut live = intervals.live_out(block_index).cloned().unwrap_or_default();
+        let mut live = intervals.live_out(block_index).unwrap_or_default();
         for (index, instruction) in block.insts.iter().enumerate().rev() {
             if let Some(def) = instruction.def() {
                 live.remove(&def);
