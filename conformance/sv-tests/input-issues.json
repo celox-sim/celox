@@ -11,6 +11,10 @@
         "tests/corev_apu/axi_node"
       ],
       "reason": "The pinned CVA6 testbench generator retains an uninstalled Spike include and resolves its relative axi_node include against the sv-tests tests directory. Preserve the upstream input and report a driver input failure, not a language-support failure."
+    },
+    "generated/uvm-examples/biquad_example.sv": {
+      "no_module": true,
+      "reason": "Upstream uvm-examples lists only the example's agent interfaces and packages, not its testbench top (tb/tb/biquad_tb.sv), RTL or env, register, sequence and test packages, so its files declare no module to elaborate. Preserve this dashboard input and report the driver's missing-module failure."
     }
   }
 }

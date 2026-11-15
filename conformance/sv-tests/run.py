@@ -127,8 +127,7 @@ def run_case(root, driver, out_dir, test, state_mode, case_timeout=None):
         "test": test, "state_mode": state_mode, "result": verdict,
         "mode": meta.get("mode", ""), "tags": meta.get("tags", "") if meta else case_metadata(root / "tests" / test).get("tags", ""),
         "group": (meta.get("results_group") or "main") if meta else case_group(root / "tests" / test),
-        "input_issue": (input_issues.get(test, {}).get("reason", "")
-                        if meta.get("rc") == "1" and "include directory is unavailable:" in log else ""),
+        "input_issue": input_issue(input_issues.get(test), meta.get("rc"), log),
         "rc": meta.get("rc", ""), "tool_success": meta.get("tool_success", ""),
         "log": str(log_path),
     }, log)
@@ -251,6 +250,24 @@ def collect_cases(root, driver, out_dir, tests, modes, jobs, case_timeout=None):
     if errors:
         raise CollectionError(rows, errors)
     return sorted(rows, key=lambda row: (row["test"], row["state_mode"]))
+
+
+# What the driver reports when the files of a case declare no module to
+# elaborate (crates/celox/examples/sv_tests.rs).
+NO_MODULE = "elaboration requires a module root; none found in the parsed sources"
+
+
+def input_issue(issue, rc, log):
+    """The reason of `issue`, a reviewed upstream input defect of a case (see
+    input-issues.json), when the case's run failed of it: an include directory
+    it names is missing, or its files declare no module."""
+    if not issue or rc != "1":
+        return ""
+    if ("missing_include" in issue or "missing_includes" in issue) and "include directory is unavailable:" in log:
+        return issue["reason"]
+    if issue.get("no_module") and NO_MODULE in log:
+        return issue["reason"]
+    return ""
 
 
 def case_metadata(path):
