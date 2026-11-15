@@ -58,6 +58,10 @@ fn unbound(
     ty: &Type,
     env: &ConstEnv,
 ) -> Option<TyId> {
+    #[cfg(test)]
+    {
+        table.unbound_reads += 1;
+    }
     nested_type(table, functions, ty, env)
 }
 
@@ -76,6 +80,16 @@ pub(in crate::ast) fn bind_declared(
     {
         ty.binding.set(table, id);
     }
+}
+
+/// The semantic type of `ty`, a type that names no constant or type of a
+/// scope, such as a built-in one: the same in every scope.
+pub(in crate::ast) fn of_builtin(
+    table: &mut TyTable,
+    functions: &const_functions::ConstantFunctions,
+    ty: &Type,
+) -> Option<TyId> {
+    convert(table, functions, ty, &ConstEnv::default())
 }
 
 /// `ty`, a type that names no constant or type of a scope, such as a

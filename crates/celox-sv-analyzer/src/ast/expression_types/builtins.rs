@@ -76,7 +76,7 @@ pub(super) fn result(
                 let element = if locator.returns_index() {
                     match kind {
                         ArrayKind::Associative { key } => key,
-                        _ => int(tree, session, dims)?,
+                        _ => int(tree, session)?,
                     }
                 } else {
                     element
@@ -100,7 +100,7 @@ pub(super) fn result(
                 (ArrayKind::Queue { .. }, "pop_front" | "pop_back") => Some(element),
                 // 7.5.2, 7.9.1, 7.10.2.1.
                 (ArrayKind::Dynamic | ArrayKind::Queue { .. }, "size")
-                | (ArrayKind::Associative { .. }, "num" | "size") => int(tree, session, dims),
+                | (ArrayKind::Associative { .. }, "num" | "size") => int(tree, session),
                 _ => None,
             }
         }
@@ -111,7 +111,7 @@ pub(super) fn result(
             match method {
                 // 6.19.5: member methods return the receiver's enum type.
                 "first" | "last" | "next" | "prev" => Some(receiver),
-                "num" => int(tree, session, dims),
+                "num" => int(tree, session),
                 "name" => Some(session.types.intern(TyData::String)),
                 _ => None,
             }
@@ -140,7 +140,7 @@ pub(super) fn result(
                     _ => "int",
                 };
                 let ty = type_binding::builtin_type(name, None)?;
-                semantic_types::of_type(&mut session.types, &tree.functions, &ty, &dims.const_env)
+                semantic_types::of_builtin(&mut session.types, &tree.functions, &ty)
             }
         }
         // 9.7: get_randstate returns the process random state as a string.
@@ -153,13 +153,8 @@ pub(super) fn result(
     }
 }
 
-fn int(tree: &AnalysisContext<'_>, session: &mut Session, dims: &PackedDimensions) -> Option<TyId> {
-    semantic_types::of_type(
-        &mut session.types,
-        &tree.functions,
-        &procedural::int_type(),
-        &dims.const_env,
-    )
+fn int(tree: &AnalysisContext<'_>, session: &mut Session) -> Option<TyId> {
+    semantic_types::of_builtin(&mut session.types, &tree.functions, &procedural::int_type())
 }
 
 /// The result of a system function, by its declaration in IEEE 1800-2023
