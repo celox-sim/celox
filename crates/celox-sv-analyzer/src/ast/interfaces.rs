@@ -61,20 +61,24 @@ pub fn interface_prototypes_with_options(
     selected: Option<&HashSet<String>>,
     options: crate::AnalysisOptions,
 ) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
-    Ok(prototypes(sources, selected, options, true)?
+    Ok(prototypes(sources, selected, options, Packages::Full)?
         .into_iter()
         .map(|prototype| prototype.prototype)
         .collect())
 }
 
-/// The prototypes of the interfaces in `selected`, analyzing the packages
-/// and compilation units their declarations need.
+/// The prototypes of the interfaces in `selected`, analyzing the
+/// declarations of the packages and compilation units their declarations
+/// need, but no executable body of them: a virtual interface type is
+/// declared from these prototypes, which the packages' class methods use,
+/// as a bus functional model's package holds its driver's virtual
+/// interface; their declarations do not.
 pub(super) fn prototypes_with_packages(
     sources: &[(&str, &Path)],
     selected: Option<&HashSet<String>>,
     options: crate::AnalysisOptions,
 ) -> Result<Vec<Prototype>, AnalyzerError> {
-    prototypes(sources, selected, options, true)
+    prototypes(sources, selected, options, Packages::Declarations)
 }
 
 /// The prototypes of the interfaces in `selected`, built without analyzing
@@ -88,14 +92,23 @@ pub(super) fn prototypes_without_packages(
     selected: Option<&HashSet<String>>,
     options: crate::AnalysisOptions,
 ) -> Result<Vec<Prototype>, AnalyzerError> {
-    prototypes(sources, selected, options, false)
+    prototypes(sources, selected, options, Packages::None)
+}
+
+/// What of the packages building prototypes analyzes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Packages {
+    None,
+    /// Their declarations, no executable body.
+    Declarations,
+    Full,
 }
 
 fn prototypes(
     sources: &[(&str, &Path)],
     selected: Option<&HashSet<String>>,
     options: crate::AnalysisOptions,
-    analyze_packages: bool,
+    analyze_packages: Packages,
 ) -> Result<Vec<Prototype>, AnalyzerError> {
     if selected.is_some_and(HashSet::is_empty) {
         return Ok(Vec::new());
@@ -150,7 +163,7 @@ fn prototypes(
         .zip(sources)
         .map(|(file, (_, path))| (&file.syntax_tree, *path))
         .collect::<Vec<_>>();
-    let packages = if analyze_packages {
+    let packages = if analyze_packages != Packages::None {
         // Only the packages the interfaces name, and those they depend on:
         // the classes of others may use the virtual interface types these
         // prototypes declare.
@@ -168,12 +181,19 @@ fn prototypes(
                 needed.extend(super::imports::ScopeImports::from_scope(&unit)?.packages);
             }
         }
-        packages::Packages::analyze_needed(&trees, &needed, &units, options)
-            .map_err(|error| error.with_warnings(source_warnings))?
+        packages::Packages::analyze_needed(
+            &trees,
+            &needed,
+            &units,
+            options,
+            analyze_packages == Packages::Declarations,
+        )
+        .map_err(|error| error.with_warnings(source_warnings))?
     } else {
         packages::Packages::default()
     };
     let package_warnings = packages.warnings().to_vec();
+    let mut package_design = packages.design();
     let mut used_names = design
         .modules
         .keys()
@@ -223,30 +243,15 @@ fn prototypes(
                         .iter()
                         .map(|m| m.name.clone())
                         .collect::<Vec<_>>();
-                    let signature = |members_only| {
-                        interface_ast::signature(
-                            &scoped,
-                            sources[interface.file].1,
-                            &packages,
-                            probe_name.clone(),
-                            &members,
-                            &interface.names,
-                            members_only,
-                        )
-                    };
-                    match signature(false) {
-                        // Without the packages, an interface whose
-                        // subroutines or imports name a package, as a bus
-                        // functional model names the classes of the package
-                        // whose driver holds it through a virtual interface,
-                        // has the members of its declarations alone; one
-                        // whose members need a package fails again.
-                        Err(
-                            AnalyzerError::UnknownPackage { .. }
-                            | AnalyzerError::UnknownPackageItem { .. },
-                        ) if !analyze_packages => signature(true),
-                        result => result,
-                    }?
+                    interface_ast::signature(
+                        &scoped,
+                        sources[interface.file].1,
+                        &packages,
+                        &mut package_design,
+                        probe_name.clone(),
+                        &members,
+                        &interface.names,
+                    )?
                 };
                 let prototype = InterfacePrototype {
                     name: interface.name.clone(),
