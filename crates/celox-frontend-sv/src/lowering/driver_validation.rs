@@ -264,9 +264,12 @@ fn child_output_drivers(
         let Some(child) = modules.get(&child_id) else {
             continue;
         };
-        let Ok(authored_connections) =
-            expand_structure_connections(&instance.port_connections, &module.source, &child.source)
-        else {
+        let Ok(authored_connections) = expand_structure_connections(
+            &instance.port_connections,
+            &module.source,
+            &child.source,
+            None,
+        ) else {
             // Attaching the instance reports an invalid connection.
             continue;
         };

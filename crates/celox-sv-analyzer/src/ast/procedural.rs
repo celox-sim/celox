@@ -476,7 +476,6 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
             real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
             string: matches!(r#type.kind(), TypeKind::String),
             class: r#type.class().map(str::to_owned),
-            virtual_interface: r#type.virtual_interface.clone(),
             packed: dimensions::signal_packed_dimension_widths(r#type.packed_ranges()),
             unpacked: unpacked_dimension_widths(r#type.unpacked_ranges()),
             signed: r#type.is_signed(),
@@ -654,7 +653,6 @@ pub(super) fn int_type() -> Type {
         members: Vec::new(),
         signed_element_depth: None,
         class: None,
-        virtual_interface: None,
         unpacked_struct: None,
         spelling: type_names::Spelling::keyword("int"),
     })

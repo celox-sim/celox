@@ -36,10 +36,6 @@ fn element_identity(shape: &VariableDimensions, table: &semantic_types::TyTable)
     {
         return Some(table.spell(id));
     }
-    debug_assert!(
-        shape.virtual_interface.is_none(),
-        "an array of virtual interfaces is told by its semantic type"
-    );
     if let Some(aggregate) = shape.unpacked_struct_in(table) {
         return Some(format!("struct {}", aggregate.identity()));
     }
