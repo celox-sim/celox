@@ -362,9 +362,7 @@ impl StateSchema {
 impl<B: SimBackend> Simulator<B> {
     /// The state objects of this design as state files name them.
     pub fn state_schema(&self) -> Arc<StateSchema> {
-        self.state_schema
-            .get_or_init(|| Arc::new(self.build_state_schema()))
-            .clone()
+        self.state_schema.clone()
     }
 
     /// Save the value of every state object, by path.
@@ -455,11 +453,14 @@ impl<B: SimBackend> Simulator<B> {
 
     /// Name the state objects: the hierarchical path, followed by `#n` when
     /// several objects share it.
-    fn build_state_schema(&self) -> StateSchema {
-        let schema = &self.program.runtime_schema;
+    pub(super) fn build_state_schema(
+        backend: &B,
+        program: &crate::ir::RuntimeProgram,
+    ) -> StateSchema {
+        let schema = &program.runtime_schema;
         StateSchema::from_design(
-            &self.backend,
-            &self.program.design,
+            backend,
+            &program.design,
             |address| schema.comb_writes.contains(address),
             schema
                 .time_slots
