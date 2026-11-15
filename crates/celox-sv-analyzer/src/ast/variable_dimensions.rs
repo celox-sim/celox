@@ -129,7 +129,48 @@ impl VariableDimensions {
 
     /// The semantic type the declaration was bound to, if it was.
     pub(super) fn bound(&self, table: &semantic_types::TyTable) -> Option<semantic_types::TyId> {
-        self.binding.as_ref()?.in_table(table)
+        let id = self.binding.as_ref()?.in_table(table)?;
+        debug_assert!(
+            self.has_dimensions_of(table, id),
+            "a shape is bound to a type with its unpacked dimensions"
+        );
+        Some(id)
+    }
+
+    /// Whether semantic type `id` has the unpacked dimensions of this shape:
+    /// one fixed-size array for each of its unpacked ranges, around a
+    /// container if the shape is one.
+    fn has_dimensions_of(
+        &self,
+        table: &semantic_types::TyTable,
+        mut id: semantic_types::TyId,
+    ) -> bool {
+        for _ in &self.shape.unpacked {
+            match table.data(id) {
+                semantic_types::TyData::Array {
+                    kind: semantic_types::ArrayKind::Fixed(_),
+                    element,
+                } => id = *element,
+                _ => return false,
+            }
+        }
+        match (&self.shape.container, table.data(id)) {
+            // A fixed-size array class property, held in a container, is of
+            // the fixed-size array type.
+            (Some(container), _) if container.fixed.is_some() => true,
+            (Some(_), semantic_types::TyData::Array { kind, .. }) => {
+                !matches!(kind, semantic_types::ArrayKind::Fixed(_))
+            }
+            (Some(_), _) => false,
+            (None, semantic_types::TyData::Array { .. }) => false,
+            (None, _) => true,
+        }
+    }
+
+    /// Whether the variable's type is an unpacked structure type, or a
+    /// fixed-size array of them, as its semantic type in `table` tells.
+    pub(super) fn is_unpacked_struct_in(&self, table: &semantic_types::TyTable) -> bool {
+        unpacked_structs::is_struct(self.bound(table), table, self.unpacked_struct.is_some())
     }
 
     /// What the variable's type is of an enumeration, as its semantic type

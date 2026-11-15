@@ -486,7 +486,7 @@ fn operand(
     if let Expr::Concat(leaves) = &value
         && shape
             .as_ref()
-            .is_some_and(|shape| shape.unpacked_struct.is_some())
+            .is_some_and(|shape| shape.is_unpacked_struct_in(&session.types))
     {
         // Each member streams as fixed-size data.
         for leaf in leaves {

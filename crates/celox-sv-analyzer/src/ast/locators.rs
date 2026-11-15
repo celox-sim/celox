@@ -627,7 +627,7 @@ pub(super) fn bind(
                     return Err(min_max_chandles());
                 }
                 _ if element.class_in(&session.types).is_some()
-                    || element.unpacked_struct().is_some()
+                    || element.is_unpacked_struct_in(&session.types)
                     || element.container.is_some() =>
                 {
                     return Err(unsupported(

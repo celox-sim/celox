@@ -63,7 +63,7 @@ pub(super) fn bind(
                 "array reduction arguments require a with expression",
             ));
         }
-        if container.record.is_some() && container.element.unpacked_struct().is_none() {
+        if container.record.is_some() && !container.element_is_unpacked_struct(&session.types) {
             return Err(unsupported(
                 "array reduction of elements wider than 64 bits",
             ));

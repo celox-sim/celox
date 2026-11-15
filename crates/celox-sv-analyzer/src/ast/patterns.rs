@@ -266,6 +266,8 @@ pub(super) fn assignment_value(
     // Structure metadata on an array describes its element, not a scalar
     // structure value. Array-valued items use the compatibility path below.
     if (shape.unpacked.is_empty() && unpacked_structs::holds_struct(shape, tree, session, dims))
+        // The type of the value expression is made from its operands,
+        // without a semantic type of its own.
         || value_type
             .is_some_and(|ty| ty.unpacked_ranges().is_empty() && ty.unpacked_struct().is_some())
     {

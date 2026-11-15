@@ -175,7 +175,7 @@ pub(in crate::ast) fn pattern(
             return Err(unsupported("%p of a container of real values"));
         }
         if !element.members.is_empty()
-            || element.unpacked_struct.is_some()
+            || container.element_is_unpacked_struct(&session.types)
             || element.container.is_some()
             || !element.unpacked_ranges.is_empty()
         {
@@ -229,7 +229,7 @@ pub(in crate::ast) fn pattern(
                 return Ok(Pattern::Handle(None));
             }
             if !element.members.is_empty()
-                || element.unpacked_struct.is_some()
+                || container.element_is_unpacked_struct(&session.types)
                 || element.container.is_some()
                 || !element.unpacked_ranges.is_empty()
             {
@@ -304,7 +304,7 @@ pub(in crate::ast) fn pattern(
         return checked(
             ty.enumeration_in(&session.types).enumeration,
             !ty.members.is_empty()
-                || ty.unpacked_struct.is_some()
+                || ty.is_unpacked_struct_in(&session.types)
                 || !ty.unpacked_ranges.is_empty(),
         );
     }

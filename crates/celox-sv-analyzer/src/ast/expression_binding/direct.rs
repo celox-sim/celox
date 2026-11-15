@@ -1399,7 +1399,7 @@ fn selected_container_element(
     // A packed structure is a `[N-1:0]` vector with members; only it has
     // members to select.
     let structure = !element.members.is_empty()
-        && element.unpacked_struct().is_none()
+        && !container.element_is_unpacked_struct(&session.types)
         && matches!(element.packed_ranges(), [range]
             if eval_ast_const_expr(&tree.functions, range.right(), &dimensions.const_env)
                 == Some(0));
