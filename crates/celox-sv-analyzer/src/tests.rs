@@ -6801,6 +6801,29 @@ fn class_randomize_rejects_unsupported_semantics() {
             "c.randomize()",
             "a soft constraint on a randc variable",
         ),
+        // Functions in constraints (18.5.11): in a loop, with an argument
+        // other than an input, or whose argument calls one, and in inline
+        // constraints.
+        (
+            "rand int x; int a[$]; function int f(int v); return v; endfunction constraint c { foreach (a[i]) x == f(a[i]); }",
+            "c.randomize()",
+            "a function call in a constraint loop",
+        ),
+        (
+            "rand int x, y; function int f(output int v); v = 1; return 1; endfunction constraint c { x == f(y); }",
+            "c.randomize()",
+            "with an argument other than an input",
+        ),
+        (
+            "rand int x, y; function int f(int v); return v; endfunction constraint c { x == f(f(y)); }",
+            "c.randomize()",
+            "whose argument calls a function",
+        ),
+        (
+            "rand int x, y; function int f(int v); return v; endfunction",
+            "c.randomize() with { x == f(y); }",
+            "in inline constraints",
+        ),
         (
             "rand int x, y; constraint c { solve x before y; x == y; }",
             "c.randomize()",
