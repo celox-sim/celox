@@ -966,7 +966,7 @@ mod tests {
             module \escaped.name (output logic y); assign y = 1'b0; endmodule
             module Duplicate; endmodule
             module Duplicate; endmodule
-            module Legacy({y}); output y; endmodule
+            module Legacy(y, y); inout y; endmodule
         "#,
             Path::new("index.sv"),
         )
