@@ -903,6 +903,102 @@ endmodule"#;
     }
 }
 
+/// A run-time select of a member of a packed structure, `s.m[idx]`, or of
+/// a member of an element of a packed array member, `hw2reg.out_stall[k].d`,
+/// writes bits of that member only, which are its process's driver (IEEE
+/// 1800-2023 6.5): continuous assignments and other processes may drive the
+/// other members. An edge process commits the member only. Verilator 5.054
+/// prints the same lines.
+#[test]
+fn run_time_member_selects_drive_their_member() {
+    let source = r#"`timescale 1ns/1ns
+package regs;
+  typedef struct packed { logic d; logic de; } bit_t;
+  typedef struct packed { bit_t [3:0] in_stall; bit_t [3:0] out_stall; logic [3:0] status; } hw2reg_t;
+  typedef struct packed { logic [3:0] m; logic [3:0] n; } s_t;
+endpackage
+module top;
+  import regs::*;
+  logic clk = 0;
+  s_t s, f, g;
+  hw2reg_t hw2reg;
+  logic [1:0] idx = 2'd2, k = 2'd1;
+  logic b = 1'b1;
+  always_comb begin
+    s.m = '0;
+    s.m[idx] = b;
+  end
+  assign s.n = 4'h9;
+  assign hw2reg.status = 4'h9;
+  assign hw2reg.in_stall = '0;
+  always_comb begin
+    hw2reg.out_stall = '0;
+    hw2reg.out_stall[k].d = 1'b1;
+  end
+  always_ff @(posedge clk) begin
+    f.m <= '0;
+    f.m[idx] <= b;
+  end
+  always_ff @(posedge clk) f.n <= 4'h6;
+  always_ff @(posedge clk) g.n <= 4'h5;
+  always_ff @(posedge clk) begin
+    g.m <= '0;
+    g.m[idx] <= b;
+  end
+  initial begin
+    #1 clk = 1;
+    #1 $display("%h %b %h %h", s, hw2reg, f, g);
+    idx = 2'd0;
+    k = 2'd3;
+    clk = 0;
+    #1 clk = 1;
+    #1 $display("%h %b %h %h", s, hw2reg, f, g);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            display_lines(source, four_state),
+            [
+                "49 00000000000010001001 46 45",
+                "19 00000000100000001001 16 15"
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// Another driver of bits of the member a run-time select writes is a
+/// second driver of those bits (IEEE 1800-2023 6.5).
+#[test]
+fn run_time_member_selects_overlapping_other_drivers_are_rejected() {
+    for (process, other) in [
+        ("always_comb s.m[idx] = b;", "assign s.m[3] = 1'b0;"),
+        ("always_comb s.r[idx].d = b;", "assign s.r[0].d = 1'b0;"),
+    ] {
+        let source = format!(
+            "module top(input logic [1:0] idx, input logic b);
+               typedef struct packed {{ logic d; logic de; }} bit_t;
+               typedef struct packed {{ logic [3:0] m; bit_t [3:0] r; logic [3:0] n; }} s_t;
+               s_t s;
+               {process}
+               {other}
+             endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("overlap.sv"))],
+            "top",
+        )
+        .build()
+        .map(|_| ())
+        .expect_err("overlapping drivers are rejected")
+        .to_string();
+        assert!(
+            error.contains("multiple variable drivers for `s`"),
+            "{process}: {error}"
+        );
+    }
+}
+
 // A run-time bit-select or indexed part-select of a member of a packed
 // structure selects within the member (IEEE 1800-2023 7.2.1, 11.5.1): the
 // bits it selects outside the member's range read X and are not written, and
