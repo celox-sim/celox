@@ -160,13 +160,18 @@ pub(in crate::ast) fn classify<'a>(
                 continue;
             }
             // `$timeformat` sets the format of every `%t` in the design's
-            // state, which a combinational process does not write. Such a
-            // process runs as a process instead: `always_comb` and
-            // `always_latch` once at time zero, then after each change of
-            // their implicit sensitivity (IEEE 1800-2023 9.2.2.2.1), and
-            // `always @*` after each change of its implicit event list
-            // (9.4.2.2).
-            if effects.time_format && process.kind != CombProcessKind::ContinuousAssign {
+            // state, which a combinational process does not write, and an
+            // `always @*` may assign nonblocking (10.4.2), as one with an
+            // explicit event list does. Such a process runs as a process
+            // instead: `always_comb` and `always_latch` once at time zero,
+            // then after each change of their implicit sensitivity (IEEE
+            // 1800-2023 9.2.2.2.1), and `always @*` after each change of its
+            // implicit event list (9.4.2.2).
+            let nonblocking =
+                process.kind == CombProcessKind::AlwaysStar && assigns_nonblocking(&process.body);
+            if (effects.time_format && process.kind != CombProcessKind::ContinuousAssign)
+                || nonblocking
+            {
                 let always_star = process.kind == CombProcessKind::AlwaysStar;
                 let wait = timing::implicit_event_kind(
                     &process.body,
@@ -196,10 +201,6 @@ pub(in crate::ast) fn classify<'a>(
                     repeats: true,
                 });
                 continue;
-            }
-            if process.kind == CombProcessKind::AlwaysStar && assigns_nonblocking(&process.body) {
-                eprintln!("PROBE timed_tasks always@* body={:?}", process.body);
-                return Err(unsupported("nonblocking assignment inside always_comb"));
             }
             retained.push(process);
             continue;
