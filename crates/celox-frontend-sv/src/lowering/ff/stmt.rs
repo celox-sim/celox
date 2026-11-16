@@ -94,8 +94,19 @@ impl Ff<'_, '_> {
             return Err(unsupported("timed task call outside a suspendable process"));
         }
         match stmt {
-            sv::ir::Stmt::ProceduralAssign { .. } | sv::ir::Stmt::Deassign { .. } => {
-                unreachable!("the analyzer lowers procedural continuous assignments")
+            sv::ir::Stmt::ProceduralAssign { .. }
+            | sv::ir::Stmt::Deassign { .. }
+            | sv::ir::Stmt::Force { .. }
+            | sv::ir::Stmt::Release { .. } => {
+                unreachable!("the analyzer lowers procedural continuous assignments and forces")
+            }
+            // The store follows the force controls, which the force set
+            // before it, and the release cleared (see
+            // `procedural_forces`).
+            sv::ir::Stmt::ForceStore { lhs, rhs } => {
+                self.assign(lhs, rhs)?;
+                self.observe_assignment(std::slice::from_ref(lhs))?;
+                Ok(true)
             }
             sv::ir::Stmt::DeferActive => {
                 self.with_kernel(ProcessKernelBuilder::defer_active)

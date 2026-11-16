@@ -329,7 +329,7 @@ pub(super) fn substitute_overlay(
 }
 
 pub(super) fn force_reads(expr: &sv::ir::Expr, m: &ProcModule<'_>) -> sv::ir::Expr {
-    if m.forceable.is_empty() {
+    if !m.forces_reads() {
         return expr.clone();
     }
     use sv::ir::Expr;
@@ -337,7 +337,7 @@ pub(super) fn force_reads(expr: &sv::ir::Expr, m: &ProcModule<'_>) -> sv::ir::Ex
     match expr {
         Expr::Ident(name) => {
             if let Some(id) = m.id(name)
-                && let Some((enabled, forced)) = m.force_controls(id)
+                && let Some((enabled, forced)) = m.force_read_controls(id)
             {
                 Expr::Resize {
                     width: m.var(id).width,

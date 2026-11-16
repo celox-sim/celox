@@ -2001,6 +2001,9 @@ impl<'a> Frame<'a> {
             | Stmt::AssignConcat { .. }
             | Stmt::ProceduralAssign { .. }
             | Stmt::Deassign { .. }
+            | Stmt::Force { .. }
+            | Stmt::Release { .. }
+            | Stmt::ForceStore { .. }
             | Stmt::Call { .. } => return None,
         }
         Some(Flow::Next)

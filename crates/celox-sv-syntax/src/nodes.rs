@@ -1511,6 +1511,10 @@ pub enum StatementKind {
     ProceduralAssign(AssignId),
     /// `deassign variable_lvalue ;` (10.6.1).
     ProceduralDeassign(ExprId),
+    /// `force variable_assignment ;` or `force net_assignment ;` (10.6.2).
+    ProceduralForce(AssignId),
+    /// `release variable_lvalue ;` or `release net_lvalue ;` (10.6.2).
+    ProceduralRelease(ExprId),
     Return(Option<ExprId>),
     Break,
     Continue,
@@ -1541,8 +1545,6 @@ pub enum StatementKind {
         control: Option<TimingControlId>,
         target: ExprId,
     },
-    /// `force` or `release` (10.6.2), unparsed.
-    ProceduralRelease(TokenRange),
     Unconverted {
         category: String,
         tokens: TokenRange,

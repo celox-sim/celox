@@ -154,8 +154,8 @@ struct SvVariable {
     source: Option<SourceLocation>,
     /// A procedural local or a lowering temporary: not addressable by name.
     hidden: bool,
-    /// Compiler-generated external override slot: (target, is_enable).
-    force_control: Option<(SourceVarId, bool)>,
+    /// A compiler-generated force control of another variable.
+    force_control: Option<ForceSlot>,
     /// The variable whose sampled value this hidden copy holds
     /// (`SimModule::sample_shadows`).
     sampled_from: Option<SourceVarId>,
@@ -167,6 +167,20 @@ struct SvVariable {
     /// with a frame (`celox_design::ProcessFrame::private`) each activation
     /// has its own; every other variable is the module's.
     activation_scratch: bool,
+}
+
+/// A force control: the enable or the forced value of `target`. A host
+/// force (`Simulator::force`) controls reads and writes of the target; a
+/// procedural one (IEEE 1800-2023 10.6.2) its writes only, as the force
+/// stores the value in the target itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ForceSlot {
+    pub(crate) target: SourceVarId,
+    pub(crate) enable: bool,
+    pub(crate) procedural: bool,
+    /// Whether a procedural force stores its value into the target (see
+    /// `sv::ir::ForceControl::stored`).
+    pub(crate) stored: bool,
 }
 
 impl SvVariable {
