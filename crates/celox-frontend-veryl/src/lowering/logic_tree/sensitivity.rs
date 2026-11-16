@@ -30,7 +30,8 @@ struct Reads<'a> {
 impl Reads<'_> {
     fn selection(&mut self, index: &VarIndex, select: &VarSelect) -> Result<(), ParserError> {
         for expr in index
-            .expressions()
+            .indices
+            .iter()
             .chain(select.0.iter())
             .chain(select.1.iter().map(|(_, expr)| expr))
         {

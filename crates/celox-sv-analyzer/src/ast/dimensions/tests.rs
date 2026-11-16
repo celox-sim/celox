@@ -30,7 +30,7 @@ fn query_number(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
     context: Option<&PackedDimensions>,
 ) -> Option<usize> {
     let mut context = context
@@ -86,7 +86,7 @@ fn literal_arithmetic_queries_keep_widths_and_skip_scope_discovery() {
                 &tree,
                 session,
                 &ConstEnv::default(),
-                &HashMap::default(),
+                &TypeAliases::default(),
                 Some(&input),
             )
         })
@@ -110,7 +110,7 @@ fn queries_still_discover_names_in_unselected_conditional_arms() {
             &tree,
             session,
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
             Some(&PackedDimensions::default()),
         ),
         Some(16)
@@ -204,7 +204,6 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
                     chandle: false,
                     pattern_type: f.return_type.clone(),
                     enum_domain: None,
-                    virtual_interface: None,
                     container: None,
                 },
             )
@@ -283,7 +282,7 @@ fn preliminary_function_scope_discovers_shadowing_formals() {
         &tree,
         session,
         &ConstEnv::default(),
-        &HashMap::default(),
+        &TypeAliases::default(),
         Some(&dimensions),
     )
     .unwrap();
@@ -399,7 +398,7 @@ fn nonansi_validation_leaves_generate_queries_to_elaboration() {
         &tree,
         session,
         &ConstEnv::default(),
-        &HashMap::default(),
+        &TypeAliases::default(),
         &ScopedMap::default(),
         &HashMap::default(),
     )
@@ -426,7 +425,7 @@ fn unpacked_dimensions_discovers_local_dpi_return_types() {
                 &tree,
                 session,
                 &ConstEnv::default(),
-                &HashMap::default(),
+                &TypeAliases::default(),
                 None
             ),
             Some(0)
@@ -454,7 +453,7 @@ fn unpacked_dimensions_preserves_runtime_indexed_range_types() {
             &tree,
             session,
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
             None
         ),
         Some(1)
@@ -524,7 +523,7 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
                 &tree,
                 session,
                 &ConstEnv::default(),
-                &HashMap::default(),
+                &TypeAliases::default(),
                 None,
             ),
             Some(1),
@@ -536,7 +535,7 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
                 &tree,
                 session,
                 &ConstEnv::default(),
-                &HashMap::default(),
+                &TypeAliases::default(),
                 None,
             ),
             Some(2),
@@ -680,7 +679,7 @@ fn preliminary_literal_queries_do_not_discover_scope_declarations() {
                 &tree,
                 session,
                 &ConstEnv::default(),
-                &HashMap::default(),
+                &TypeAliases::default(),
                 Some(&context),
             )
         })
@@ -694,7 +693,7 @@ fn preliminary_literal_queries_do_not_discover_scope_declarations() {
                 &tree,
                 session,
                 &ConstEnv::default(),
-                &HashMap::default(),
+                &TypeAliases::default(),
                 Some(&input),
             )
         })
@@ -729,7 +728,7 @@ fn discovery_prefix_does_not_copy_a_growing_symbol_overlay() {
             &tree,
             session,
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
             None,
         ),
         Some(8)
@@ -797,6 +796,401 @@ fn discovery_settles_a_scope_once_for_its_queries() {
         SCOPE_SETTLES.with(|count| count.get())
     };
     assert_eq!(settles(2), settles(16));
+}
+
+/// The widths of the signals of the first module of `source`, analyzed as
+/// file `path`, and the scope discoveries its queries settled.
+fn signal_widths_and_settles(source: &str, path: &str) -> (Vec<Option<usize>>, usize) {
+    SCOPE_SETTLES.with(|count| count.set(0));
+    let ir = crate::analyze_source(source, Path::new(path)).expect("the source analyzes");
+    let widths = ir.modules()[0]
+        .signals()
+        .iter()
+        .map(|signal| signal.r#type().resolved_width())
+        .collect();
+    (widths, SCOPE_SETTLES.with(|count| count.get()))
+}
+
+#[test]
+fn type_operands_need_no_discovery() {
+    // The size of a built-in type, and of a type the tables of the query
+    // already bind, does not depend on the declarations of the scope, which
+    // are not discovered for it: of a typedef of the scope, of a type
+    // parameter of a class and of a typedef of a package (IEEE 1800-2023
+    // 20.6.2).
+    let (widths, settles) = signal_widths_and_settles(
+        "package p;
+            typedef bit [5:0] word_t;
+            class C #(type T = bit [2:0]);
+                function int size(); return $bits(T) + $bits(word_t); endfunction
+            endclass
+            class D; C#(bit [8:0]) c; endclass
+            function int f(); return $bits(byte) + $bits((word_t)); endfunction
+        endpackage
+        module Top;
+            import p::*;
+            typedef bit [3:0] nibble_t;
+            localparam int A = $bits(nibble_t);
+            localparam int B = $bits(word_t) + $bits(logic [1:0]);
+            localparam int E = f();
+            logic [A:0] a;
+            logic [B:0] b;
+            logic [E:0] e;
+        endmodule",
+        "type-operands.sv",
+    );
+    assert_eq!(widths, [Some(5), Some(9), Some(15)]);
+    assert_eq!(settles, 0);
+}
+
+/// The widths of the signals of the first module of `source`, analyzed as
+/// file `path`, by the last part of their names, and the queries that
+/// discovered the declarations of their scope.
+fn named_widths_and_discoveries(source: &str, path: &str) -> (Vec<(String, usize)>, usize) {
+    SYNTAX_TYPE_DISCOVERIES.with(|count| count.set(0));
+    let ir = crate::analyze_source(source, Path::new(path)).expect("the source analyzes");
+    let mut widths = ir.modules()[0]
+        .signals()
+        .iter()
+        .filter_map(|signal| {
+            let name = signal.name().rsplit('.').next()?.to_string();
+            Some((name, signal.r#type().resolved_width()?))
+        })
+        .collect::<Vec<_>>();
+    widths.sort();
+    (widths, SYNTAX_TYPE_DISCOVERIES.with(|count| count.get()))
+}
+
+#[test]
+fn marked_variable_operands_need_no_discovery() {
+    // A generate block is elaborated in an environment that keeps the
+    // dimensions of the variables it has declared so far. A data query of
+    // such a variable reads those: the declarations of the scope are not
+    // discovered for it, however many declarations and blocks query it
+    // (IEEE 1800-2023 20.6.2, 20.7).
+    let blocks = |count: usize| {
+        (0..count)
+            .map(|index| {
+                format!(
+                    "if (1) begin : g{index}
+                        logic [15:0] near;
+                        logic [3:0][7:0] p;
+                        logic signed [4:0] m [2:0];
+                        logic single;
+                        wire [$bits(near):0] a{index};
+                        wire [$bits((p)):0] b{index};
+                        wire [$bits(m):0] c{index};
+                        wire [$bits(single):0] d{index};
+                        wire [$size(p):0] e{index};
+                        wire [$left(p):0] f{index};
+                        wire [$high(m, 1):0] h{index};
+                        wire [$dimensions(m):0] i{index};
+                        wire [$unpacked_dimensions(m):0] j{index};
+                        wire [$right(m, 2):0] k{index};
+                        wire [$increment(m):0] l{index};
+                    end
+                    "
+                )
+            })
+            .collect::<String>()
+    };
+    for count in [1, 8] {
+        let (widths, discoveries) = named_widths_and_discoveries(
+            &format!("module Top; {} endmodule", blocks(count)),
+            "marked-variables.sv",
+        );
+        let width = |name: &str| {
+            widths
+                .iter()
+                .find(|(signal, _)| signal == name)
+                .map(|(_, width)| *width)
+        };
+        for index in 0..count {
+            let got = "abcdefhijkl"
+                .chars()
+                .map(|letter| width(&format!("{letter}{index}")))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                got,
+                [17, 33, 16, 2, 5, 4, 3, 3, 2, 1, 2].map(Some),
+                "block {index} of {count}"
+            );
+        }
+        assert_eq!(discoveries, 0, "{count} blocks");
+    }
+}
+
+/// An environment that keeps `name` as a variable `[left:right]`, as the
+/// elaboration of a generate block keeps the variables it has declared.
+fn marked_variable(name: &str, left: i128, right: i128) -> ConstEnv {
+    let mut env = ConstEnv::default();
+    env.insert(variable_dimensions_marker(name), 1);
+    env.insert(variable_unpacked_dimensions_marker(name), 0);
+    env.insert(variable_dimension_marker(name, 0, "left"), left);
+    env.insert(variable_dimension_marker(name, 0, "right"), right);
+    env.insert(variable_signed_marker(name), 0);
+    env
+}
+
+#[test]
+fn locals_hide_marked_variables() {
+    // A query of a variable that the generate block around it has declared
+    // reads the declaration, unless a declaration nearer to the operand
+    // replaces it, which discovering the scope finds: a formal, the result
+    // or a local of the subroutine, or a variable of a loop or block. A
+    // variable of an outer block is
+    // discovered too: the blocks between may give the names of its type
+    // another meaning (IEEE 1800-2023 13.4.1, 23.9).
+    for (declarations, bits, discovered) in [
+        ("localparam N = $bits(t);", 16, false),
+        ("if (1) begin : h localparam N = $bits(t); end", 16, true),
+        (
+            "function automatic int f(); logic [1:0] u; return $bits(t); endfunction",
+            16,
+            false,
+        ),
+        (
+            "function automatic int f(logic [2:0] t); return $bits(t); endfunction",
+            3,
+            true,
+        ),
+        (
+            "function automatic int f(); logic [1:0] t; return $bits(t); endfunction",
+            2,
+            true,
+        ),
+        (
+            "function automatic int f();
+                int n;
+                for (byte t = 0; t < 1; t++) n = $bits(t);
+                return n;
+            endfunction",
+            8,
+            true,
+        ),
+        (
+            "function automatic int f();
+                int n;
+                begin : inner
+                    logic [5:0] t;
+                    n = $bits(t);
+                end
+                return n;
+            endfunction",
+            6,
+            true,
+        ),
+        (
+            "function automatic logic [4:0] t(); return $bits(t); endfunction",
+            5,
+            true,
+        ),
+    ] {
+        let session = &mut Session::default();
+        let native = crate::source_tree::parse_scope_fixture(
+            &format!("module Top; if (1) begin : g logic [15:0] t; {declarations} end endmodule"),
+            Path::new("hidden-marked-variables.sv"),
+        )
+        .unwrap();
+        let call = native_calls(&native)[0];
+        let tree = AnalysisContext::unspecialized(&native);
+        SYNTAX_TYPE_DISCOVERIES.with(|count| count.set(0));
+        assert_eq!(
+            query_number(
+                call,
+                &tree,
+                session,
+                &marked_variable("t", 15, 0),
+                &TypeAliases::default(),
+                None,
+            ),
+            Some(bits),
+            "{declarations}"
+        );
+        assert_eq!(
+            SYNTAX_TYPE_DISCOVERIES.with(|count| count.get()) > 0,
+            discovered,
+            "{declarations}"
+        );
+    }
+}
+
+#[test]
+fn class_scopes_discover_marked_variables() {
+    // The tables of a class specialization replace those of the scope
+    // around the class, so a query bound in a class reads the declarations.
+    let session = &mut Session::default();
+    let native = crate::source_tree::parse_scope_fixture(
+        "module Top; localparam N = $bits(t); endmodule",
+        Path::new("class-marked-variables.sv"),
+    )
+    .unwrap();
+    let call = native_calls(&native)[0];
+    let tree = AnalysisContext::unspecialized(&native);
+    let env = marked_variable("t", 15, 0);
+    let mut context = PackedDimensions::new(HashMap::default(), &env, &TypeAliases::default());
+    context.class_scope = Some("C".into());
+    SYNTAX_TYPE_DISCOVERIES.with(|count| count.set(0));
+    let _ = query_number(
+        call,
+        &tree,
+        session,
+        &env,
+        &TypeAliases::default(),
+        Some(&context),
+    );
+    assert!(SYNTAX_TYPE_DISCOVERIES.with(|count| count.get()) > 0);
+}
+
+#[test]
+fn marked_variable_queries_read_the_environment_of_each_binding() {
+    // Every binding that keeps the dimensions of a variable in its
+    // environment reads them the same way: a generate block that declares
+    // the name of a variable of the module again, a block nested in it and
+    // the blocks of a loop, beside the queries of variables of the module,
+    // which discover the scope.
+    let (widths, _) = named_widths_and_discoveries(
+        "module Top (input logic [15:0] s);
+            logic [6:0] v;
+            localparam int P = $bits(s) + $bits(v);
+            logic [P:0] a;
+            if (1) begin : g
+                logic [8:0] s;
+                wire [$bits(s):0] b;
+                wire [$bits(v):0] c;
+                if (1) begin : inner
+                    wire [$bits(s):0] d;
+                end
+            end
+            for (genvar i = 0; i < 2; ++i) begin : lanes
+                logic [i + 2:0] lane;
+                wire [$bits(lane):0] h;
+            end
+        endmodule",
+        "marked-variable-bindings.sv",
+    );
+    assert_eq!(
+        widths
+            .iter()
+            .filter(|(name, _)| ["a", "b", "c", "d", "h"].contains(&name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>(),
+        [
+            ("a", 24),
+            ("b", 10),
+            ("c", 8),
+            ("d", 10),
+            ("h", 4),
+            ("h", 5)
+        ]
+        .map(|(name, width)| (name.to_string(), width))
+    );
+}
+
+#[test]
+fn type_parameters_are_the_types_the_tables_bind() {
+    // The tables of a query bind a type parameter of a module or class to
+    // the type it is given, which its declaration does not hide (IEEE
+    // 1800-2023 6.20.3).
+    for declarations in [
+        "module Top #(parameter type T = int); localparam N = $bits(T); endmodule",
+        "module Top;
+            class C #(type T = int);
+                function int f(); return $bits(T); endfunction
+            endclass
+        endmodule",
+    ] {
+        let session = &mut Session::default();
+        let tree = crate::source_tree::parse_scope_fixture(
+            &format!("package P; typedef logic [4:0] T; endpackage {declarations}"),
+            Path::new("type-parameters.sv"),
+        )
+        .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        // The type the parameter is given.
+        let aliases = type_aliases_from_scope(&tree, session).unwrap();
+        let module_scope = tree
+            .root_scopes()
+            .unwrap()
+            .into_iter()
+            .find(|handle| {
+                handle.unit(tree.declarations()).unwrap().kind == celox_sv_syntax::UnitKind::Module
+            })
+            .unwrap();
+        let tree = tree.scoped(module_scope).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let call = native_calls(&tree)[0];
+        SCOPE_SETTLES.with(|count| count.set(0));
+        assert_eq!(
+            query_number(call, &tree, session, &ConstEnv::default(), &aliases, None),
+            Some(5),
+            "{declarations}"
+        );
+        assert_eq!(SCOPE_SETTLES.with(|count| count.get()), 0, "{declarations}");
+    }
+}
+
+#[test]
+fn hidden_type_names_are_discovered() {
+    // A declaration nearer to the operand than the type of its name hides
+    // the type, also for a query whose tables hold only the type: a
+    // variable, a net, a typedef, a formal, a loop variable and a
+    // declaration of a generate block (IEEE 1800-2023 23.9).
+    for (declarations, bits) in [
+        ("wire [4:0] t; localparam N = $bits(t);", 5),
+        (
+            "function automatic int f(); logic [1:0] t; return $bits(t); endfunction",
+            2,
+        ),
+        (
+            "function automatic int f(); typedef logic [8:0] t; return $bits(t); endfunction",
+            9,
+        ),
+        (
+            "function automatic int f(logic [2:0] t); return $bits(t); endfunction",
+            3,
+        ),
+        (
+            "function automatic int f();
+                int n;
+                for (byte t = 0; t < 1; t++) n = $bits(t);
+                return n;
+            endfunction",
+            8,
+        ),
+        (
+            "if (1) begin : g logic [9:0] t; localparam N = $bits(t); end",
+            10,
+        ),
+    ] {
+        let session = &mut Session::default();
+        let tree = crate::source_tree::parse_scope_fixture(
+            &format!(
+                "package P; typedef logic [6:0] t; endpackage
+                module Top; import P::*; {declarations} endmodule"
+            ),
+            Path::new("hidden-type-names.sv"),
+        )
+        .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let aliases = type_aliases_from_scope(&tree, session).unwrap();
+        let module_scope = tree
+            .root_scopes()
+            .unwrap()
+            .into_iter()
+            .find(|handle| {
+                handle.unit(tree.declarations()).unwrap().kind == celox_sv_syntax::UnitKind::Module
+            })
+            .unwrap();
+        let tree = tree.scoped(module_scope).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let call = native_calls(&tree)[0];
+        assert_eq!(
+            query_number(call, &tree, session, &ConstEnv::default(), &aliases, None),
+            Some(bits),
+            "{declarations}"
+        );
+    }
 }
 
 #[test]

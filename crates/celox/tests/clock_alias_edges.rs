@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! An aliased clock or reset keeps the edge its event control names.
 //!
 //! `assign g = clk;` makes `g` and `clk` one clock domain, so the domain that

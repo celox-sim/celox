@@ -110,7 +110,7 @@ run() {
         (cd "$CELOX_ROOT" && cargo build --locked --quiet --profile "$RICA_CELOX_CARGO_PROFILE" -p celox-bench --bin celox-rica)
     fi
     if [[ ( "$RICA_HARNESS" == native-tb || "$RICA_HARNESS" == tiered ) && "$RICA_BUILD_CELOX_RUNNER" == 1 ]]; then
-        (cd "$CELOX_ROOT" && cargo build --locked --quiet --profile "$RICA_CELOX_CARGO_PROFILE" -p celox-vpi --bin celox)
+        (cd "$CELOX_ROOT" && cargo build --locked --quiet --profile "$RICA_CELOX_CARGO_PROFILE" -p celox --bin celox)
     fi
     if [[ "$RICA_HARNESS" == tiered && "$RICA_BUILD_CELOX_RUNNER" == 1 ]]; then
         (cd "$CELOX_ROOT" && cargo build --locked --quiet --profile "$RICA_CELOX_CARGO_PROFILE" -p celox-bench --bin veryl-heliodor)

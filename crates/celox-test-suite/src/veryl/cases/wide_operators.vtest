@@ -178,6 +178,11 @@ assign o = acc;
   (tick clk)
   (assert_eq o (* step 3)))
 
+; 128-bit logical and/or in always_comb.
+;
+; Veryl syntax:
+; - `a && b` => BinaryOp::LogicAnd
+; - `a || b` => BinaryOp::LogicOr
 (case test_wide_comb_logic_and_or
   (source "test.veryl" #"
 module Top (
@@ -220,6 +225,10 @@ assign y_or_w  = (|a) || (|b);
   (assert_eq y_and_w 1)
   (assert_eq y_or_w 1))
 
+; Regression: wide operand (65-bit, 2 chunks) `&&`/`||` a narrow 1-bit operand.
+;
+; Before the fix, `reduce_to_bool` in `emit_wide_logic_andor` passed raw I8
+; chunks to a `bor.i64` accumulator, producing a Cranelift verifier error.
 (case test_wide_logic_or_with_narrow_operand
   (source "test.veryl" #"
 module Top (
@@ -252,6 +261,7 @@ assign o_and = (|a) && b;
   (assert_eq o_or 1)
   (assert_eq o_and 1))
 
+; 128-bit multiply in always_comb.
 (case test_wide_comb_mul
   (source "test.veryl" #"
 module Top (
@@ -274,6 +284,7 @@ assign y = a * b;
     (set b 0x100000000))
   (assert_eq y 0x10000000000000000))
 
+; 128-bit multiply in always_ff.
 (case test_wide_ff_mul
   (source "test.veryl" #"
 module Top (
@@ -308,6 +319,7 @@ assign y = r;
   (tick clk)
   (assert_eq y (* 12345 67890)))
 
+; 128-bit division in always_comb.
 (case test_wide_comb_div
   (source "test.veryl" #"
 module Top (
@@ -331,6 +343,7 @@ assign q = a / b;
     (set b big_b))
   (assert_eq q (trunc 128 (<< 1 50))))
 
+; 128-bit modulo in always_comb.
 (case test_wide_comb_rem
   (source "test.veryl" #"
 module Top (
@@ -353,6 +366,7 @@ assign r = a % b;
     (set b big_b))
   (assert_eq r 42))
 
+; 128-bit XNOR in always_comb.
 (case test_wide_comb_bitxnor
   (source "test.veryl" #"
 module Top (
@@ -372,6 +386,7 @@ assign y = a ~^ b;
     (set b vb))
   (assert_eq y expected))
 
+; 128-bit arithmetic shift right in always_comb.
 (case test_wide_comb_sar
   (source "test.veryl" #"
 module Top (
@@ -397,6 +412,7 @@ assign y = a >>> b;
   ; -16 >>> 2 = -4, which is u128::MAX - 3
   (assert_eq y (- 0xffffffffffffffffffffffffffffffff 3)))
 
+; 128-bit signed less-than.
 (case test_wide_comb_signed_lt
   (source "test.veryl" #"
 module Top (
@@ -426,6 +442,7 @@ assign y = a <: b;
     (set b 42))
   (assert_eq y 0))
 
+; 128-bit signed greater-than.
 (case test_wide_comb_signed_gt
   (source "test.veryl" #"
 module Top (
@@ -450,6 +467,7 @@ assign y = a >: b;
     (set b 1))
   (assert_eq y 0))
 
+; 128-bit reduction NAND.
 (case test_wide_comb_reduction_nand
   (source "test.veryl" #"
 module Top (
@@ -467,6 +485,7 @@ assign y = ~&a;
   (assert_eq y 1))
   ; not all 1s -> 1
 
+; 128-bit reduction NOR.
 (case test_wide_comb_reduction_nor
   (source "test.veryl" #"
 module Top (
@@ -484,6 +503,7 @@ assign y = ~|a;
   (assert_eq y 0))
   ; not all 0s -> 0
 
+; 128-bit reduction XNOR.
 (case test_wide_comb_reduction_xnor
   (source "test.veryl" #"
 module Top (
@@ -504,6 +524,8 @@ assign y = ~^a;
   (assert_eq y 1))
   ; 2 ones (even) -> 1
 
+; Signed ordering must use the declared sign bit when the top storage
+; chunk is only partially occupied.
 (case test_wide_signed_compare_non_chunk_aligned
   (source "test.veryl" #"
 module Top (

@@ -11,10 +11,24 @@
 //! Idle workers spin briefly for the next kernel and then park; dispatch
 //! unparks only workers that announced they were going to sleep.
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: the dispatching thread writes the job slot and the celox-lane worker threads read it after acquiring the epoch"
+)]
 use std::cell::UnsafeCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: the failure slot and task timings are written by the celox-lane worker threads and read by the dispatching thread"
+)]
+use std::sync::Mutex;
+use std::sync::atomic::Ordering;
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: epoch, progress, abort and sleep flags are shared by the dispatching thread and the celox-lane worker threads, and diagnostic ids come from a process-wide counter"
+)]
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -23,6 +37,10 @@ use serde::{Deserialize, Serialize};
 /// Process-local identity for diagnostic objects. Never derived from addresses
 /// or topology, and never persisted in native images.
 pub fn new_diagnostic_id() -> String {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: lane schedules and pools are built on whichever thread compiles or runs a simulation (simulator builders, celox-jit-compile workers), all drawing from this one counter"
+    )]
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let id = NEXT
         .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
@@ -41,6 +59,10 @@ struct TaskTiming {
 struct ExecutionTrace {
     start: Instant,
     // Each cell has one writer. Read only after all workers have finished.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: each task timing is written by the celox-lane thread that runs the task and read by the dispatching thread after every lane finishes"
+    )]
     tasks: Vec<Mutex<TaskTiming>>,
 }
 
@@ -195,17 +217,45 @@ const MAX_EPOCH: u64 = u32::MAX as u64;
 
 struct Shared {
     lanes: usize,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the dispatching thread publishes each job epoch and the celox-lane worker threads acquire it"
+    )]
     job_epoch: Padded<AtomicU64>,
     /// Written by the dispatching thread before `job_epoch` is published and
     /// read by workers only after they acquire that epoch.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the dispatching thread writes the job slot while workers are idle and the celox-lane worker threads read it after acquiring the epoch"
+    )]
     job: UnsafeCell<Option<Job>>,
     /// Per lane: `epoch << 32 | completed tasks`, or `epoch << 32 |
     /// LANE_DONE` once the lane has finished the epoch. Each lane writes only
     /// its own counter, so completion never contends on a shared line.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: each lane thread publishes its completed task count and the other lane threads wait on it"
+    )]
     progress: Box<[Padded<AtomicU64>]>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: a failing lane thread raises it and every other lane thread polls it to skip remaining tasks"
+    )]
     abort: Padded<AtomicBool>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: any lane thread records its task failure and the dispatching thread takes it after the run"
+    )]
     failure: Mutex<Option<LaneTaskFailure>>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: an idle celox-lane worker announces it is parking and the dispatching thread unparks only those workers"
+    )]
     sleeping: Box<[Padded<AtomicBool>]>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the dropping LanePool sets it and the celox-lane worker threads poll it to exit"
+    )]
     shutdown: AtomicBool,
     idle_spin: Duration,
 }
@@ -333,6 +383,10 @@ impl LanePool {
 
     pub fn with_idle_spin(lanes: u32, idle_spin: Duration) -> std::io::Result<Self> {
         let lanes = lanes.max(1) as usize;
+        #[expect(
+            clippy::disallowed_types,
+            reason = "cross-thread: builds the state shared by the dispatching thread and the celox-lane worker threads spawned below"
+        )]
         let shared = Arc::new(Shared {
             lanes,
             job_epoch: Padded(AtomicU64::new(0)),
@@ -390,6 +444,10 @@ impl LanePool {
             tracing::trace!(target: "celox::parallel", event = "pool_fallback", reason = "insufficient_workers", requested = schedule.lanes, available = self.shared.lanes);
             return schedule.run_sequential(runner);
         }
+        #[expect(
+            clippy::disallowed_types,
+            reason = "cross-thread: each task timing is written by the celox-lane thread that runs the task and read by the dispatching thread after every lane finishes"
+        )]
         let trace =
             tracing::enabled!(target: "celox::parallel", tracing::Level::TRACE).then(|| {
                 ExecutionTrace {
@@ -544,6 +602,10 @@ impl Drop for LanePool {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_types,
+    reason = "test-only: test kernels record what the celox-lane worker threads run"
+)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicI64;

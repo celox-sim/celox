@@ -3,38 +3,6 @@
 #[allow(unused_macros)]
 mod test_utils;
 
-all_backends! {
-    fn tb_string_array_elements(sim) {
-        @omit_veryl;
-        @ignore_on(sv);
-        @case "tb_string::array_elements";
-    }
-    fn tb_string_function_argument(sim) {
-        @omit_veryl;
-        @ignore_on(sv);
-        @case "tb_string::function_argument";
-    }
-
-    fn tb_string_assignment(sim) {
-        @omit_veryl;
-        // Veryl does not emit #[test] modules into SystemVerilog.
-        @ignore_on(sv);
-        @case "tb_string::assignment";
-    }
-    fn tb_string_comparison(sim) {
-        @omit_veryl;
-        // Veryl does not emit #[test] modules into SystemVerilog.
-        @ignore_on(sv);
-        @case "tb_string::comparison";
-    }
-    fn tb_string_control_flow(sim) {
-        @omit_veryl;
-        // Veryl does not emit #[test] modules into SystemVerilog.
-        @ignore_on(sv);
-        @case "tb_string::control_flow";
-    }
-}
-
 #[test]
 fn let_and_var_strings_preserve_display_values() {
     // Regression for https://github.com/veryl-lang/veryl/issues/3555.

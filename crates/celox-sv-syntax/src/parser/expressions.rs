@@ -254,6 +254,18 @@ impl Value {
 }
 
 impl Parser<'_> {
+    /// Whether `left` is a call of `randomize`, or names it.
+    fn calls_randomize(&self, left: ExprId) -> bool {
+        let callee = match &self.expressions[left.0].kind {
+            ExprKind::Call { expression, .. } => *expression,
+            _ => left,
+        };
+        match &self.expressions[callee.0].kind {
+            ExprKind::Name(name) | ExprKind::Member { name, .. } => name.value() == "randomize",
+            _ => false,
+        }
+    }
+
     pub(super) fn variable_lvalue(&self, root: ExprId) -> bool {
         let mut pending = vec![root];
         while let Some(id) = pending.pop() {
@@ -279,6 +291,15 @@ impl Parser<'_> {
         Ok(self
             .expression_machine(Job::Expression(minimum))?
             .expression())
+    }
+    /// The delay value of a delay control or cycle delay, parenthesized or
+    /// not, or the event name of an event control, without the
+    /// parenthesized expression that may follow it.
+    pub(super) fn timing_operand(&mut self) -> Result<ExprId> {
+        let outer = self.timing_operand_start.replace(self.at);
+        let value = self.expression(14);
+        self.timing_operand_start = outer;
+        value
     }
     /// Resume an ordinary expression after an event group proved to contain
     /// only an expression. This resolves parentheses without token rescanning.
@@ -365,6 +386,18 @@ impl Parser<'_> {
                         constant_dimension_operands(dimension, &mut pending);
                     }
                 }
+                ExprKind::Unique(items) => {
+                    for item in items {
+                        constant_dimension_operands(item, &mut pending);
+                    }
+                }
+                ExprKind::Dist { expression, items } => {
+                    pending.push(*expression);
+                    for item in items {
+                        constant_dimension_operands(&item.value, &mut pending);
+                        pending.extend(item.weight.map(|weight| weight.value));
+                    }
+                }
                 ExprKind::Streaming {
                     slice, expressions, ..
                 } => {
@@ -375,6 +408,7 @@ impl Parser<'_> {
                 ExprKind::RandomizeWith {
                     expression,
                     constraints,
+                    ..
                 } => {
                     pending.push(*expression);
                     pending.extend(constraints.iter().flatten());
@@ -387,6 +421,17 @@ impl Parser<'_> {
                 }
                 ExprKind::ConstraintForeach { array, body, .. } => {
                     pending.extend([*array, *body]);
+                }
+                ExprKind::SoftConstraint { expression } => pending.push(*expression),
+                ExprKind::DisableSoft {
+                    variable,
+                    condition,
+                } => {
+                    pending.push(*variable);
+                    pending.extend(*condition);
+                }
+                ExprKind::SolveBefore { before, after } => {
+                    pending.extend(before.iter().chain(after));
                 }
                 ExprKind::Call { .. }
                 | ExprKind::Parameterized { .. }
@@ -460,11 +505,6 @@ impl Parser<'_> {
     }
 
     pub(super) fn node(&mut self, start: usize, kind: ExprKind) -> Result<ExprId> {
-        // A million arena nodes is tens of MiB of structural data before token
-        // strings/source storage, rather than an ordinary expression-depth limit.
-        if self.expressions.len() >= 1_000_000 {
-            return Err(self.unsupported("native expression arena exceeds one million nodes"));
-        }
         let id = ExprId(self.expressions.len());
         self.expressions.push(Expr {
             kind,
@@ -682,7 +722,7 @@ impl Parser<'_> {
                                         ExprKind::Literal(token.text.clone())
                                     } else {
                                         ExprKind::Name(Name {
-                                            spelling: token.text.clone(),
+                                            spelling: system_alias(token).to_string(),
                                             origin: token.origin,
                                         })
                                     }
@@ -781,7 +821,13 @@ impl Parser<'_> {
                             },
                         )?;
                     }
-                    "(" | "#" => {
+                    // A delay value or event name takes no call arguments: in
+                    // `#1 (a | b)`, `#(1) (a | b)` and `@e (a | b)` the
+                    // parentheses begin the controlled expression (IEEE
+                    // 1800-2023 A.6.5, A.2.2.3).
+                    "(" | "#"
+                        if !(self.peek() == "(" && self.timing_operand_start == Some(start)) =>
+                    {
                         let parameterized = self.eat("#");
                         jobs.push(Job::Call {
                             start,
@@ -791,21 +837,34 @@ impl Parser<'_> {
                         });
                         jobs.push(Job::Arguments);
                     }
-                    "with" if self.nth(1) == "{" => {
-                        let callee = match &self.expressions[left.0].kind {
-                            ExprKind::Call { expression, .. } => *expression,
-                            _ => left,
-                        };
-                        let is_randomize = match &self.expressions[callee.0].kind {
-                            ExprKind::Name(name) | ExprKind::Member { name, .. } => {
-                                name.value() == "randomize"
-                            }
-                            _ => false,
-                        };
-                        if !is_randomize {
+                    "with"
+                        if self.nth(1) == "{"
+                            || self.nth(1) == "(" && self.calls_randomize(left) =>
+                    {
+                        if !self.calls_randomize(left) {
                             return Err(self.error("constraint with block requires randomize"));
                         }
                         self.at += 1;
+                        // A restricted constraint block lists the names
+                        // that resolve into the object's class (18.7).
+                        let restricted = if self.eat("(") {
+                            let mut names = Vec::new();
+                            if !self.eat(")") {
+                                loop {
+                                    names.push(self.name()?);
+                                    if self.eat(")") {
+                                        break;
+                                    }
+                                    self.expect(",")?;
+                                }
+                            }
+                            if self.peek() != "{" {
+                                return Err(self.error("a constraint block after `with (...)`"));
+                            }
+                            Some(names)
+                        } else {
+                            None
+                        };
                         if self.inline_constraint_depth != 0 {
                             return Err(self.unsupported("inline constraint nesting limit"));
                         }
@@ -820,6 +879,7 @@ impl Parser<'_> {
                             ExprKind::RandomizeWith {
                                 expression: left,
                                 constraints,
+                                restricted,
                             },
                         )?;
                     }
@@ -1779,5 +1839,15 @@ fn constant_dimension_operands(dimension: &Dimension, pending: &mut Vec<ExprId>)
         DimensionKind::Indexed { base, width, .. } => pending.extend([base, width]),
         DimensionKind::Queue(Some(value)) => pending.push(value),
         DimensionKind::Unsized | DimensionKind::Queue(None) | DimensionKind::Wildcard => {}
+    }
+}
+
+/// The name of the system function a vendor alias stands for: `$psprintf`,
+/// which simulators accept as `$sformatf` (IEEE 1800-2023 21.3.3), is taken
+/// as it (a documented deviation).
+fn system_alias(token: &crate::lexer::Token) -> &str {
+    match (token.kind, token.text.as_str()) {
+        (TokenKind::SystemIdentifier, "$psprintf") => "$sformatf",
+        (_, text) => text,
     }
 }

@@ -1,0 +1,166 @@
+//! The current path: what the branches taken on it decide (conditions with
+//! a known value, complementary conditions, two-state values), and the
+//! condition under which the current statement runs.
+
+use super::*;
+
+/// The conditions that hold on the current path.
+#[derive(Default)]
+pub(super) struct PathConditions {
+    /// Branch conditions known on the current path, with their values.
+    pub(super) facts: Vec<(NodeId, bool, Sources)>,
+    /// Other conditions that hold on the current path: no jump taken yet,
+    /// an unrolled iteration running, a short-circuit operand evaluated.
+    pub(super) guards: Vec<Value>,
+}
+
+impl Comb<'_, '_> {
+    /// The value a condition is known to have on the current path, from an
+    /// enclosing branch on the same or the complementary two-state condition.
+    pub(super) fn known(&self, truth: NodeId) -> Option<bool> {
+        self.path.facts.iter().rev().find_map(|&(fact, value, _)| {
+            if fact == truth {
+                Some(value)
+            } else if self.complementary(fact, truth) {
+                Some(!value)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// The boolean a truth node tests, without the truth wrappers.
+    pub(super) fn truth_core(&self, node: NodeId) -> NodeId {
+        let mut node = node;
+        loop {
+            match self.arena.get(node) {
+                SLTNode::Unary(UnaryOp::ToTwoState | UnaryOp::Ident, inner) => node = *inner,
+                SLTNode::Unary(UnaryOp::Or, inner) if self.width(*inner) == 1 => node = *inner,
+                _ => return node,
+            }
+        }
+    }
+
+    /// Whether two truth nodes are complements for every two-state input.
+    pub(super) fn complementary(&self, left: NodeId, right: NodeId) -> bool {
+        let left = self.truth_core(left);
+        let right = self.truth_core(right);
+        if !self.two_state(left) || !self.two_state(right) {
+            return false;
+        }
+        let negates = |a: NodeId, b: NodeId| match self.arena.get(b) {
+            SLTNode::Unary(UnaryOp::LogicNot, inner) => self.truth_core(*inner) == a,
+            SLTNode::Unary(UnaryOp::BitNot, inner) => {
+                self.width(*inner) == 1 && self.truth_core(*inner) == a
+            }
+            _ => false,
+        };
+        if negates(left, right) || negates(right, left) {
+            return true;
+        }
+        match (self.arena.get(left), self.arena.get(right)) {
+            (SLTNode::Binary(a, op_a, b), SLTNode::Binary(c, op_b, d)) => {
+                a == c
+                    && b == d
+                    && matches!(
+                        (op_a, op_b),
+                        (BinaryOp::Eq, BinaryOp::Ne)
+                            | (BinaryOp::Ne, BinaryOp::Eq)
+                            | (BinaryOp::EqCase, BinaryOp::NeCase)
+                            | (BinaryOp::NeCase, BinaryOp::EqCase)
+                    )
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a value never holds unknown bits: every operand it is
+    /// computed from is two-state. Operands are shared, so each node of the
+    /// expression graph is visited once.
+    pub(super) fn two_state(&self, node: NodeId) -> bool {
+        if !self.m.four_state {
+            return true;
+        }
+        let mut seen = HashSet::default();
+        let mut pending = vec![node];
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            match self.arena.get(node) {
+                SLTNode::Input {
+                    variable, index, ..
+                } => {
+                    if !index.is_empty()
+                        || !self
+                            .m
+                            .variables
+                            .get(variable)
+                            .is_some_and(|var| !var.is_4state)
+                    {
+                        return false;
+                    }
+                }
+                SLTNode::Constant(_, mask, _, _) => {
+                    if !mask.is_zero() {
+                        return false;
+                    }
+                }
+                SLTNode::Unary(UnaryOp::ToTwoState, _) => {}
+                SLTNode::Unary(_, inner)
+                | SLTNode::Slice { expr: inner, .. }
+                | SLTNode::Capture { expr: inner, .. } => pending.push(*inner),
+                SLTNode::Binary(left, op, right) => {
+                    // A division by zero is X.
+                    if matches!(
+                        op,
+                        BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS
+                    ) {
+                        return false;
+                    }
+                    pending.extend([*left, *right]);
+                }
+                SLTNode::Mux {
+                    cond,
+                    then_expr,
+                    else_expr,
+                } => pending.extend([*cond, *then_expr, *else_expr]),
+                SLTNode::Concat(parts) => pending.extend(parts.iter().map(|(part, _)| *part)),
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    /// The condition under which the current statement runs, if it does not
+    /// run unconditionally.
+    pub(super) fn path_condition(&mut self) -> Result<Option<Value>, sv::AnalyzerError> {
+        let mut terms: Vec<Value> = Vec::new();
+        for (truth, value, sources) in self.path.facts.clone() {
+            let node = if value {
+                truth
+            } else {
+                slt_not(self.arena, &mut self.consts, truth)?
+            };
+            terms.push((node, sources));
+        }
+        terms.extend(self.path.guards.iter().cloned());
+        let mut result: Option<Value> = None;
+        for (node, sources) in terms {
+            if slt_bool(self.arena, &mut self.consts, node) == Some(true) {
+                continue;
+            }
+            result = Some(match result {
+                None => (node, sources),
+                Some((other, mut other_sources)) => {
+                    other_sources.extend(sources);
+                    (
+                        slt_and(self.arena, &mut self.consts, other, node)?,
+                        other_sources,
+                    )
+                }
+            });
+        }
+        Ok(result)
+    }
+}

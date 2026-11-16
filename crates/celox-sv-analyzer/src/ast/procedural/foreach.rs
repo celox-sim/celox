@@ -22,9 +22,9 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         header: &ForeachHeader,
     ) -> Result<Vec<ForeachLoop>, AnalyzerError> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let container =
-            containers::native_type(header.array, native, self.tree, self.session, &self.dims)?;
+            containers::native_type(header.array, native, &self.tree, self.session, &self.dims)?;
         let mut array = header.array;
         let mut unit_member = None;
         let array = loop {
@@ -43,6 +43,27 @@ impl BodyBuilder<'_, '_, '_> {
                 _ => return Err(unsupported("foreach array")),
             }
         };
+        // A fixed-size array property iterates the indices of its range
+        // from left to right (IEEE 1800-2023 12.7.3), each element at its
+        // position in the container that holds it.
+        if let Some((left, right)) = container.as_ref().and_then(|container| container.fixed) {
+            let variables = match &header.variables[..] {
+                [variable] => variable.as_ref(),
+                _ => {
+                    return Err(unsupported(
+                        "foreach over a fixed-size array class property with more than one index",
+                    ));
+                }
+            };
+            let Some(variable) = variables else {
+                return Ok(Vec::new());
+            };
+            let name = self.declare(
+                &instances::normalize_identifier(&variable.spelling),
+                super::loops::foreach_index_type(left, right),
+            );
+            return Ok(vec![ForeachLoop::Static(name, left, right)]);
+        }
         if let Some(container) = container {
             // Each loop variable iterates one dimension, the first the
             // outermost; the element at the outer indices is the container
@@ -93,7 +114,7 @@ impl BodyBuilder<'_, '_, '_> {
         // A string is a dynamic array of bytes indexed from 0 to N-1, where
         // N is its length (IEEE 1800-2023 12.7.3).
         if expression_binding::native_string(
-            self.tree,
+            &self.tree,
             self.session,
             header.array,
             native,
@@ -145,7 +166,7 @@ impl BodyBuilder<'_, '_, '_> {
             .key
             .as_ref()
             .filter(|key| key.kind() == TypeKind::Process);
-        let index_type = if object || container.key.as_ref().is_some_and(|key| key.chandle) {
+        let index_type = if object || container.key.as_ref().is_some_and(|key| key.is_chandle()) {
             container
                 .key
                 .clone()
@@ -154,11 +175,9 @@ impl BodyBuilder<'_, '_, '_> {
             process.clone()
         } else if string {
             type_binding::builtin_type("string", None).expect("string is a builtin type")
-        } else if let Some(key) = container
-            .key
-            .as_ref()
-            .filter(|key| !key.members.is_empty() || key.is_enum)
-        {
+        } else if let Some(key) = container.key.as_ref().filter(|key| {
+            !key.members.is_empty() || container.key_enumeration(&self.session.types).enumeration
+        }) {
             // A packed structure or enumeration index keeps its type, so the
             // body may select its members or call its methods (IEEE
             // 1800-2023 12.7.3, 6.19.5).

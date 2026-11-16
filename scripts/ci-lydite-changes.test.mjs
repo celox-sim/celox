@@ -128,7 +128,7 @@ test("Cargo.lock edits select only the lanes that reach the changed entries", ()
   const pr = (lock) => pullRequestScope(["Cargo.lock"], packages, lock);
   // A Celox crate gaining a workspace dependency reaches no Lydite lane.
   assert.deepEqual(
-    pr(edit("celox-vpi", ' "celox",\n', ' "celox",\n "celox-design",\n')),
+    pr(edit("celox-bench", ' "celox",\n', ' "celox",\n "celox-design",\n')),
     neither,
   );
   assert.deepEqual(pr(edit("serde_json", "dependencies = [", "dependencies = [\n \"new\",")), {

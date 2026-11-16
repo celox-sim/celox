@@ -11,8 +11,8 @@ impl Ff<'_, '_> {
             // The pre-scan classifies earlier waits. Keep the frame invariant
             // here too, including calls materialized while binding argument
             // defaults.
-            self.process_control = true;
-            self.forked = true;
+            self.activation.process_control = true;
+            self.activation.forked = true;
             self.urandom_state();
         } else if !(self.can_request()
             && matches!(
@@ -44,9 +44,10 @@ impl Ff<'_, '_> {
             return Err(unsupported("process method outside a process kernel"));
         }
         let function = self
+            .call_stack
             .active_calls
             .iter()
-            .skip(self.timing_call_boundary)
+            .skip(self.call_stack.timing_call_boundary)
             .any(|name| self.m.subroutine(name).is_some_and(|s| !s.is_task));
         if op == ProcessOp::Await && function {
             return Err(unsupported("process.await task called from a function"));
@@ -99,11 +100,12 @@ impl Ff<'_, '_> {
             self.m.variables.get_mut(&id).unwrap().value_kind = ValueKind::StrRef;
         }
         let index = self
-            .host_request_sites
+            .sites
+            .host_request
             .iter()
             .filter(|s| s.kind == HostRequestKind::Process)
             .count() as u32;
-        self.host_request_sites.push(HostRequestSite {
+        self.sites.host_request.push(HostRequestSite {
             process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Process,
             operation: op as u32
@@ -148,7 +150,7 @@ impl Ff<'_, '_> {
     /// variable `suspended`, a 32-bit result of a wait request, is nonzero:
     /// the kernel's own flush site, or a unit's (see `Ff::unit_flush_point`).
     fn flush_if_suspended(&mut self, suspended: SourceVarId) {
-        if self.kernel.is_some() && self.flush_site.is_none() {
+        if self.kernel.is_some() && self.assertions.flush_site.is_none() {
             return;
         }
         let value = self.b.alloc_bit(32, false);
@@ -171,7 +173,7 @@ impl Ff<'_, '_> {
             false_block: (join, Vec::new()),
         });
         self.b.switch_to_block(flush);
-        match self.flush_site {
+        match self.assertions.flush_site {
             Some(site_id) if self.kernel.is_some() => {
                 self.b.emit(SIRInstruction::RuntimeEvent {
                     site_id,
@@ -195,8 +197,8 @@ impl Ff<'_, '_> {
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use sv::ir::Expr;
         if self.kernel.is_some() {
-            self.process_control = true;
-            self.forked = true;
+            self.activation.process_control = true;
+            self.activation.forked = true;
         } else if !self.can_request() {
             // A function unit makes the requests by suspending (see
             // `out_of_line`); a blocking one retries when it continues.
@@ -299,9 +301,9 @@ impl Ff<'_, '_> {
                             self.m.variables.get_mut(&handle).unwrap().value_kind =
                                 ValueKind::ObjRef;
                             // A forked activation keeps its own object.
-                            if self.forked {
-                                let slot = self.frame_locals.len();
-                                self.frame_locals.push(handle);
+                            if self.activation.forked {
+                                let slot = self.activation.frame_locals.len();
+                                self.activation.frame_locals.push(handle);
                                 self.with_kernel(|kernel| kernel.local(slot))
                                     .map_err(kernel_error)?;
                             }
@@ -324,11 +326,12 @@ impl Ff<'_, '_> {
             }
         }
         let index = self
-            .host_request_sites
+            .sites
+            .host_request
             .iter()
             .filter(|s| s.kind == HostRequestKind::Process)
             .count() as u32;
-        self.host_request_sites.push(HostRequestSite {
+        self.sites.host_request.push(HostRequestSite {
             process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Process,
             operation: op as u32,

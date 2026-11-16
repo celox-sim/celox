@@ -66,7 +66,9 @@ test("Taxi daily compares complete configurations on the same VM and publishes o
   assert.match(workflow, /version: "5\.052"/);
   assert.match(workflow, /uses: \$\/\.github\/actions\/setup-verilator/);
   assert.match(workflow, /revision: ea338be98e1e838d3518809ce8899f85a009963c/);
-  assert.deepEqual([...workflow.matchAll(/runs-on: (.+)/g)].map(m => m[1]), Array(3).fill("ubuntu-26.04"));
+  // The yield gate runs first on a small runner; every measurement job shares one image.
+  assert.deepEqual([...workflow.matchAll(/runs-on: (.+)/g)].map(m => m[1]), ["ubuntu-latest", ...Array(3).fill("ubuntu-26.04")]);
+  assert.match(workflow, /  build:\n    needs: yield\n    if: needs\.yield\.outputs\.run == 'true'/);
   assert.match(workflow, /needs: comparison\n    if: github.ref == 'refs\/heads\/master'/);
   assert.doesNotMatch(workflow, /continue-on-error|--no-verify/);
   assert.match(workflow, /if: always\(\)[\s\S]+retention-days: 30/);

@@ -136,7 +136,7 @@ pub(super) fn needs_functions(tree: &AnalysisContext<'_>) -> Converted<bool> {
     Ok(false)
 }
 struct Context<'b> {
-    outer: Cow<'b, HashMap<String, Type>>,
+    outer: Cow<'b, TypeAliases>,
     /// The constant functions outside the block, if its imports rebind some.
     outer_functions: Option<const_functions::ConstantFunctions>,
 }
@@ -671,7 +671,7 @@ mod tests {
         let tree=crate::source_tree::parse_scope_fixture("module M;function automatic int rootf();return 1;endfunction generate function automatic int regionf();return 2;endfunction endgenerate endmodule",Path::new("native-root-seeding.sv")).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let env = ConstEnv::default();
-        let aliases = HashMap::default();
+        let aliases = TypeAliases::default();
         let seeded =
             items_with_literal_use(&tree, session, &env, &aliases, LiteralUse::RootSubroutines)
                 .unwrap();

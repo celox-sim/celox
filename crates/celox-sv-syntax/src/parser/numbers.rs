@@ -42,6 +42,79 @@ pub(super) fn integral(text: &str) -> bool {
     }
 }
 
+/// The value of an integral number (IEEE 1800-2023 A.8.7) that is not
+/// negative, has no unknown digits and fits 64 bits. A sized number is
+/// truncated to its size first (5.7.1).
+pub(super) fn integral_value(text: &str) -> Option<u64> {
+    if !integral(text) {
+        return None;
+    }
+    // The value of the digits modulo 2^128, and whether it is 2^128 or more.
+    let digits = |body: &str, radix: u32| -> Option<(u128, bool)> {
+        let mut value = 0u128;
+        let mut wide = false;
+        for digit in body.chars().filter(|character| *character != '_') {
+            let digit = u128::from(digit.to_digit(radix)?);
+            let (scaled, overflow) = value.overflowing_mul(u128::from(radix));
+            let (sum, carry) = scaled.overflowing_add(digit);
+            wide |= overflow || carry;
+            value = sum;
+        }
+        Some((value, wide))
+    };
+    let Some((size, suffix)) = text.split_once('\'') else {
+        let (value, wide) = digits(text, 10)?;
+        return if wide {
+            None
+        } else {
+            u64::try_from(value).ok()
+        };
+    };
+    let signed = suffix.starts_with(['s', 'S']);
+    let suffix = suffix.strip_prefix(['s', 'S']).unwrap_or(suffix);
+    let radix = match suffix.as_bytes().first()?.to_ascii_lowercase() {
+        b'd' => 10,
+        b'b' => 2,
+        b'o' => 8,
+        _ => 16,
+    };
+    let (value, wide) = digits(suffix[1..].trim_start(), radix)?;
+    let width = if size.is_empty() {
+        // An unsized number is at least 32 bits wide; a wider signed one
+        // keeps a sign bit above its value.
+        let bits = if wide {
+            return None;
+        } else {
+            128 - value.leading_zeros()
+        };
+        match bits {
+            0..=32 => 32,
+            _ if signed => bits + 1,
+            _ => bits,
+        }
+    } else {
+        let (size, wide) = digits(size, 10)?;
+        if wide {
+            return None;
+        }
+        u32::try_from(size).ok()?
+    };
+    // Bits above the 128 the digits were reduced to are unknown here.
+    if wide && width > 128 {
+        return None;
+    }
+    let value = if width < 128 {
+        value & ((1 << width) - 1)
+    } else {
+        value
+    };
+    let negative = signed && width <= 128 && (value >> (width - 1)) & 1 == 1;
+    if negative {
+        return None;
+    }
+    u64::try_from(value).ok()
+}
+
 fn fixed(text: &str) -> bool {
     if let Some((whole, fraction)) = text.split_once('.') {
         unsigned(whole) && unsigned(fraction)

@@ -15,7 +15,8 @@ export function resetReports(directory, source = currentReport(process.cwd())) {
   clearCurrentReport(source);
   if (!existsSync(directory)) return;
   for (const name of readdirSync(directory)) {
-    if (/^nextest-(?:full|cocotb-\d+|\d+)\.xml$/.test(name)) rmSync(resolve(directory, name));
+    // scripts/run-vtest.py writes vtest.xml there directly.
+    if (/^(?:nextest-(?:full|cocotb-\d+|\d+)|vtest)\.xml$/.test(name)) rmSync(resolve(directory, name));
   }
 }
 

@@ -209,6 +209,7 @@
   ; Let's see how the current fallback logic handles reduction.
   ; Many JIT implementations just fallback to X if ANY bit is X for simplification.
 
+; Bitwise XOR with partial X
 (case test_four_state_xor_partial_x
   (four_state)
   (source "test.veryl" #"
@@ -229,6 +230,7 @@
   (let m_y (xmask (get y)))
   (assert (== m_y 0x0F) "XOR mask should be union of input masks"))
 
+; Concatenation with X
 (case test_four_state_concat
   (four_state)
   (source "test.veryl" #"
@@ -252,6 +254,7 @@
   ; Lower nibble value should be 5
   (assert_eq (& v_y 0x0F) 0x05))
 
+; Shift with constant amount (mask should shift too)
 (case test_four_state_shift_by_constant
   (four_state)
   (source "test.veryl" #"
@@ -275,6 +278,7 @@
   (let m_shl (xmask (get y_shl)))
   (assert (== m_shl 0xF0) "Left shift by 4 should shift X mask to upper nibble"))
 
+; Shift by X amount → full X output
 (case test_four_state_shift_by_x_amount
   (four_state)
   (source "test.veryl" #"
@@ -294,6 +298,7 @@
   (let m_y (xmask (get y)))
   (assert (== m_y 0xFF) "Shift by X amount should produce all-X mask"))
 
+; Comparison with X → result is X
 (case test_four_state_comparison_with_x
   (four_state)
   (source "test.veryl" #"
@@ -342,6 +347,7 @@
   (assert (== v_y 0xBB))
   (assert (== m_y 0x11) "Mux with X condition must merge branch bits"))
 
+; Mux with defined condition, X in selected branch
 (case test_four_state_mux_x_in_branch
   (four_state)
   (source "test.veryl" #"
@@ -370,6 +376,7 @@
   (assert (== m_y 0) "Mux sel=0 selecting defined branch should have mask=0")
   (assert (== v_y 0xBB)))
 
+; Multi-word (128-bit) with X mask
 (case test_four_state_wide_128bit
   (four_state)
   (source "test.veryl" #"
@@ -401,6 +408,7 @@
   (let m_or (xmask (get y_or)))
   (assert (== m_or 0) "128-bit OR: 1|X = 1, so mask should be 0"))
 
+; always_comb chain with X propagation
 (case test_four_state_always_comb_chain
   (four_state)
   (source "test.veryl" #"
@@ -429,6 +437,7 @@
   ; So final mask should have only bit 0 as X = 0x01
   (assert (== m_y 0x01) "always_comb chain should propagate X through AND then OR correctly"))
 
+; always_ff: X captured in FF, reset clears X
 (case test_four_state_ff_capture_and_reset
   (four_state)
   (source "test.veryl" #"
@@ -474,6 +483,7 @@
   (assert (== v_q 0))
   (assert (== m_q 0) "Reset should clear X mask in FF"))
 
+; Defined inputs in 4-state mode → same as 2-state behavior
 (case test_four_state_all_defined
   (four_state)
   (source "test.veryl" #"
@@ -531,6 +541,7 @@
   (assert (== v_y expected_v) "128-bit simple AND value")
   (assert (== m_y 0) "128-bit simple AND mask should be 0"))
 
+; Multi-word (128-bit) Shifts with X
 (case test_four_state_wide_shifts
   (four_state)
   (source "test.veryl" #"
@@ -596,6 +607,7 @@
   (let all_x (| (<< 0xffffffffffffffff 64) 0xffffffffffffffff))
   (assert (== m_add all_x) "Arithmetic with partial X should result in all-X for multi-word"))
 
+; Multi-word (128-bit) Signed Ops with X
 (case test_four_state_wide_signed
   (four_state)
   (source "test.veryl" #"
@@ -624,6 +636,7 @@
   (let m_lts (xmask (get y_lts)))
   (assert (== m_lts 1) "Comparison with X should result in X (conservative)"))
 
+; Multi-word (128-bit) Concatenation with Mixed 2-state/4-state
 (case test_four_state_wide_concat_mixed
   (four_state)
   (source "test.veryl" #"
@@ -651,6 +664,7 @@
   (assert (== v_c expected_v))
   (assert (== m_c expected_m)))
 
+; P0: MUL / DIV / MOD + X (conservative all-X)
 (case test_four_state_mul_with_x
   (four_state)
   (source "test.veryl" #"
@@ -732,6 +746,8 @@
   (assert (== m 0xFF) "MOD with X divisor should yield all-X")
   (assert (== v 0xFF) "Value normalized at X positions (v |= m)"))
 
+; P0: Comparison operators with X (NE, GT, GE, LE + signed variants)
+; Known unequal bits decide equality even when other bits are X or Z.
 (case test_four_state_equality_known_mismatch_with_unknown_bits
   (four_state)
   (source "test.veryl" #"
@@ -875,6 +891,7 @@
   (assert (== m_le 1) "Signed LE with X should yield X")
   (assert (== m_ge 1) "Signed GE with X should yield X"))
 
+; P0: Reduction XOR + X
 (case test_four_state_reduction_xor_with_x
   (four_state)
   (source "test.veryl" #"
@@ -897,6 +914,7 @@
   (let m (xmask (get y_rxor)))
   (assert (== m 1) "Reduction XOR with any X bit should yield X"))
 
+; P0: 65-bit width (1→2 chunk boundary)
 (case test_four_state_65bit_boundary
   (four_state)
   (source "test.veryl" #"
@@ -936,6 +954,7 @@
   ; Operations produce X (v=1,m=1): v |= m for 65-bit all-X
   (assert (== v_add m_add)))
 
+; P1: Negation (-) + X
 (case test_four_state_negation_with_x
   (four_state)
   (source "test.veryl" #"
@@ -961,6 +980,7 @@
   ; Operations produce X (v=1,m=1), never Z
   (assert (== v 0xFF)))
 
+; P1: Logical NOT (!) + X
 (case test_four_state_logical_not_with_x
   (four_state)
   (source "test.veryl" #"
@@ -989,6 +1009,7 @@
   (let m (xmask (get y_lnot)))
   (assert (== m 1) "Logical NOT with X should yield X"))
 
+; P1: SAR + X shift amount
 (case test_four_state_sar_x_shift_amount
   (four_state)
   (source "test.veryl" #"
@@ -1017,6 +1038,7 @@
   ; Value is normalized at X positions: v |= m → 0xFF
   (assert (== v 0xFF)))
 
+; P1: 3+ element concatenation with X
 (case test_four_state_concat_three_elements
   (four_state)
   (source "test.veryl" #"
@@ -1076,6 +1098,7 @@
   (assert (== m_eq 1) "Wide EQ with X should yield X")
   (assert (== m_lt 1) "Wide LT with X should yield X"))
 
+; P2: Multi-bit selector (case) with X
 (case test_four_state_multibit_mux_with_x
   (four_state)
   (source "test.veryl" #"
@@ -1161,6 +1184,7 @@
   (assert (== mask 0))
   (assert (== value 0xA5)))
 
+; P2: Width narrowing (wide → narrow) with X
 (case test_four_state_width_narrowing_with_x
   (four_state)
   (source "test.veryl" #"
@@ -1185,6 +1209,7 @@
   (assert (== m 0x0F) "Lower nibble X should propagate")
   (assert (== v 0) "X bits normalized to 0"))
 
+; P2: Width widening (narrow → wide) with X
 (case test_four_state_width_widening_with_x
   (four_state)
   (source "test.veryl" #"
@@ -1205,6 +1230,7 @@
   (assert (== m 0x0F) "Only lower nibble X should propagate")
   (assert (== v 0xA5) "Widening preserves input value at X positions"))
 
+; P2: FF with conditional assignment + X
 (case test_four_state_ff_conditional_with_x
   (four_state)
   (source "test.veryl" #"
@@ -1252,6 +1278,7 @@
   (let m_q (xmask (get q)))
   (assert (== m_q 0x0F) "en=0: q should hold previous X mask"))
 
+; P2: Odd-width concatenation (3bit + 5bit) with X
 (case test_four_state_concat_odd_width
   (four_state)
   (source "test.veryl" #"
@@ -1278,6 +1305,7 @@
   ; Normalization: v |= m → 0xB3 | 0x40 = 0xF3
   (assert (== v 0xB3) "Concat preserves input value at X positions"))
 
+; P2: 127-bit width test
 (case test_four_state_127bit
   (four_state)
   (source "test.veryl" #"
@@ -1301,6 +1329,7 @@
   ; AND: a[126]=X, b[126]=1 → result[126]=X
   (assert (== m mask_a) "127-bit AND: X at MSB should propagate"))
 
+; Wide (128-bit) Unary NOT + X
 (case test_four_state_wide_unary_not_with_x
   (four_state)
   (source "test.veryl" #"
@@ -1323,6 +1352,7 @@
   ; Lower word: ~0xFF..FF = 0x00..00
   (assert_eq (& v 0xffffffffffffffff) 0 "Lower word: ~0xFFFFFFFFFFFFFFFF = 0"))
 
+; Wide (128-bit) Negation + X
 (case test_four_state_wide_negation_with_x
   (four_state)
   (source "test.veryl" #"
@@ -1345,6 +1375,7 @@
   ; Operations produce X (v=1,m=1): all-X means v = all ones
   (assert (== v all_x)))
 
+; Wide (128-bit) Reduction AND/OR/XOR + X
 (case test_four_state_wide_reduction_with_x
   (four_state)
   (source "test.veryl" #"
@@ -1375,6 +1406,7 @@
   (let m_rxor (xmask (get y_rxor)))
   (assert (== m_rxor 1) "Wide ^a with any X should be X"))
 
+; Mux: both branches X
 (case test_four_state_mux_both_branches_x
   (four_state)
   (source "test.veryl" #"
@@ -1444,6 +1476,7 @@
   (assert (== v 0xCC) "sel1=0 → c regardless of sel2")
   (assert (== m 0)))
 
+; Shift: both data and amount have X
 (case test_four_state_shift_both_x
   (four_state)
   (source "test.veryl" #"
@@ -1466,6 +1499,7 @@
   ; Value is normalized at X positions: v |= m → 0xFF
   (assert (== v 0xFF)))
 
+; Case statement with 4-state (EqWildcard)
 (case test_four_state_case_defined_selector
   (four_state)
   (source "test.veryl" #"
@@ -1512,6 +1546,7 @@
   ; With X selector, the comparison results are X, so the mux selects conservatively
   (assert (!= m 0) "Case with X selector should produce X in output (conservative mux)"))
 
+; Reduction OR/AND dominant-value semantics
 (case test_four_state_reduction_or_dominant_one
   (four_state)
   (source "test.veryl" #"
@@ -1663,6 +1698,7 @@
   (assert (== m 0) "1 && 1 should be definite")
   (assert (== v 1) "1 && 1 = 1"))
 
+; IEEE 1800 LogicOr (||) dominant-value: 1 || x = 1
 (case test_four_state_logic_or_dominant_one
   (four_state)
   (source "test.veryl" #"
@@ -1720,6 +1756,7 @@
   (assert (== m 0) "0 || 0 should be definite")
   (assert (== v 0) "0 || 0 = 0"))
 
+; IEEE 1800 EqWildcard (==?) with LHS value at wildcard positions
 (case test_four_state_eq_wildcard_value_at_wildcard_pos
   (four_state)
   (source "test.veryl" #"
@@ -1850,6 +1887,7 @@
   (assert_eq y_eq (fourstate 0 0))
   (assert_eq y_ne (fourstate 1 0)))
 
+; Wide MUL + X (128-bit)
 (case test_four_state_wide_mul_with_x
   (four_state)
   (source "test.veryl" #"
@@ -1880,6 +1918,7 @@
   ; Operations produce X (v=1,m=1): all-X means v = all ones
   (assert (== v all_x_128)))
 
+; Wide DIV + X (128-bit)
 (case test_four_state_wide_div_with_x
   (four_state)
   (source "test.veryl" #"
@@ -1908,6 +1947,7 @@
   (assert (== m all_x_128) "Wide DIV with X dividend should yield all-X")
   (assert (== v all_x_128) "Operations produce X: v |= m"))
 
+; Wide MOD + X (128-bit)
 (case test_four_state_wide_mod_with_x
   (four_state)
   (source "test.veryl" #"
@@ -1937,6 +1977,7 @@
   ; Operations produce X (v=1,m=1): all-X means v = all ones
   (assert (== v all_x_128)))
 
+; SAR with both data and shift amount having X
 (case test_four_state_sar_both_x
   (four_state)
   (source "test.veryl" #"
@@ -1995,6 +2036,7 @@
   (let m (xmask (get y_ne)))
   (assert (== m 1) "Wide NE with X should yield X result"))
 
+; Wide GT + X (128-bit unsigned)
 (case test_four_state_wide_gt_with_x
   (four_state)
   (source "test.veryl" #"
@@ -2023,6 +2065,7 @@
   (let m (xmask (get y_gt)))
   (assert (== m 1) "Wide GT with X should yield X result"))
 
+; Wide GE/LE + X (128-bit unsigned)
 (case test_four_state_wide_ge_le_with_x
   (four_state)
   (source "test.veryl" #"
@@ -2058,6 +2101,7 @@
   (assert (== m_ge 1) "Wide GE with X should yield X")
   (assert (== m_le 1) "Wide LE with X should yield X"))
 
+; Wide signed comparison + X (128-bit)
 (case test_four_state_wide_signed_comparison_with_x
   (four_state)
   (source "test.veryl" #"
@@ -2102,6 +2146,7 @@
   (assert (== m_le 1) "Wide signed LE with X should yield X")
   (assert (== m_ge 1) "Wide signed GE with X should yield X"))
 
+; Wide logical NOT + X (128-bit)
 (case test_four_state_wide_logical_not_with_x
   (four_state)
   (source "test.veryl" #"
@@ -2132,6 +2177,7 @@
   (let m (xmask (get y_lnot)))
   (assert (== m 1) "Wide logical NOT with X should yield X"))
 
+; Concat: X crossing chunk boundary (64-bit)
 (case test_four_state_concat_chunk_boundary_x
   (four_state)
   (source "test.veryl" #"
@@ -2165,6 +2211,7 @@
   (let v_a (>> v 80))
   (assert (== v_a 0x123456789ABC) "Upper 48 bits from a should be intact"))
 
+; FF: synchronous reset + X
 (case test_four_state_ff_sync_reset_with_x
   (four_state)
   (source "test.veryl" #"
@@ -2231,6 +2278,7 @@
   (assert (== v_q 0) "Second sync reset should set q to 0")
   (assert (== m_q 0) "Second sync reset should clear all X"))
 
+; Explicit cast + X: signed↔unsigned conversion preserves X
 (case test_four_state_explicit_cast_with_x
   (four_state)
   (source "test.veryl" #"
@@ -2325,6 +2373,7 @@
   (assert (== m 0xFF) "X literal: all bits should have mask=1")
   (assert (== v 0xFF) "X literal: X encoding has v=1"))
 
+; Multi-word (128-bit) Arithmetic with X (Conservative all-X)
 (case test_four_state_shifts_preserve_xz
   (four_state)
   (source "test.veryl" #"module Top (sh: input logic<16>,

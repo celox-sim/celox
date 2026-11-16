@@ -15,6 +15,10 @@ use super::*;
 pub(super) struct ScopeSymbols {
     /// User package qualifiers precede implicit std declarations (26.7).
     pub package_scopes: HashSet<String>,
+    /// The subroutines of every package of the design, which a scope copies
+    /// when its calls reach them though it imports no package that has them
+    /// (see [`packages::DesignSubroutines`]).
+    pub design_subroutines: packages::SharedDesignSubroutines,
     /// Declaration inspection omits executable bodies; it is not simulation validation.
     pub declarations_only: bool,
     /// Constant values of parameters and enum members, with their type
@@ -23,18 +27,23 @@ pub(super) struct ScopeSymbols {
     /// Literal values of parameters and enum members.
     pub parameter_values: HashMap<String, Expr>,
     pub parameters: Vec<Parameter>,
-    pub type_aliases: HashMap<String, Type>,
+    pub type_aliases: TypeAliases,
+    /// The names of every type the scope declares, also those the binder
+    /// does not bind (yet), so that its importers tell a type that has no
+    /// binding from a name that no type has.
+    pub type_declarations: HashSet<String>,
     /// Bound type parameters, keyed by native declaration ownership.
     pub type_parameter_bindings: HashMap<celox_sv_syntax::ParameterId, Type>,
     pub pattern_parameter_bindings: HashMap<celox_sv_syntax::ParameterId, BoundPattern>,
     pub enum_constants: EnumMemberConstants,
+    pub constant_types: HashMap<String, semantic_types::ConstantType>,
     pub functions: HashMap<String, Function>,
     pub function_return_types: HashMap<String, FunctionReturnMetadata>,
     pub constant_functions: const_functions::ConstantFunctions,
     pub subroutine_params: HashMap<String, Vec<String>>,
-    pub subroutine_shapes: HashMap<String, Vec<VariableDimensions>>,
-    pub subroutines: Vec<Subroutine>,
-    pub locals: Vec<LocalVariable>,
+    pub subroutine_shapes: HashMap<String, Arc<Vec<VariableDimensions>>>,
+    pub subroutines: Vec<Arc<Subroutine>>,
+    pub locals: Vec<Arc<LocalVariable>>,
     pub dpi_imports: Vec<crate::ir::DpiImport>,
     /// Array parameters and constant variables, which are constant signals
     /// copied into each scope, and their initializers.
@@ -63,14 +72,85 @@ pub(super) struct ScopeSymbols {
     /// The names the imports of a generate block bind there to another
     /// declaration than outside it, by the native body identity of the block.
     pub generate_imports: HashMap<celox_sv_syntax::BodyItemId, HashMap<String, String>>,
+    /// What the imports a procedural block or a subroutine body declares
+    /// bind, by the source offset of its first import: the names the block
+    /// references, with the declarations its imports give them, looked up
+    /// as in generate blocks (IEEE 1800-2023 26.3). The block's statements
+    /// after the import are analyzed with them.
+    pub block_imports: HashMap<usize, HashMap<String, String>>,
+    /// The names the imports of the procedural blocks being analyzed bind
+    /// to package subroutines and DPI imports: a call of one calls that
+    /// declaration, as a call naming it with its package does.
+    pub block_calls: HashMap<String, String>,
     /// The classes the scope declares, laid out, by their qualified names
     /// (IEEE 1800-2023 26.3): a scope that uses them may be analyzed from
     /// another source, without their declarations.
-    pub classes: Vec<classes::Class>,
+    pub classes: Vec<Arc<classes::Class>>,
     /// Class-declared types, frozen in each specialization's declaration
     /// environment before another source imports them (8.23, 8.25).
     pub class_member_types: HashMap<String, HashMap<String, Type>>,
     pub inline_randomizations: Vec<classes::constraints::InlineRequest>,
+    /// The compilation unit of a scope that names none of its items, which
+    /// it takes when a specialization of a package class it takes names an
+    /// item of the unit (see `Module::from_selected_scope`).
+    pub unit: Option<Arc<DeferredUnit>>,
+}
+
+/// The compilation unit a scope takes only if a specialization it takes
+/// names one of the unit's items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DeferredUnit {
+    /// The identities of the items the unit declares, which tell them from
+    /// the items of the units of other sources (3.12.1).
+    pub items: Vec<String>,
+    /// The unit's symbols, or why it cannot be analyzed, which the scope
+    /// reports when it takes the unit.
+    pub symbols: Result<ScopeSymbols, crate::AnalyzerError>,
+}
+
+impl DeferredUnit {
+    /// Whether `name`, a qualified name such as that of a specialization,
+    /// names an item of the unit.
+    pub fn named_by(&self, name: &str) -> bool {
+        name.contains("$unit::") && self.items.iter().any(|item| name.contains(item.as_str()))
+    }
+
+    /// The unit's symbols when one of `names`, those of the specializations
+    /// the scope takes, names an item of it, or why the unit cannot be
+    /// analyzed.
+    pub fn taken<'a>(
+        &self,
+        mut names: impl Iterator<Item = &'a str>,
+    ) -> Result<Option<&ScopeSymbols>, crate::AnalyzerError> {
+        if !names.any(|name| self.named_by(name)) {
+            return Ok(None);
+        }
+        self.symbols.as_ref().map(Some).map_err(Clone::clone)
+    }
+}
+
+#[cfg(test)]
+mod deferred_unit_tests {
+    use super::*;
+
+    #[test]
+    fn a_deferred_unit_is_taken_only_for_its_items_and_reports_its_error() {
+        let unit = |symbols| DeferredUnit {
+            items: vec!["$unit::C@0000000000000001".into()],
+            symbols,
+        };
+        let named = ["p::Reg#(T=$unit::C@0000000000000001)"];
+        let other = ["p::Reg#(T=$unit::C@0000000000000002)", "p::Reg#(T=int)"];
+        let analyzed = unit(Ok(ScopeSymbols::default()));
+        assert!(analyzed.taken(other.into_iter()).unwrap().is_none());
+        assert!(analyzed.taken(named.into_iter()).unwrap().is_some());
+        // A unit that cannot be analyzed is reported when a specialization
+        // names an item of it, and only then.
+        let error = crate::AnalyzerError::Unsupported("union".into());
+        let failed = unit(Err(error.clone()));
+        assert!(failed.taken(other.into_iter()).unwrap().is_none());
+        assert_eq!(failed.taken(named.into_iter()).unwrap_err(), error);
+    }
 }
 
 /// The name a reference to item `name` of `package` has in the scope being
@@ -91,8 +171,9 @@ pub(super) fn imported(tree: &AnalysisContext<'_>) -> Arc<ScopeSymbols> {
 /// The name a constant-environment marker key describes, with the marker
 /// text before it.
 pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
-    const FIXED: [&str; 13] = [
+    const FIXED: [&str; 14] = [
         "__parameter::local::",
+        "__parameter::members::",
         "__parameter::unbounded::",
         "__parameter::width::",
         "__parameter::signed_element::",
@@ -123,6 +204,12 @@ pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
         let _ = (index, bound);
         return Some((&key[..prefix_len], name));
     }
+    // `__parameter::member::{value,type}::{path}::{name}`
+    if let Some(rest) = key.strip_prefix("__parameter::member::") {
+        let mut parts = rest.splitn(3, "::");
+        let (_, _, name) = (parts.next()?, parts.next()?, parts.next()?);
+        return Some((&key[..key.len() - name.len()], name));
+    }
     key.strip_prefix("__parameter::")
         .map(|name| ("__parameter::", name))
 }
@@ -132,20 +219,12 @@ impl ScopeSymbols {
     pub fn extend(&mut self, other: &ScopeSymbols) {
         self.package_scopes
             .extend(other.package_scopes.iter().cloned());
-        for request in &other.inline_randomizations {
-            if !self
-                .inline_randomizations
-                .iter()
-                .any(|known| known.key == request.key)
-            {
-                self.inline_randomizations.push(request.clone());
-            }
-        }
-        for class in &other.classes {
-            if !self.classes.iter().any(|known| known.name == class.name) {
-                self.classes.push(class.clone());
-            }
-        }
+        extend_unnamed(
+            &mut self.inline_randomizations,
+            &other.inline_randomizations,
+            |request| &request.key,
+        );
+        extend_unnamed(&mut self.classes, &other.classes, |class| &*class.name);
         extend_missing(&mut self.class_member_types, &other.class_member_types);
         for (name, value) in &other.const_env {
             self.const_env.entry(name.clone()).or_insert(*value);
@@ -155,15 +234,9 @@ impl ScopeSymbols {
                 .entry(name.clone())
                 .or_insert_with(|| value.clone());
         }
-        for parameter in &other.parameters {
-            if !self
-                .parameters
-                .iter()
-                .any(|known| known.name == parameter.name)
-            {
-                self.parameters.push(parameter.clone());
-            }
-        }
+        extend_unnamed(&mut self.parameters, &other.parameters, |parameter| {
+            &*parameter.name
+        });
         extend_missing(&mut self.interface_members, &other.interface_members);
         extend_missing(&mut self.interface_types, &other.interface_types);
         extend_missing(&mut self.interface_arrays, &other.interface_arrays);
@@ -171,6 +244,8 @@ impl ScopeSymbols {
         self.interface_declarations
             .extend(other.interface_declarations.iter().copied());
         extend_missing(&mut self.type_aliases, &other.type_aliases);
+        self.type_declarations
+            .extend(other.type_declarations.iter().cloned());
         extend_missing(
             &mut self.enum_constants.numbers,
             &other.enum_constants.numbers,
@@ -181,6 +256,7 @@ impl ScopeSymbols {
             &mut self.enum_constants.declarations,
             &other.enum_constants.declarations,
         );
+        extend_missing(&mut self.constant_types, &other.constant_types);
         extend_missing(&mut self.functions, &other.functions);
         extend_missing(
             &mut self.function_return_types,
@@ -190,56 +266,32 @@ impl ScopeSymbols {
             .extend_missing(&other.constant_functions);
         extend_missing(&mut self.subroutine_params, &other.subroutine_params);
         extend_missing(&mut self.subroutine_shapes, &other.subroutine_shapes);
-        for subroutine in &other.subroutines {
-            if !self
-                .subroutines
+        extend_unnamed(&mut self.subroutines, &other.subroutines, |subroutine| {
+            &*subroutine.name
+        });
+        extend_unnamed(&mut self.locals, &other.locals, |local| &*local.name);
+        extend_unnamed(&mut self.state_signals, &other.state_signals, |signal| {
+            &*signal.name
+        });
+        let added = extend_unnamed(&mut self.signals, &other.signals, |signal| &*signal.name);
+        if added > 0 {
+            let added = self.signals[self.signals.len() - added..]
                 .iter()
-                .any(|known| known.name == subroutine.name)
-            {
-                self.subroutines.push(subroutine.clone());
-            }
-        }
-        for local in &other.locals {
-            if !self.locals.iter().any(|known| known.name == local.name) {
-                self.locals.push(local.clone());
-            }
-        }
-        for signal in &other.state_signals {
-            if !self
-                .state_signals
-                .iter()
-                .any(|known| known.name == signal.name)
-            {
-                self.state_signals.push(signal.clone());
-            }
-        }
-        let mut added = Vec::new();
-        for signal in &other.signals {
-            if !self.signals.iter().any(|known| known.name == signal.name) {
-                self.signals.push(signal.clone());
-                added.push(signal.name.as_str());
-            }
-        }
-        for process in &other.initial_processes {
-            if added.iter().any(|name| initializes(process, name))
-                && !self.initial_processes.contains(process)
-            {
-                self.initial_processes.push(process.clone());
+                .map(|signal| signal.name.as_str())
+                .collect::<HashSet<_>>();
+            for process in &other.initial_processes {
+                if initializes_any(process, &added) && !self.initial_processes.contains(process) {
+                    self.initial_processes.push(process.clone());
+                }
             }
         }
         self.ports.extend(other.ports.iter().cloned());
         self.comb_processes
             .extend(other.comb_processes.iter().cloned());
         self.ff_processes.extend(other.ff_processes.iter().cloned());
-        for import in &other.dpi_imports {
-            if !self
-                .dpi_imports
-                .iter()
-                .any(|known| known.name() == import.name())
-            {
-                self.dpi_imports.push(import.clone());
-            }
-        }
+        extend_unnamed(&mut self.dpi_imports, &other.dpi_imports, |import| {
+            import.name()
+        });
     }
 
     /// Make the symbol `target` visible as `name` too, as an import makes a
@@ -273,10 +325,14 @@ impl ScopeSymbols {
         self.const_env.extend(markers);
         alias_entry(&mut self.parameter_values, name, target);
         alias_entry(&mut self.type_aliases, name, target);
+        if self.type_declarations.contains(target) {
+            self.type_declarations.insert(name.to_string());
+        }
         alias_entry(&mut self.enum_constants.numbers, name, target);
         alias_entry(&mut self.enum_constants.exprs, name, target);
         alias_entry(&mut self.enum_constants.types, name, target);
         alias_entry(&mut self.enum_constants.declarations, name, target);
+        alias_entry(&mut self.constant_types, name, target);
         alias_entry(&mut self.functions, name, target);
         alias_entry(&mut self.function_return_types, name, target);
         self.constant_functions.alias(name, target);
@@ -343,12 +399,14 @@ impl ScopeSymbols {
         self.parameter_values.retain(|name, _| kept(name));
         self.parameters.retain(|parameter| kept(&parameter.name));
         self.type_aliases.retain(|name, _| kept(name));
+        self.type_declarations.retain(|name| kept(name));
         self.enum_constants.numbers.retain(|name, _| kept(name));
         self.enum_constants.exprs.retain(|name, _| kept(name));
         self.enum_constants.types.retain(|name, _| kept(name));
         self.enum_constants
             .declarations
             .retain(|name, _| kept(name));
+        self.constant_types.retain(|name, _| kept(name));
         self.functions.retain(|name, _| kept(name));
         self.function_return_types.retain(|name, _| kept(name));
         self.constant_functions
@@ -401,7 +459,11 @@ impl ScopeSymbols {
             })
             .collect();
         ScopeSymbols {
+            // The symbols of a package, renamed for the scopes that use it,
+            // do not carry a compilation unit.
+            unit: None,
             package_scopes: self.package_scopes.clone(),
+            design_subroutines: self.design_subroutines.clone(),
             // Classes have their qualified names already.
             classes: self.classes.clone(),
             class_member_types: self.class_member_types.clone(),
@@ -442,6 +504,7 @@ impl ScopeSymbols {
                 .iter()
                 .map(|(name, r#type)| (key(name), rename.r#type(r#type.clone())))
                 .collect(),
+            type_declarations: self.type_declarations.iter().map(key).collect(),
             enum_constants: EnumMemberConstants {
                 declarations: self
                     .enum_constants
@@ -468,6 +531,11 @@ impl ScopeSymbols {
                     .map(|(name, value)| (key(name), *value))
                     .collect(),
             },
+            constant_types: self
+                .constant_types
+                .iter()
+                .map(|(name, ty)| (key(name), ty.clone()))
+                .collect(),
             functions: self
                 .functions
                 .iter()
@@ -494,24 +562,28 @@ impl ScopeSymbols {
                 .map(|(name, shapes)| {
                     (
                         key(name),
-                        shapes
-                            .iter()
-                            .map(|shape| rename.dimensions(shape.clone()))
-                            .collect(),
+                        Arc::new(
+                            shapes
+                                .iter()
+                                .map(|shape| rename.dimensions(shape.clone()))
+                                .collect(),
+                        ),
                     )
                 })
                 .collect(),
             subroutines: self
                 .subroutines
                 .iter()
-                .map(|subroutine| rename.subroutine(subroutine.clone()))
+                .map(|subroutine| Arc::new(rename.subroutine((**subroutine).clone())))
                 .collect(),
             locals: self
                 .locals
                 .iter()
-                .map(|local| LocalVariable {
-                    name: rename.name(&local.name),
-                    ..local.clone()
+                .map(|local| {
+                    Arc::new(LocalVariable {
+                        name: rename.name(&local.name),
+                        ..(**local).clone()
+                    })
                 })
                 .collect(),
             dpi_imports: self
@@ -530,6 +602,7 @@ impl ScopeSymbols {
                         port.is_net,
                     )
                     .with_unresolved_net(port.unresolved_net)
+                    .with_net_resolution(port.net_resolution)
                     .with_default(port.default.clone().map(|value| rename.const_expr(value)))
                 })
                 .collect(),
@@ -592,6 +665,8 @@ impl ScopeSymbols {
                 .collect(),
             aliases: HashMap::default(),
             generate_imports: HashMap::default(),
+            block_imports: HashMap::default(),
+            block_calls: HashMap::default(),
         }
     }
 }
@@ -607,6 +682,39 @@ fn stmt_initializes(stmt: &Stmt, name: &str) -> bool {
         Stmt::AssignConcat { parts, .. } => parts.iter().any(|part| part.name() == name),
         _ => false,
     }
+}
+
+/// Whether `process` [`initializes`] one of the signals `names`.
+fn initializes_any(process: &InitialProcess, names: &HashSet<&str>) -> bool {
+    !process.is_final()
+        && process.body.iter().any(|stmt| match stmt {
+            Stmt::Assign { lhs, .. } => names.contains(lhs.name()),
+            Stmt::AssignConcat { parts, .. } => {
+                parts.iter().any(|part| names.contains(part.name()))
+            }
+            _ => false,
+        })
+}
+
+/// Append the items of `other` that `known` does not name yet, each name
+/// once, and tell how many were appended.
+fn extend_unnamed<T: Clone, K: Eq + std::hash::Hash + ?Sized>(
+    known: &mut Vec<T>,
+    other: &[T],
+    name: impl for<'a> Fn(&'a T) -> &'a K,
+) -> usize {
+    if other.is_empty() {
+        return 0;
+    }
+    let mut names = known.iter().map(&name).collect::<HashSet<_>>();
+    let missing = other
+        .iter()
+        .filter(|item| names.insert(name(item)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let added = missing.len();
+    known.extend(missing);
+    added
 }
 
 fn extend_missing<V: Clone + 'static, M: Table<V>>(map: &mut M, other: &M) {
@@ -642,6 +750,21 @@ impl<V: 'static> Table<V> for HashMap<String, V> {
         self.get(name)
     }
     fn put(&mut self, name: String, value: V) {
+        self.insert(name, value);
+    }
+}
+
+impl Table<Type> for TypeAliases {
+    fn entries(&self) -> impl Iterator<Item = (&String, &Type)> {
+        self.iter()
+    }
+    fn has(&self, name: &str) -> bool {
+        self.contains_key(name)
+    }
+    fn find(&self, name: &str) -> Option<&Type> {
+        self.get(name)
+    }
+    fn put(&mut self, name: String, value: Type) {
         self.insert(name, value);
     }
 }
@@ -850,6 +973,7 @@ impl Renamer<'_> {
                 signed,
                 array_slice_width,
                 array_slice_reversed,
+                window,
                 is_2state,
             } => LValue::Select {
                 name: self.name(&name),
@@ -858,6 +982,7 @@ impl Renamer<'_> {
                 signed,
                 array_slice_width: array_slice_width.map(|width| self.const_expr(width)),
                 array_slice_reversed,
+                window,
                 is_2state,
             },
         }
@@ -894,22 +1019,36 @@ impl Renamer<'_> {
     }
 
     pub fn r#type(&self, mut r#type: Type) -> Type {
-        r#type.packed_ranges = r#type
-            .packed_ranges
+        // The names it renames denote what they did, so the type keeps its
+        // semantic type.
+        let shape = r#type.shape_keeping_binding();
+        shape.packed_ranges = std::mem::take(&mut shape.packed_ranges)
             .into_iter()
             .map(|range| self.packed_range(range))
             .collect();
-        for range in &mut r#type.unpacked_ranges {
+        for range in &mut shape.unpacked_ranges {
             range.left = self.const_expr(range.left.clone());
             range.right = self.const_expr(range.right.clone());
             range.size = range.size.take().map(|size| self.const_expr(size));
         }
-        r#type.members = r#type
-            .members
+        shape.members = std::mem::take(&mut shape.members)
             .into_iter()
-            .map(|member| member.with_type(|r#type| self.r#type(r#type)))
+            .map(|member| member.with_type(|ty| self.r#type(ty)))
             .collect();
+        shape.container = shape
+            .container
+            .take()
+            .map(|container| self.container(&container));
         r#type
+    }
+
+    /// Container type `container` with the bounds of its element and index
+    /// types renamed; its layout holds their evaluated widths already.
+    pub(super) fn container(&self, container: &ContainerType) -> Arc<ContainerType> {
+        let mut container = container.clone();
+        container.key = container.key.map(|key| self.r#type(key));
+        container.element = self.r#type(container.element);
+        Arc::new(container)
     }
 
     pub fn dimensions(&self, dimensions: VariableDimensions) -> VariableDimensions {
@@ -977,5 +1116,21 @@ impl Renamer<'_> {
                 .collect(),
             ..subroutine
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extend_unnamed_appends_each_new_name_once() {
+        // As a scan of the known items for each new one appends them: in
+        // their order, the first of each name, and none that is known.
+        let mut known = vec![("a", 1), ("b", 2)];
+        let other = [("b", 3), ("c", 4), ("a", 5), ("c", 6), ("d", 7)];
+        assert_eq!(extend_unnamed(&mut known, &other, |item| item.0), 2);
+        assert_eq!(known, [("a", 1), ("b", 2), ("c", 4), ("d", 7)]);
+        assert_eq!(extend_unnamed(&mut known, &[], |item| item.0), 0);
     }
 }

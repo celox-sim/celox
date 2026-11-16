@@ -99,9 +99,10 @@ other compiler and simulator implementations can reuse the Veryl source,
 stimulus, and assertions. Prefer the shared suite for implementation-independent
 language behavior and portable regressions. Keep tests of Celox-specific APIs,
 IR, diagnostics, tracing, performance, and optimization settings in their
-owning crate. Wire shared cases into Celox's backend test harness, preserve
-relevant backend exclusions, and validate the new cases with the available
-external simulator adapters as well.
+owning crate. A shared case runs on Celox's backends through
+`scripts/run-vtest.py` without a Rust test registering it; record a backend
+the case does not apply to or cannot run yet in `crates/celox/vtest.toml`, and
+validate the new cases with the available external simulator adapters as well.
 
 ## Pull request titles
 

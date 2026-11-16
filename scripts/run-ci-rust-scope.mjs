@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { intersectTestFilters } from "./ci-backend-tests.mjs";
-import { runtimeCasesFeature, testProfile } from "./run-vtest.mjs";
+import { CELOX_CLI_UNIT_TARGETS } from "./ci-rust-scope.mjs";
+import { runtimeCasesFeature, testProfile } from "./rust-test-build.mjs";
 import { clearCurrentReport, saveCurrentReport } from "./ci-rust-reports.mjs";
 
 // Keep target flags local to their packages. Cargo applies --test to every -p.
@@ -23,7 +24,10 @@ export function cargoCommands(mode, builds, filter, backendFilter = "all()") {
     const enabled = mode === "test" && packages.includes("celox")
       ? [...new Set([...features, runtimeCasesFeature])] : features;
     if (enabled.length) args.push("--features", enabled.join(","));
-    for (const target of targets) args.push("--test", target);
+    for (const target of targets) {
+      const unit = packages.includes("celox") ? CELOX_CLI_UNIT_TARGETS[target] : undefined;
+      args.push(...(unit ? unit.cargo : ["--test", target]));
+    }
     if (mode === "lint") {
       if (!targets.length) args.push("--all-targets");
       args.push("--no-deps");
@@ -39,10 +43,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.argv[2], JSON.parse(process.env.BUILDS), process.env.FILTER,
     process.env.CELOX_BACKEND_FILTER || "all()",
   )) {
-    if (process.argv[2] === "test"
-      && args.some((arg, index) => arg === "celox" && args[index - 1] === "-p")
-      && !process.env.CELOX_VTEST_RUNNER)
-      throw new Error("Celox CI tests require the prepared vtest executor");
     console.log("cargo", ...args);
     if (reportDirectory) clearCurrentReport();
     const result = spawnSync("cargo", args, { stdio: "inherit" });

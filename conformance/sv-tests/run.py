@@ -127,8 +127,7 @@ def run_case(root, driver, out_dir, test, state_mode, case_timeout=None):
         "test": test, "state_mode": state_mode, "result": verdict,
         "mode": meta.get("mode", ""), "tags": meta.get("tags", "") if meta else case_metadata(root / "tests" / test).get("tags", ""),
         "group": (meta.get("results_group") or "main") if meta else case_group(root / "tests" / test),
-        "input_issue": (input_issues.get(test, {}).get("reason", "")
-                        if meta.get("rc") == "1" and "include directory is unavailable:" in log else ""),
+        "input_issue": input_issue(input_issues.get(test), meta.get("rc"), log),
         "rc": meta.get("rc", ""), "tool_success": meta.get("tool_success", ""),
         "log": str(log_path),
     }, log)
@@ -253,6 +252,24 @@ def collect_cases(root, driver, out_dir, tests, modes, jobs, case_timeout=None):
     return sorted(rows, key=lambda row: (row["test"], row["state_mode"]))
 
 
+# What the driver reports when the files of a case declare no module to
+# elaborate (crates/celox/examples/sv_tests.rs).
+NO_MODULE = "elaboration requires a module root; none found in the parsed sources"
+
+
+def input_issue(issue, rc, log):
+    """The reason of `issue`, a reviewed upstream input defect of a case (see
+    input-issues.json), when the case's run failed of it: an include directory
+    it names is missing, or its files declare no module."""
+    if not issue or rc != "1":
+        return ""
+    if ("missing_include" in issue or "missing_includes" in issue) and "include directory is unavailable:" in log:
+        return issue["reason"]
+    if issue.get("no_module") and NO_MODULE in log:
+        return issue["reason"]
+    return ""
+
+
 def case_metadata(path):
     """Read reporting annotations only; tools/runner still owns the verdict."""
     metadata = {}
@@ -265,6 +282,14 @@ def case_metadata(path):
 
 def case_group(path):
     return case_metadata(path).get("results_group") or "main"
+
+
+def library_cases(root, tests):
+    """The tests that tools/runner compiles with a conf/runners/libs.json
+    library (UVM), which it attaches when the library's name is a tag."""
+    libraries = set(json.loads((root / "conf/runners/libs.json").read_text()))
+    return {test for test in tests
+            if libraries & set(case_metadata(root / "tests" / test).get("tags", "").split())}
 
 
 def main(argv=None):
@@ -283,6 +308,13 @@ def main(argv=None):
                              "case's own :timeout: (default: the case's)")
     parser.add_argument("--shard", type=shard,
                         help="INDEX/COUNT: run and compare only that shard of the tests and expectations")
+    libraries = parser.add_mutually_exclusive_group()
+    libraries.add_argument("--exclude-library-cases", action="store_true",
+                           help="leave out the tests compiled with a libs.json library (UVM); "
+                                "their expectations are neither compared nor replaced")
+    libraries.add_argument("--only-library-cases", action="store_true",
+                           help="run only the tests compiled with a libs.json library (UVM); "
+                                "the expectations of the others are neither compared nor replaced")
     options = parser.parse_args(argv)
     if options.group and options.expected:
         parser.error("--group cannot be combined with --expected")
@@ -310,8 +342,16 @@ def main(argv=None):
         if not tests:
             raise ValueError("sv-tests checkout contains no .sv tests")
         # Expected tests that the corpus lost belong to a shard too, so that
-        # exactly one shard reports them missing.
-        members = shard_members(set(tests) | {test for test, _ in expected}, options.shard)
+        # exactly one shard reports them missing; a run of only the library
+        # cases leaves them to the others, as it cannot read their tags.
+        known = set(tests) | {test for test, _ in expected}
+        if options.exclude_library_cases:
+            excluded = library_cases(root, tests)
+        elif options.only_library_cases:
+            excluded = known - library_cases(root, tests)
+        else:
+            excluded = set()
+        members = shard_members(known - excluded, options.shard)
         tests = [test for test in tests if test in members]
         expected = {key: value for key, value in expected.items() if key[0] in members}
         requested = len(tests) * len(modes)

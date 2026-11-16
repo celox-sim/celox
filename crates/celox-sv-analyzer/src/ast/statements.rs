@@ -175,6 +175,20 @@ pub(super) fn assignment_op_expr(
     rhs: Expr,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
+    let left = expr_from_lvalue(tree, &session.types, lhs, packed_dimensions);
+    assignment_op_value(tree, session, left, op, rhs, packed_dimensions)
+}
+
+/// The value `left op rhs` that the assignment operator `op` (`+=`, ...)
+/// writes, `left` being the value of its target (IEEE 1800-2023 11.4.1).
+pub(super) fn assignment_op_value(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    left: Expr,
+    op: &str,
+    rhs: Expr,
+    packed_dimensions: &PackedDimensions,
+) -> Converted<Expr> {
     let operator = || unsupported(format!("assignment operator `{op}`"));
     let op = match op.strip_suffix('=').ok_or_else(operator)? {
         "+" => BinaryOp::Add,
@@ -191,7 +205,6 @@ pub(super) fn assignment_op_expr(
         "^" => BinaryOp::BitXor,
         _ => return Err(operator()),
     };
-    let left = expr_from_lvalue(tree, lhs, packed_dimensions);
     if (expression_binding::real_value(&left, packed_dimensions)
         || expression_binding::real_value(&rhs, packed_dimensions))
         && !matches!(
@@ -217,6 +230,7 @@ pub(super) fn assignment_op_expr(
 
 pub(super) fn expr_from_lvalue(
     tree: &AnalysisContext<'_>,
+    table: &semantic_types::TyTable,
     lhs: &LValue,
     packed_dimensions: &PackedDimensions,
 ) -> Expr {
@@ -227,7 +241,7 @@ pub(super) fn expr_from_lvalue(
         LValue::Object { place, guards, .. } => {
             let (select, scope) = variable_view(lhs, packed_dimensions);
             let load = place.load();
-            let value = expr_from_selection(tree, load.clone(), select, &scope);
+            let value = expr_from_selection(tree, table, load.clone(), select, &scope);
             if guards.is_empty() {
                 return value;
             }
@@ -252,6 +266,7 @@ pub(super) fn expr_from_lvalue(
         }
         _ => expr_from_selection(
             tree,
+            table,
             Expr::Ident(lhs.name().to_owned()),
             lhs,
             packed_dimensions,
@@ -264,30 +279,57 @@ pub(super) fn expr_from_lvalue(
 /// `packed_dimensions` holds under the variable's name.
 pub(in crate::ast) fn expr_from_selection(
     tree: &AnalysisContext<'_>,
+    table: &semantic_types::TyTable,
     variable: Expr,
     lhs: &LValue,
     packed_dimensions: &PackedDimensions,
 ) -> Expr {
     let functions = &tree.functions;
-    if let Some(value) = selects::invalid_unpacked_read(tree, lhs, packed_dimensions) {
+    if let Some(value) = selects::invalid_unpacked_read(tree, table, lhs, packed_dimensions) {
         return value;
     }
     let (base, array_slice_width, array_slice_reversed, signed) = match lhs {
         LValue::Ident(_) => return variable,
-        LValue::Object { .. } => return expr_from_lvalue(tree, lhs, packed_dimensions),
+        LValue::Object { .. } => return expr_from_lvalue(tree, table, lhs, packed_dimensions),
         LValue::Select {
             msb,
             lsb,
             signed,
             array_slice_width,
             array_slice_reversed,
+            window,
             ..
         } => (
-            Expr::Select {
-                expr: Box::new(variable),
-                msb: msb.clone(),
-                lsb: lsb.clone(),
-                signed: *signed,
+            match window {
+                // A run-time select of a structure member is a select of the
+                // member's value, at positions counted from its lowest bit:
+                // the bits it selects outside the member read X, as those
+                // outside any vector do (IEEE 1800-2023 11.5.1).
+                Some(window) => {
+                    let literal = |value: u32| ConstExpr::Literal(value.to_string());
+                    let within = |position: &ConstExpr| ConstExpr::Binary {
+                        left: Box::new(position.clone()),
+                        op: BinaryOp::Sub,
+                        right: Box::new(literal(window.lsb)),
+                    };
+                    Expr::Select {
+                        expr: Box::new(Expr::Select {
+                            expr: Box::new(variable),
+                            msb: literal(window.msb),
+                            lsb: literal(window.lsb),
+                            signed: false,
+                        }),
+                        msb: within(msb),
+                        lsb: within(lsb),
+                        signed: *signed,
+                    }
+                }
+                None => Expr::Select {
+                    expr: Box::new(variable),
+                    msb: msb.clone(),
+                    lsb: lsb.clone(),
+                    signed: *signed,
+                },
             },
             array_slice_width,
             *array_slice_reversed,

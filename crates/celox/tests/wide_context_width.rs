@@ -1,44 +1,5 @@
 use celox::BigUint;
 
-#[path = "test_utils/mod.rs"]
-#[macro_use]
-mod test_utils;
-
-all_backends! {
-
-    fn test_wide_context_addition_carry(sim) {
-        @case "wide_context_width::test_wide_context_addition_carry";
-    }
-
-    fn test_wide_context_subtraction_underflow(sim) {
-        @case "wide_context_width::test_wide_context_subtraction_underflow";
-    }
-
-    fn test_wide_context_shift_left(sim) {
-        @case "wide_context_width::test_wide_context_shift_left";
-    }
-
-    fn test_wide_context_constant_folding(sim) {
-        @case "wide_context_width::test_wide_context_constant_folding";
-    }
-
-    fn test_wide_runtime_shift_width_behavior(sim) {
-        @case "wide_context_width::test_wide_runtime_shift_width_behavior";
-    }
-
-    fn test_wide_context_constant_folding_128bit(sim) {
-        @case "wide_context_width::test_wide_context_constant_folding_128bit";
-    }
-
-    fn test_wide_context_multiplication_boundary(sim) {
-        @case "wide_context_width::test_wide_context_multiplication_boundary";
-    }
-
-    fn test_wide_context_addition_mixed_boundary(sim) {
-        @case "wide_context_width::test_wide_context_addition_mixed_boundary";
-    }
-}
-
 #[test]
 fn test_wide_context_nested_propagation() {
     // (120-bit + 120-bit) * 2'd2 in 122-bit context

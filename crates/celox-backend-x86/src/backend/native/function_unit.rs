@@ -46,32 +46,76 @@ pub(crate) fn is_frame_slot(addr: &RegionedAbsoluteAddr) -> bool {
     addr.instance_id == FRAME_SLOT_INSTANCE
 }
 
+/// The state offset that stands for the first byte of a function's frame
+/// in `layout`: past the state, so that no access of the state, which
+/// reaches at most MAX_ACCESS_OVERREACH bytes past it, starts in the
+/// window, and keeping the alignment the slots have relative to a 64-byte
+/// boundary of the frame.
+fn window_base(layout: &MemoryLayout) -> Result<usize, String> {
+    layout
+        .merged_total_size
+        .checked_add(layout.triggered_bits_total_size)
+        .ok_or("the state size overflows")?
+        .checked_add(MAX_ACCESS_OVERREACH)
+        .map(|end| end.next_multiple_of(64))
+        .ok_or_else(|| "the frame window overflows".to_string())
+}
+
+/// The state object that stands for slot `index` of a frame.
+fn slot_object(index: usize) -> Result<RegionedAbsoluteAddr, String> {
+    Ok(RegionedAbsoluteAddr {
+        region: STABLE_REGION,
+        instance_id: FRAME_SLOT_INSTANCE,
+        var_id: celox_design::StateObjectId(
+            u32::try_from(index).map_err(|_| "too many frame slots")?,
+        ),
+    })
+}
+
+/// Place the state objects that stand for the slots of `frame` in its
+/// window of `layout`, for compiling the function whose frame it is, and
+/// return them for [`remove_frame_slots`]. The function's compilation only
+/// looks objects up in the layout, so one layout serves every function in
+/// turn: each places its slots, which the next one's replace.
+pub fn place_frame_slots(
+    layout: &mut MemoryLayout,
+    frame: &FrameLayout<RegionedAbsoluteAddr>,
+) -> Result<Vec<celox_design::StateAddr>, String> {
+    let base = window_base(layout)?;
+    let mut placed = Vec::with_capacity(frame.slots.len());
+    for (index, slot) in frame.slots.iter().enumerate() {
+        let absolute = slot_object(index)?.absolute_addr();
+        if layout.offsets.contains_key(&absolute) {
+            remove_frame_slots(layout, &placed);
+            return Err(format!("frame slot object {absolute} is a state object"));
+        }
+        layout.offsets.insert(absolute, base + slot.offset);
+        layout.widths.insert(absolute, slot.width);
+        layout.is_4states.insert(absolute, slot.four_state);
+        placed.push(absolute);
+    }
+    Ok(placed)
+}
+
+/// Remove the frame slot objects [`place_frame_slots`] placed.
+pub fn remove_frame_slots(layout: &mut MemoryLayout, placed: &[celox_design::StateAddr]) {
+    for absolute in placed {
+        layout.offsets.remove(absolute);
+        layout.widths.remove(absolute);
+        layout.is_4states.remove(absolute);
+    }
+}
+
 /// The unit of a function whose frame is `frame`, with each slot address
-/// replaced by the state object that stands for it, and the layout that
-/// places those objects in the frame window.
+/// replaced by the state object that stands for it, and the window that
+/// those objects lie in. `layout` holds the objects
+/// ([`place_frame_slots`]).
 pub(crate) fn prepare(
     unit: &ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &MemoryLayout,
     frame: &FrameLayout<RegionedAbsoluteAddr>,
-) -> Result<
-    (
-        ExecutionUnit<RegionedAbsoluteAddr>,
-        MemoryLayout,
-        FrameWindow,
-    ),
-    String,
-> {
-    let state_end = layout
-        .merged_total_size
-        .checked_add(layout.triggered_bits_total_size)
-        .ok_or("the state size overflows")?;
-    // Accesses of the state reach at most MAX_ACCESS_OVERREACH bytes past
-    // it, so none of them starts in the window. The base keeps the alignment
-    // the slots have relative to a 64-byte boundary of the frame.
-    let base = state_end
-        .checked_add(MAX_ACCESS_OVERREACH)
-        .map(|end| end.next_multiple_of(64))
-        .ok_or("the frame window overflows")?;
+) -> Result<(ExecutionUnit<RegionedAbsoluteAddr>, FrameWindow), String> {
+    let base = window_base(layout)?;
     let size = frame
         .size
         .checked_add(MAX_ACCESS_OVERREACH)
@@ -84,23 +128,18 @@ pub(crate) fn prepare(
         .and_then(|end| i32::try_from(end).ok())
         .ok_or("the frame window exceeds i32")?;
 
-    let mut layout = layout.clone();
     let mut objects = HashMap::default();
     for (index, slot) in frame.slots.iter().enumerate() {
-        let object = RegionedAbsoluteAddr {
-            region: STABLE_REGION,
-            instance_id: FRAME_SLOT_INSTANCE,
-            var_id: celox_design::StateObjectId(
-                u32::try_from(index).map_err(|_| "too many frame slots")?,
-            ),
-        };
+        let object = slot_object(index)?;
         let absolute = object.absolute_addr();
-        if layout.offsets.contains_key(&absolute) {
-            return Err(format!("frame slot object {absolute} is a state object"));
+        if layout.offsets.get(&absolute) != Some(&(base + slot.offset))
+            || layout.widths.get(&absolute) != Some(&slot.width)
+            || layout.is_4states.get(&absolute) != Some(&slot.four_state)
+        {
+            return Err(format!(
+                "frame slot object {absolute} is not placed in the frame window"
+            ));
         }
-        layout.offsets.insert(absolute, base + slot.offset);
-        layout.widths.insert(absolute, slot.width);
-        layout.is_4states.insert(absolute, slot.four_state);
         objects.insert(slot.addr, object);
     }
     let map = |addr: &RegionedAbsoluteAddr| {
@@ -135,7 +174,7 @@ pub(crate) fn prepare(
             .collect(),
         register_map: unit.register_map.clone(),
     };
-    Ok((unit, layout, window))
+    Ok((unit, window))
 }
 
 /// Whether running `unit` may raise a runtime event or a comb capture, which

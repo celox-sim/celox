@@ -361,7 +361,6 @@ fn tiered_promotion_with_lane_partitioned_kernels() {
 }
 
 /// Wildcard comparison results must remain X when the native tier takes over.
-#[cfg(feature = "systemverilog")]
 #[test]
 fn tiered_wildcard_unknown_stays_x_across_promotion() {
     let code = r#"

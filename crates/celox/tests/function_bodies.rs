@@ -3,64 +3,6 @@
 #[allow(unused_macros)]
 mod test_utils;
 
-// The Veryl reference simulator mis-evaluates an output bound to a
-// concatenation and does not model X for a missing return value.
-all_backends! {
-
-fn test_conditional_function_static_partial_not_four_state(sim) {
-    @case "function_bodies::test_conditional_function_static_partial_not_four_state";
-}
-
-
-fn test_conditional_function_static_partial_not(sim) {
-    @case "function_bodies::test_conditional_function_static_partial_not";
-}
-
-
-fn test_dynamic_index_write_to_function_local(sim) {
-    @case "function_bodies::test_dynamic_index_write_to_function_local";
-}
-
-fn test_out_of_range_dynamic_write_to_function_local_is_ignored(sim) {
-    @case "function_bodies::test_out_of_range_dynamic_write_to_function_local_is_ignored";
-}
-
-fn test_concatenated_destination_in_function_body(sim) {
-    @case "function_bodies::test_concatenated_destination_in_function_body";
-}
-
-fn test_nested_output_to_concat_and_dynamic_local(sim) {
-    // Veryl 0.22.0's simulator ignores concatenation offsets and dynamic selects when copying
-    // an output out.
-    @ignore_on(veryl);
-    @case "function_bodies::test_nested_output_to_concat_and_dynamic_local";
-}
-
-fn test_path_without_return_yields_unknown(sim) {
-    // Veryl 0.22.0's simulator keeps the previous call's return value on a path without
-    // `return` instead of X.
-    @ignore_on(veryl);
-    @case "function_bodies::test_path_without_return_yields_unknown";
-}
-
-fn test_runtime_select_of_expression_bound_formal(sim) {
-    @case "function_bodies::test_runtime_select_of_expression_bound_formal";
-}
-
-fn test_runtime_bounded_loop_in_function(sim) {
-    @case "function_bodies::test_runtime_bounded_loop_in_function";
-}
-
-fn test_runtime_effects_nested_in_function_statements(sim) {
-    @case "function_bodies::test_runtime_effects_nested_in_function_statements";
-}
-
-fn test_runtime_bounded_loop_function_reentry(sim) {
-    @case "function_bodies::test_runtime_bounded_loop_function_reentry";
-}
-
-}
-
 // The analyzer unrolls constant-bound loops by cloning the body; each copy's
 // runtime effect must observe that iteration's state.
 #[test]

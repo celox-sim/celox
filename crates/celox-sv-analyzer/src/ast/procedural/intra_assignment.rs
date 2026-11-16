@@ -15,30 +15,44 @@ impl BodyBuilder<'_, '_, '_> {
         if operator != "=" && !nonblocking {
             return Err(unsupported("compound assignment with a timing control"));
         }
-        self.allow_timing("intra-assignment timing control")?;
         let control = control.ok_or_else(|| unsupported("intra-assignment cycle control"))?;
+        // A nonblocking assignment with an intra-assignment delay evaluates
+        // its right-hand side now and schedules the update for later; it
+        // does not suspend, so an `always` body may contain it (IEEE
+        // 1800-2023 9.4.5, 10.4.2).
+        let delayed = nonblocking
+            && repeat_count.is_none()
+            && matches!(
+                self.syntax().declarations().timing_control(control).kind,
+                celox_sv_syntax::TimingControlKind::Delay { .. }
+            );
+        if !delayed {
+            self.allow_timing("intra-assignment timing control")?;
+        }
         if self.implicit_event_control(control)? {
             return Err(unsupported("implicit intra-assignment event control"));
         }
         let mut output = self.effects(&[right])?;
         let target_effects = self.effects(&[left])?;
-        let shape = dimensions::operand_shape(left, self.tree, self.session, &self.dims)?
+        let shape = dimensions::operand_shape(left, &self.tree, self.session, &self.dims)?
             .ok_or_else(|| unsupported("intra-assignment target type"))?;
         if type_names::declared_type(&shape)
             .is_some_and(|ty| matches!(ty.kind, TypeKind::Process | TypeKind::Event))
-            || shape.real
-            || shape.string
-            || shape.class.is_some()
-            || shape.container.is_some()
-            || shape.unpacked_struct.is_some()
-            || !shape.unpacked.is_empty()
-            || shape.chandle
-            || shape.virtual_interface.is_some()
+            || !shape
+                .type_id(
+                    &mut self.session.types,
+                    &self.tree.functions,
+                    &self.dims.const_env,
+                )
+                .is_some_and(|ty| self.session.types.is_integral(ty))
         {
             return Err(unsupported("nonintegral intra-assignment target"));
         }
         if nonblocking {
-            let delay = self.native_timing_control(control)?;
+            self.delayed_nonblocking = delayed;
+            let delay = self.native_timing_control(control);
+            self.delayed_nonblocking = false;
+            let delay = delay?;
             if repeat_count.is_some() || !matches!(delay, Stmt::Delay { .. }) {
                 return Err(unsupported("nonblocking intra-assignment event control"));
             }
@@ -77,24 +91,19 @@ impl BodyBuilder<'_, '_, '_> {
             rhs,
             nonblocking: false,
         });
-        let waits = if let Some(stmts) = self.virtual_event_control(control)? {
-            stmts
-        } else {
-            vec![self.native_timing_control(control)?]
-        };
+        let waits = self.timing_control_statements(control)?;
         if let Some(count) = repeat_count {
             output.extend(self.effects(&[count])?);
             let count_shape =
-                dimensions::operand_shape(count, self.tree, self.session, &self.dims)?
+                dimensions::operand_shape(count, &self.tree, self.session, &self.dims)?
                     .ok_or_else(|| unsupported("intra-assignment repeat count type"))?;
-            if count_shape.real
-                || count_shape.string
-                || count_shape.class.is_some()
-                || count_shape.container.is_some()
-                || count_shape.unpacked_struct.is_some()
-                || !count_shape.unpacked.is_empty()
-                || count_shape.chandle
-                || count_shape.virtual_interface.is_some()
+            if !count_shape
+                .type_id(
+                    &mut self.session.types,
+                    &self.tree.functions,
+                    &self.dims.const_env,
+                )
+                .is_some_and(|ty| self.session.types.is_integral(ty))
                 || type_names::declared_type(&count_shape)
                     .is_some_and(|ty| matches!(ty.kind, TypeKind::Process | TypeKind::Event))
             {
@@ -123,7 +132,7 @@ impl BodyBuilder<'_, '_, '_> {
         let mut rhs = packed_structs::checked_value(
             destination_checks,
             Expr::Ident(saved_source),
-            self.tree,
+            &self.tree,
             &self.dims,
         )?;
         self.rename_expr(&mut rhs);

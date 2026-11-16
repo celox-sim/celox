@@ -22,6 +22,9 @@ module Top (
     (set a9 0x155))
   (assert_eq out 1 "en=1: out should be 1 (en zero-extended)"))
 
+; 4-state mode: exercises the mask-cast path in translate_terminator.
+; A ternary with i8->i16 boundary must compile and produce correct results
+; with X/Z propagation enabled.
 (case test_comb_mux_i8_vs_i16_four_state
   (four_state)
   (source "test.veryl" #"

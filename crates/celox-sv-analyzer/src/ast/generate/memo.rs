@@ -33,7 +33,7 @@ struct Entry {
     literal_use: LiteralUse,
     overrides: HashMap<String, ConstExpr>,
     env: ConstEnv,
-    aliases: HashMap<String, Type>,
+    aliases: TypeAliases,
     items: Vec<Item>,
     /// How many call sites the elaboration allocated.
     sites: usize,
@@ -63,7 +63,7 @@ pub(super) fn items(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
     literal_use: LiteralUse,
     elaborate: impl FnOnce(&mut Session) -> Result<Vec<Item>, AnalyzerError>,
 ) -> Result<Vec<Item>, AnalyzerError> {
@@ -195,6 +195,28 @@ mod tests {
             end
         endmodule
     "#;
+
+    #[test]
+    fn discoveries_of_a_scope_without_classes_do_not_elaborate_it() {
+        // Each generate block that queries a variable of the module
+        // discovers the declarations around it. A discovery makes the class
+        // specializations the scope names; without any class there are none
+        // to make, the scope is not elaborated for that, and the
+        // elaborations of the module do not grow with its blocks.
+        let elaborations = |blocks: usize| {
+            let source = format!(
+                "module Top (input logic reset, input logic [15:0] s);
+                    wire [15:0] w = s;
+                    {}
+                endmodule",
+                "if (1) begin wire [$bits(reset)-1:0] unused = reset; end\n".repeat(blocks)
+            );
+            let (result, count) = analyze(&source, true);
+            result.expect("the module analyzes");
+            count
+        };
+        assert_eq!(elaborations(2), elaborations(16));
+    }
 
     const INTERFACE: &str = r#"
         interface bus #(parameter int W = 4);

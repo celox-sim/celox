@@ -644,7 +644,6 @@ pub fn parse(
     Ok((program, dynamic_for_diagnostics))
 }
 
-#[cfg(feature = "systemverilog")]
 pub fn parse_sv(
     sources: &[(&str, &std::path::Path)],
     top: &str,
@@ -673,7 +672,46 @@ pub fn parse_sv(
     component_file_base: Option<std::path::PathBuf>,
     warnings: &mut Vec<celox_frontend_sv::FrontendWarning>,
     force_signals: &[String],
+    tops: &[String],
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
+    let mut analysis_options = celox_frontend_sv::AnalysisOptions {
+        recursion_report: diagnostics
+            .sv_recursion_report
+            .as_deref()
+            .map(std::sync::Arc::from),
+        force_out_of_line_calls: diagnostics.sv_force_out_of_line,
+        ..diagnostic_policy.sv_options(sv_timescale, legacy_empty_reductions)
+    };
+    // Several top-level modules are instantiated by one root that stands
+    // for `$root` (IEEE 1800-2023 23.3.1); one top is the root itself.
+    let root_name;
+    let root_source;
+    let mut joint_sources;
+    let (sources, top) = if tops.len() > 1 {
+        // A parameter override names a parameter of the one top.
+        if !parameter_overrides.is_empty() {
+            return Err(sv_analysis_error(
+                celox_frontend_sv::AnalyzerError::Unsupported(
+                    "parameter overrides of a design with several top-level modules".into(),
+                ),
+            ));
+        }
+        let names: Vec<_> = tops.iter().map(String::as_str).collect();
+        (root_name, root_source) =
+            celox_frontend_sv::top_level_root_source(sources, &names, analysis_options.clone())
+                .map_err(sv_analysis_error)?;
+        analysis_options.generated_root = true;
+        joint_sources = sources.to_vec();
+        joint_sources.push((
+            root_source.as_str(),
+            std::path::Path::new("<top-level modules>"),
+        ));
+        (joint_sources.as_slice(), root_name.as_str())
+    } else if let [top] = tops {
+        (sources, top.as_str())
+    } else {
+        (sources, top)
+    };
     let frontend_trace_options = trace_opts.frontend(diagnostics);
     let mut frontend_trace = celox_frontend_core::FrontendTrace::default();
     let mut schedule_options = crate::optimizer::parallel_schedule_options(optimize_options);
@@ -681,6 +719,11 @@ pub fn parse_sv(
         // Native code applies explicit forces to reads the SLT has already
         // folded, outside any partition's dependencies.
         schedule_options.settle = celox_frontend_core::SettlePartitionMode::Off;
+    } else {
+        // Every reader of a pure SystemVerilog design is one of its own
+        // units, which the frontend sees; a host testbench compiled after
+        // it could read any signal.
+        schedule_options.unobserved_nets = optimize_options.unobserved_nets();
     }
     let frontend_start = diagnostics.phase_timing.then(crate::timing::now);
     let scheduled =
@@ -696,14 +739,7 @@ pub fn parse_sv(
             trace.is_some().then_some(&mut frontend_trace),
             config.allow_inferred_latches,
             warnings,
-            celox_frontend_sv::AnalysisOptions {
-                recursion_report: diagnostics
-                    .sv_recursion_report
-                    .as_deref()
-                    .map(std::sync::Arc::from),
-                force_out_of_line_calls: diagnostics.sv_force_out_of_line,
-                ..diagnostic_policy.sv_options(sv_timescale, legacy_empty_reductions)
-            },
+            analysis_options,
             force_signals,
         )
         .map_err(|error| match error {
@@ -744,7 +780,6 @@ pub fn parse_sv(
 
 /// Split only SystemVerilog hierarchy separators. Escaped identifiers retain
 /// their spelling and whitespace terminator (IEEE 1800-2023 5.6.1).
-#[cfg(feature = "systemverilog")]
 fn sv_reflection_scope_segments(segments: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     for segment in segments {
@@ -769,7 +804,6 @@ fn sv_reflection_scope_segments(segments: &[String]) -> Vec<String> {
 
 /// An analyzer error as a parser error: a construct the analyzer does not
 /// support stays unsupported, and anything else is an error in the source.
-#[cfg(feature = "systemverilog")]
 pub(crate) fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
     match error.into_error() {
         error @ celox_frontend_sv::AnalyzerError::Unsupported(_) => ParserError::unsupported(
@@ -788,7 +822,6 @@ pub(crate) fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> Pars
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(feature = "systemverilog")]
 pub fn parse_mixed(
     top: &StrId,
     ir: &mut veryl_analyzer::ir::Ir,
@@ -932,6 +965,9 @@ pub fn parse_mixed(
                         context,
                         used_names,
                         names,
+                        diagnostic_policy
+                            .sv_options(sv_timescale, legacy_empty_reductions)
+                            .first_duplicate_module,
                     )?;
                     let exported = celox_frontend_veryl::external_signatures(&specialized, config)?;
                     let signature = exported.modules.values().next().cloned().ok_or_else(|| {
@@ -1123,7 +1159,6 @@ pub fn parse_with_external_hierarchy(
     Ok((program, dynamic_for_diagnostics))
 }
 
-#[cfg(feature = "systemverilog")]
 fn reachable_external_sv_roots(ir: &veryl_analyzer::ir::Ir, top: &StrId) -> HashSet<StrId> {
     use veryl_analyzer::ir::{Component, Declaration};
 
@@ -1260,7 +1295,7 @@ mod fused_hint_tests {
     }
 }
 
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 mod sv_scope_tests {
     use super::sv_reflection_scope_segments;
 

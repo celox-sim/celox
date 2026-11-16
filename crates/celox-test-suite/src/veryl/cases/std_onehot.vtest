@@ -1,5 +1,6 @@
 (group std_onehot (category standard_library))
 
+; Exhaustive 8-bit onehot detection
 (case test_onehot_8bit_exhaustive
   (source "test.veryl"
     (std "countones/onehot.veryl")

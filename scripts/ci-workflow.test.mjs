@@ -4,7 +4,7 @@ import { readFileSync, mkdtempSync, writeFileSync, chmodSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { workspaceFeatures } from "./run-vtest.mjs";
+import { workspaceFeatures } from "./rust-test-build.mjs";
 import { CI_FEATURES } from "./ci-rust-scope.mjs";
 
 const workflow = readFileSync(
@@ -406,11 +406,10 @@ test("cache warming shares the Rust Tests key and builds without running tests",
   );
   assert.match(warm, /steps.cache.outputs.cache-hit != 'true'/);
   for (const text of [warm, job("rust-tests")]) {
-    assert.match(text, /key: vtest-\$\{\{ hashFiles\('scripts\/run-vtest\.mjs'\) \}\}/);
-    assert.match(text, /run: node scripts\/run-vtest.mjs --prepare-ci/);
+    assert.match(text, /key: vtest-\$\{\{ hashFiles\('scripts\/run-vtest\.py'\) \}\}/);
   }
-  assert.match(warm, /name: Build the optimized vtest executor to populate dependencies\n        if: steps.cache.outputs.cache-hit != 'true'/);
-  assert.match(warm, /"scripts\/run-vtest.mjs"/);
+  assert.match(warm, /name: Build the optimized vtest executor to populate dependencies\n        if: steps.cache.outputs.cache-hit != 'true'\n        env:\n          CELOX_RUST_FULL: "true"\n        run: python3 scripts\/run-vtest.py --build-only/);
+  assert.match(warm, /"scripts\/run-vtest.py"/);
   assert.match(
     warm,
     /cargo nextest list --locked --workspace --exclude 'lydite\*' --cargo-profile vtest --message-format json/,
@@ -438,7 +437,7 @@ function cargoArguments(jobName, stepName, env) {
       features: (env.FEATURES ?? "").split(",").filter(Boolean),
     }]);
     const result = spawnSync("bash", ["-e", "-c", script], {
-      env: { ...process.env, CELOX_VTEST_RUNNER: "/ci/vtest-exec", ...env, BUILDS: builds, PATH: `${directory}:${process.env.PATH}` }, encoding: "utf8",
+      env: { ...process.env, ...env, BUILDS: builds, PATH: `${directory}:${process.env.PATH}` }, encoding: "utf8",
     });
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
@@ -450,16 +449,16 @@ function cargoArguments(jobName, stepName, env) {
 
 test("scoped Cargo commands build only the selected integration targets", () => {
   const env = {
-    PACKAGES: "celox", FEATURES: "celox/systemverilog",
+    PACKAGES: "celox", FEATURES: "celox/cranelift",
     TARGETS: "flip_flop systemverilog", FILTER: "binary_id(celox::flip_flop) | binary_id(celox::systemverilog)",
   };
   assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", env), [
     "nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest", "--no-tests=pass",
-    "-p", "celox", "--features", "celox/systemverilog,celox-test-suite/runtime-cases",
+    "-p", "celox", "--features", "celox/cranelift,celox-test-suite/runtime-cases",
     "--test", "flip_flop", "--test", "systemverilog", "-E", env.FILTER,
   ]);
   assert.deepEqual(cargoArguments("lint", "Lint the crates this pull request can affect", env), [
-    "clippy", "--locked", "-p", "celox", "--features", "celox/systemverilog",
+    "clippy", "--locked", "-p", "celox", "--features", "celox/cranelift",
     "--test", "flip_flop", "--test", "systemverilog", "--no-deps",
   ]);
   assert.deepEqual(cargoArguments("lint", "Lint the crates this pull request can affect", {
@@ -470,19 +469,63 @@ test("scoped Cargo commands build only the selected integration targets", () => 
   }), ["doc", "--locked", "--no-deps", "-p", "celox-runtime", "-p", "celox"]);
 });
 
-test("CI prepares one executor for full runs and scopes containing Celox", () => {
+// The workflow's run command with a recording runner in place of python3.
+function vtestArguments(step, env) {
+  const script = step.match(/        run: (?:>-\n((?:          [^\n]*\n)*)|([^\n]*)\n)/);
+  const command = (script[1] ?? script[2]).replaceAll("\n", " ");
+  const directory = mkdtempSync(join(tmpdir(), "celox-vtest-"));
+  try {
+    const python = join(directory, "python3");
+    writeFileSync(python, "#!/bin/sh\nprintf '\\036%s' \"$@\"\n");
+    chmodSync(python, 0o755);
+    const result = spawnSync("bash", ["-e", "-c", command], {
+      env: { ...process.env, CELOX_CI_REPORT_DIR: "reports", ...env, PATH: `${directory}:${process.env.PATH}` },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.split("\x1e").slice(1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("CI runs the suite cases through the runner, scoped like the Rust tests", () => {
   const rust = job("rust-tests");
-  const step = rust.split("      - name: Build the optimized vtest executor\n")[1]
-    .split("\n      #")[0];
-  assert.match(step, /if: needs.changes.outputs.fast_queue != 'true' && \(needs.changes.outputs.rust_full != 'false' \|\| contains\(format\(' \{0\} ', needs.changes.outputs.rust_packages\), ' celox '\)/);
-  assert.match(step, /run: node scripts\/run-vtest.mjs --prepare-ci/);
-  assert.ok(rust.indexOf("Build the optimized vtest executor") < rust.indexOf("Run workspace tests"));
+  assert.doesNotMatch(rust, /run-vtest\.mjs|CELOX_VTEST_RUNNER/);
+  assert.match(job("changes"), /rust_vtest: \$\{\{ steps\.classify\.outputs\.rust_vtest \}\}/);
+  const step = rust.split("      - name: Run the suite cases this change can affect\n")[1].split("\n      - name:")[0];
+  assert.match(step, /id: vtest/);
+  assert.match(step, /needs\.changes\.outputs\.rust_full != 'false' \|\| needs\.changes\.outputs\.rust_vtest != ''/);
+  // The executor build shares the test build's packages and features.
+  assert.match(step, /CELOX_RUST_FULL: \$\{\{ needs\.changes\.outputs\.rust_full \}\}\n          BUILDS: \$\{\{ needs\.changes\.outputs\.rust_builds \}\}/);
+  assert.ok(rust.indexOf("Run the tests this pull request can affect") < rust.indexOf("id: vtest"));
+  assert.ok(rust.indexOf("id: vtest") < rust.indexOf("Collect Rust test reports"));
+  assert.deepEqual(vtestArguments(step, { SCOPE: '{"select":[{"groups":["sv/latch"]}]}' }), [
+    "scripts/run-vtest.py", "--scope", '{"select":[{"groups":["sv/latch"]}]}', "--junit", "reports/vtest.xml",
+  ]);
+  // Detection failure leaves the scope empty: every case.
+  assert.deepEqual(vtestArguments(step, { SCOPE: "" }), ["scripts/run-vtest.py", "--junit", "reports/vtest.xml"]);
+  const queue = rust.split("      - name: Run merge queue suite cases\n")[1].split("\n      - name:")[0];
+  assert.match(queue, /if: needs\.changes\.outputs\.fast_queue == 'true'/);
+  assert.deepEqual(vtestArguments(queue, {}), [
+    "scripts/run-vtest.py", "--cargo-profile", "dev", "veryl/counter::", "veryl/hierarchy::",
+    "--junit", "reports/vtest.xml",
+  ]);
+  assert.match(rust, /test_step_outcome: \$\{\{ \(steps\.vtest\.outcome == 'failure' \|\| steps\.queue-vtest\.outcome == 'failure'\) && 'failure' \|\|/);
   assert.match(rust, /cargo nextest run[^\n]*\n[^\n]*celox-test-suite\/runtime-cases/);
   assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", {
     PACKAGES: "celox-heap", FEATURES: "", TARGETS: "", FILTER: "package(celox-heap)",
-    CELOX_VTEST_RUNNER: "",
   }), ["nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest", "--no-tests=pass",
     "-p", "celox-heap", "-E", "package(celox-heap)"]);
+});
+
+test("the runner's full build is the full Rust test build", () => {
+  const runner = readFileSync(new URL("./run-vtest.py", import.meta.url), "utf8");
+  const features = runner.match(/WORKSPACE_FEATURES = \(\n((?:\s+"[^"]*"\n)+)\)/)[1]
+    .match(/"([^"]*)"/g).map((part) => part.slice(1, -1)).join("");
+  assert.equal(features, workspaceFeatures);
+  assert.match(runner, /TEST_PROFILE = "vtest"/);
+  assert.match(runner, /RUNTIME_CASES = "celox-test-suite\/runtime-cases"/);
 });
 
 test("CI reports each Rust run to Mergify without weakening test failures", () => {
@@ -517,15 +560,15 @@ test("scoped checks preserve full-run fallbacks and use their own package scopes
 });
 
 test("cocotb reuses the original scoped Cargo build", () => {
-  const builds = [{ packages: ["celox", "celox-vpi", "celox-test-suite"], targets: [],
-    features: ["celox/systemverilog", "celox-test-suite/icarus"] }];
+  const builds = [{ packages: ["celox", "celox-test-suite"], targets: [],
+    features: ["celox-test-suite/icarus"] }];
   const args = cargoArguments("rust-tests", "Run cocotb VPI end-to-end test", {
     RUST_FULL: "false", BUILDS: JSON.stringify(builds),
   });
   assert.deepEqual(args, ["nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest",
-    "-p", "celox", "-p", "celox-vpi", "-p", "celox-test-suite", "--features",
-    "celox/systemverilog,celox-test-suite/icarus,celox-test-suite/runtime-cases",
-    "-E", 'binary_id(celox-vpi::cocotb_e2e) & test(/^cocotb_/)', "--run-ignored", "only"]);
+    "-p", "celox", "-p", "celox-test-suite", "--features",
+    "celox-test-suite/icarus,celox-test-suite/runtime-cases",
+    "-E", 'binary_id(celox::cocotb_e2e) & test(/^cocotb_/)', "--run-ignored", "only"]);
 });
 
 test("full cocotb runs reuse the workspace build and report failures before upload", () => {
@@ -557,8 +600,6 @@ test("default-feature validation is parallel and mandatory when selected", () =>
 test("CI builds tests with the executor's profile and warms each platform's cache", () => {
   const rust = job("rust-tests");
   assert.match(rust, /--profile ci --cargo-profile vtest -E "\$CELOX_BACKEND_FILTER"/);
-  // The executor build shares the test build's packages and features.
-  assert.match(rust, /CELOX_RUST_FULL: \$\{\{ needs\.changes\.outputs\.rust_full \}\}\n          BUILDS: \$\{\{ needs\.changes\.outputs\.rust_builds \}\}\n        run: node scripts\/run-vtest\.mjs --prepare-ci/);
   const full = rust.match(/--cargo-profile vtest -E "\$CELOX_BACKEND_FILTER"\n          --features (\S+)/);
   assert.equal(full?.[1], workspaceFeatures);
   // Documentation tests reuse the libraries of that build.
@@ -579,7 +620,8 @@ test("the suite with out-of-line calls runs only in full validation", () => {
   const forced = job("sv-out-of-line-calls");
   assert.match(forced, /\n    if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.full_validation != 'false' && \(/);
   assert.match(forced, /CELOX_SV_FORCE_OUT_OF_LINE: "1"/);
-  assert.match(forced, /run: node scripts\/run-vtest\.mjs --test systemverilog --no-fail-fast/);
+  assert.match(forced, /--features "celox-test-suite\/runtime-cases,\$CELOX_TEST_FEATURES" --test systemverilog/);
+  assert.match(forced, /run: python3 scripts\/run-vtest\.py --language sv/);
   assert.match(job("full-validation"), /sv-out-of-line-calls,/);
   assert.match(job("report-full-validation"), /sv-out-of-line-calls,/);
   assert.doesNotMatch(job("rust"), /sv-out-of-line-calls/);
@@ -594,7 +636,7 @@ test("upstream SV TB runs on full CI and feeds failure reporting", () => {
   assert.match(upstream, /needs.changes.outputs.full_validation == 'true'/);
   assert.doesNotMatch(upstream, /continue-on-error/);
   assert.match(upstream, /conformance\/common-cells\/revision/);
-  assert.match(upstream, /cargo build --locked -p celox-vpi --features systemverilog --bin celox/);
+  assert.match(upstream, /cargo build --locked -p celox --bin celox/);
   assert.match(upstream, /node scripts\/run-common-cells.mjs/);
   assert.match(upstream, /if: always\(\)/);
   assert.match(upstream, /retention-days: 14/);
@@ -605,7 +647,7 @@ test("rtlmeter qualification runs all pinned cases and verifies completion and c
   const rtlmeter = job("rtlmeter");
   assert.match(rtlmeter, /needs: changes/);
   assert.doesNotMatch(rtlmeter, /continue-on-error/);
-  assert.match(rtlmeter, /cargo build --locked --release -p celox-vpi --features systemverilog --bin celox/);
+  assert.match(rtlmeter, /cargo build --locked --release -p celox --bin celox/);
   assert.match(rtlmeter, /python scripts\/run-rtlmeter-bench\.py prepare/);
   assert.match(rtlmeter, /python scripts\/run-rtlmeter-bench\.py check\s+all/);
   assert.match(rtlmeter, /--states two-state,four-state/);
@@ -619,17 +661,45 @@ test("rtlmeter qualification runs all pinned cases and verifies completion and c
 
 test("sv-tests shards reuse one driver and together cover every case", () => {
   const driver = job("sv-tests");
-  assert.match(driver, /cargo build --locked --release -p celox --features systemverilog --example sv_tests/);
+  assert.match(driver, /cargo build --locked --release -p celox --example sv_tests/);
   assert.match(driver, /name: sv-tests-driver/);
   const shard = job("sv-tests-shard");
   assert.match(shard, /needs: \[changes, sv-tests\]/);
   assert.match(shard, /if: \$\{\{ !cancelled\(\) && needs\.sv-tests\.result == 'success' \}\}/);
   assert.doesNotMatch(shard, /cargo |rust-cache/);
-  const count = shard.match(/shard: \[([\d, ]+)\]/)[1].split(",").map(Number);
-  assert.deepEqual(count, count.map((_, index) => index + 1));
-  assert.match(shard, new RegExp(`--shard \\$\\{\\{ matrix\\.shard \\}\\}/${count.length}\n`));
+  // Pull requests run one shard without the UVM cases; full runs shard the
+  // others and, one case at a time, the UVM cases.
+  const [, light, full] = shard.match(
+    /include: \$\{\{ fromJSON\(needs\.changes\.outputs\.full_validation == 'false' && '(\[.*?\])' \|\| '(\[.*?\])'\) \}\}/,
+  );
+  const sets = (matrix) => {
+    const bySet = {};
+    for (const { set, shard: index, of } of JSON.parse(matrix)) {
+      (bySet[set] ??= []).push([index, of]);
+    }
+    for (const entries of Object.values(bySet)) {
+      assert.deepEqual(
+        entries,
+        entries.map((_, index) => [index + 1, entries.length]),
+      );
+    }
+    return Object.fromEntries(Object.entries(bySet).map(([set, entries]) => [set, entries.length]));
+  };
+  assert.deepEqual(sets(light), { main: 1 });
+  const fullSets = sets(full);
+  assert.ok(fullSets.main > 1 && fullSets.library > 1);
+  assert.match(shard, /--shard \$\{\{ matrix\.shard \}\}\/\$\{\{ matrix\.of \}\}\n/);
+  assert.match(shard, /--jobs \$\{\{ matrix\.set == 'library' && 1 \|\| 4 \}\}\n/);
+  assert.match(shard, /--case-timeout \$\{\{ matrix\.set == 'library' && \d+ \|\| 78 \}\}\n/);
+  assert.match(
+    shard,
+    /\n\s+\$\{\{ matrix\.set == 'library' && '--only-library-cases' \|\| '--exclude-library-cases' \}\}\n/,
+  );
   assert.match(shard, /fail-fast: false/);
-  assert.match(shard, /name: sv-tests-report-\$\{\{ matrix\.shard \}\}/);
+  assert.match(
+    shard,
+    /name: sv-tests-report-\$\{\{ matrix\.set == 'library' && 'uvm-' \|\| '' \}\}\$\{\{ matrix\.shard \}\}/,
+  );
 });
 
 test("sv-tests generates the pinned main corpus before running and retains its summary", () => {
@@ -674,7 +744,6 @@ test("PR backend policy reaches scoped, workspace fallback and queue execution",
   const args = cargoArguments("rust-tests", "Run the tests this pull request can affect", {
     BUILDS: JSON.stringify([{ packages: ["celox"], targets: ["counter"], features: [] }]),
     FILTER: "binary_id(celox::counter)", CELOX_BACKEND_FILTER: "not test(parallel)",
-    CELOX_VTEST_RUNNER: "/executor",
   });
   assert.equal(args.at(-1), "(binary_id(celox::counter)) & (not test(parallel))");
 });

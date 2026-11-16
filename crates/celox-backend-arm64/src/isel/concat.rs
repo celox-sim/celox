@@ -520,3 +520,153 @@ fn lower_mux_chunk_blend(
 
     result_chunks
 }
+
+/// Lower `Concat(dst, args)`; `args` are most significant first.
+pub(super) fn lower_concat(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    dst: &RegisterId,
+    args: &[RegisterId],
+    sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
+    sir_defs: &HashMap<RegisterId, usize>,
+) {
+    if try_lower_concat_of_muxes(ctx, block, *dst, args, sir_block, sir_defs) {
+        return;
+    }
+    if try_lower_repeated_msb_concat(ctx, block, *dst, args) {
+        return;
+    }
+
+    // Concat: build a wide value from chunks.
+    // For ≤64-bit result, shift and OR the pieces together.
+    let dst_vreg = ctx.reg_map.get(*dst);
+    let dst_width = ctx.sir_width(dst);
+
+    if dst_width <= 64 {
+        // args are [MSB, ..., LSB]
+        // Build from LSB to MSB
+        let mut accumulated: Option<VReg> = None;
+        let mut shift_pos = 0usize;
+
+        for arg in args.iter().rev() {
+            let arg_vreg = ctx.reg_map.get(*arg);
+            let arg_width = ctx.sir_width(arg);
+
+            match accumulated {
+                None => {
+                    // First (LSB) element
+                    accumulated = Some(arg_vreg);
+                }
+                Some(acc) => {
+                    // Shift this arg and OR with accumulator
+                    let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::ShlImm {
+                        dst: shifted,
+                        src: arg_vreg,
+                        imm: shift_pos as u8,
+                    });
+                    let merged = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Or {
+                        dst: merged,
+                        lhs: acc,
+                        rhs: shifted,
+                    });
+                    accumulated = Some(merged);
+                }
+            }
+            shift_pos += arg_width;
+        }
+
+        if let Some(result) = accumulated {
+            if result != dst_vreg {
+                ctx.emit_mov(block, dst_vreg, result);
+            }
+        }
+
+        // 4-state: concat masks the same way
+        if ctx.four_state {
+            let mut m_acc: Option<VReg> = None;
+            let mut m_shift = 0usize;
+            for arg in args.iter().rev() {
+                let m = ctx.get_mask(*arg, block);
+                let aw = ctx.sir_width(arg);
+                match m_acc {
+                    None => {
+                        m_acc = Some(m);
+                    }
+                    Some(a) => {
+                        let sh = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::ShlImm {
+                            dst: sh,
+                            src: m,
+                            imm: m_shift as u8,
+                        });
+                        let mg = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Or {
+                            dst: mg,
+                            lhs: a,
+                            rhs: sh,
+                        });
+                        m_acc = Some(mg);
+                    }
+                }
+                m_shift += aw;
+            }
+            if let Some(m_res) = m_acc {
+                ctx.set_mask(*dst, m_res);
+            }
+        }
+    } else {
+        // Wide concat (>64 bits): record chunk vregs for use by Store.
+        // args are [MSB, ..., LSB]. Collect bits in LSB-first order,
+        // then repack into uniform 64-bit chunks so Slice can use
+        // bit_offset / 64 for indexing.
+        let total_width = args.iter().map(|a| ctx.sir_width(a)).sum::<usize>();
+
+        // Collect a flat bit stream: list of (vreg, width) in LSB-first order
+        let mut flat_bits: Vec<(VReg, usize)> = Vec::new();
+        for arg in args.iter().rev() {
+            let arg_width = ctx.sir_width(arg);
+            if arg_width > 64 {
+                let arg_chunks = ctx.get_wide_chunks(arg, block);
+                for ch in arg_chunks {
+                    flat_bits.push(ch);
+                }
+            } else {
+                let arg_vreg = ctx.reg_map.get(*arg);
+                flat_bits.push((arg_vreg, arg_width));
+            }
+        }
+
+        let dst_chunks = lower_flat_concat_to_chunks(ctx, block, flat_bits, total_width);
+        ctx.set_wide_chunks(*dst, dst_chunks);
+
+        // 4-state: repack mask chunks the same way
+        if ctx.four_state {
+            let mut mask_flat: Vec<(VReg, usize)> = Vec::new();
+            for arg in args.iter().rev() {
+                let arg_width = ctx.sir_width(arg);
+                if arg_width > 64 {
+                    let mc =
+                        get_wide_mask_chunks(ctx, block, arg, ISelContext::num_chunks(arg_width));
+                    for (i, mv) in mc.into_iter().enumerate() {
+                        let cw = if i == ISelContext::num_chunks(arg_width) - 1 {
+                            let r = arg_width % 64;
+                            if r == 0 { 64 } else { r }
+                        } else {
+                            64
+                        };
+                        mask_flat.push((mv, cw));
+                    }
+                } else {
+                    let m = ctx.get_mask(*arg, block);
+                    mask_flat.push((m, arg_width));
+                }
+            }
+
+            let dst_m_chunks = lower_flat_concat_to_chunks(ctx, block, mask_flat, total_width);
+            ctx.set_mask(*dst, dst_m_chunks[0].0);
+            ctx.wide_masks.insert(*dst, dst_m_chunks);
+        }
+    }
+}

@@ -1,5 +1,11 @@
 (group std_edge_detector (category standard_library))
 
+; Edge detector: output is combinational (assign), internal `data` register
+; updates on clock edge. So the output reflects the difference between
+; current i_data and the registered (previous-cycle) value.
+;
+; Flow: set i_data -> tick (FF captures i_data into `data`) -> change i_data
+;       -> eval_comb -> read outputs (edge between old data and new i_data)
 (case test_edge_detector_basic
   (source "test.veryl"
     (std "edge_detector/edge_detector.veryl")
@@ -58,6 +64,12 @@ module Top (
   (assert_eq (trunc 8 (get o_negedge)) 1 "negedge: i_data=0, data=1")
   (assert_eq (trunc 8 (get o_edge)) 1))
 
+; Clear suppresses posedge/negedge outputs.
+;
+; Note: the stdlib edge_detector has operator precedence such that:
+;   o_edge    = i_data ^ (data & ~i_clear)   -- XOR, not fully masked by clear
+;   o_posedge = i_data & ~data & ~i_clear     -- AND, fully masked by clear
+;   o_negedge = ~i_data & data & ~i_clear     -- AND, fully masked by clear
 (case test_edge_detector_clear
   (source "test.veryl"
     (std "edge_detector/edge_detector.veryl")
@@ -100,6 +112,9 @@ module Top (
   (assert_eq (trunc 8 (get o_posedge)) 0 "clear should suppress posedge")
   (assert_eq (trunc 8 (get o_negedge)) 0 "clear should suppress negedge"))
 
+; Multi-bit edge detection (WIDTH=4) using o_edge output. The assignment
+; context propagates WIDTH into the bitwise expression, so the one-bit
+; i_clear operand is widened before `~` is applied.
 (case test_edge_detector_multibit
   (source "test.veryl"
     (std "edge_detector/edge_detector.veryl")

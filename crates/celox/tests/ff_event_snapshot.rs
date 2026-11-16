@@ -135,23 +135,3 @@ fn acyclic_shared_clock_array_samples_the_previous_input_pair(sim) {
     }
 }
 }
-
-all_backends! {
-fn ff_read_array_uses_previous_index(sim) {
-    @case "ff_event_snapshot::ff_read_array_uses_previous_index";
-}
-
-fn ff_read_bit_select_uses_previous_index(sim) {
-    @case "ff_event_snapshot::ff_read_bit_select_uses_previous_index";
-}
-
-fn ff_read_part_select_uses_previous_index(sim) {
-    @case "ff_event_snapshot::ff_read_part_select_uses_previous_index";
-}
-}
-
-all_backends! {
-fn reset_groups_sample_the_same_pre_edge_state(sim) {
-    @case "ff_event_snapshot::reset_groups_sample_the_same_pre_edge_state";
-}
-}

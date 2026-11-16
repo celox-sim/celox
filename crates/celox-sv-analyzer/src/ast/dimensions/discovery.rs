@@ -28,6 +28,19 @@ pub(in crate::ast) struct State {
     /// that depend on its operand, while the query's input and the set of
     /// specializations stay the same.
     settled: std::rc::Rc<HashMap<Key, Vec<std::rc::Rc<Settled>>>>,
+    /// The last query context [`overlaid`] made, which the next query with
+    /// the same base and input takes as it is: the queries of one
+    /// declaration, such as the items of a parameter's assignment pattern,
+    /// share both.
+    overlaid: Option<std::rc::Rc<Overlaid>>,
+}
+
+/// A query context of [`State::overlaid`]. `base` and `input` are held so
+/// that the identities of their tables stay unique.
+struct Overlaid {
+    base: PackedDimensions,
+    input: PackedDimensions,
+    context: PackedDimensions,
 }
 
 /// The most settled discoveries [`State::settled`] holds for one key: the
@@ -46,6 +59,7 @@ impl State {
             partial: self.partial.clone(),
             class_signatures: self.class_signatures.clone(),
             settled: self.settled.clone(),
+            overlaid: None,
         }
     }
 }
@@ -72,6 +86,7 @@ pub(in crate::ast) fn same_tables(a: &PackedDimensions, b: &PackedDimensions) ->
         && a.array_parameter_values.identity() == b.array_parameter_values.identity()
         && a.expression_signedness.identity() == b.expression_signedness.identity()
         && a.constant_indexed_base == b.constant_indexed_base
+        && a.constant_function_bodies == b.constant_function_bodies
         && a.scope_types_complete == b.scope_types_complete
         && a.type_query == b.type_query
         && Arc::ptr_eq(&a.subroutine_param_shapes, &b.subroutine_param_shapes)
@@ -89,7 +104,7 @@ pub(in crate::ast) fn same_tables(a: &PackedDimensions, b: &PackedDimensions) ->
 /// that their identities stay unique.
 struct ClassSignatures {
     const_env: SharedEnv,
-    type_aliases: SharedMap<Type>,
+    type_aliases: SharedAliases,
     function_return_types: SharedMap<FunctionReturnMetadata>,
     specializations: usize,
     shapes: Vec<(String, Vec<VariableDimensions>)>,
@@ -446,7 +461,15 @@ fn declaration(
                 // are bound; that of a generate block is named by the path
                 // of its elaborated scope.
                 if top {
-                    ty.name_declaration(|| types::declaration_name(tree, alias, None));
+                    ty.name_declaration(
+                        types::declaring_scope(
+                            classes::enclosing_unit(tree.declarations(), alias.tokens),
+                            tree.declarations(),
+                            alias.tokens,
+                            session,
+                        ),
+                        || types::declaration_name(tree, alias, None),
+                    );
                 }
                 if context.constant_types.contains_key(&name(&alias.name)) {
                     Arc::make_mut(&mut context.constant_types).remove(&name(&alias.name));
@@ -612,7 +635,7 @@ fn class_signatures(
         class_name,
         &env,
         &aliases,
-        |session: &mut Session, env: &SharedEnv, aliases: &SharedMap<Type>| {
+        |session: &mut Session, env: &SharedEnv, aliases: &SharedAliases| {
             let mut scope = context.clone();
             scope.class_base = Some(classes::specializations::class_base(
                 session, class_name, context,
@@ -705,7 +728,7 @@ fn class_builtin_signatures(
     constructor: bool,
     session: &mut Session,
 ) -> Converted<()> {
-    for method in ["randomize", "srandom", "rand_mode"] {
+    for method in procedural::randomization::RANDOMIZATION_METHODS {
         let mut formals = vec![(
             FunctionArgumentMetadata {
                 name: classes::THIS.into(),
@@ -714,39 +737,44 @@ fn class_builtin_signatures(
             },
             handle.clone(),
         )];
-        let (argument, ty) = match method {
-            "randomize" => (
-                "$selection",
-                // Signature discovery must not require an otherwise unused class
-                // to have a supported layout. A call validates the layout before
-                // using this selection formal; lowering reports layout errors.
-                classes::shared_class(
-                    tree,
-                    class_name,
-                    &context.const_env,
-                    &context.type_aliases,
-                    session,
-                )
-                .map_or_else(
-                    |_| classes::unsigned_type(1),
-                    |layout| layout.selection_type(),
-                ),
-            ),
-            "srandom" => ("seed", procedural::int_type()),
-            _ => ("on_off", classes::unsigned_type(1)),
-        };
-        formals.push((
-            FunctionArgumentMetadata {
-                name: argument.into(),
-                direction: ParamDirection::Input,
-                has_default: false,
-            },
-            ty,
-        ));
+        // Signature discovery must not require an otherwise unused class
+        // to have a supported layout. A call validates the layout before
+        // using this selection formal; lowering reports layout errors.
+        let argument = procedural::randomization::randomization_method_argument(method, || {
+            classes::shared_class(
+                tree,
+                class_name,
+                &context.const_env,
+                &context.type_aliases,
+                session,
+            )
+            .map_or_else(
+                |_| classes::unsigned_type(1),
+                |layout| layout.selection_type(),
+            )
+        });
+        if let Some((argument, ty)) = argument {
+            let ty = semantic_types::bound_builtin(&mut session.types, &tree.functions, ty);
+            formals.push((
+                FunctionArgumentMetadata {
+                    name: argument.into(),
+                    direction: ParamDirection::Input,
+                    has_default: false,
+                },
+                ty,
+            ));
+        }
         publish_signature(
             classes::Class::subroutine_name(class_name, method),
             formals,
-            Some((method == "randomize").then(procedural::int_type)),
+            Some(
+                match method {
+                    "randomize" => Some(procedural::int_type()),
+                    "get_randstate" => Some(procedural::randomization::string_type()),
+                    _ => None,
+                }
+                .map(|ty| semantic_types::bound_builtin(&mut session.types, &tree.functions, ty)),
+            ),
             tree,
             session,
             context,
@@ -787,7 +815,11 @@ fn class_builtin_signatures(
             formal(procedural::CAST_DESTINATION, ParamDirection::Inout),
             formal(procedural::CAST_SOURCE, ParamDirection::Input),
         ],
-        Some(Some(procedural::int_type())),
+        Some(Some(semantic_types::bound_builtin(
+            &mut session.types,
+            &tree.functions,
+            procedural::int_type(),
+        ))),
         tree,
         session,
         context,
@@ -1042,7 +1074,7 @@ fn subroutine_signatures(
                 let _ = signature(id, tree, session, context, key);
                 publish(&mut session.dimensions, key, context);
             } else if let BodyItemKind::Dpi(id) = native.body_item(*id).kind
-                && let Ok(import) = dpi::import(id, native)
+                && let Ok(import) = dpi::import(id, tree, session, context)
                 && let Some(metadata) =
                     FunctionReturnMetadata::from_dpi(&import, &mut session.types)
             {
@@ -1181,6 +1213,7 @@ fn local_declaration(
                     alias,
                     &context.const_env,
                     &context.type_aliases,
+                    None,
                     &mut EnumMemberConstants::default(),
                 )?
             {
@@ -1303,6 +1336,298 @@ fn lexical_scopes(
     }
     Ok(scopes)
 }
+/// Whether a declaration around `target` gives `wanted` to something other
+/// than a typedef of the scope itself: a declaration of the blocks, of the
+/// subroutine or of the nested scopes around `target`, or one of the scope
+/// or its header that is no typedef. Where `target` is, such a declaration
+/// hides a type of that name which the tables of a query bind (IEEE
+/// 1800-2023 23.9). A type parameter hides none: its type is the one the
+/// tables bind, which its discovery leaves alone. An item whose names the
+/// syntax does not tell declares `wanted` when it spells it.
+pub(in crate::ast) fn hides_type_name(
+    tree: &AnalysisContext<'_>,
+    target: TokenRange,
+    wanted: &str,
+) -> Converted<bool> {
+    hides(tree, target, wanted, Hidden::TypeName)
+}
+
+/// Whether a declaration nested in the scope around `target` declares
+/// `wanted`: one of the blocks, of the subroutine or of the nested scopes
+/// around `target`, such as a class. Where `target` is, such a declaration
+/// hides an item of the scope itself of that name (IEEE 1800-2023 23.9). An
+/// import there may bring any name (26.3).
+pub(in crate::ast) fn hides_scope_item(
+    tree: &AnalysisContext<'_>,
+    target: TokenRange,
+    wanted: &str,
+) -> Converted<bool> {
+    hides(tree, target, wanted, Hidden::ScopeItem)
+}
+
+/// The declaration of the variable that name `wanted` at `target` denotes,
+/// when the nearest declaration of the name is a variable or a net of the
+/// generate block immediately around `target`: none when the name is a
+/// formal, the result or a local of the subroutine or the statements around
+/// it, when the block declares the name as anything else as well (an
+/// enumeration member, a parameter, a type, a genvar, an import), or when
+/// the declaration is further out, where the declarations between may give
+/// the names of its type another meaning (IEEE 1800-2023 23.9). A method
+/// declared outside its class sees the members of the class, which the
+/// syntax around it does not tell (8.24).
+pub(in crate::ast) fn nearest_block_variable(
+    tree: &AnalysisContext<'_>,
+    target: TokenRange,
+    wanted: &str,
+) -> Converted<Option<BodyItemId>> {
+    if hides(tree, target, wanted, Hidden::MarkedVariable)? {
+        return Ok(None);
+    }
+    let native = tree.declarations();
+    let owners = owners(tree, target)?;
+    // The items of the scope itself are no block's.
+    let [_, .., frame] = owners.frames.as_slice() else {
+        return Ok(None);
+    };
+    let named = |declared: &celox_sv_syntax::Name| name(declared) == wanted;
+    let mut variable = None;
+    for id in direct(frame, tree)? {
+        let item = native.body_item(id);
+        let declares = match &item.kind {
+            BodyItemKind::Loop { variable, .. } => named(variable),
+            // An import may declare any name (26.3).
+            BodyItemKind::PackageBinding(_) => true,
+            BodyItemKind::Modport(_) | BodyItemKind::Unconverted { .. } => native.tokens
+                [item.tokens.range()]
+            .iter()
+            .any(|token| instances::normalize_identifier(&token.text) == wanted),
+            _ => imports::item_names(id, tree).contains(wanted),
+        };
+        if !declares {
+            continue;
+        }
+        let declared_variable = match &item.kind {
+            BodyItemKind::Data(data) => match native.data_declaration(*data) {
+                celox_sv_syntax::DataDeclaration::Variables(value)
+                | celox_sv_syntax::DataDeclaration::Constructed(value) => {
+                    value.variables.iter().any(|variable| named(&variable.name))
+                }
+                celox_sv_syntax::DataDeclaration::Unconverted(_) => false,
+            },
+            BodyItemKind::Net(net) => native
+                .net_declaration(*net)
+                .variables
+                .iter()
+                .any(|variable| named(&variable.name)),
+            _ => false,
+        };
+        // An enumeration member the type of the declaration declares is
+        // no variable either.
+        if !declared_variable || variable.is_some() {
+            return Ok(None);
+        }
+        variable = Some(id);
+    }
+    Ok(variable)
+}
+
+/// What the declarations around a name may hide.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hidden {
+    /// A type that the tables of a query bind: [`hides_type_name`].
+    TypeName,
+    /// An item of the scope itself: [`hides_scope_item`].
+    ScopeItem,
+    /// A variable of a generate block: [`nearest_block_variable`].
+    MarkedVariable,
+}
+
+fn hides(
+    tree: &AnalysisContext<'_>,
+    target: TokenRange,
+    wanted: &str,
+    hidden: Hidden,
+) -> Converted<bool> {
+    let native = tree.declarations();
+    let named = |declared: &celox_sv_syntax::Name| name(declared) == wanted;
+    let spelled = |tokens: TokenRange| {
+        !contains(tokens, target)
+            && native.tokens[tokens.range()]
+                .iter()
+                .any(|token| instances::normalize_identifier(&token.text) == wanted)
+    };
+    let member = |id: celox_sv_syntax::TypeId| {
+        matches!(
+            &native.data_type(id).kind,
+            DataTypeKind::Enum { items, .. } if items.iter().any(|item| named(&item.name))
+        )
+    };
+    let parameter = |parameter: &celox_sv_syntax::Parameter| match &parameter.kind {
+        ParameterKind::Type { .. } => hidden != Hidden::TypeName && named(&parameter.name),
+        ParameterKind::Value { data_type, .. } => named(&parameter.name) || member(*data_type),
+    };
+    // An import may declare any name (26.3): the one it spells, or any
+    // through a wildcard.
+    let import = |tokens: TokenRange| hidden != Hidden::TypeName || spelled(tokens);
+    if hidden == Hidden::TypeName
+        && let Ok(unit) = tree.root_unit()
+        && (unit.parameters.iter().flatten().any(parameter)
+            || unit.ports.iter().any(|port| match &port.kind {
+                celox_sv_syntax::PortKind::Named(port)
+                | celox_sv_syntax::PortKind::Explicit { name: port, .. } => named(port),
+                celox_sv_syntax::PortKind::NonAnsi(Some(port)) => {
+                    spelled(native.expression(*port).tokens)
+                }
+                celox_sv_syntax::PortKind::NonAnsi(None) | celox_sv_syntax::PortKind::Wildcard => {
+                    false
+                }
+            }))
+    {
+        return Ok(true);
+    }
+    let owners = owners(tree, target)?;
+    // The index of a generate loop around `target` is a constant of each
+    // of its blocks (27.4), which hides an item of the scope.
+    if hidden == Hidden::ScopeItem
+        && owners.path.iter().any(|id| {
+            matches!(&native.body_item(*id).kind,
+                BodyItemKind::Loop { variable, .. } if named(variable))
+        })
+    {
+        return Ok(true);
+    }
+    // The items of the scope and of its blocks replace no marker.
+    let frames: &[Vec<BodyItemId>] = if hidden == Hidden::MarkedVariable {
+        &[]
+    } else {
+        &owners.frames
+    };
+    for (depth, frame) in frames.iter().enumerate() {
+        // The items of the scope itself hide none of them.
+        if hidden == Hidden::ScopeItem && depth == 0 {
+            continue;
+        }
+        for id in direct(frame, tree)? {
+            let item = native.body_item(id);
+            let declares = match &item.kind {
+                // The typedef whose type the tables bind.
+                BodyItemKind::TypeAlias(alias)
+                    if depth == 0 && named(&native.type_alias(*alias).name) =>
+                {
+                    false
+                }
+                BodyItemKind::Data(data)
+                    if matches!(
+                        native.data_declaration(*data),
+                        celox_sv_syntax::DataDeclaration::Unconverted(_)
+                    ) =>
+                {
+                    spelled(item.tokens)
+                }
+                BodyItemKind::Parameter(declaration) => native
+                    .parameter_declaration(*declaration)
+                    .parameters
+                    .iter()
+                    .any(parameter),
+                BodyItemKind::Data(_)
+                | BodyItemKind::Net(_)
+                | BodyItemKind::TypeAlias(_)
+                | BodyItemKind::Subroutine(_)
+                | BodyItemKind::Dpi(_)
+                | BodyItemKind::Instance(_) => imports::item_names(id, tree).contains(wanted),
+                BodyItemKind::Unconverted { category, .. } if category == "class" => {
+                    imports::item_names(id, tree).contains(wanted)
+                }
+                BodyItemKind::Loop { variable, .. } => named(variable),
+                BodyItemKind::PackageBinding(_) => import(item.tokens),
+                BodyItemKind::Modport(_) | BodyItemKind::Unconverted { .. } => spelled(item.tokens),
+                BodyItemKind::Assign(_)
+                | BodyItemKind::Defparam(_)
+                | BodyItemKind::LogicGate(_)
+                | BodyItemKind::Procedure(_)
+                | BodyItemKind::Time(_)
+                | BodyItemKind::Unit(_)
+                | BodyItemKind::Assertion(_)
+                | BodyItemKind::Region(_)
+                | BodyItemKind::Block { .. }
+                | BodyItemKind::Conditional { .. }
+                | BodyItemKind::Case { .. } => false,
+            };
+            if declares {
+                return Ok(true);
+            }
+        }
+    }
+    if let Some(id) = owners.subroutine {
+        let subroutine = native.subroutine(id);
+        if hidden == Hidden::MarkedVariable && !subroutine.scope.is_empty() {
+            return Ok(true);
+        }
+        // In its body, the name of a function is also its result (13.4.1).
+        if hidden != Hidden::TypeName && named(&subroutine.name) {
+            return Ok(true);
+        }
+        let ports = subroutine.ports.as_deref().into_iter().flatten().chain(
+            subroutine
+                .port_declarations
+                .iter()
+                .flat_map(|group| &group.ports),
+        );
+        for port in ports {
+            // A prototype's lone identifier may be the name of its formal.
+            if port
+                .name
+                .as_ref()
+                .map_or_else(|| spelled(port.tokens), named)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    for lexical in lexical_scopes(&owners.statements, target, tree)? {
+        let declares = match lexical {
+            Lexical::Statements(items) => items.into_iter().any(|id| {
+                let statement = native.statement(id);
+                match &statement.kind {
+                    StatementKind::Declaration(
+                        LocalDeclaration::Variables(data) | LocalDeclaration::Constructed(data),
+                    ) => {
+                        data.variables.iter().any(|variable| named(&variable.name))
+                            || member(data.data_type)
+                    }
+                    StatementKind::Declaration(LocalDeclaration::Parameters(id)) => native
+                        .parameter_declaration(*id)
+                        .parameters
+                        .iter()
+                        .any(parameter),
+                    StatementKind::Declaration(LocalDeclaration::TypeAlias(id)) => {
+                        let alias = native.type_alias(*id);
+                        named(&alias.name)
+                            || matches!(alias.target, TypeAliasTarget::DataType(id) if member(id))
+                    }
+                    StatementKind::Declaration(LocalDeclaration::PackageBinding(_)) => {
+                        import(statement.tokens)
+                    }
+                    StatementKind::Declaration(LocalDeclaration::Unconverted(_)) => {
+                        spelled(statement.tokens)
+                    }
+                    _ => false,
+                }
+            }),
+            Lexical::For(declarations) => declarations.iter().any(|declaration| {
+                declaration
+                    .variables
+                    .iter()
+                    .any(|variable| named(&variable.name))
+            }),
+            Lexical::Foreach(names) => names.iter().any(named),
+        };
+        if declares {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 fn statement_scope(
     ids: &[StatementId],
     target: TokenRange,
@@ -1353,6 +1678,43 @@ fn statement_scope(
         }
     }
     Ok(())
+}
+
+/// `base` with the declarations of `input` overlaid (see [`overlay`]),
+/// the context of the last query if it had the same base and input.
+fn overlaid(
+    state: &mut State,
+    mut base: PackedDimensions,
+    input: &PackedDimensions,
+) -> PackedDimensions {
+    if let Some(last) = &state.overlaid
+        && same_overlay_input(&last.input, input)
+        && last.base == base
+    {
+        return last.context.clone();
+    }
+    let unchanged = base.clone();
+    overlay(&mut base, input);
+    state.overlaid = Some(std::rc::Rc::new(Overlaid {
+        base: unchanged,
+        input: input.clone(),
+        context: base.clone(),
+    }));
+    base
+}
+
+/// Whether [`overlay`] reads the same tables of `a` and `b`: each table is
+/// the same snapshot.
+fn same_overlay_input(a: &PackedDimensions, b: &PackedDimensions) -> bool {
+    a.variables.identity() == b.variables.identity()
+        && a.const_env.identity() == b.const_env.identity()
+        && a.type_aliases.identity() == b.type_aliases.identity()
+        && a.function_return_types.identity() == b.function_return_types.identity()
+        && a.parameter_values.identity() == b.parameter_values.identity()
+        && Arc::ptr_eq(&a.constant_types, &b.constant_types)
+        && a.class_base == b.class_base
+        && a.class_scope == b.class_scope
+        && a.constructor == b.constructor
 }
 
 fn overlay(context: &mut PackedDimensions, input: &PackedDimensions) {
@@ -1419,7 +1781,7 @@ fn settle_scope(
     #[cfg(test)]
     super::SCOPE_SETTLES.with(|count| count.set(count.get() + 1));
     let mut context = input.clone();
-    for (name, binding) in &scope::imported(tree).enum_constants.declarations {
+    for (name, binding) in &scope::imported(tree).constant_types {
         Arc::make_mut(&mut context.constant_types)
             .entry(name.clone())
             .or_insert_with(|| binding.clone());
@@ -1499,9 +1861,8 @@ pub(in crate::ast) fn query_operand_dimensions_id(
         path: owners.path.clone(),
         block: None,
     };
-    if let Some(mut partial) = session.dimensions.partial.get(&key).cloned() {
-        overlay(&mut partial, input);
-        return Ok(finish(partial));
+    if let Some(partial) = session.dimensions.partial.get(&key).cloned() {
+        return Ok(finish(overlaid(&mut session.dimensions, partial, input)));
     }
     // The scope's declarations are discovered from the scope's own inputs,
     // without the locals the query's scope adds and the operand values of
@@ -1567,6 +1928,8 @@ fn scope_inputs(input: &PackedDimensions) -> PackedDimensions {
         // name only the formats it binds (21.2.1.5).
         method_name: None,
         scope_name: None,
+        // A query discovers declarations; it reports no undeclared name.
+        declared_values: false,
         ..input.clone()
     };
     // In a class specialization, the tables of the scope around the class,
@@ -1610,7 +1973,7 @@ fn query_published(
 ) -> Converted<PackedDimensions> {
     let native = tree.declarations();
     let target = native.expression(root).tokens;
-    overlay(&mut context, input);
+    context = overlaid(&mut session.dimensions, context, input);
     if let Some(id) = owners.subroutine {
         let subroutine = native.subroutine(id);
         for (argument, ty) in formal_types(subroutine, tree, session, &context)? {
@@ -1664,6 +2027,7 @@ fn query_published(
                 tree,
                 session,
                 &item.type_aliases(&context.type_aliases),
+                None,
                 &item.env,
                 Some(&declared),
                 &mut signals,
@@ -1702,6 +2066,9 @@ fn publish_enum_constants(
     )? && let DataTypeKind::Enum { items, .. } = &tree.declarations().data_type(id).kind
     {
         for member in items {
+            // The member hides a variable of an outer scope (IEEE 1800-2023
+            // 23.9).
+            context.remove(&name(&member.name));
             Arc::make_mut(&mut context.constant_types).insert(name(&member.name), binding.clone());
         }
     }
@@ -1745,7 +2112,7 @@ mod tests {
         let input = PackedDimensions::new(
             HashMap::default(),
             &[("N".to_string(), 16)].into_iter().collect::<ConstEnv>(),
-            &HashMap::default(),
+            &TypeAliases::default(),
         );
         let context = query_operand_dimensions_id(argument(&tree), &tree, session, &input).unwrap();
         assert_eq!(
@@ -1773,7 +2140,7 @@ mod tests {
         let input = PackedDimensions::new(
             HashMap::default(),
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
         );
         let context = query_operand_dimensions_id(argument(&tree), &tree, session, &input).unwrap();
         assert_eq!(context.function_return_types["f"].width, Some(8));
@@ -1790,7 +2157,7 @@ mod tests {
         let input = PackedDimensions::new(
             HashMap::default(),
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
         );
         let context = query_operand_dimensions_id(argument(&tree), &tree, session, &input).unwrap();
         let shape = context.get("a").unwrap();

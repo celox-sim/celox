@@ -5,7 +5,35 @@ use system_functions::{
     ContainerConcat, ContainerKind, ContainerLayout, ContainerOp, HandleProperty,
 };
 
+/// `base` with the unpacked dimensions `dims` of a declaration in
+/// `context`, bound to its semantic type there, where the declaration is
+/// (IEEE 1800-2023 6.18). Without dimensions it is `base` itself.
 pub(super) fn with_dimensions(
+    base: Type,
+    dims: &[Dimension],
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Converted<Type> {
+    if dims.is_empty() {
+        return Ok(base);
+    }
+    let mut ty = dimensioned(base, dims, tree, session, context)?;
+    semantic_types::bind_declared(
+        &mut session.types,
+        &tree.functions,
+        &mut ty,
+        &context.const_env,
+    );
+    // A reader that has the container alone takes the binding from it.
+    let binding = ty.binding.clone();
+    if let Some(container) = &mut ty.shape_keeping_binding().container {
+        Arc::make_mut(container).binding = binding;
+    }
+    Ok(ty)
+}
+
+fn dimensioned(
     base: Type,
     dims: &[Dimension],
     tree: &AnalysisContext<'_>,
@@ -69,7 +97,11 @@ pub(super) fn with_dimensions(
                         && !object
                         && (!matches!(
                             ty.kind(),
-                            TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Process
+                            TypeKind::Bit
+                                | TypeKind::Chandle
+                                | TypeKind::Logic
+                                | TypeKind::Reg
+                                | TypeKind::Process
                         ) || !ty.unpacked_ranges.is_empty())
                     {
                         return Err(unsupported(
@@ -119,6 +151,20 @@ pub(super) fn with_dimensions(
             "dynamic container of fixed-size unpacked arrays",
         ));
     }
+    container_type(base, kind, index_type, None, tree, context)
+}
+
+/// The type of a container of kind `kind` of `base` elements, indexed by
+/// `index_type` for an associative array, holding the fixed-size array
+/// with range `fixed`.
+fn container_type(
+    base: Type,
+    kind: ContainerKind,
+    index_type: Option<Type>,
+    fixed: Option<(i128, i128)>,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+) -> Converted<Type> {
     if matches!(base.kind(), TypeKind::Real | TypeKind::Shortreal) {
         return Err(unsupported("real dynamic container elements"));
     }
@@ -134,7 +180,11 @@ pub(super) fn with_dimensions(
             && base.container.is_none()
             && matches!(
                 base.kind(),
-                TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+                TypeKind::Bit
+                    | TypeKind::Chandle
+                    | TypeKind::Logic
+                    | TypeKind::Reg
+                    | TypeKind::Implicit
             ) =>
         {
             let mut field = classes::field(&tree.functions, &base, &context.const_env, 0)?;
@@ -172,7 +222,7 @@ pub(super) fn with_dimensions(
         signed: shape.signed && record.is_none(),
         two_state: matches!(
             base.kind(),
-            TypeKind::Bit | TypeKind::Process | TypeKind::Event
+            TypeKind::Bit | TypeKind::Chandle | TypeKind::Process | TypeKind::Event
         ) || handle.is_some(),
         handle,
     };
@@ -181,23 +231,271 @@ pub(super) fn with_dimensions(
         layout,
         element: base,
         record,
+        fixed,
+        binding: Default::default(),
     }))
 }
 
+/// The most elements of a fixed-size array class property, those of the
+/// largest container the heap makes (see `celox_heap::randomization`).
+const MAX_FIXED_PROPERTY_ELEMENTS: u128 = 1 << 24;
+
+/// The container that holds a fixed-size unpacked array class property of
+/// type `ty` in an object (see `classes::Property::storage`): one element
+/// for each index of its range, in order from left to right (IEEE
+/// 1800-2023 7.4).
+pub(super) fn fixed_storage(
+    ty: &Type,
+    table: &semantic_types::TyTable,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+) -> Converted<Arc<ContainerType>> {
+    let [range] = ty.unpacked_ranges.as_slice() else {
+        return Err(unsupported(
+            "class property with more than one unpacked dimension",
+        ));
+    };
+    let bound = |expr: &ConstExpr| {
+        eval_ast_const_expr(&tree.functions, expr, &context.const_env)
+            .ok_or_else(|| unsupported("class property with a range that is not constant"))
+    };
+    // The checks of every fixed-size unpacked dimension, then a count of
+    // elements a container holds.
+    types::validate_unpacked_dimension_sizes(
+        &tree.functions,
+        &ty.unpacked_ranges,
+        &context.const_env,
+    )?;
+    let fixed = (bound(range.left())?, bound(range.right())?);
+    // An index of the property is an `int`, as is a foreach index over it
+    // and one a locator method returns (IEEE 1800-2023 12.7.3, 7.12.1).
+    if i32::try_from(fixed.0).is_err() || i32::try_from(fixed.1).is_err() {
+        return Err(unsupported(
+            "fixed-size array class property with a bound outside int",
+        ));
+    }
+    if fixed
+        .0
+        .abs_diff(fixed.1)
+        .checked_add(1)
+        .is_none_or(|count| count > MAX_FIXED_PROPERTY_ELEMENTS)
+    {
+        return Err(unsupported(format!(
+            "fixed-size array class property of more than {MAX_FIXED_PROPERTY_ELEMENTS} elements"
+        )));
+    }
+    let mut element = ty.clone();
+    element.unpacked_ranges_mut().clear();
+    // The element has the element type of the array (7.4).
+    if let Some(semantic_types::TyData::Array { element: id, .. }) =
+        ty.binding.get(table).map(|id| table.data(id))
+    {
+        element.bind(table, *id);
+    }
+    // A container does not give its elements the initial values of their
+    // members (see `unpacked_structs::record`).
+    if element
+        .unpacked_struct_in(table)
+        .is_some_and(|aggregate| aggregate.leaves().iter().any(|leaf| leaf.default.is_some()))
+    {
+        return Err(unsupported(
+            "fixed-size array class property of an unpacked structure with member initial values",
+        ));
+    }
+    let storage = container_type(
+        element,
+        ContainerKind::Dynamic,
+        None,
+        Some(fixed),
+        tree,
+        context,
+    )?;
+    Ok(storage.container.clone().expect("a container type"))
+}
+
+impl ContainerType {
+    /// The semantic type of the container's elements: the element's own
+    /// binding, else the element of the container's semantic type.
+    fn element_id(&self, table: &semantic_types::TyTable) -> Option<semantic_types::TyId> {
+        self.element.binding.get(table).or_else(|| {
+            match self.binding.get(table).map(|id| table.data(id)) {
+                Some(semantic_types::TyData::Array { element, .. }) => Some(*element),
+                _ => None,
+            }
+        })
+    }
+
+    /// The semantic type of the index of an associative array, as
+    /// [`Self::element_id`] tells that of its elements.
+    fn key_id(&self, table: &semantic_types::TyTable) -> Option<semantic_types::TyId> {
+        self.key.as_ref()?.binding.get(table).or_else(|| {
+            match self.binding.get(table).map(|id| table.data(id)) {
+                Some(semantic_types::TyData::Array {
+                    kind: semantic_types::ArrayKind::Associative { key },
+                    ..
+                }) => Some(*key),
+                _ => None,
+            }
+        })
+    }
+
+    /// The class of the elements of a container of handles (IEEE 1800-2023
+    /// 8.4), from their semantic type.
+    pub(super) fn element_class(&self, table: &semantic_types::TyTable) -> Option<Arc<str>> {
+        Self::part_class(&self.element, self.element_id(table), table)
+    }
+
+    /// The class of the index of an associative array with a class index
+    /// (7.8.5), from its semantic type.
+    pub(super) fn key_class(&self, table: &semantic_types::TyTable) -> Option<Arc<str>> {
+        Self::part_class(self.key.as_ref()?, self.key_id(table), table)
+    }
+
+    /// Whether the container's elements are of an unpacked structure type
+    /// (7.2), from their semantic type.
+    pub(super) fn element_is_unpacked_struct(&self, table: &semantic_types::TyTable) -> bool {
+        unpacked_structs::is_struct(
+            self.element_id(table),
+            table,
+            self.element.unpacked_struct.is_some(),
+        )
+    }
+
+    /// The declaration of the unpacked structure type of the container's
+    /// elements (7.2), from their semantic type.
+    pub(super) fn element_struct<'a>(
+        &'a self,
+        table: &'a semantic_types::TyTable,
+    ) -> Option<&'a Arc<unpacked_structs::UnpackedStruct>> {
+        unpacked_structs::declaration_of(
+            self.element_id(table),
+            table,
+            self.element.unpacked_struct.as_ref(),
+        )
+    }
+
+    /// The enumeration of the container's elements (6.19), from their
+    /// semantic type.
+    pub(super) fn element_enumeration(
+        &self,
+        table: &semantic_types::TyTable,
+    ) -> enums::Enumeration {
+        enums::Enumeration::of(
+            self.element_id(table),
+            table,
+            self.element.enumeration_fields(),
+        )
+    }
+
+    /// The enumeration of the index of an associative array (7.8.4), from
+    /// its semantic type; none without an index.
+    pub(super) fn key_enumeration(&self, table: &semantic_types::TyTable) -> enums::Enumeration {
+        self.key.as_ref().map_or_else(Default::default, |key| {
+            enums::Enumeration::of(self.key_id(table), table, key.enumeration_fields())
+        })
+    }
+
+    /// The class of `part`, the element or index type of the container,
+    /// whose semantic type is `id`.
+    fn part_class(
+        part: &Type,
+        id: Option<semantic_types::TyId>,
+        table: &semantic_types::TyTable,
+    ) -> Option<Arc<str>> {
+        let class = id.and_then(|id| table.handle_class(id)).cloned();
+        debug_assert_eq!(
+            class.as_deref(),
+            part.class(),
+            "the class of a container's elements or index is told by its semantic type"
+        );
+        class
+    }
+
+    /// The number of elements of the fixed-size array the container holds.
+    pub(super) fn fixed_size(&self) -> Option<u64> {
+        self.fixed
+            .map(|(left, right)| left.abs_diff(right) as u64 + 1)
+    }
+}
+
 /// The type of a container of type `container`: a heap handle.
-fn of(container: ContainerType) -> Type {
+pub(super) fn of(container: ContainerType) -> Type {
+    let binding = container.binding.clone();
     let mut ty = Type::new(TypeKind::Object);
     ty.packed_ranges.push(PackedRange::new(
         ConstExpr::Literal("31".into()),
         ConstExpr::Literal("0".into()),
     ));
     ty.container = Some(Arc::new(container));
+    // A container's type is the one it was bound to, if it was, and so is
+    // its element type, as it has no unpacked dimensions.
+    ty.element = binding.clone();
+    ty.binding = binding;
     ty
 }
 
 /// The shape of a value of container type `container`.
 pub(super) fn shape(container: &ContainerType) -> VariableDimensions {
     procedural::dimensions_from_type(&of(container.clone()))
+}
+
+/// Whether declared shape `shape` holds dynamically sized arrays: it is a
+/// dynamic array, queue or associative array, or a fixed-size array of
+/// them (7.5, 7.8, 7.10), as its type tells.
+pub(super) fn holds_container(
+    shape: &VariableDimensions,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> bool {
+    shape_holds_container(shape, &mut session.types, &tree.functions, &dims.const_env)
+}
+
+/// [`holds_container`] with the constants of `env`. A shape whose type
+/// cannot be formed in `env` is told by its container metadata, which every
+/// shape keeps until declarations bind their types.
+fn shape_holds_container(
+    shape: &VariableDimensions,
+    table: &mut semantic_types::TyTable,
+    functions: &const_functions::ConstantFunctions,
+    env: &ConstEnv,
+) -> bool {
+    let metadata = shape.container.is_some();
+    let Some(mut ty) = shape.type_id(table, functions, env) else {
+        return metadata;
+    };
+    while let semantic_types::TyData::Array {
+        kind: semantic_types::ArrayKind::Fixed(_),
+        element,
+    } = table.data(ty)
+    {
+        ty = *element;
+    }
+    let found = matches!(table.data(ty), semantic_types::TyData::Array { .. });
+    debug_assert_eq!(
+        found, metadata,
+        "the type and the container metadata of a shape disagree"
+    );
+    found
+}
+
+/// The type of native expression `id` when it is a dynamic array, queue
+/// or associative array value (7.5, 7.8, 7.10), as its type tells, or
+/// `None` for another value or one whose type is not known.
+pub(super) fn value_container(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Option<semantic_types::TyId> {
+    let ty = expression_types::type_of(tree, session, id, native, dims).ok()?;
+    matches!(
+        session.types.data(ty),
+        semantic_types::TyData::Array { kind, .. }
+            if !matches!(kind, semantic_types::ArrayKind::Fixed(_))
+    )
+    .then_some(ty)
 }
 
 pub(super) fn native_type(
@@ -222,10 +520,34 @@ pub(super) fn native_type(
     {
         return Ok(shape.container.clone());
     }
+    // A member of a variable of unpacked structure type, which is a leaf
+    // variable of its own (see `unpacked_structs`).
+    if let Some(name) = unpacked_structs::native_member(id, native, &session.types, dims)
+        && let Some(shape) = dims.get(&name)
+    {
+        return Ok(shape.container.clone());
+    }
+    // A container member of a container element, `q[i].m`.
+    if matches!(native.expression(ungrouped).kind, ExprKind::Member { .. })
+        && let Some((member, _)) = element_member(id, native, tree, session, dims)?
+    {
+        return Ok(member.container.clone());
+    }
+    // A hierarchical name, or the name of a member of an interface, is
+    // bound to a local variable of the type of the object it denotes.
+    if matches!(native.expression(ungrouped).kind, ExprKind::Member { .. })
+        && let Some(name) = expression_binding::alias_name(tree, session, id, native, dims)
+        && let Some(shape) = scope::imported(tree)
+            .interface_members
+            .get(&name)
+            .and_then(|binding| dims.get(binding))
+    {
+        return Ok(shape.container.clone());
+    }
     if let Some((property, _)) =
         expression_binding::object_property(tree, session, id, native, dims)?
     {
-        return Ok(property.r#type.container);
+        return Ok(property.storage.or(property.r#type.container.clone()));
     }
     if let Some(name) = expression_binding::object_static_property(tree, session, id, native, dims)?
         && let Some(shape) = dims.get(&name)
@@ -419,6 +741,30 @@ pub(super) fn assignment(
         };
         let size = expression_binding::value(size, native, tree, session, dims)?;
         let init = match initializer {
+            // `'{default: v}` gives each of the `size` elements the value
+            // `v` (10.9.1: every element is covered): an empty array whose
+            // default element is `v`, which `New` takes for the elements
+            // past the ones it copies.
+            Some(id)
+                if let Some(value) = default_only_pattern(id, native)
+                    && target.element.container.is_none()
+                    && !target.element_is_unpacked_struct(&session.types) =>
+            {
+                let value = element_value(value, tree, session, dims, target)?;
+                call(ContainerOp::WithDefault, target.layout, vec![value])
+            }
+            // An assignment pattern is an array of the target's type, as
+            // when it is assigned to the array (10.9.1).
+            Some(id)
+                if matches!(
+                    native
+                        .expression(expression_binding::ungroup(id, native))
+                        .kind,
+                    ExprKind::Pattern { target: None, .. }
+                ) =>
+            {
+                assignment(id, tree, session, dims, target)?
+            }
             Some(id) => {
                 check_compatible(id, native, tree, session, dims, target)?;
                 expression_binding::value(id, native, tree, session, dims)?
@@ -544,6 +890,182 @@ pub(super) fn assignment(
     ))
 }
 
+/// The value received by the container `target` holds of a fixed-size
+/// unpacked array class property (see `classes::Property::storage`): an
+/// assignment pattern or an unpacked array concatenation of one value for
+/// each element (IEEE 1800-2023 10.9.1, 10.10), or a fixed-size array
+/// property of as many elements, whose elements it copies (7.6).
+pub(super) fn fixed_assignment(
+    root: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+    target: &ContainerType,
+) -> Converted<Expr> {
+    let native = tree.declarations();
+    let size = target
+        .fixed_size()
+        .expect("the container of a fixed-size array");
+    let mismatch = |actual: String| AnalyzerError::IncompatibleAssignment {
+        context: "fixed-size array class property".into(),
+        actual,
+        target: format!("an array of {size} elements"),
+    };
+    if dynamic_array_new(root, native).is_some() {
+        return Err(mismatch("new[]".into()));
+    }
+    match &native
+        .expression(expression_binding::ungroup(root, native))
+        .kind
+    {
+        ExprKind::Pattern {
+            target: None,
+            items,
+        } if items.iter().all(|item| item.key.is_none()) => {
+            if items.len() as u64 != size {
+                return Err(mismatch(format!(
+                    "an assignment pattern of {} elements",
+                    items.len()
+                )));
+            }
+        }
+        // An unpacked array concatenation of one value for each element
+        // (10.10); one with an array among its items, of whatever kind,
+        // stays unsupported, since such an item stands for its elements.
+        ExprKind::Concatenation(items) => {
+            for &item in items {
+                let array = native_type(item, native, tree, session, dims)?.is_some()
+                    || expression_types::type_of(tree, session, item, native, dims).is_ok_and(
+                        |ty| matches!(session.types.data(ty), semantic_types::TyData::Array { .. }),
+                    );
+                if array {
+                    return Err(unsupported(
+                        "an array in a concatenation for a fixed-size array class property",
+                    ));
+                }
+            }
+            if items.len() as u64 != size {
+                return Err(mismatch(format!(
+                    "an unpacked array concatenation of {} elements",
+                    items.len()
+                )));
+            }
+        }
+        ExprKind::Pattern { .. } => {
+            return Err(unsupported(
+                "keyed assignment pattern for a fixed-size array class property",
+            ));
+        }
+        _ => match native_type(root, native, tree, session, dims)? {
+            // The types decide (7.6): an array of as many elements of an
+            // equivalent type. Containers do not change once made (an
+            // update makes another), so the handle of the source's is a
+            // copy of its elements.
+            Some(source) if source.fixed.is_some() => {
+                check_fixed_compatible(
+                    root,
+                    tree,
+                    session,
+                    dims,
+                    target,
+                    "fixed-size array class property",
+                )?;
+                if source.layout != target.layout {
+                    return Err(unsupported(
+                        "assignment between fixed-size array class properties of differently held elements",
+                    ));
+                }
+                return expression_binding::value(root, native, tree, session, dims);
+            }
+            None => {
+                check_fixed_compatible(
+                    root,
+                    tree,
+                    session,
+                    dims,
+                    target,
+                    "fixed-size array class property",
+                )?;
+                return fixed_array_literal(root, tree, &session.types, dims, target);
+            }
+            Some(_) => {
+                return Err(unsupported(
+                    "assignment to a fixed-size array class property from other than a pattern or a fixed-size array",
+                ));
+            }
+        },
+    }
+    assignment(root, tree, session, dims, target)
+}
+
+/// The container `target` holds of the elements of ordinary fixed-size
+/// array `id`, a variable named by itself, from its left index to its right
+/// one (IEEE 1800-2023 7.6), for an assignment or a comparison.
+pub(super) fn fixed_array_literal(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    table: &semantic_types::TyTable,
+    dims: &PackedDimensions,
+    target: &ContainerType,
+) -> Converted<Expr> {
+    let native = tree.declarations();
+    let other =
+        || unsupported("fixed-size array class property with an array other than a variable");
+    let ExprKind::Name(name) = &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    else {
+        return Err(other());
+    };
+    let name = instances::normalize_identifier(&name.spelling);
+    let shape = dims.get(&name).ok_or_else(other)?;
+    let [range] = shape.unpacked.as_slice() else {
+        return Err(other());
+    };
+    if shape.container.is_some() || target.record.is_some() || target.element.container.is_some() {
+        return Err(unsupported(
+            "fixed-size array class property of unpacked structures or containers with an array",
+        ));
+    }
+    let bound = |expr: &ConstExpr| {
+        eval_ast_const_expr(&tree.functions, expr, &dims.const_env).ok_or_else(other)
+    };
+    let (left, right) = (bound(&range.left)?, bound(&range.right)?);
+    let indices: Vec<i128> = if left <= right {
+        (left..=right).collect()
+    } else {
+        (right..=left).rev().collect()
+    };
+    let mut values = Vec::with_capacity(indices.len());
+    for index in indices {
+        let lvalue = selects::lvalue_from_indices(
+            tree,
+            name.clone(),
+            vec![ConstExpr::Literal(index.to_string())],
+            dims,
+        )?;
+        values.push(statements::expr_from_lvalue(tree, table, &lvalue, dims));
+    }
+    Ok(call(ContainerOp::Literal, target.layout, values))
+}
+
+/// The container of `target`'s elements that a new object holds for a
+/// fixed-size array class property without an initializer: each element
+/// the default of its type (IEEE 1800-2023 7.4, 8.7).
+pub(super) fn fixed_default(target: &ContainerType) -> Expr {
+    let size = target
+        .fixed_size()
+        .expect("the container of a fixed-size array");
+    inner_levels(
+        call(
+            ContainerOp::New,
+            target.layout,
+            vec![Expr::Literal(size.to_string()), Expr::Literal("0".into())],
+        ),
+        target,
+    )
+}
+
 /// Whether item `id` of an unpacked array concatenation received by
 /// `target` is an array whose elements it contributes (10.10): one that
 /// may be assigned to `target` itself.
@@ -645,6 +1167,28 @@ pub(super) fn check_written_actual(
     }
 }
 
+/// The value of assignment pattern `id` when it is `'{default: value}`.
+fn default_only_pattern(id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<ExprId> {
+    let ExprKind::Pattern {
+        target: None,
+        items,
+    } = &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    else {
+        return None;
+    };
+    let [item] = items.as_slice() else {
+        return None;
+    };
+    let key = item.key?;
+    matches!(
+        &native.expression(expression_binding::ungroup(key, native)).kind,
+        ExprKind::Literal(text) if text == "default"
+    )
+    .then_some(item.value)
+}
+
 fn check_compatible(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
@@ -685,6 +1229,30 @@ fn check_compatible(
     })
 }
 
+/// Check that value `id` of a fixed-size array may be assigned to, or
+/// compared with, the fixed-size array class property `target` holds: an
+/// array of as many elements of an equivalent type (IEEE 1800-2023 6.22.2,
+/// 7.6).
+fn check_fixed_compatible(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+    target: &ContainerType,
+    context: &str,
+) -> Converted<()> {
+    let native = tree.declarations();
+    let (left, right) = target.fixed.expect("a fixed-size array");
+    let source = expression_types::type_of(tree, session, id, native, dims)
+        .map_err(|_| unsupported(format!("{context} from a value of unknown type")))?;
+    let literal = |value: i128| ConstExpr::Literal(value.to_string());
+    let mut ty = target.element.clone();
+    *ty.unpacked_ranges_mut() = vec![UnpackedRange::new(literal(left), literal(right))];
+    let target = semantic_types::of_type(&mut session.types, &tree.functions, &ty, &dims.const_env)
+        .ok_or_else(|| unsupported("type of a fixed-size array class property"))?;
+    assignments::check_types(tree, session, dims, source, target, &|| context.into())
+}
+
 fn element_value(
     id: ExprId,
     tree: &AnalysisContext<'_>,
@@ -701,7 +1269,7 @@ fn element_value(
     if native_type(id, native, tree, session, dims)?.is_some() {
         return Err(unsupported("container used as an element"));
     }
-    if let Some(class) = target.element.class.as_deref() {
+    if let Some(class) = target.element_class(&session.types).as_deref() {
         if let Some(call) =
             expression_binding::object_constructor(tree, session, id, native, dims, class)?
         {
@@ -717,12 +1285,12 @@ fn element_value(
             || "container element assignment".into(),
         )?;
     }
-    if target.element.unpacked_struct().is_some() {
+    if target.element_is_unpacked_struct(&session.types) {
         let structure = unpacked_structs::type_id(&target.element, tree, session, dims)?;
         unpacked_structs::check_value(structure, id, native, tree, session, dims)?;
     }
     expression_binding::check_chandle_assignment(
-        target.element.chandle && target.element.unpacked_ranges.is_empty(),
+        target.element.is_chandle() && target.element.unpacked_ranges.is_empty(),
         id,
         tree,
         native,
@@ -768,9 +1336,103 @@ fn index_value(
     dims: &PackedDimensions,
     target: &ContainerType,
 ) -> Converted<Expr> {
+    let index = index_value_in(id, base, tree, session, dims, target)?;
+    fixed_position(target, index)
+}
+
+/// Check that native expression `id`, which a write of an element or a
+/// method that changes the array names, may write the fixed-size array
+/// property it is or selects into: every write of the elements of one is a
+/// write of the property (IEEE 1800-2023 8.19), as a write of it whole is.
+/// A container member of a structure element of a container, `q[i].m`, is
+/// written in place by such a write, but equal elements may share the
+/// record that holds it (see `unpacked_structs::record`): the write stays
+/// unsupported rather than change the other elements too.
+pub(super) fn check_written_storage(
+    mut id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<()> {
+    let native = tree.declarations();
+    loop {
+        id = expression_binding::ungroup(id, native);
+        if matches!(native.expression(id).kind, ExprKind::Member { .. })
+            && element_member(id, native, tree, session, dims)?
+                .is_some_and(|(member, _)| member.container.is_some())
+        {
+            return Err(unsupported(
+                "update of a container member of a structure element of a container",
+            ));
+        }
+        if let Some((property, _)) =
+            expression_binding::object_property(tree, session, id, native, dims)?
+            && property.storage.is_some()
+        {
+            return expression_binding::check_writable(&property, dims);
+        }
+        id = match &native.expression(id).kind {
+            ExprKind::Select { expression, .. } => *expression,
+            ExprKind::Member {
+                expression,
+                separator,
+                ..
+            } if separator == "." => *expression,
+            _ => return Ok(()),
+        };
+    }
+}
+
+/// The position in container `target` of the element at index `index`:
+/// for a fixed-size array the container holds, its distance from the left
+/// bound of the range (IEEE 1800-2023 7.4.6).
+pub(super) fn fixed_position(target: &ContainerType, index: Expr) -> Converted<Expr> {
+    let Some((left, right)) = target.fixed else {
+        return Ok(index);
+    };
+    if left.min(right) < 0 {
+        return Err(unsupported(
+            "class property with a negative unpacked range bound",
+        ));
+    }
+    // As wide as the bound needs, so that it is not cut before the index
+    // is taken from it.
+    let literal = |value: i128| {
+        let width = if i32::try_from(value).is_ok() {
+            32
+        } else if i64::try_from(value).is_ok() {
+            64
+        } else {
+            128
+        };
+        Expr::Literal(format!("{width}'sd{value}"))
+    };
+    Ok(match (left <= right, left) {
+        (true, 0) => index,
+        (true, _) => Expr::Binary {
+            left: Box::new(index),
+            op: BinaryOp::Sub,
+            right: Box::new(literal(left)),
+        },
+        (false, _) => Expr::Binary {
+            left: Box::new(literal(left)),
+            op: BinaryOp::Sub,
+            right: Box::new(index),
+        },
+    })
+}
+
+fn index_value_in(
+    id: ExprId,
+    base: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+    target: &ContainerType,
+) -> Converted<Expr> {
     let native = tree.declarations();
     // A class index takes handles of its class or a derived one.
-    if let Some(class) = target.key.as_ref().and_then(|key| key.class()).filter(|_| {
+    if let Some(class) = target.key_class(&session.types).filter(|_| {
         matches!(
             target.layout.kind,
             ContainerKind::Associative { object: true, .. }
@@ -782,12 +1444,12 @@ fn index_value(
             id,
             native,
             dims,
-            class,
+            &class,
             || "associative array index".into(),
         )?;
     }
     // Only an associative array indexed by chandles takes a chandle index.
-    let chandle = target.key.as_ref().is_some_and(|key| key.chandle);
+    let chandle = target.key.as_ref().is_some_and(|key| key.is_chandle());
     expression_binding::check_chandle_assignment(chandle, id, tree, native, dims, session)?;
     // An integral key, declared or wildcard, takes only an integral
     // index: nonintegral values are illegal (7.8.1). A string literal is
@@ -808,8 +1470,8 @@ fn index_value(
                 .is_some_and(|ty| {
                     // A process handle is an integral identity, not
                     // an object key (7.8.5).
-                    (ty.class.is_some()
-                        && ty.class.as_deref() != Some(processes::CLASS))
+                    ty.class_in(&session.types)
+                        .is_some_and(|class| &*class != processes::CLASS)
                         || ty.container.is_some()
                 })))
     {
@@ -843,13 +1505,13 @@ fn index_value(
             operator,
             right,
         } if !chandle && (operator == "+" || operator == "-") => Expr::Binary {
-            left: Box::new(index_value(*left, base, tree, session, dims, target)?),
+            left: Box::new(index_value_in(*left, base, tree, session, dims, target)?),
             op: if operator == "+" {
                 BinaryOp::Add
             } else {
                 BinaryOp::Sub
             },
-            right: Box::new(index_value(*right, base, tree, session, dims, target)?),
+            right: Box::new(index_value_in(*right, base, tree, session, dims, target)?),
         },
         _ if chandle => {
             expression_binding::bind_chandle_value(id, native, tree, session, dims, None)?
@@ -890,12 +1552,55 @@ pub(super) fn value(
         } if native_type(*left, native, tree, session, dims)?.is_some()
             || native_type(*right, native, tree, session, dims)?.is_some() =>
         {
+            // A fixed-size array property may be either operand.
+            let (left, right) = match native_type(*left, native, tree, session, dims)? {
+                None if native_type(*right, native, tree, session, dims)?
+                    .is_some_and(|right| right.fixed.is_some()) =>
+                {
+                    (right, left)
+                }
+                _ => (left, right),
+            };
             let Some(target) = native_type(*left, native, tree, session, dims)? else {
                 return Err(unsupported("container comparison requires two containers"));
             };
-            check_compatible(*right, native, tree, session, dims, &target)?;
-            let source =
-                native_type(*right, native, tree, session, dims)?.expect("checked compatibility");
+            // A fixed-size array property compares with an array of its
+            // type, which the types decide (IEEE 1800-2023 7.6, 11.4.5): one
+            // held as it is, or an ordinary array of its elements.
+            let mut other = None;
+            let source = if target.fixed.is_some() {
+                check_fixed_compatible(
+                    *right,
+                    tree,
+                    session,
+                    dims,
+                    &target,
+                    "comparison of a fixed-size array class property",
+                )?;
+                match native_type(*right, native, tree, session, dims)? {
+                    Some(source) if source.fixed.is_some() && source.layout == target.layout => {
+                        source
+                    }
+                    Some(_) => {
+                        return Err(unsupported(
+                            "comparison of a fixed-size array class property with other than one of as many elements",
+                        ));
+                    }
+                    None => {
+                        other = Some(fixed_array_literal(
+                            *right,
+                            tree,
+                            &session.types,
+                            dims,
+                            &target,
+                        )?);
+                        target.clone()
+                    }
+                }
+            } else {
+                check_compatible(*right, native, tree, session, dims, &target)?;
+                native_type(*right, native, tree, session, dims)?.expect("checked compatibility")
+            };
             if std::mem::discriminant(&source.layout.kind)
                 != std::mem::discriminant(&target.layout.kind)
             {
@@ -920,12 +1625,16 @@ pub(super) fn value(
                 "===" | "!==" => ContainerOp::CaseEqual,
                 _ => return Err(unsupported("integral operator on a dynamic container")),
             };
+            let right = match other {
+                Some(other) => other,
+                None => expression_binding::value(*right, native, tree, session, dims)?,
+            };
             let value = call(
                 op,
                 target.layout,
                 vec![
                     expression_binding::value(*left, native, tree, session, dims)?,
-                    expression_binding::value(*right, native, tree, session, dims)?,
+                    right,
                 ],
             );
             Ok(Some(if matches!(operator.as_str(), "!=" | "!==") {
@@ -944,6 +1653,11 @@ pub(super) fn value(
             let Some(target) = native_type(*expression, native, tree, session, dims)? else {
                 return Ok(None);
             };
+            // A slice of a fixed-size array (7.4.5) would be an array of the
+            // range, which no container holds here.
+            if target.fixed.is_some() && !matches!(dimension.kind, DimensionKind::Index(_)) {
+                return Err(unsupported("slice of a fixed-size array class property"));
+            }
             if let DimensionKind::Range { left, right } = dimension.kind
                 && matches!(target.layout.kind, ContainerKind::Queue { .. })
             {
@@ -978,31 +1692,23 @@ pub(super) fn value(
                 }
                 _ => return Err(unsupported("dynamic container slice")),
             };
-            Ok(Some(element_read(
-                &target,
-                call(
-                    ContainerOp::Get,
-                    target.layout,
-                    vec![
-                        expression_binding::value(*expression, native, tree, session, dims)?,
-                        match index {
-                            Some(index) => {
-                                index_value(index, *expression, tree, session, dims, &target)?
-                            }
-                            None => last_index(
-                                &target,
-                                expression_binding::value(
-                                    *expression,
-                                    native,
-                                    tree,
-                                    session,
-                                    dims,
-                                )?,
-                            )?,
-                        },
-                    ],
-                ),
-            )))
+            let get = call(
+                ContainerOp::Get,
+                target.layout,
+                vec![
+                    expression_binding::value(*expression, native, tree, session, dims)?,
+                    match index {
+                        Some(index) => {
+                            index_value(index, *expression, tree, session, dims, &target)?
+                        }
+                        None => last_index(
+                            &target,
+                            expression_binding::value(*expression, native, tree, session, dims)?,
+                        )?,
+                    },
+                ],
+            );
+            Ok(Some(element_read(&target, &session.types, get)))
         }
         ExprKind::Call { .. } | ExprKind::Member { .. } => {
             // No-argument built-in methods also permit the bare member form,
@@ -1034,6 +1740,18 @@ pub(super) fn value(
                 return Ok(None);
             }
             let (op, count) = match name.spelling.as_str() {
+                // A fixed-size array property has the methods of its type,
+                // the array methods of 7.12, whose locators and reductions
+                // are bound elsewhere; the methods of dynamic arrays, queues
+                // and associative arrays (7.5, 7.9, 7.10) are not its own.
+                method
+                    if target.fixed.is_some()
+                        && !matches!(method, "reverse" | "sort" | "rsort" | "shuffle") =>
+                {
+                    return Err(AnalyzerError::Parse(format!(
+                        "`{method}` is no method of a fixed-size array (IEEE 1800-2023 7.12)"
+                    )));
+                }
                 "reverse" | "sort" | "rsort" | "shuffle"
                     if !matches!(target.layout.kind, ContainerKind::Associative { .. }) =>
                 {
@@ -1044,7 +1762,7 @@ pub(super) fn value(
                         _ => ContainerOp::Rsort,
                     };
                     if matches!(op, ContainerOp::Sort | ContainerOp::Rsort)
-                        && target.element.unpacked_struct().is_some()
+                        && target.element_is_unpacked_struct(&session.types)
                     {
                         return Err(unsupported(
                             "sorting unpacked structures requires a with expression",
@@ -1057,7 +1775,7 @@ pub(super) fn value(
                     }
                     // Chandles have no relational operators (6.14, 7.12.2).
                     if matches!(op, ContainerOp::Sort | ContainerOp::Rsort)
-                        && target.element.chandle
+                        && target.element.is_chandle()
                     {
                         return Err(AnalyzerError::IllegalChandleUse {
                             detail: "sorting chandles".into(),
@@ -1120,6 +1838,9 @@ pub(super) fn value(
             {
                 return Err(unsupported("void container method used as a value"));
             }
+            if op.mutates() {
+                check_written_storage(*base, tree, session, dims)?;
+            }
             if arguments.len() != count
                 || arguments
                     .iter()
@@ -1156,10 +1877,10 @@ pub(super) fn value(
                     // The index variable of a class index is passed by
                     // reference, so it has the index's class (IEEE 1800-2023
                     // 7.9.4).
-                    let key_class = target.key.as_ref().and_then(|key| key.class());
+                    let key_class = target.key_class(&session.types);
                     // So is the variable of a chandle index, which is no
                     // integral variable (6.14).
-                    if shape.chandle != target.key.as_ref().is_some_and(|key| key.chandle) {
+                    if shape.chandle != target.key.as_ref().is_some_and(|key| key.is_chandle()) {
                         return Err(AnalyzerError::IllegalChandleUse {
                             detail: "an associative traversal index of another type than the index"
                                 .into(),
@@ -1167,9 +1888,14 @@ pub(super) fn value(
                     }
                     if let ContainerKind::Associative { string, object, .. } = target.layout.kind
                         && (shape.string != string
-                            || shape.container.is_some()
+                            || holds_container(shape, tree, session, dims)
                             || !shape.unpacked.is_empty()
-                            || object && shape.class.as_deref() != key_class)
+                            || object
+                                && expression_binding::objects::shape_class(
+                                    shape, tree, session, dims,
+                                )
+                                .as_deref()
+                                    != key_class.as_deref())
                     {
                         return Err(unsupported(
                             "incompatible associative traversal index variable",
@@ -1193,7 +1919,7 @@ pub(super) fn value(
             let value = call(op, target.layout, args);
             Ok(Some(
                 if matches!(op, ContainerOp::PopFront | ContainerOp::PopBack) {
-                    element_read(&target, value)
+                    element_read(&target, &session.types, value)
                 } else {
                     value
                 },
@@ -1246,6 +1972,11 @@ fn query(
     {
         return Err(unsupported("dynamic array query arguments"));
     }
+    // A fixed-size array property is of its type, however it is held: the
+    // queries of that type answer for it (IEEE 1800-2023 20.7).
+    if target.fixed.is_some() {
+        return Ok(None);
+    }
     if matches!(
         name.spelling.as_str(),
         "$dimensions" | "$unpacked_dimensions"
@@ -1270,8 +2001,8 @@ fn query(
                     // packed dimensions; a structure has none.
                     + if innermost.layout.handle.is_some()
                         && (innermost.record.is_none()
-                            || innermost.element.unpacked_struct().is_some())
-                        || innermost.element.chandle
+                            || innermost.element_is_unpacked_struct(&session.types))
+                        || innermost.element.is_chandle()
                     {
                         0
                     } else {
@@ -1329,9 +2060,10 @@ fn query(
 }
 
 /// The element `c[k]` of a dynamic array, queue or associative array of
-/// integral elements that native target `left` is, or selects bits of, as
-/// in `c[k][i] = v`: its native expression, the container's type, and the
-/// values of the container and the index.
+/// integral elements that native target `left` is, or selects bits or
+/// packed structure members of, as in `c[k][i] = v` or `c[k].f = v`: its
+/// native expression, the container's type, and the values of the
+/// container and the index.
 pub(super) fn selected_element(
     left: ExprId,
     tree: &AnalysisContext<'_>,
@@ -1356,9 +2088,9 @@ pub(super) fn selected_element(
             // A select of an element that is a container selects its
             // elements, see `set`; other elements have no bits to select.
             if ty.container.is_some()
-                || ty.class.is_some()
-                || ty.chandle
-                || ty.unpacked_struct().is_some()
+                || target.element_class(&session.types).is_some()
+                || ty.is_chandle()
+                || ty.is_unpacked_struct_in(&session.types)
                 || !ty.unpacked_ranges.is_empty()
                 || target.layout.handle.is_some()
                 || target.record.is_some()
@@ -1374,29 +2106,134 @@ pub(super) fn selected_element(
             {
                 return Ok(None);
             }
-            let container_value =
-                expression_binding::value(*container, native, tree, session, dims)?;
-            let index = match dimension.kind {
-                DimensionKind::Index(index) => {
-                    index_value(index, *container, tree, session, dims, &target)?
-                }
-                // `q[$]`, the last element of a queue: its index, which an
-                // assignment may have saved (see `last_index`).
-                _ if matches!(target.layout.kind, ContainerKind::Queue { .. }) => {
-                    match dims.last_indices.get(&element) {
-                        Some(index) => index.clone(),
-                        None => last_index(&target, container_value.clone())?,
-                    }
-                }
-                _ => return Ok(None),
+            let Some((container_value, index)) = element_address(
+                element,
+                *container,
+                &dimension.kind,
+                &target,
+                tree,
+                session,
+                dims,
+            )?
+            else {
+                return Ok(None);
             };
             return Ok(Some((element, target, container_value, index)));
         }
-        let ExprKind::Select { expression, .. } = &native.expression(element).kind else {
-            return Ok(None);
+        // A select, or a member of a packed structure element (7.2.1).
+        element = match &native.expression(element).kind {
+            ExprKind::Select { expression, .. } => *expression,
+            ExprKind::Member {
+                expression,
+                separator,
+                ..
+            } if separator == "." => *expression,
+            _ => return Ok(None),
         };
-        element = expression_binding::ungroup(*expression, native);
+        element = expression_binding::ungroup(element, native);
     }
+}
+
+/// The value of container `container`, of type `target`, and the index of
+/// its element `element`, which selects it by `dimension`: `c[k]`, or
+/// `c[$]` of a queue.
+#[allow(clippy::too_many_arguments)]
+fn element_address(
+    element: ExprId,
+    container: ExprId,
+    dimension: &DimensionKind,
+    target: &ContainerType,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<(Expr, Expr)>> {
+    let native = tree.declarations();
+    let container_value = expression_binding::value(container, native, tree, session, dims)?;
+    let index = match dimension {
+        DimensionKind::Index(index) => index_value(*index, container, tree, session, dims, target)?,
+        // `q[$]`, the last element of a queue: its index, which an
+        // assignment may have saved (see `last_index`).
+        DimensionKind::Queue(None) if matches!(target.layout.kind, ContainerKind::Queue { .. }) => {
+            match dims.last_indices.get(&element) {
+                Some(index) => index.clone(),
+                None => last_index(target, container_value.clone())?,
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some((container_value, index)))
+}
+
+/// The index of the element that native select `select`, `c[k]` or `c[$]`
+/// of a container of any element type, names: what the address of a place
+/// it is or holds evaluates once (IEEE 1800-2023 11.4.1).
+pub(super) fn element_index(
+    select: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<Expr>> {
+    let native = tree.declarations();
+    let select = expression_binding::ungroup(select, native);
+    let ExprKind::Select {
+        expression: container,
+        dimension,
+    } = &native.expression(select).kind
+    else {
+        return Ok(None);
+    };
+    let Some(target) = native_type(*container, native, tree, session, dims)? else {
+        return Ok(None);
+    };
+    Ok(element_address(
+        select,
+        *container,
+        &dimension.kind,
+        &target,
+        tree,
+        session,
+        dims,
+    )?
+    .map(|(_, index)| index))
+}
+
+/// The element of unpacked structure type that native expression `id`
+/// selects of a container, `c[k]` or `c[$]`, as a place a member write goes
+/// through: the container's type, its value and the index.
+pub(super) fn struct_element_place(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<(Arc<ContainerType>, Expr, Expr)>> {
+    let native = tree.declarations();
+    let id = expression_binding::ungroup(id, native);
+    let ExprKind::Select {
+        expression: container,
+        dimension,
+    } = &native.expression(id).kind
+    else {
+        return Ok(None);
+    };
+    let Some(target) = native_type(*container, native, tree, session, dims)? else {
+        return Ok(None);
+    };
+    if !target.element_is_unpacked_struct(&session.types) {
+        return Ok(None);
+    }
+    let Some((container_value, index)) = element_address(
+        id,
+        *container,
+        &dimension.kind,
+        &target,
+        tree,
+        session,
+        dims,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((target, container_value, index)))
 }
 
 pub(super) fn set(
@@ -1419,6 +2256,7 @@ pub(super) fn set(
     let Some(target) = native_type(*expression, native, tree, session, dims)? else {
         return Ok(None);
     };
+    check_written_storage(*expression, tree, session, dims)?;
     if nonblocking {
         return Err(unsupported("nonblocking dynamic element assignment"));
     }
@@ -1479,7 +2317,7 @@ fn compound_value(
     }
     let element = &target.element;
     if element.container.is_some()
-        || element.class.is_some()
+        || target.element_class(&session.types).is_some()
         || target.layout.handle.is_some()
         || target.record.is_some()
     {
@@ -1504,6 +2342,7 @@ fn compound_value(
     };
     let current = element_read(
         target,
+        &session.types,
         call(
             ContainerOp::Get,
             target.layout,
@@ -1526,6 +2365,79 @@ fn compound_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `logic [N-1:0] q[$]`, a queue whose element width names `N`.
+    fn symbolic_queue() -> VariableDimensions {
+        let mut element = Type::new(TypeKind::Logic);
+        element.packed_ranges.push(PackedRange::new(
+            ConstExpr::Binary {
+                left: Box::new(ConstExpr::Ident("N".into())),
+                op: BinaryOp::Sub,
+                right: Box::new(ConstExpr::Literal("1".into())),
+            },
+            ConstExpr::Literal("0".into()),
+        ));
+        // A container is held by its handle (see `with_dimensions`).
+        let mut queue = Type::new(TypeKind::Object);
+        queue.packed_ranges.push(PackedRange::new(
+            ConstExpr::Literal("31".into()),
+            ConstExpr::Literal("0".into()),
+        ));
+        queue.container = Some(Arc::new(ContainerType {
+            key: None,
+            layout: ContainerLayout {
+                kind: ContainerKind::Queue { capacity: 0 },
+                width: 4,
+                signed: false,
+                two_state: false,
+                handle: None,
+            },
+            element,
+            record: None,
+            fixed: None,
+            binding: Default::default(),
+        }));
+        procedural::dimensions_from_type(&queue)
+    }
+
+    #[test]
+    fn shapes_whose_type_is_not_formed_keep_their_container_metadata() {
+        // An output-only queue formal whose element width names a constant
+        // that the caller's scope lacks is still a queue: the guards that
+        // ask leave it out of the values a call passes in (13.5.1).
+        let queue = symbolic_queue();
+        assert!(queue.container.is_some());
+        let functions = const_functions::ConstantFunctions::default();
+        let mut table = semantic_types::TyTable::default();
+        assert!(
+            queue
+                .type_id(&mut table, &functions, &ConstEnv::default())
+                .is_none()
+        );
+        assert!(shape_holds_container(
+            &queue,
+            &mut table,
+            &functions,
+            &ConstEnv::default()
+        ));
+        let env = ConstEnv::from_iter([("N".into(), 4)]);
+        assert!(shape_holds_container(&queue, &mut table, &functions, &env));
+        // A vector of that width is no container, formed or not.
+        let mut vector = Type::new(TypeKind::Logic);
+        vector
+            .packed_ranges
+            .push(queue.container.as_ref().unwrap().element.packed_ranges[0].clone());
+        let vector = procedural::dimensions_from_type(&vector);
+        assert!(!shape_holds_container(
+            &vector,
+            &mut table,
+            &functions,
+            &ConstEnv::default()
+        ));
+        assert!(!shape_holds_container(
+            &vector, &mut table, &functions, &env
+        ));
+    }
     #[test]
     fn queue_slice_rejects_nonintegral_bounds() {
         for (declaration, bound) in [
@@ -1574,8 +2486,16 @@ mod tests {
                 "nonblocking",
             ),
             (
-                "module Top; class C; int q[2]; endclass C c; initial c=new; endmodule",
-                "unpacked dimensions",
+                "module Top; class C; int q[2][3]; endclass C c; initial c=new; endmodule",
+                "more than one unpacked dimension",
+            ),
+            (
+                "module Top; class C; static int q[2]; endclass C c; initial c=new; endmodule",
+                "static class property with unpacked dimensions",
+            ),
+            (
+                "module Top; class C; int q[2] = '{1, 2, 3}; endclass C c; initial c=new; endmodule",
+                "an assignment pattern of 3 elements",
             ),
         ] {
             let error = crate::analyze_source(source, Path::new("class-container-rejection.sv"))
@@ -1763,10 +2683,14 @@ mod method_call_tests {
 
 /// An element that `get` reads, as a whole value: the flat structure value
 /// of a record element.
-pub(super) fn element_read(target: &ContainerType, get: Expr) -> Expr {
+pub(super) fn element_read(
+    target: &ContainerType,
+    table: &semantic_types::TyTable,
+    get: Expr,
+) -> Expr {
     match &target.record {
         // An integral element keeps its signedness.
-        Some(record) if target.element.unpacked_struct().is_none() => {
+        Some(record) if !target.element_is_unpacked_struct(table) => {
             classes::object_call(ObjectOp::Load(record.fields[0]), vec![get])
         }
         Some(record) => classes::object_call(ObjectOp::Unbox(record.clone()), vec![get]),
@@ -1807,7 +2731,7 @@ fn struct_element(
     let Some(target) = native_type(base, native, tree, session, dims)? else {
         return Ok(None);
     };
-    if target.element.unpacked_struct().is_none() {
+    if !target.element_is_unpacked_struct(&session.types) {
         return Ok(None);
     }
     let Some(value) = value(id, native, tree, session, dims, false)? else {
@@ -1838,7 +2762,7 @@ pub(super) fn native_struct_element(
 ) -> Converted<Option<Arc<unpacked_structs::UnpackedStruct>>> {
     let id = expression_binding::ungroup(id, native);
     if let Some((target, _)) = locators::record_iterator(id, native, dims) {
-        return Ok(target.element.unpacked_struct().cloned());
+        return Ok(target.element_struct(&session.types).cloned());
     }
     let base = match &native.expression(id).kind {
         ExprKind::Select { expression, .. } => *expression,
@@ -1854,7 +2778,7 @@ pub(super) fn native_struct_element(
         _ => return Ok(None),
     };
     Ok(native_type(base, native, tree, session, dims)?
-        .and_then(|target| target.element.unpacked_struct().cloned()))
+        .and_then(|target| target.element_struct(&session.types).cloned()))
 }
 
 /// A member `e.m` (or `e.m.n`) of a container element `e` of unpacked
@@ -1891,8 +2815,7 @@ pub(super) fn element_member(
         return Ok(None);
     };
     let aggregate = target
-        .element
-        .unpacked_struct()
+        .element_struct(&session.types)
         .expect("a structure element")
         .clone();
     // A path into a packed structure member selects its bits; a path
@@ -1909,6 +2832,17 @@ pub(super) fn element_member(
     };
     if !packed.is_empty() && member_type.members.is_empty() {
         return Ok(None);
+    }
+    // The member has its type in the element's semantic type (7.2).
+    let mut member_type = member_type;
+    if member_type.binding.get(&session.types).is_none()
+        && let Some(id) = target.element_id(&session.types).and_then(|id| {
+            names
+                .iter()
+                .try_fold(id, |id, name| session.types.member(id, name))
+        })
+    {
+        member_type.bind(&session.types, id);
     }
     let leaves_in_order = aggregate.leaves();
     let parts = leaves
@@ -1938,7 +2872,7 @@ pub(super) fn element_member(
             "structure member with several members of an element read with a side effect",
         ));
     }
-    let value = if member_type.unpacked_struct().is_some() {
+    let value = if member_type.is_unpacked_struct_in(&session.types) {
         Expr::Concat(parts)
     } else {
         parts.into_iter().next().expect("one leaf")

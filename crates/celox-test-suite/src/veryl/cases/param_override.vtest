@@ -1,5 +1,6 @@
 (group param_override (category types))
 
+; Basic param override: change WIDTH from default 8 to 16 and verify signal width.
 (case test_param_override_basic_width
   (source "test.veryl" #"
         module Top #(
@@ -15,6 +16,7 @@
   (modify (set a 0xAB))
   (assert_eq b 0xAB))
 
+; Param value reflected in logic (assign b = a + OFFSET).
 (case test_param_override_logic_reflection
   (source "test.veryl" #"
         module Top #(
@@ -30,6 +32,7 @@
   (modify (set a 5))
   (assert_eq b 15))
 
+; No override -> default value is used.
 (case test_param_override_default_value
   (source "test.veryl" #"
         module Top #(
@@ -43,6 +46,7 @@
   (top Top)
   (assert_eq o 42))
 
+; Multiple params overridden simultaneously.
 (case test_param_override_multiple
   (source "test.veryl" #"
         module Top #(
@@ -57,6 +61,7 @@
   (top Top)
   (assert_eq o 3))
 
+; Param expression in always_ff of a child instance with overridden params.
 (case test_param_in_child_always_ff
   (source "test.veryl" #"
         module Counter #(
@@ -126,6 +131,7 @@
   (let done_val (get done))
   (assert (== done_val 1) "done should be 1 after N=4 cycles (child override)"))
 
+; Const-folded if condition using param expression in always_ff.
 (case test_param_const_fold_if
   (source "test.veryl" #"
         module Top #(
@@ -160,6 +166,7 @@
   (tick clk)
   (assert_eq o 0xAA "MODE=1 should select a"))
 
+; Param propagation to a child module via inst param override.
 (case test_param_override_child_propagation
   (source "test.veryl" #"
         module Child #(
@@ -187,6 +194,7 @@
   (modify (set a 0xAB))
   (assert_eq b 0xAB))
 
+; Param expression `N - 1` inside always_ff must evaluate correctly.
 (case test_param_in_always_ff
   (source "test.veryl" #"
         module Top #(

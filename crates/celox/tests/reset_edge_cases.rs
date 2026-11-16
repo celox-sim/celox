@@ -1,45 +1,5 @@
-#[path = "test_utils/mod.rs"]
-#[macro_use]
-mod test_utils;
-
-all_backends! {
-    fn test_reset_literals_polarity(sim) {
-        @case "reset_edge_cases::test_reset_literals_polarity";
-    }
-    fn test_reset_literals_context(sim) {
-        @case "reset_edge_cases::test_reset_literals_context";
-    }
-    fn test_reset_literals_ff(sim) {
-        @case "reset_edge_cases::test_reset_literals_ff";
-    }
-
-
-    // Test `reset_async_high`: the FF resets when the reset signal is HIGH.
-    fn test_reset_async_high(sim) {
-        @case "reset_edge_cases::test_reset_async_high";
-    }
-
-    // Test `reset_sync_high`: synchronous reset, active HIGH.
-    fn test_reset_sync_high(sim) {
-        @case "reset_edge_cases::test_reset_sync_high";
-    }
-
-    // Test `reset_sync_low`: synchronous reset, active LOW.
-    fn test_reset_sync_low(sim) {
-        @case "reset_edge_cases::test_reset_sync_low";
-    }
-
-    // Test multiple FF blocks sharing the same reset signal.
-    fn test_shared_reset(sim) {
-        @case "reset_edge_cases::test_shared_reset";
-    }
-
-    // Reset value that is non-zero: verifies the reset assignment uses
-    // the specified value, not just zero.
-    fn test_nonzero_reset_value(sim) {
-        @case "reset_edge_cases::test_nonzero_reset_value";
-    }
-}
+//! Reset literal tests that are not celox-test-suite cases (the suite
+//! cases themselves run from their `.vtest` files).
 
 #[test]
 fn reset_literals_follow_the_builder_reset_type_in_rtl_and_testbenches() {

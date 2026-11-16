@@ -9,16 +9,17 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         id: TimingControlId,
     ) -> Result<Stmt, AnalyzerError> {
-        let control = self.tree.declarations().timing_control(id);
+        let control = self.syntax().declarations().timing_control(id);
         match &control.kind {
             TimingControlKind::Delay {
                 value,
                 parenthesized,
             } => {
                 self.allow_timing("delay control")?;
-                let literal = expression_binding::ungroup(*value, self.tree.declarations());
-                if let ExprKind::Literal(text) = &self.tree.declarations().expression(literal).kind
-                    && let Some(ticks) = timescales::delay_literal(literal, text, self.tree)?
+                let literal = expression_binding::ungroup(*value, self.syntax().declarations());
+                if let ExprKind::Literal(text) =
+                    &self.syntax().declarations().expression(literal).kind
+                    && let Some(ticks) = timescales::delay_literal(literal, text, &self.tree)?
                 {
                     return Ok(Stmt::Delay {
                         amount: Expr::Literal(format!("64'd{ticks}")),
@@ -29,10 +30,10 @@ impl BodyBuilder<'_, '_, '_> {
                 }
                 Ok(Stmt::Delay {
                     amount: self.native_delay(*value, *parenthesized)?,
-                    ticks_per_unit: timescales::time_divisor(*value, self.tree)?,
-                    ticks_per_precision: timescales::precision_divisor(*value, self.tree)?,
+                    ticks_per_unit: timescales::time_divisor(*value, &self.tree)?,
+                    ticks_per_precision: timescales::precision_divisor(*value, &self.tree)?,
                     precision_steps_per_tick: timescales::precision_steps_per_tick(
-                        *value, self.tree,
+                        *value, &self.tree,
                     )?,
                 })
             }
@@ -42,10 +43,10 @@ impl BodyBuilder<'_, '_, '_> {
                     EventControl::Items(items)
                         if items.iter().any(|item| {
                             events::is_handle(
-                                self.tree,
+                                &self.tree,
                                 self.session,
                                 item.expression,
-                                self.tree.declarations(),
+                                self.syntax().declarations(),
                                 &self.dims,
                             )
                         }) =>
@@ -57,10 +58,10 @@ impl BodyBuilder<'_, '_, '_> {
                             if item.edge != TimingEdge::Any
                                 || item.iff.is_some()
                                 || !events::is_handle(
-                                    self.tree,
+                                    &self.tree,
                                     self.session,
                                     item.expression,
-                                    self.tree.declarations(),
+                                    self.syntax().declarations(),
                                     &self.dims,
                                 )
                             {
@@ -97,10 +98,10 @@ impl BodyBuilder<'_, '_, '_> {
                     }
                     EventControl::Named(id)
                         if events::is_handle(
-                            self.tree,
+                            &self.tree,
                             self.session,
                             *id,
-                            self.tree.declarations(),
+                            self.syntax().declarations(),
                             &self.dims,
                         ) =>
                     {
@@ -133,18 +134,32 @@ impl BodyBuilder<'_, '_, '_> {
     /// which checks the handles after every wake and so reports the access
     /// through `null` rather than an edge of the selection it ends. A handle that an automatic
     /// variable, an argument or a class property holds is read when the wait begins.
+    /// The statements that wait for the event control or delay `id` as a
+    /// procedural timing control does: through
+    /// [`Self::virtual_event_control`] when it reads members through virtual
+    /// interfaces.
+    pub(super) fn timing_control_statements(
+        &mut self,
+        id: TimingControlId,
+    ) -> Result<Vec<Stmt>, AnalyzerError> {
+        if let Some(stmts) = self.virtual_event_control(id)? {
+            return Ok(stmts);
+        }
+        Ok(vec![self.native_timing_control(id)?])
+    }
+
     pub(super) fn virtual_event_control(
         &mut self,
         id: TimingControlId,
     ) -> Result<Option<Vec<Stmt>>, AnalyzerError> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let control = native.timing_control(id);
         let TimingControlKind::Event(EventControl::Items(items)) = &control.kind else {
             return Ok(None);
         };
         if !items.iter().any(|item| {
             virtual_interfaces::native_member(
-                self.tree,
+                &self.tree,
                 self.session,
                 item.expression,
                 native,
@@ -170,7 +185,7 @@ impl BodyBuilder<'_, '_, '_> {
             // The member is read below without the binder.
             expression_binding::check_chandle_read(
                 item.expression,
-                self.tree,
+                &self.tree,
                 native,
                 &self.dims,
                 self.session,
@@ -180,7 +195,7 @@ impl BodyBuilder<'_, '_, '_> {
                 .map(|iff| self.native_chandle_value(iff))
                 .transpose()?;
             let expr = match virtual_interfaces::native_member(
-                self.tree,
+                &self.tree,
                 self.session,
                 item.expression,
                 native,
@@ -210,8 +225,9 @@ impl BodyBuilder<'_, '_, '_> {
                     }) {
                         copy.clone()
                     } else {
-                        let (_, unique) =
-                            self.hidden(virtual_interfaces::value_type((*ty).clone()));
+                        let copy_type =
+                            virtual_interfaces::value_type(&mut self.session.types, (*ty).clone());
+                        let (_, unique) = self.hidden(copy_type);
                         let copy = Expr::Ident(unique.clone());
                         // Each activation of the wait has its own copy.
                         copies.push((
@@ -247,7 +263,7 @@ impl BodyBuilder<'_, '_, '_> {
                     if copied {
                         continue;
                     }
-                    virtual_interfaces::watched(self.tree, self.session, handle, &ty, &member)?
+                    virtual_interfaces::watched(&self.tree, self.session, handle, &ty, &member)?
                 }
                 None => self.native_value(item.expression)?,
             };
@@ -287,12 +303,39 @@ impl BodyBuilder<'_, '_, '_> {
         if handles.is_empty() {
             return Ok(vec![Stmt::Wait(condition)]);
         }
-        if !handles.iter().all(|handle| self.watched_handle(handle)) {
+        if !handles
+            .iter()
+            .all(|handle| self.watched_handle(handle) || self.watched_property(handle))
+        {
             return Err(unsupported_watch());
         }
         // The process evaluates the condition, so a read through `null`
         // fails only where the condition's guards let it be evaluated.
         Ok(vec![Stmt::Wait(condition)])
+    }
+
+    /// Whether a level wait can watch handle `handle` that a class property
+    /// holds, of the method's object (`this.p`, or `p` in a method) or of an
+    /// object a watched variable holds: the wait evaluates its condition
+    /// again after each store of the property, as it does for any property
+    /// it reads, and after each change of the variable, so it follows a
+    /// change of the handle as well as of the member it selects (IEEE
+    /// 1800-2023 9.4.2, 9.4.3). `this` does not change during the
+    /// activation.
+    fn watched_property(&self, handle: &Expr) -> bool {
+        let Expr::Call {
+            callee: Callee::Object(op),
+            args,
+            ..
+        } = handle
+        else {
+            return false;
+        };
+        let mut this = Expr::Ident(classes::THIS.to_string());
+        self.rename_expr(&mut this);
+        matches!(**op, system_functions::ObjectOp::Load(_))
+            && matches!(args.as_slice(), [Some(object)]
+                if *object == this || self.watched_handle(object))
     }
 
     /// Whether a wait can watch handle `handle`, of a virtual interface or a
@@ -335,7 +378,7 @@ impl BodyBuilder<'_, '_, '_> {
         &self,
         id: TimingControlId,
     ) -> Result<bool, AnalyzerError> {
-        let control = self.tree.declarations().timing_control(id);
+        let control = self.syntax().declarations().timing_control(id);
         if !matches!(
             control.kind,
             TimingControlKind::Event(EventControl::Wildcard)
@@ -351,7 +394,7 @@ impl BodyBuilder<'_, '_, '_> {
         mut value: ExprId,
         parenthesized: bool,
     ) -> Result<Expr, AnalyzerError> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         if parenthesized {
             value = expression_binding::ungroup(value, native);
             if let ExprKind::MinTypMax { typical, .. } = native.expression(value).kind {
@@ -361,7 +404,13 @@ impl BodyBuilder<'_, '_, '_> {
         if parenthesized {
             return self.native_value(value);
         }
-        expression_binding::check_chandle_read(value, self.tree, native, &self.dims, self.session)?;
+        expression_binding::check_chandle_read(
+            value,
+            &self.tree,
+            native,
+            &self.dims,
+            self.session,
+        )?;
         match &native.expression(value).kind {
             ExprKind::Literal(text) if text.chars().all(|c| c.is_ascii_digit() || c == '_') => {
                 Ok(Expr::Literal(text.replace('_', "")))
@@ -436,10 +485,11 @@ pub(super) fn implicit_event_kind(body: &[Stmt], removed: &[Stmt], always_comb: 
     }
 }
 
-/// A wait through a virtual interface that is not a static variable.
+/// A wait through a virtual interface that neither a static variable nor a
+/// class property of a watched object holds.
 fn unsupported_watch() -> AnalyzerError {
     unsupported(
-        "wait on a member through a virtual interface held by an automatic variable, \
-         an argument or a class property",
+        "wait on a member through a virtual interface held by an automatic variable \
+         or an argument, or by a class property of an object that one holds",
     )
 }

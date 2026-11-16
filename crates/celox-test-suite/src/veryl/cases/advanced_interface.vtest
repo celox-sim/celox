@@ -1,5 +1,6 @@
 (group advanced_interface (category hierarchy))
 
+; Interface with multiple modport signals and bidirectional data flow.
 (case test_interface_bidirectional
   (source "test.veryl" #"
 interface Handshake {
@@ -66,6 +67,7 @@ got:  got,
   (assert_eq got 1)
   (assert_eq dout 0xBB))
 
+; Multiple interface instances used in parallel.
 (case test_multiple_interface_instances
   (source "test.veryl" #"
 interface DataBus {
@@ -115,6 +117,7 @@ inst r1: Reader (bus: bus1, out: o1);
   (assert_eq o0 0xFF)
   (assert_eq o1 0x00))
 
+; Interface with wide (multi-bit) signals.
 (case test_interface_wide_signal
   (source "test.veryl" #"
 interface WideBus {
@@ -156,6 +159,10 @@ inst dst_inst: Sink   (bus: wb, out: out);
   ; Concatenation {a, b}: a is MSB, b is LSB → 0x12345678
   (assert_eq out 0x12345678))
 
+; Transitive generics: type parameter flows through interface → child module → top.
+;
+; Tests that generic type parameters are correctly propagated across multiple
+; levels of the module hierarchy (a pattern that has been buggy in the past).
 (case test_transitive_generics
   (source "test.veryl" #"
 interface DataBus::<T: type> {
@@ -202,6 +209,7 @@ assign o_val = b_bus.data;
   (modify (set i_val 0xFFFF))
   (assert_eq (trunc 16 (get o_val)) 0 "u16 should wrap around"))
 
+; Two-level transitive generics: Top → Mid::<T> → Leaf::<T>, all with concrete type at Top.
 (case test_transitive_generics_two_level
   (source "test.veryl" #"
 module Leaf::<T: type> (

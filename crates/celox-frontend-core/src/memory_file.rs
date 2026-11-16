@@ -234,13 +234,16 @@ fn parse_memory_word(
                 };
                 value |= BigUint::from(digit);
             }
-            'x' | 'X' | '?' => {
-                mask |= (BigUint::from(1u8) << bits_per_digit) - BigUint::from(1u8);
-            }
-            'z' | 'Z' => {
+            // Four-state bits are `(value, mask)`: X is `(1, 1)` and Z is
+            // `(0, 1)`. `?` is another way of writing Z (IEEE 1800-2023
+            // 5.7.1).
+            'x' | 'X' => {
                 let unknown = (BigUint::from(1u8) << bits_per_digit) - BigUint::from(1u8);
                 value |= &unknown;
                 mask |= unknown;
+            }
+            'z' | 'Z' | '?' => {
+                mask |= (BigUint::from(1u8) << bits_per_digit) - BigUint::from(1u8);
             }
             _ => return Err(invalid_memory_word(token)),
         }

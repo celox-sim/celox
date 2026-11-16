@@ -3,57 +3,7 @@
 use super::*;
 
 sv_backends! {
-    fn unpacked_struct_clock_and_reset_events(sim) { @case "unpacked_structs::clock_and_reset_events"; }
-    fn unpacked_struct_clock_four_state_edges(sim) { @case "unpacked_structs::clock_four_state_edges"; }
 
-    fn unpacked_struct_integral_array_member_defaults(sim) { @case "unpacked_structs::integral_array_member_defaults"; }
-    fn unpacked_struct_integral_array_member_defaults_four_state(sim) { @case "unpacked_structs::integral_array_member_defaults_four_state"; }
-
-    fn unpacked_struct_integral_array_members_wide(sim) { @case "unpacked_structs::integral_array_members_wide"; }
-    fn unpacked_struct_integral_array_members_nested(sim) { @case "unpacked_structs::integral_array_members_nested"; }
-
-    fn unpacked_struct_integral_array_members_parameters(sim) { @case "unpacked_structs::integral_array_members_parameters"; }
-    fn unpacked_struct_integral_array_members_replication(sim) { @case "unpacked_structs::integral_array_members_replication"; }
-
-    fn unpacked_struct_integral_array_members_of_arrays(sim) { @case "unpacked_structs::integral_array_members_of_arrays"; }
-    fn unpacked_struct_integral_array_members_of_arrays_four_state(sim) { @case "unpacked_structs::integral_array_members_of_arrays_four_state"; }
-
-    fn unpacked_struct_integral_array_members(sim) { @case "unpacked_structs::integral_array_members"; }
-    fn unpacked_struct_integral_array_members_local(sim) { @case "unpacked_structs::integral_array_members_local"; }
-    fn unpacked_struct_integral_array_members_four_state(sim) { @case "unpacked_structs::integral_array_members_four_state"; }
-
-    fn unpacked_struct_fixed_array_pattern_rows(sim) { @case "unpacked_structs::fixed_array_pattern_rows"; }
-    fn unpacked_struct_fixed_array_pattern_rows_four_state(sim) { @case "unpacked_structs::fixed_array_pattern_rows_four_state"; }
-
-    fn unpacked_struct_fixed_array_wide_and_nba(sim) { @case "unpacked_structs::fixed_array_wide_and_nba"; }
-    fn unpacked_struct_fixed_array_members_and_copies(sim) { @case "unpacked_structs::fixed_array_members_and_copies"; }
-    fn unpacked_struct_fixed_array_nested_members(sim) { @case "unpacked_structs::fixed_array_nested_members"; }
-    fn unpacked_struct_fixed_array_multidimensional_and_bounds(sim) { @case "unpacked_structs::fixed_array_multidimensional_and_bounds"; }
-    fn unpacked_struct_fixed_array_local_lifetime(sim) { @case "unpacked_structs::fixed_array_local_lifetime"; }
-    fn unpacked_struct_fixed_array_four_state(sim) { @case "unpacked_structs::fixed_array_four_state"; }
-
-    fn unpacked_struct_member_initial_values(sim) { @case "unpacked_structs::member_initial_values"; }
-    fn unpacked_struct_member_initial_values_local_lifetimes(sim) { @case "unpacked_structs::member_initial_values_local_lifetimes"; }
-    fn unpacked_struct_member_initial_values_declaration_scope(sim) { @case "unpacked_structs::member_initial_values_declaration_scope"; }
-    fn unpacked_struct_member_initial_values_specialized_functions(sim) { @case "unpacked_structs::member_initial_values_specialized_functions"; }
-    fn unpacked_struct_member_initial_values_assignment_context(sim) { @case "unpacked_structs::member_initial_values_assignment_context"; }
-    fn unpacked_struct_member_initial_values_four_state(sim) { @case "unpacked_structs::member_initial_values_four_state"; }
-    fn unpacked_struct_member_initial_values_class_properties(sim) { @case "unpacked_structs::member_initial_values_class_properties"; }
-
-    fn unpacked_struct_module_port_recursive_defaults(sim) {
-        @case "unpacked_structs::module_port_recursive_defaults";
-    }
-
-    fn unpacked_struct_module_port_patterns(sim) {
-        @case "unpacked_structs::module_port_patterns";
-    }
-    fn unpacked_struct_module_port_four_state_members(sim) {
-        @case "unpacked_structs::module_port_four_state_members";
-    }
-
-    fn unpacked_struct_module_ports(sim) {
-        @case "unpacked_structs::module_ports";
-    }
     fn unpacked_struct_top_level_member_ports(sim) {
         @setup {
             let source = r#"
@@ -79,22 +29,6 @@ sv_backends! {
             assert_eq!(sim.get(ob), BigUint::from((b + 1) & 15));
             assert_eq!(sim.get(same), BigUint::from(0u8));
         }
-    }
-
-    fn unpacked_struct_members_whole_copies_and_equality(sim) {
-        @case "unpacked_structs::members_whole_copies_and_equality";
-    }
-    fn unpacked_struct_assignment_patterns(sim) {
-        @case "unpacked_structs::assignment_patterns";
-    }
-    fn unpacked_struct_subroutine_arguments_and_results(sim) {
-        @case "unpacked_structs::subroutine_arguments_and_results";
-    }
-    fn unpacked_struct_initializers_results_and_defaults(sim) {
-        @case "unpacked_structs::initializers_results_and_defaults";
-    }
-    fn unpacked_struct_results_and_outputs(sim) {
-        @case "unpacked_structs::results_and_outputs";
     }
 
     fn structure_properties_hide_module_variables(sim) {
@@ -512,54 +446,6 @@ sv_backends! {
         let done = sim.signal("done");
         assert_eq!(sim.get(done), BigUint::from(1u8));
     }
-    fn unpacked_struct_module_variables(sim) {
-        @case "unpacked_structs::module_variables";
-    }
-    fn unpacked_struct_handle_members_survive_heap_collections(sim) {
-        @case "unpacked_structs::handle_members_survive_heap_collections";
-    }
-    fn unpacked_struct_four_state_members(sim) {
-        @case "unpacked_structs::four_state_members";
-    }
-    fn unpacked_struct_reference_formals(sim) {
-        @case "unpacked_structs::reference_formals";
-    }
-    fn unpacked_struct_reference_formals_of_virtual_methods(sim) {
-        @case "unpacked_structs::reference_formals_of_virtual_methods";
-    }
-    fn unpacked_struct_reference_formals_across_time(sim) {
-        @case "unpacked_structs::reference_formals_across_time";
-    }
-    fn unpacked_struct_reference_formals_four_state(sim) {
-        @case "unpacked_structs::reference_formals_four_state";
-    }
-    fn unpacked_struct_reference_formal_handles_survive_heap_collections(sim) {
-        @case "unpacked_structs::reference_formal_handles_survive_heap_collections";
-    }
-    fn unpacked_struct_class_properties(sim) {
-        @case "unpacked_structs::class_properties";
-    }
-    fn unpacked_struct_class_property_assignment_order(sim) {
-        @case "unpacked_structs::class_property_assignment_order";
-    }
-    fn unpacked_struct_class_property_four_state_members(sim) {
-        @case "unpacked_structs::class_property_four_state_members";
-    }
-    fn unpacked_struct_class_properties_inheritance_and_collections(sim) {
-        @case "unpacked_structs::class_properties_inheritance_and_collections";
-    }
-    fn unpacked_struct_container_elements(sim) {
-        @case "unpacked_structs::container_elements";
-    }
-    fn unpacked_struct_container_element_member_selects(sim) {
-        @case "unpacked_structs::container_element_member_selects";
-    }
-    fn unpacked_struct_container_element_four_state_defaults(sim) {
-        @case "unpacked_structs::container_element_four_state_defaults";
-    }
-    fn unpacked_struct_container_records_survive_heap_collections(sim) {
-        @case "unpacked_structs::container_records_survive_heap_collections";
-    }
 }
 
 #[test]
@@ -632,14 +518,6 @@ fn unsupported_and_illegal_uses_are_rejected() {
         (
             "i_t q[$]; initial q.sort();",
             "sorting unpacked structures requires a with expression",
-        ),
-        (
-            "s_t q[$]; initial begin q.push_back('{1, \"x\"}); q[0].a = 5; end",
-            "assignment to a member of a dynamic container element",
-        ),
-        (
-            "s_t q[$]; initial begin q.push_back('{1, \"x\"}); q[0].a++; end",
-            "assignment to a member of a dynamic container element",
         ),
         (
             "typedef struct { bit [15:8] hi; string s; } h_t; h_t q[$]; bit x; initial x = q[0].hi[8];",
@@ -900,7 +778,6 @@ fn integral_array_member_boundaries_are_explicit() {
     }
     for fields in [
         "string values[2];",
-        "int values[];",
         "int values[0];",
         "int values[2] = '{1, 2};",
     ] {
@@ -956,4 +833,430 @@ fn integral_array_member_defaults_require_compatible_values() {
             "{source}: {error}"
         );
     }
+}
+
+sv_backends! {
+    // A `return` in a named block that a `disable` names copies the members
+    // of an unpacked structure output back, as one outside the block does
+    // (IEEE 1800-2023 9.6.2, 13.5).
+    fn return_in_disabled_block_copies_structure_outputs(sim) {
+        @setup { let source = r#"
+module Top(output int a, output int b, output int kept, output bit [1:0] results);
+    typedef struct { int a; int b; } pair_t;
+    function automatic bit fill(output pair_t p, input int x);
+        begin : body
+            p.a = x;
+            if (x < 0) disable body;
+            p.b = x + 1;
+            return 1;
+        end
+        p.b = -1;
+        return 0;
+    endfunction
+    pair_t first, second;
+    initial begin
+        results[0] = fill(first, 4);
+        results[1] = fill(second, -7);
+        a = first.a;
+        b = first.b;
+        kept = second.b;
+    end
+endmodule
+"#; }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("return_in_disabled_block.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("a")), 4u32.into());
+        assert_eq!(sim.get(sim.signal("b")), 5u32.into());
+        assert_eq!(sim.get(sim.signal("kept")), 0xffff_ffffu32.into());
+        assert_eq!(sim.get(sim.signal("results")), 1u8.into());
+    }
+}
+
+sv_backends! {
+    fn container_members_hold_values(sim) {
+        @setup {
+            // A dynamic array, queue or associative array member (IEEE
+            // 1800-2023 7.2, 7.4) is a container of its own: its methods,
+            // elements and patterns work as a variable's, and an assignment
+            // of the structure, a container element holding it, a formal and
+            // a function result copy its value (7.2.1, 7.6, 13.5).
+            let source = r#"module Top(output int sizes, output int copies,
+                                    output int patterns, output int calls);
+                typedef struct { string arg; string args[$]; int d[]; int m[string]; } p_t;
+                typedef struct { int tag; p_t inner; } n_t;
+                class K; p_t s; endclass
+                p_t q[$];
+                n_t n;
+                K k;
+                function automatic int poke(p_t v); v.args[0] = "f"; return v.args.size(); endfunction
+                function automatic p_t make();
+                    p_t r;
+                    r.args.push_back("r0");
+                    r.args.push_back("r1");
+                    return r;
+                endfunction
+                initial begin
+                    p_t t, t2, t3, t4;
+                    t.args.push_back("a");
+                    t.args.push_back("b");
+                    t.d = new[3];
+                    t.d[2] = 7;
+                    t.m["k"] = 5;
+                    sizes = t.args.size() * 1000 + t.d.size() * 100 + t.d[2] * 10 + t.m.size();
+                    // Copies keep their own containers.
+                    t2 = t;
+                    t2.args[0] = "z";
+                    t2.m["k"] = 6;
+                    q.push_back(t);
+                    t.args[1] = "y";
+                    t3 = q[0];
+                    t3.args.push_back("w");
+                    k = new;
+                    k.s = t;
+                    k.s.args[0] = "c";
+                    n.inner = t;
+                    n.inner.args[0] = "N";
+                    copies = (t.args[0] == "a") + 2 * (t2.args[0] == "z") + 4 * (t.m["k"] == 5)
+                        + 8 * (q[0].args[1] == "b") + 16 * (q[0].args.size() == 2)
+                        + 32 * (k.s.args[0] == "c") + 64 * (n.inner.args[0] == "N")
+                        + 128 * (t.args[0] == "a") + 256 * (t == t) + 512 * (t != t2);
+                    // Patterns give container members their values.
+                    t3 = '{arg: "x", args: '{"m", "n"}, d: '{1, 2}, m: t.m};
+                    q.push_back('{"p", {t.args, "e"}, t.d, t.m});
+                    patterns = (t3.args[1] == "n") + 2 * (t3.d.size() == 2) + 4 * (t3.m["k"] == 5)
+                        + 8 * (q[1].args.size() == 3) + 16 * (q[$].args[$] == "e");
+                    foreach (q[1].args[i]) patterns += 100;
+                    t4 = make();
+                    calls = poke(t) * 10 + (t.args[0] == "a") + 100 * (t4.args[1] == "r1");
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("container_members.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let sizes = sim.signal("sizes");
+        assert_eq!(sim.get(sizes), BigUint::from(2371u32));
+        let copies = sim.signal("copies");
+        assert_eq!(sim.get(copies), BigUint::from(1023u32));
+        let patterns = sim.signal("patterns");
+        assert_eq!(sim.get(patterns), BigUint::from(331u32));
+        let calls = sim.signal("calls");
+        assert_eq!(sim.get(calls), BigUint::from(121u32));
+    }
+}
+
+sv_backends! {
+    fn static_queues_of_structures_with_queue_members(sim) {
+        @setup {
+            // UVM 1.2's `uvm_component::m_uvm_applied_cl_action`: a static
+            // queue property of structures with a string queue member,
+            // filled from a local structure and updated by member.
+            let source = r#"module Top(output int value);
+                class C;
+                    typedef struct { string arg; string args[$]; int unsigned used; } parsed_t;
+                    static parsed_t applied[$];
+                    static function void add(string s);
+                        string a[$];
+                        parsed_t t;
+                        a.push_back(s);
+                        a.push_back("y");
+                        t.args = a;
+                        t.arg = s;
+                        applied.push_back(t);
+                    endfunction
+                    static function int use_all();
+                        int total;
+                        foreach (applied[i]) begin
+                            string args[$] = applied[i].args;
+                            applied[i].used++;
+                            total += args.size() * 100 + applied[i].used * 10 + (args[0] == applied[i].arg);
+                        end
+                        return total;
+                    endfunction
+                endclass
+                initial begin
+                    C::add("one");
+                    C::add("two");
+                    void'(C::use_all());
+                    value = C::use_all();
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("static_struct_queue.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(442u32));
+    }
+}
+
+sv_backends! {
+    fn associative_members_take_wildcard_and_class_indices(sim) {
+        @setup {
+            // An associative array member indexed by `*` or by a class
+            // (IEEE 1800-2023 7.8.1, 7.8.5) is a container member too.
+            let source = r#"module Top(output int value);
+                class O; endclass
+                typedef struct { int w[*]; int c[O]; } s_t;
+                s_t x;
+                O a, b;
+                initial begin
+                    a = new;
+                    b = new;
+                    x.w[3] = 4;
+                    x.w[70000] = 5;
+                    x.c[a] = 6;
+                    x.c[b] = 7;
+                    value = x.w[3] * 1000 + x.w[70000] * 100 + x.c[a] * 10 + x.c[b]
+                        + 10000 * (x.w.num() + x.c.num());
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("associative_members.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(44_567u32));
+    }
+}
+
+sv_backends! {
+    fn structures_holding_containers_index_associative_arrays_by_value(sim) {
+        @setup {
+            // A structure with a container member is a legal associative
+            // array index (IEEE 1800-2023 7.8.5): equal values name one entry,
+            // and the stored index is a copy the variable no longer changes.
+            let source = r#"module Top(output int value);
+                typedef struct { byte b; int items[*]; } key_t;
+                int map[key_t];
+                key_t a, b, c;
+                initial begin
+                    a.b = 1;
+                    a.items[3] = 7;
+                    b = a;
+                    c.b = 1;
+                    c.items[3] = 8;
+                    map[a] = 10;
+                    map[c] = 20;
+                    map[b] += 5;
+                    a.items[3] = 9;
+                    value = map.num() * 10000 + map.exists(a) * 1000 + map[b] * 10 + map[c] / 10;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("structure_indices.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(20_152u32));
+    }
+}
+
+#[test]
+fn container_members_of_container_elements_are_read_only() {
+    // Equal elements of a container may share the record that holds their
+    // container member, which a write would change in place for all of
+    // them: such a member is read, compared and copied, but its updates stay
+    // unsupported.
+    let declarations = "typedef struct { int items[$]; } s_t; s_t q[$]; s_t e;";
+    let read = format!(
+        "module Top(output int value, output bit same);
+            {declarations} s_t f;
+            initial begin
+                e.items.push_back(5);
+                q.push_back(e);
+                q.push_back(e);
+                f.items.push_back(5);
+                value = q[0].items.size() * 10 + q[1].items[0];
+                same = q[0] == q[1] && q[1] == f && !(q[0] != f);
+            end
+        endmodule"
+    );
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(read.as_str(), Path::new("read.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("value")), BigUint::from(15u32));
+    assert_eq!(sim.get(sim.signal("same")), BigUint::from(1u32));
+    for update in [
+        "q[0].items.push_back(2);",
+        "q[0].items[0] = 3;",
+        "q[0].items = {1, 2};",
+        "q[0].items.delete();",
+    ] {
+        let source = format!(
+            "module Top; {declarations}
+                initial begin q.push_back(e); q.push_back(e); {update} end
+            endmodule"
+        );
+        let error = match celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("update.sv"))],
+            "Top",
+        )
+        .build()
+        {
+            Err(error) => format!("{error:?}"),
+            Ok(_) => panic!("{update} accepted"),
+        };
+        assert!(
+            error.contains("update of a container member of a structure element of a container"),
+            "{update}: {error}"
+        );
+    }
+}
+
+#[test]
+fn structures_holding_containers_are_no_ports() {
+    // A port carries the bits of a structure, not the heap handle of a
+    // dynamic array, queue or associative array member, also one of a
+    // nested structure.
+    for (types, port) in [
+        ("typedef struct { int values[$]; } s_t;", "input s_t p"),
+        ("typedef struct { int values[$]; } s_t;", "output s_t p"),
+        (
+            "typedef struct { int m[string]; } i_t; typedef struct { bit b; i_t inner; } s_t;",
+            "input s_t p",
+        ),
+    ] {
+        let source = format!("{types} module Top({port}); endmodule");
+        let error = match celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("port.sv"))],
+            "Top",
+        )
+        .build()
+        {
+            Err(error) => format!("{error:?}"),
+            Ok(_) => panic!("{types} {port} accepted"),
+        };
+        assert!(
+            error.contains(
+                "unpacked structure with a dynamic array, queue or associative array member on a port"
+            ),
+            "{port}: {error}"
+        );
+    }
+}
+
+// Unpacked dimensions on the declarator make the variable an unpacked array
+// (IEEE 1800-2023 7.4): `int a[2]` and `s_t s[2]` are arrays, of `int` and
+// of the structure, assignable to arrays of the same shape (7.6).
+#[test]
+fn declarator_dimensions_make_arrays_of_scalars_and_structures() {
+    let source = "module Top;
+        typedef struct {int x; int y;} s_t;
+        int a[2], b[2];
+        s_t s[2], t[2];
+        initial begin
+            a = '{3, 4};
+            b = a;
+            s[0] = '{x: 1, y: 2};
+            s[1].x = b[1];
+            s[1].y = $size(s);
+            t = s;
+            $display(\"%0d %0d %0d %0d %0d\", b[0], $size(b), t[0].y, t[1].x, t[1].y);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["3 2 2 4 2"]
+    );
+}
+
+#[test]
+fn structure_properties_of_class_specializations_take_their_own_member_defaults() {
+    // IEEE 1800-2023 8.25: each specialization of a parameterized class
+    // declares its own types, so a member default that reads a parameter
+    // (7.2.2) has that specialization's value.
+    let source = "module Top;
+        class C #(int P = 0);
+            struct {int a = P; int b = P + 1;} s;
+            typedef struct {int a = P * 10;} t_t;
+            t_t t;
+        endclass
+        initial begin
+            C #(1) one;
+            C #(2) two;
+            C #(2)::t_t x;
+            one = new;
+            two = new;
+            x = two.t;
+            $display(\"%0d %0d %0d %0d %0d %0d %0d\", one.s.a, one.s.b, one.t.a, two.s.a, two.s.b, two.t.a, x.a);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1 2 10 2 3 20 20"]
+    );
+}
+
+#[test]
+fn structure_types_of_distinct_class_specializations_do_not_match() {
+    // IEEE 1800-2023 6.22.1 d: a typedef of a structure matches only within
+    // the scope of its identifier, and each specialization of a
+    // parameterized class is a scope of its own (8.25); unpacked structures
+    // that do not match are not equivalent (6.22.2) and so not assignment
+    // compatible (6.22.3), nor is a port connected to one (23.3.3.7).
+    // `d_t` has the same members in every specialization; only the
+    // specialization tells its types apart.
+    let package = "package p;
+        class C #(int W = 1);
+            typedef struct {bit [W-1:0] a;} t_t;
+            typedef struct {int a;} d_t;
+        endclass
+    endpackage
+    ";
+    for ty in ["t_t", "d_t"] {
+        let assignment = format!(
+            "{package}module Top;
+                p::C#(4)::{ty} x;
+                p::C#(8)::{ty} y;
+                initial y = x;
+            endmodule"
+        );
+        let connection = format!(
+            "{package}module Sub(input p::C#(8)::{ty} i);
+            endmodule
+            module Top;
+                p::C#(4)::{ty} x;
+                Sub s(.i(x));
+            endmodule"
+        );
+        for (source, expected) in [
+            (
+                assignment,
+                format!(
+                    "`struct p::C#(W=4)::{ty}` is not assignment compatible with `struct p::C#(W=8)::{ty}`"
+                ),
+            ),
+            (
+                connection,
+                "port `i` requires a variable of the same unpacked structure type".to_owned(),
+            ),
+        ] {
+            let result = Simulator::from_sv_sources(vec![(&source, Path::new("spec.sv"))], "Top")
+                .build_cranelift();
+            let Err(error) = result else {
+                panic!("a structure of another specialization accepted: {source}")
+            };
+            assert!(
+                format!("{error:?}").contains(&expected),
+                "{source}: {error:?}"
+            );
+        }
+    }
+    // A specialization's own type matches itself across the hierarchy.
+    let same = format!(
+        "{package}module Sub(input p::C#(4)::t_t i, input p::C#(4)::d_t d, output int o);
+            assign o = i.a * 100 + d.a;
+        endmodule
+        module Top;
+            p::C#(4)::t_t x;
+            p::C#(4)::d_t d;
+            int o;
+            Sub s(.i(x), .d(d), .o(o));
+            initial begin
+                x.a = 4'd9;
+                d.a = 4;
+                #1 $display(\"%0d\", o);
+            end
+        endmodule"
+    );
+    assert_eq!(super::hierarchical_references::displayed(&same), ["904"]);
 }

@@ -65,7 +65,6 @@ fn invalid_overrides_and_config_levels_fail() {
     );
 }
 
-#[cfg(feature = "systemverilog")]
 mod sv {
     use super::*;
     use std::path::Path;
@@ -131,6 +130,106 @@ mod sv {
         assert!(error.warnings().is_empty(), "{error}");
     }
 
+    /// A rendered diagnostic's text without the line wrapping of its frame.
+    fn unwrapped(text: String) -> String {
+        text.split_whitespace()
+            .filter(|word| *word != "│")
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    // IEEE 1800-2023 3.14.2.3: an error if some design elements declare a
+    // time unit and precision and others do not. The error names the
+    // elements without them; relaxed, each takes the default with a warning
+    // that names it, as other simulators do.
+    #[test]
+    fn mixed_timescales_name_each_element_that_takes_the_default() {
+        let package = "package P; localparam int N = 1; endpackage";
+        let child = "module Child(output int t); initial #1 t = $time; endmodule";
+        let top = "module Top(output int t, c); timeunit 10ns / 1ns; Child child(c); initial #1 t = $time; endmodule";
+        let builder = || {
+            celox::Simulation::from_sv_sources(
+                vec![
+                    (package, Path::new("p.sv")),
+                    (child, Path::new("child.sv")),
+                    (top, Path::new("top.sv")),
+                ],
+                "Top",
+            )
+        };
+        let error = unwrapped(builder().build().err().unwrap().to_string());
+        assert!(
+            error.contains("mixed explicit and default")
+                && error.contains(
+                    "`Child` declares no time unit or precision, `P` declares no time unit or precision"
+                ),
+            "{error}"
+        );
+        let mut sim = builder()
+            .diagnostic_policy(policy("mixed_timescale", DiagnosticLevel::Warn))
+            .build()
+            .unwrap();
+        let named: Vec<_> = sim
+            .warnings()
+            .iter()
+            .filter_map(|warning| match warning {
+                celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
+                    kind:
+                        celox::SvFrontendWarningKind::MixedTimescale {
+                            element,
+                            unit,
+                            precision,
+                        },
+                    ..
+                }) => Some((element.clone(), *unit, *precision, warning.to_string())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            named
+                .iter()
+                .map(|(e, u, p, _)| (e.as_str(), *u, *p))
+                .collect::<Vec<_>>(),
+            [("Child", true, true), ("P", true, true)]
+        );
+        assert!(
+            named[0]
+                .3
+                .contains("design element `Child` declares no time unit or precision"),
+            "{}",
+            named[0].3
+        );
+        // The child's default 1 ns unit waits 1 ns; the top's 10 ns unit 10 ns,
+        // both counted in the 1 ps global precision of the default.
+        sim.run_until(1_000).unwrap();
+        assert_eq!(sim.get(sim.signal("c")), 1u32.into());
+        sim.run_until(10_000).unwrap();
+        assert_eq!(sim.get(sim.signal("t")), 1u32.into());
+    }
+
+    // The error says which part each element lacks, and names an authored
+    // element whatever its name.
+    #[test]
+    fn mixed_timescale_errors_name_what_each_element_lacks() {
+        let error = Simulator::from_sv_sources(
+            vec![(
+                "module __celox_mine; timeunit 1ns; endmodule
+                 module Top; timeunit 1ns / 1ps; __celox_mine m(); endmodule",
+                Path::new("top.sv"),
+            )],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap()
+        .to_string();
+        let error = unwrapped(error);
+        assert!(
+            error.contains("`__celox_mine` declares no time precision"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn mixed_language_interface_probes_use_the_same_policy() {
         let veryl = "module Top(a: input logic<8>, y: output logic<8>) { inst bus: $sv::Bus; assign bus.req = a; assign y = bus.rsp; }";
@@ -153,7 +252,7 @@ mod sv {
                 .filter(|warning| matches!(
                     warning,
                     celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
-                        kind: celox::SvFrontendWarningKind::MixedTimescale,
+                        kind: celox::SvFrontendWarningKind::MixedTimescale { .. },
                         ..
                     })
                 ))
@@ -163,6 +262,137 @@ mod sv {
         let a = sim.signal("a");
         sim.modify(|io| io.set(a, 8u8)).unwrap();
         assert_eq!(sim.get(sim.signal("y")), 9u8.into());
+    }
+
+    // A module declared more than once is an error; relaxed, the first
+    // declaration is the module and the others are left out.
+    #[test]
+    fn duplicate_modules_use_the_first_declaration_when_relaxed() {
+        let first = "module Leaf(output logic [7:0] y); assign y = 8'd1; endmodule
+            module Top(output logic [7:0] y, z); Leaf a(y); Other b(z); endmodule";
+        let second = "module Leaf(output logic [7:0] y); assign y = 8'd2; endmodule
+            module Other(output logic [7:0] y); Leaf leaf(y); endmodule
+            module Leaf(output logic [7:0] y); assign y = 8'd3; endmodule";
+        let sources = || {
+            vec![
+                (first, Path::new("first.sv")),
+                (second, Path::new("second.sv")),
+            ]
+        };
+        let error = Simulator::from_sv_sources(sources(), "Top")
+            .build()
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("Duplicate module declaration: Leaf"),
+            "{error}"
+        );
+        for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
+            let mut sim = Simulator::from_sv_sources(sources(), "Top")
+                .diagnostic_policy(policy("duplicate_module", level))
+                .build()
+                .unwrap();
+            let reported = sim
+                .warnings()
+                .iter()
+                .filter(|warning| {
+                    matches!(
+                        warning,
+                        celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
+                            kind: celox::SvFrontendWarningKind::DuplicateModule { name },
+                            ..
+                        }) if name == "Leaf"
+                    )
+                })
+                .count();
+            assert_eq!(reported, usize::from(level == DiagnosticLevel::Warn));
+            assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("z")), 1u8.into());
+        }
+    }
+
+    // The first declaration is also the one whose interface ports are
+    // planned and whose `default_nettype` applies; the implicit net `u`
+    // the left-out declaration uses under `default_nettype none` is no
+    // error.
+    #[test]
+    fn duplicate_modules_keep_the_first_ports_and_net_type() {
+        let source = "`default_nettype wire
+            interface bus; logic v; endinterface
+            module Leaf(bus b, output logic y); assign t = b.v; assign y = t; endmodule
+            `default_nettype none
+            module Leaf(input wire logic x, output wire logic y); assign u = ~x; assign y = u; endmodule
+            `default_nettype wire
+            module \\Leaf (output logic y);
+              `default_nettype none
+              assign y = 1'b0;
+            endmodule
+            `default_nettype wire
+            module Top(input logic v, output logic y);
+              bus b();
+              assign b.v = v;
+              Leaf leaf(.b(b), .y(y));
+            endmodule";
+        let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("leaf.sv"))], "Top")
+            .diagnostic_policy(policy("duplicate_module", DiagnosticLevel::Allow))
+            .build()
+            .unwrap();
+        let v = sim.signal("v");
+        for value in [0u8, 1] {
+            sim.modify(|io| io.set(v, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), value.into());
+        }
+    }
+
+    /// A later declaration goes with the attribute instances in front of
+    /// it (IEEE 1800-2023 A.1.2), also as the last item of a source, and a
+    /// `macromodule` is the first declaration of its name as a `module` is,
+    /// with the implicit-net setting of its own place.
+    #[test]
+    fn later_declarations_go_with_their_attributes_after_macromodules() {
+        let source = "`default_nettype wire
+            macromodule Leaf(input logic a, output logic y); assign t = a; assign y = t; endmodule
+            `default_nettype none
+            module Top(input logic a, output logic y); Leaf leaf(.a(a), .y(y)); endmodule
+            (* keep = 1 *) (* note = \"second\" *)
+            module Leaf(input logic a, output logic y); assign y = ~a; endmodule";
+        let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("leaf.sv"))], "Top")
+            .diagnostic_policy(policy("duplicate_module", DiagnosticLevel::Allow))
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let a = sim.signal("a");
+        for value in [0u8, 1] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), value.into());
+        }
+    }
+
+    /// The checks of a mixed Veryl and SystemVerilog design see the first
+    /// declaration too: a later one whose body its source's settings make
+    /// invalid is left out before any of them parse the source.
+    #[test]
+    fn mixed_designs_keep_the_first_declaration_of_a_module() {
+        let sv = "module Leaf(input logic [7:0] a, output logic [7:0] b); assign b = a + 8'd1; endmodule
+            `default_nettype none
+            module Leaf(input logic [7:0] a, output logic [7:0] b); assign t = a; assign b = t; endmodule
+            `default_nettype wire";
+        let veryl = r#"
+module Top (
+    y: output logic<8>,
+) {
+    var a: logic<8>;
+    assign a = 8'd7;
+    inst leaf: $sv::Leaf (a, b: y);
+}
+"#;
+        let mut sim = Simulator::builder(veryl, "Top")
+            .with_sv_sources(vec![(sv, Path::new("leaf.sv"))])
+            .diagnostic_policy(policy("duplicate_module", DiagnosticLevel::Allow))
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(sim.get(sim.signal("y")), 8u8.into());
     }
 
     #[test]
@@ -177,7 +407,6 @@ mod sv {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn overlapping_always_ff_memories_require_explicit_relaxation() {
     const SOURCE: &str = r#"module Top(input bit a, b, input bit[1:0] x, y,
@@ -221,7 +450,6 @@ mod inferred_latch {
     use std::path::Path;
 
     const VERYL: &str = "module Top(en: input logic, d: input logic<8>, q: output logic<8>, t: output logic<8>) { always_comb { t = d; if en { q = d; } } }";
-    #[cfg(feature = "systemverilog")]
     const SV: &str = "module Top(input logic en, input logic [7:0] d, output logic [7:0] q, t); always_comb begin t=d; if(en) q=d; end endmodule";
 
     fn veryl() -> celox::SimulatorBuilder<'static> {
@@ -272,7 +500,6 @@ mod inferred_latch {
                             .unwrap(),
                         level,
                     );
-                    #[cfg(feature = "systemverilog")]
                     assert_behavior(
                         Simulator::from_sv_sources(vec![(SV, Path::new("latch.sv"))], "Top")
                             .diagnostic_policy(policy("inferred_latch", level))
@@ -303,7 +530,6 @@ mod inferred_latch {
                 "{error}"
             );
             assert!(error.to_string().contains("inferred_latch"), "{error}");
-            #[cfg(feature = "systemverilog")]
             {
                 let error = Simulator::from_sv_sources(vec![(SV, Path::new("latch.sv"))], "Top")
                     .diagnostic_policy(policy("inferred_latch", DiagnosticLevel::Error))
@@ -360,7 +586,6 @@ mod inferred_latch {
         assert!(sim.warnings().is_empty(), "{:?}", sim.warnings());
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn explicit_and_wildcard_latches_do_not_emit_inferred_diagnostics() {
         for keyword in ["always_latch", "always @*"] {
@@ -375,7 +600,6 @@ mod inferred_latch {
         }
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn relaxation_does_not_hide_nba_or_continuous_feedback_errors() {
         for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
@@ -392,7 +616,6 @@ mod inferred_latch {
             }
         }
     }
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn state_reading_processes_use_the_same_latch_diagnostic() {
         let source = "module Top(input logic en, output logic [7:0] q); always_comb if(en) q=$time; endmodule";
@@ -435,7 +658,6 @@ mod inferred_latch {
         }
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn static_block_locals_participate_in_latch_diagnostics() {
         for body in [
@@ -495,7 +717,6 @@ mod inferred_latch {
         }
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn complete_nonzero_lsb_state_reading_slice_does_not_warn() {
         let source = "module Top(input logic en, output logic [7:0] q); always_comb if(en) q[7:4]=$time; else q[7:4]=0; endmodule";
@@ -512,7 +733,6 @@ mod inferred_latch {
     // IEEE 1800-2023 9.2.2.2.1 excludes written expressions from implicit
     // sensitivity. A procedural read of previous q is state, not an endlessly
     // retriggering continuous-assignment feedback loop.
-    #[cfg(feature = "systemverilog")]
     fn assert_complete_read_before_write_activation<B: celox::SimBackend>(
         mut sim: Simulator<B>,
         level: DiagnosticLevel,
@@ -532,7 +752,6 @@ mod inferred_latch {
         }
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn complete_procedural_read_before_write_is_recoverable_state() {
         let source = "module Top(input logic en, output logic q); always_comb q=q^en; endmodule";
@@ -572,7 +791,6 @@ mod inferred_latch {
         }
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn complete_state_reading_array_assignments_do_not_warn() {
         let source = "module Top(output logic [7:0] q); logic [7:0] a[2]; always_comb begin a[0]=$time; a[1]=$time; end assign q=a[0]; endmodule";
@@ -583,7 +801,6 @@ mod inferred_latch {
         assert!(sim.warnings().is_empty(), "{:?}", sim.warnings());
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn an_authored_process_warns_once_across_instances() {
         let source = "module Latch(input logic en,d, output logic q); always_comb if(en) q=d; endmodule module Top(input logic en,d, output logic a,b); Latch u(en,d,a); Latch v(en,d,b); endmodule";
@@ -600,7 +817,6 @@ mod inferred_latch {
         assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
     }
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn out_of_bounds_state_writes_do_not_expand_diagnostic_masks() {
         let source = "module Top(output logic [7:0] q); logic [7:0] a[2]; always_comb begin q=$time; a[-1]=$time; a[2147483647]=$time; end endmodule";
@@ -616,7 +832,6 @@ mod inferred_latch {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn interface_array_queries_require_a_recoverable_diagnostic_override() {
     use std::path::Path;
@@ -649,7 +864,6 @@ fn interface_array_queries_require_a_recoverable_diagnostic_override() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn interface_array_extension_keeps_interfaces_out_of_data_expressions() {
     use std::path::Path;
@@ -674,7 +888,6 @@ fn interface_array_extension_keeps_interfaces_out_of_data_expressions() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn interface_array_query_warning_survives_a_later_analysis_error() {
     use std::path::Path;
@@ -688,7 +901,6 @@ fn interface_array_query_warning_survives_a_later_analysis_error() {
     assert_eq!(error.warnings().len(), 1, "{error}");
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn interface_array_query_policy_covers_formals_and_generated_scopes() {
     use std::path::Path;
@@ -714,7 +926,6 @@ fn interface_array_query_policy_covers_formals_and_generated_scopes() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn invalid_interface_array_query_dimensions_return_integer_unknowns() {
     use std::path::Path;
@@ -735,7 +946,6 @@ fn invalid_interface_array_query_dimensions_return_integer_unknowns() {
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn unindexed_interface_array_parameters_have_a_located_recoverable_diagnostic() {
     use std::path::Path;
@@ -770,7 +980,6 @@ fn unindexed_interface_array_parameters_have_a_located_recoverable_diagnostic() 
     }
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn unindexed_interface_parameter_lookup_respects_lexical_shadowing() {
     use std::path::Path;
@@ -787,7 +996,6 @@ fn unindexed_interface_parameter_lookup_respects_lexical_shadowing() {
     assert!(sim.warnings().is_empty());
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn unindexed_interface_parameters_resolve_inside_indexed_generate_paths() {
     use std::path::Path;

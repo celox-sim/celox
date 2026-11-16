@@ -167,7 +167,8 @@ Recoverable errors support relaxation only when the compiler defines a fallback.
 consistent explicit time units and precisions. Its default is `error`. With `warn`
 or `allow`, undeclared settings use Celox's defaults (1ns unit, 1ps precision),
 explicit settings remain effective, and the global precision includes default
-scopes. Syntax errors, unsupported constructs and invalid precision declarations
+scopes. The error names the design elements without a unit or precision, and
+`warn` reports one warning for each, naming it. Syntax errors, unsupported constructs and invalid precision declarations
 remain errors.
 
 `interface_array_query` defaults to `error`. Set it to `warn` or `allow` to enable
@@ -182,6 +183,12 @@ interface_array_query = "warn"
 ```
 
 The CLI uses the same policy: `celox run top.sv --top Top --diagnostic interface_array_query=warn`.
+
+`duplicate_module` defaults to `error`: a design declares each module once. With
+`warn` or `allow`, the first declaration of a module in source order is the
+module and the later declarations of the same name are left out, as tools that
+only warn about them do. Interfaces, programs and packages declared twice
+remain errors.
 
 `interface_array_parameter` also defaults to `error`. Set it to `warn` or `allow`
 for the compatibility shorthand `bus.WIDTH` when `bus` is an interface array.

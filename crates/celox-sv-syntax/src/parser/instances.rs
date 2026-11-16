@@ -134,9 +134,6 @@ impl Parser<'_> {
             }
         }
         self.expect(";")?;
-        if self.instantiations.len() >= 1_000_000 {
-            return Err(self.unsupported("native instantiation arena exceeds one million entries"));
-        }
         let id = InstantiationId(self.instantiations.len());
         self.instantiations.push(Instantiation {
             name,

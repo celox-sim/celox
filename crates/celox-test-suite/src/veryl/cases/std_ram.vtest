@@ -1,5 +1,6 @@
 (group std_ram (category standard_library))
 
+; Dual-port RAM: write via port A, read via port B (BUFFER_OUT=false, combinational read)
 (case test_ram_write_read
   (source "test.veryl"
     (std "ram/ram.veryl")
@@ -72,6 +73,7 @@ o_qb,
   (eval)
   (assert_eq (trunc 8 (get o_qb)) 0xCC "addr 2 should be 0xCC"))
 
+; Overwrite same address and verify latest value
 (case test_ram_overwrite
   (source "test.veryl"
     (std "ram/ram.veryl")
@@ -128,6 +130,7 @@ o_qb,
   (eval)
   (assert_eq (trunc 8 (get o_qb)) 0x22 "overwritten value should be 0x22"))
 
+; RAM with USE_RESET=true: clear via i_clr
 (case test_ram_reset_and_clear
   (source "test.veryl"
     (std "ram/ram.veryl")

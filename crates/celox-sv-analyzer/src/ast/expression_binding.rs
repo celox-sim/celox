@@ -24,6 +24,7 @@ pub(super) use chandles::{
     native_chandle, read as check_chandle_read, type_holds_chandle,
 };
 pub(super) use direct::bind_argument;
+pub(super) use direct::interface_member_name;
 pub(super) use direct::{
     arguments, bind_chandle_value, bind_value, call_name as native_name, callable_name,
     cast_target_class, cast_target_native, formal_arguments, format_arguments, member_context,
@@ -41,20 +42,21 @@ pub(super) use objects::{
     Cast as ObjectCast, Receiver as ObjectReceiver,
     aggregate_property as object_aggregate_property, call_method as object_call_method,
     callee as call_callee, cast_to as object_cast_to, check_access as check_member_access,
-    check_assignment as check_handle_assignment, check_writable, class as object_class,
-    constraint_mode_call as object_constraint_mode_call, constructor as object_constructor,
-    method as object_method, method_result as object_method_result, named_class,
-    native_class as object_native_class, property as object_property,
-    rand_mode_call as object_rand_mode_call, receiver as object_receiver,
-    static_property as object_static_property,
-    static_property_declaration as object_static_property_declaration, this as object_this,
+    check_assignment as check_handle_assignment, check_member_declared, check_writable,
+    class as object_class, constraint_mode_call as object_constraint_mode_call,
+    constructor as object_constructor, method as object_method,
+    method_result as object_method_result, named_class, native_class as object_native_class,
+    property as object_property, rand_mode_call as object_rand_mode_call,
+    receiver as object_receiver, static_property as object_static_property,
+    static_property_declaration as object_static_property_declaration,
+    static_rand_mode as object_static_rand_mode, this as object_this,
 };
 pub(super) use streams::{
     Receiver as StreamReceiver, Unpack as StreamUnpack, fixed_from_container, free as stream_free,
     is_stream, pack as pack_stream, take as stream_take, unpack as stream_unpack,
 };
 pub(super) use strings::{
-    call as string_call, fixed_array_element as fixed_string_array_element,
+    alias_name, call as string_call, fixed_array_element as fixed_string_array_element,
     method as string_method, native_string, string_value, to_string as string_operand,
 };
 fn disagreement() -> AnalyzerError {
@@ -69,9 +71,9 @@ pub(super) fn bind(
     bind_value(root, tree.declarations(), tree, session, dimensions, None)
 }
 /// The value of an assignment pattern without a type assigned to a
-/// selection, such as `m[i] = '{x: 1, y: 5}`: the pattern takes the type of
-/// the selected element (IEEE 1800-2023 10.9). `None` for any other
-/// assignment.
+/// selection, such as `m[i] = '{x: 1, y: 5}` or `m[i] = c ? '{x: 1, y: 5} :
+/// v`: the pattern takes the type of the selected element (IEEE 1800-2023
+/// 10.8, 10.9). `None` for any other assignment.
 pub(super) fn selected_pattern(
     left: ExprId,
     right: ExprId,
@@ -81,11 +83,9 @@ pub(super) fn selected_pattern(
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
     if matches!(lhs, LValue::Select { .. })
-        && unpacked_structs::native_struct(left, tree.declarations(), tree, session, dimensions)?
-            .is_some()
+        && let Some(structure) =
+            unpacked_structs::value_struct(left, tree.declarations(), tree, session, dimensions)
     {
-        let structure =
-            expression_types::type_of(tree, session, left, tree.declarations(), dimensions)?;
         unpacked_structs::check_value(
             structure,
             right,
@@ -101,12 +101,7 @@ pub(super) fn selected_pattern(
         LValue::Object { select, .. } => matches!(**select, LValue::Select { .. }),
         LValue::Ident(_) => false,
     };
-    if !selected
-        || !matches!(
-            native.expression(ungroup(right, native)).kind,
-            ExprKind::Pattern { target: None, .. }
-        )
-    {
+    if !selected || !direct::reaches_untyped_pattern(right, native) {
         return Ok(None);
     }
     // A selected target's type is the select typing's (`target_type`).
@@ -136,7 +131,7 @@ pub(super) fn expression(
     // shape, or a selection aligned to the left.
     if streams::is_stream(root, native) {
         let receiver = match shape {
-            Some(shape) => streams::receiver(shape, &tree.functions, dimensions)?,
+            Some(shape) => streams::receiver(shape, &session.types, &tree.functions, dimensions)?,
             None => streams::selection_receiver(
                 lhs,
                 lvalue_expr_type(&tree.functions, lhs, dimensions)
@@ -157,7 +152,9 @@ pub(super) fn expression(
     // element of an array of handles (IEEE 1800-2023 8.7).
     let class = match lhs {
         LValue::Object { .. } => None,
-        LValue::Ident(_) => shape.and_then(|shape| shape.class.as_deref()),
+        LValue::Ident(_) => {
+            shape.and_then(|shape| objects::shape_class(shape, tree, session, dimensions))
+        }
         LValue::Select {
             name,
             array_slice_width: None,
@@ -165,10 +162,10 @@ pub(super) fn expression(
         } => dimensions
             .get(name)
             .filter(|shape| !shape.unpacked.is_empty())
-            .and_then(|shape| shape.class.as_deref()),
+            .and_then(|shape| objects::shape_class(shape, tree, session, dimensions)),
         LValue::Select { .. } => None,
     };
-    if let Some(class) = class {
+    if let Some(class) = class.as_deref() {
         if let Some(call) = objects::constructor(tree, session, root, native, dimensions, class)? {
             return Ok(call);
         }
@@ -289,5 +286,27 @@ mod query_depth_tests {
         let value = bind(root, &tree, session, &context);
         drop(tree);
         assert_eq!(value.unwrap(), Expr::Literal("32".into()));
+    }
+}
+
+/// The signal of another scope, such as a variable of an interface
+/// instance, that path native expression `id` names, by its name in this
+/// scope (IEEE 1800-2023 25.5).
+pub(super) fn path_signal(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dims: &PackedDimensions,
+) -> Option<String> {
+    let (mut parts, None) = direct::path(id, native, tree, session, dims).ok()? else {
+        return None;
+    };
+    if parts.len() < 2 || !packed_structs::bind_interface_path(tree, &mut parts, dims) {
+        return None;
+    }
+    match parts.as_slice() {
+        [name] => Some(name.clone()),
+        _ => None,
     }
 }

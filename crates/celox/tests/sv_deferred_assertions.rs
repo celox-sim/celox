@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! The actions of deferred immediate assertions wait in the deferred
 //! assertion report queue of their process: `#0` ones mature in the
 //! Observed region, `final` ones in the Postponed region, and a flush point
@@ -62,6 +61,27 @@ macro_rules! deferred {
                         1
                     ),
                     vec![("i".to_owned(), Some(AssertionDeferral::None))]
+                );
+            }
+
+            /// A process resumed from a wait in a task is at a flush point
+            /// (IEEE 1800-2023 16.4.2) although another process passed the
+            /// same wait without blocking meanwhile: `b` is flushed. The
+            /// task is recursive, so it is called out of line.
+            #[test]
+            fn a_resume_in_a_shared_task_flushes_after_another_passes_it() {
+                assert_eq!(
+                    run(
+                        "  event e1, e2;\n  \
+                         task automatic waits(event e, input int n);\n    \
+                         if (n > 0) waits(e, n - 1);\n    \
+                         else wait (e.triggered);\n  \
+                         endtask\n  \
+                         initial begin #1; b: assert #0 (0) else $error(\"b\"); waits(e2, 1); end\n  \
+                         initial begin #1; #0; -> e1; -> e2; waits(e1, 1); end",
+                        1
+                    ),
+                    vec![]
                 );
             }
 

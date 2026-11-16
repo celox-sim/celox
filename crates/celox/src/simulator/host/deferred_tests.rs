@@ -243,3 +243,89 @@ fn failed_portable_load_restores_deferred_owner_context() {
     assert_eq!(before.ordinary, after.ordinary);
     assert_eq!(before.current, after.current);
 }
+
+/// The format of `%t` is in the design's state (IEEE 1800-2023 20.4.3): a
+/// display at 1.5 ns after `$timeformat` at 0, then another `$timeformat`
+/// at 2 ns, run in picoseconds.
+fn time_format_simulation() -> crate::Simulation {
+    let source = r#"module Top;
+        initial begin
+            $timeformat(-9, 1, "ns", 0);
+            #1.5 $display("[%t]", $realtime);
+            #0.5 $timeformat(-12, 0, "ps", 0);
+            #1 $display("[%t]", $realtime);
+        end
+    endmodule"#;
+    crate::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("time_format.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap()
+}
+
+fn displays(events: Vec<RuntimeEvent>) -> Vec<String> {
+    events
+        .into_iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Each drain handle formats the events it takes as their sites captured
+/// the format, also after an earlier handle took other events.
+#[test]
+fn a_new_drain_handle_formats_in_the_format_of_each_event() {
+    let mut sim = time_format_simulation();
+    sim.run_until(1000).unwrap();
+    {
+        let mut drain = sim.simulator.runtime_event_drain().unwrap();
+        assert!(displays(drain.drain()).is_empty());
+    }
+    sim.run_until(3000).unwrap();
+    let mut drain = sim.simulator.runtime_event_drain().unwrap();
+    assert_eq!(displays(drain.drain()), ["[1.5ns]", "[3000ps]"]);
+}
+
+/// A checkpoint taken before a later `$timeformat` restores the format it
+/// was taken with.
+#[test]
+fn a_checkpoint_restores_the_format_of_time_conversions() {
+    let mut sim = time_format_simulation();
+    sim.run_until(1000).unwrap();
+    let checkpoint = sim.checkpoint().unwrap();
+    sim.run_until(2500).unwrap();
+    assert_eq!(displays(sim.drain_runtime_events()), ["[1.5ns]"]);
+    sim.restore(&checkpoint).unwrap();
+    sim.run_until(1500).unwrap();
+    assert_eq!(displays(sim.drain_runtime_events()), ["[1.5ns]"]);
+}
+
+/// A differential simulation mirrors the primary into its reference before
+/// each step; the reference formats `%t` as the primary does.
+#[test]
+fn a_mirror_has_the_format_of_time_conversions() {
+    let source = r#"module Top;
+        initial begin
+            $timeformat(-9, 1, "ns", 0);
+            #1.5 $display("[%t]", $realtime);
+            #0.5 $timeformat(-12, 0, "ps", 0);
+            #1 $display("[%t]", $realtime);
+        end
+    endmodule"#;
+    let mut sim = crate::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("time_format.sv"))],
+        "Top",
+    )
+    .scheduler_mode(crate::SchedulerMode::Differential)
+    .build()
+    .unwrap();
+    sim.run_until(3000).unwrap();
+    assert_eq!(
+        displays(sim.drain_runtime_events()),
+        ["[1.5ns]", "[3000ps]"]
+    );
+    assert!(sim.scheduler_stats().checked_steps > 0);
+}

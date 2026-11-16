@@ -6,7 +6,7 @@ pub(super) fn ports_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     selected: Option<&port_owners::Selection<'_>>,
 ) -> Result<Vec<Port>, AnalyzerError> {
     let mut ports = Vec::new();
@@ -14,6 +14,10 @@ pub(super) fn ports_from_scope(
     let mut inherited_type = Type::implicit();
     let mut inherited_variable = false;
     let mut inherited_unresolved = false;
+    let mut inherited_resolution = NetResolution::Wire;
+    // A port type names a type visible in the design element (IEEE
+    // 1800-2023 6.18, 23.2.2).
+    let declarations = types::scope_type_declarations(syntax_tree)?;
     for native in port_owners::scope(selected, syntax_tree)? {
         let direction = native
             .direction
@@ -31,12 +35,18 @@ pub(super) fn ports_from_scope(
                     celox_sv_syntax::DataTypeKind::Implicit
                 )
             });
-        let base =
-            match type_binding::port_type(native, syntax_tree, session, const_env, type_aliases)? {
-                Some(ty) => ty,
-                None if native.data_type.is_none() => inherited_type.clone(),
-                None => return Err(unsupported("unsupported port data type")),
-            };
+        let base = match type_binding::port_type(
+            native,
+            syntax_tree,
+            session,
+            const_env,
+            type_aliases,
+            &declarations,
+        )? {
+            Some(ty) => ty,
+            None if native.data_type.is_none() => inherited_type.clone(),
+            None => return Err(unsupported("unsupported port data type")),
+        };
         if !type_binding::declared_port_range_matches(
             native,
             &base,
@@ -53,7 +63,7 @@ pub(super) fn ports_from_scope(
         }
         inherited_direction = direction;
         inherited_type = base.clone();
-        let ty = type_with_unpacked_ranges(
+        let mut ty = type_with_unpacked_ranges(
             base,
             constant_binding::unpacked_ranges(
                 &native.dimensions,
@@ -63,22 +73,43 @@ pub(super) fn ports_from_scope(
                 type_aliases,
             )?,
         )?;
+        // The port is declared in this scope: its type is the one the
+        // scope's constants give it.
+        semantic_types::bind_declared(
+            &mut session.types,
+            &syntax_tree.functions,
+            &mut ty,
+            const_env,
+        );
         if ty.container.is_some() {
             return Err(unsupported("dynamic container port"));
         }
         if ty.kind() == TypeKind::Event {
             return Err(unsupported("event port"));
         }
-        if ty.unpacked_struct().is_some() {
+        if ty.is_unpacked_struct_in(&session.types) {
+            // A port carries bits, not the heap handle of a container
+            // member.
             if ty
-                .unpacked_struct()
+                .unpacked_struct_in(&session.types)
+                .is_some_and(|aggregate| aggregate.holds_container())
+            {
+                return Err(unsupported(
+                    "unpacked structure with a dynamic array, queue or associative array member on a port",
+                ));
+            }
+            if ty
+                .unpacked_struct_in(&session.types)
                 .is_some_and(|aggregate| aggregate.has_array_members())
             {
                 return Err(unsupported("unpacked structure array members on a port"));
             }
-            if ty.unpacked_struct().is_some_and(|aggregate| {
-                aggregate.leaves().iter().any(|leaf| leaf.default.is_some())
-            }) {
+            if ty
+                .unpacked_struct_in(&session.types)
+                .is_some_and(|aggregate| {
+                    aggregate.leaves().iter().any(|leaf| leaf.default.is_some())
+                })
+            {
                 return Err(unsupported(
                     "unpacked structure member initial values on a port",
                 ));
@@ -147,6 +178,13 @@ pub(super) fn ports_from_scope(
         } else {
             inherited_unresolved
         };
+        inherited_resolution = if let Some(net_type) = &native.net_type {
+            NetResolution::of(net_type)
+        } else if native.direction.is_some() || variable {
+            NetResolution::Wire
+        } else {
+            inherited_resolution
+        };
         let mut port = Port::new(
             native_port_name(native)?,
             direction,
@@ -154,6 +192,7 @@ pub(super) fn ports_from_scope(
             !explicit && !variable,
         )
         .with_unresolved_net(inherited_unresolved)
+        .with_net_resolution(inherited_resolution)
         .with_default(default);
         port.randomizable = variable && direction != PortDirection::Input;
         ports.push(port);
@@ -222,7 +261,7 @@ pub(super) fn module_interface_from_scope(
 pub(super) fn parameters_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     base_const_env: &ConstEnv,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<Vec<Parameter>, AnalyzerError> {
@@ -311,7 +350,7 @@ pub(super) fn signals_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     signals_from_scope_with_declaration_ranges(syntax_tree, session, const_env, type_aliases, false)
 }
@@ -320,10 +359,14 @@ pub(super) fn signals_from_scope_with_declaration_ranges(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     preserve_parameters: bool,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let mut signals = Vec::new();
+    // A variable or net type names a type visible in the design element or
+    // in its generate block, whose typedefs `item` binds (IEEE 1800-2023
+    // 6.18).
+    let declarations = types::scope_type_declarations(syntax_tree)?;
     for mut item in generate::items(syntax_tree, session, const_env, type_aliases)? {
         let syntax_tree = &item.scoped(syntax_tree);
         if preserve_parameters {
@@ -339,6 +382,7 @@ pub(super) fn signals_from_scope_with_declaration_ranges(
             syntax_tree,
             session,
             &item.type_aliases(type_aliases),
+            Some(&declarations),
             &item.env,
             None,
             &mut signals,
@@ -367,28 +411,33 @@ fn declared_scope(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
     signals: &[Signal],
 ) -> Box<PackedDimensions> {
+    // Each variable is bound where it is declared, here.
     let variables: HashMap<_, _> = signals
         .iter()
         .map(|signal| {
             (
                 signal.name().to_string(),
-                procedural::dimensions_from_type(signal.r#type()),
+                procedural::bound_dimensions_from_type(
+                    signal.r#type(),
+                    &tree.functions,
+                    &mut session.types,
+                    env,
+                ),
             )
         })
         .collect();
-    let scope = PackedDimensions::new(variables, env, aliases);
-    scope.bind_types(&mut session.types, &tree.functions);
-    Box::new(scope)
+    Box::new(PackedDimensions::new(variables, env, aliases))
 }
 
 pub(super) fn signals_from_body_item(
     id: celox_sv_syntax::BodyItemId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
+    declarations: Option<&Arc<types::TypeDeclarations>>,
     env: &ConstEnv,
     selected_name: Option<&str>,
     signals: &mut Vec<Signal>,
@@ -424,7 +473,15 @@ pub(super) fn signals_from_body_item(
                         celox_sv_syntax::DataTypeKind::Named(_)
                     )
                 {
-                    type_binding::alias_signals(value, tree, session, env, aliases, selected_name)?
+                    type_binding::alias_signals(
+                        value,
+                        tree,
+                        session,
+                        env,
+                        aliases,
+                        declarations,
+                        selected_name,
+                    )?
                 } else {
                     // A type operator names the variables declared before.
                     let scope = matches!(
@@ -438,6 +495,7 @@ pub(super) fn signals_from_body_item(
                         session,
                         env,
                         aliases,
+                        declarations,
                         selected_name,
                         scope.as_deref(),
                     )?
@@ -455,6 +513,7 @@ pub(super) fn signals_from_body_item(
             session,
             env,
             aliases,
+            declarations,
             selected_name,
         )?,
         BodyItemKind::Instance(id) => {
@@ -491,7 +550,7 @@ pub(super) fn signals_from_body_item(
     };
     substitute_signal_local_constants(&mut declared, env);
     for signal in declared {
-        if signal.r#type.unpacked_struct().is_none() {
+        if !signal.r#type.is_unpacked_struct_in(&session.types) {
             signals.push(signal);
             continue;
         }
@@ -514,7 +573,7 @@ pub(super) fn signals_from_body_item(
         // variables; they are not storage (see `unpacked_structs`).
         let leaves = signal
             .r#type
-            .unpacked_struct()
+            .unpacked_struct_in(&session.types)
             .expect("checked above")
             .leaves();
         for (name, r#type) in unpacked_structs::aggregates(&signal.name, &signal.r#type) {
@@ -529,11 +588,14 @@ pub(super) fn signals_from_body_item(
 
 fn substitute_signal_local_constants(signals: &mut [Signal], const_env: &ConstEnv) {
     for signal in signals {
-        for range in &mut signal.r#type.packed_ranges {
+        // The constants are those of the scope the type was bound in, so
+        // their values leave its semantic type as it is.
+        let shape = signal.r#type.shape_keeping_binding();
+        for range in &mut shape.packed_ranges {
             range.left = substitute_dimension_constants(range.left.clone(), const_env);
             range.right = substitute_dimension_constants(range.right.clone(), const_env);
         }
-        for range in &mut signal.r#type.unpacked_ranges {
+        for range in &mut shape.unpacked_ranges {
             range.left = substitute_dimension_constants(range.left.clone(), const_env);
             range.right = substitute_dimension_constants(range.right.clone(), const_env);
             range.size = range

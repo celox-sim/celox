@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! The functions of UVM's C library that Celox provides itself.
 use std::path::Path;
 
@@ -341,5 +340,200 @@ endmodule
             0u32.into(),
             "four_state={four_state}"
         );
+    }
+}
+
+/// UVM 1.2's regular expressions (`src/dpi/uvm_regex.cc`), declared as its
+/// `context` imports: `uvm_re_match` compiles and matches in one call, `0`
+/// on a match, without the brackets of `/re/`; `uvm_glob_to_re` brackets the
+/// expression of a glob, gives "" for an empty one or a lone `/`, and keeps
+/// one already bracketed; `uvm_dump_re_cache` does nothing.
+const UVM_12_SOURCE: &str = r#"
+module Top(output int checks, output int failed);
+  import "DPI-C" context function int uvm_re_match(string re, string str);
+  import "DPI-C" context function void uvm_dump_re_cache();
+  import "DPI-C" context function string uvm_glob_to_re(string glob);
+  initial begin
+    checks = 0; failed = 0;
+    if (uvm_glob_to_re("top.u?.*") == "/^top\\.u.\\..*$/") checks++; else failed |= 1;
+    if (uvm_glob_to_re("") == "" && uvm_glob_to_re("/") == "") checks++; else failed |= 2;
+    if (uvm_glob_to_re("/^a+$/") == "/^a+$/") checks++; else failed |= 4;
+    if (uvm_re_match(uvm_glob_to_re("uvm_test_top.*"), "uvm_test_top.env") == 0) checks++; else failed |= 8;
+    if (uvm_re_match(uvm_glob_to_re("uvm_test_top.*"), "top.env") != 0) checks++; else failed |= 16;
+    if (uvm_re_match("/^a[0-9]+b$/", "a42b") == 0 && uvm_re_match("^a[0-9]+b$", "ab") != 0) checks++; else failed |= 32;
+    if (uvm_re_match("(", "x") != 0) checks++; else failed |= 64;
+    uvm_dump_re_cache();
+  end
+endmodule
+"#;
+
+#[test]
+fn uvm_12_regular_expressions() {
+    fn check<B: celox::SimBackend>(mut sim: celox::Simulation<B>, four_state: bool) {
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("failed")),
+            0u8.into(),
+            "four_state={four_state}"
+        );
+        assert_eq!(
+            sim.get(sim.signal("checks")),
+            7u8.into(),
+            "four_state={four_state}"
+        );
+    }
+    for four_state in [false, true] {
+        let build = || {
+            celox::Simulation::from_sv_sources(
+                vec![(UVM_12_SOURCE, Path::new("uvm12_dpi.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+        };
+        check(build().build_interpreter().unwrap(), four_state);
+        check(build().build().unwrap(), four_state);
+    }
+}
+
+/// UVM 1.2's command-line expressions (`src/dpi/uvm_svcmd_dpi.c`), declared
+/// as its imports: `uvm_dpi_regcomp` compiles the expression as it is
+/// written (no `/re/` brackets) or gives `null`; `uvm_dpi_regexec` gives `0`
+/// on a match and nonzero for no match or `null`; `uvm_dpi_regfree` frees,
+/// `null` too. The expression is UVM 1.2's component name check.
+const UVM_12_SVCMD_SOURCE: &str = r#"
+module Top(output int checks, output int failed);
+  import "DPI-C" function chandle uvm_dpi_regcomp(string regex);
+  import "DPI-C" function int uvm_dpi_regexec(chandle preg, string str);
+  import "DPI-C" function void uvm_dpi_regfree(chandle preg);
+  initial begin
+    static chandle names, slashed, bad;
+    checks = 0; failed = 0;
+    names = uvm_dpi_regcomp("^[][[:alnum:](){}_:-]([][[:alnum:](){} _:-]*[][[:alnum:](){}_:-])?$");
+    if (names != null) checks++; else failed |= 1;
+    if (uvm_dpi_regexec(names, "agent[0]") == 0 && uvm_dpi_regexec(names, "a b") == 0) checks++; else failed |= 2;
+    if (uvm_dpi_regexec(names, " env") != 0 && uvm_dpi_regexec(names, "a.b") != 0) checks++; else failed |= 4;
+    uvm_dpi_regfree(names);
+    slashed = uvm_dpi_regcomp("/a/");
+    if (uvm_dpi_regexec(slashed, "x/a/") == 0 && uvm_dpi_regexec(slashed, "a") != 0) checks++; else failed |= 8;
+    uvm_dpi_regfree(slashed);
+    bad = uvm_dpi_regcomp("(");
+    if (bad == null && uvm_dpi_regexec(bad, "x") != 0) checks++; else failed |= 16;
+    uvm_dpi_regfree(bad);
+  end
+endmodule
+"#;
+
+#[test]
+fn uvm_12_command_line_regular_expressions() {
+    fn check<B: celox::SimBackend>(mut sim: celox::Simulation<B>, four_state: bool) {
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("failed")),
+            0u8.into(),
+            "four_state={four_state}"
+        );
+        assert_eq!(
+            sim.get(sim.signal("checks")),
+            5u8.into(),
+            "four_state={four_state}"
+        );
+    }
+    for four_state in [false, true] {
+        let build = || {
+            celox::Simulation::from_sv_sources(
+                vec![(UVM_12_SVCMD_SOURCE, Path::new("uvm12_svcmd_dpi.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+        };
+        check(build().build_interpreter().unwrap(), four_state);
+        check(build().build().unwrap(), four_state);
+    }
+}
+
+/// UVM 1.2's C functions report through the function its package exports
+/// for them, `m__uvm_report_dpi` (`base/uvm_globals.svh`), so an error they
+/// report counts as a UVM error: an invalid expression of `uvm_re_match`
+/// (`UVM/DPI/REGEX_INV`) or `uvm_dpi_regcomp` (`UVM/DPI/REGCOMP`), and
+/// `uvm_dump_re_cache`'s message. A call that does not fail reports nothing.
+const UVM_12_REPORT_SOURCE: &str = r#"
+package fake_uvm;
+  int errors, infos, verbosities, lines;
+  string ids;
+  export "DPI-C" function m__uvm_report_dpi;
+  function void m__uvm_report_dpi(int severity, string id, string message,
+                                  int verbosity, string filename, int line);
+    if (severity == 2) errors++;
+    if (severity == 0) infos++;
+    ids = {ids, id, ";"};
+    verbosities += verbosity;
+    lines += line;
+  endfunction
+  import "DPI-C" context function int uvm_re_match(string re, string str);
+  import "DPI-C" context function void uvm_dump_re_cache();
+  import "DPI-C" function chandle uvm_dpi_regcomp(string regex);
+  import "DPI-C" function int uvm_dpi_regexec(chandle preg, string str);
+  import "DPI-C" function void uvm_dpi_regfree(chandle preg);
+  function automatic int run();
+    chandle c;
+    int r = 0;
+    if (uvm_re_match("^a$", "a") == 0) r += 1;
+    if (uvm_re_match("(", "a") != 0) r += 10;
+    c = uvm_dpi_regcomp("(");
+    if (c == null) r += 100;
+    c = uvm_dpi_regcomp("^ok$");
+    if (uvm_dpi_regexec(c, "ok") == 0) r += 1000;
+    uvm_dpi_regfree(c);
+    uvm_dump_re_cache();
+    return r;
+  endfunction
+  function automatic int match_re(string re, string str);
+    return uvm_re_match(re, str);
+  endfunction
+endpackage
+module Top(output int result, output int errors, output int infos, output int sums, output bit ids_ok);
+  // Called without the package's reporting: its report goes nowhere and
+  // is no report of the package's next call, which succeeds.
+  import "DPI-C" context function int uvm_re_match(string re, string str);
+  initial begin
+    if (uvm_re_match("(", "a") == 0 || fake_uvm::match_re("^a$", "a") != 0) $finish;
+    result = fake_uvm::run();
+    errors = fake_uvm::errors;
+    infos = fake_uvm::infos;
+    sums = fake_uvm::verbosities * 1000 + fake_uvm::lines;
+    ids_ok = fake_uvm::ids == "UVM/DPI/REGEX_INV;UVM/DPI/REGCOMP;UVM/DPI/REGEX_MAX;";
+  end
+endmodule
+"#;
+
+#[test]
+fn uvm_12_functions_report_through_the_uvm_package() {
+    fn check<B: celox::SimBackend>(mut sim: celox::Simulation<B>, four_state: bool) {
+        sim.run_until(0).unwrap();
+        for (name, expected) in [
+            ("result", 1111u32),
+            ("errors", 2),
+            ("infos", 1),
+            // Verbosity LOW (100) of the cache message; lines 94, 107, 249.
+            ("sums", 100 * 1000 + 94 + 107 + 249),
+            ("ids_ok", 1),
+        ] {
+            assert_eq!(
+                sim.get(sim.signal(name)),
+                expected.into(),
+                "{name}, four_state={four_state}"
+            );
+        }
+    }
+    for four_state in [false, true] {
+        let build = || {
+            celox::Simulation::from_sv_sources(
+                vec![(UVM_12_REPORT_SOURCE, Path::new("uvm12_reports.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+        };
+        check(build().build_interpreter().unwrap(), four_state);
+        check(build().build().unwrap(), four_state);
     }
 }

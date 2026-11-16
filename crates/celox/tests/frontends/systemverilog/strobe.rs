@@ -1,13 +1,6 @@
 use crate::*;
 
 sv_backends! {
-    fn strobe_reads_after_reactive_program(sim) { @case "file_io::strobe_reads_after_reactive_program"; }
-    fn strobe_radix_variants(sim) { @case "file_io::strobe_radix_variants"; }
-    fn strobe_reads_after_nba(sim) { @case "file_io::strobe_reads_after_nba"; }
-    fn fstrobe_stdout_reads_final_value(sim) { @case "file_io::fstrobe_stdout_reads_final_value"; }
-}
-
-sv_backends! {
     fn strobe_observes_zero_delay_nba_and_sampled_values(sim) {
         @setup { let source=r#"module Top;
             timeunit 1ps; timeprecision 1ps;

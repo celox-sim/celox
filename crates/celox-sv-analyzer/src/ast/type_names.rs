@@ -1,15 +1,17 @@
 //! `$typename` (IEEE 1800-2023 20.6.1): the string that represents the
 //! resolved type of a data type or of an expression.
 //!
-//! The string is built from the bound [`Type`]: typedefs are already
-//! resolved, a signing equal to the default is not written, ranges are
-//! written as `[left:right]` decimal numbers, an unpacked dimension follows
-//! the `$` that stands for the name of the array, and an enumeration,
-//! struct or union is written with its members and the scope-qualified
-//! name of its typedef. A type this cannot spell exactly, such as an
-//! anonymous enumeration, is rejected rather than spelled differently.
+//! The string is built from the semantic type ([`TyData`]) and the
+//! declarations it names ([`semantic_types::DeclData`]): typedefs are
+//! already resolved, a signing equal to the default is not written, ranges
+//! are written as `[left:right]` decimal numbers, an unpacked dimension
+//! follows the `$` that stands for the name of the array, and an
+//! enumeration, struct or union is written with its members and the
+//! scope-qualified name of its typedef, which its declaration records. A
+//! type this cannot spell exactly, such as an anonymous enumeration, is
+//! rejected rather than spelled differently.
 use super::*;
-use system_functions::ContainerKind;
+use semantic_types::{ArrayKind, Decl, DeclId, PackedElement, TyData, TyId};
 
 /// The declaration that names an enumeration, struct or union type, and how
 /// `$typename` spells a type where its structure does not tell. Type
@@ -34,6 +36,15 @@ struct SpellingParts {
     aggregate: Option<&'static str>,
     /// The name of the typedef of an enumeration, struct or union.
     name: Option<TypedefName>,
+    /// The source position that declares an enumeration, which tells an
+    /// anonymous one apart (IEEE 1800-2023 6.22.1 c).
+    anonymous: Option<Arc<str>>,
+    /// The elaborated scope that declares the enumeration, struct or union
+    /// type: an analysis of a module, interface or program, which each
+    /// instance with other parameter values has (6.22). `None` for a
+    /// package, a compilation unit or a class specialization, whose
+    /// declarations are named apart already.
+    scope: Option<Arc<str>>,
 }
 
 impl Spelling {
@@ -52,17 +63,54 @@ impl Spelling {
     }
 
     /// Name the type after the typedef whose identity is `declaration` and
-    /// whose `$typename` name is `name`.
-    pub(super) fn name(&mut self, declaration: Arc<str>, name: TypedefName) {
+    /// whose `$typename` name is `name`, declared in elaborated scope
+    /// `scope`.
+    pub(super) fn name(
+        &mut self,
+        declaration: Arc<str>,
+        name: TypedefName,
+        scope: Option<Arc<str>>,
+    ) {
         let mut parts = self.0.as_deref().cloned().unwrap_or_default();
         parts.declaration = Some(declaration);
         parts.name = Some(name);
+        parts.scope = scope;
         self.0 = Some(Arc::new(parts));
+    }
+
+    /// Record that elaborated scope `scope` declares the anonymous type.
+    pub(super) fn declared_in(&mut self, scope: Arc<str>) {
+        let mut parts = self.0.as_deref().cloned().unwrap_or_default();
+        parts.scope = Some(scope);
+        self.0 = Some(Arc::new(parts));
+    }
+
+    /// Record that the enumeration is declared at source position
+    /// `declaration`, in elaborated scope `scope` if a module, interface or
+    /// program.
+    pub(super) fn anonymous_enum(&mut self, declaration: Arc<str>, scope: Option<Arc<str>>) {
+        let mut parts = self.0.as_deref().cloned().unwrap_or_default();
+        parts.anonymous = Some(declaration);
+        if scope.is_some() {
+            parts.scope = scope;
+        }
+        self.0 = Some(Arc::new(parts));
+    }
+
+    /// The source position that declares an enumeration (see
+    /// [`Self::anonymous_enum`]).
+    pub(super) fn anonymous(&self) -> Option<&str> {
+        self.parts()?.anonymous.as_deref()
     }
 
     /// The identity of the typedef that names the type.
     pub(super) fn declaration(&self) -> Option<&str> {
         self.parts()?.declaration.as_deref()
+    }
+
+    /// The elaborated scope that declares the type.
+    pub(super) fn scope(&self) -> Option<&str> {
+        self.parts()?.scope.as_deref()
     }
 
     fn parts(&self) -> Option<&SpellingParts> {
@@ -73,11 +121,11 @@ impl Spelling {
         self.parts()?.keyword
     }
 
-    fn aggregate_of(&self) -> Option<&'static str> {
+    pub(super) fn aggregate_of(&self) -> Option<&'static str> {
         self.parts()?.aggregate
     }
 
-    fn name_of(&self) -> Option<&TypedefName> {
+    pub(super) fn name_of(&self) -> Option<&TypedefName> {
         self.parts()?.name.as_ref()
     }
 }
@@ -95,7 +143,7 @@ impl std::hash::Hash for Spelling {
 }
 
 /// The name of a typedef, prefixed with the scope that declares it (rule f).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TypedefName {
     /// Declared in a package (`p::t`), a module, interface or program
     /// (`m.t`, `m.g.t` in generate scope `g`) or the compilation unit
@@ -149,6 +197,25 @@ pub(super) struct Declared(Option<Arc<Type>>);
 impl Declared {
     pub(super) fn new(r#type: &Type) -> Self {
         Self(Some(Arc::new(r#type.clone())))
+    }
+
+    /// The declared type of `shape`, whatever its dimensions.
+    pub(super) fn of_shape(
+        shape: &crate::ast::variable_dimensions::VariableShape,
+    ) -> Option<&Type> {
+        shape.declared.0.as_deref()
+    }
+
+    /// Whether `other` declares the same type, which shape equality does
+    /// not compare.
+    pub(super) fn same(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+
+    /// Feed the declared type to `state`, which the `Hash` of a shape does
+    /// not.
+    pub(super) fn hash_type<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.0, state);
     }
 
     /// The declared type, if the shape still has its declared dimensions.
@@ -329,7 +396,7 @@ fn operand_type(
         }
         celox_sv_syntax::ExprKind::Parameterized { .. } => {
             expression_binding::named_class(tree, session, argument, native, context)?
-                .map(|class| classes::handle(&class))
+                .map(|class| classes::handle(&mut session.types, &class))
                 .ok_or_else(|| unsupported_operand("this class"))
         }
         _ => Err(unsupported_operand(
@@ -352,7 +419,7 @@ fn class_operand(
     // (8.25).
     if classes::is_parameterized(tree, session, &class) {
         let class = classes::specializations::specialize(tree, session, &class, &[], context)?;
-        return Ok(Some(classes::handle(&class)));
+        return Ok(Some(classes::handle(&mut session.types, &class)));
     }
     Ok(classes::handle_type(tree, session, &class))
 }
@@ -375,38 +442,50 @@ pub(super) fn type_name(
     session: &mut Session,
     env: &ConstEnv,
 ) -> Converted<String> {
-    let range = |left: &ConstExpr, right: &ConstExpr| -> Converted<String> {
-        let bound = |bound: &ConstExpr| {
-            eval_ast_const_expr(&tree.functions, bound, env)
-                .ok_or_else(|| unsupported_operand("a type with a range that is not constant"))
-        };
-        Ok(format!("[{}:{}]", bound(left)?, bound(right)?))
-    };
+    // The type the declaration gave it, where it was bound.
+    let id = semantic_types::of_declared(&mut session.types, &tree.functions, r#type, env)
+        .ok_or_else(|| unsupported_operand("a type with a range that is not constant"))?;
+    name_of(id, tree, session, env)
+}
+
+/// The `$typename` string of semantic type `id`: its element type, then
+/// its unpacked dimensions, slowest varying first.
+fn name_of(
+    id: TyId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Converted<String> {
     let mut dimensions = String::new();
-    for unpacked in &r#type.unpacked_ranges {
-        dimensions.push_str(&range(&unpacked.left, &unpacked.right)?);
-    }
-    let element = match &r#type.container {
-        Some(container) => {
-            dimensions.push_str(&match container.layout.kind {
-                ContainerKind::Dynamic => "[]".to_owned(),
-                ContainerKind::Queue { capacity: 0 } => "[$]".to_owned(),
-                ContainerKind::Queue { capacity } => format!("[$:{}]", capacity - 1),
-                ContainerKind::Associative { .. } => match &container.key {
-                    Some(key) => format!("[{}]", type_name(key, tree, session, env)?),
-                    None => "[*]".to_owned(),
-                },
-            });
-            &container.element
-        }
-        None => r#type,
-    };
-    if element.container.is_some()
-        || (!std::ptr::eq(element, r#type) && !element.unpacked_ranges.is_empty())
+    let mut element = id;
+    let mut container = false;
+    while let TyData::Array {
+        kind,
+        element: inner,
+    } = session.types.data(element).clone()
     {
-        return Err(unsupported_operand("an array of containers"));
+        // 20.6.1 spells the dimensions of an array, not the arrays of a
+        // variable-size dimension.
+        if container {
+            return Err(unsupported_operand("an array of containers"));
+        }
+        match kind {
+            ArrayKind::Fixed(range) => {
+                dimensions.push_str(&format!("[{}:{}]", range.left, range.right));
+            }
+            ArrayKind::Dynamic => dimensions.push_str("[]"),
+            ArrayKind::Queue { bound: None } => dimensions.push_str("[$]"),
+            ArrayKind::Queue { bound: Some(bound) } => {
+                dimensions.push_str(&format!("[$:{bound}]"));
+            }
+            ArrayKind::Associative { key } => {
+                dimensions.push_str(&format!("[{}]", name_of(key, tree, session, env)?));
+            }
+        }
+        container = !matches!(kind, ArrayKind::Fixed(_));
+        element = inner;
     }
-    let mut name = element_name(element, tree, session, env, &range)?;
+    let mut name = element_name(element, tree, session, env)?;
     if !dimensions.is_empty() {
         // `$` stands for the name of the unpacked array (rule d).
         name.push('$');
@@ -415,111 +494,118 @@ pub(super) fn type_name(
     Ok(name)
 }
 
-/// The name of the element of an unpacked array of type `r#type`.
+/// The name of semantic type `id`, an element of an unpacked array.
 fn element_name(
-    r#type: &Type,
+    id: TyId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    range: &dyn Fn(&ConstExpr, &ConstExpr) -> Converted<String>,
 ) -> Converted<String> {
-    // An event is a handle of a built-in class that has no class name.
-    if let Some(class) = r#type.class().filter(|_| r#type.kind != TypeKind::Event) {
-        return class_name(class, tree, session, env);
-    }
-    if r#type.chandle {
-        return Ok("chandle".to_owned());
-    }
-    match r#type.kind {
-        TypeKind::Event => return Ok("event".to_owned()),
-        TypeKind::Real => return Ok("real".to_owned()),
-        TypeKind::Shortreal => return Ok("shortreal".to_owned()),
-        TypeKind::String => return Ok("string".to_owned()),
-        TypeKind::Object | TypeKind::Process => {
-            return Err(unsupported_operand("this class type"));
+    match session.types.data(id).clone() {
+        TyData::Packed(packed) => packed_name(&packed, tree, session, env),
+        TyData::Real => Ok("real".to_owned()),
+        TyData::Shortreal => Ok("shortreal".to_owned()),
+        TyData::String => Ok("string".to_owned()),
+        TyData::Chandle => Ok("chandle".to_owned()),
+        // An event is a handle of a built-in class that has no class name.
+        TyData::Class(Decl::Class(decl)) => {
+            let class = session.types.decl(decl).name.clone();
+            if &*class == events::CLASS {
+                return Ok("event".to_owned());
+            }
+            class_name(&class, tree, session, env)
         }
-        TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => {}
+        TyData::UnpackedStruct(Decl::Aggregate { decl, members }) => {
+            unpacked_struct_name(decl, &members, tree, session, env)
+        }
+        // 20.6.1 has no rule for a virtual interface; it is written as it is
+        // declared (25.9).
+        TyData::VirtualInterface {
+            interface: Decl::Interface(interface),
+            modport,
+        } => Ok(match (&session.types.decl(interface).name, modport) {
+            (interface, Some(modport)) => format!("virtual {interface}.{modport}"),
+            (interface, None) => format!("virtual {interface}"),
+        }),
+        TyData::Null
+        | TyData::Class(_)
+        | TyData::VirtualInterface { .. }
+        | TyData::UnpackedStruct(_)
+        | TyData::Array { .. } => Err(unsupported_operand("this class type")),
     }
-    if let Some(aggregate) = r#type.unpacked_struct() {
-        return unpacked_struct_name(r#type, aggregate, tree, session, env);
-    }
-    if r#type.is_enum {
-        return enum_name(r#type, tree, session, env, range);
-    }
-    if !r#type.members.is_empty() {
-        return aggregate_name(r#type, tree, session, env, range);
-    }
-    if r#type.signed_element_depth.is_some() {
+}
+
+/// A packed type: a vector, an enumeration, a packed structure or union, or
+/// a packed array of one.
+fn packed_name(
+    packed: &semantic_types::Packed,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Converted<String> {
+    match &packed.element {
+        PackedElement::Enum { decl, array } => {
+            if *array {
+                return Err(unsupported_operand("a packed array of an enumerated type"));
+            }
+            enum_name(packed, decl, tree, session, env)
+        }
+        PackedElement::Aggregate(Decl::Aggregate { decl, members }) => {
+            aggregate_name(packed, *decl, members, tree, session, env)
+        }
+        PackedElement::Aggregate(_) => Err(unsupported_operand("this packed type")),
         // No declaration without a typedef has this type (7.4.1).
-        return Err(unsupported_operand("a packed array of a signed type"));
+        PackedElement::Bits if packed.signed_element_depth.is_some() => {
+            Err(unsupported_operand("a packed array of a signed type"))
+        }
+        PackedElement::Bits => Ok(vector_name(packed)),
     }
-    vector_name(r#type, tree, env, range)
 }
 
 /// A simple bit vector type, or an integer type with a predefined width
 /// (6.11), which `$typename` tells apart from a vector of its width.
-fn vector_name(
-    r#type: &Type,
-    tree: &AnalysisContext<'_>,
-    env: &ConstEnv,
-    range: &dyn Fn(&ConstExpr, &ConstExpr) -> Converted<String>,
-) -> Converted<String> {
-    let keyword = r#type.spelling.keyword_of().filter(|keyword| {
-        let (kind, width) = match *keyword {
-            "byte" => (TypeKind::Bit, 8),
-            "shortint" => (TypeKind::Bit, 16),
-            "int" => (TypeKind::Bit, 32),
-            "longint" => (TypeKind::Bit, 64),
-            "integer" => (TypeKind::Logic, 32),
-            "time" => (TypeKind::Logic, 64),
-            _ => return false,
-        };
-        r#type.kind == kind
-            && matches!(r#type.packed_ranges.as_slice(), [only]
-                if eval_ast_const_expr(&tree.functions, &only.left, env) == Some(width - 1)
-                    && eval_ast_const_expr(&tree.functions, &only.right, env) == Some(0))
-    });
-    let (mut name, signed) = match keyword {
+fn vector_name(packed: &semantic_types::Packed) -> String {
+    let (mut name, signed) = match packed.keyword {
         Some(keyword) => (keyword.to_owned(), keyword != "time"),
         // `reg` is `logic` (6.11.2).
-        None if r#type.kind == TypeKind::Bit => ("bit".to_owned(), false),
-        None => ("logic".to_owned(), false),
+        None if packed.four_state => ("logic".to_owned(), false),
+        None => ("bit".to_owned(), false),
     };
     // Only a signing other than the default is written (rule b).
-    if r#type.is_signed != signed {
-        name.push_str(if r#type.is_signed {
+    if packed.signed != signed {
+        name.push_str(if packed.signed {
             " signed"
         } else {
             " unsigned"
         });
     }
-    if keyword.is_none() {
-        for packed in &r#type.packed_ranges {
-            name.push_str(&range(&packed.left, &packed.right)?);
+    if packed.keyword.is_none() {
+        for range in &packed.dims {
+            name.push_str(&format!("[{}:{}]", range.left, range.right));
         }
     }
-    Ok(name)
+    name
 }
 
 /// An enumeration, with its named constants and their values (rule e).
 fn enum_name(
-    r#type: &Type,
+    packed: &semantic_types::Packed,
+    decl: &Decl,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    range: &dyn Fn(&ConstExpr, &ConstExpr) -> Converted<String>,
 ) -> Converted<String> {
-    if r#type.packed_enum {
-        return Err(unsupported_operand("a packed array of an enumerated type"));
-    }
-    let domain = r#type
-        .enum_domain
-        .as_deref()
+    let (domain, named) = match decl {
+        Decl::Named(decl) => (session.types.decl(*decl).domain.clone(), Some(*decl)),
+        Decl::AnonymousEnum { domain, .. } => (domain.clone(), None),
+        _ => (None, None),
+    };
+    let domain = domain
         .ok_or_else(|| unsupported_operand("an enumerated type with values that are not known"))?;
-    let mut base = r#type.clone();
-    base.is_enum = false;
-    base.enum_domain = None;
-    let base = vector_name(&base, tree, env, range)?;
+    let base = vector_name(&semantic_types::Packed {
+        element: PackedElement::Bits,
+        ..packed.clone()
+    });
     let mut name = if base == "int" {
         "enum".to_owned()
     } else {
@@ -542,7 +628,7 @@ fn enum_name(
     name.push_str(&constants.join(","));
     name.push('}');
     name.push_str(&typedef_name(
-        r#type,
+        named,
         "an anonymous enumerated type",
         tree,
         session,
@@ -553,21 +639,23 @@ fn enum_name(
 
 /// A packed struct or union, with its members.
 fn aggregate_name(
-    r#type: &Type,
+    packed: &semantic_types::Packed,
+    decl: DeclId,
+    members: &[(Arc<str>, TyId)],
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    range: &dyn Fn(&ConstExpr, &ConstExpr) -> Converted<String>,
 ) -> Converted<String> {
-    let aggregate = r#type
-        .spelling
-        .aggregate_of()
+    let aggregate = session
+        .types
+        .decl(decl)
+        .aggregate
         .ok_or_else(|| unsupported_operand("a soft or tagged union"))?;
     // The last packed range is the aggregate itself; those before it are
     // dimensions of a packed array of it.
-    let outer = &r#type.packed_ranges[..r#type.packed_ranges.len().saturating_sub(1)];
-    let signed = match (outer.len(), r#type.signed_element_depth) {
-        (0, _) => r#type.is_signed,
+    let outer = &packed.dims[..packed.dims.len().saturating_sub(1)];
+    let signed = match (outer.len(), packed.signed_element_depth) {
+        (0, _) => packed.signed,
         (_, None) => false,
         (depth, Some(signed)) if signed == depth => true,
         _ => return Err(unsupported_operand("a packed array of a signed type")),
@@ -577,22 +665,22 @@ fn aggregate_name(
         name.push_str(" signed");
     }
     name.push('{');
-    for member in &r#type.members {
-        name.push_str(&type_name(member.r#type(), tree, session, env)?);
+    for (member, r#type) in members {
+        name.push_str(&name_of(*r#type, tree, session, env)?);
         name.push(' ');
-        name.push_str(member.name());
+        name.push_str(member);
         name.push(';');
     }
     name.push('}');
     name.push_str(&typedef_name(
-        r#type,
+        Some(decl),
         "an anonymous struct or union type",
         tree,
         session,
         env,
     )?);
-    for packed in outer {
-        name.push_str(&range(&packed.left, &packed.right)?);
+    for range in outer {
+        name.push_str(&format!("[{}:{}]", range.left, range.right));
     }
     Ok(name)
 }
@@ -600,28 +688,28 @@ fn aggregate_name(
 /// An unpacked struct with its members, as the example of 20.6.1 writes
 /// `struct{bit A;bit B;}top.AB_t`.
 fn unpacked_struct_name(
-    r#type: &Type,
-    aggregate: &unpacked_structs::UnpackedStruct,
+    decl: DeclId,
+    members: &[(Arc<str>, TyId)],
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
 ) -> Converted<String> {
     let mut name = "struct{".to_owned();
-    for member in aggregate.members() {
+    for (member, r#type) in members {
         // 20.6.1 has no spelling of the name of a member array.
-        if !member.r#type.unpacked_ranges.is_empty() || member.r#type.container.is_some() {
+        if matches!(session.types.data(*r#type), TyData::Array { .. }) {
             return Err(unsupported_operand(
                 "an unpacked structure with an unpacked array member",
             ));
         }
-        name.push_str(&type_name(&member.r#type, tree, session, env)?);
+        name.push_str(&name_of(*r#type, tree, session, env)?);
         name.push(' ');
-        name.push_str(&member.name);
+        name.push_str(member);
         name.push(';');
     }
     name.push('}');
     name.push_str(&typedef_name(
-        r#type,
+        Some(decl),
         "an anonymous struct or union type",
         tree,
         session,
@@ -630,20 +718,21 @@ fn unpacked_struct_name(
     Ok(name)
 }
 
-/// The scope-qualified name of the typedef of `r#type` (rule f). The
-/// system-generated name of an anonymous type (rule c) is not supported.
+/// The scope-qualified name of the typedef that declares `decl` (rule f).
+/// The system-generated name of an anonymous type (rule c) is not
+/// supported.
 fn typedef_name(
-    r#type: &Type,
+    decl: Option<DeclId>,
     anonymous: &str,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
 ) -> Converted<String> {
-    match r#type.spelling.name_of() {
+    match decl.and_then(|decl| session.types.decl(decl).typename.clone()) {
         Some(TypedefName::Scope(name)) => Ok(name.to_string()),
         Some(TypedefName::Class { class, name }) => Ok(format!(
             "{}::{name}",
-            class_name(class, tree, session, env)?
+            class_name(&class, tree, session, env)?
         )),
         None => Err(unsupported_operand(anonymous)),
     }
@@ -684,8 +773,12 @@ fn declared_class_name(
             &instances::normalize_identifier(&declaration.name.spelling),
         )),
         // A class of a package that another scope declares is named by
-        // its package already.
+        // its package already; one of a compilation unit of another file,
+        // by the identifier it declares.
         None if generic.contains("::") && !generic.starts_with(packages::UNIT) => Ok(generic),
+        None if let Some(identifier) = classes::unit_class_identifier(&generic) => {
+            Ok(scoped_name(None, identifier))
+        }
         None => Err(unsupported_operand(format!("class `{class}`"))),
     }
 }
@@ -714,16 +807,13 @@ fn class_name(
         None => class != generic,
     };
     if parameterized {
-        let specialization = specialization.ok_or_else(|| {
-            unsupported_operand(format!("class `{class}` without its parameters"))
-        })?;
-        let arguments = specialization
-            .arguments
+        let arguments = class_arguments(class, specialization, tree, session, env)?;
+        let arguments = arguments
             .iter()
             .map(|argument| match argument {
-                ClassArgument::Type(r#type) => type_name(r#type, tree, session, env),
-                ClassArgument::Value(Some(value)) => Ok(value.to_string()),
-                ClassArgument::Value(None) => Err(unsupported_operand(format!(
+                semantic_types::ClassArgument::Type(id) => name_of(*id, tree, session, env),
+                semantic_types::ClassArgument::Value(Some(value)) => Ok(value.to_string()),
+                semantic_types::ClassArgument::Value(None) => Err(unsupported_operand(format!(
                     "class `{name}` with a parameter value that is not integral"
                 ))),
             })
@@ -731,4 +821,41 @@ fn class_name(
         name.push_str(&format!("#({})", arguments.join(",")));
     }
     Ok(name)
+}
+
+/// The parameter values of class specialization `class`, which its
+/// declaration records the first time they are asked for: the types
+/// [`specializations::Specialization::arguments`] gives, in the constants
+/// of `env` where they are not bound.
+fn class_arguments(
+    class: &str,
+    specialization: Option<std::rc::Rc<classes::specializations::Specialization>>,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Converted<Arc<[semantic_types::ClassArgument]>> {
+    let Decl::Class(decl) = session.types.class(class) else {
+        unreachable!("a class declares a class");
+    };
+    if let Some(arguments) = &session.types.decl(decl).arguments {
+        return Ok(arguments.clone());
+    }
+    let specialization = specialization
+        .ok_or_else(|| unsupported_operand(format!("class `{class}` without its parameters")))?;
+    let arguments = specialization
+        .arguments
+        .iter()
+        .map(|argument| match argument {
+            ClassArgument::Type(r#type) => {
+                semantic_types::of_declared(&mut session.types, &tree.functions, r#type, env)
+                    .map(semantic_types::ClassArgument::Type)
+                    .ok_or_else(|| unsupported_operand("a type with a range that is not constant"))
+            }
+            ClassArgument::Value(value) => Ok(semantic_types::ClassArgument::Value(*value)),
+        })
+        .collect::<Converted<Arc<[_]>>>()?;
+    session
+        .types
+        .record_class_arguments(decl, arguments.clone());
+    Ok(arguments)
 }

@@ -1,6 +1,6 @@
 [workspace]
 # Keep optional backend and comparison crates out of ordinary local builds.
-default-members = ["crates/celox", "crates/celox-napi", "crates/celox-vpi"]
+default-members = ["crates/celox", "crates/celox-napi"]
 members = [
     "crates/aplite",
     "crates/celox",
@@ -31,7 +31,6 @@ members = [
     "crates/celox-napi",
     "crates/celox-ts-gen",
     "crates/celox-wasm",
-    "crates/celox-vpi",
     "crates/lydite-ir",
     "crates/lydite",
     "crates/lydite-celox",

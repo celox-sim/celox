@@ -953,7 +953,6 @@ pub(crate) fn host_bits(value: &HostValue) -> Option<(num_bigint::BigUint, u32)>
 mod tests {
     use super::*;
 
-    #[cfg(feature = "systemverilog")]
     #[test]
     fn source_vcd_filters_injected_component_trace_descriptors_and_values() {
         use std::sync::Arc;

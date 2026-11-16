@@ -10,7 +10,7 @@ pub(super) fn expression(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: impl ToShared<i128, ConstEnv>,
-    aliases: impl ToShared<Type>,
+    aliases: impl ToShared<Type, TypeAliases>,
 ) -> Converted<Option<ConstExpr>> {
     bind_in(
         root,
@@ -79,6 +79,10 @@ fn bind_in_context(
         System(SystemFunction, usize),
         Cast(casts::RuntimeCastTarget),
         Select(String, usize),
+        /// `left inside {items}`: whether each item is a range.
+        Inside(Vec<bool>),
+        /// A value to push as it is.
+        Value(ConstExpr),
     }
     let mut jobs = vec![Job::Enter(root)];
     let mut values = Vec::new();
@@ -142,11 +146,81 @@ fn bind_in_context(
                     expression,
                     postfix: false,
                 } => {
-                    if constants::unary_op_from_text(operator).is_none() {
+                    if constants::unary_op_from_text(operator).is_none()
+                        && constants::negated_reduction_from_text(operator).is_none()
+                    {
                         return Ok(None);
                     }
                     jobs.push(Job::Unary(operator.clone()));
                     jobs.push(Job::Enter(*expression));
+                }
+                ExprKind::Binary {
+                    left,
+                    operator,
+                    right,
+                } if operator == "inside" => {
+                    // A set membership test of constants is a constant
+                    // (IEEE 1800-2023 11.4.13).
+                    let ExprKind::Set(items) = &native.expression(*right).kind else {
+                        return Ok(None);
+                    };
+                    // An unpacked array operand is matched by its elements
+                    // (11.4.13), which no comparison here does: such a test
+                    // is not folded.
+                    let unpacked = |id: ExprId| {
+                        let ExprKind::Name(name) = &native
+                            .expression(expression_binding::ungroup(id, native))
+                            .kind
+                        else {
+                            return false;
+                        };
+                        let name = instances::normalize_identifier(&name.spelling);
+                        array_parameters::names_array_parameter(tree, &name)
+                            || [dimensions, query_dimensions].iter().any(|scope| {
+                                scope.array_parameter_values.contains_key(&name)
+                                    || scope
+                                        .get(&name)
+                                        .is_some_and(|shape| !shape.unpacked.is_empty())
+                            })
+                    };
+                    if unpacked(*left) {
+                        return Ok(None);
+                    }
+                    let mut ranges = Vec::new();
+                    let mut operands = vec![*left];
+                    for item in items {
+                        match item.kind {
+                            celox_sv_syntax::DimensionKind::Index(id) => {
+                                if unpacked(id) {
+                                    return Ok(None);
+                                }
+                                ranges.push(false);
+                                operands.push(id);
+                            }
+                            celox_sv_syntax::DimensionKind::Range { left, right } => {
+                                ranges.push(true);
+                                operands.extend([left, right]);
+                            }
+                            _ => return Ok(None),
+                        }
+                    }
+                    jobs.push(Job::Inside(ranges));
+                    // An unbased unsized literal item, `'0`, fills the width
+                    // of the comparison, which the fold below gives it.
+                    jobs.extend(operands.into_iter().rev().map(|id| {
+                        match &native
+                            .expression(expression_binding::ungroup(id, native))
+                            .kind
+                        {
+                            ExprKind::Literal(text)
+                                if casts::resize_unbased_fill_literal_for_cast(text, 1, false)
+                                    .is_some() =>
+                            {
+                                Job::Value(ConstExpr::Literal(text.clone()))
+                            }
+                            _ => Job::Enter(id),
+                        }
+                    }));
                 }
                 ExprKind::Binary {
                     left,
@@ -388,7 +462,33 @@ fn bind_in_context(
                         values.push(value);
                     }
                 }
+                // A coverage function is no constant system function
+                // (11.2.1), although its call folds to a literal.
+                ExprKind::Call { expression, .. }
+                    if matches!(&native.expression(*expression).kind, ExprKind::Name(name)
+                        if SystemFunction::from_name(&name.spelling)
+                            .is_some_and(SystemFunction::is_coverage)) =>
+                {
+                    let ExprKind::Name(name) = &native.expression(*expression).kind else {
+                        unreachable!()
+                    };
+                    return Err(AnalyzerError::InvalidSystemTfCall {
+                        name: name.spelling.clone(),
+                        detail: "a coverage function is not a constant system function".into(),
+                    });
+                }
                 ExprKind::Call { .. } | ExprKind::Member { .. } => {
+                    // A member of a packed structure parameter is a constant
+                    // of the member's type (11.2.1, 7.2.1). Fold it here: a
+                    // dimension or a generate condition has no layout to
+                    // select from, and an override is evaluated before the
+                    // instance that receives it exists.
+                    if let Some(literal) =
+                        parameter_member(id, native, tree, &query_dimensions.const_env)
+                    {
+                        values.push(ConstExpr::Literal(literal));
+                        continue;
+                    }
                     let is_query = matches!(&native.expression(id).kind,ExprKind::Call{expression,..} if matches!(&native.expression(*expression).kind,ExprKind::Name(name) if SystemFunction::from_name(&name.spelling).is_some_and(|f|f.is_data_query()||matches!(f,SystemFunction::Isunbounded|SystemFunction::Typename))));
                     let mut context = if is_query {
                         query_dimensions.clone()
@@ -416,6 +516,25 @@ fn bind_in_context(
                         }
                         value => value,
                     };
+                    // `$sformatf` of constants is a constant (11.2.1): the
+                    // string it makes, once the values of its operands are
+                    // known. Parameters whose values are literals, as those
+                    // of strings are, are known here.
+                    if matches!(
+                        &value,
+                        Expr::Call {
+                            callee: Callee::String(StringOp::Format { .. }),
+                            ..
+                        }
+                    ) {
+                        let Some(value) =
+                            selects::indexed_expression_value(tree, session, value, dimensions)
+                        else {
+                            return Ok(None);
+                        };
+                        values.push(value);
+                        continue;
+                    }
                     let countbits = matches!(
                         &value,
                         Expr::Call {
@@ -457,10 +576,9 @@ fn bind_in_context(
             }
             Job::Unary(op) => {
                 let expr = values.pop().ok_or_else(disagreement)?;
-                values.push(ConstExpr::Unary {
-                    op: constants::unary_op_from_text(&op).ok_or_else(disagreement)?,
-                    expr: Box::new(expr),
-                });
+                values.push(
+                    constants::unary_const_expr_from_text(&op, expr).ok_or_else(disagreement)?,
+                );
             }
             Job::Binary(op) => {
                 let right = values.pop().ok_or_else(disagreement)?;
@@ -492,6 +610,74 @@ fn bind_in_context(
                     },
                     right: Box::new(right),
                 });
+            }
+            Job::Value(value) => values.push(value),
+            Job::Inside(ranges) => {
+                let count = ranges
+                    .iter()
+                    .map(|range| if *range { 2 } else { 1 })
+                    .sum::<usize>();
+                let start = values
+                    .len()
+                    .checked_sub(count + 1)
+                    .ok_or_else(disagreement)?;
+                let mut operands = values.split_off(start);
+                // The operands are compared at the width of the widest
+                // (11.4.13), which an unbased unsized literal fills.
+                let is_fill = |operand: &ConstExpr| {
+                    matches!(operand, ConstExpr::Literal(text)
+                        if casts::resize_unbased_fill_literal_for_cast(text, 1, false).is_some())
+                };
+                // A fill takes the widest width only when every other
+                // operand's width is known, such as not that of a call.
+                let widths = operands
+                    .iter()
+                    .filter(|operand| !is_fill(operand))
+                    .map(|operand| {
+                        parameters::infer_const_expr_type_in(operand, &query_dimensions.const_env)
+                            .map(|r#type| r#type.width)
+                    })
+                    .collect::<Option<Vec<_>>>();
+                if widths.is_none() && operands.iter().any(is_fill) {
+                    return Ok(None);
+                }
+                let width = widths.and_then(|widths| widths.into_iter().max());
+                for operand in &mut operands {
+                    if is_fill(operand)
+                        && let ConstExpr::Literal(text) = operand
+                        && let Some(width) = width
+                        && let Some(filled) =
+                            casts::resize_unbased_fill_literal_for_cast(text, width, false)
+                    {
+                        *operand = ConstExpr::Literal(filled);
+                    }
+                }
+                let mut operands = operands.into_iter();
+                let left = operands.next().ok_or_else(disagreement)?;
+                let binary = |left: ConstExpr, op, right: ConstExpr| ConstExpr::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                };
+                // An item matches by wildcard equality, a range by its
+                // bounds; the test is their logical or (11.4.13).
+                let mut tests = Vec::new();
+                for range in ranges {
+                    let first = operands.next().ok_or_else(disagreement)?;
+                    tests.push(if range {
+                        let last = operands.next().ok_or_else(disagreement)?;
+                        binary(
+                            binary(left.clone(), BinaryOp::Ge, first),
+                            BinaryOp::LogicAnd,
+                            binary(left.clone(), BinaryOp::Le, last),
+                        )
+                    } else {
+                        binary(left.clone(), BinaryOp::EqWildcard, first)
+                    });
+                }
+                let mut tests = tests.into_iter();
+                let first = tests.next().ok_or_else(disagreement)?;
+                values.push(tests.fold(first, |any, test| binary(any, BinaryOp::LogicOr, test)));
             }
             Job::Mux => {
                 let else_expr = values.pop().ok_or_else(disagreement)?;
@@ -540,7 +726,7 @@ pub(super) fn packed_ranges(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Vec<PackedRange>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     type_binding::binding::packed_ranges(dimensions, tree, session, &context)
@@ -551,7 +737,7 @@ pub(super) fn unpacked_ranges(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Vec<UnpackedRange>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     dimensions
@@ -565,7 +751,7 @@ pub(super) fn unpacked_dimension(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<UnpackedRange> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     bind_unpacked_dimension(dimension, tree, session, &context)
@@ -602,6 +788,51 @@ pub(super) fn bind_unpacked_dimension(
         }
     };
     range.ok_or_else(|| unsupported("unresolved unpacked array dimension"))
+}
+
+/// The typed literal of native expression `id` if it selects a member, or a
+/// member of a member, of a packed structure parameter whose member
+/// constants `env` holds: `p.m`, `p.m.n` or `pkg::p.m`.
+fn parameter_member(
+    mut id: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    env: &ConstEnv,
+) -> Option<String> {
+    let mut path = Vec::new();
+    let root = loop {
+        match &native.expression(id).kind {
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "." => {
+                path.push(instances::normalize_identifier(&name.spelling));
+                id = *expression;
+            }
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "::" => {
+                let ExprKind::Name(package) = &native.expression(*expression).kind else {
+                    return None;
+                };
+                break scope::qualified_name(
+                    tree,
+                    &instances::normalize_identifier(&package.spelling),
+                    &instances::normalize_identifier(&name.spelling),
+                );
+            }
+            ExprKind::Name(name) => break instances::normalize_identifier(&name.spelling),
+            _ => return None,
+        }
+    };
+    if path.is_empty() {
+        return None;
+    }
+    path.reverse();
+    parameters::member_literal(&root, &path.join("."), env)
 }
 
 /// The operand of native expression `id` if it is a `$typename` call.

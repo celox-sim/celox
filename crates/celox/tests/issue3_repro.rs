@@ -5,21 +5,6 @@ use celox::{Simulation, Simulator};
 #[allow(unused_macros)]
 mod test_utils;
 
-all_backends! {
-
-fn test_comb_mux_i8_vs_i16_correctness(sim) {
-    @case "issue3_repro::test_comb_mux_i8_vs_i16_correctness";
-}
-
-// 4-state mode: exercises the mask-cast path in translate_terminator.
-// A ternary with i8->i16 boundary must compile and produce correct results
-// with X/Z propagation enabled.
-fn test_comb_mux_i8_vs_i16_four_state(sim) {
-    @case "issue3_repro::test_comb_mux_i8_vs_i16_four_state";
-}
-
-}
-
 // Tests that use Simulation::builder or just test build success stay as regular #[test]
 
 // 1-bit then vs 9-bit else (i8 → i16 boundary)

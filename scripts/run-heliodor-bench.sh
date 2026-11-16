@@ -593,9 +593,13 @@ validate_gate_tiered_stats() {
             mixed_count=$((mixed_count + 1))
         fi
     done <"$log"
+    # Hotspot statistics survive whole-image promotion (they snapshot the
+    # interpreting phase), so a valid hotspot record may accompany either a
+    # mixed-mode record or a promoted record, not only the former.
     if ((marker_count != 1 ||
         (hotspot_count == 0 && valid_count != 1) ||
-        (hotspot_count != 0 && (hotspot_count != 1 || hotspot_valid != 1 || mixed_count != 1)))); then
+        (hotspot_count != 0 && (hotspot_count != 1 || hotspot_valid != 1 ||
+            (valid_count != 1 && mixed_count != 1))))); then
         echo "error: tiered Celox gate requires one whole-image promotion or hotspot record with generated-code execution" >&2
         echo "records=$marker_count promoted=$valid_count mixed=$mixed_count hotspot=$hotspot_count valid_hotspot=$hotspot_valid" >&2
         return 1
@@ -1255,7 +1259,7 @@ build_celox_runner() {
         fi
     fi
     if ! env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET \
-        cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox-vpi \
+        cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox \
         --bin celox --profile "$HELIODOR_CELOX_CARGO_PROFILE" --locked \
         "${feature_args[@]}" "${target_args[@]}" "${target_dir_args[@]}" >"$log" 2>&1; then
         tail -n 80 "$log" >&2 || true
@@ -1287,7 +1291,7 @@ build_celox_codegen_runner() {
         feature_args=(--features "$HELIODOR_CELOX_CODEGEN_CARGO_FEATURES")
     fi
     if ! env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET \
-        cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox-vpi \
+        cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox \
         --bin celox --profile "$HELIODOR_CELOX_CARGO_PROFILE" --locked \
         "${feature_args[@]}" "${target_dir_args[@]}" >"$log" 2>&1; then
         tail -n 80 "$log" >&2 || true

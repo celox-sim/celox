@@ -1,5 +1,6 @@
 (group std_binary_codec (category standard_library))
 
+; Binary encoder: onehot input -> binary output (UNARY_WIDTH=8, BIN_WIDTH=3)
 (case test_binary_encoder
   (source "test.veryl"
     (std "binary_enc_dec/binary_encoder.veryl")
@@ -22,6 +23,7 @@ o_bin,
     (let bin_out (trunc 8 (get o_bin)))
     (assert (== bin_out bit_pos) "encoder")))
 
+; Binary decoder: binary input -> onehot output (BIN_WIDTH=3, UNARY_WIDTH=8)
 (case test_binary_decoder
   (source "test.veryl"
     (std "binary_enc_dec/binary_decoder.veryl")
@@ -44,6 +46,7 @@ o_unary,
     (let expected (<< 1 val))
     (assert (== unary_out expected) "decoder")))
 
+; Roundtrip: encoder -> decoder (onehot -> binary -> onehot)
 (case test_binary_codec_roundtrip
   (source "test.veryl"
     (std "binary_enc_dec/binary_encoder.veryl")
@@ -73,6 +76,7 @@ o_unary,
     (let roundtrip (trunc 8 (get o_unary)))
     (assert (== roundtrip onehot_val) "roundtrip failed for bit")))
 
+; Encoder with enable=0: output should be 0 (masked)
 (case test_binary_encoder_disabled
   (source "test.veryl"
     (std "binary_enc_dec/binary_encoder.veryl")

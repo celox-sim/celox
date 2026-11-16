@@ -104,6 +104,27 @@ impl Ff<'_, '_> {
             }
             DpiBuiltin::ToolName => Some(call(self, ops::UVM_TOOL_NAME, &[])),
             DpiBuiltin::ToolVersion => Some(call(self, ops::UVM_TOOL_VERSION, &[])),
+            DpiBuiltin::ReMatch => {
+                let re = operand(self, 0)?;
+                let string = operand(self, 1)?;
+                Some(call(self, ops::UVM_RE_MATCH, &[re, string]))
+            }
+            DpiBuiltin::GlobToRe => {
+                let glob = operand(self, 0)?;
+                Some(call(self, ops::UVM_GLOB_TO_RE, &[glob]))
+            }
+            DpiBuiltin::RegComp => {
+                let regex = operand(self, 0)?;
+                Some(call(self, ops::UVM_DPI_REGCOMP, &[regex]))
+            }
+            DpiBuiltin::DumpReCache => {
+                call(self, ops::UVM_DUMP_RE_CACHE, &[]);
+                None
+            }
+            DpiBuiltin::ReportInt | DpiBuiltin::ReportString => {
+                let field = operand(self, 0)?;
+                Some(call(self, ops::UVM_REPORT_FIELD, &[field]))
+            }
             // `null`, 0 or "" (an empty string has handle 0): the facility
             // is unavailable; outputs keep their values, though their
             // selectors are evaluated as for any call.
@@ -129,7 +150,10 @@ impl Ff<'_, '_> {
 
     /// A string argument as a string: a string expression, or the bytes of
     /// an integral one such as a literal (IEEE 1800-2023 6.16).
-    fn string_argument(&mut self, arg: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+    pub(super) fn string_argument(
+        &mut self,
+        arg: &sv::ir::Expr,
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         let arg = self.hoist(arg)?;
         if self.m.expr_is_string(&arg) {
             return self.heap_operand(

@@ -1,6 +1,7 @@
 (group nba_dynamic_array (category arrays))
 
 (case test_subbyte_arithmetic_padding_does_not_corrupt_concat
+  (allow_inferred_latches)
   (source "test.veryl" #"
 module Top (
     bound: input  logic<4>,
@@ -136,6 +137,9 @@ module Top (
   (tick clk)
   (assert_eq q 0x9a))
 
+; Separate always_ff blocks on the same clock sample the same pre-edge
+; state. A dynamic array write in one block must not become visible to a
+; read in another block until all blocks for the edge have evaluated.
 (case test_dynamic_array_write_is_deferred_across_ff_blocks
   (source "test.veryl" #"
 module Top (
@@ -245,6 +249,7 @@ module Top (
   (assert_eq q 0x82))
 
 (case test_packed_rat_checkpoint_round_trip
+  (allow_inferred_latches)
   (source "test.veryl" #"
 module Top (
     clk    : input  clock,
@@ -298,6 +303,7 @@ module Top (
   (assert_eq q31 31))
 
 (case test_line_write_loop_updates_large_sparse_ff_array
+  (allow_inferred_latches)
   (source "test.veryl" #"
 module Top (
     clk  : input  clock,
@@ -367,6 +373,8 @@ module Top (
   (assert_eq q_hi 0xaabbccdd "high word was not committed")
   (assert_eq q_dynamic 0xaabbccdd "dynamic high read was not invalidated"))
 
+; Partitioned kernels commit sparse state in a task of its own, which
+; scans every summary word of the object.
 (case test_sparse_commit_reaches_every_summary_word
   (source "test.veryl" #"
 module Bank (
@@ -819,6 +827,7 @@ module Top (
 ; part select reads and writes only its in-range bits (IEEE 1800-2023 7.4.6,
 ; 11.5.1).
 (case test_out_of_range_dynamic_comb_access
+  (allow_inferred_latches)
   (four_state)
   (source "test.veryl" #"
 module Top (

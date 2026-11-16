@@ -8,7 +8,7 @@
 //! lane that accesses its state in the combinational settle, so each lane
 //! keeps working on data already in its core's cache.
 
-use celox_design::{InstanceId, RegionedAbsoluteAddrBase};
+use celox_design::{DeadStorePolicy, InstanceId, RegionedAbsoluteAddrBase};
 use celox_sir::{ExecutionUnit, LaneUnit, ParallelFfKernel, SIRInstruction, StateAccess};
 
 use crate::symbolic::artifact::FfPart;
@@ -34,6 +34,11 @@ pub struct ParallelScheduleOptions {
     /// Whether a partitioned settle counts its partitions' runs
     /// (`celox_design::settle_profile_offset`).
     pub settle_profile: bool,
+    /// The state the host observes of the design, as its dead-store policy
+    /// guarantees it: the combinational nets outside it that only carry a
+    /// value between paths leave the program (`celox_slt::net_inline`).
+    /// [`DeadStorePolicy::Off`] keeps every net.
+    pub unobserved_nets: DeadStorePolicy,
 }
 
 /// Whether a settle is partitioned ([`ParallelScheduleOptions::settle`]).
@@ -56,6 +61,7 @@ impl ParallelScheduleOptions {
         minimum_speedup_percent: 125,
         settle: SettlePartitionMode::Off,
         settle_profile: false,
+        unobserved_nets: DeadStorePolicy::Off,
     };
 
     /// Request `lanes` simulation lanes with the default cost model.

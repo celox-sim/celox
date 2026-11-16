@@ -402,7 +402,9 @@ export interface SimulatorOptions {
 	 * clocks; "-sir:derived_edge_units" walks their plans instead, which
 	 * builds faster and ticks slower), partitioned_settle (settle only the
 	 * partitions of the combinational logic whose inputs changed; off unless
-	 * enabled with "+sir:partitioned_settle")
+	 * enabled with "+sir:partitioned_settle"), net_inlining (SystemVerilog
+	 * designs built with a dead store policy: combinational nets the policy
+	 * does not keep observable become part of the logic that reads them)
 	 *
 	 * @example ["-sir:reschedule", "+sir:gvn"]
 	 */

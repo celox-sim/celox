@@ -1148,6 +1148,28 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:6:15: Unsupported: IEEE 1800-2005 reserved word not implemented: '$coverage_control'\n    6 |     r_check = $coverage_control(3, 23, 11, $root);\n      |               ^~~~~~~~~~~~~~~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <case>/source_0.sv:7:14: Unsupported: IEEE 1800-2005 reserved word not implemented: '$coverage_control'\n    7 |     r_stop = $coverage_control(1, 23, 11, $root);\n      |              ^~~~~~~~~~~~~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:8:13: Unsupported: IEEE 1800-2005 reserved word not implemented: '$coverage_get_max'\n    8 |     r_max = $coverage_get_max(23, 11, $root.Top);\n      |             ^~~~~~~~~~~~~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:9:13: Unsupported: IEEE 1800-2005 reserved word not implemented: '$coverage_get'\n    9 |     r_get = $coverage_get(22, 10, \"Top\");\n      |             ^~~~~~~~~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:10:13: Unsupported: IEEE 1800-2005 reserved word not implemented: '$coverage_get_max'\n   10 |     r_bad = $coverage_get_max(99, 11, $root);\n      |             ^~~~~~~~~~~~~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:11:13: Unsupported: IEEE 1800-2005 reserved word not implemented: '$get_coverage'\n   11 |     total = $get_coverage();\n      |             ^~~~~~~~~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:12:5: Unsupported: IEEE 1800-2005 reserved word not implemented: '$set_coverage_db_name'\n   12 |     $set_coverage_db_name(\"db\");\n      |     ^~~~~~~~~~~~~~~~~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:13:5: Unsupported: IEEE 1800-2005 reserved word not implemented: '$load_coverage_db'\n   13 |     $load_coverage_db(\"db\");\n      |     ^~~~~~~~~~~~~~~~~\n%Error: Exiting due to 8 error(s)\n",
+      "expectation": "Simulation",
+      "name": "system_functions::coverage_without_instrumentation",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:12:14: Unsupported: IEEE 1800-2005 reserved word not implemented: '$coverage_save'\n   12 |     r_save = $coverage_save(23, \"db\");\n      |              ^~~~~~~~~~~~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <case>/source_0.sv:13:13: Unsupported: IEEE 1800-2005 reserved word not implemented: '$coverage_get_max'\n   13 |     r_sum = $coverage_get_max(T - 1, 11, $root);\n      |             ^~~~~~~~~~~~~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:14:13: Unsupported: IEEE 1800-2005 reserved word not implemented: '$coverage_get_max'\n   14 |     r_bad = $coverage_get_max(T + 1, 11, $root);\n      |             ^~~~~~~~~~~~~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:15:13: Unsupported: IEEE 1800-2005 reserved word not implemented: '$coverage_get'\n   15 |     r_min = $coverage_get(-128'sh80000000000000000000000000000000, 11, $root);\n      |             ^~~~~~~~~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:16:5: Unsupported: IEEE 1800-2005 reserved word not implemented: '$set_coverage_db_name'\n   16 |     $set_coverage_db_name(next_name());\n      |     ^~~~~~~~~~~~~~~~~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:17:5: Unsupported: IEEE 1800-2005 reserved word not implemented: '$load_coverage_db'\n   17 |     $load_coverage_db(next_name());\n      |     ^~~~~~~~~~~~~~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:18:5: Unsupported: IEEE 1800-2005 reserved word not implemented: '$load_coverage_db'\n   18 |     $load_coverage_db(name);\n      |     ^~~~~~~~~~~~~~~~~\n%Error: Exiting due to 7 error(s)\n",
+      "expectation": "Simulation",
+      "name": "system_functions::coverage_selectors_and_database_names",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

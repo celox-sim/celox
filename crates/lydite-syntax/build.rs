@@ -9,7 +9,7 @@ fn main() {
         .expect("generate lyd grammar");
     let out = std::env::var("OUT_DIR").unwrap();
     let modules = format!(
-        "#[allow(clippy::too_many_arguments)] #[path = {:?}] mod lyd_grammar_trait;\n#[path = {:?}] mod lyd_parser;\n",
+        "#[allow(clippy::too_many_arguments)] #[path = {:?}] mod lyd_grammar_trait;\n#[expect(clippy::disallowed_types, reason = \"generated: the scanner that parol's scanner! macro expands to keeps its state in a RefCell\")] #[path = {:?}] mod lyd_parser;\n",
         format!("{out}/lyd_grammar_trait.rs"),
         format!("{out}/lyd_parser.rs")
     );
