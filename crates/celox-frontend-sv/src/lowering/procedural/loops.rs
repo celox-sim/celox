@@ -32,20 +32,62 @@ pub(in crate::lowering) fn canonical_for_loop(
     condition: Option<&sv::ir::Expr>,
     step: &[sv::ir::Stmt],
 ) -> Option<CanonicalLoop> {
+    let shape = counted_for_loop(init, condition, step)?;
+    let step = shape.integral_step()?;
+    Some(CanonicalLoop {
+        var: shape.var.to_owned(),
+        start: shape.start.clone(),
+        end: shape.end.clone(),
+        compare: shape.compare,
+        step,
+        step_op: shape.step_op,
+        decreasing: shape.decreasing,
+    })
+}
+
+pub(in crate::lowering) struct CountedForLoop<'a> {
+    pub var: &'a str,
+    start: &'a sv::ir::Expr,
+    end: &'a sv::ir::Expr,
+    compare: sv::ir::BinaryOp,
+    step: &'a sv::ir::Expr,
+    step_op: celox_slt::SLTStepOp,
+    decreasing: bool,
+}
+
+impl CountedForLoop<'_> {
+    pub fn integral_step(&self) -> Option<usize> {
+        let step = literal_usize(self.step)?;
+        (step != 0 || self.step_op != celox_slt::SLTStepOp::Add).then_some(step)
+    }
+
+    pub fn has_real_step(&self) -> bool {
+        self.step_op == celox_slt::SLTStepOp::Add
+            && matches!(self.step, sv::ir::Expr::Literal(text)
+                if text.replace('_', "").parse::<f64>()
+                    .is_ok_and(|step| step.is_finite() && step > 0.0))
+    }
+}
+
+pub(in crate::lowering) fn counted_for_loop<'a>(
+    init: &'a [sv::ir::Stmt],
+    condition: Option<&'a sv::ir::Expr>,
+    step: &'a [sv::ir::Stmt],
+) -> Option<CountedForLoop<'a>> {
     let (var, start) = match init {
         [
             sv::ir::Stmt::Local {
                 name,
                 init: Some(start),
             },
-        ] => (name.clone(), start.clone()),
+        ] => (name, start),
         [
             sv::ir::Stmt::Assign {
                 lhs: sv::ir::LValue::Ident(name),
                 rhs,
                 nonblocking: false,
             },
-        ] => (name.clone(), rhs.clone()),
+        ] => (name, rhs),
         _ => return None,
     };
     let [
@@ -63,10 +105,9 @@ pub(in crate::lowering) fn canonical_for_loop(
     else {
         return None;
     };
-    if *step_target != var || !matches!(&**step_left, sv::ir::Expr::Ident(name) if *name == var) {
+    if step_target != var || !matches!(&**step_left, sv::ir::Expr::Ident(name) if name == var) {
         return None;
     }
-    let step = literal_usize(step_right)?;
     let (step_op, decreasing) = match step_binary {
         sv::ir::BinaryOp::Add => (celox_slt::SLTStepOp::Add, false),
         sv::ir::BinaryOp::Sub => (celox_slt::SLTStepOp::Add, true),
@@ -76,15 +117,12 @@ pub(in crate::lowering) fn canonical_for_loop(
         sv::ir::BinaryOp::BitXor => (celox_slt::SLTStepOp::BitXor, false),
         _ => return None,
     };
-    if step == 0 && step_op == celox_slt::SLTStepOp::Add {
-        return None;
-    }
     let sv::ir::Expr::Binary { left, op, right } = condition? else {
         return None;
     };
-    let is_var = |expr: &sv::ir::Expr| matches!(expr, sv::ir::Expr::Ident(name) if *name == var);
+    let is_var = |expr: &sv::ir::Expr| matches!(expr, sv::ir::Expr::Ident(name) if name == var);
     let (compare, end) = if is_var(left) {
-        (*op, (**right).clone())
+        (*op, &**right)
     } else if is_var(right) {
         let flipped = match op {
             sv::ir::BinaryOp::Lt => sv::ir::BinaryOp::Gt,
@@ -93,7 +131,7 @@ pub(in crate::lowering) fn canonical_for_loop(
             sv::ir::BinaryOp::Ge => sv::ir::BinaryOp::Le,
             _ => return None,
         };
-        (flipped, (**left).clone())
+        (flipped, &**left)
     } else {
         return None;
     };
@@ -104,12 +142,12 @@ pub(in crate::lowering) fn canonical_for_loop(
         }
         _ => false,
     };
-    valid.then_some(CanonicalLoop {
+    valid.then_some(CountedForLoop {
         var,
         start,
         end,
         compare,
-        step,
+        step: step_right,
         step_op,
         decreasing,
     })

@@ -59,7 +59,7 @@ impl Ff<'_, '_> {
     /// What an [`Self::event_sample`] of `expr` holds: its value, or the bits
     /// of a real, so that every change of it is one, however small (as an
     /// event expression's variable keeps them).
-    pub(super) fn sampled_value(&self, expr: sv::ir::Expr) -> sv::ir::Expr {
+    pub(in crate::lowering::ff) fn sampled_value(&self, expr: sv::ir::Expr) -> sv::ir::Expr {
         let function = match self.m.expr_float_precision(&expr) {
             None => return expr,
             Some(celox_sir::FloatPrecision::F64) => sv::ir::SystemFunction::Realtobits,
