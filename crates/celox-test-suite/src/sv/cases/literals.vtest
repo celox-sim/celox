@@ -101,3 +101,22 @@ endmodule
   (assert_eq fraction 0x3ff4000000000000)
   (assert_eq tiny 0)
   (assert_eq micro 1000))
+
+(case unsized_decimal_literals_wider_than_32_bits_stay_positive
+  (source "wide_unsized_decimals.sv" #"
+module Top(
+    output logic positive_34, output logic positive_35,
+    output logic [7:0] bits_32, output logic [7:0] bits_34, output logic [7:0] bits_35);
+    assign positive_34 = -1 < 4294967296;
+    assign positive_35 = 10000000000 > 0;
+    assign bits_32 = $bits(4294967295);
+    assign bits_34 = $bits(4294967296);
+    assign bits_35 = $bits(10000000000);
+endmodule
+"#)
+  (top Top) (eval)
+  (assert_eq positive_34 1)
+  (assert_eq positive_35 1)
+  (assert_eq bits_32 32)
+  (assert_eq bits_34 34)
+  (assert_eq bits_35 35))
