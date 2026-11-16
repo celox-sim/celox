@@ -216,6 +216,8 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<SIROffset, ParserError> {
         crate::bitaccess::reject_runtime_array_slice(index)?;
+        let folded = crate::bitaccess::fold_array_range(index, select)?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
         // Keep unpacked-array indexing separate from packed bit selection.
         // Backends may give array elements a physical stride different from
         // their logical packed width, so combining both here loses essential
@@ -383,7 +385,7 @@ impl<'a> FfParser<'a> {
                     let signed = selected_expr.comptime().r#type.signed
                         && !matches!(select.1, Some((VarSelectOp::MinusColon, _)));
                     match part_elements {
-                        Some(elements) if elements > 1 => {
+                        Some(elements) if elements > 1 && !is_unpacked => {
                             guard.part = Some(PartGuard {
                                 lsb: index_reg,
                                 signed,
@@ -398,11 +400,17 @@ impl<'a> FfParser<'a> {
                                     ir_builder.register(&index_reg).width(),
                                     dimension_width,
                                 );
+                            let first_elements = match part_elements {
+                                Some(elements) if is_unpacked => {
+                                    dimension_width.saturating_sub(elements - 1)
+                                }
+                                _ => dimension_width,
+                            };
                             and_index_guard(
                                 &mut guard.indices,
                                 index_reg,
                                 signed,
-                                Some(dimension_width),
+                                Some(first_elements),
                                 ir_builder,
                             )
                         }
@@ -462,6 +470,21 @@ impl<'a> FfParser<'a> {
                 element_width,
                 bit_offset: static_bit_offset as usize,
                 dynamic_bit_offset,
+            });
+        }
+
+        // A run of whole elements from a runtime first element, such as the
+        // clamped read behind a runtime array slice.
+        if let Some(element_index) = dynamic_element_index
+            && array_dimension_count != 0
+            && dynamic_bit_offset.is_none()
+            && static_bit_offset == 0
+            && selected_width > element_width
+            && selected_width.is_multiple_of(element_width)
+        {
+            return Ok(SIROffset::ElementRun {
+                index: element_index,
+                element_width,
             });
         }
 
