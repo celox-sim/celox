@@ -461,12 +461,6 @@ pub struct TypeShape {
     signed_element_depth: Option<usize>,
     /// The class of an object handle type.
     class: Option<Arc<str>>,
-    /// The interface of a virtual interface type (IEEE 1800-2023 25.9), or of
-    /// the elements of an array of them. Only the conversion to a semantic
-    /// type reads it: readers ask the type's `TyId`. It holds the element's
-    /// identity where a change of dimensions forgets the type's binding,
-    /// until the shape keeps its element's semantic type itself.
-    virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
     /// The members of an unpacked structure type (IEEE 1800-2023 7.2).
     unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
     /// The typedef that names an enumeration, struct or union type, and how
@@ -474,9 +468,12 @@ pub struct TypeShape {
     spelling: type_names::Spelling,
 }
 
+/// Two types are equal if their shapes and the identities of their elements
+/// are: a virtual interface type has the shape of the number that holds its
+/// value, and its element type tells its interface (IEEE 1800-2023 25.9).
 impl PartialEq for Type {
     fn eq(&self, other: &Self) -> bool {
-        self.shape == other.shape
+        self.shape == other.shape && self.element.identity() == other.element.identity()
     }
 }
 
@@ -485,6 +482,7 @@ impl Eq for Type {}
 impl std::hash::Hash for Type {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.shape.hash(state);
+        self.element.identity().hash(state);
     }
 }
 

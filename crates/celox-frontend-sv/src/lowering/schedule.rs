@@ -724,6 +724,7 @@ fn schedule_sources_collecting(
                 hierarchical_targets.get(&module_id).unwrap_or(&no_targets),
                 warnings,
                 calls.as_mut(),
+                &mut design,
             );
             if let (Some(graph), Some(path)) =
                 (&calls, analysis_options.recursion_report.as_deref())

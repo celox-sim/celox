@@ -225,10 +225,8 @@ impl BodyBuilder<'_, '_, '_> {
                     }) {
                         copy.clone()
                     } else {
-                        let copy_type = virtual_interfaces::bound_value_type(
-                            &mut self.session.types,
-                            (*ty).clone(),
-                        );
+                        let copy_type =
+                            virtual_interfaces::value_type(&mut self.session.types, (*ty).clone());
                         let (_, unique) = self.hidden(copy_type);
                         let copy = Expr::Ident(unique.clone());
                         // Each activation of the wait has its own copy.

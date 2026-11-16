@@ -14,6 +14,7 @@ pub(crate) fn attach_instance_glue(
     hierarchical_targets: &HashSet<String>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
     calls: Option<&mut recursion::CallGraph>,
+    design: &mut sv::Design,
 ) -> Result<(), ParserError> {
     let mut signal_names = lowered.signal_names.clone();
     let mut parent_variables = lowered.variables.clone();
@@ -40,9 +41,10 @@ pub(crate) fn attach_instance_glue(
             &instance.port_connections,
             &lowered.source,
             &child.source,
+            Some(&mut *design),
         )?
         .into_owned();
-        bind_port_patterns(&mut authored_connections, child)?;
+        bind_port_patterns(&mut authored_connections, child, design)?;
         let connections = match instance.array_element {
             Some((position, count)) => {
                 module

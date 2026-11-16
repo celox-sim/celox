@@ -200,7 +200,7 @@ fn interface_subroutines(
         .keys()
         .map(|name| virtual_interfaces::subroutine_name(interface, name))
         .collect();
-    let ty = virtual_interfaces::bound_value_type(
+    let ty = virtual_interfaces::value_type(
         &mut session.types,
         VirtualInterface {
             interface: interface.to_string(),
