@@ -399,11 +399,22 @@ impl Parser<'_> {
             self.adopt_port_objects(&mut port_declarations, &mut items)?;
             self.at += 1;
             if self.eat(":") {
-                end_label = Some(if kind == SubroutineKind::Constructor {
+                let label = if kind == SubroutineKind::Constructor {
                     self.contextual_name(&["new"])?
                 } else {
                     self.name()?
-                });
+                };
+                // The name after `endfunction` or `endtask` shall be that
+                // of the subroutine (IEEE 1800-2023 9.3.4).
+                if label.value() != name.value() {
+                    self.at -= 1;
+                    return Err(self.error(format!(
+                        "end label `{}` differs from the name `{}` of its subroutine",
+                        label.value(),
+                        name.value()
+                    )));
+                }
+                end_label = Some(label);
             }
         } else {
             body_tokens = self.range(body_start);

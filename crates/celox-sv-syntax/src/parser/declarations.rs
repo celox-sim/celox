@@ -602,9 +602,7 @@ impl Parser<'_> {
                 frame.unit.body = self.range(frame.body_start);
                 if !frame.unit.external {
                     self.expect(frame.end)?;
-                    if self.eat(":") {
-                        frame.unit.end_label = Some(self.name()?);
-                    }
+                    frame.unit.end_label = self.end_label(Some(&frame.unit.name))?;
                 }
                 frame.unit.tokens = self.range(frame.start);
                 if let Some(parent) = frames.last_mut() {

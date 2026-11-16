@@ -253,11 +253,6 @@ impl Builder {
         }
         if parser.peek() == "end" && matches!(self.frames.last(), Some(Frame::Block { .. })) {
             parser.at += 1;
-            let end_label = if parser.eat(":") {
-                Some(parser.name()?)
-            } else {
-                None
-            };
             if scopes.pop() != Some("end") {
                 return Err(parser.error("mismatched generate-block boundary"));
             }
@@ -270,6 +265,7 @@ impl Builder {
             else {
                 unreachable!()
             };
+            let end_label = parser.end_label(label.as_ref().or(leading.as_ref()))?;
             let id = Self::node(
                 parser,
                 start,
