@@ -467,6 +467,17 @@ impl BodyBuilder<'_, '_, '_> {
             _ => return Err(unsupported("system task or function name")),
         };
         let celox_sv_syntax::ExprKind::Name(name) = &declarations.expression(callee).kind else {
+            if let celox_sv_syntax::ExprKind::Member { expression, .. } =
+                &declarations.expression(callee).kind
+            {
+                expression_binding::objects::reject_covergroup(
+                    &self.tree,
+                    self.session,
+                    *expression,
+                    declarations,
+                    &self.dims,
+                )?;
+            }
             // `h.m();` of a class that declares no `m` (8.5).
             expression_binding::check_member_declared(
                 &self.tree,

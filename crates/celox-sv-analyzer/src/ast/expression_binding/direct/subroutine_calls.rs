@@ -196,6 +196,9 @@ pub(super) fn enter_call(
         return Ok(None);
     }
     let Some(name) = bound_callable_name(tree, session, *expression, native, dimensions)? else {
+        if let ExprKind::Member { expression, .. } = &native.expression(*expression).kind {
+            objects::reject_covergroup(tree, session, *expression, native, dimensions)?;
+        }
         // `h.m()` of a class that declares no `m` (8.5).
         objects::check_member_declared(tree, session, *expression, native, dimensions)?;
         return Err(unsupported("method or randomize call"));
