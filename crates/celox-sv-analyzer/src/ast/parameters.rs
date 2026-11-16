@@ -485,12 +485,20 @@ pub(super) fn parameters_from_native_with_environment(
     let has_declared_type = native_prefix.has_declared_type();
     let alias_has_use_site_dimensions =
         declared_alias.is_some() && !native_prefix.data.packed_dimensions.is_empty();
-    let parameter_signed = parameter_width.map(|_| {
-        declared_alias
-            .as_ref()
-            .map(|alias| alias.is_signed() && !alias_has_use_site_dimensions)
-            .unwrap_or_else(|| native_prefix.signed())
-    });
+    let parameter_signed = parameter_width
+        .map(|_| {
+            declared_alias
+                .as_ref()
+                .map(|alias| alias.is_signed() && !alias_has_use_site_dimensions)
+                .unwrap_or_else(|| native_prefix.signed())
+        })
+        // A signing without a type or range still applies, to the range of
+        // the final value (IEEE 1800-2023 6.20.2).
+        .or_else(|| {
+            (!has_declared_type)
+                .then_some(native_prefix.data.signed)
+                .flatten()
+        });
     let parameter_signed_element_depth = native_prefix.signed_element_depth();
     let parameter_ranges =
         native_prefix.ranges(syntax_tree, session, base_const_env, type_aliases)?;
@@ -719,7 +727,10 @@ pub(super) fn parameters_from_native_with_environment(
             is_local,
         );
         parameter.floating = native_prefix.floating().or_else(|| {
-            if has_declared_type {
+            // A range without a type still declares an integral parameter
+            // (IEEE 1800-2023 6.20.2); only a parameter with neither takes
+            // a real type from its value.
+            if has_declared_type || !native_prefix.data.packed_dimensions.is_empty() {
                 return None;
             }
             let expanded = substitute_expr_idents(
