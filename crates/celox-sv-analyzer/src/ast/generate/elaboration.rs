@@ -388,6 +388,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         }
         let mut scope = (*parent).clone();
         scope.in_loop |= index.is_some();
+        scope.blocks.push(name.clone());
         scope.path = if parent.path.is_empty() {
             name
         } else {

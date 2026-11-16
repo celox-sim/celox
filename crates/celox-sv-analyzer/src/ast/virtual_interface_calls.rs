@@ -114,6 +114,7 @@ fn interface_subroutines(
         &[],
         &ModuleInterfaces::default(),
         false,
+        &[],
     )?;
     let symbols = module
         .symbols

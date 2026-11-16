@@ -138,7 +138,9 @@ impl ModuleBinding<'_> {
                         &types,
                         self.interfaces.extra,
                         self.imported.declarations_only,
+                        &[],
                     )
+                    .map_err(|error| interface_port_reference(error, &port.name))
                 }?;
                 // Header ports are members of the interface view, just like body signals.
                 for port in &interface.ports {
@@ -250,5 +252,22 @@ impl ModuleBinding<'_> {
         self.caller_ports = caller.ports.clone();
         self.caller_symbols = caller.symbols.as_ref().unwrap().clone();
         Ok(caller)
+    }
+}
+
+/// A hierarchical name of the body of an interface that interface port
+/// `port` holds denotes an object relative to where the instance is, not to
+/// the module the port is of (IEEE 1800-2023 23.8): that module cannot
+/// resolve it, so it is rejected rather than looked up there.
+fn interface_port_reference(error: AnalyzerError, port: &str) -> AnalyzerError {
+    match error {
+        AnalyzerError::HierarchicalReference { path, .. } => unsupported(format!(
+            "hierarchical name `{path}` in the body of an interface that interface port `{port}` connects"
+        )),
+        AnalyzerError::WithWarnings { error, warnings } => AnalyzerError::WithWarnings {
+            error: Box::new(interface_port_reference(*error, port)),
+            warnings,
+        },
+        error => error,
     }
 }

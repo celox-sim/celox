@@ -39,6 +39,10 @@ const STATIC_PLACEHOLDER_PREFIX: &str = "$vifstatic$";
 /// The prefix of that variable of interface instance `<id>`:
 /// `$vifstaticof$<id>$<name>`.
 const STATIC_PREFIX: &str = "$vifstaticof$";
+/// The prefix of the signal that an outward hierarchical name of the body of
+/// an interface instance denotes (IEEE 1800-2023 23.8), see
+/// [`VirtualInterfaceSignal::Upward`].
+const UPWARD_PREFIX: &str = "$vifup$";
 
 /// A virtual interface type: an interface, with a modport if one is
 /// selected (IEEE 1800-2023 25.9).
@@ -316,6 +320,16 @@ impl DefinitionId {
         Self(hasher.finish())
     }
 
+    /// The key of hierarchical name `components` of the body of interface
+    /// instance `handle`: of the parsed components, not of a spelling that
+    /// joins them, which an escaped identifier could make ambiguous.
+    pub fn of_name(handle: &str, components: &[String]) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = fxhash::FxHasher64::default();
+        (handle, components).hash(&mut hasher);
+        Self(hasher.finish())
+    }
+
     /// The key that `text` spells, all of it.
     fn parse(text: &str) -> Option<Self> {
         (text.len() == 16 && text.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -372,11 +386,28 @@ pub enum VirtualInterfaceSignal {
     /// called through a virtual interface (13.3.2, 25.9): one per instance,
     /// held by the scope that makes the call.
     Static { id: u32, name: String },
+    /// The object that hierarchical name `name` (see
+    /// [`DefinitionId::of_name`]) of the body of an instance of interface
+    /// `definition` denotes, found from the scope that instantiates it
+    /// (23.8): held by that scope, which the frontend binds to the object.
+    Upward {
+        definition: DefinitionId,
+        name: DefinitionId,
+    },
 }
 
 impl VirtualInterfaceSignal {
     /// The kind of a signal named `name`, if the frontend binds it.
     pub fn of(name: &str) -> Option<Self> {
+        if let Some((definition, name)) = name
+            .strip_prefix(UPWARD_PREFIX)
+            .and_then(DefinitionId::split)
+        {
+            return Some(Self::Upward {
+                definition,
+                name: DefinitionId::parse(name)?,
+            });
+        }
         if let Some((definition, name)) = name
             .strip_prefix(STATIC_PLACEHOLDER_PREFIX)
             .and_then(DefinitionId::split)
@@ -446,8 +477,20 @@ impl VirtualInterfaceSignal {
                 format!("{STATIC_PLACEHOLDER_PREFIX}{definition}${name}")
             }
             Self::Static { id, name } => format!("{STATIC_PREFIX}{id}${name}"),
+            Self::Upward { definition, name } => format!("{UPWARD_PREFIX}{definition}${name}"),
         }
     }
+}
+
+/// The signal that hierarchical name `components` of the body of instance
+/// `handle` of interface `interface` denotes in the scope that instantiates
+/// the instance, see [`VirtualInterfaceSignal::Upward`].
+pub fn upward_signal(interface: &str, handle: &str, components: &[String]) -> String {
+    VirtualInterfaceSignal::Upward {
+        definition: DefinitionId::of(interface),
+        name: DefinitionId::of_name(handle, components),
+    }
+    .name()
 }
 
 /// The type of a virtual interface value: an unsigned two-state number,

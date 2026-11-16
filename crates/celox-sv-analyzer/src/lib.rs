@@ -132,7 +132,17 @@ pub enum AnalyzerError {
     /// of the scope: a hierarchical name (IEEE 1800-2023 23.6) that the
     /// caller did not resolve to a signal of another instance.
     #[error("unresolved hierarchical reference `{path}`")]
-    HierarchicalReference { path: String },
+    HierarchicalReference {
+        path: String,
+        /// The components of the name, each an identifier as declarations
+        /// spell it (an escaped one normalized), with a constant index of an
+        /// instance array element: `path` split without splitting an
+        /// escaped identifier.
+        components: Vec<String>,
+        /// The interface instance whose body has the name, which the
+        /// instance's parent then resolves (23.8).
+        interface: Option<Box<InterfaceBodyScope>>,
+    },
     /// A delay, event control or wait statement in a function, an
     /// `always_comb` or an `always_ff` body (IEEE 1800-2023 9.2.2.2,
     /// 9.2.2.4, 13.4).
@@ -339,6 +349,23 @@ pub enum AnalyzerError {
     /// members the same value.
     #[error("enumeration: {0} (IEEE 1800-2023 6.19)")]
     InvalidEnumeration(String),
+}
+
+/// The interface instance in whose body a hierarchical name was written:
+/// the scope that IEEE 1800-2023 23.8 starts its upward search from, in
+/// the parent that instantiates it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceBodyScope {
+    /// The instance as the parent names it, with the generate scopes that
+    /// hold it and the index of an element of an instance array, such as
+    /// `g[1].u` or `bfm[2]`.
+    pub handle: String,
+    /// The generate blocks that hold the instance, outermost first, each as
+    /// a hierarchical name spells it (`g[1]`). An escaped block name may
+    /// contain `.` (IEEE 1800-2023 5.6.1), so these are not `handle` split.
+    pub blocks: Vec<String>,
+    /// The interface the instance is of.
+    pub interface: String,
 }
 
 impl miette::Diagnostic for AnalyzerError {}

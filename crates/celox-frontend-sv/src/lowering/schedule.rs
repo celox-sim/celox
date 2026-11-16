@@ -414,7 +414,7 @@ fn schedule_sources_collecting(
             }
             // Elaborate the hierarchy below the module before resolving its
             // hierarchical names.
-            Err(error) if hierarchical_reference_path(&error).is_some() => {
+            Err(error) if unresolved_name(&error).is_some() => {
                 hierarchical_modules.push(module_id);
                 specialize_module_declarations(base, &mut design, &key)?
             }
@@ -475,12 +475,22 @@ fn schedule_sources_collecting(
                 Ok(ir) => break ir,
                 // A name with an instance index that is a constant
                 // expression reaches the analysis with the index evaluated.
-                Err(error) => match hierarchical_reference_path(&error) {
-                    Some(path)
+                Err(error) => match unresolved_name(&error) {
+                    Some((components, None))
                         if hierarchy::resolve_name(
                             &hierarchy,
                             module_id,
-                            &path.split('.').map(str::to_string).collect::<Vec<_>>(),
+                            components,
+                            &mut resolved,
+                        )? => {}
+                    // A name of the body of an interface instance of the
+                    // module, which the module's scopes are searched for.
+                    Some((components, Some(scope)))
+                        if hierarchy::resolve_interface_name(
+                            &hierarchy,
+                            module_id,
+                            scope,
+                            components,
                             &mut resolved,
                         )? => {}
                     _ => return Err(error.into()),

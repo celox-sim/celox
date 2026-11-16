@@ -251,7 +251,8 @@ fn prototypes(
                         probe_name.clone(),
                         &members,
                         &interface.names,
-                    )?
+                    )
+                    .map_err(|error| virtual_interface_reference(error, &interface.name))?
                 };
                 let prototype = InterfacePrototype {
                     name: interface.name.clone(),
@@ -444,6 +445,24 @@ pub(crate) fn body_component_references(tree: &SyntaxTree) -> HashSet<String> {
         .iter()
         .map(|instance| normalize_identifier(&instance.name.spelling))
         .collect()
+}
+
+/// The subroutines of an interface that a virtual interface names are
+/// analyzed apart from its instances, for every instance a handle may
+/// select; a hierarchical name they do not declare denotes an object
+/// relative to the instance (IEEE 1800-2023 23.8), which that analysis
+/// cannot resolve, so it is rejected rather than looked up there.
+fn virtual_interface_reference(error: AnalyzerError, interface: &str) -> AnalyzerError {
+    match error {
+        AnalyzerError::HierarchicalReference { path, .. } => unsupported(format!(
+            "hierarchical name `{path}` in a task or function of interface `{interface}`, which a virtual interface names"
+        )),
+        AnalyzerError::WithWarnings { error, warnings } => AnalyzerError::WithWarnings {
+            error: Box::new(virtual_interface_reference(*error, interface)),
+            warnings,
+        },
+        error => error,
+    }
 }
 
 fn unsupported(construct: impl Into<String>) -> AnalyzerError {
