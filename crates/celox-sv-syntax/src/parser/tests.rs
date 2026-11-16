@@ -2290,6 +2290,46 @@ fn reserved_keywords_cannot_supply_declaration_or_expression_identifiers() {
     }
 }
 
+/// A word the `begin_keywords` version does not reserve is an identifier
+/// wherever an identifier may appear, not only where a declaration names
+/// it (22.14): as a statement's target, an operand, a port, a net, a
+/// parameter and a generate block's name.
+#[test]
+fn unreserved_keywords_are_identifiers_everywhere() {
+    let tree = parse(
+        "`begin_keywords \"1364-2005\"
+module M(input bit, output reg [1:0] var);
+  wire byte = bit;
+  localparam string = 2;
+  integer int, expect, do;
+  task t; input bit; begin int = bit; end endtask
+  generate for (genvar i = 0; i < 2; i = i + 1) begin : logic wire w = byte; end endgenerate
+  initial begin
+    var <= #2 2'b01;
+    expect = int + string;
+    do[1:0] = logic[1].w;
+    for (int = 0; int < 2; int = int + 1) expect = expect;
+  end
+endmodule
+`end_keywords",
+    );
+    assert!(
+        tree.tokens
+            .iter()
+            .filter(|token| token.text == "\\bit")
+            .all(|token| token.kind == crate::TokenKind::EscapedIdentifier)
+    );
+    for source in [
+        "`begin_keywords \"1364-2005\" `end_keywords module M; logic bit; endmodule",
+        "`begin_keywords \"1800-2005\" module M; logic bit; endmodule `end_keywords",
+    ] {
+        assert!(
+            Declarations::parse(source, Path::new("reserved.sv")).is_err(),
+            "{source}"
+        );
+    }
+}
+
 #[test]
 fn keyword_directive_scopes_and_escaped_identifiers_preserve_names() {
     parse("module \\module ; logic \\always ; assign \\always =1; endmodule");

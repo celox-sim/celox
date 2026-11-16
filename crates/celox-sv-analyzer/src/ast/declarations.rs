@@ -203,7 +203,9 @@ pub(super) fn ports_from_scope(
 fn native_port_name(port: &celox_sv_syntax::Port) -> Converted<String> {
     match &port.kind {
         celox_sv_syntax::PortKind::Named(name)
-        | celox_sv_syntax::PortKind::Explicit { name, .. } => Ok(name.spelling.clone()),
+        | celox_sv_syntax::PortKind::Explicit { name, .. } => {
+            Ok(instances::normalize_identifier(&name.spelling))
+        }
         _ => Err(AnalyzerError::Parse(
             "native ANSI port has a non-ANSI name".into(),
         )),
