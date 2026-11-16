@@ -14,6 +14,30 @@ impl Comb<'_, '_> {
         })
     }
 
+    /// The bits that continuous assignment `body` writes, for each part of
+    /// a concatenated target too: a variable or a constant select of one
+    /// writes its bits, a select at a run-time position any bit of its
+    /// variable.
+    pub fn continuous_target_bits(
+        &mut self,
+        body: &[sv::ir::Stmt],
+    ) -> Option<Vec<(SourceVarId, BitAccess)>> {
+        let parts = match body {
+            [sv::ir::Stmt::Assign { lhs, .. }] => std::slice::from_ref(lhs),
+            [sv::ir::Stmt::AssignConcat { parts, .. }] => parts.as_slice(),
+            _ => return None,
+        };
+        parts
+            .iter()
+            .map(
+                |lhs| match self.lvalue_target(&Store::default(), lhs).ok()? {
+                    Target::Static { id, access, .. } => Some((id, access)),
+                    Target::Dynamic { id, .. } => Some((id, full(self.m.var(id).width))),
+                },
+            )
+            .collect()
+    }
+
     pub(super) fn lvalue_target(
         &mut self,
         store: &Store,
