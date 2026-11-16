@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794795594641,
+  "lastUpdate": 1794797203155,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -454725,6 +454725,37 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-tiered-aarch64/heliodor_suite_66_smp_linux_boot_4hart_end_to_end",
             "unit": "ms",
             "value": 6308482.539334
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "af8518690ee12273c18ec6f3d91bce2d74116244",
+          "message": "feat(sv): name the static variables of subroutines through their subroutines (#3915)",
+          "timestamp": "2026-11-14T08:58:52Z",
+          "url": "https://github.com/celox-sim/celox/commit/af8518690ee12273c18ec6f3d91bce2d74116244"
+        },
+        "date": 1794797203155,
+        "cpu": "Neoverse-N2",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_suite_71_linux_boot_compilation",
+            "unit": "ms",
+            "value": 131786.753676
+          },
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_suite_71_linux_boot_execution",
+            "unit": "ms",
+            "value": 179520.865675
           }
         ]
       }
