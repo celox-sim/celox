@@ -8893,3 +8893,27 @@ fn static_formals_of_package_functions_that_fork_are_rejected() {
         }
     }
 }
+
+#[test]
+fn block_imports_bind_the_calls_of_folded_branches() {
+    // The branch a constant condition never takes stays in the process's
+    // sensitivity body (IEEE 1800-2023 9.2.2.2.1), where the block's import
+    // binds its call as in the statements the process runs.
+    let code = "package q; int v; function int g(); return v; endfunction endpackage\n\
+                module Top #(parameter bit EN = 0) (output int y);\n\
+                always_comb begin import q::*; if (EN) y = g(); else y = 7; end\n\
+                endmodule";
+    let ir = analyze_source(code, Path::new("folded.sv")).unwrap();
+    let module = ir
+        .modules()
+        .iter()
+        .find(|module| module.name() == "Top")
+        .unwrap();
+    let sensitivity = module
+        .comb_processes()
+        .iter()
+        .map(|process| format!("{:?}", process.sensitivity_body()))
+        .collect::<String>();
+    assert!(sensitivity.contains("\"q::g\""), "{sensitivity}");
+    assert!(!sensitivity.contains("\"g\""), "{sensitivity}");
+}

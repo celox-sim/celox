@@ -77,6 +77,9 @@ impl ScopeElaboration<'_> {
             interface_declarations: self.imported.interface_declarations.clone(),
             interface_instances: self.imported.interface_instances.clone(),
             generate_imports: HashMap::default(),
+            // The imports of the scope's blocks bind there only.
+            block_imports: HashMap::default(),
+            block_calls: HashMap::default(),
         })
     }
 

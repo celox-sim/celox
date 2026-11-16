@@ -229,6 +229,9 @@ mod references;
 #[path = "frontends/systemverilog/module_class_overrides.rs"]
 mod module_class_overrides;
 
+#[path = "frontends/systemverilog/block_imports.rs"]
+mod block_imports;
+
 #[path = "frontends/systemverilog/top_level_modules.rs"]
 mod top_level_modules;
 #[path = "frontends/systemverilog/virtual_interfaces.rs"]

@@ -72,6 +72,16 @@ pub(super) struct ScopeSymbols {
     /// The names the imports of a generate block bind there to another
     /// declaration than outside it, by the native body identity of the block.
     pub generate_imports: HashMap<celox_sv_syntax::BodyItemId, HashMap<String, String>>,
+    /// What the imports a procedural block or a subroutine body declares
+    /// bind, by the source offset of its first import: the names the block
+    /// references, with the declarations its imports give them, looked up
+    /// as in generate blocks (IEEE 1800-2023 26.3). The block's statements
+    /// after the import are analyzed with them.
+    pub block_imports: HashMap<usize, HashMap<String, String>>,
+    /// The names the imports of the procedural blocks being analyzed bind
+    /// to package subroutines and DPI imports: a call of one calls that
+    /// declaration, as a call naming it with its package does.
+    pub block_calls: HashMap<String, String>,
     /// The classes the scope declares, laid out, by their qualified names
     /// (IEEE 1800-2023 26.3): a scope that uses them may be analyzed from
     /// another source, without their declarations.
@@ -655,6 +665,8 @@ impl ScopeSymbols {
                 .collect(),
             aliases: HashMap::default(),
             generate_imports: HashMap::default(),
+            block_imports: HashMap::default(),
+            block_calls: HashMap::default(),
         }
     }
 }
