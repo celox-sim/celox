@@ -124,6 +124,35 @@ pub(super) fn is_array_parameter(
         })
 }
 
+/// Whether `name` names an array parameter of the scope or of a package it
+/// imports, also before the scope binds its array parameters.
+pub(super) fn names_array_parameter(tree: &AnalysisContext<'_>, name: &str) -> bool {
+    let native = tree.declarations();
+    let named = |parameter: &celox_sv_syntax::Parameter| {
+        instances::normalize_identifier(&parameter.name.spelling) == name
+            && is_array_parameter(parameter, native)
+    };
+    let header = tree
+        .root_unit()
+        .is_ok_and(|unit| unit.parameters.iter().flatten().any(named));
+    let body = tree.body_membership().is_ok_and(|ids| {
+        ids.into_iter().any(|id| match native.body_item(id).kind {
+            celox_sv_syntax::BodyItemKind::Parameter(id) => native
+                .parameter_declaration(id)
+                .parameters
+                .iter()
+                .any(named),
+            _ => false,
+        })
+    });
+    header
+        || body
+        || scope::imported(tree)
+            .signals
+            .iter()
+            .any(|signal| signal.name() == name)
+}
+
 fn declared_type(
     native: &celox_sv_syntax::Parameter,
     tree: &AnalysisContext<'_>,

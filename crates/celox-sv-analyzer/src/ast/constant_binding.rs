@@ -79,6 +79,10 @@ fn bind_in_context(
         System(SystemFunction, usize),
         Cast(casts::RuntimeCastTarget),
         Select(String, usize),
+        /// `left inside {items}`: whether each item is a range.
+        Inside(Vec<bool>),
+        /// A value to push as it is.
+        Value(ConstExpr),
     }
     let mut jobs = vec![Job::Enter(root)];
     let mut values = Vec::new();
@@ -149,6 +153,74 @@ fn bind_in_context(
                     }
                     jobs.push(Job::Unary(operator.clone()));
                     jobs.push(Job::Enter(*expression));
+                }
+                ExprKind::Binary {
+                    left,
+                    operator,
+                    right,
+                } if operator == "inside" => {
+                    // A set membership test of constants is a constant
+                    // (IEEE 1800-2023 11.4.13).
+                    let ExprKind::Set(items) = &native.expression(*right).kind else {
+                        return Ok(None);
+                    };
+                    // An unpacked array operand is matched by its elements
+                    // (11.4.13), which no comparison here does: such a test
+                    // is not folded.
+                    let unpacked = |id: ExprId| {
+                        let ExprKind::Name(name) = &native
+                            .expression(expression_binding::ungroup(id, native))
+                            .kind
+                        else {
+                            return false;
+                        };
+                        let name = instances::normalize_identifier(&name.spelling);
+                        array_parameters::names_array_parameter(tree, &name)
+                            || [dimensions, query_dimensions].iter().any(|scope| {
+                                scope.array_parameter_values.contains_key(&name)
+                                    || scope
+                                        .get(&name)
+                                        .is_some_and(|shape| !shape.unpacked.is_empty())
+                            })
+                    };
+                    if unpacked(*left) {
+                        return Ok(None);
+                    }
+                    let mut ranges = Vec::new();
+                    let mut operands = vec![*left];
+                    for item in items {
+                        match item.kind {
+                            celox_sv_syntax::DimensionKind::Index(id) => {
+                                if unpacked(id) {
+                                    return Ok(None);
+                                }
+                                ranges.push(false);
+                                operands.push(id);
+                            }
+                            celox_sv_syntax::DimensionKind::Range { left, right } => {
+                                ranges.push(true);
+                                operands.extend([left, right]);
+                            }
+                            _ => return Ok(None),
+                        }
+                    }
+                    jobs.push(Job::Inside(ranges));
+                    // An unbased unsized literal item, `'0`, fills the width
+                    // of the comparison, which the fold below gives it.
+                    jobs.extend(operands.into_iter().rev().map(|id| {
+                        match &native
+                            .expression(expression_binding::ungroup(id, native))
+                            .kind
+                        {
+                            ExprKind::Literal(text)
+                                if casts::resize_unbased_fill_literal_for_cast(text, 1, false)
+                                    .is_some() =>
+                            {
+                                Job::Value(ConstExpr::Literal(text.clone()))
+                            }
+                            _ => Job::Enter(id),
+                        }
+                    }));
                 }
                 ExprKind::Binary {
                     left,
@@ -538,6 +610,74 @@ fn bind_in_context(
                     },
                     right: Box::new(right),
                 });
+            }
+            Job::Value(value) => values.push(value),
+            Job::Inside(ranges) => {
+                let count = ranges
+                    .iter()
+                    .map(|range| if *range { 2 } else { 1 })
+                    .sum::<usize>();
+                let start = values
+                    .len()
+                    .checked_sub(count + 1)
+                    .ok_or_else(disagreement)?;
+                let mut operands = values.split_off(start);
+                // The operands are compared at the width of the widest
+                // (11.4.13), which an unbased unsized literal fills.
+                let is_fill = |operand: &ConstExpr| {
+                    matches!(operand, ConstExpr::Literal(text)
+                        if casts::resize_unbased_fill_literal_for_cast(text, 1, false).is_some())
+                };
+                // A fill takes the widest width only when every other
+                // operand's width is known, such as not that of a call.
+                let widths = operands
+                    .iter()
+                    .filter(|operand| !is_fill(operand))
+                    .map(|operand| {
+                        parameters::infer_const_expr_type_in(operand, &query_dimensions.const_env)
+                            .map(|r#type| r#type.width)
+                    })
+                    .collect::<Option<Vec<_>>>();
+                if widths.is_none() && operands.iter().any(is_fill) {
+                    return Ok(None);
+                }
+                let width = widths.and_then(|widths| widths.into_iter().max());
+                for operand in &mut operands {
+                    if is_fill(operand)
+                        && let ConstExpr::Literal(text) = operand
+                        && let Some(width) = width
+                        && let Some(filled) =
+                            casts::resize_unbased_fill_literal_for_cast(text, width, false)
+                    {
+                        *operand = ConstExpr::Literal(filled);
+                    }
+                }
+                let mut operands = operands.into_iter();
+                let left = operands.next().ok_or_else(disagreement)?;
+                let binary = |left: ConstExpr, op, right: ConstExpr| ConstExpr::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                };
+                // An item matches by wildcard equality, a range by its
+                // bounds; the test is their logical or (11.4.13).
+                let mut tests = Vec::new();
+                for range in ranges {
+                    let first = operands.next().ok_or_else(disagreement)?;
+                    tests.push(if range {
+                        let last = operands.next().ok_or_else(disagreement)?;
+                        binary(
+                            binary(left.clone(), BinaryOp::Ge, first),
+                            BinaryOp::LogicAnd,
+                            binary(left.clone(), BinaryOp::Le, last),
+                        )
+                    } else {
+                        binary(left.clone(), BinaryOp::EqWildcard, first)
+                    });
+                }
+                let mut tests = tests.into_iter();
+                let first = tests.next().ok_or_else(disagreement)?;
+                values.push(tests.fold(first, |any, test| binary(any, BinaryOp::LogicOr, test)));
             }
             Job::Mux => {
                 let else_expr = values.pop().ok_or_else(disagreement)?;
