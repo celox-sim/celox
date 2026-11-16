@@ -576,6 +576,7 @@ pub struct Port {
     r#type: Type,
     is_net: bool,
     unresolved_net: bool,
+    net_resolution: crate::ast::NetResolution,
     default: Option<ConstExpr>,
     pattern_target: Option<crate::ast::Type>,
 }
@@ -586,6 +587,7 @@ pub struct Signal {
     r#type: Type,
     is_net: bool,
     unresolved_net: bool,
+    net_resolution: crate::ast::NetResolution,
     package_variable: Option<(String, String)>,
     hierarchical: Option<String>,
 }
@@ -597,6 +599,7 @@ impl Signal {
             r#type,
             is_net,
             unresolved_net: false,
+            net_resolution: crate::ast::NetResolution::Wire,
             package_variable: None,
             hierarchical: None,
         }
@@ -652,6 +655,16 @@ impl Signal {
         self.unresolved_net = unresolved;
         self
     }
+
+    /// How several drivers of the net combine (IEEE 1800-2023 6.6).
+    pub fn net_resolution(&self) -> crate::ast::NetResolution {
+        self.net_resolution
+    }
+
+    pub(crate) fn with_net_resolution(mut self, resolution: crate::ast::NetResolution) -> Self {
+        self.net_resolution = resolution;
+        self
+    }
 }
 
 impl Port {
@@ -662,6 +675,7 @@ impl Port {
             r#type,
             is_net,
             unresolved_net: false,
+            net_resolution: crate::ast::NetResolution::Wire,
             default: None,
             pattern_target: None,
         }
@@ -717,6 +731,16 @@ impl Port {
 
     pub(crate) fn with_unresolved_net(mut self, unresolved: bool) -> Self {
         self.unresolved_net = unresolved;
+        self
+    }
+
+    /// How several drivers of the net combine (IEEE 1800-2023 6.6).
+    pub fn net_resolution(&self) -> crate::ast::NetResolution {
+        self.net_resolution
+    }
+
+    pub(crate) fn with_net_resolution(mut self, resolution: crate::ast::NetResolution) -> Self {
+        self.net_resolution = resolution;
         self
     }
 
@@ -927,6 +951,13 @@ pub struct Type {
     class: Option<String>,
     /// A `chandle`, held as 64 bits (IEEE 1800-2023 6.14).
     chandle: bool,
+    /// The type of an associative or dynamic array or of a queue, whose
+    /// variable holds the handle of the container.
+    container: Option<std::sync::Arc<ast::Type>>,
+    /// The declared type of a packed structure or union, or of a packed
+    /// array of them, whose members a name of the variable from another
+    /// scope selects (IEEE 1800-2023 7.2, 23.6).
+    packed_structure: Option<std::sync::Arc<ast::Type>>,
 }
 
 /// Shared metadata, allocated only for unpacked structure types. Ordinary
@@ -938,6 +969,12 @@ struct StructureType {
 }
 
 impl Type {
+    /// The declared type of a packed structure or union, or of a packed
+    /// array of them (see [`ast::Type::with_members_of`]).
+    pub fn packed_structure(&self) -> Option<&ast::Type> {
+        self.packed_structure.as_deref()
+    }
+
     /// Nominal identity of a non-storage unpacked structure declaration.
     pub fn structure_identity(&self) -> Option<&str> {
         self.structure
@@ -956,6 +993,13 @@ impl Type {
     /// this signal must keep (see [`crate::ast::Type::with_chandle`]).
     pub fn is_chandle(&self) -> bool {
         self.chandle
+    }
+
+    /// The type of the container a variable of this type holds the handle
+    /// of, as its declaration gives it; analyses of names that denote the
+    /// variable from other scopes must keep it.
+    pub fn container(&self) -> Option<&ast::Type> {
+        self.container.as_deref()
     }
 
     /// How many leading packed dimensions select an element of a signed
@@ -1083,6 +1127,8 @@ impl Type {
             signed_element_depth: None,
             class: None,
             chandle: false,
+            container: None,
+            packed_structure: None,
         }
     }
 
@@ -1106,6 +1152,20 @@ impl Type {
         let class = r#type.class().map(str::to_owned);
         let signed_element_depth = r#type.signed_element_depth();
         let chandle = r#type.is_chandle();
+        // The declaration's bounds, resolved where its constant functions
+        // are known: a name of the variable from another scope takes the
+        // type with these bounds.
+        let container = r#type.is_container().then(|| {
+            std::sync::Arc::new(
+                r#type
+                    .with_resolved_container_bounds(&|expr| {
+                        typecheck::eval_const_expr_in_env(expr, constants)
+                    })
+                    .unwrap_or_else(|| r#type.clone()),
+            )
+        });
+        let packed_structure = (r#type.has_packed_members() && container.is_none())
+            .then(|| std::sync::Arc::new(r#type.clone()));
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
             structure,
@@ -1119,6 +1179,8 @@ impl Type {
             signed_element_depth,
             class,
             chandle,
+            container,
+            packed_structure,
         }
     }
 }
@@ -1166,7 +1228,9 @@ impl From<ast::TypeKind> for TypeKind {
             ast::TypeKind::Object => TypeKind::Object,
             ast::TypeKind::Process => TypeKind::Process,
             ast::TypeKind::Event => TypeKind::Event,
-            ast::TypeKind::Bit => TypeKind::Bit,
+            // The IR keeps a chandle as its bits, marked by its own flag
+            // (`Type::is_chandle`).
+            ast::TypeKind::Chandle | ast::TypeKind::Bit => TypeKind::Bit,
             ast::TypeKind::Logic => TypeKind::Logic,
             ast::TypeKind::Reg => TypeKind::Reg,
             ast::TypeKind::Implicit => TypeKind::Implicit,
@@ -1360,11 +1424,18 @@ pub struct CombProcess {
     assignments: Vec<Assignment>,
     body: Vec<Stmt>,
     sensitivity_body: Vec<Stmt>,
+    drive_strength: bool,
 }
 
 impl CombProcess {
     pub fn site(&self) -> Option<&SourceSpan> {
         self.site.as_ref()
+    }
+
+    /// Whether the continuous assignment or gate states a drive strength
+    /// (IEEE 1800-2023 10.3.4, 28.11).
+    pub fn has_drive_strength(&self) -> bool {
+        self.drive_strength
     }
 
     /// Where an `always` procedure is written, as a process.
@@ -1393,6 +1464,7 @@ impl CombProcess {
             site: None,
             process_site: None,
             sensitivity_body: Vec::new(),
+            drive_strength: false,
             kind,
             condition,
             assignments,
@@ -2315,6 +2387,7 @@ impl From<ast::CombProcess> for CombProcess {
         result.creation_order = process.creation_order();
         result.site = process.site().cloned();
         result.process_site = process.process_site().cloned();
+        result.drive_strength = process.has_drive_strength();
         result.sensitivity_body = process
             .sensitivity_body()
             .iter()
@@ -2611,8 +2684,8 @@ impl From<BinaryOp> for ast::BinaryOp {
     }
 }
 
-/// The C type a DPI-C import passes or returns by value (IEEE 1800-2023
-/// 35.5.6).
+/// The type of an argument or result of a DPI-C import, which decides the
+/// C type it is passed as (IEEE 1800-2023 35.5.6, H.7.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DpiType {
     /// `bit`, passed as `svBit`.
@@ -2622,28 +2695,50 @@ pub enum DpiType {
     /// `byte`, `shortint`, `int` or `longint`, passed as the C integer of
     /// that width.
     Integer { width: usize, signed: bool },
-    /// `string`, only for a [`DpiBuiltin`]: a heap handle.
+    /// `string`, passed as `const char *`: a heap handle in the design.
     String,
     /// `chandle`, passed as a C pointer (IEEE 1800-2023 6.14).
     Chandle,
+    /// A packed array of `bit`, passed as a pointer to `svBitVecVal`
+    /// words.
+    BitVector { width: usize, signed: bool },
+    /// A packed array of `logic` or `reg`, `integer` or `time`, passed as a
+    /// pointer to `svLogicVecVal` words.
+    LogicVector { width: usize, signed: bool },
 }
 
 impl DpiType {
     pub fn width(&self) -> usize {
         match self {
             DpiType::Bit | DpiType::Logic => 1,
-            DpiType::Integer { width, .. } => *width,
+            DpiType::Integer { width, .. }
+            | DpiType::BitVector { width, .. }
+            | DpiType::LogicVector { width, .. } => *width,
             DpiType::String => celox_design::HANDLE_WIDTH,
             DpiType::Chandle => 64,
         }
     }
 
     pub fn is_signed(&self) -> bool {
-        matches!(self, DpiType::Integer { signed: true, .. })
+        matches!(
+            self,
+            DpiType::Integer { signed: true, .. }
+                | DpiType::BitVector { signed: true, .. }
+                | DpiType::LogicVector { signed: true, .. }
+        )
     }
 
     pub fn is_4state(&self) -> bool {
-        matches!(self, DpiType::Logic)
+        matches!(self, DpiType::Logic | DpiType::LogicVector { .. })
+    }
+
+    /// Whether the type is a packed array, which C takes by pointer even as
+    /// an `input`.
+    pub fn is_vector(&self) -> bool {
+        matches!(
+            self,
+            DpiType::BitVector { .. } | DpiType::LogicVector { .. }
+        )
     }
 }
 
@@ -2661,41 +2756,75 @@ pub enum DpiBuiltin {
     NextArg,
     ToolName,
     ToolVersion,
+    /// UVM 1.2's `uvm_re_match(re, str)`: `0` when `str` matches `re`.
+    ReMatch,
+    /// UVM 1.2's `uvm_glob_to_re(glob)`.
+    GlobToRe,
+    /// UVM 1.2's `uvm_dpi_regcomp(regex)`: `regex` compiled as it is
+    /// written, or `null`. Its `uvm_dpi_regexec` and `uvm_dpi_regfree` are
+    /// [`Self::ReExec`] and [`Self::ReFree`].
+    RegComp,
+    /// The integer field of number `field` of the report a function above
+    /// recorded, or with field `0`, whether one was recorded, which then
+    /// is the one the other fields read (see `procedural::dpi_reports`).
+    ReportInt,
+    /// The string field of number `field` of that report.
+    ReportString,
+    /// UVM 1.2's `uvm_dump_re_cache()`, which only reports that its cache
+    /// is not implemented: it does nothing.
+    DumpReCache,
     /// A function of UVM's C library that Celox does not provide yet: it
     /// returns 0 (`null`, failure) and writes no output, so UVM reports the
     /// facility as unavailable.
     Unavailable,
 }
 
-/// An argument of a DPI-C import. Only `input` arguments are supported,
-/// except by a [`DpiBuiltin`].
+/// The direction of an argument of a DPI-C import (IEEE 1800-2023
+/// 35.5.1.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DpiDirection {
+    Input,
+    Output,
+    Inout,
+}
+
+/// An argument of a DPI-C import.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DpiArgument {
     name: String,
     r#type: DpiType,
-    output: bool,
+    direction: DpiDirection,
 }
 
 impl DpiArgument {
     pub(crate) fn new(name: String, r#type: DpiType) -> Self {
-        Self {
-            name,
-            r#type,
-            output: false,
-        }
+        Self::with_direction(name, r#type, DpiDirection::Input)
     }
 
     pub(crate) fn output(name: String, r#type: DpiType) -> Self {
+        Self::with_direction(name, r#type, DpiDirection::Output)
+    }
+
+    pub(crate) fn with_direction(name: String, r#type: DpiType, direction: DpiDirection) -> Self {
         Self {
             name,
             r#type,
-            output: true,
+            direction,
         }
     }
 
-    /// Whether the argument is an `output` (or `inout`), of a builtin.
+    /// Whether the call writes the actual: an `output` or `inout`.
     pub fn is_output(&self) -> bool {
-        self.output
+        self.direction != DpiDirection::Input
+    }
+
+    /// Whether the call reads the actual: an `input` or `inout`.
+    pub fn is_input(&self) -> bool {
+        self.direction != DpiDirection::Output
+    }
+
+    pub fn direction(&self) -> DpiDirection {
+        self.direction
     }
 
     pub fn name(&self) -> &str {
@@ -2777,6 +2906,17 @@ impl DpiImport {
 
     pub fn arguments(&self) -> &[DpiArgument] {
         &self.arguments
+    }
+
+    /// Whether a call passes a pointer: an `output` or `inout` argument, a
+    /// packed array, or a string argument or result.
+    pub fn uses_call_area(&self) -> bool {
+        self.return_type == Some(DpiType::String)
+            || self.arguments.iter().any(|argument| {
+                argument.is_output()
+                    || argument.r#type().is_vector()
+                    || argument.r#type() == DpiType::String
+            })
     }
 }
 
@@ -2897,7 +3037,57 @@ mod virtual_instances {
                 interface: of,
                 member,
             } if of == interface => Some(VirtualInterfaceSignal::Member { id, member }.name()),
+            VirtualInterfaceSignal::StaticPlaceholder {
+                interface: of,
+                name,
+            } if of == interface => Some(VirtualInterfaceSignal::Static { id, name }.name()),
             _ => None,
+        }
+    }
+
+    /// The interface of the static variable placeholder `stmt` assigns, as
+    /// an initializer of a static variable of an interface subroutine
+    /// called through a virtual interface does.
+    pub(super) fn assigned_static(stmt: &Stmt) -> Option<String> {
+        let Stmt::Assign { lhs, .. } = stmt else {
+            return None;
+        };
+        match VirtualInterfaceSignal::of(lhs.name())? {
+            VirtualInterfaceSignal::StaticPlaceholder { interface, .. } => Some(interface),
+            _ => None,
+        }
+    }
+
+    /// `stmt` for instance `id` of interface `interface`.
+    pub(super) fn for_each_instance(
+        stmt: &Stmt,
+        interface: &str,
+        ids: &HashMap<String, Vec<u32>>,
+    ) -> Vec<Stmt> {
+        ids.get(interface)
+            .into_iter()
+            .flatten()
+            .map(|&id| stmt_for_instance(stmt.clone(), interface, id))
+            .collect()
+    }
+
+    /// The names of static variable placeholder `name` for each instance of
+    /// its interface in `ids`, or `name` itself.
+    pub(super) fn static_names(name: &str, ids: &HashMap<String, Vec<u32>>) -> Vec<String> {
+        match VirtualInterfaceSignal::of(name) {
+            Some(VirtualInterfaceSignal::StaticPlaceholder { interface, name }) => ids
+                .get(&interface)
+                .into_iter()
+                .flatten()
+                .map(|&id| {
+                    VirtualInterfaceSignal::Static {
+                        id,
+                        name: name.clone(),
+                    }
+                    .name()
+                })
+                .collect(),
+            _ => vec![name.to_string()],
         }
     }
 
@@ -3062,6 +3252,21 @@ mod virtual_instances {
     ) -> Vec<Signal> {
         let mut found = Vec::new();
         for signal in signals {
+            // A static variable of an interface subroutine is the calling
+            // scope's own, one for each instance.
+            if let Some(VirtualInterfaceSignal::StaticPlaceholder { .. }) =
+                VirtualInterfaceSignal::of(&signal.name)
+            {
+                found.extend(
+                    static_names(&signal.name, ids)
+                        .into_iter()
+                        .map(|name| Signal {
+                            name,
+                            ..signal.clone()
+                        }),
+                );
+                continue;
+            }
             let Some(VirtualInterfaceSignal::Placeholder { interface, member }) =
                 VirtualInterfaceSignal::of(&signal.name)
             else {
@@ -3112,6 +3317,16 @@ impl Module {
         }
         for process in &mut self.initial_processes {
             expand_stmts(&mut process.body, ids);
+            // The initializers of the static variables of interface
+            // subroutines called through virtual interfaces, for each
+            // instance.
+            process.body = std::mem::take(&mut process.body)
+                .into_iter()
+                .flat_map(|stmt| match virtual_instances::assigned_static(&stmt) {
+                    Some(interface) => virtual_instances::for_each_instance(&stmt, &interface, ids),
+                    None => vec![stmt],
+                })
+                .collect();
         }
         for subroutine in self
             .subroutines
@@ -3120,6 +3335,10 @@ impl Module {
         {
             expand_stmts(&mut subroutine.body, ids);
             expand_stmts(&mut subroutine.sensitivity_body, ids);
+            subroutine.persistent_locals = std::mem::take(&mut subroutine.persistent_locals)
+                .iter()
+                .flat_map(|name| virtual_instances::static_names(name, ids))
+                .collect();
             for param in &mut subroutine.params {
                 if let Some(default) = &mut param.default {
                     expand(default);

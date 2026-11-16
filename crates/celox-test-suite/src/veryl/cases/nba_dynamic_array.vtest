@@ -136,6 +136,9 @@ module Top (
   (tick clk)
   (assert_eq q 0x9a))
 
+; Separate always_ff blocks on the same clock sample the same pre-edge
+; state. A dynamic array write in one block must not become visible to a
+; read in another block until all blocks for the edge have evaluated.
 (case test_dynamic_array_write_is_deferred_across_ff_blocks
   (source "test.veryl" #"
 module Top (
@@ -367,6 +370,8 @@ module Top (
   (assert_eq q_hi 0xaabbccdd "high word was not committed")
   (assert_eq q_dynamic 0xaabbccdd "dynamic high read was not invalidated"))
 
+; Partitioned kernels commit sparse state in a task of its own, which
+; scans every summary word of the object.
 (case test_sparse_commit_reaches_every_summary_word
   (source "test.veryl" #"
 module Bank (

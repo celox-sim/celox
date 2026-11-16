@@ -101,10 +101,33 @@ pub enum ExprKind {
         variables: Vec<Option<Name>>,
         body: ExprId,
     },
+    /// A soft constraint `soft expression` (IEEE 1800-2023 18.5.13), also
+    /// one a guard or an implication makes conditional: the guard is part
+    /// of `expression`.
+    SoftConstraint {
+        expression: ExprId,
+    },
+    /// `disable soft variable` (IEEE 1800-2023 18.5.13.2), under a guard or
+    /// an implication while `condition` holds.
+    DisableSoft {
+        variable: ExprId,
+        condition: Option<ExprId>,
+    },
+    /// `solve before before after` (IEEE 1800-2023 18.5.9): an order in
+    /// which to choose the values of random variables, which leaves the
+    /// solutions as they are.
+    SolveBefore {
+        before: Vec<ExprId>,
+        after: Vec<ExprId>,
+    },
     /// Per-call class constraints (IEEE 1800-2023 18.7).
     RandomizeWith {
         expression: ExprId,
         constraints: Option<Vec<ExprId>>,
+        /// The identifier list of a restricted constraint block, `with
+        /// (x, y) {...}`: only names that begin with one of them resolve
+        /// into the object's class.
+        restricted: Option<Vec<Name>>,
     },
     Parameterized {
         expression: ExprId,
@@ -128,6 +151,14 @@ pub enum ExprKind {
         items: Vec<PatternItem>,
     },
     Set(Vec<Dimension>),
+    /// `unique { items }` of a constraint (IEEE 1800-2023 18.5.4): its
+    /// members take pairwise different values.
+    Unique(Vec<Dimension>),
+    /// `expression dist { items }` of a constraint (IEEE 1800-2023 18.5.3).
+    Dist {
+        expression: ExprId,
+        items: Vec<DistItem>,
+    },
     Streaming {
         operator: String,
         slice: Option<ExprId>,
@@ -148,6 +179,22 @@ pub struct Argument {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PatternItem {
     pub key: Option<ExprId>,
+    pub value: ExprId,
+}
+
+/// An item of a distribution (IEEE 1800-2023 18.5.3): a value or a range,
+/// and its weight, `:= 1` without one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DistItem {
+    pub value: Dimension,
+    pub weight: Option<DistWeight>,
+}
+
+/// The weight of a distribution item: `:= value` for each value of a range,
+/// or `:/ value` for the range as a whole.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DistWeight {
+    pub per_range: bool,
     pub value: ExprId,
 }
 
@@ -317,6 +364,27 @@ pub struct LogicGateInstance {
     /// Output first, followed by one or more inputs.
     pub terminals: Vec<ExprId>,
     pub tokens: TokenRange,
+}
+
+/// One assignment of a `defparam` statement (IEEE 1800-2023 23.10.1): the
+/// hierarchical name of a parameter and its new value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DefparamAssignment {
+    /// Whether the name starts at `$root`.
+    pub rooted: bool,
+    /// The scopes of the name, then the parameter.
+    pub path: Vec<DefparamSegment>,
+    pub value: ExprId,
+    pub tokens: TokenRange,
+}
+
+/// A component of the hierarchical name of a `defparam` target: the name of
+/// a scope with the index of a generate block or instance array element,
+/// or the parameter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DefparamSegment {
+    pub name: Name,
+    pub index: Option<ExprId>,
 }
 
 /// Stable handle for an authored parameter/localparam statement in any scope.
@@ -689,6 +757,8 @@ pub enum BodyItemKind {
     Parameter(ParameterDeclarationId),
     Assign(AssignId),
     LogicGate(Box<LogicGate>),
+    /// `defparam` assignments (IEEE 1800-2023 23.10.1).
+    Defparam(Vec<DefparamAssignment>),
     Procedure(ProcedureId),
     Subroutine(SubroutineId),
     TypeAlias(TypeAliasId),
@@ -1193,20 +1263,114 @@ pub struct PropertySpec {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct SequenceId(pub(crate) usize);
 
-/// A sequence of steps a fixed number of clock ticks apart (IEEE 1800-2023
-/// 16.7), or an implication with such an antecedent and consequent
-/// (16.12.7): `|=>` is `|->` with the consequent one tick later. The local
-/// variables are those its declaration declares (16.10).
+/// A sequence (IEEE 1800-2023 16.7), or an implication with a sequence
+/// antecedent and consequent (16.12.7): `|=>` is `|->` with the consequent
+/// one tick later. The local variables are those its declaration declares
+/// (16.10).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Sequence {
-    pub antecedent: Option<Vec<SequenceStep>>,
-    pub consequent: Vec<SequenceStep>,
+    pub antecedent: Option<SequenceExpr>,
+    pub consequent: SequenceExpr,
     pub locals: Vec<SequenceLocal>,
+}
+
+/// A sequence expression in the supported subset of Syntax 16-3.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SequenceExpr {
+    /// A Boolean expression, which matches in one tick, with the match items
+    /// it runs when it matches (16.10, 16.11).
+    Boolean(SequenceBoolean),
+    /// `left ##delay right` (16.7): `right` starts `delay` ticks after the
+    /// tick `left` ends its match at, or after the start of the sequence
+    /// without `left`.
+    Concat {
+        left: Option<Box<SequenceExpr>>,
+        delay: CycleDelay,
+        right: Box<SequenceExpr>,
+    },
+    /// `left or right` (16.9.7): a match of either.
+    Or(Box<SequenceExpr>, Box<SequenceExpr>),
+    /// `left and right` (16.9.5): both start at one tick, and the sequence
+    /// matches at the later of their matches.
+    And(Box<SequenceExpr>, Box<SequenceExpr>),
+    /// `left intersect right` (16.9.6): both start at one tick and match at
+    /// one tick.
+    Intersect(Box<SequenceExpr>, Box<SequenceExpr>),
+    /// `condition throughout sequence` (16.9.9): `condition` holds at each
+    /// tick from the start of `sequence` to its match.
+    Throughout {
+        condition: SequenceBoolean,
+        sequence: Box<SequenceExpr>,
+    },
+    /// `@(event) sequence` (16.13): `sequence` clocked by `clock`, which
+    /// starts at a tick of it.
+    Clocked {
+        clock: TimingControlId,
+        sequence: Box<SequenceExpr>,
+    },
+}
+
+impl SequenceExpr {
+    /// The Boolean expressions of the sequence, from left to right.
+    pub fn booleans(&self) -> Vec<&SequenceBoolean> {
+        let mut found = Vec::new();
+        let mut pending = vec![self];
+        while let Some(expr) = pending.pop() {
+            match expr {
+                SequenceExpr::Boolean(boolean) => found.push(boolean),
+                SequenceExpr::Concat { left, right, .. } => {
+                    pending.push(right);
+                    if let Some(left) = left {
+                        pending.push(left);
+                    }
+                }
+                SequenceExpr::Or(left, right)
+                | SequenceExpr::And(left, right)
+                | SequenceExpr::Intersect(left, right) => {
+                    pending.push(right);
+                    pending.push(left);
+                }
+                SequenceExpr::Throughout {
+                    condition,
+                    sequence,
+                } => {
+                    found.push(condition);
+                    pending.push(sequence);
+                }
+                SequenceExpr::Clocked { sequence, .. } => pending.push(sequence),
+            }
+        }
+        found
+    }
+
+    /// The Boolean expression the sequence is, without match items.
+    pub fn boolean(&self) -> Option<ExprId> {
+        match self {
+            SequenceExpr::Boolean(boolean) if boolean.items.is_empty() => Some(boolean.expression),
+            _ => None,
+        }
+    }
+}
+
+/// A Boolean expression of a sequence and its match items.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SequenceBoolean {
+    pub expression: ExprId,
+    pub items: Vec<SequenceMatchItem>,
+    pub tokens: TokenRange,
+}
+
+/// A cycle delay `##n` or `##[min:max]` (16.7), in ticks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CycleDelay {
+    pub min: u32,
+    pub max: u32,
 }
 
 /// A Boolean expression `delay` ticks after the previous step (after the
 /// match of the antecedent for the first step of a consequent), and the
-/// match items run when it matches (16.10, 16.11).
+/// match items run when it matches (16.10, 16.11): a step of one way a
+/// sequence matches, a fixed number of ticks after its start.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SequenceStep {
     pub delay: u32,
@@ -1244,6 +1408,44 @@ pub struct AssertionDeclarationId(pub(crate) usize);
 pub enum AssertionDeclarationKind {
     Sequence,
     Property,
+}
+
+/// The header of a covergroup declaration (IEEE 1800-2023 19.3), which
+/// declares a covergroup type of its name; its body stays unconverted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CovergroupDeclaration {
+    pub name: Name,
+    /// From `covergroup` through the name.
+    pub tokens: TokenRange,
+}
+
+/// A user-defined nettype declaration (IEEE 1800-2023 6.6.7), `nettype
+/// data_type name [with ...];` or `nettype other name;`, which declares a
+/// net type of its name; the declaration stays unconverted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NettypeDeclaration {
+    pub name: Name,
+    pub tokens: TokenRange,
+}
+
+/// A `let` declaration (IEEE 1800-2023 11.12), `let name [(ports)] =
+/// expression;`, whose item stays unconverted. Its calls are ordinary call
+/// and name expressions, which the analyzer expands.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LetDeclaration {
+    pub name: Name,
+    pub ports: Vec<LetPort>,
+    pub body: ExprId,
+    /// The tokens of the item, from its attributes.
+    pub tokens: TokenRange,
+}
+
+/// A formal argument of a `let`: an untyped one has no type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LetPort {
+    pub name: Name,
+    pub data_type: Option<TypeId>,
+    pub default: Option<ExprId>,
 }
 
 /// A named sequence (IEEE 1800-2023 16.8) or property (16.12) without formal
@@ -1305,7 +1507,10 @@ pub enum StatementKind {
     },
     Expression(ExprId),
     Declaration(LocalDeclaration),
+    /// `assign variable_assignment ;` in a procedure (IEEE 1800-2023 10.6.1).
     ProceduralAssign(AssignId),
+    /// `deassign variable_lvalue ;` (10.6.1).
+    ProceduralDeassign(ExprId),
     Return(Option<ExprId>),
     Break,
     Continue,
@@ -1336,6 +1541,7 @@ pub enum StatementKind {
         control: Option<TimingControlId>,
         target: ExprId,
     },
+    /// `force` or `release` (10.6.2), unparsed.
     ProceduralRelease(TokenRange),
     Unconverted {
         category: String,
@@ -1393,4 +1599,391 @@ pub struct Statement {
     pub qualifier: Option<String>,
     pub kind: StatementKind,
     pub tokens: TokenRange,
+}
+
+impl ExprKind {
+    /// This node with each expression it holds directly mapped by `map`,
+    /// in a fixed order. The types it holds are kept; see
+    /// [`DataType::map_parts`].
+    pub fn map_expressions(&self, mut map: impl FnMut(ExprId) -> ExprId) -> ExprKind {
+        let kind = self;
+        let map = &mut map;
+        match kind {
+            ExprKind::MinTypMax {
+                minimum,
+                typical,
+                maximum,
+            } => ExprKind::MinTypMax {
+                minimum: map(*minimum),
+                typical: map(*typical),
+                maximum: map(*maximum),
+            },
+            ExprKind::Literal(_) | ExprKind::Name(_) | ExprKind::Type(_) => kind.clone(),
+            ExprKind::Group(inner) => ExprKind::Group(map(*inner)),
+            ExprKind::Unary {
+                operator,
+                expression,
+                postfix,
+            } => ExprKind::Unary {
+                operator: operator.clone(),
+                expression: map(*expression),
+                postfix: *postfix,
+            },
+            ExprKind::Binary {
+                left,
+                operator,
+                right,
+            } => ExprKind::Binary {
+                left: map(*left),
+                operator: operator.clone(),
+                right: map(*right),
+            },
+            ExprKind::Conditional {
+                condition,
+                then_expression,
+                else_expression,
+            } => ExprKind::Conditional {
+                condition: map(*condition),
+                then_expression: map(*then_expression),
+                else_expression: map(*else_expression),
+            },
+            ExprKind::Assignment {
+                left,
+                operator,
+                right,
+            } => ExprKind::Assignment {
+                left: map(*left),
+                operator: operator.clone(),
+                right: map(*right),
+            },
+            ExprKind::Tagged { member, value } => ExprKind::Tagged {
+                member: member.clone(),
+                value: value.map(&mut *map),
+            },
+            ExprKind::Copy(inner) => ExprKind::Copy(map(*inner)),
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } => ExprKind::Member {
+                expression: map(*expression),
+                separator: separator.clone(),
+                name: name.clone(),
+            },
+            ExprKind::Call {
+                expression,
+                arguments: given,
+            } => ExprKind::Call {
+                expression: map(*expression),
+                arguments: map_arguments(given, map),
+            },
+            ExprKind::ArrayMethodWith {
+                expression,
+                predicate,
+            } => ExprKind::ArrayMethodWith {
+                expression: map(*expression),
+                predicate: map(*predicate),
+            },
+            ExprKind::ConstraintForeach {
+                array,
+                variables,
+                body,
+            } => ExprKind::ConstraintForeach {
+                array: map(*array),
+                variables: variables.clone(),
+                body: map(*body),
+            },
+            ExprKind::SoftConstraint { expression } => ExprKind::SoftConstraint {
+                expression: map(*expression),
+            },
+            ExprKind::DisableSoft {
+                variable,
+                condition,
+            } => ExprKind::DisableSoft {
+                variable: map(*variable),
+                condition: condition.map(&mut *map),
+            },
+            ExprKind::SolveBefore { before, after } => ExprKind::SolveBefore {
+                before: before.iter().map(|id| map(*id)).collect(),
+                after: after.iter().map(|id| map(*id)).collect(),
+            },
+            ExprKind::RandomizeWith {
+                expression,
+                constraints,
+                restricted,
+            } => ExprKind::RandomizeWith {
+                expression: map(*expression),
+                constraints: constraints
+                    .as_ref()
+                    .map(|constraints| constraints.iter().map(|id| map(*id)).collect()),
+                restricted: restricted.clone(),
+            },
+            ExprKind::Parameterized {
+                expression,
+                arguments: given,
+            } => ExprKind::Parameterized {
+                expression: map(*expression),
+                arguments: map_arguments(given, map),
+            },
+            ExprKind::Select {
+                expression,
+                dimension: selected,
+            } => ExprKind::Select {
+                expression: map(*expression),
+                dimension: Box::new(map_dimension(selected, map)),
+            },
+            ExprKind::Cast { target, expression } => ExprKind::Cast {
+                target: map(*target),
+                expression: map(*expression),
+            },
+            ExprKind::Concatenation(parts) => {
+                ExprKind::Concatenation(parts.iter().map(|id| map(*id)).collect())
+            }
+            ExprKind::Replication { count, expressions } => ExprKind::Replication {
+                count: map(*count),
+                expressions: expressions.iter().map(|id| map(*id)).collect(),
+            },
+            ExprKind::Pattern { target, items } => ExprKind::Pattern {
+                target: target.map(&mut *map),
+                items: items
+                    .iter()
+                    .map(|item| PatternItem {
+                        key: item.key.map(&mut *map),
+                        value: map(item.value),
+                    })
+                    .collect(),
+            },
+            ExprKind::Set(dimensions) => ExprKind::Set(
+                dimensions
+                    .iter()
+                    .map(|selected| map_dimension(selected, map))
+                    .collect(),
+            ),
+            ExprKind::Unique(dimensions) => ExprKind::Unique(
+                dimensions
+                    .iter()
+                    .map(|selected| map_dimension(selected, map))
+                    .collect(),
+            ),
+            ExprKind::Dist { expression, items } => ExprKind::Dist {
+                expression: map(*expression),
+                items: items
+                    .iter()
+                    .map(|item| DistItem {
+                        value: map_dimension(&item.value, map),
+                        weight: item.weight.map(|weight| DistWeight {
+                            per_range: weight.per_range,
+                            value: map(weight.value),
+                        }),
+                    })
+                    .collect(),
+            },
+            ExprKind::Streaming {
+                operator,
+                slice,
+                expressions,
+            } => ExprKind::Streaming {
+                operator: operator.clone(),
+                slice: slice.map(&mut *map),
+                expressions: expressions.iter().map(|id| map(*id)).collect(),
+            },
+            ExprKind::StreamSelect {
+                expression,
+                dimension: selected,
+            } => ExprKind::StreamSelect {
+                expression: map(*expression),
+                dimension: Box::new(map_dimension(selected, map)),
+            },
+        }
+    }
+}
+
+impl DataType {
+    /// This type with each expression and type it holds directly mapped,
+    /// such as the operand of `type(...)`, its dimensions and the types of
+    /// its members.
+    pub fn map_parts(
+        &self,
+        expression: &mut dyn FnMut(ExprId) -> ExprId,
+        data_type: &mut dyn FnMut(TypeId) -> TypeId,
+    ) -> DataType {
+        let kind = match &self.kind {
+            DataTypeKind::TypeOf(operand) => DataTypeKind::TypeOf(expression(*operand)),
+            DataTypeKind::Named(segments) => DataTypeKind::Named(
+                segments
+                    .iter()
+                    .map(|segment| TypeSegment {
+                        name: segment.name.clone(),
+                        arguments: segment
+                            .arguments
+                            .as_ref()
+                            .map(|arguments| map_arguments(arguments, expression)),
+                    })
+                    .collect(),
+            ),
+            DataTypeKind::VirtualInterface {
+                name,
+                arguments,
+                modport,
+            } => DataTypeKind::VirtualInterface {
+                name: name.clone(),
+                arguments: arguments
+                    .as_ref()
+                    .map(|arguments| map_arguments(arguments, expression)),
+                modport: modport.clone(),
+            },
+            DataTypeKind::Struct {
+                union,
+                soft,
+                tagged,
+                packed,
+                fields,
+            } => DataTypeKind::Struct {
+                union: *union,
+                soft: *soft,
+                tagged: *tagged,
+                packed: *packed,
+                fields: fields
+                    .iter()
+                    .map(|field| Field {
+                        name: field.name.clone(),
+                        data_type: data_type(field.data_type),
+                        random: field.random.clone(),
+                        dimensions: field
+                            .dimensions
+                            .iter()
+                            .map(|dimension| map_dimension(dimension, expression))
+                            .collect(),
+                        default: field.default.map(&mut *expression),
+                    })
+                    .collect(),
+            },
+            DataTypeKind::Enum { base, items } => DataTypeKind::Enum {
+                base: base.map(&mut *data_type),
+                items: items
+                    .iter()
+                    .map(|item| EnumItem {
+                        name: item.name.clone(),
+                        dimensions: item
+                            .dimensions
+                            .iter()
+                            .map(|dimension| map_dimension(dimension, expression))
+                            .collect(),
+                        value: item.value.map(&mut *expression),
+                    })
+                    .collect(),
+            },
+            DataTypeKind::Implicit | DataTypeKind::Builtin(_) | DataTypeKind::Interface { .. } => {
+                self.kind.clone()
+            }
+        };
+        DataType {
+            kind,
+            signed: self.signed,
+            packed_dimensions: self
+                .packed_dimensions
+                .iter()
+                .map(|dimension| map_dimension(dimension, expression))
+                .collect(),
+            tokens: self.tokens,
+        }
+    }
+}
+
+fn map_dimension(dimension: &Dimension, map: &mut dyn FnMut(ExprId) -> ExprId) -> Dimension {
+    Dimension {
+        kind: match &dimension.kind {
+            DimensionKind::Index(index) => DimensionKind::Index(map(*index)),
+            DimensionKind::Range { left, right } => DimensionKind::Range {
+                left: map(*left),
+                right: map(*right),
+            },
+            DimensionKind::Indexed {
+                base,
+                operator,
+                width,
+            } => DimensionKind::Indexed {
+                base: map(*base),
+                operator: operator.clone(),
+                width: map(*width),
+            },
+            DimensionKind::Queue(bound) => DimensionKind::Queue(bound.map(&mut *map)),
+            other => other.clone(),
+        },
+        tokens: dimension.tokens,
+    }
+}
+
+fn map_arguments(arguments: &[Argument], map: &mut dyn FnMut(ExprId) -> ExprId) -> Vec<Argument> {
+    arguments
+        .iter()
+        .map(|argument| Argument {
+            name: argument.name.clone(),
+            value: argument.value.map(&mut *map),
+        })
+        .collect()
+}
+
+/// The productions of a `randsequence` statement (IEEE 1800-2023 18.17),
+/// which stays an unconverted statement whose items are its code blocks:
+/// each [`RsProd::Code`] and weight code block is one of them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Randsequence {
+    pub statement: StatementId,
+    /// The production `randsequence (main)` starts from; the first one
+    /// without it.
+    pub main: Option<Name>,
+    pub productions: Vec<RsProduction>,
+}
+
+/// `[data_type_or_void] name [(tf_port_list)] : rs_rule { | rs_rule } ;`
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RsProduction {
+    pub name: Name,
+    /// Its result type, `void` included, if it declares one.
+    pub return_type: Option<TypeId>,
+    /// Its formals, if it declares them (18.17.7).
+    pub formals: Option<Vec<SubroutinePort>>,
+    pub rules: Vec<RsRule>,
+    pub tokens: TokenRange,
+}
+
+/// `rs_production_list [:= weight [rs_code_block]]` (18.17.1).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RsRule {
+    /// `rand join [(expression)]` before the items (18.17.5): `Some` with
+    /// its expression, if any.
+    pub join: Option<Option<ExprId>>,
+    pub items: Vec<RsProd>,
+    pub weight: Option<ExprId>,
+    pub weight_code: Option<StatementId>,
+}
+
+/// One item of a production list: a production, which is a name or a call
+/// with arguments (18.17.7), a code block, or a production control
+/// (18.17.2-18.17.4).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RsProd {
+    Item(ExprId),
+    Code(StatementId),
+    If {
+        condition: ExprId,
+        then: ExprId,
+        otherwise: Option<ExprId>,
+    },
+    Repeat {
+        count: ExprId,
+        item: ExprId,
+    },
+    Case {
+        selector: ExprId,
+        items: Vec<RsCaseItem>,
+    },
+}
+
+/// An item of a `case` production control; no labels for `default`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RsCaseItem {
+    pub labels: Vec<ExprId>,
+    pub item: ExprId,
 }

@@ -10,7 +10,7 @@ pub(super) struct Prefix<'a> {
 pub(super) fn prefix<'a>(
     parameter: Option<&celox_sv_syntax::Parameter>,
     tree: &'a SyntaxTree,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Option<Prefix<'a>>> {
     let Some(parameter) = parameter else {
         return Ok(None);
@@ -31,7 +31,7 @@ pub(super) fn prefix<'a>(
             Some(
                 type_binding::builtin_type(name, data.signed)
                     // A chandle is no constant (IEEE 1800-2023 6.14).
-                    .filter(|ty| !ty.chandle)
+                    .filter(|ty| !ty.is_chandle())
                     .ok_or_else(|| unsupported("unsupported parameter data type"))?,
             ),
         ),
@@ -77,7 +77,7 @@ impl Prefix<'_> {
         self.alias
             .as_ref()
             .or(self.primitive.as_ref())
-            .is_some_and(|ty| ty.kind == TypeKind::Bit)
+            .is_some_and(|ty| matches!(ty.kind, TypeKind::Bit | TypeKind::Chandle))
     }
     pub fn scalar_width(&self, functions: &const_functions::ConstantFunctions) -> Option<usize> {
         self.primitive
@@ -99,7 +99,7 @@ impl Prefix<'_> {
         tree: &AnalysisContext<'_>,
         session: &mut Session,
         env: &ConstEnv,
-        aliases: &HashMap<String, Type>,
+        aliases: &TypeAliases,
     ) -> Converted<Vec<PackedRange>> {
         let mut ranges = constant_binding::packed_ranges(
             &self.data.packed_dimensions,

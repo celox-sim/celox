@@ -77,9 +77,11 @@ pub(super) fn port_type(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
+    declarations: &Arc<types::TypeDeclarations>,
 ) -> Converted<Option<Type>> {
-    let context = PackedDimensions::new(HashMap::default(), env, aliases);
+    let mut context = PackedDimensions::new(HashMap::default(), env, aliases);
+    context.type_declarations = Some(declarations.clone());
     let Some(id) = port.data_type else {
         return Ok(None);
     };
@@ -95,7 +97,7 @@ pub(super) fn declared_port_range_matches(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<bool> {
     let Some(id) = port.declared_type else {
         return Ok(true);
@@ -126,13 +128,19 @@ pub(super) fn implicit_subroutine_type(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: impl ToShared<i128, ConstEnv>,
-    aliases: impl ToShared<Type>,
+    aliases: impl ToShared<Type, TypeAliases>,
 ) -> Converted<Type> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     let data = tree.declarations().data_type(id);
     let mut ty = Type::new(TypeKind::Logic);
     ty.is_signed = data.signed.unwrap_or(false);
     ty.packed_ranges = binding::packed_ranges(&data.packed_dimensions, tree, session, &context)?;
+    semantic_types::bind_declared(
+        &mut session.types,
+        &tree.functions,
+        &mut ty,
+        &context.const_env,
+    );
     Ok(ty)
 }
 /// The signals that `declaration` declares. A type operator applied to an
@@ -143,7 +151,8 @@ pub(super) fn local_signals(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
+    declarations: Option<&Arc<types::TypeDeclarations>>,
     selected_name: Option<&str>,
     scope: Option<&PackedDimensions>,
 ) -> Converted<Vec<Signal>> {
@@ -166,7 +175,11 @@ pub(super) fn local_signals(
         {
             scope.clone()
         }
-        _ => PackedDimensions::new(HashMap::default(), env, aliases),
+        _ => {
+            let mut context = PackedDimensions::new(HashMap::default(), env, aliases);
+            context.type_declarations = declarations.cloned();
+            context
+        }
     };
     let Some(base) = bind(declaration.data_type, tree, session, &context)? else {
         // Ports, and variables of a generate block, are not in the scope of
@@ -214,7 +227,8 @@ pub(super) fn net_signals(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
+    declarations: Option<&Arc<types::TypeDeclarations>>,
     selected_name: Option<&str>,
 ) -> Converted<Vec<Signal>> {
     if declaration.net_type == "interconnect" {
@@ -226,7 +240,8 @@ pub(super) fn net_signals(
     ) {
         return Err(unsupported("unsupported net data type"));
     }
-    let context = PackedDimensions::new(HashMap::default(), env, aliases);
+    let mut context = PackedDimensions::new(HashMap::default(), env, aliases);
+    context.type_declarations = declarations.cloned();
     let Some(base) = bind(declaration.data_type, tree, session, &context)? else {
         return Err(unsupported("unsupported net data type"));
     };
@@ -256,6 +271,7 @@ pub(super) fn net_signals(
         signals.push(
             Signal::new_net(name, ty)
                 .with_unresolved_net(declaration.net_type == "uwire")
+                .with_net_resolution(NetResolution::of(&declaration.net_type))
                 .with_net_drive(drive),
         );
     }
@@ -269,7 +285,7 @@ pub(super) fn argument_type(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     if let celox_sv_syntax::ExprKind::Type(id) = tree.declarations().expression(root).kind {
@@ -283,7 +299,7 @@ pub(super) fn argument_type(
     };
     let ranges = binding::packed_ranges(&dimensions, tree, session, &context)?;
     // A chandle is no packed array element (IEEE 1800-2023 6.14).
-    if base.chandle && !ranges.is_empty() {
+    if base.is_chandle() && !ranges.is_empty() {
         return types::packed_chandles();
     }
     Ok(Some(types::enclose_aliased_packed_type(
@@ -336,7 +352,7 @@ pub(super) fn procedural_type(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: impl ToShared<i128, ConstEnv>,
-    aliases: impl ToShared<Type>,
+    aliases: impl ToShared<Type, TypeAliases>,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     binding::bind_in(id, native, tree, session, &context)
@@ -348,7 +364,7 @@ pub(super) fn enum_constant_base(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     bind(id, tree, session, &context)
@@ -360,14 +376,17 @@ pub(super) fn alias_base_type(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: impl ToShared<i128, ConstEnv>,
-    aliases: impl ToShared<Type>,
+    aliases: impl ToShared<Type, TypeAliases>,
+    declarations: Option<&Arc<types::TypeDeclarations>>,
     defer_class_defaults: bool,
 ) -> Converted<Option<Type>> {
-    // Typedef type-reference inference is outside the supported alias path.
+    // A typedef of a type reference (IEEE 1800-2023 6.23) is not bound,
+    // rather than skipped as if it named nothing.
     if matches!(native.data_type(id).kind, DataTypeKind::TypeOf(_)) {
-        return Ok(None);
+        return Err(unsupported("typedef of a type reference"));
     }
-    let context = PackedDimensions::new(HashMap::default(), env, aliases);
+    let mut context = PackedDimensions::new(HashMap::default(), env, aliases);
+    context.type_declarations = declarations.cloned();
     binding::bind_alias_in(id, native, tree, session, &context, defer_class_defaults)
 }
 
@@ -387,13 +406,12 @@ pub(super) fn builtin_type(name: &str, signing: Option<bool>) -> Option<Type> {
         "longint" => (TypeKind::Bit, Some(64), true),
         "integer" => (TypeKind::Logic, Some(32), true),
         "time" => (TypeKind::Logic, Some(64), false),
-        "chandle" => (TypeKind::Bit, Some(64), false),
+        "chandle" => (TypeKind::Chandle, Some(64), false),
         // A named event is a handle (IEEE 1800-2023 15.5).
-        "event" => return Some(super::classes::handle(super::events::CLASS)),
+        "event" => return Some(super::classes::handle_shape(super::events::CLASS)),
         _ => return None,
     };
     let mut ty = Type::new(kind);
-    ty.chandle = name == "chandle";
     ty.is_signed = signing.unwrap_or(signed);
     let keyword = match name {
         "byte" => Some("byte"),
@@ -423,10 +441,12 @@ pub(super) fn alias_signals(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
+    declarations: Option<&Arc<types::TypeDeclarations>>,
     selected_name: Option<&str>,
 ) -> Converted<Vec<Signal>> {
-    let context = PackedDimensions::new(HashMap::default(), env, aliases);
+    let mut context = PackedDimensions::new(HashMap::default(), env, aliases);
+    context.type_declarations = declarations.cloned();
     let Some(base) = bind(declaration.data_type, tree, session, &context)? else {
         return Ok(Vec::new());
     };
@@ -449,4 +469,4 @@ pub(super) fn alias_signals(
 }
 
 mod subroutines;
-pub(super) use subroutines::subroutine_formals;
+pub(super) use subroutines::{port_formals, subroutine_formals};

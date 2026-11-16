@@ -1437,6 +1437,43 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "12 7 hi 4 1 0\n7 1 12 0\n12 0 1\n"))
 
+; An object's get_randstate returns the state of its RNG, which
+; set_randstate restores so that its randomizations repeat; objects seeded
+; alike have equal states and draw alike, and objects created one after
+; the other by a thread have different states (IEEE 1800-2023 18.13.4,
+; 18.13.5, 18.14.3). this.get_randstate names the object itself.
+(case object_random_state
+  (source "randstate.sv" #"
+module Top(output int checks);
+    class Item;
+        rand int x;
+        function new(int seed = 0); if (seed != 0) this.srandom(seed); endfunction
+        function string state(); return this.get_randstate(); endfunction
+    endclass
+    initial begin
+        Item a = new(200), b = new(200), c = new(7);
+        Item d = new, e = new;
+        string sa, sc;
+        int first;
+        sa = a.get_randstate();
+        sc = c.get_randstate();
+        checks = 0;
+        checks += (sa == b.get_randstate()) * 1;
+        checks += (sa != sc && sa != "") * 2;
+        checks += (d.get_randstate() != e.get_randstate()) * 4;
+        void'(a.randomize());
+        first = a.x;
+        a.set_randstate(sa);
+        void'(a.randomize());
+        checks += (a.x == first) * 8;
+        void'(b.randomize());
+        checks += (b.x == first) * 16;
+        checks += (a.state() == a.get_randstate()) * 32;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 63))
+
 (case unconstrained_randomize
   (source "randomize.sv" #"
 module Top(output bit done, output int errors);
@@ -2609,6 +2646,403 @@ module Top(output int bad, output bit done);
             foreach (l.kinds[j]) if (!(l.kinds[j] inside {A, B})) bad++;
         end
         if (nonzero == 0) bad++;
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
+(case constrained_randomize_selects
+  (source "selects.sv" #"
+module Top(output int bad, output bit done);
+    typedef bit signed [3:0] nibble_t;
+    class Selects;
+        rand bit [31:0] addr;
+        rand bit [0:7] up;
+        rand bit [35:4] off;
+        rand bit [3:0][7:0] p;
+        rand int i;
+        rand bit signed [7:0] g;
+        rand bit [15:0] w;
+        // An element of a signed named type is signed (7.4.1).
+        rand nibble_t [1:0] n;
+        constraint c {
+            addr[1:0] == 0;
+            addr[31] == 1'b1;
+            up[0:3] == 4'ha;
+            up[7] == 1'b1;
+            off[11:4] == 8'h3c;
+            off[35-:4] == 4'h9;
+            off[12+:4] == 4'h6;
+            p[2] == 8'h5a;
+            i[31] == 1'b1;
+            // A select is unsigned: a negative g reads as a positive byte.
+            g[7:0] > 0 && g < 0;
+            w[15:8] == w[7:0] + 8'h1;
+            n[0] < 0;
+            n[1] > 0;
+        }
+    endclass
+    Selects s;
+    // n[0] < 0 and n[1] > 0, read from the whole value.
+    function automatic int nibbles(bit [7:0] v);
+        return v[3] == 1 && v[7] == 0 && v[7:4] != 0;
+    endfunction
+    initial begin
+        s = new;
+        for (int n = 0; n < 20; n++) begin
+            if (s.randomize() == 0) bad++;
+            // `up` and `off` are read whole: up[0:3] are its high bits and
+            // off[11:4] its low ones.
+            if (s.addr[1:0] != 0 || s.addr[31] != 1 || s.up >> 4 != 4'ha || s.up % 2 != 1
+                || s.off % 256 != 8'h3c || s.off >> 28 != 4'h9 || s.off / 256 % 16 != 4'h6
+                || (s.p >> 16) % 256 != 8'h5a || s.i >= 0 || s.g >= 0 || s.w[15:8] != s.w[7:0] + 8'h1
+                || nibbles(s.n) != 1)
+                bad++;
+            if (s.randomize() with { addr[3:2] == 2'b11; } == 0 || s.addr[3:0] != 4'hc) bad++;
+        end
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
+; `solve before` orders the choice of values (18.5.9): the solutions are
+; the ones the other constraints allow.
+(case constrained_randomize_solve_before
+  (source "solve_before.sv" #"
+module Top(output int bad, output bit done);
+    class Fill;
+        rand bit [31:0] start_addr;
+        rand int block_size;
+        rand byte q[$];
+        constraint block_sys_limit { block_size inside {16, 32, 64, 128, 512, 1024}; }
+        constraint within_range {
+            start_addr < (32'h0104_0000 - block_size * 4);
+            start_addr > 32'h0100_0000;
+            solve block_size before start_addr;
+            start_addr[1:0] == 0;
+        }
+        constraint sized { solve q.size() before block_size; q.size() < 4; }
+    endclass
+    // A member of the object a rand handle refers to orders too.
+    class Item; rand bit [7:0] m; endclass
+    class Outer;
+        rand Item h;
+        rand bit [7:0] y;
+        constraint c { solve h.m before y; y == h.m + 1; h.m < 8'hff; }
+        function new(); h = new; endfunction
+    endclass
+    // Properties qualified by `this` and `super` (8.11, 8.15), as other
+    // constraints name them, also inline (18.7).
+    class Base; rand bit [7:0] z; endclass
+    class Named extends Base;
+        rand bit [7:0] x, y;
+        constraint c {
+            solve this.x before y;
+            solve super.z before this.x;
+            y == this.x + 1;
+            super.z < 8'h10;
+            x > z;
+            x < 8'h80;
+        }
+    endclass
+    // A select of a rand variable and a class-scoped static rand property
+    // (Syntax 18-8, 8.23), as other constraints name them.
+    class Scoped;
+        static rand bit [7:0] s;
+        rand bit [1:0] a;
+        rand bit b;
+        constraint c {
+            solve a[0] before b;
+            solve Scoped::s before a;
+            b == a[0];
+            Scoped::s < 8'h10;
+        }
+    endclass
+    Fill f;
+    Outer o;
+    Named m;
+    Scoped sc;
+    // The arguments of a scope randomize are random variables (18.12.1).
+    bit [7:0] a, b;
+    initial begin
+        f = new;
+        o = new;
+        m = new;
+        sc = new;
+        for (int n = 0; n < 20; n++) begin
+            if (f.randomize() == 0) bad++;
+            if (!(f.block_size inside {16, 32, 64, 128, 512, 1024}) || f.start_addr[1:0] != 0
+                || f.start_addr <= 32'h0100_0000 || f.start_addr >= 32'h0104_0000 - f.block_size * 4
+                || f.q.size() >= 4)
+                bad++;
+            if (f.randomize() with { solve start_addr before block_size; block_size == 64; } == 0
+                || f.block_size != 64)
+                bad++;
+            if (o.randomize() == 0 || o.y != o.h.m + 1) bad++;
+            if (m.randomize() == 0 || m.y != m.x + 1 || m.z >= 8'h10 || m.x <= m.z
+                || m.x >= 8'h80)
+                bad++;
+            if (m.randomize() with { solve this.y before x; this.y == 8'h20; } == 0
+                || m.y != 8'h20 || m.x != 8'h1f)
+                bad++;
+            if (std::randomize(a, b) with { solve a before b; b == a + 1; a < 8'h10; } == 0
+                || b != a + 1 || a >= 8'h10)
+                bad++;
+            if (sc.randomize() == 0 || sc.b != sc.a[0] || Scoped::s >= 8'h10) bad++;
+        end
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
+; A 4-state rand property takes a 2-state value (18.3), with or without
+; constraints, also as an argument of randomize (18.11).
+(case randomize_four_state_properties
+  (source "four_state.sv" #"
+module Top(output int bad, output bit done);
+    class Item;
+        rand logic [31:0] addr;
+        rand logic [31:0] data;
+        rand integer n;
+        logic [3:0] state;
+        constraint align { addr[1:0] == 0; addr < 32'h0100_0000 - n * 4; n inside {[1:9]}; }
+        // A 4-state state value without X or Z bits is a value (18.3),
+        // also in a guard decided before solving (18.5.13).
+        constraint follow { data[3:0] == state; }
+        logic [3:0] mode = 0;
+        rand bit [7:0] picked;
+        constraint guard { if (mode == 0) picked == 1; else picked == 2; }
+    endclass
+    class Plain;
+        rand logic [7:0] a;
+        logic [7:0] b;
+    endclass
+    Item item;
+    Plain p;
+    initial begin
+        item = new;
+        p = new;
+        if (!$isunknown(item.addr) || !$isunknown(p.a)) bad++;
+        item.state = 4'h5;
+        for (int i = 0; i < 20; i++) begin
+            if (item.randomize() == 0) bad++;
+            if ($isunknown(item.addr) || $isunknown(item.data) || $isunknown(item.n)
+                || item.addr[1:0] != 0 || item.n < 1 || item.n > 9
+                || item.addr >= 32'h0100_0000 - item.n * 4 || item.data[3:0] != 4'h5
+                || item.picked != 1)
+                bad++;
+            if (p.randomize() == 0 || $isunknown(p.a) || !$isunknown(p.b)) bad++;
+            if (p.randomize(b) == 0 || $isunknown(p.b)) bad++;
+            p.b = 'x;
+        end
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (four_state)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
+; A 4-state variable of the caller is an input of inline constraints while
+; the bits they read are known (18.3, 18.7), as UVM 1.2's
+; mbus_pipelined_seq reads its `logic [31:0] base_address`.
+(case inline_constraint_four_state_inputs
+  (source "four_state_inputs.sv" #"
+module Top(output int bad, output bit done);
+    class Item; rand bit [31:0] maddr; endclass
+    class Seq;
+        logic [31:0] base_address;
+        Item req;
+        function new(); req = new; endfunction
+        function int go();
+            return req.randomize() with {
+                maddr inside {[base_address:(base_address + 32'h1000)]};
+            };
+        endfunction
+    endclass
+    Seq s;
+    initial begin
+        s = new;
+        s.base_address = 32'h4000;
+        for (int i = 0; i < 10; i++)
+            if (s.go() == 0 || s.req.maddr < 32'h4000 || s.req.maddr > 32'h5000) bad++;
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (four_state)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
+; In 2-state simulation a 4-state property holds plain values (18.3).
+(case randomize_four_state_properties_two_state
+  (source "four_state_two_state.sv" #"
+module Top(output int bad, output bit done);
+    class Item;
+        rand logic [31:0] addr;
+        rand logic [7:0] data;
+        logic [3:0] state;
+        constraint c { addr[1:0] == 0; addr < 32'h100; data[3:0] == state; }
+    endclass
+    Item item;
+    initial begin
+        item = new;
+        item.state = 4'h9;
+        for (int i = 0; i < 20; i++)
+            if (item.randomize() == 0 || item.addr[1:0] != 0 || item.addr >= 32'h100
+                || item.data[3:0] != 4'h9 || item.state != 4'h9)
+                bad++;
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
+; An element at a constant position outside a loop over its array (18.4,
+; 18.5.8); an array whose size and elements constraints name has its size
+; solved first (18.5.7.1), with what a constraint on its elements implies
+; of it and other sizes tried when the rest needs one, and an element past
+; the end reads as 0 (7.4.6). A select of an element takes its bits.
+(case constrained_randomize_constant_elements
+  (source "constant_elements.sv" #"
+// A class scope names a base of a package by the identifier that declares
+// it (8.23).
+package pk;
+    class PB;
+        function int f(int v); return v + 1; endfunction
+    endclass
+    class PD extends PB;
+        rand int y, w;
+        constraint q { y == 5; w == PB::f(y); }
+    endclass
+endpackage
+module Top(output int bad, output bit done);
+    class B_item;
+        rand byte fb[$];
+        rand byte burst_len;
+        constraint small_burst_len_range { burst_len > 1 && burst_len < 10; }
+        constraint byte_zero_is_length { fb[0] == burst_len; }
+        constraint length_is_consistent { burst_len == fb.size() - 1; }
+    endclass
+    class Mixed;
+        rand bit [7:0] d[];
+        rand bit [7:0] f[4];
+        bit [7:0] s[$];
+        rand bit [7:0] x;
+        constraint c {
+            d.size() == 3;
+            foreach (d[i]) d[i] > d[0] || i == 0;
+            d[0] == s[1];
+            f[3] == x + 1;
+            x == s[0];
+            d[5] == 0;
+        }
+    endclass
+    // The arguments of a function solve after the sizes and before the
+    // rest (18.5.7.1, 18.5.11).
+    class Called;
+        rand bit [7:0] a[];
+        rand bit [7:0] x;
+        function bit [7:0] id(bit [7:0] v); return v; endfunction
+        constraint c { a.size() inside {[2:4]}; a[0] inside {[4:5]}; x == id(a[0]); }
+    endclass
+    // A size the argument solve does not solve is a value there: one solved
+    // before, and that of a state array.
+    class Sized;
+        rand bit [7:0] a[];
+        rand bit [7:0] z;
+        bit [7:0] q[$];
+        rand bit [7:0] x, y;
+        function bit [7:0] id(bit [7:0] v); return v; endfunction
+        constraint c {
+            this.a.size() == 3;
+            a[0] == a.size();
+            x == id(a[0]);
+            z == q.size();
+            y == id(z);
+        }
+    endclass
+    // An element named through `this` or `super` (8.11, 8.15).
+    class Base; rand bit [7:0] e[2]; endclass
+    class Named extends Base;
+        rand bit [7:0] w;
+        constraint c { this.e[0] == 8'h11; super.e[1] == w; w == 8'h22; }
+    endclass
+    // A size a conjunct gives is kept for the solve of sizes; other sizes
+    // are tried when an element at a constant position needs one; the bits
+    // of an element (11.5.1).
+    class Conj;
+        rand bit [7:0] a[];
+        constraint c { a.size() == 3 && a[0] == 1; }
+    endclass
+    class Retry;
+        rand bit [7:0] a[];
+        constraint c { a.size() inside {[1:2]}; a[1] == 1; }
+    endclass
+    class Bits;
+        rand bit [7:0] e[2];
+        constraint c { e[0][3:0] == 4'h5; e[1][7] == 1'b1; }
+    endclass
+    B_item b;
+    Mixed m;
+    Called k;
+    Sized z;
+    Named n;
+    Conj cj;
+    Retry rt;
+    Bits bt;
+    pk::PD pd;
+    bit [7:0] e0, e1;
+    initial begin
+        cj = new;
+        rt = new;
+        bt = new;
+        pd = new;
+        b = new;
+        m = new;
+        k = new;
+        z = new;
+        n = new;
+        m.s = '{7, 20};
+        z.q = '{1, 2, 3, 4, 5};
+        for (int i = 0; i < 20; i++) begin
+            if (b.randomize() == 0 || b.burst_len < 2 || b.burst_len > 9
+                || b.fb.size() != b.burst_len + 1 || b.fb[0] != b.burst_len)
+                bad++;
+            if (m.randomize() == 0 || m.d.size() != 3 || m.d[0] != 20 || m.d[1] <= 20
+                || m.d[2] <= 20 || m.x != 7 || m.f[3] != 8)
+                bad++;
+            if (b.randomize() with { fb[1] == 8'h55; } == 0 || b.fb[1] != 8'h55
+                || b.fb[0] != b.fb.size() - 1)
+                bad++;
+            if (k.randomize() == 0 || k.a.size() < 2 || k.a.size() > 4 || k.a[0] < 4
+                || k.a[0] > 5 || k.x != k.a[0])
+                bad++;
+            if (z.randomize() == 0 || z.a.size() != 3 || z.a[0] != 3 || z.x != 3 || z.z != 5
+                || z.y != 5)
+                bad++;
+            if (n.randomize() == 0 || n.e[0] != 8'h11 || n.e[1] != 8'h22) bad++;
+            if (cj.randomize() == 0 || cj.a.size() != 3 || cj.a[0] != 1) bad++;
+            if (rt.randomize() == 0 || rt.a.size() != 2 || rt.a[1] != 1) bad++;
+            if (bt.randomize() == 0) bad++;
+            e0 = bt.e[0];
+            e1 = bt.e[1];
+            if (e0[3:0] != 4'h5 || e1[7] != 1'b1) bad++;
+            if (pd.randomize() == 0 || pd.w != 6) bad++;
+        end
         $display("%0d", bad);
         done = bad == 0;
     end
@@ -5236,3 +5670,1145 @@ module Top(output bit ok);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq ok 1))
+
+; Soft constraints (IEEE 1800-2023 18.5.13): the solver keeps each one the
+; hard constraints and the soft ones of higher priority allow, from the
+; highest priority down, and treats the others as true. A later constraint
+; of a block, one of a later block by its prototype, one of a derived class
+; and an inline one are above the others (18.5.13.1); `disable soft`
+; discards the lower soft constraints that name its variable (18.5.13.2); a
+; guard makes a soft constraint conditional.
+(case soft_constraints
+  (source "soft.sv" #"
+module Top(output int checks);
+    class A;
+        rand int b;
+        constraint c1 { soft b > 4; soft b < 12; }
+    endclass
+    class B extends A;
+        constraint c2 { soft b == 20; }
+    endclass
+    class C extends A;
+        constraint c2 { soft b == 20; }
+        constraint c3;
+    endclass
+    constraint C::c3 { soft b > 100; }
+    class D;
+        rand int b;
+        constraint c1 { soft b > 4; soft b < 12; }
+        constraint c2 { disable soft b; }
+        constraint c3 { soft b == 20; }
+    endclass
+    class E;
+        rand int b;
+        constraint h { b inside {[1:3]}; }
+        constraint s { soft b == 7; }
+    endclass
+    class F;
+        rand bit p;
+        rand int q;
+        constraint c { p == 1; p -> soft q == 5; if (!p) soft q == 6; }
+    endclass
+    class G;
+        rand int b;
+        constraint s1 { soft b == 3; }
+        constraint s2 { soft b == 4; }
+    endclass
+    initial begin
+        A a = new;
+        B b = new;
+        C c = new;
+        D d = new;
+        E e = new;
+        F f = new;
+        G g = new;
+        checks = 0;
+        checks += (a.randomize() && a.b > 4 && a.b < 12) * 1;
+        checks += (b.randomize() && b.b == 20) * 2;
+        checks += (c.randomize() && c.b > 100) * 4;
+        checks += (c.randomize() with { soft b == 90; } && c.b == 90) * 8;
+        checks += (d.randomize() && d.b == 20) * 16;
+        checks += (e.randomize() && e.b >= 1 && e.b <= 3) * 32;
+        checks += (f.randomize() && f.p == 1 && f.q == 5) * 64;
+        checks += (g.randomize() && g.b == 4) * 128;
+        b.c2.constraint_mode(0);
+        checks += (b.randomize() && b.b > 4 && b.b < 12) * 256;
+        checks += (c.randomize() with { b < 0; } && c.b < 0) * 512;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 1023))
+; The priorities of soft constraints follow the whole chain of classes,
+; also through a base class of a package (IEEE 1800-2023 18.5.13.1), and a
+; guarded `disable soft` discards while its guard holds (18.5.13.2).
+(case soft_constraint_classes_and_guarded_disables
+  (source "soft_more.sv" #"
+package P;
+    class A;
+        rand int b;
+        constraint a1 { soft b == 1; }
+    endclass
+endpackage
+module Top(output int checks);
+    class B extends P::A;
+        constraint p0 { b >= 0; }
+        constraint p1 { b < 100; }
+        constraint x1 { soft b == 2; }
+    endclass
+    class C extends B;
+        constraint y { soft b == 3; }
+    endclass
+    class G;
+        rand int x;
+        bit off;
+        constraint range { x inside {3, 4}; }
+        constraint c1 { soft x == 3; }
+        constraint c2 { if (off) disable soft x; }
+    endclass
+    initial begin
+        C c = new;
+        G g = new;
+        int fours;
+        checks = 0;
+        checks += (c.randomize() && c.b == 3) * 1;
+        fours = 0;
+        repeat (16) if (g.randomize() && g.x == 4) fours++;
+        checks += (fours == 0) * 2;
+        g.off = 1;
+        fours = 0;
+        repeat (32) if (g.randomize() && g.x == 4) fours++;
+        checks += (fours > 0) * 4;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 7))
+
+; A soft distribution (18.5.13) constrains its operand to its items of
+; nonzero weight while it is kept, and its weights shape the choice as those
+; of a hard one do (18.5.3); one that other constraints contradict, or that
+; a `disable soft` discards, has no effect, also on a variable a function
+; call in a constraint takes, solved first.
+(case soft_distributions
+  (source "soft_dist.sv" #"
+module Top(output int checks);
+    class D;
+        rand bit [3:0] x;
+        bit off;
+        constraint c { soft x dist {1 := 9, 2 := 0, [8:9] :/ 1}; }
+        constraint d { if (off) disable soft x; }
+    endclass
+    class F;
+        rand bit [3:0] a, b;
+        function bit [3:0] same(bit [3:0] v); return v; endfunction
+        constraint c { soft a dist {11 := 9, [0:15] :/ 1}; b == same(a); }
+    endclass
+    initial begin
+        D d = new;
+        F f = new;
+        int ones, others, highs, elevens, mismatched;
+        checks = 0;
+        ones = 0;
+        others = 0;
+        repeat (64) if (d.randomize()) begin
+            if (d.x == 1) ones++;
+            else if (!(d.x inside {8, 9})) others++;
+        end
+        checks += (others == 0 && ones > 32 && ones < 64) * 1;
+        checks += (d.randomize() with { x == 5; } && d.x == 5) * 2;
+        highs = 0;
+        repeat (16) if (d.randomize() with { x > 1; } && d.x inside {8, 9}) highs++;
+        checks += (highs == 16) * 4;
+        d.off = 1;
+        others = 0;
+        repeat (32) if (d.randomize() && !(d.x inside {1, 8, 9})) others++;
+        checks += (others > 0) * 8;
+        // A function argument is solved first (18.5.11), its soft
+        // distribution weighting it there too.
+        elevens = 0;
+        mismatched = 0;
+        repeat (64) if (f.randomize()) begin
+            if (f.a == 11) elevens++;
+            if (f.b != f.a) mismatched++;
+        end
+        checks += (elevens > 32 && elevens < 64 && mismatched == 0) * 16;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 31))
+
+; `disable soft h.x` discards the soft constraints on the random variable
+; of the object a rand handle refers to (18.5.13.2).
+(case soft_constraints_disabled_through_rand_handles
+  (source "soft_handles.sv" #"
+module Top(output int checks);
+    class Child;
+        rand bit [7:0] x;
+        constraint c { soft x == 1; }
+    endclass
+    class Kept;
+        rand Child h;
+        function new(); h = new; endfunction
+    endclass
+    class Dropped;
+        rand Child h;
+        constraint d { disable soft h.x; }
+        function new(); h = new; endfunction
+    endclass
+    initial begin
+        Kept k = new;
+        Dropped d = new;
+        int others;
+        checks = 0;
+        others = 0;
+        repeat (16) if (!k.randomize() || k.h.x != 1) others++;
+        checks += (others == 0) * 1;
+        others = 0;
+        repeat (16) if (d.randomize() && d.h.x != 1) others++;
+        checks += (others > 0) * 2;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 3))
+
+; A guard compares class handles, such as with `null`, by their values when
+; the call starts (IEEE 1800-2023 18.5.13), also a static handle; a rand
+; handle is not changed.
+(case constraint_handle_guards
+  (source "guards.sv" #"
+module Top(output int checks);
+    class Node;
+        int d;
+    endclass
+    class A;
+        rand int b;
+        Node next, other;
+        constraint c1 { if (next == null) b == 5; else b == 6; }
+        constraint c2 { (next != other) -> b > 0; }
+    endclass
+    class S;
+        rand int b;
+        static Node head;
+        Node mine;
+        constraint c { if (head == null) b == 1; else if (head == mine) b == 2; else b == 3; }
+    endclass
+    initial begin
+        A a = new;
+        S s = new;
+        checks = 0;
+        checks += (a.randomize() && a.b == 5) * 1;
+        a.next = new;
+        checks += (a.randomize() && a.b == 6) * 2;
+        a.other = a.next;
+        checks += (a.randomize() && a.b == 6 && a.next != null) * 4;
+        checks += (a.randomize() with { null === next -> b == 7; } && a.b == 6) * 8;
+        checks += (s.randomize() && s.b == 1) * 16;
+        S::head = new;
+        checks += (s.randomize() && s.b == 3) * 32;
+        s.mine = S::head;
+        checks += (s.randomize() && s.b == 2) * 64;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 127))
+
+; A static constraint block has one constraint mode for every object of the
+; class that declares it, which constraint_mode through any of them sets and
+; reads, by the object's class, also for an object a rand handle reaches
+; (IEEE 1800-2023 18.5.11); a block a derived class overrides is the derived
+; class's. constraint_mode() is an int.
+(case static_constraint_blocks
+  (source "static_blocks.sv" #"
+module Top(output int checks);
+    class A;
+        rand int b;
+        static constraint c1 { b == 5; }
+        static constraint c2 { b >= 2; b <= 3; }
+        constraint c3 { b != 3; }
+    endclass
+    class B extends A;
+        constraint c1 { b > 0; }
+    endclass
+    class C;
+        rand int x;
+        extern static constraint c;
+        constraint d { soft x == 8; }
+    endclass
+    constraint C::c { x == 7; }
+    class Base;
+        rand int v;
+        static constraint s { v == 1; }
+    endclass
+    class Derived extends Base;
+        static constraint s { v == 2; }
+    endclass
+    class Holder;
+        rand C member;
+        function new(); member = new; endfunction
+    endclass
+    initial begin
+        A a1 = new, a2 = new;
+        B b = new;
+        C c = new, other = new;
+        Derived d = new;
+        Base h = d, base = new;
+        Holder holder = new;
+        checks = 0;
+        checks += (!a1.randomize() && !a2.randomize()) * 1;
+        a1.c1.constraint_mode(0);
+        checks += (a1.c1.constraint_mode() == 0 && a2.c1.constraint_mode() == 0) * 2;
+        checks += (a2.randomize() && a2.b == 2 && a1.randomize() && a1.b == 2) * 4;
+        checks += (b.randomize() && b.b == 2 && b.c1.constraint_mode() == 1) * 8;
+        a2.c2.constraint_mode(0);
+        a2.c1.constraint_mode(1);
+        checks += (a1.randomize() && a1.b == 5) * 16;
+        checks += (c.randomize() && c.x == 7) * 32;
+        // Through a rand handle: the block is off for every C, which
+        // leaves its soft constraint.
+        other.c.constraint_mode(0);
+        checks += (holder.randomize() && holder.member.x == 8) * 64;
+        // Through a Base handle, the Derived override's mode.
+        h.s.constraint_mode(0);
+        checks += (d.s.constraint_mode() == 0 && base.s.constraint_mode() == 1
+                   && base.randomize() && base.v == 1) * 128;
+        checks += ($bits(h.s.constraint_mode()) == 32 && h.s.constraint_mode() == 0) * 256;
+        h.s.constraint_mode();
+        // Every block of an object, its static ones for every object.
+        a1.constraint_mode(0);
+        checks += (a2.c1.constraint_mode() == 0 && a2.c3.constraint_mode() == 1
+                   && a1.c3.constraint_mode() == 0) * 512;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 1023))
+
+; Inline constraints name the caller's variables where the object's class
+; has no member of the name: a property of the class of the method that
+; makes the call, and its arguments. A restricted constraint block
+; resolves only the names it lists into the object's class, the others in
+; the caller's scope, a dotted name by its first identifier (IEEE 1800-2023
+; 18.7). The caller's variable that holds the object the call randomizes
+; names it there, unless the class has a member of its name that the block
+; does not leave out, also in loops, at constant positions and in guards:
+; read once as the call starts, also after a pre_randomize() assigns it.
+(case inline_constraint_caller_names
+  (source "inline_caller.sv" #"
+class C0;
+    rand int x;
+endclass
+class Limits;
+    int limit = 2;
+endclass
+class C1;
+    rand int x;
+    int y = -1;
+    Limits cfg;
+    function new(); cfg = new; endfunction
+endclass
+class C2;
+    int x = 100, y = 5;
+    function int doit(C0 f, int x, int z);
+        return f.randomize() with { x > 0; x < y + z; };
+    endfunction
+endclass
+function int restricted(C1 obj, int y);
+    return obj.randomize() with (x) { x > 0; x < y; };
+endfunction
+function int listed(C1 obj, int y);
+    return obj.randomize() with (x, y) { x == y; };
+endfunction
+function int dotted(C1 obj);
+    return obj.randomize() with (x, cfg) { x == cfg.limit; };
+endfunction
+function int via_receiver(C1 item, int v);
+    return item.randomize() with { item.x == v; };
+endfunction
+function int via_receiver_restricted(C1 item);
+    return item.randomize() with (y) { item.x == 6; };
+endfunction
+class Node;
+    rand int x;
+    Node next;
+endclass
+function int member_first(Node next);
+    return next.randomize() with { x == next.x + 1; };
+endfunction
+class Tagged;
+    rand int x, y;
+    int item;
+    rand bit [7:0] a[3];
+    Node link;
+endclass
+function int collision_unlisted(Tagged item);
+    return item.randomize() with (x) { item.y == 4; };
+endfunction
+function int receiver_elements(Tagged h);
+    return h.randomize() with {
+        foreach (h.a[i]) h.a[i] == i + 1;
+        h.a[1] == 2;
+        foreach (a[j]) h.a[j] > 0;
+        h.link == null -> h.x == 3;
+    };
+endfunction
+typedef class Redirected;
+class Holder;
+    static Redirected current, other;
+    static function int go();
+        return current.randomize() with { current.x == 5; };
+    endfunction
+endclass
+class Redirected;
+    rand int x;
+    function void pre_randomize();
+        Holder::current = Holder::other;
+    endfunction
+endclass
+module Top(output int checks);
+    initial begin
+        C0 b = new;
+        C1 c = new;
+        C2 d = new;
+        int ok;
+        checks = 0;
+        ok = 0;
+        repeat (8) if (d.doit(b, 50, 2) && b.x > 0 && b.x < 7) ok++;
+        checks += (ok == 8) * 1;
+        ok = 0;
+        repeat (8) if (restricted(c, 4) && c.x inside {[1:3]}) ok++;
+        checks += (ok == 8) * 2;
+        checks += (listed(c, 9) && c.x == -1) * 4;
+        checks += (dotted(c) && c.x == 2) * 8;
+        checks += (via_receiver(c, 5) && c.x == 5) * 16;
+        checks += (via_receiver_restricted(c) && c.x == 6) * 32;
+        begin
+            Node n = new, m = new;
+            m.x = 7;
+            n.next = m;
+            checks += (member_first(n) && n.x == 8) * 64;
+        end
+        begin
+            Tagged t = new;
+            Redirected first = new;
+            checks += (collision_unlisted(t) && t.y == 4) * 128;
+            checks += (receiver_elements(t) && t.a[0] == 1 && t.a[2] == 3 && t.x == 3) * 256;
+            Holder::current = first;
+            Holder::other = new;
+            checks += (Holder::go() && first.x == 5 && Holder::other.x == 0
+                && Holder::current == Holder::other) * 512;
+        end
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 1023))
+
+; A select of a member a handle path names, `h.m[0]`, `this.h.m[3:0]`,
+; `super.h.m[1:0]` or the receiver's `item.h.m[6]`, and of a member of a loop
+; element, takes its bits in every constraint position: a constraint, a
+; guard, `dist`, `solve ... before`, `disable soft` and a function's argument
+; (IEEE 1800-2023 11.5.1, 18.5.9, Syntax 18-8), through a static handle too;
+; so do `this.a[0]` and `this.q.size()`.
+(case constraint_member_path_selects
+  (source "member_path_selects.sv" #"
+module Top(output int checks);
+    class Inner;
+        rand bit [7:0] m;
+        bit [7:0] s = 8'hA5;
+    endclass
+    class Base;
+        rand Inner bh;
+        function new(); bh = new; endfunction
+    endclass
+    class Outer extends Base;
+        rand Inner h;
+        Inner st;
+        rand bit [7:0] a[2];
+        rand byte q[];
+        rand bit [3:0] y, z;
+        rand bit b;
+        function new(); super.new(); h = new; st = new; endfunction
+        function bit [3:0] id(bit [3:0] v); return v; endfunction
+        constraint c {
+            h.m[3:0] == 4'h3;
+            this.h.m[7] == 1'b1;
+            super.bh.m[1:0] == 2'b10;
+            y == st.s[3:0];
+            z == id(st.s[7:4]);
+            h.m[0] -> b;
+            st.s[7] -> this.a[0][1:0] == 2'b01;
+            b dist {0 := 1, 1 := 1};
+            this.q.size() inside {[1:3]};
+            solve h.m[0] before b;
+            solve this.a[0] before y;
+            solve this.q.size() before z;
+        }
+    endclass
+    class Soft;
+        rand Inner h;
+        function new(); h = new; endfunction
+        constraint s { soft h.m[7:4] == 4'h9; }
+        constraint d { disable soft h.m[2]; }
+    endclass
+    class Loop;
+        rand bit [3:0] v;
+        Inner hs[2];
+        function new(); foreach (hs[i]) hs[i] = new; endfunction
+        // A parenthesized element, `(hs[i]).s`, names the same member.
+        constraint c { foreach (hs[i]) { v > hs[i].s[3:0]; v < (hs[i]).s[3:0] + 4'h2; } }
+    endclass
+    // A static handle is a state value as another handle is.
+    class Shared;
+        static Inner head;
+        static Inner none;
+        rand bit [3:0] v, w;
+        constraint c {
+            v == head.s[3:0];
+            head.s[7] -> v != 0;
+            none != null -> w == none.s[3:0];
+            w == 4'h2;
+        }
+    endclass
+    function int via_receiver(Outer item);
+        return item.randomize() with { item.h.m[6] == 1'b0; };
+    endfunction
+    initial begin
+        Outer o = new;
+        Soft sf = new;
+        Loop lp = new;
+        Shared sh = new;
+        bit [7:0] m, bm, a0;
+        int nines;
+        checks = 0;
+        if (o.randomize()) begin
+            m = o.h.m;
+            bm = o.bh.m;
+            a0 = o.a[0];
+            checks += (m[3:0] == 4'h3 && m[7] && bm[1:0] == 2'b10) * 1;
+            checks += (o.y == 4'h5 && o.z == 4'hA && o.b == 1 && a0[1:0] == 2'b01) * 2;
+            checks += (o.q.size() inside {[1:3]}) * 4;
+        end
+        if (via_receiver(o)) begin
+            m = o.h.m;
+            checks += (m[6] == 1'b0 && m[3:0] == 4'h3) * 8;
+        end
+        nines = 0;
+        repeat (16) if (sf.randomize()) begin
+            m = sf.h.m;
+            if (m[7:4] == 4'h9) nines++;
+        end
+        checks += (nines < 16) * 16;
+        checks += (lp.randomize() && lp.v == 4'h6) * 32;
+        Shared::head = new;
+        checks += (sh.randomize() && sh.v == 4'h5 && sh.w == 4'h2) * 64;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 127))
+
+; `std::randomize(v...) with { ... }` solves the variables with the
+; constraints, which also read other variables of the scope, and writes them
+; only when it succeeds (IEEE 1800-2023 18.12.1).
+(case scope_randomize_with
+  (source "scope_with.sv" #"
+module Top(output int checks);
+    class A;
+        function int pick(int y, output int got);
+            int x, success;
+            success = std::randomize(x) with { x > 0; x < y; };
+            got = x;
+            return success;
+        endfunction
+    endclass
+    int a, b, limit = 10;
+    bit [3:0] nibble;
+    initial begin
+        A obj = new;
+        int got;
+        checks = 0;
+        checks += (obj.pick(3, got) == 1 && got > 0 && got < 3) * 1;
+        checks += (std::randomize(a, b) with { a + b == limit; a > 3; b > 3; }
+                   && a + b == 10 && a > 3 && b > 3) * 2;
+        a = 77;
+        checks += (std::randomize(a) with { a > 5; a < 5; } == 0 && a == 77) * 4;
+        checks += (std::randomize(nibble) with { nibble == 4'hf; soft nibble == 1; } && nibble == 15) * 8;
+        // A distribution names the variables as any other constraint.
+        checks += (std::randomize(a) with { a dist { 3 := 1, [7:8] :/ 1 }; }
+                   && (a == 3 || a == 7 || a == 8)) * 16;
+        checks += (std::randomize(a, b) with { a dist { 2 := 1, 4 := 1 }; b == a + limit; }
+                   && (a == 2 || a == 4) && b == a + 10) * 32;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 63))
+
+; The names of a scope randomize call's constraints bind as those of inline
+; constraints do (IEEE 1800-2023 18.7, 18.12): a member of the class of the
+; caller's method, also through `this` or `super`, is a value of the call; a
+; parameter or an enumeration constant is a constant; `unique` takes the
+; call's variables.
+(case scope_randomize_caller_names
+  (source "scope_names.sv" #"
+module Top(output int checks);
+    parameter int LIMIT = 6;
+    localparam bit [3:0] LOW = 2;
+    typedef enum bit [1:0] { RED, GREEN, BLUE } color_t;
+    class Base;
+        int floor = 30;
+    endclass
+    class A extends Base;
+        int limit = 9;
+        static int top = 20;
+        function int pick(output int got);
+            int x, success;
+            success = std::randomize(x) with { x > limit; x < this.limit + 2; };
+            got = x;
+            return success;
+        endfunction
+        function int pick_static(output int got);
+            int x, success;
+            success = std::randomize(x) with { x == top - 1; };
+            got = x;
+            return success;
+        endfunction
+        function int pick_super(output int got);
+            int x, success;
+            success = std::randomize(x) with { x == super.floor + LIMIT; };
+            got = x;
+            return success;
+        endfunction
+    endclass
+    // Inline constraints of a class randomize call bind them alike.
+    class C;
+        rand int v;
+    endclass
+    class Driver;
+        int offset = 5;
+        function int drive(C c);
+            return c.randomize() with { v == offset + LIMIT; };
+        endfunction
+    endclass
+    int a;
+    bit [7:0] n;
+    bit [1:0] u, v, w;
+    initial begin
+        A obj = new;
+        int got;
+        checks = 0;
+        checks += (obj.pick(got) == 1 && got == 10) * 1;
+        checks += (obj.pick_static(got) == 1 && got == 19) * 2;
+        checks += (obj.pick_super(got) == 1 && got == 36) * 4;
+        // `LOW` is unsigned, so is `n > LOW` (11.8.1).
+        checks += (std::randomize(n) with { n > LOW; n < LIMIT; n != 3; n != 5; } && n == 4) * 8;
+        checks += (std::randomize(u, v) with { unique {u, v}; u == 1; v < 2; } && u == 1 && v == 0) * 16;
+        w = 2;
+        checks += (std::randomize(u) with { unique {u, w}; u > 1; } && u == 3) * 32;
+        checks += (std::randomize(a) with { a > RED; a < BLUE; } && a == GREEN) * 64;
+        begin
+            C c = new;
+            Driver d = new;
+            checks += (d.drive(c) == 1 && c.v == 11) * 128;
+            checks += (c.randomize() with { v == LIMIT + GREEN; } && c.v == 7) * 256;
+        end
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 511))
+
+; A variable of a scope randomize call inside a method resolves as the
+; name does there (IEEE 1800-2023 18.12): a local, else a property of the
+; class, inherited or static ones included, which the call writes when it
+; succeeds; `this.` and `super.` name the same variable in the constraints.
+(case scope_randomize_class_properties
+  (source "scope_properties.sv" #"
+module Top(output int checks);
+    class Base;
+        int inherited;
+    endclass
+    class Packet extends Base;
+        bit [7:0] pkt_size;
+        static int count;
+        function int fill();
+            return std::randomize(pkt_size) with { pkt_size inside {[10:50]}; this.pkt_size != 10; };
+        endfunction
+        function int fill_inherited();
+            return std::randomize(inherited) with { super.inherited == 7; };
+        endfunction
+        function int fill_static();
+            return std::randomize(count) with { count == 3; };
+        endfunction
+        function int unsatisfiable();
+            return std::randomize(pkt_size) with { pkt_size > 200; pkt_size < 100; };
+        endfunction
+        function int shadowed(output bit [7:0] got);
+            bit [7:0] pkt_size;
+            int success = std::randomize(pkt_size) with { pkt_size == 5; this.pkt_size == 77; };
+            got = pkt_size;
+            return success;
+        endfunction
+    endclass
+    initial begin
+        Packet p = new;
+        bit [7:0] got;
+        checks = 0;
+        checks += (p.fill() == 1 && p.pkt_size > 10 && p.pkt_size <= 50) * 1;
+        checks += (p.fill_inherited() == 1 && p.inherited == 7) * 2;
+        checks += (p.fill_static() == 1 && Packet::count == 3) * 4;
+        p.pkt_size = 77;
+        checks += (p.unsatisfiable() == 0 && p.pkt_size == 77) * 8;
+        checks += (p.shadowed(got) == 1 && got == 5 && p.pkt_size == 77) * 16;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 31))
+
+; `std::randomize` returns an `int` (IEEE 1800-2023 18.12); without
+; variables it checks its constraints and changes nothing.
+(case scope_randomize_check_only_and_result
+  (source "scope_check.sv" #"
+module Top(output int checks);
+    int a = 4, b;
+    initial begin
+        checks = 0;
+        checks += (std::randomize(b) with { b == 1; } > -1) * 1;
+        checks += ($signed(std::randomize(b) with { b == 1; }) == 1 && b == 1) * 2;
+        checks += (std::randomize() with { a == 4; } == 1 && a == 4) * 4;
+        checks += (std::randomize() with { a > 4; } == 0 && a == 4) * 8;
+        checks += (randomize() with { a < 5; a > 3; } == 1 && a == 4) * 16;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 31))
+
+; Each activation of a process draws its scope randomize calls from the
+; process's RNG where the previous left it (IEEE 1800-2023 18.14), and
+; seeding the process repeats them.
+(case scope_randomize_process_rng
+  (source "scope_rng.sv" #"
+module Top(output int checks);
+    int x, first, second, third, seeded;
+    process current;
+    initial begin
+        checks = 0;
+        void'(std::randomize(x) with { x >= 0; });
+        first = x;
+        #1;
+        void'(std::randomize(x) with { x >= 0; });
+        second = x;
+        #1;
+        void'(std::randomize(x) with { x >= 0; });
+        third = x;
+        checks += (first != second && second != third && first != third) * 1;
+        current = process::self();
+        current.srandom(7);
+        void'(std::randomize(x) with { x >= 0; });
+        seeded = x;
+        #1;
+        current.srandom(7);
+        void'(std::randomize(x) with { x >= 0; });
+        checks += (x == seeded) * 2;
+    end
+endmodule
+"#)
+  (top Top) (run_until 4) (assert_eq checks 3))
+
+; A constraint calls a function of its class (IEEE 1800-2023 18.5.11): the
+; random variables in the arguments are solved first, by the constraints
+; that name only them; the function is then called as the object's class
+; calls it, an override included, with their values, and its value is state
+; to the other constraints. A random variable the function reads that is no
+; argument has its value before the call, and a call that fails changes
+; nothing.
+(case constraint_functions
+  (source "functions.sv" #"
+module Top(output int checks);
+    int scale = 5;
+    class A;
+        rand int b1, b2, b3;
+        function int F(input int d);
+            F = d;
+        endfunction
+        function int twice(int v);
+            return 2 * v + 1;
+        endfunction
+        constraint c1 { b1 == 5; }
+        constraint c2 { b2 == F(b1); }
+        constraint c3 { b3 == twice(b1 + 1); }
+    endclass
+    class Ordered;
+        rand int x, y;
+        function int same(int v); return v; endfunction
+        constraint d { y inside {[1:10]}; soft y == 2; }
+        constraint c { x == same(y); x > 5; }
+    endclass
+    class Base;
+        rand int a, b;
+        virtual function int g(int v); return v; endfunction
+        constraint c { a == 3; b == g(a); }
+    endclass
+    class Derived extends Base;
+        virtual function int g(int v); return v * 10; endfunction
+    endclass
+    class Reads;
+        rand int a, k, m;
+        int scale = 2;
+        function int h(int v); return v + k; endfunction
+        function bit [3:0] low(int v); return v; endfunction
+        function int narrow(bit [1:0] v); return v; endfunction
+        function int scaled(int v); return v * scale; endfunction
+        rand int c, n, s;
+        constraint r { a == 18; k inside {[1:9]}; m == h(a); c == low(a);
+                       n == narrow(a); s == scaled(a); }
+    endclass
+    initial begin
+        A obj = new;
+        Ordered o = new;
+        Derived d = new;
+        Base h = d;
+        Reads r = new;
+        checks = 0;
+        checks += (obj.randomize() && obj.b1 == 5 && obj.b2 == 5 && obj.b3 == 13) * 1;
+        // y is solved first, to 2, which leaves x no value.
+        o.x = 77;
+        checks += (!o.randomize() && o.x == 77) * 2;
+        checks += (d.randomize() && d.b == 30 && h.randomize() && h.b == 30) * 4;
+        r.k = 100;
+        checks += (r.randomize() && r.m == 118 && r.k != 100) * 8;
+        checks += (r.c == 2 && r.n == 2 && r.s == 36) * 16;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 31))
+
+; The calls of a block that is off or that a derived class overrides pin
+; nothing; a guard that calls a function waits for the solve of the rest; a
+; randc argument takes a value its cycle has not produced yet; an array size
+; named only in an argument is solved; a static rand argument is the
+; property (IEEE 1800-2023 18.5.11). A function that randomizes another
+; object between the two solves leaves the arguments pinned; an inherited
+; constraint calls the non-virtual method its class sees and the override
+; of a virtual one (8.20). A state value is a value to the constraints of
+; the arguments, a block that is off calls nothing, the sum of a random
+; array in an argument solves its elements there, and `this.f` and
+; `super.f` call the class's method and its base's.
+(case constraint_function_phases
+  (source "function_phases.sv" #"
+module Top(output int checks);
+    class M;
+        rand int x, y;
+        function int f(int v); return v + 1; endfunction
+        constraint c1 { x == f(y); }
+        constraint c2 { x == y; x == 0; }
+    endclass
+    class N extends M;
+        constraint c1 { x >= 0; }
+    endclass
+    class G;
+        rand int x, y;
+        function int f(int v); return v; endfunction
+        constraint s { soft x == 3; }
+        constraint d { y == 1; if (f(y) > 0) disable soft x; x inside {3, 4}; }
+    endclass
+    class C;
+        randc bit [1:0] r;
+        rand int y;
+        function int id(int v); return v; endfunction
+        constraint k { y == id(r); }
+    endclass
+    class Q;
+        rand int q[];
+        rand int n;
+        function int size_of(int s); return s; endfunction
+        constraint k { n == size_of(q.size()); }
+    endclass
+    class S;
+        static rand int s;
+        rand int y;
+        function int id(int v); return v; endfunction
+        constraint k { s inside {[1:3]}; y == id(s) + 10; }
+    endclass
+    class In;
+        rand int v, w;
+        function int id(int a); return a; endfunction
+        constraint k { v inside {[1:3]}; w == id(v); }
+    endclass
+    class Out;
+        rand int a, b;
+        In inner;
+        function new(); inner = new; endfunction
+        function int pick(int s); void'(inner.randomize()); return s + 1; endfunction
+        constraint k { a inside {[0:100]}; b == pick(a); }
+    endclass
+    class B;
+        rand int x, y;
+        function int f(int v); return v + 1; endfunction
+        virtual function int g(int v); return v + 10; endfunction
+        constraint k { y == 5; x == f(y) + g(y); }
+    endclass
+    class D extends B;
+        function int f(int v); return v + 100; endfunction
+        virtual function int g(int v); return v + 1000; endfunction
+    endclass
+    // A state value the constraints of the arguments read is a value there.
+    class L;
+        rand bit [1:0] x, y;
+        bit [1:0] limit = 1;
+        function bit [1:0] id(bit [1:0] v); return v; endfunction
+        constraint k { x <= limit; y == id(x); }
+    endclass
+    // A block that is off makes no call (18.9).
+    class Off;
+        rand int a, b;
+        int calls;
+        function int count(int v); calls++; return v; endfunction
+        constraint k { b == count(a); }
+    endclass
+    // The sum of a random array in an argument makes its elements
+    // variables of the solve of arguments, which the rest keeps.
+    class Summed;
+        rand bit [7:0] q[3];
+        rand bit [7:0] y;
+        function bit [7:0] id(bit [7:0] v); return v; endfunction
+        constraint k { y == id(q.sum()); }
+    endclass
+    // `this.f`, `super.f` and a class scope of a base (8.11, 8.15, 8.23).
+    class Qualified extends B;
+        rand int z, w;
+        function int f(int v); return v + 100; endfunction
+        constraint q { z == this.f(y) + super.f(y); w == B::f(y); }
+    endclass
+    // The solve of arguments is the solve every phase takes: the weights of
+    // a `dist`, the preferred sizes and the restart of one randc cycle at a
+    // time shape it (18.5.3, 18.4.2), and the objects whose hooks ran take
+    // part in the solve of the rest whatever the functions change (18.6.2).
+    class W;
+        rand bit x;
+        rand int y;
+        function int id(int v); return v; endfunction
+        constraint k { x dist {0 := 1, 1 := 9}; y == id(x); }
+    endclass
+    class Z;
+        rand int q[];
+        rand int n;
+        function int size_of(int s); return s; endfunction
+        constraint k { n == size_of(q.size()); }
+    endclass
+    class R;
+        randc bit a, b;
+        rand int y;
+        function int id(int v); return v; endfunction
+        constraint eq { a == b; }
+        constraint k { y == id(a) + id(b); }
+    endclass
+    class Kid;
+        rand int v;
+        int pre, post;
+        function void pre_randomize(); pre++; endfunction
+        function void post_randomize(); post++; endfunction
+    endclass
+    class P;
+        rand Kid h;
+        rand int x, y;
+        function new(); h = new; endfunction
+        function int drop(int v); h = null; return v; endfunction
+        constraint k { y == drop(x); }
+    endclass
+    // A class whose constraints read static properties visits the
+    // members of its own call too.
+    class SP;
+        static rand int s;
+        rand Kid h;
+        function new(); h = new; endfunction
+    endclass
+    // Each call keeps its own participants, also while a function its
+    // constraints call randomizes another object.
+    class Nest;
+        rand Kid h;
+        rand int x, y;
+        SP other;
+        function new(); h = new; other = new; endfunction
+        function int f(int v); void'(other.randomize()); h = null; return v; endfunction
+        constraint k { y == f(x); }
+    endclass
+    // An omitted input takes its default and actuals may be named, as in any
+    // call (13.5.3, 13.5.4); a call under a guard runs only while the guard
+    // holds (18.5.13).
+    class Args;
+        rand int x, y;
+        function int dflt(int v = 3); return v; endfunction
+        function int pair(int a, int b); return a * 10 + b; endfunction
+        constraint k { x == dflt(); y == pair(.b(2), .a(1)); }
+    endclass
+    class Guarded;
+        rand int y;
+        Kid child;
+        function int id(int v); return v; endfunction
+        constraint k { child != null -> y == id(child.v); }
+    endclass
+    // A function's value in an item of a `dist` (18.5.3).
+    class DI;
+        rand int x;
+        function int id(int v); return v; endfunction
+        constraint k { x dist {id(3) := 1, 4 := 0}; }
+    endclass
+    initial begin
+        M m = new;
+        W w = new;
+        Z z = new;
+        R r = new;
+        P pp = new;
+        Kid kid;
+        DI di = new;
+        SP sp = new;
+        Nest ns = new;
+        Kid nkid;
+        Args ar = new;
+        Guarded gd = new;
+        int ones, oversized;
+        L l = new;
+        Off off = new;
+        Summed sm = new;
+        Qualified qq = new;
+        int bounded, summed;
+        N nn = new;
+        G g = new;
+        C c = new;
+        Q q = new;
+        S st = new;
+        Out o = new;
+        D dd = new;
+        bit [3:0] seen;
+        int sized, pinned;
+        checks = 0;
+        m.c1.constraint_mode(0);
+        checks += (m.randomize() && m.x == 0 && m.y == 0) * 1;
+        checks += (nn.randomize() && nn.x == 0 && nn.y == 0) * 2;
+        checks += (g.randomize() && g.y == 1) * 4;
+        seen = 0;
+        repeat (4) if (c.randomize()) seen[c.r] = 1;
+        checks += (seen == 4'hf) * 8;
+        sized = 0;
+        repeat (8) if (q.randomize() && q.n == q.q.size() && q.q.size() != 0) sized++;
+        checks += (sized > 0) * 16;
+        checks += (st.randomize() && st.y == S::s + 10 && S::s inside {[1:3]}) * 32;
+        pinned = 0;
+        repeat (8) if (o.randomize() && o.b == o.a + 1 && o.inner.w == o.inner.v) pinned++;
+        checks += (pinned == 8) * 64;
+        checks += (dd.randomize() && dd.x == 6 + 1005) * 128;
+        bounded = 0;
+        repeat (16) if (l.randomize() && l.x <= 1 && l.y == l.x) bounded++;
+        checks += (bounded == 16) * 256;
+        off.k.constraint_mode(0);
+        checks += (off.randomize() && off.calls == 0) * 512;
+        summed = 0;
+        repeat (8) if (sm.randomize() && sm.y == sm.q[0] + sm.q[1] + sm.q[2]) summed++;
+        checks += (summed == 8) * 1024;
+        checks += (qq.randomize() && qq.z == (5 + 100) + (5 + 1) && qq.w == 5 + 1) * 2048;
+        ones = 0;
+        repeat (64) if (w.randomize() && w.x == 1 && w.y == 1) ones++;
+        checks += (ones > 40) * 4096;
+        oversized = 0;
+        repeat (8) if (!z.randomize() || z.q.size() > 4096 || z.n != z.q.size()) oversized++;
+        checks += (oversized == 0) * 8192;
+        // The cycles have only a = 0 and b = 1 left; restarting a's alone
+        // allows a == b == 1.
+        r.eq.constraint_mode(0);
+        void'(r.randomize() with { a == 1; b == 0; });
+        r.eq.constraint_mode(1);
+        checks += (r.randomize() && r.a == 1 && r.b == 1 && r.y == 2) * 16384;
+        kid = pp.h;
+        checks += (pp.randomize() && pp.h == null && kid.pre == 1 && kid.post == 1) * 32768;
+        checks += (di.randomize() && di.x == 3) * 65536;
+        checks += (sp.randomize() && sp.h.pre == 1 && sp.h.post == 1) * 131072;
+        nkid = ns.h;
+        checks += (ns.randomize() && ns.h == null && nkid.pre == 1 && nkid.post == 1) * 262144;
+        checks += (ar.randomize() && ar.x == 3 && ar.y == 12) * 524288;
+        begin
+            int guarded;
+            guarded = gd.randomize();
+            gd.child = new;
+            gd.child.v = 7;
+            checks += (guarded && gd.randomize() && gd.y == 7) * 1048576;
+        end
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 2097151))
+
+; A random guard of a call is solved with the arguments, and the call runs
+; only while it holds; one whose argument reads through a null handle is
+; taken not to hold, rather than failing the call (IEEE 1800-2023 18.5.11,
+; 18.5.13).
+(case constraint_function_random_guard
+  (source "random_guard.sv" #"
+module Top(output int checks);
+    class Kid;
+        int v;
+    endclass
+    class RG;
+        rand bit use_it;
+        rand int y;
+        Kid child;
+        int calls;
+        function int id(int v); calls++; return v; endfunction
+        constraint k { use_it -> y == id(child.v); }
+    endclass
+    initial begin
+        RG rg = new;
+        int valid, ones, zeros;
+        checks = 0;
+        checks += (rg.randomize() && rg.use_it == 0 && rg.calls == 0) * 1;
+        checks += (rg.randomize() with { use_it == 1; } == 0 && rg.calls == 0) * 2;
+        rg.child = new;
+        rg.child.v = 7;
+        valid = 0;
+        ones = 0;
+        zeros = 0;
+        repeat (32) begin
+            if (rg.randomize() && (!rg.use_it || rg.y == 7)) valid++;
+            if (rg.use_it) ones++; else zeros++;
+        end
+        checks += (valid == 32) * 4;
+        checks += (ones > 0 && zeros > 0) * 8;
+        checks += (rg.calls == ones) * 16;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 31))
+
+; uvm-1.2's uvm_sequence_base::pick_sequence: a function with no rand
+; argument is a state value, evaluated before solving (18.5.11), here of a
+; base class through a handle that may be null, in a derived object.
+(case constraint_function_pick_sequence
+  (source "pick_sequence.sv" #"
+module Top(output int bad, output bit done);
+    class Seqr;
+        int sequences[$];
+        function int num_sequences(); return sequences.size(); endfunction
+    endclass
+    class Item; endclass
+    class SeqBase extends Item;
+        Seqr m_sequencer;
+        rand int unsigned seq_kind;
+        constraint pick_sequence {
+            (num_sequences() <= 2) || (seq_kind >= 2);
+            (seq_kind <  num_sequences()) || (seq_kind == 0); }
+        function int num_sequences();
+            if (m_sequencer == null) return 0;
+            return (m_sequencer.num_sequences());
+        endfunction
+    endclass
+    class MySeq extends SeqBase; rand bit [3:0] x; endclass
+    initial begin
+        MySeq s = new;
+        Seqr r = new;
+        repeat (8) if (!s.randomize() || s.seq_kind != 0) bad++;
+        s.m_sequencer = r;
+        r.sequences = '{1, 2};
+        repeat (8) if (!s.randomize() || s.seq_kind > 1) bad++;
+        r.sequences = '{1, 2, 3, 4, 5};
+        repeat (8) if (!s.randomize() || s.seq_kind < 2 || s.seq_kind > 4) bad++;
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))

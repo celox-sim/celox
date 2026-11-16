@@ -19,7 +19,8 @@ pub(super) fn find_cross_block_priority_chain_plans(
             continue;
         }
         let block = &eu.blocks[&block_id];
-        let suffix_chunks = std::cell::OnceCell::new();
+        // The live-through chunks of the block, computed at its first Mux chain.
+        let mut suffix_chunks = None;
         for first_mux_idx in 0..block.instructions.len() {
             let SIRInstruction::Mux(dst, cond, true_val, false_val) =
                 &block.instructions[first_mux_idx]
@@ -171,7 +172,7 @@ pub(super) fn find_cross_block_priority_chain_plans(
                     .unwrap_or(1) as u128
             };
             let live_through_cost = suffix_chunks
-                .get_or_init(|| mux_live_through_chunks(block, &eu.register_map))
+                .get_or_insert_with(|| mux_live_through_chunks(block, &eu.register_map))
                 [muxes.last().expect("chain has a first mux").mux_idx];
             let introduced_cost = (muxes.len() as u128)
                 .saturating_mul(BRANCH_CONTROL_COST)
@@ -448,7 +449,8 @@ pub(super) fn find_cross_block_branchify_plans(
             continue;
         }
         let block = &eu.blocks[&block_id];
-        let suffix_chunks = std::cell::OnceCell::new();
+        // The live-through chunks of the block, computed at its first Mux chain.
+        let mut suffix_chunks = None;
         for (mux_idx, inst) in block.instructions.iter().enumerate() {
             let SIRInstruction::Mux(dst, cond, true_val, false_val) = inst else {
                 continue;
@@ -574,7 +576,7 @@ pub(super) fn find_cross_block_branchify_plans(
                 false_defs,
             };
             let live_through_chunks = suffix_chunks
-                .get_or_init(|| mux_live_through_chunks(block, &eu.register_map))[mux_idx];
+                .get_or_insert_with(|| mux_live_through_chunks(block, &eu.register_map))[mux_idx];
             if cross_block_branch_is_profitable(eu, &plan, live_through_chunks)
                 && selection.reserve(
                     block_id,

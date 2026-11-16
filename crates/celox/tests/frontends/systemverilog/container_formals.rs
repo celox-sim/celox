@@ -1,44 +1,5 @@
 use super::*;
 
-sv_backends! {
-    fn input_container_changes_are_not_seen_by_the_caller(sim) {
-        @case "container_formals::input_container_changes_are_not_seen_by_the_caller";
-    }
-    fn input_container_from_container_values(sim) {
-        @case "container_formals::input_container_from_container_values";
-    }
-    fn input_container_from_an_empty_concatenation(sim) {
-        @case "container_formals::input_container_from_an_empty_concatenation";
-    }
-    fn output_container_starts_empty_and_is_copied_back(sim) {
-        @case "container_formals::output_container_starts_empty_and_is_copied_back";
-    }
-    fn inout_container_is_copied_in_and_back(sim) {
-        @case "container_formals::inout_container_is_copied_in_and_back";
-    }
-    fn task_copies_containers_back_when_it_returns(sim) {
-        @case "container_formals::task_copies_containers_back_when_it_returns";
-    }
-    fn container_formals_of_class_handles_copy_the_container(sim) {
-        @case "container_formals::container_formals_of_class_handles_copy_the_container";
-    }
-    fn container_formals_of_class_methods(sim) {
-        @case "container_formals::container_formals_of_class_methods";
-    }
-    fn static_subroutine_container_formals(sim) {
-        @case "container_formals::static_subroutine_container_formals";
-    }
-    fn container_formals_forwarded_and_read_from_properties(sim) {
-        @case "container_formals::container_formals_forwarded_and_read_from_properties";
-    }
-    fn selects_of_reference_container_elements(sim) {
-        @case "container_formals::selects_of_reference_container_elements";
-    }
-    fn selects_of_four_state_container_elements(sim) {
-        @case "container_formals::selects_of_four_state_container_elements";
-    }
-}
-
 /// The index of a select of a dynamic element assigned a value with a call
 /// is evaluated before the call and keeps its width and unknown bits: out
 /// of range or unknown, it writes no element (IEEE 1800-2023 7.10.1,
@@ -151,4 +112,36 @@ fn increments_evaluate_place_addresses_once() {
     sim.run_until(0).unwrap();
     assert_eq!(sim.get(first), BigUint::from(0x00u8));
     assert_eq!(sim.get(calls), BigUint::from(1u8));
+}
+
+/// An output container formal is copied out to its actual when the
+/// subroutine returns (IEEE 1800-2023 13.5.1): the actual is not a value
+/// passed in, so what it held before the call does not reach the formal.
+#[test]
+fn output_container_formals_copy_out_only() {
+    let source = r#"
+    module Top(output int size, output int first, output int seen);
+        parameter int W = 4;
+        logic [W-1:0] r[$];
+        task automatic fill(output logic [W-1:0] q[$], output int held);
+            held = q.size();
+            q.push_back(4'd5);
+            q.push_back(4'd7);
+        endtask
+        initial begin
+            r = '{4'd1, 4'd2, 4'd3};
+            fill(r, seen);
+            size = r.size();
+            first = r[0];
+        end
+    endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("output-queue.sv"))], "Top")
+            .build()
+            .unwrap();
+    let (size, first, seen) = (sim.signal("size"), sim.signal("first"), sim.signal("seen"));
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(size), BigUint::from(2u8));
+    assert_eq!(sim.get(first), BigUint::from(5u8));
+    assert_eq!(sim.get(seen), BigUint::from(0u8));
 }

@@ -9,16 +9,46 @@ use crate::{
 
 pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
     let warnings = source.warnings();
-    crate::finish_analysis(analyze_source_impl(source), warnings)
+    let (modules, mut publication) = source.into_publication();
+    crate::finish_analysis(publish(modules, &mut publication), warnings)
 }
 
-fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
+/// [`analyze_source`] of a source analyzed in `design`, which takes back
+/// the types the analysis moved into it.
+pub(crate) fn analyze_source_in(
+    source: ast::Source,
+    design: &mut ast::packages::Design,
+) -> Result<ir::Ir, AnalyzerError> {
+    let warnings = source.warnings();
+    let (modules, mut publication) = source.into_publication();
+    let ir = publish(modules, &mut publication);
+    design.restore_publication(publication);
+    crate::finish_analysis(ir, warnings)
+}
+
+/// [`analyze_source`], with the types the source carried back, for the
+/// session that analyzed it.
+pub(crate) fn analyze_source_keeping(
+    source: ast::Source,
+) -> (Result<ir::Ir, AnalyzerError>, ast::Publication) {
+    let warnings = source.warnings();
+    let (modules, mut publication) = source.into_publication();
+    let ir = publish(modules, &mut publication);
+    (crate::finish_analysis(ir, warnings), publication)
+}
+
+/// The IR of `modules`, whose types are bound in those of `publication`.
+fn publish(
+    source_modules: Vec<ast::Module>,
+    publication: &mut ast::Publication,
+) -> Result<ir::Ir, AnalyzerError> {
     let mut module_table = ModuleTable::default();
     let mut modules = Vec::new();
-    for mut module in source.into_modules() {
+    for mut module in source_modules {
         let syntax = crate::source_tree::SourceTree::empty();
         let tree = &module.constant_context(&syntax);
-        let session = &mut ast::Session::default();
+        let mut lent = publication.lend();
+        let session: &mut ast::Session = &mut lent;
         let id = module_table.insert(&module)?;
         let mut constants = crate::ast::ConstEnv::default();
         let mut parameter_types = HashMap::default();
@@ -137,6 +167,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     port.is_net(),
                 )
                 .with_unresolved_net(port.is_unresolved_net())
+                .with_net_resolution(port.net_resolution())
                 .with_default(port.default().cloned().map(Into::into))
                 .with_pattern_target(port.r#type().pattern_target(
                     &ast::const_functions::Environment {
@@ -157,6 +188,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                         port.is_net(),
                     )
                     .with_unresolved_net(port.is_unresolved_net())
+                    .with_net_resolution(port.net_resolution())
                 })
             })
             .collect::<Vec<_>>();
@@ -176,7 +208,8 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                         ast::ir_type(session, &tree.functions, ty, &type_env),
                         port.is_net(),
                     )
-                    .with_unresolved_net(port.is_unresolved_net()),
+                    .with_unresolved_net(port.is_unresolved_net())
+                    .with_net_resolution(port.net_resolution()),
                 );
             }
         }
@@ -185,12 +218,20 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             .signals()
             .iter()
             .map(|signal| {
+                // A signal of a generate block takes the names of its block,
+                // which may import what the module's imports hide.
                 ir::Signal::new(
                     signal.name().to_string(),
-                    ast::ir_type(session, &tree.functions, signal.r#type().clone(), &type_env),
+                    ast::declared_ir_type(
+                        session,
+                        &tree.functions,
+                        signal.r#type().clone(),
+                        &type_env,
+                    ),
                     signal.is_net(),
                 )
                 .with_unresolved_net(signal.is_unresolved_net())
+                .with_net_resolution(signal.net_resolution())
                 .with_package_variable(signal.package_variable())
                 .with_hierarchical(signal.hierarchical())
             })

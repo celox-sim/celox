@@ -62,9 +62,112 @@ pub(in crate::ast) enum Assignable {
 }
 
 impl TyTable {
+    /// Whether `id` is an integral type: a packed type, made of bits, of an
+    /// enumeration or of a packed structure or union (IEEE 1800-2023 6.11.1).
+    pub fn is_integral(&self, id: TyId) -> bool {
+        matches!(self.data(id), TyData::Packed(_))
+    }
+
+    /// The members of the enumeration `id` is, or is a packed array of
+    /// (6.19).
+    pub fn enum_domain(&self, id: TyId) -> Option<&Arc<super::super::enums::EnumDomain>> {
+        let TyData::Packed(Packed {
+            element: PackedElement::Enum { decl, .. },
+            ..
+        }) = self.data(id)
+        else {
+            return None;
+        };
+        match decl {
+            Decl::AnonymousEnum { domain, .. } => domain.as_ref(),
+            Decl::Named(decl) => self.decl(*decl).domain.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Record the members of the enumeration declaration `decl` declares
+    /// (6.19). A declaration is one per elaborated scope, which its
+    /// parameters belong to, so it has one set of members.
+    /// Record how `$typename` names declaration `decl`: the `typename` of
+    /// its typedef and the `aggregate` keyword of a structure or union.
+    pub(in crate::ast) fn record_spelling(
+        &mut self,
+        decl: super::DeclId,
+        typename: Option<&super::super::type_names::TypedefName>,
+        aggregate: Option<&'static str>,
+    ) {
+        let data = &mut self.decls[decl.0 as usize];
+        if let Some(typename) = typename {
+            let recorded = data.typename.get_or_insert_with(|| typename.clone());
+            debug_assert!(
+                recorded == typename,
+                "declaration `{}` of scope {:?} named {recorded:?} and {typename:?}",
+                data.name,
+                data.scope
+            );
+        }
+        if let Some(aggregate) = aggregate {
+            let recorded = data.aggregate.get_or_insert(aggregate);
+            debug_assert!(
+                *recorded == aggregate,
+                "declaration `{}` of scope {:?} is both a {recorded} and a {aggregate}",
+                data.name,
+                data.scope
+            );
+        }
+    }
+
+    /// Record the parameter values `arguments` of class specialization
+    /// `decl`.
+    pub(in crate::ast) fn record_class_arguments(
+        &mut self,
+        decl: super::DeclId,
+        arguments: Arc<[super::ClassArgument]>,
+    ) {
+        let data = &mut self.decls[decl.0 as usize];
+        let recorded = data.arguments.get_or_insert_with(|| arguments.clone());
+        debug_assert!(
+            *recorded == arguments,
+            "class `{}` specialized with {recorded:?} and {arguments:?}",
+            data.name
+        );
+    }
+
+    pub(in crate::ast) fn record_enum_domain(
+        &mut self,
+        decl: super::DeclId,
+        domain: &Arc<super::super::enums::EnumDomain>,
+    ) {
+        let data = &mut self.decls[decl.0 as usize];
+        let recorded = data.domain.get_or_insert_with(|| domain.clone());
+        debug_assert!(
+            recorded == domain,
+            "enumeration `{}` of scope {:?} recorded with two sets of members",
+            data.name,
+            data.scope
+        );
+    }
+
+    /// Whether `id` is an enumerated type (`Some(false)`) or a packed array
+    /// of one (`Some(true)`), which tells its enumeration (6.19, 7.4.1).
+    pub fn enumeration(&self, id: TyId) -> Option<bool> {
+        match self.data(id) {
+            TyData::Packed(Packed {
+                element: PackedElement::Enum { array, .. },
+                ..
+            }) => Some(*array),
+            _ => None,
+        }
+    }
+
     /// Whether `id` is an enumerated type, not a packed array of one (6.19).
     pub fn is_enum(&self, id: TyId) -> bool {
         matches!(self.data(id), TyData::Packed(packed) if scalar_enum(packed))
+    }
+
+    /// Whether `id` is an unpacked structure type, not an array of one (7.2).
+    pub fn is_unpacked_struct(&self, id: TyId) -> bool {
+        matches!(self.data(id), TyData::UnpackedStruct(_))
     }
 
     /// Whether `a` and `b` are equivalent types (IEEE 1800-2023 6.22.2).

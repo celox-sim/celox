@@ -7,40 +7,105 @@ use celox_heap::{HANDLE_BYTES, Handle, HandleKind, Root};
 use super::host::Simulator;
 use crate::backend::SimBackend;
 
+/// The heap handles of the design state and of running processes.
+#[derive(Default)]
+pub(crate) struct HeapRoots {
+    /// Byte offsets of every handle slot in the stable and working
+    /// regions, with what its handles refer to, sorted by offset.
+    pub(super) handle_slots: Arc<[(usize, celox_heap::HandleKind)]>,
+    /// Set while handles live outside state memory, where no collection
+    /// may run: between the polls of concurrent testbench processes.
+    pub(crate) safepoints_blocked: bool,
+    /// The merged byte ranges of state the hardware accesses, which a
+    /// testbench write outside of is private to the testbench.
+    pub(crate) testbench_hardware_ranges: Vec<std::ops::Range<usize>>,
+    pub(crate) process_roots: Vec<celox_heap::Root>,
+}
+
+impl HeapRoots {
+    /// The heap roots of a simulator of `program` on `backend`, with the
+    /// tables of its state layout computed once, at build.
+    pub(super) fn new<B: SimBackend>(backend: &B, program: &crate::ir::RuntimeProgram) -> Self {
+        Self {
+            handle_slots: handle_slots(backend, program),
+            testbench_hardware_ranges: testbench_hardware_ranges(backend, program),
+            ..Self::default()
+        }
+    }
+}
+
+/// See [`HeapRoots::handle_slots`].
+fn handle_slots<B: SimBackend>(
+    backend: &B,
+    program: &crate::ir::RuntimeProgram,
+) -> Arc<[(usize, HandleKind)]> {
+    let layout = backend.layout();
+    let mut slots = Vec::new();
+    for (address, metadata) in &program.design.state_objects {
+        let kind = match metadata.value_kind {
+            celox_design::ValueKind::Bits => continue,
+            celox_design::ValueKind::StrRef => HandleKind::String,
+            celox_design::ValueKind::ObjRef => HandleKind::Object,
+        };
+        debug_assert!(
+            !layout.sparse_offsets.contains_key(address),
+            "handle slots are never sparse FF targets"
+        );
+        let elements = metadata.width / celox_design::HANDLE_WIDTH;
+        let bases = layout.offsets.get(address).copied().into_iter().chain(
+            layout
+                .working_offsets
+                .get(address)
+                .map(|offset| layout.working_base_offset + offset),
+        );
+        for base in bases {
+            slots.extend((0..elements).map(|index| (base + index * HANDLE_BYTES, kind)));
+        }
+    }
+    slots.sort_unstable_by_key(|&(offset, _)| offset);
+    slots.into()
+}
+
+/// See [`HeapRoots::testbench_hardware_ranges`].
+fn testbench_hardware_ranges<B: SimBackend>(
+    backend: &B,
+    program: &crate::ir::RuntimeProgram,
+) -> Vec<std::ops::Range<usize>> {
+    let layout = backend.layout();
+    let mut ranges: Vec<_> = program
+        .rtl_accesses
+        .iter()
+        .chain(backend.id_to_addr_slice())
+        .filter_map(|addr| {
+            let start = *layout.offsets.get(addr)?;
+            let planes =
+                if layout.four_state && layout.is_4states.get(addr).copied().unwrap_or(false) {
+                    2
+                } else {
+                    1
+                };
+            Some(start..start + layout.plane_size(addr) * planes)
+        })
+        .collect();
+    ranges.sort_unstable_by_key(|range| (range.start, range.end));
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+    for range in ranges {
+        if let Some(last) = merged.last_mut()
+            && range.start <= last.end
+        {
+            last.end = last.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+    merged
+}
+
 impl<B: SimBackend> Simulator<B> {
     /// Byte offsets of every handle slot in the stable and working regions,
     /// with what its handles refer to, sorted by offset.
     pub(crate) fn handle_slots(&self) -> Arc<[(usize, HandleKind)]> {
-        self.handle_slots
-            .get_or_init(|| {
-                let layout = self.backend.layout();
-                let mut slots = Vec::new();
-                for (address, metadata) in &self.program.design.state_objects {
-                    let kind = match metadata.value_kind {
-                        celox_design::ValueKind::Bits => continue,
-                        celox_design::ValueKind::StrRef => HandleKind::String,
-                        celox_design::ValueKind::ObjRef => HandleKind::Object,
-                    };
-                    debug_assert!(
-                        !layout.sparse_offsets.contains_key(address),
-                        "handle slots are never sparse FF targets"
-                    );
-                    let elements = metadata.width / celox_design::HANDLE_WIDTH;
-                    let bases = layout.offsets.get(address).copied().into_iter().chain(
-                        layout
-                            .working_offsets
-                            .get(address)
-                            .map(|offset| layout.working_base_offset + offset),
-                    );
-                    for base in bases {
-                        slots
-                            .extend((0..elements).map(|index| (base + index * HANDLE_BYTES, kind)));
-                    }
-                }
-                slots.sort_unstable_by_key(|&(offset, _)| offset);
-                slots.into()
-            })
-            .clone()
+        self.heap.handle_slots.clone()
     }
 
     /// The heap handle slots of the frames an activation of `kernel` is
@@ -132,7 +197,7 @@ impl<B: SimBackend> Simulator<B> {
     /// events still in the backend's buffer are taken first, which reads
     /// their string arguments.
     pub(crate) fn heap_safepoint(&mut self) {
-        if self.heap_safepoints_blocked || !self.backend.heap().should_collect() {
+        if self.heap.safepoints_blocked || !self.backend.heap().should_collect() {
             return;
         }
         self.stash_runtime_events();
@@ -150,7 +215,7 @@ impl<B: SimBackend> Simulator<B> {
         self.backend.heap_mut().collect(
             roots
                 .into_iter()
-                .chain(self.process_heap_roots.iter().copied())
+                .chain(self.heap.process_roots.iter().copied())
                 .chain(extra_roots),
         );
     }

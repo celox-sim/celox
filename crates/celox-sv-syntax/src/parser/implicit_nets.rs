@@ -258,7 +258,12 @@ impl Parser<'_> {
                 // declare names this pass does not know; any identifier in
                 // them counts as declared.
                 BodyItemKind::Unconverted { .. } => opaque.push(self.body_items[item.0].tokens),
-                BodyItemKind::Procedure(_) | BodyItemKind::Time(_) | BodyItemKind::Unit(_) => {}
+                // A `defparam` names a parameter of another scope: it
+                // declares nothing and its target is no net (6.10).
+                BodyItemKind::Defparam(_)
+                | BodyItemKind::Procedure(_)
+                | BodyItemKind::Time(_)
+                | BodyItemKind::Unit(_) => {}
             }
         }
         scope
@@ -302,9 +307,6 @@ impl Parser<'_> {
         tokens: TokenRange,
         net_type: &str,
     ) -> Result<BodyItemId> {
-        if self.types.len() >= 1_000_000 {
-            return Err(self.unsupported("native type arena exceeds one million nodes"));
-        }
         let data_type = TypeId(self.types.len());
         self.types.push(DataType {
             kind: DataTypeKind::Implicit,
@@ -327,9 +329,6 @@ impl Parser<'_> {
             }],
             tokens,
         });
-        if self.body_items.len() >= 1_000_000 {
-            return Err(self.unsupported("native body-item arena exceeds one million entries"));
-        }
         let item = BodyItemId(self.body_items.len());
         self.body_items.push(BodyItem {
             kind: BodyItemKind::Net(id),

@@ -20,7 +20,7 @@ From the repository root, with the development shell active:
 git clone --branch v2.1.0 --depth 1 https://github.com/cocotb/cocotb.git work/cocotb
 python3 -m venv work/cocotb-python
 work/cocotb-python/bin/python -m pip install -r conformance/cocotb/requirements.txt
-cargo build --locked -p celox-vpi
+cargo build --locked -p celox
 python3 conformance/cocotb/run.py work/cocotb \
   --python "$PWD/work/cocotb-python/bin/python"
 ```

@@ -50,12 +50,6 @@ endmodule"#;
         assert_eq!(sim.get(sim.signal("rounded")), BigUint::from(2u8));
         assert_eq!(sim.get(sim.signal("truncated")), BigUint::from(1u8));
     }
-    fn realtime_returns_real_in_timed_processes(sim) {
-        @case "realtime::realtime_returns_real_in_timed_processes";
-    }
-    fn realtime_keeps_the_full_tick_counter(sim) {
-        @case "realtime::realtime_keeps_the_full_tick_counter";
-    }
     fn realtime_checkpoint_restores_fractional_time(sim) {
         @setup {
             let source = r#"module Top(output logic [63:0] sampled);

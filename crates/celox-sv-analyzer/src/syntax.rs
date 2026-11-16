@@ -119,6 +119,27 @@ pub fn source_module_implicit_net_permissions(
     code: &str,
     path: &Path,
 ) -> Result<Vec<(String, bool)>, AnalyzerError> {
+    implicit_net_permissions(code, path, None)
+}
+
+/// [`source_module_implicit_net_permissions`] of the modules a source
+/// declares first, as [`crate::ParsedSource::parse_with_first_modules`]
+/// keeps them: `declared` holds the modules of the sources before this one
+/// and receives those of this one. The body of a later declaration is left
+/// out, its directives too.
+pub fn source_first_module_implicit_net_permissions(
+    code: &str,
+    path: &Path,
+    declared: &mut fxhash::FxHashSet<String>,
+) -> Result<Vec<(String, bool)>, AnalyzerError> {
+    implicit_net_permissions(code, path, Some(declared))
+}
+
+fn implicit_net_permissions(
+    code: &str,
+    path: &Path,
+    mut declared: Option<&mut fxhash::FxHashSet<String>>,
+) -> Result<Vec<(String, bool)>, AnalyzerError> {
     let mut preprocessor = celox_sv_syntax::Preprocessor::new(celox_sv_syntax::Options {
         includes: celox_sv_syntax::IncludePolicy::Ignore,
         strip_comments: true,
@@ -166,7 +187,7 @@ pub fn source_module_implicit_net_permissions(
                 }
                 implicit_nets_allowed = true;
             }
-            "module" => {
+            "module" | "macromodule" => {
                 let mut name_index = index + 1;
                 if tokens
                     .get(name_index)
@@ -174,7 +195,29 @@ pub fn source_module_implicit_net_permissions(
                 {
                     name_index += 1;
                 }
-                if let Some(name) = tokens.get(name_index) {
+                let prototype = index > 0 && tokens[index - 1] == "extern";
+                if let Some(name) = tokens.get(name_index)
+                    && !prototype
+                    && let Some(declared) = declared.as_deref_mut()
+                    && !declared.insert(crate::ast::instances::normalize_identifier(name))
+                {
+                    // A later declaration: skip to its `endmodule`, past
+                    // nested module declarations.
+                    let mut depth = 0usize;
+                    while index < tokens.len() {
+                        match tokens[index].as_str() {
+                            "module" | "macromodule" => depth += 1,
+                            "endmodule" => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        index += 1;
+                    }
+                } else if let Some(name) = tokens.get(name_index) {
                     modules.push((name.clone(), implicit_nets_allowed));
                     current_module = Some(name.clone());
                 }

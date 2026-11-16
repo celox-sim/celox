@@ -1,7 +1,7 @@
 # SystemVerilog サポート
 
 Celox は **Rust API** から SystemVerilog をシミュレートできます。
-Cargo feature の `systemverilog` を有効にし、ソースファイルとトップモジュールを指定して使います。
+ソースファイルとトップモジュールを指定して使います。
 TypeScript パッケージと Vite プラグインは、現時点では Veryl のみを読み込みます。
 
 Celox は IEEE Std 1800™-2023 に従います。
@@ -11,11 +11,11 @@ Celox は IEEE Std 1800™-2023 に従います。
 
 ## 最初のモジュールを動かす
 
-Rust プロジェクトで feature を有効にします。
+Rust プロジェクトに Celox を追加します。
 
 ```toml
 [dependencies]
-celox = { version = "*", features = ["systemverilog"] }
+celox = "*"
 ```
 
 `Simulator::from_sv_sources` にソース文字列とそのパスを渡し、トップモジュール名を指定します。
@@ -78,10 +78,10 @@ Veryl と混在する階層では `Simulation::from_sources(veryl).with_sv_sourc
   スカラ部分集合を超えるクラスのランダム化と制約。
 - `bind`、checker、covergroup、clocking ブロック、`specify` ブロック、UDP、
   `defparam`、手続き的な `force` / `release`、`disable fork` 以外の `disable`。
-- `always_comb` と `always_latch` 内のノンブロッキング代入、複数ドライバ、
-  トライステートバス、`always_ff` の `iff`。
-- ワイルドカード `.*` 接続、`ref` ポート、non-ANSI ポート式、
-  遅延・強度付きゲートプリミティブ、interface の一部の機能。
+- `always_comb` と `always_latch` 内のノンブロッキング代入、複数モジュールに
+  またがるネットのドライバ（モジュール間のトライステートバス）、`always_ff` の `iff`。
+- `ref` ポート、non-ANSI ポート式、遅延・強度付きゲートプリミティブ、
+  interface の一部の機能。
 - `always_comb` の推論ラッチ。`inferred_latch = "warn"` または `"allow"` を
   設定しない限りエラーになります。
 
@@ -99,9 +99,10 @@ interface と `input` / `output` modport も言語間で接続できます。
 
 ## DPI-C imports
 
-`sv-dpi` を有効にすると、`always_ff` プロセスから C 関数を呼び出せます。
+手続きコードから C 関数を呼び出せます。
 関数や共有ライブラリは `dpi_function` / `dpi_library` で登録します。
 C と SV の型を一致させる必要があるため、どちらも `unsafe` API です。
+`celox run` コマンドは `--dpi-lib PATH` で共有ライブラリをリンクします。
 対応する型と呼び出し位置は [DPI-C imports](./systemverilog-reference#dpi-c-imports)を参照してください。
 
 ## 個別の挙動を調べる {#semantics-worth-knowing}

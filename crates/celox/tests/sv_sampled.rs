@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! `$sampled(e)` is the value of `e` in the Preponed region of the time
 //! slot, the value at the end of the previous slot, and before the first
 //! slot the declared or default value (IEEE 1800-2023 4.4.2.1, 16.5.1,

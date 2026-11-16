@@ -4,6 +4,7 @@ use super::*;
 mod discovery;
 pub(super) use discovery::State;
 pub(super) use discovery::all_class_signatures;
+pub(super) use discovery::hides_scope_item;
 pub(super) use discovery::local_constants;
 pub(super) use discovery::same_tables;
 mod query_binding;
@@ -96,6 +97,14 @@ impl Signedness for SizeQuerySignedness<'_> {
         }
         parameter_type_from_const_env(self.const_env, name)
             .map(|ty| ty.signed)
+            // A constant too wide for the numeric environment, such as a
+            // wide enumeration member, is known by its literal.
+            .or_else(|| match self.dimensions.parameter_values.get(name) {
+                Some(Expr::Literal(literal)) => {
+                    typecheck::parse_integral_literal(literal).map(|literal| literal.signed)
+                }
+                _ => None,
+            })
             .or_else(|| self.const_env.contains_key(name).then_some(true))
     }
 }
@@ -127,43 +136,47 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
     ports: &[Port],
     signals: &[Signal],
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
 ) -> PackedDimensions {
     let mut dimensions = HashMap::default();
     for port in ports {
         dimensions.insert(
             port.name().to_string(),
-            VariableDimensions::new(VariableShape {
-                declared: type_names::Declared::new(port.r#type()),
-                chandle: port.r#type().chandle,
-                container: port.r#type().container.clone(),
-                randomizable: port.r#type().container.is_none()
-                    && !port.r#type().holds_chandle()
-                    && (!port.r#type().is_enum || port.r#type().enum_domain.is_some())
-                    && port.randomizable,
-                enum_domain: port.r#type().enum_domain.clone(),
-                packed_enum: port.r#type().packed_enum,
-                real: matches!(port.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
-                string: matches!(port.r#type().kind(), TypeKind::String),
-                class: port.r#type().class().map(str::to_owned),
-                virtual_interface: port.r#type().virtual_interface.clone(),
-                packed: signal_packed_dimension_widths(port.r#type().packed_ranges()),
-                unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
-                signed: port.r#type().is_signed(),
-                is_2state: matches!(
-                    port.r#type().kind(),
-                    TypeKind::Bit
-                        | TypeKind::Real
-                        | TypeKind::Shortreal
-                        | TypeKind::String
-                        | TypeKind::Object
-                        | TypeKind::Process
-                        | TypeKind::Event
-                ),
-                members: port.r#type().members.clone(),
-                signed_element_depth: port.r#type().signed_element_depth,
-                unpacked_struct: port.r#type().unpacked_struct.clone(),
-            }),
+            VariableDimensions::bound_to(
+                VariableShape {
+                    declared: type_names::Declared::new(port.r#type()),
+                    chandle: port.r#type().is_chandle(),
+                    container: port.r#type().container.clone(),
+                    randomizable: port.r#type().container.is_none()
+                        && !port.r#type().holds_chandle()
+                        && port.randomizable,
+                    enum_domain: port.r#type().enum_domain.clone(),
+                    packed_enum: port.r#type().packed_enum,
+                    real: matches!(port.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
+                    string: matches!(port.r#type().kind(), TypeKind::String),
+                    class: port.r#type().class().map(str::to_owned),
+                    virtual_interface: port.r#type().virtual_interface.clone(),
+                    packed: signal_packed_dimension_widths(port.r#type().packed_ranges()),
+                    unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
+                    signed: port.r#type().is_signed(),
+                    is_2state: matches!(
+                        port.r#type().kind(),
+                        TypeKind::Bit
+                            | TypeKind::Chandle
+                            | TypeKind::Real
+                            | TypeKind::Shortreal
+                            | TypeKind::String
+                            | TypeKind::Object
+                            | TypeKind::Process
+                            | TypeKind::Event
+                    ),
+                    members: port.r#type().members.clone(),
+                    signed_element_depth: port.r#type().signed_element_depth,
+                    unpacked_struct: port.r#type().unpacked_struct.clone(),
+                },
+                // The shape has the type the port was declared with.
+                &port.r#type().binding,
+            ),
         );
     }
     for port in ports {
@@ -182,38 +195,42 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
     for signal in signals {
         dimensions.insert(
             signal.name().to_string(),
-            VariableDimensions::new(VariableShape {
-                declared: type_names::Declared::new(signal.r#type()),
-                chandle: signal.r#type().chandle,
-                container: signal.r#type().container.clone(),
-                randomizable: signal.r#type().container.is_none()
-                    && !signal.r#type().holds_chandle()
-                    && (!signal.r#type().is_enum || signal.r#type().enum_domain.is_some())
-                    && !signal.is_net()
-                    && !signal.is_const,
-                enum_domain: signal.r#type().enum_domain.clone(),
-                packed_enum: signal.r#type().packed_enum,
-                real: matches!(signal.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
-                string: matches!(signal.r#type().kind(), TypeKind::String),
-                class: signal.r#type().class().map(str::to_owned),
-                virtual_interface: signal.r#type().virtual_interface.clone(),
-                packed: signal_packed_dimension_widths(signal.r#type().packed_ranges()),
-                unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
-                signed: signal.r#type().is_signed(),
-                is_2state: matches!(
-                    signal.r#type().kind(),
-                    TypeKind::Bit
-                        | TypeKind::Real
-                        | TypeKind::Shortreal
-                        | TypeKind::String
-                        | TypeKind::Object
-                        | TypeKind::Process
-                        | TypeKind::Event
-                ),
-                members: signal.r#type().members.clone(),
-                signed_element_depth: signal.r#type().signed_element_depth,
-                unpacked_struct: signal.r#type().unpacked_struct.clone(),
-            }),
+            VariableDimensions::bound_to(
+                VariableShape {
+                    declared: type_names::Declared::new(signal.r#type()),
+                    chandle: signal.r#type().is_chandle(),
+                    container: signal.r#type().container.clone(),
+                    randomizable: signal.r#type().container.is_none()
+                        && !signal.r#type().holds_chandle()
+                        && !signal.is_net()
+                        && !signal.is_const,
+                    enum_domain: signal.r#type().enum_domain.clone(),
+                    packed_enum: signal.r#type().packed_enum,
+                    real: matches!(signal.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
+                    string: matches!(signal.r#type().kind(), TypeKind::String),
+                    class: signal.r#type().class().map(str::to_owned),
+                    virtual_interface: signal.r#type().virtual_interface.clone(),
+                    packed: signal_packed_dimension_widths(signal.r#type().packed_ranges()),
+                    unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
+                    signed: signal.r#type().is_signed(),
+                    is_2state: matches!(
+                        signal.r#type().kind(),
+                        TypeKind::Bit
+                            | TypeKind::Chandle
+                            | TypeKind::Real
+                            | TypeKind::Shortreal
+                            | TypeKind::String
+                            | TypeKind::Object
+                            | TypeKind::Process
+                            | TypeKind::Event
+                    ),
+                    members: signal.r#type().members.clone(),
+                    signed_element_depth: signal.r#type().signed_element_depth,
+                    unpacked_struct: signal.r#type().unpacked_struct.clone(),
+                },
+                // The shape has the type the signal was declared with.
+                &signal.r#type().binding,
+            ),
         );
     }
     PackedDimensions::new(dimensions, const_env, type_aliases)
@@ -331,6 +348,23 @@ pub(super) fn parameter_signed_element_marker(name: &str) -> String {
     format!("__parameter::signed_element::{name}")
 }
 
+/// Present for a parameter of packed structure type whose member constants
+/// are published; the payload is their count.
+pub(super) fn parameter_members_marker(name: &str) -> String {
+    format!("__parameter::members::{name}")
+}
+
+/// The value of member `path` (`a.b` for a member of a member) of the packed
+/// structure parameter `name`.
+pub(super) fn parameter_member_value_marker(name: &str, path: &str) -> String {
+    format!("__parameter::member::value::{path}::{name}")
+}
+
+/// The type of that member: its width, shifted left by one, and its sign.
+pub(super) fn parameter_member_type_marker(name: &str, path: &str) -> String {
+    format!("__parameter::member::type::{path}::{name}")
+}
+
 pub(super) fn variable_bits_marker(name: &str) -> String {
     format!("__variable::bits::{name}")
 }
@@ -385,9 +419,8 @@ fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, con
             continue;
         }
         let packed_ranges = ranges.split_off(unpacked);
-        let ty = Type {
+        let ty = Type::from(TypeShape {
             container: None,
-            chandle: false,
             is_enum: false,
             enum_domain: None,
             packed_enum: false,
@@ -404,7 +437,7 @@ fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, con
             virtual_interface: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
-        };
+        });
         let mut shape = procedural::dimensions_from_type(&ty);
         // The markers keep the shape, not the declared type.
         shape.declared = type_names::Declared::default();

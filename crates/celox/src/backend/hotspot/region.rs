@@ -17,9 +17,14 @@ use celox_sir::{
     SIRValue,
 };
 use num_bigint::BigUint;
+#[expect(
+    clippy::disallowed_types,
+    reason = "single-threaded: lazily computed use counts and CFG analysis of a unit; only the hotspot worker thread fills and reads them, the simulation thread just holds the Arc"
+)]
+use std::sync::OnceLock;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
 
 #[cfg(test)]
@@ -107,7 +112,7 @@ mod tests {
                 regs.set(invariant, SIRValue::new(42u8));
             }
             code.run(&mut memory, &mut regs).unwrap();
-            assert_eq!(regs.get(invariant).unwrap(), &value);
+            assert_eq!(*regs.get(invariant).unwrap(), value);
             // Reenter the body, without rerunning the preheader definition.
             resumed.run(&mut memory, &mut regs).unwrap();
         }
@@ -202,8 +207,8 @@ mod tests {
             regs.set(left, a.clone());
             regs.set(right, z.clone());
             code.run(&mut memory, &mut regs).unwrap();
-            assert_eq!(regs.get(q).unwrap(), &a);
-            assert_eq!(regs.get(out).unwrap(), &z);
+            assert_eq!(*regs.get(q).unwrap(), a);
+            assert_eq!(*regs.get(out).unwrap(), z);
             if let Some(trace) = &layout.trace {
                 let bytes = unsafe {
                     std::slice::from_raw_parts_mut(
@@ -235,8 +240,8 @@ mod tests {
                 );
             }
             // Swap the inputs to exercise both X/Z planes in each slot.
-            a = regs.get(out).unwrap().clone();
-            z = regs.get(q).unwrap().clone();
+            a = regs.get(out).unwrap().into_owned();
+            z = regs.get(q).unwrap().into_owned();
         }
     }
 }
@@ -246,8 +251,16 @@ const MAX_FRAME_BYTES: usize = 256 * 1024;
 
 pub(crate) struct RegionSource {
     unit: Arc<ExecutionUnit<RegionedAbsoluteAddr>>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: lazily computed use counts and CFG analysis of a unit; only the hotspot worker thread fills and reads them, the simulation thread just holds the Arc"
+    )]
     uses: OnceLock<HashMap<RegisterId, usize>>,
     next_register: usize,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: lazily computed use counts and CFG analysis of a unit; only the hotspot worker thread fills and reads them, the simulation thread just holds the Arc"
+    )]
     analysis: OnceLock<Option<SourceAnalysis>>,
 }
 
@@ -257,6 +270,10 @@ struct SourceAnalysis {
 }
 
 impl RegionSource {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "single-threaded: lazily computed use counts and CFG analysis of a unit; only the hotspot worker thread fills and reads them, the simulation thread just holds the Arc"
+    )]
     pub(crate) fn new(unit: Arc<ExecutionUnit<RegionedAbsoluteAddr>>) -> Self {
         let next_register = unit
             .register_map
@@ -623,6 +640,17 @@ impl BlockCode {
                 std::slice::from_raw_parts_mut(memory.as_mut_ptr().cast::<u8>(), memory.len() * 8)
             };
             for (reg, slot) in &self.inputs {
+                // A small register is a two-state value: no mask bits.
+                if let Some(value) = registers.get_small(*reg)? {
+                    let plane = &mut bytes[slot.offset..slot.offset + slot.bytes];
+                    plane.fill(0);
+                    let len = plane.len().min(8);
+                    plane[..len].copy_from_slice(&value.to_le_bytes()[..len]);
+                    if slot.four_state {
+                        bytes[slot.offset + slot.bytes..slot.offset + slot.bytes * 2].fill(0);
+                    }
+                    continue;
+                }
                 let value = registers.get(*reg)?;
                 write(
                     &mut bytes[slot.offset..slot.offset + slot.bytes],

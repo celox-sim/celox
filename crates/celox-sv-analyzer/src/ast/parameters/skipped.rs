@@ -204,6 +204,14 @@ pub(in crate::ast) fn validate(
                             ));
                         }
                     }
+                } else if name == "$sformatf" {
+                    // A constant system function that is a string operation
+                    // (IEEE 1800-2023 11.2.1, 21.3.3).
+                    for argument in arguments {
+                        if let Some(value) = argument.value {
+                            jobs.push((value, query, None));
+                        }
+                    }
                 } else if name.starts_with('$') {
                     return Err(AnalyzerError::UnknownSystemTf { name });
                 } else {
@@ -362,6 +370,20 @@ pub(in crate::ast) fn validate(
                     dimension_jobs(&part.kind, &mut jobs, query);
                 }
             }
+            ExprKind::Unique(items) => {
+                for item in items {
+                    dimension_jobs(&item.kind, &mut jobs, query);
+                }
+            }
+            ExprKind::Dist { expression, items } => {
+                push(&mut jobs, *expression);
+                for item in items {
+                    dimension_jobs(&item.value.kind, &mut jobs, query);
+                    if let Some(weight) = item.weight {
+                        push(&mut jobs, weight.value);
+                    }
+                }
+            }
             ExprKind::MinTypMax {
                 minimum,
                 typical,
@@ -381,7 +403,10 @@ pub(in crate::ast) fn validate(
             }
             ExprKind::ArrayMethodWith { .. }
             | ExprKind::RandomizeWith { .. }
-            | ExprKind::ConstraintForeach { .. } => {
+            | ExprKind::ConstraintForeach { .. }
+            | ExprKind::SoftConstraint { .. }
+            | ExprKind::DisableSoft { .. }
+            | ExprKind::SolveBefore { .. } => {
                 return Err(unsupported("array method with expression"));
             }
             ExprKind::Parameterized { .. } => {
@@ -664,7 +689,10 @@ pub(in crate::ast) fn literal_widths(
         match &native.expression(id).kind {
             ExprKind::ArrayMethodWith { .. }
             | ExprKind::RandomizeWith { .. }
-            | ExprKind::ConstraintForeach { .. } => {
+            | ExprKind::ConstraintForeach { .. }
+            | ExprKind::SoftConstraint { .. }
+            | ExprKind::DisableSoft { .. }
+            | ExprKind::SolveBefore { .. } => {
                 return Err(unsupported("array method with expression"));
             }
             ExprKind::Literal(text) if evaluated => {
@@ -1158,6 +1186,17 @@ pub(in crate::ast) fn needs_selected(
         }
         match &native.expression(id).kind {
             ExprKind::Cast { .. } => return true,
+            // The complement of a name has the width of what the name
+            // denotes, which only the typed evaluation knows.
+            ExprKind::Unary {
+                operator,
+                expression,
+                ..
+            } if operator == "~"
+                && expression_binding::native_name(tree, *expression, native).is_some() =>
+            {
+                return true;
+            }
             ExprKind::Select {
                 expression,
                 dimension,
@@ -1171,6 +1210,9 @@ pub(in crate::ast) fn needs_selected(
             {
                 return true;
             }
+            // The items of an assignment pattern take their types from the
+            // pattern's target, whose binding evaluates them.
+            ExprKind::Pattern { .. } => {}
             _ => jobs.extend(children(id, native)),
         }
     }
@@ -1198,25 +1240,13 @@ fn validate_operators(
         {
             return Err(unsupported("empty parameter concatenation"));
         }
-        if let ExprKind::Unary {
-            operator,
-            expression,
-            ..
-        } = &native.expression(id).kind
-        {
-            if matches!(
+        if let ExprKind::Unary { operator, .. } = &native.expression(id).kind
+            && matches!(
                 operator.as_str(),
                 "&" | "|" | "^" | "~&" | "~|" | "~^" | "^~"
-            ) {
-                return Err(unsupported("reduction operator in parameter expression"));
-            }
-            if operator == "~"
-                && expression_binding::native_name(tree, *expression, native).is_some()
-            {
-                return Err(unsupported(
-                    "width-dependent complement in parameter expression",
-                ));
-            }
+            )
+        {
+            return Err(unsupported("reduction operator in parameter expression"));
         }
         jobs.extend(children(id, native));
     }
@@ -1250,6 +1280,7 @@ pub(in crate::ast) fn children(
         ExprKind::RandomizeWith {
             expression,
             constraints,
+            ..
         } => {
             children.push(*expression);
             children.extend(constraints.iter().flatten());
@@ -1261,6 +1292,15 @@ pub(in crate::ast) fn children(
             children.extend([*expression, *predicate]);
         }
         ExprKind::ConstraintForeach { array, body, .. } => children.extend([*array, *body]),
+        ExprKind::SoftConstraint { expression } => children.push(*expression),
+        ExprKind::DisableSoft {
+            variable,
+            condition,
+        } => {
+            children.push(*variable);
+            children.extend(*condition);
+        }
+        ExprKind::SolveBefore { before, after } => children.extend(before.iter().chain(after)),
         ExprKind::Call {
             expression,
             arguments,

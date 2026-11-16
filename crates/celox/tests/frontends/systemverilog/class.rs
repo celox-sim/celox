@@ -3,81 +3,6 @@
 use super::*;
 
 sv_backends! {
-    fn class_external_constraints(sim) { @case "class::external_constraints"; }
-    fn class_external_constraints_in_packages(sim) {
-        @case "class::external_constraints_in_packages";
-    }
-
-    fn class_imported_member_type_dimensions(sim) { @case "class::imported_member_type_dimensions"; }
-    fn class_members_hide_module_names(sim) { @case "class::members_hide_module_names"; }
-    fn class_imported_member_type_inheritance(sim) { @case "class::imported_member_type_inheritance"; }
-    fn class_package_constant_class_defaults(sim) { @case "class::package_constant_class_defaults"; }
-    fn class_waits_on_static_properties(sim) { @case "class::waits_on_static_properties"; }
-    fn class_waits_on_instance_properties(sim) { @case "class::waits_on_instance_properties"; }
-    fn class_body_parameters_are_local(sim) { @case "class::body_parameters_are_local"; }
-    fn class_waits_on_properties_in_package_subroutines(sim) { @case "class::waits_on_properties_in_package_subroutines"; }
-    fn class_package_constant_type_arguments(sim) { @case "class::package_constant_type_arguments"; }
-    fn class_named_aggregate_type_arguments(sim) { @case "class::named_aggregate_type_arguments"; }
-    fn class_enumeration_constants_of_classes(sim) { @case "class::enumeration_constants_of_classes"; }
-    fn class_container_type_aliases_of_classes(sim) { @case "class::container_type_aliases_of_classes"; }
-    fn class_members_of_call_results(sim) { @case "class::members_of_call_results"; }
-    fn class_generate_scope_enum_type_arguments(sim) { @case "class::generate_scope_enum_type_arguments"; }
-    fn class_method_ranges_of_scope_declarations(sim) { @case "class::method_ranges_of_scope_declarations"; }
-    fn class_type_alias_members(sim) { @case "class::type_alias_members"; }
-    fn class_type_alias_lexical_scopes(sim) { @case "class::type_alias_lexical_scopes"; }
-    fn constraint_mode_ordinary_struct_members(sim) {
-        @case "class::constraint_mode_ordinary_struct_members";
-    }
-    fn class_type_parameter_imports(sim) { @case "class::type_parameter_imports"; }
-    fn class_type_parameter_shadowing(sim) { @case "class::type_parameter_shadowing"; }
-    fn class_objects_properties_and_methods(sim) { @case "class::objects_properties_and_methods"; }
-}
-
-sv_backends! {
-    fn class_implicit_constructors_and_this(sim) { @case "class::implicit_constructors_and_this"; }
-    fn class_objects_referring_to_objects(sim) { @case "class::objects_referring_to_objects"; }
-    fn class_extern_methods_and_tasks(sim) { @case "class::extern_methods_and_tasks"; }
-    fn class_objects_survive_heap_collections(sim) { @case "class::objects_survive_heap_collections"; }
-    fn class_string_methods_on_properties(sim) { @case "class::string_methods_on_properties"; }
-    fn class_derived_properties_hide_base_properties(sim) { @case "class::derived_properties_hide_base_properties"; }
-    fn class_inherited_properties_and_methods(sim) { @case "class::inherited_properties_and_methods"; }
-    fn class_static_properties_and_methods(sim) { @case "class::static_properties_and_methods"; }
-    fn class_constructors_chain_to_base(sim) { @case "class::constructors_chain_to_base"; }
-    fn class_virtual_methods_dispatch_on_object_class(sim) { @case "class::virtual_methods_dispatch_on_object_class"; }
-    fn class_abstract_classes_and_pure_virtual_methods(sim) { @case "class::abstract_classes_and_pure_virtual_methods"; }
-    fn class_methods_of_handle_array_elements(sim) { @case "class::methods_of_handle_array_elements"; }
-    fn class_classes_implementing_interface_classes(sim) { @case "class::classes_implementing_interface_classes"; }
-    fn class_methods_called_through_interface_class_handles(sim) { @case "class::methods_called_through_interface_class_handles"; }
-    fn class_inherited_methods_of_extended_interface_classes(sim) { @case "class::inherited_methods_of_extended_interface_classes"; }
-    fn class_casts_of_class_handles(sim) { @case "class::casts_of_class_handles"; }
-    fn class_casts_to_class_properties(sim) { @case "class::casts_to_class_properties"; }
-    fn class_void_casts_of_class_handles(sim) { @case "class::void_casts_of_class_handles"; }
-    fn class_failing_casts_evaluate_their_sources(sim) { @case "class::failing_casts_evaluate_their_sources"; }
-    fn class_casts_from_interface_class_handles(sim) { @case "class::casts_from_interface_class_handles"; }
-    fn class_specializations_of_parameterized_classes(sim) { @case "class::specializations_of_parameterized_classes"; }
-    fn class_specializations_are_named_by_parameter_values(sim) { @case "class::specializations_are_named_by_parameter_values"; }
-    fn class_specializations_with_their_own_handles(sim) { @case "class::specializations_with_their_own_handles"; }
-    fn class_class_scoped_parameters_and_types(sim) { @case "class::class_scoped_parameters_and_types"; }
-    fn class_specializations_of_interface_classes(sim) { @case "class::specializations_of_interface_classes"; }
-    fn class_named_constructor_arguments(sim) { @case "class::named_constructor_arguments"; }
-    fn class_named_method_arguments(sim) { @case "class::named_method_arguments"; }
-    fn class_typedefs_of_interface_classes(sim) { @case "class::typedefs_of_interface_classes"; }
-    fn class_specializations_in_generate_blocks(sim) { @case "class::specializations_in_generate_blocks"; }
-    fn class_specializations_of_procedural_constants(sim) { @case "class::specializations_of_procedural_constants"; }
-    fn class_specializations_of_procedural_aggregate_types(sim) { @case "class::specializations_of_procedural_aggregate_types"; }
-    fn class_specializations_keep_their_parameter_scopes(sim) { @case "class::specializations_keep_their_parameter_scopes"; }
-    fn class_untyped_class_parameters_take_the_type_of_their_value(sim) { @case "class::untyped_class_parameters_take_the_type_of_their_value"; }
-    fn class_class_declarations_bind_in_their_scopes(sim) { @case "class::class_declarations_bind_in_their_scopes"; }
-    fn class_parameter_defaults_bind_where_the_class_is_declared(sim) { @case "class::parameter_defaults_bind_where_the_class_is_declared"; }
-    fn class_specialization_keys_follow_the_bound_parameters(sim) { @case "class::specialization_keys_follow_the_bound_parameters"; }
-    fn class_derived_classes_keep_their_declaration_scopes(sim) { @case "class::derived_classes_keep_their_declaration_scopes"; }
-    fn class_shallow_copies(sim) { @case "class::shallow_copies"; }
-    fn class_classes_of_packages(sim) { @case "class::classes_of_packages"; }
-    fn class_package_classes_by_their_qualified_names(sim) { @case "class::package_classes_by_their_qualified_names"; }
-    fn class_classes_of_the_compilation_unit(sim) { @case "class::classes_of_the_compilation_unit"; }
-}
-
-sv_backends! {
     // Actuals are evaluated in the order they are written, as for other
     // calls with named arguments.
     fn named_constructor_arguments_are_evaluated_in_written_order(sim) {
@@ -280,7 +205,6 @@ sv_backends! {
 }
 
 sv_backends! {
-    fn class_four_state_properties(sim) { @case "class::four_state_properties"; }
 
     fn four_state_properties_are_two_state_in_two_state_mode(sim) {
         @setup {
@@ -968,13 +892,6 @@ fn constraints_on_handle_and_string_properties_are_rejected() {
             "c.randomize()",
             "a randc dynamic array or queue",
         ),
-        // A loop over a rand array would constrain its elements, which the
-        // solver does not take yet.
-        (
-            "class C; rand int x; rand int a[]; constraint k { foreach (a[i]) x != a[i]; } endclass",
-            "c.randomize()",
-            "constraint foreach over a rand array",
-        ),
         (
             "class C; rand int x; int a[]; constraint k { foreach (a[i]) x != a[i + 1]; } endclass",
             "c.randomize()",
@@ -1041,13 +958,6 @@ fn constraints_on_handle_and_string_properties_are_rejected() {
              class C; rand int x; R rs[$]; constraint k { foreach (rs[i]) x < rs[i].t; } endclass",
             "c.randomize()",
             "a real in a constraint",
-        ),
-        // An inline loop cannot be disabled: one over an array the call
-        // selects would constrain its elements.
-        (
-            "class C; rand int x; int a[]; endclass",
-            "c.randomize(a) with { foreach (a[i]) x != a[i]; }",
-            "an inline constraint foreach over an array the call randomizes",
         ),
         // The size and indices of an associative array are not random (18.4).
         (
@@ -1513,13 +1423,12 @@ endmodule
 }
 
 /// A call whose random set includes the array of an enabled constraint loop
-/// (IEEE 1800-2023 18.11), as `randomize(a)` directly or through a base
-/// handle to a derived class with the loop, would constrain its elements,
-/// which the solver does not take: the call faults. With the block disabled
-/// (18.9), the loop takes no part and the call randomizes the array.
+/// (IEEE 1800-2023 18.11), as `randomize(a)` directly, through a base
+/// handle to a derived class with the loop, or with an inline loop, solves
+/// the elements of the array with the loop (18.5.8.1).
 #[test]
-fn constraint_loops_over_selected_arrays_fault() {
-    let base = r#"module Top(output int done);
+fn constraint_loops_over_selected_arrays_solve_their_elements() {
+    let source = r#"module Top(output int ok);
     class B;
         rand bit [3:0] x;
         bit [3:0] a[];
@@ -1531,72 +1440,254 @@ fn constraint_loops_over_selected_arrays_fault() {
     C c;
     initial begin
         c = new;
-        c.a = new[2];
-        void'(c.randomize());
-        CALL;
-        done = 1;
+        c.a = new[4];
+        c.x = 5;
+        ok = 1;
+        repeat (8) begin
+            ok &= c.randomize(a) && c.x == 5 && c.a.size() == 4;
+            foreach (c.a[i]) ok &= c.a[i] != 5;
+            b = c;
+            ok &= b.randomize(a);
+            foreach (c.a[i]) ok &= c.a[i] != 5;
+            ok &= c.randomize(a) with { foreach (a[i]) a[i] < 3; };
+            foreach (c.a[i]) ok &= c.a[i] < 3;
+        end
     end
 endmodule
 "#;
-    for call in [
-        "void'(c.randomize(a))",
-        "begin b = c; void'(b.randomize(a)); end",
-    ] {
-        let source = base.replace("CALL", call);
-        let mut sim = celox::Simulation::from_sv_sources(
-            vec![(source.as_str(), Path::new("select.sv"))],
-            "Top",
-        )
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("select.sv"))], "Top")
         .build()
         .unwrap();
-        let error = sim.run_until(0).unwrap_err().to_string();
-        assert!(
-            error.contains("a constraint loop over an array the call randomizes"),
-            "{call}: {error}"
-        );
-    }
-    let source = base.replace(
-        "CALL",
-        "begin c.k.constraint_mode(0); void'(c.randomize(a)); end",
-    );
-    let mut sim =
-        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("select.sv"))], "Top")
-            .build()
-            .unwrap();
-    let done = sim.signal("done");
     sim.run_until(0).unwrap();
-    assert_eq!(sim.get(done), BigUint::from(1u8));
+    assert_eq!(sim.get(sim.signal("ok")), BigUint::from(1u8));
 }
 
 #[test]
-fn randomizing_four_state_properties_is_rejected() {
-    for (body, want) in [
-        (
-            "class C; rand logic [3:0] x; endclass C c; initial begin c = new; void'(c.randomize()); end",
-            "randomization of a 4-state class property",
-        ),
-        (
-            "class C; rand bit [3:0] x; logic [3:0] y; constraint k { x < y; } endclass C c; initial begin c = new; void'(c.randomize()); end",
-            "4-state class property in a constraint",
-        ),
-        (
-            "class C; logic [3:0] x; rand bit [3:0] y; constraint k { y < 5; } endclass C c; initial begin c = new; void'(c.randomize(x)); end",
-            "randomization of a 4-state class property",
-        ),
+fn rand_arrays_have_their_elements_constrained() {
+    // The elements of a rand array, fixed-size or dynamic, are solver
+    // variables of loops and sums over it (IEEE 1800-2023 18.4, 18.5.8.1,
+    // 18.5.8.2); a state array's sum is its elements' sum.
+    let source = r#"module Top(output int ok, output int fixed_sum, output int state_sum);
+    class C;
+        rand int f[5];
+        rand int s[4];
+        rand bit [7:0] d[];
+        int w[3] = '{1, 2, 3};
+        rand int t;
+        constraint cf { foreach (f[i]) f[i] == 5; }
+        constraint cs { s.sum() == 5; foreach (s[i]) s[i] inside {[0:5]}; }
+        constraint cd { foreach (d[i]) d[i] == i + 1; }
+        constraint ct { t == w.sum(); }
+    endclass
+    C c;
+    initial begin
+        c = new;
+        c.d = new[4];
+        ok = 1;
+        repeat (8) begin
+            ok &= c.randomize();
+            ok &= c.s.sum() == 5 && c.d.size() == 4 && c.t == 6;
+            foreach (c.d[i]) ok &= c.d[i] == i + 1;
+        end
+        fixed_sum = c.f.sum();
+        state_sum = c.w.sum();
+    end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("arrays.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("ok")), BigUint::from(1u8));
+    assert_eq!(sim.get(sim.signal("fixed_sum")), BigUint::from(25u8));
+    assert_eq!(sim.get(sim.signal("state_sum")), BigUint::from(6u8));
+    // A rand array whose size and elements constraints name has its size
+    // solved first, which is then state to the loop and the sum over it
+    // (IEEE 1800-2023 18.5.7.1, 18.5.7.2).
+    let source = r#"module Top(output int ok);
+    class C;
+        rand int a[];
+        constraint k { a.size() inside {[1:4]}; foreach (a[i]) a[i] == i; a.sum() * 2 == a.size() * (a.size() - 1); }
+    endclass
+    C c;
+    initial begin
+        c = new;
+        ok = 1;
+        repeat (8) begin
+            ok &= c.randomize() && c.a.size() >= 1 && c.a.size() <= 4;
+            foreach (c.a[i]) ok &= c.a[i] == i;
+        end
+    end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("sized.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("ok")), BigUint::from(1u8));
+}
+
+#[test]
+fn four_state_properties_randomize_to_two_state_values() {
+    // A 4-state rand property, static or not, and a 4-state property a call
+    // names take 2-state values (IEEE 1800-2023 18.3, 18.11); a constraint
+    // takes a 4-state instance property as state only while it has no X
+    // or Z bits, which a 2-state simulation never has.
+    let run = |body: &str, four_state: bool| {
+        let source = format!(
+            "module Top(output int ok); {body} initial begin c = new; ok = c.randomize(); end endmodule"
+        );
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        let ok = sim.signal("ok");
+        sim.run_until(0).map(|()| sim.get(ok))
+    };
+    for body in [
+        "class C; rand logic [3:0] x; constraint k { x > 3; } endclass C c;",
+        "class C; static rand logic [3:0] x; constraint k { x > 3; } endclass C c;",
+        "class C; rand bit [3:0] x; logic [3:0] y = 2; constraint k { x > y; } endclass C c;",
     ] {
-        let source = format!("module Top; {body} endmodule");
         for four_state in [false, true] {
-            let Err(error) =
-                Simulator::from_sv_sources(vec![(&source, Path::new("class.sv"))], "Top")
-                    .four_state(four_state)
-                    .build_cranelift()
-            else {
-                panic!("{want} is unsupported");
-            };
-            let error = error.to_string();
-            assert!(error.contains(want), "{error}");
+            assert_eq!(run(body, four_state).unwrap(), BigUint::from(1u8), "{body}");
         }
     }
+    // X and Z bits follow the 4-state semantics of each operation: only
+    // those that decide a constraint's or a guard's truth are an error
+    // (18.3). A guard that reads known bits decides what it guards, which
+    // then dereferences no null handle (18.5.13); a function's value
+    // carries the X and Z bits of its 4-state type, while a 2-state one has
+    // none (6.11).
+    let unknown = "class C; rand bit [3:0] x; logic [3:0] y; constraint k { x > y; } endclass C c;";
+    let guarded = "class D; rand bit [7:0] x; endclass class C; rand bit [3:0] x; rand D d; logic [7:0] y = 8'bxxxx_0001; constraint k { if (y[3:0] == 0) d.x == 1; x == y[3:0]; } endclass C c;";
+    let logic_call = "class C; rand bit x; logic [3:0] y; function logic f(); return y == 0; endfunction constraint k { x == f(); } endclass C c;";
+    let bit_call = "class C; rand bit x; logic [3:0] y; function bit f(); return y == 0; endfunction constraint k { x == f(); } endclass C c;";
+    for (body, error) in [
+        (unknown, true),
+        (guarded, false),
+        (logic_call, true),
+        (bit_call, false),
+    ] {
+        assert_eq!(run(body, false).unwrap(), BigUint::from(1u8), "{body}");
+        match run(body, true) {
+            Ok(ok) => assert!(!error && ok == BigUint::from(1u8), "{body}"),
+            Err(reason) => assert!(
+                error && reason.to_string().contains("X or Z bits"),
+                "{body}: {reason}"
+            ),
+        }
+    }
+    // A static 4-state property a constraint reads as state stays
+    // unsupported.
+    let source = "module Top; class C; rand bit [3:0] x; static logic [3:0] y = 2; constraint k { x > y; } endclass C c; initial begin c = new; void'(c.randomize()); end endmodule";
+    let Err(error) =
+        Simulator::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top").build_cranelift()
+    else {
+        panic!("a static 4-state property in a constraint is unsupported");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("4-state class property in a constraint"),
+        "{error}"
+    );
+}
+
+#[test]
+fn four_state_inline_inputs_take_their_known_bits() {
+    // A 4-state variable of the caller is an input of inline constraints
+    // while its bits are known; one a constraint reads with X or Z bits is
+    // an error (IEEE 1800-2023 18.3, 18.7).
+    let run = |body: &str, four_state: bool| {
+        let source = format!(
+            "module Top(output int ok, output int got);
+                class C; rand bit [7:0] x; endclass
+                C c;
+                logic [7:0] base;
+                initial begin c = new; {body} got = c.x; end
+            endmodule"
+        );
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        let (ok, got) = (sim.signal("ok"), sim.signal("got"));
+        sim.run_until(0).map(|()| (sim.get(ok), sim.get(got)))
+    };
+    let one = BigUint::from(1u8);
+    for four_state in [false, true] {
+        let (ok, got) = run(
+            "base = 8'h20; ok = c.randomize() with { x inside {[base:base + 8'h3]}; };",
+            four_state,
+        )
+        .unwrap();
+        assert!(
+            ok == one
+                && (0x20u8..=0x23)
+                    .contains(&(got.to_u32_digits().first().copied().unwrap_or(0) as u8)),
+            "{four_state}"
+        );
+    }
+    let scope = "begin bit [7:0] v; ok = std::randomize(v) with { v == base; }; c.x = v; end";
+    for body in [
+        "base = 8'bxxxx_0101; ok = c.randomize() with { x == base; };".to_owned(),
+        format!("base = 8'bxxxx_0101; {scope}"),
+    ] {
+        assert_eq!(run(&body, false).unwrap().0, one, "{body}");
+        let error = run(&body, true).unwrap_err().to_string();
+        assert!(error.contains("X or Z bits"), "{body}: {error}");
+    }
+    // X and Z bits follow the 4-state semantics of each operation: only
+    // those that decide a constraint's or a guard's truth count, in
+    // `std::randomize` too.
+    for (body, want) in [
+        (
+            "base = 8'b1010_xxxx; ok = c.randomize() with { x == base >> 4; };",
+            0xa,
+        ),
+        (
+            "base = 8'b1010_xxxx; ok = c.randomize() with { x == (base & 8'hf0); };",
+            0xa0,
+        ),
+        (
+            "base = 8'b0xxx_xxxx; ok = c.randomize() with { if (base >> 7) x == 1; else x == 2; };",
+            2,
+        ),
+        (
+            "base = 8'b1xxx_xxxx; ok = c.randomize() with { if (base >> 7) x == 1; else x == 2; };",
+            1,
+        ),
+        (
+            "base = 8'b1010_xxxx; begin bit [7:0] v; ok = std::randomize(v) with { v == base >> 4; }; c.x = v; end",
+            0xa,
+        ),
+        (
+            "base = 8'b1010_xxxx; ok = c.randomize() with { x == (base & ~8'h0f); };",
+            0xa0,
+        ),
+        (
+            "base = 8'bx000_0000; ok = c.randomize() with { if ((base >> 7) && 1'b0) x == 1; x == 2; };",
+            2,
+        ),
+    ] {
+        let (ok, got) = run(body, true).unwrap();
+        assert_eq!(
+            (ok, got),
+            (one.clone(), BigUint::from(want as u8)),
+            "{body}"
+        );
+    }
+    // An X that decides a guard's truth is an error.
+    let decided = "base = 8'bx000_0000; ok = c.randomize() with { if ((base >> 7) && 1'b1) x == 1; x == 2; };";
+    let error = run(decided, true).unwrap_err().to_string();
+    assert!(error.contains("X or Z bits"), "{error}");
 }
 
 #[test]
@@ -1678,7 +1769,7 @@ fn incompatible_class_handle_assignments_are_rejected() {
 
 /// The SV frontend is recursive, and one case nests class specializations
 /// 64 deep, so the cases build on a thread with room on its stack (like
-/// suite cases in `suite::run_case`).
+/// the vtest executor runs suite cases).
 #[test]
 fn misused_parameterized_classes_are_rejected() {
     std::thread::scope(|scope| {
@@ -1821,8 +1912,28 @@ fn unbindable_call_arguments_are_rejected() {
 }
 
 sv_backends! {
-    fn class_unconstrained_randomize(sim) { @case "class::unconstrained_randomize"; }
-    fn class_randomize_without_rand_members(sim) { @case "class::randomize_without_rand_members"; }
+    // set_randstate with a string that get_randstate did not return is
+    // undefined (IEEE 1800-2023 18.13.5); Celox ends the simulation with an
+    // error.
+    fn class_set_randstate_rejects_a_foreign_state(sim) {
+        @setup {
+            let source = r#"module Top(output int started);
+                class Item; rand int x; endclass
+                Item item = new;
+                initial begin
+                    started = 1;
+                    item.set_randstate("not a state");
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("set_randstate.sv"))], "Top");
+        let error = sim.run_until(0).unwrap_err().to_string();
+        assert!(error.contains("set_randstate with a state that get_randstate did not return"), "{error}");
+        assert_eq!(sim.get(sim.signal("started")), 1u8.into());
+    }
+}
+
+sv_backends! {
     fn class_randomize_null_receiver(sim) {
         @setup {
             let source = r#"module Top(output int hooks, result);
@@ -1857,7 +1968,7 @@ sv_backends! {
                     function void post_randomize(); calls++; endfunction
                 endclass
                 class Derived extends Base;
-                    constraint c { x dist {1 := 2}; }
+                    constraint c { (x == 1) <-> (x < 3); }
                 endclass
                 Base b;
                 Derived d;
@@ -1939,13 +2050,6 @@ sv_backends! {
             assert_eq!(sim.get_four_state(value), expected);
         }
     }
-}
-
-sv_backends! {
-    fn class_randomization_mode_bit_argument(sim) { @case "class::randomization_mode_bit_argument"; }
-    fn class_randomization_inheritance(sim) { @case "class::randomization_inheritance"; }
-    fn class_randomization_modes_and_selection(sim) { @case "class::randomization_modes_and_selection"; }
-    fn class_randomization_pre_hook_controls_modes(sim) { @case "class::randomization_pre_hook_controls_modes"; }
 }
 
 sv_backends! {
@@ -2093,6 +2197,856 @@ fn compilation_unit_types_of_separate_files_specialize_package_classes_separatel
     sim.run_until(1).unwrap();
     assert_eq!(sim.get(sim.signal("a")), 1u32.into());
     assert_eq!(sim.get(sim.signal("b")), 2u32.into());
+}
+
+#[test]
+fn a_specialization_asked_of_a_package_runs_with_the_classes_it_does_not_change() {
+    // The package is analyzed again for `p::C#(5)`. The classes that the
+    // specialization does not change keep what their first analysis made:
+    // `D::g` reaches the new class through the dispatcher of `B::f`, and
+    // the static locals of `B::twice` and `K::tick` are the same variables
+    // (IEEE 1800-2023 8.20, 8.25).
+    let source = "`timescale 1ns/1ns
+    package p;
+        int count;
+        class B;
+            int x;
+            virtual function int f(); return x; endfunction
+            function int twice(); static int calls; calls++; return 2 * f() + calls; endfunction
+        endclass
+        class C #(int N = 2) extends B;
+            virtual function int f(); count++; return N + x; endfunction
+        endclass
+        class D;
+            B b;
+            function int g(); int local_value; local_value = b.twice(); return local_value; endfunction
+        endclass
+        class K;
+            static function int tick(); static int ticks; ticks++; return ticks; endfunction
+        endclass
+    endpackage
+    module Top(output int o, output int n, output int t);
+        p::C#(5) c;
+        p::D d;
+        initial begin
+            c = new; d = new; d.b = c; c.x = 1;
+            o = d.g();
+            o = o + d.g();
+            n = p::count;
+            t = p::K::tick() + p::K::tick();
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("o")), 27u32.into());
+    assert_eq!(sim.get(sim.signal("n")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("t")), 3u32.into());
+}
+
+#[test]
+fn a_specialization_asked_of_a_package_keeps_its_static_formals() {
+    // The formals of a static task of a package that suspends are package
+    // variables (IEEE 1800-2023 13.3.1, 13.3.2): every analysis of the
+    // package, including the one made again for `p::C#(5)`, names the
+    // same ones.
+    let source = "`timescale 1ns/1ns
+    package p;
+        int done;
+        task settle(int value); #1 done = value; endtask
+        class B; virtual function int f(); return 1; endfunction endclass
+        class C #(int N = 2) extends B;
+            virtual function int f(); return N; endfunction
+        endclass
+    endpackage
+    module Top(output int o, output int d);
+        p::C#(5) c;
+        initial begin c = new; o = c.f(); p::settle(7); d = p::done; end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("o")), 5u32.into());
+    assert_eq!(sim.get(sim.signal("d")), 7u32.into());
+}
+
+#[test]
+fn methods_a_package_specialization_lowers_share_their_static_variables() {
+    // `Seq#(Item)` makes the package lower `Item::op` for its dispatcher.
+    // The static variable of that method is one variable of the
+    // compilation unit, which `Item` declares, whichever scope calls it
+    // (IEEE 1800-2023 6.21, 8.25).
+    let source = "`timescale 1ns/1ns
+    package p;
+        class Base; virtual function void op(); endfunction endclass
+        class Seq #(type T = Base);
+            T item;
+            function void run(); item.op(); endfunction
+        endclass
+    endpackage
+    import p::*;
+    class Item extends Base;
+        int count, calls;
+        virtual function void op();
+            calls++;
+            begin
+                static bit warned;
+                if (!warned) begin count++; warned = 1; end
+            end
+        endfunction
+    endclass
+    module Top(output int count, output int calls, output int other_count, output int other_calls);
+        Seq #(Item) s;
+        Item other;
+        initial begin
+            s = new; s.item = new; other = new;
+            s.run(); s.run(); other.op();
+            count = s.item.count; calls = s.item.calls;
+            other_count = other.count; other_calls = other.calls;
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("count")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("calls")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("other_count")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("other_calls")), 1u32.into());
+}
+
+#[test]
+fn a_package_specialization_runs_methods_of_the_classes_it_takes() {
+    // `Registry#(Item)` makes the package run `Item::code` through the
+    // dispatcher of `Obj::code` in the initializer of a static property.
+    // The locals of the method are its own, not the package's: `keep`
+    // holds its `v` across the call, and the method writes its `v`
+    // (IEEE 1800-2023 8.25, 13.4.2).
+    let source = "`timescale 1ns/1ns
+    package p;
+        class Obj; virtual function int code(int x); return x; endfunction endclass
+        function automatic int keep(Obj o);
+            int v;
+            v = 100;
+            v = v + o.code(1);
+            return v;
+        endfunction
+        class Registry #(type T = Obj);
+            static int registered = register();
+            static function int register(); T t = new; return keep(t); endfunction
+        endclass
+    endpackage
+    import p::*;
+    class Item extends Obj;
+        virtual function int code(int x); int v; v = x * 7; return v; endfunction
+    endclass
+    module Top(output int o);
+        typedef Registry#(Item) R;
+        initial o = R::registered;
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("o")), 107u32.into());
+}
+
+#[test]
+fn package_classes_name_the_compilation_unit_classes_of_other_files() {
+    // `$typename` of a type parameter of a package class, specialized with
+    // a class of the compilation unit of another file, as
+    // `uvm_resource_db#(C)` is (IEEE 1800-2023 20.6.1, 3.12.1).
+    let package = "package p;
+        class R #(type T = int);
+            static function string name(); return $typename(T); endfunction
+        endclass
+    endpackage";
+    let top = "class C; endclass
+    module Top(output bit named);
+        initial named = p::R#(C)::name() == \"$unit::C\";
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(package, Path::new("p.sv")), (top, Path::new("top.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("named")), 1u32.into());
+}
+
+#[test]
+fn constraints_name_members_of_objects_their_handles_refer_to() {
+    // A constraint names a member of the object a handle property refers
+    // to (IEEE 1800-2023 18.5.9): through a rand handle, a variable solved
+    // with the object's; through another, a state value.
+    let source = "class A;
+        rand int v;
+        constraint r { v inside {[0:9]}; }
+    endclass
+    class B extends A;
+        rand A aObj;
+        A s;
+        rand int w;
+        constraint c { aObj.v < v; w == s.v + 1; }
+        function new(); aObj = new; s = new; endfunction
+    endclass
+    module Top;
+        B b;
+        int ok;
+        initial begin
+            b = new;
+            b.s.v = 41;
+            ok = 1;
+            repeat (20) ok &= b.randomize() && b.aObj.v < b.v && b.aObj.v >= 0 && b.w == 42 && b.s.v == 41;
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn constraints_name_a_member_size_of_the_object_a_handle_refers_to() {
+    // `h.size` is a member of the object handle `h` refers to, by the type
+    // of `h`, not the size of an array (IEEE 1800-2023 18.5.9).
+    let source = "class A; rand int size; endclass
+    class B;
+        rand A h;
+        constraint c { h.size == 3; }
+        function new(); h = new; endfunction
+    endclass
+    module Top;
+        B b;
+        int ok;
+        initial begin
+            b = new;
+            ok = b.randomize() && b.h.size == 3;
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn guards_keep_constraints_from_members_of_null_handles() {
+    // A guard of state variables is evaluated before the constraints are
+    // solved (IEEE 1800-2023 18.5.13): a constraint it leaves out does not
+    // read the member of a null handle, under `if` or `->`.
+    let source = "class A; int v; endclass
+    class B;
+        bit enabled;
+        A h;
+        rand int x, y;
+        constraint c { if (enabled) h.v == x; enabled -> h.v == y; }
+    endclass
+    module Top;
+        B b;
+        int ok, off, on;
+        initial begin
+            b = new;
+            off = b.randomize();
+            b.h = new;
+            b.h.v = 7;
+            b.enabled = 1;
+            on = b.randomize() && b.x == 7 && b.y == 7;
+            $display(\"%0d %0d\", off, on);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1"]);
+}
+
+#[test]
+fn guards_read_fixed_members_of_objects_the_call_solves() {
+    // A guard that reads a state member, or a rand member whose rand_mode is
+    // off, through a rand handle is evaluated before solving too (IEEE
+    // 1800-2023 18.5.13, 18.8): the call solves that object, but the member
+    // keeps its value, so a false guard leaves out the member of a null
+    // handle.
+    let source = "class H; bit enabled; rand int w; endclass
+    class G; rand int v; endclass
+    class B;
+        rand H h;
+        rand G g;
+        constraint c { if (h.enabled) g.v == 1; h.w > 0 -> g.v == 2; }
+        function new(); h = new; endfunction
+    endclass
+    module Top;
+        B b;
+        int off, on;
+        initial begin
+            b = new;
+            b.h.w = 0;
+            b.h.w.rand_mode(0);
+            off = b.randomize();
+            b.g = new;
+            b.h.enabled = 1;
+            on = b.randomize() && b.g.v == 1;
+            $display(\"%0d %0d\", off, on);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1"]);
+}
+
+#[test]
+fn guards_of_any_state_expression_are_known_before_solving() {
+    // A guard is known before solving whatever operators it applies to
+    // state values, a shift or a state array's size among them (IEEE
+    // 1800-2023 18.5.13): a false one leaves out the member of a null
+    // handle.
+    let source = "class A; int v; endclass
+    class B;
+        bit [3:0] bits;
+        int arr[];
+        A h;
+        rand int x;
+        constraint c {
+            if (bits << 1) h.v == x;
+            if ((bits >> 3) == 1) h.v == x + 1;
+            if (arr.size() == 0) h.v == x + 2;
+        }
+    endclass
+    module Top;
+        B b;
+        int off, on;
+        initial begin
+            b = new;
+            b.arr = new[2];
+            off = b.randomize();
+            b.h = new;
+            b.h.v = 9;
+            b.bits = 4'b0100;
+            on = b.randomize() && b.x == 9;
+            $display(\"%0d %0d\", off, on);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1"]);
+}
+
+#[test]
+fn handle_members_named_like_array_methods_are_members() {
+    // `h.sum` and `h.size` name the members of the object `h` refers to,
+    // as `h` is a class handle, not an array (IEEE 1800-2023 7.12, 18.5.9).
+    let source = "class A; rand int sum; rand int size; endclass
+    class B;
+        rand A h;
+        constraint c { h.sum == 3; h.size == h.sum + 1; }
+        function new(); h = new; endfunction
+    endclass
+    module Top;
+        B b;
+        initial begin
+            b = new;
+            $display(\"%0d %0d %0d\", b.randomize(), b.h.sum, b.h.size);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 3 4"]);
+}
+
+#[test]
+fn constraints_name_members_only_through_handles_they_may_access() {
+    // The handle of `h.m` is a member the constraint accesses: a `local`
+    // one of a base class is not visible in a derived class's constraint
+    // (IEEE 1800-2023 8.18, 18.5.9).
+    let source = "class A;
+        rand int v;
+    endclass
+    class Base;
+        local rand A h;
+        function new(); h = new; endfunction
+    endclass
+    class Derived extends Base;
+        constraint c { h.v == 1; }
+    endclass
+    module Top; Derived d; initial begin d = new; void'(d.randomize()); end endmodule";
+    let error =
+        match celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+            .build()
+        {
+            Err(error) => error.to_string(),
+            Ok(mut sim) => sim
+                .run_until(1)
+                .expect_err("a base class's local handle")
+                .to_string(),
+        };
+    assert!(error.contains("local member `h` of class"), "{error}");
+}
+
+#[test]
+fn uniqueness_constraints_keep_their_members_apart() {
+    // `unique` gives its members pairwise different values, with other
+    // constraints; a group of fewer than two members has no effect, and a
+    // group with no different values left fails the call (IEEE 1800-2023
+    // 18.5.4).
+    let source = "class C;
+        rand bit [1:0] a, b, c;
+        rand int x;
+        constraint k { unique {a, b, c}; a != 3; b != 3; c != 3; unique {x}; }
+    endclass
+    module Top;
+        C o;
+        int ok, failed;
+        initial begin
+            o = new;
+            ok = 1;
+            repeat (50) ok &= o.randomize() && o.a != o.b && o.b != o.c && o.a != o.c;
+            failed = o.randomize() with { a == b; };
+            $display(\"%0d %0d\", ok, failed);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 0"]);
+    for (members, constraint, message) in [
+        (
+            "randc bit [1:0] a; rand bit [1:0] b;",
+            "unique {a, b};",
+            "a randc variable in a uniqueness constraint",
+        ),
+        (
+            "rand bit [1:0] a; rand int b;",
+            "unique {a, b};",
+            "members of types that are not equivalent",
+        ),
+        (
+            "rand int a; rand int q[];",
+            "unique {a, q};",
+            "an array in a uniqueness constraint",
+        ),
+    ] {
+        let error = uniqueness_error(members, constraint);
+        assert!(error.contains(message), "{constraint}: {error}");
+    }
+}
+
+/// The error of randomizing a class with `members` and `constraint`.
+fn uniqueness_error(members: &str, constraint: &str) -> String {
+    let source = format!(
+        "class C; {members} constraint k {{ {constraint} }} endclass
+        module Top; C c; initial begin c = new; void'(c.randomize()); end endmodule"
+    );
+    match celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("class.sv"))], "Top")
+        .build()
+    {
+        Err(error) => error.to_string(),
+        Ok(mut sim) => sim.run_until(1).expect_err(constraint).to_string(),
+    }
+}
+
+#[test]
+fn uniqueness_constraint_members_are_variables() {
+    // A member is a variable, not a value computed from one (IEEE 1800-2023
+    // 18.5.4).
+    let error = uniqueness_error("rand int a, b;", "unique {a + 1, b};");
+    assert!(
+        error.contains("a uniqueness constraint member that is not a variable"),
+        "{error}"
+    );
+}
+
+#[test]
+fn uniqueness_constraint_members_are_of_equivalent_types() {
+    // Two enumerations of one base type are not equivalent (IEEE 1800-2023
+    // 6.22.2, 18.5.4).
+    let error = uniqueness_error(
+        "typedef enum bit [1:0] {A0, A1} ea; typedef enum bit [1:0] {B0, B1} eb; rand ea a; rand eb b;",
+        "unique {a, b};",
+    );
+    assert!(
+        error.contains("members of types that are not equivalent"),
+        "{error}"
+    );
+}
+
+#[test]
+fn uniqueness_constraints_of_many_members_stay_solvable() {
+    // 33 members make 528 pairwise differences, which the solver takes as
+    // a balanced conjunction (IEEE 1800-2023 18.5.4).
+    let names: Vec<String> = (0..33).map(|index| format!("m{index}")).collect();
+    let source = format!(
+        "class C;
+        rand bit [7:0] {};
+        constraint k {{ unique {{{}}}; }}
+    endclass
+    module Top;
+        C o;
+        int ok, apart;
+        initial begin
+            o = new;
+            ok = o.randomize();
+            apart = 1;
+            {}
+            $display(\"%0d %0d\", ok, apart);
+        end
+    endmodule",
+        names.join(", "),
+        names.join(", "),
+        (0..33)
+            .flat_map(|a| ((a + 1)..33).map(move |b| format!("apart &= o.m{a} != o.m{b};")))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    assert_eq!(super::hierarchical_references::displayed(&source), ["1 1"]);
+}
+
+#[test]
+fn distributions_constrain_values_and_weigh_their_items() {
+    // `dist` allows the values of its items of nonzero total weight, weighs
+    // a range by its values with `:=` and as a whole with `:/`, and its
+    // weights never make a call fail; with the class's, an inline one that
+    // leaves no value fails the call (IEEE 1800-2023 18.5.3, 18.7).
+    let source = "class C;
+        rand int b;
+        rand bit [3:0] r;
+        constraint c { b dist {3 := 0, 10 := 5}; }
+        constraint d { r dist {[0:3] :/ 1, [4:15] := 0, 15 := 3}; }
+    endclass
+    module Top;
+        C c;
+        int ok, fifteen, low, failed;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (200) begin
+                ok &= c.randomize() && c.b == 10 && (c.r <= 3 || c.r == 15);
+                if (c.r == 15) fifteen++; else low++;
+            end
+            $display(\"%0d %0d %0d\", ok, fifteen > 120, low > 20);
+            ok = c.randomize() with { b dist {10 := 1, 3 := 9}; };
+            failed = c.randomize() with { b dist {3 := 1, 10 := 0}; };
+            $display(\"%0d %0d %0d\", ok, c.b, failed);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1 1 1", "1 10 0"]
+    );
+    let source = "class C;
+        rand int b;
+        int w = 2;
+        constraint c { b dist {10 := w}; }
+    endclass
+    module Top; C c; initial begin c = new; void'(c.randomize()); end endmodule";
+    let error =
+        match celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+            .build()
+        {
+            Err(error) => error.to_string(),
+            Ok(mut sim) => sim
+                .run_until(1)
+                .expect_err("a weight that is no constant")
+                .to_string(),
+        };
+    assert!(
+        error.contains("distribution weight other than a constant"),
+        "{error}"
+    );
+    // However the operand names the randc property, or reads it among other
+    // operands, also as a member of an object a rand handle refers to
+    // (18.5.9), or a static handle does, which may alias such an object.
+    for operand in [
+        "b",
+        "(b)",
+        "b + 4'd1",
+        "h.b",
+        "h.b + 4'd1",
+        "s.b",
+        "s.b + 4'd1",
+    ] {
+        let source = format!(
+            "class D; randc bit [3:0] b; endclass
+            class C;
+                randc bit [3:0] b;
+                rand D h;
+                static D s;
+                constraint c {{ {operand} dist {{3 := 0, 10 := 5}}; }}
+                function new; h = new; endfunction
+            endclass
+            module Top; C c; initial begin c = new; void'(c.randomize()); end endmodule"
+        );
+        let error = match celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        {
+            Err(error) => error.to_string(),
+            Ok(mut sim) => sim.run_until(1).expect_err(operand).to_string(),
+        };
+        assert!(
+            error.contains("distribution of a randc variable"),
+            "{operand}: {error}"
+        );
+    }
+}
+
+#[test]
+fn distribution_ranges_count_their_values_in_their_type() {
+    // `:=` counts the values of a range in the type the items compare in:
+    // [LOW:2] of a signed `int` with LOW = -2 holds five values, as many as
+    // the other item weighs (IEEE 1800-2023 18.5.3).
+    let source = "class C;
+        localparam int LOW = -2;
+        rand int b;
+        constraint c { b dist {[LOW:2] := 1, 100 := 5}; }
+    endclass
+    module Top;
+        C c;
+        int ok, range, hundred;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (200) begin
+                ok &= c.randomize() && (c.b inside {[-2:2], 100});
+                if (c.b == 100) hundred++; else range++;
+            end
+            $display(\"%0d %0d %0d\", ok, range > 60, hundred > 60);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1 1"]);
+}
+
+#[test]
+fn distribution_weights_and_bounds_are_constant_expressions() {
+    // A weight, and a bound of a range weighted per value, is any constant
+    // expression (IEEE 1800-2023 18.5.3).
+    let source = "class C;
+        rand int e;
+        constraint d { e dist {1 := 2 + 3, [1 + 2:5] := 1}; }
+    endclass
+    module Top;
+        C c;
+        int ok, one, three;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (200) begin
+                ok &= c.randomize() && (c.e inside {1, [3:5]});
+                if (c.e == 1) one++; else three++;
+            end
+            $display(\"%0d %0d %0d\", ok, one > 60, three > 40);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1 1"]);
+}
+
+#[test]
+fn distribution_ranges_may_be_open_ended() {
+    // `$` bounds a range by the lowest or highest value of the type of the
+    // expression (IEEE 1800-2023 11.4.13, 18.5.3): [$:-3] of an `int` is
+    // every value up to -3, [250:$] of an 8-bit unsigned one 250 to 255.
+    let source = "class C;
+        rand int b;
+        rand bit [7:0] u;
+        constraint c { b dist {[$:-3] :/ 1, [10:12] :/ 1}; }
+        constraint d { u dist {[250:$] := 1, [0:5] := 1}; }
+    endclass
+    module Top;
+        C c;
+        int ok, low, high;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (200) begin
+                ok &= c.randomize() && (c.b <= -3 || c.b inside {[10:12]})
+                    && (c.u >= 250 || c.u <= 5);
+                if (c.b <= -3) low++;
+                if (c.u >= 250) high++;
+            end
+            $display(\"%0d %0d %0d\", ok, low > 60, high > 60);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1 1"]);
+}
+
+#[test]
+fn distribution_weights_keep_their_width() {
+    // A weight is the full value of its constant expression: a 64-bit one
+    // of 2^32 is not 0 (IEEE 1800-2023 18.5.3), so its item stays allowed,
+    // also from a constant function.
+    let source = "package P;
+        function automatic longint unsigned big(); return 64'h1_0000_0000; endfunction
+    endpackage
+    class C;
+        rand int b;
+        constraint c { b dist {7 := 64'h3_0000_0000 / 3, 7 := P::big()}; }
+    endclass
+    module Top;
+        C c;
+        int ok;
+        initial begin
+            c = new;
+            ok = c.randomize() && c.b == 7;
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn distribution_range_totals_keep_their_ratio_beyond_64_bits() {
+    // A `:=` range weighs its weight times its size (IEEE 1800-2023
+    // 18.5.3): three values of weight 2^63 against one of 2^63 are tried
+    // 3:1, a total past 64 bits kept.
+    let source = "class C;
+        rand bit [1:0] x;
+        constraint c { x dist {[0:2] := 64'h8000_0000_0000_0000, 3 := 64'h8000_0000_0000_0000}; }
+    endclass
+    module Top;
+        C c;
+        int ok, three;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (1000) begin
+                ok &= c.randomize();
+                if (c.x == 3) three++;
+            end
+            $display(\"%0d %0d\", ok, three > 200 && three < 290);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1"]);
+}
+
+#[test]
+fn distribution_weights_keep_every_bit() {
+    // A weight is an unsigned value of any width (IEEE 1800-2023 18.5.3):
+    // a range of three values of weight W = 2^127 - 1 totals past 128 bits
+    // and is tried 3:2 against one value of weight 2W, so 3 is picked about
+    // 40% of the time, not the 25% of a pick by value; and 2^127 from an
+    // unsigned 128-bit constant function stays 2^127, about 1:1 against
+    // 2^127 - 1.
+    let source = "package P;
+        function automatic bit [127:0] top(); return 128'h8000_0000_0000_0000_0000_0000_0000_0000; endfunction
+    endpackage
+    class C;
+        rand bit [1:0] x;
+        rand bit y;
+        constraint c {
+            x dist {[0:2] := 128'h7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff, 3 := 129'h0_ffff_ffff_ffff_ffff_ffff_ffff_ffff_fffe};
+            y dist {0 := P::top(), 1 := 128'h7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff};
+        }
+    endclass
+    module Top;
+        C c;
+        int ok, three, zero;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (1000) begin
+                ok &= c.randomize();
+                if (c.x == 3) three++;
+                if (!c.y) zero++;
+            end
+            $display(\"%0d %0d %0d\", ok, three > 340 && three < 460, zero > 430 && zero < 570);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1 1"]);
+}
+
+#[test]
+fn distributions_of_array_sums_solve_the_elements() {
+    // The sum of a random array as the operand of a distribution makes its
+    // elements solver variables (IEEE 1800-2023 18.5.3, 18.5.8.2), so the
+    // sum, of the elements' 4 bits, takes a value of an item.
+    let source = "class C;
+        rand bit [3:0] a[2];
+        constraint c { a.sum() dist {[5:6] :/ 1}; }
+    endclass
+    module Top;
+        C c;
+        int ok;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (20) ok &= c.randomize() && c.a.sum() inside {[5:6]};
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn inline_distributions_take_open_ranges() {
+    // `$`, an open bound of a range of an inline distribution (IEEE
+    // 1800-2023 11.4.13, 18.7), names no variable of the caller.
+    let source = "class C; rand int b; endclass
+    module Top;
+        C c;
+        int ok;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (20) ok &= c.randomize() with { b dist {[$:3] :/ 1}; } && c.b <= 3;
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn negative_distribution_weights_are_unsigned() {
+    // A weight is read as unsigned at the width of its type (IEEE 1800-2023
+    // 18.5.3): -1 of an `int` constant function is 2^32 - 1, which outweighs
+    // a weight of 1.
+    let source = "package P;
+        function automatic int neg(); return -1; endfunction
+    endpackage
+    class C;
+        rand bit x;
+        constraint c { x dist {0 := P::neg(), 1 := 1}; }
+    endclass
+    module Top;
+        C c;
+        int ok, ones;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (100) begin
+                ok &= c.randomize();
+                if (c.x) ones++;
+            end
+            $display(\"%0d %0d\", ok, ones);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 0"]);
+}
+
+#[test]
+fn distributions_under_conditions_and_loops_weigh_their_items() {
+    // The weights of a distribution under `if`/`else` or `->`, also in a
+    // `foreach`, apply where its condition does (IEEE 1800-2023 18.5.3,
+    // 18.5.6, 18.5.7, 18.5.8.1).
+    let source = "class C;
+        rand int b;
+        rand int e;
+        bit mode;
+        int sel[];
+        constraint c { if (mode) b dist {10 := 1, 20 := 9}; else b dist {10 := 9, 20 := 1}; }
+        constraint d { foreach (sel[i]) sel[i] == 1 -> e dist {30 := 9, 40 := 1}; }
+    endclass
+    module Top;
+        C c;
+        int ok, twenty, ten, thirty;
+        initial begin
+            c = new;
+            c.sel = '{0, 1};
+            ok = 1;
+            repeat (200) begin
+                c.mode = 1;
+                ok &= c.randomize() && (c.b inside {10, 20}) && (c.e inside {30, 40});
+                if (c.b == 20) twenty++;
+                if (c.e == 30) thirty++;
+                c.mode = 0;
+                ok &= c.randomize();
+                if (c.b == 10) ten++;
+            end
+            $display(\"%0d %0d %0d %0d\", ok, twenty > 150, ten > 150, thirty > 150);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1 1 1 1"]
+    );
 }
 
 #[test]
@@ -2340,16 +3294,6 @@ endmodule"#;
     assert_eq!(sim.get(sim.signal("bits")), 8u32.into());
 }
 
-sv_backends! {
-    fn class_randomization_enum_inheritance(sim) { @case "class::randomization_enum_inheritance"; }
-    fn class_randomization_enum_alias(sim) { @case "class::randomization_enum_alias"; }
-    fn class_randomization_enum_domain(sim) { @case "class::randomization_enum_domain"; }
-}
-
-sv_backends! {
-    fn class_randomization_enum_fill_literals(sim) { @case "class::randomization_enum_fill_literals"; }
-}
-
 // The methods and static properties a module class inherits from a class of
 // a package in another source keep what they are there: a source-local
 // method identifier does not make a method of the module static, and a
@@ -2390,10 +3334,75 @@ endmodule"#;
     assert_eq!(sim.get(sim.signal("width")), 8u32.into());
 }
 
+#[test]
+fn randc_cycles_hold_up_to_16_bits() {
+    // IEEE 1800-2023 18.4.2: a randc property takes each value of its cycle
+    // once before the cycle restarts, also for the 16-bit
+    // `uvm_sequence_library::select_randc` that a constraint holds to a few
+    // values, and for a 9-bit property and an enumeration of 300 members.
+    let members = (0..300)
+        .map(|i| format!("M{i}={}", i * 3))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        "module Top;
+        typedef enum bit [9:0] {{ {members} }} E;
+        class Lib;
+            int unsigned size = 5;
+            randc bit [15:0] select_randc;
+            constraint valid_randc_selection {{ select_randc inside {{[0:size-1]}}; }}
+            function new(); valid_randc_selection.constraint_mode(0); endfunction
+            function bit pick(); return randomize(select_randc); endfunction
+        endclass
+        class Wide; randc bit [8:0] x; endclass
+        class Enumerated; randc E e; endclass
+        initial begin
+            Lib lib;
+            Wide wide;
+            Enumerated enumerated;
+            bit [4:0] mask;
+            bit seen[int];
+            int ok = 1;
+            lib = new;
+            wide = new;
+            enumerated = new;
+            lib.valid_randc_selection.constraint_mode(1);
+            repeat (3) begin
+                mask = 0;
+                repeat (5) begin
+                    ok &= lib.pick();
+                    mask |= 5'b1 << lib.select_randc;
+                end
+                ok &= mask == 5'b11111;
+            end
+            lib.valid_randc_selection.constraint_mode(0);
+            repeat (64) begin
+                ok &= lib.randomize();
+                seen[lib.select_randc] = 1;
+            end
+            $display(\"%0d %0d\", ok, seen.num());
+            seen.delete();
+            repeat (512) begin
+                void'(wide.randomize());
+                seen[wide.x] = 1;
+            end
+            $display(\"%0d\", seen.num());
+            seen.delete();
+            repeat (300) begin
+                void'(enumerated.randomize());
+                seen[enumerated.e] = 1;
+            end
+            $display(\"%0d\", seen.num());
+        end
+    endmodule"
+    );
+    assert_eq!(
+        super::hierarchical_references::displayed(&source),
+        ["1 64", "512", "300"]
+    );
+}
+
 sv_backends! {
-    fn class_randomization_cyclic_enum_alias(sim) { @case "class::randomization_cyclic_enum_alias"; }
-    fn class_randomization_cyclic_domains(sim) { @case "class::randomization_cyclic_domains"; }
-    fn class_randomization_cyclic_controls(sim) { @case "class::randomization_cyclic_controls"; }
     fn class_randomization_cyclic_checkpoint(sim) {
         @setup { let source = r#"
             module Top(output bit [63:0] value);
@@ -2422,60 +3431,6 @@ sv_backends! {
         sim.run_until(15).unwrap();
         assert_eq!(sim.get_four_state(value), expected);
     }
-}
-
-sv_backends! {
-    fn constrained_randomize_scalar(sim) { @case "class::constrained_randomize_scalar"; }
-    fn constrained_randomize_width_and_inheritance(sim) { @case "class::constrained_randomize_width_and_inheritance"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_hooks(sim) { @case "class::constrained_randomize_hooks"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_inside(sim) { @case "class::constrained_randomize_inside"; }
-    fn constrained_randomize_inside_widths(sim) { @case "class::constrained_randomize_inside_widths"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_conditionals(sim) { @case "class::constrained_randomize_conditionals"; }
-    fn constrained_randomize_nested_guards(sim) { @case "class::constrained_randomize_nested_guards"; }
-    fn constrained_randomize_state_properties(sim) { @case "class::constrained_randomize_state_properties"; }
-    fn constrained_randomize_rand_objects(sim) { @case "class::constrained_randomize_rand_objects"; }
-    fn output_arguments_write_class_properties(sim) { @case "class::output_arguments_write_class_properties"; }
-    fn virtual_interface_property_waits(sim) { @case "class::virtual_interface_property_waits"; }
-    fn constrained_randomize_rand_arrays(sim) { @case "class::constrained_randomize_rand_arrays"; }
-    fn constrained_randomize_shifts(sim) { @case "class::constrained_randomize_shifts"; }
-    fn constrained_randomize_foreach(sim) { @case "class::constrained_randomize_foreach"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_inline(sim) { @case "class::constrained_randomize_inline"; }
-    fn constrained_randomize_inline_inheritance(sim) { @case "class::constrained_randomize_inline_inheritance"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_inline_basic(sim) { @case "class::constrained_randomize_inline_basic"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_inline_package_instances(sim) { @case "class::constrained_randomize_inline_package_instances"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_inline_inputs(sim) { @case "class::constrained_randomize_inline_inputs"; }
-    fn constrained_randomize_inline_input_methods(sim) { @case "class::constrained_randomize_inline_input_methods"; }
-}
-
-sv_backends! {
-    fn constrained_randomize_inline_input_hooks(sim) { @case "class::constrained_randomize_inline_input_hooks"; }
-}
-
-sv_backends! {
-    fn constraint_mode_basic(sim) { @case "class::constraint_mode_basic"; }
-    fn constraint_mode_inheritance(sim) { @case "class::constraint_mode_inheritance"; }
-    fn constraint_mode_hooks(sim) { @case "class::constraint_mode_hooks"; }
 }
 
 sv_backends! {
@@ -2516,28 +3471,6 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("mode")), 0u8.into());
         assert_eq!(sim.get(sim.signal("value")), 7u8.into());
     }
-}
-
-sv_backends! {
-    fn constraint_mode_base_dispatch(sim) { @case "class::constraint_mode_base_dispatch"; }
-}
-
-sv_backends! {
-    fn class_foreign_generic_static_state_across_modules(sim) { @case "class::foreign_generic_static_state_across_modules"; }
-    fn class_foreign_generic_unit_type_constructor(sim) { @case "class::foreign_generic_unit_type_constructor"; }
-    fn class_foreign_generic_static_handle_identity(sim) { @case "class::foreign_generic_static_handle_identity"; }
-}
-
-sv_backends! {
-    fn class_foreign_generic_declaration_scope_and_equivalent_defaults(sim) { @case "class::foreign_generic_declaration_scope_and_equivalent_defaults"; }
-}
-
-sv_backends! {
-    fn class_foreign_generic_multiple_user_classes(sim) { @case "class::foreign_generic_multiple_user_classes"; }
-}
-
-sv_backends! {
-    fn class_foreign_generic_nominal_and_nested_types(sim) { @case "class::foreign_generic_nominal_and_nested_types"; }
 }
 
 #[test]
@@ -2654,41 +3587,6 @@ endmodule"#, Path::new("top.sv")),
 }
 
 sv_backends! {
-    fn class_foreign_generic_inherited_constants(sim) { @case "class::foreign_generic_inherited_constants"; }
-}
-
-sv_backends! {
-    fn class_foreign_generic_constructor_lexical_scope(sim) { @case "class::foreign_generic_constructor_lexical_scope"; }
-    fn class_foreign_generic_package_type_static_storage(sim) { @case "class::foreign_generic_package_type_static_storage"; }
-    fn class_foreign_generic_template_of_the_named_package(sim) { @case "class::foreign_generic_template_of_the_named_package"; }
-    fn class_foreign_generic_in_a_module_with_interface_instances(sim) { @case "class::foreign_generic_in_a_module_with_interface_instances"; }
-}
-
-sv_backends! {
-    fn class_scoped_typedef_handles(sim) { @case "class::scoped_typedef_handles"; }
-    fn class_specialized_scope_typedef_calls(sim) { @case "class::specialized_scope_typedef_calls"; }
-    fn class_specialized_scope_typedef_properties(sim) { @case "class::specialized_scope_typedef_properties"; }
-    fn class_parameter_strings_wider_than_a_constant(sim) { @case "class::parameter_strings_wider_than_a_constant"; }
-    fn class_new_initializers_of_scoped_and_alias_types(sim) { @case "class::new_initializers_of_scoped_and_alias_types"; }
-    fn class_parameter_literals_hide_module_constants(sim) { @case "class::parameter_literals_hide_module_constants"; }
-    fn class_static_initializers_run_once_before_time_zero(sim) { @case "class::static_initializers_run_once_before_time_zero"; }
-    fn class_method_defaults_use_the_object(sim) { @case "class::method_defaults_use_the_object"; }
-    fn class_nested_value_selects(sim) { @case "class::nested_value_selects"; }
-    fn class_property_assignment_sites(sim) { @case "class::property_assignment_sites"; }
-    fn class_property_place_addresses(sim) { @case "class::property_place_addresses"; }
-    fn class_property_member_place_addresses(sim) { @case "class::property_member_place_addresses"; }
-    fn class_formatting_task_place_outputs(sim) { @case "class::formatting_task_place_outputs"; }
-    fn class_property_member_assignment_sites(sim) { @case "class::property_member_assignment_sites"; }
-    fn class_packed_structure_property_members(sim) { @case "class::packed_structure_property_members"; }
-    fn class_tagged_members_of_structure_properties(sim) { @case "class::tagged_members_of_structure_properties"; }
-    fn class_methods_called_without_parentheses(sim) { @case "class::methods_called_without_parentheses"; }
-    fn class_constrained_enumerations_and_randc(sim) { @case "class::constrained_enumerations_and_randc"; }
-    fn class_prototype_formals_inherit_types(sim) { @case "class::prototype_formals_inherit_types"; }
-    fn class_real_values_round_into_integral_properties(sim) { @case "class::real_values_round_into_integral_properties"; }
-    fn class_real_properties(sim) { @case "class::real_properties"; }
-}
-
-sv_backends! {
     // A random enumeration of 1024 members takes one of them (IEEE 1800-2023
     // 18.3): its domain stays within the solver's limits.
     fn class_randomizes_large_enumerations(sim) {
@@ -2715,6 +3613,28 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("ok")), 1u32.into());
         let value: u32 = sim.get(sim.signal("value")).try_into().unwrap();
         assert!(value > 30 && value.is_multiple_of(3), "{value}");
+    }
+
+    // The members a ranged enumerator declares (6.19.2) are the domain of a
+    // random enumeration like any others.
+    fn class_randomizes_ranged_enumerators(sim) {
+        @setup {
+            let source = r#"module Top(output int ok, output int value);
+                typedef enum bit [3:0] { A[3] = 4, B[7:6], C } e_t;
+                class K; rand e_t e; constraint c { e != A0; e != C; } endclass
+                K k;
+                initial begin
+                    k = new;
+                    ok = k.randomize();
+                    value = k.e;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("ranged_enum_rand.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("ok")), 1u32.into());
+        let value: u32 = sim.get(sim.signal("value")).try_into().unwrap();
+        assert!((5..=8).contains(&value), "{value}");
     }
 
     // A class parameter hides the module's constant of its name also in a
@@ -3655,5 +4575,1547 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("c")), 6u32.into());
         assert_eq!(sim.get(sim.signal("d")), 7u32.into());
         assert_eq!(sim.get(sim.signal("e")), 8u32.into());
+    }
+}
+
+#[test]
+fn abstract_classes_of_the_compilation_unit_construct_their_subclasses() {
+    // The constructor of an abstract class (IEEE 1800-2023 8.21) runs for
+    // each object of a class derived from it, `super.new` implicit or not,
+    // and its pure constraint is the subclass's (18.5.2). Declared in the
+    // compilation unit, the class was not lowered: "call of `a::new`".
+    let source = "virtual class a;
+        int x = 3;
+        int made;
+        function new(); made = x + 1; endfunction
+        pure constraint c;
+    endclass
+    virtual class b extends a;
+        int y = 4;
+    endclass
+    class c extends b;
+        rand int z;
+        constraint c { z == 5; }
+    endclass
+    module Top(output int x, output int made, output int y, output int z);
+        c obj = new;
+        initial begin
+            void'(obj.randomize());
+            x = obj.x; made = obj.made; y = obj.y; z = obj.z;
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("x")), 3u32.into());
+    assert_eq!(sim.get(sim.signal("made")), 4u32.into());
+    assert_eq!(sim.get(sim.signal("y")), 4u32.into());
+    assert_eq!(sim.get(sim.signal("z")), 5u32.into());
+}
+
+#[test]
+fn modules_create_classes_they_only_reach_through_a_package_factory() {
+    // `simple_test` asks for `Reg#(simple_test)`, whose static initializer
+    // registers a `Holder#(simple_test)` with the package; the module names
+    // neither class and creates the object through the package, as UVM's
+    // `run_test("simple_test")` does. The specializations run the class's
+    // constructor, its static initializers and its overrides (IEEE
+    // 1800-2023 3.12.1, 8.25).
+    let source = "package p;
+        class Base;
+            string name;
+            function new(string name); this.name = name; endfunction
+            virtual function string get_type_name(); return \"Base\"; endfunction
+            virtual function int run(); return 0; endfunction
+        endclass
+        virtual class Wrapper;
+            pure virtual function Base create(string name);
+        endclass
+        Wrapper table_[$];
+        class Holder #(type T = Base) extends Wrapper;
+            virtual function Base create(string name); T obj; obj = new(name); return obj; endfunction
+        endclass
+        class Reg #(type T = Base);
+            static bit registered = add();
+            static function bit add(); Holder #(T) me = new; table_.push_back(me); return 1; endfunction
+        endclass
+        function automatic Base make(int kind, string name); return table_[kind].create(name); endfunction
+    endpackage
+    import p::*;
+    class simple_test extends Base;
+        typedef Reg#(simple_test) type_id;
+        const static string type_name = \"simple_test\";
+        function new(string name); super.new({name, \"!\"}); endfunction
+        virtual function string get_type_name(); return type_name; endfunction
+        virtual function int run(); return 7; endfunction
+    endclass
+    module Top(output bit named, output bit typed, output int ran);
+        initial begin
+            Base b;
+            b = make(0, \"t\");
+            named = b.name == \"t!\";
+            typed = b.get_type_name() == \"simple_test\";
+            ran = b.run();
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("named")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("typed")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("ran")), 7u32.into());
+
+    // A class of the unit declared after the module is no item the module
+    // sees (IEEE 1800-2023 3.12.1): the module does not take the unit for
+    // it, and so cannot create it.
+    let (head, module) = source.split_once("    module Top").unwrap();
+    let (package, class) = head.split_once("    class simple_test").unwrap();
+    let later = format!("{package}    module Top{module}\n    class simple_test{class}");
+    assert!(
+        celox::Simulation::from_sv_sources(vec![(later.as_str(), Path::new("class.sv"))], "Top")
+            .build()
+            .is_err(),
+        "{later}"
+    );
+
+    // A module takes only the unit of its own source: the module of b.sv
+    // sees `Reg#($unit::simple_test)`, a specialization for a class of the
+    // unit of a.sv, and leaves its own unit, which it does not use, aside
+    // (IEEE 1800-2023 3.12.1).
+    let (package, rest) = source.split_once("endpackage").unwrap();
+    let (classes, _) = rest.split_once("    module Top").unwrap();
+    let package = format!("{package}endpackage");
+    let other = "import p::*;
+    localparam int W = 3;
+    module Top(output int y);
+        initial y = 3;
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![
+            (package.as_str(), Path::new("p.sv")),
+            (classes, Path::new("a.sv")),
+            (other, Path::new("b.sv")),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 3u32.into());
+}
+
+#[test]
+fn static_rand_properties_are_solved_once_for_every_object() {
+    // A static rand property is one variable of the class: a randomize call
+    // of any object solves it under the constraints, and every object sees
+    // the value (IEEE 1800-2023 18.4). Its rand_mode is shared too (18.8):
+    // turned off through one object, it is off for the other, and a call
+    // then keeps its value.
+    let source = "class A;
+        static rand int b;
+        constraint c { b > 5; b < 12; }
+    endclass
+    module Top;
+        A o1, o2;
+        initial begin
+            o1 = new;
+            o2 = new;
+            void'(o1.randomize());
+            $display(\"%0d\", o1.b == o2.b && o1.b > 5 && o1.b < 12);
+            void'(o2.randomize());
+            $display(\"%0d\", o1.b == o2.b && A::b > 5 && A::b < 12);
+            o1.b.rand_mode(0);
+            $display(\"%0d %0d\", o1.b.rand_mode(), o2.b.rand_mode());
+            A::b = 77;
+            void'(o2.randomize());
+            $display(\"%0d\", A::b);
+            o2.b.rand_mode(1);
+            void'(o1.randomize());
+            $display(\"%0d %0d\", o1.b.rand_mode(), A::b > 5 && A::b < 12);
+            // The object's rand_mode covers the static property too.
+            o2.rand_mode(0);
+            A::b = 50;
+            void'(o1.randomize());
+            $display(\"%0d %0d\", o1.b.rand_mode(), A::b);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1", "1", "0 0", "77", "1 1", "0 50"]
+    );
+}
+
+#[test]
+fn constraints_read_static_properties_when_randomize_runs() {
+    // A static property a constraint names is read when the call starts
+    // (IEEE 1800-2023 18.5): by the class's constraints, a derived class's
+    // and an inline one's, which also reads a variable of the caller. An
+    // object that a rand handle reaches is not solved with them: its
+    // randomize call reports so.
+    let source = "class A;
+        rand int y;
+        static int lim = 3;
+        constraint c { y >= 0; y < lim; }
+    endclass
+    class D extends A;
+        static int low = 1;
+        constraint d { y > low; }
+    endclass
+    module Top;
+        A a;
+        D d;
+        int k, ok, lim;
+        initial begin
+            lim = 100;
+            a = new;
+            d = new;
+            ok = 1;
+            repeat (4) begin
+                void'(a.randomize());
+                ok &= a.y >= 0 && a.y < 3;
+            end
+            A::lim = 1;
+            void'(a.randomize());
+            $display(\"%0d %0d\", ok, a.y);
+            A::lim = 6;
+            k = 3;
+            ok = 1;
+            repeat (4) begin
+                // `lim` is the class's static property, not the caller's.
+                void'(a.randomize() with { y > k; y < lim; });
+                ok &= a.y > 3 && a.y < 6;
+                void'(d.randomize());
+                ok &= d.y > 1 && d.y < 6;
+            end
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1 0", "1"]
+    );
+    let member = "class A; rand int y; static int lim = 3; constraint c { y < lim; } endclass
+    class H; rand A a; function new(); a = new; endfunction endclass
+    module Top; H h; initial begin h = new; void'(h.randomize()); end endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(member, Path::new("class.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let error = sim
+        .run_until(1)
+        .expect_err("the member is not solved")
+        .to_string();
+    assert!(
+        error.contains("constraints name static properties"),
+        "{error}"
+    );
+    let randc = "class A; randc static bit [1:0] z; endclass
+    module Top; A a; initial a = new; endmodule";
+    let error = Simulator::from_sv_sources(vec![(randc, Path::new("class.sv"))], "Top")
+        .build_cranelift()
+        .expect_err("a randc static property is rejected")
+        .to_string();
+    assert!(error.contains("randc static class property"), "{error}");
+}
+
+#[test]
+fn static_rand_properties_are_named_by_their_declarations() {
+    // `randomize(b)` names a static rand property as it names any property
+    // of the class (IEEE 1800-2023 18.11), and the bit that turns one off is
+    // no name of the class: `p$rand_off`, an identifier (5.6), is a property
+    // of its own in either order of the declarations (18.8).
+    for order in [
+        "static rand int p; static int p$rand_off = 9;",
+        "static int p$rand_off = 9; static rand int p;",
+    ] {
+        let source = format!(
+            "class C;
+                static rand int b;
+                rand int x;
+                {order}
+                constraint k {{ b inside {{[1:3]}}; }}
+            endclass
+            module Top;
+                C c;
+                int ok;
+                initial begin
+                    c = new;
+                    c.x = 5;
+                    ok = 1;
+                    repeat (4) begin
+                        C::b = 0;
+                        ok &= c.randomize(b) && C::b >= 1 && C::b <= 3 && c.x == 5;
+                    end
+                    c.p.rand_mode(0);
+                    C::p = 1;
+                    void'(c.randomize());
+                    $display(\"%0d %0d %0d %0d\", ok, C::p, C::p$rand_off, c.p.rand_mode());
+                end
+            endmodule"
+        );
+        assert_eq!(
+            super::hierarchical_references::displayed(&source),
+            ["1 1 9 0"],
+            "{order}"
+        );
+    }
+}
+
+#[test]
+fn static_rand_properties_follow_randomize_arguments_and_their_class_methods() {
+    // Arguments of `randomize` name the random variables of the call,
+    // whatever their modes, so a static rand property they leave out keeps
+    // its value (IEEE 1800-2023 18.11); a method of the class sets and reads
+    // the mode of its static rand property by its name (18.8).
+    let source = "class C;
+        static rand int p;
+        rand int x;
+        constraint k { x inside {[0:5]}; p inside {[10:1000]}; }
+        function void freeze(); p.rand_mode(0); endfunction
+        function int mode(); return p.rand_mode(); endfunction
+    endclass
+    module Top;
+        C c;
+        int ok;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (4) begin
+                C::p = 15;
+                ok &= c.randomize(x) && C::p == 15 && c.x <= 5;
+            end
+            $display(\"%0d %0d\", ok, c.mode());
+            c.freeze();
+            C::p = 7;
+            void'(c.randomize());
+            $display(\"%0d %0d\", c.mode(), C::p);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1 1", "0 7"]
+    );
+}
+
+#[test]
+fn static_inputs_are_those_of_the_class_that_declares_them() {
+    // A base's constraint reads the base's static property though a derived
+    // class redeclares it, and the derived class's constraint reads its own
+    // (IEEE 1800-2023 8.14, 18.5). An inline constraint called through a
+    // base handle reads the caller's variable, whatever statics the class
+    // of the object adds (18.7).
+    let source = "class A;
+        rand int x;
+        static int limit = 3;
+        constraint a { x >= 0; x < limit; }
+    endclass
+    class D extends A;
+        rand int y, z;
+        static int limit = 100;
+        static int extra = 7;
+        constraint d { y >= 50; y < limit; z == extra; }
+    endclass
+    module Top;
+        A a;
+        D d;
+        int k, ok;
+        initial begin
+            d = new;
+            ok = 1;
+            repeat (4) begin
+                void'(d.randomize());
+                ok &= d.x >= 0 && d.x < 3 && d.y >= 50 && d.y < 100 && d.z == 7;
+            end
+            a = d;
+            k = 2;
+            repeat (4) begin
+                void'(a.randomize() with { x == k; });
+                ok &= d.x == 2 && d.z == 7;
+            end
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+/// The error of building and running `source` for one time unit.
+fn class_error(source: &str, what: &str) -> String {
+    match celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top").build() {
+        Err(error) => error.to_string(),
+        Ok(mut sim) => sim.run_until(1).expect_err(what).to_string(),
+    }
+}
+
+#[test]
+fn rand_mode_of_a_base_local_static_rand_property_is_not_visible() {
+    // A `local` member of a base class is not visible in a derived class
+    // (IEEE 1800-2023 8.18), its static rand property's shared mode
+    // included (18.8).
+    for use_ in [
+        "function void f(); p.rand_mode(0); endfunction",
+        "function int f(); return p.rand_mode(); endfunction",
+    ] {
+        let source = format!(
+            "class Base; local static rand int p; endclass
+            class Derived extends Base; {use_} endclass
+            module Top; Derived d; initial begin d = new; void'(d.f()); end endmodule"
+        );
+        let error = class_error(&source, use_);
+        assert!(
+            error.contains("local class member") && error.contains("::p` is not"),
+            "{use_}: {error}"
+        );
+    }
+}
+
+#[test]
+fn randomize_arguments_name_the_member_of_the_most_derived_class() {
+    // An instance property of a derived class hides a static rand property
+    // of its base of the name (IEEE 1800-2023 8.14): `randomize(p)` makes
+    // the instance property random, and leaves the static one alone (18.11).
+    let source = "class Base; static rand int p; endclass
+    class Derived extends Base;
+        rand int p;
+        constraint c { p inside {[5:7]}; }
+    endclass
+    module Top;
+        Derived d;
+        int ok;
+        initial begin
+            d = new;
+            Base::p = 100;
+            ok = d.randomize(p) && d.p >= 5 && d.p <= 7 && Base::p == 100;
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn constraints_name_the_static_property_that_hides_an_instance_one() {
+    // A static property of a derived class hides a rand instance property
+    // of its base of the name (IEEE 1800-2023 8.14): its constraint reads
+    // the static value (18.5).
+    let source = "class Base; rand int p; endclass
+    class Derived extends Base;
+        static int p = 4;
+        rand int x;
+        constraint c { x == p; }
+    endclass
+    module Top;
+        Derived d;
+        int ok;
+        initial begin
+            d = new;
+            ok = 1;
+            repeat (5) ok &= d.randomize() && d.x == 4;
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn rand_object_members_with_hidden_static_rand_properties_stay_rejected() {
+    // A static rand property a derived class hides by a static one of the
+    // name is still the base's, which the derived class's randomize calls
+    // solve: an object a rand handle reaches does not solve it, as one of a
+    // class with a visible static rand property does not (IEEE 1800-2023
+    // 18.4).
+    let source = "class Base; static rand int p; endclass
+    class Derived extends Base; static int p; endclass
+    class Holder;
+        rand Derived h;
+        function new(); h = new; endfunction
+    endclass
+    module Top; Holder o; initial begin o = new; void'(o.randomize()); end endmodule";
+    let error = class_error(source, "a hidden static rand property of a rand member");
+    assert!(
+        error.contains("a rand object member whose constraints name static properties"),
+        "{error}"
+    );
+}
+
+#[test]
+fn constraints_do_not_see_a_base_local_static_rand_property() {
+    // A `local` static rand property of a base class is not visible in the
+    // constraints of a derived class (IEEE 1800-2023 8.18).
+    let source = "class Base; local static rand int p; endclass
+    class Derived extends Base;
+        rand int x;
+        constraint c { x == p; }
+    endclass
+    module Top; Derived d; initial begin d = new; void'(d.randomize()); end endmodule";
+    let error = class_error(source, "a base's local static rand property");
+    assert!(error.contains("local member `p`"), "{error}");
+}
+
+#[test]
+fn static_properties_are_admitted_as_instance_properties_are() {
+    // The solver takes the static properties a constraint names, and the
+    // static rand ones, as it takes instance properties of the type: a
+    // 4-state rand one as an instance one, while a 4-state one it reads as
+    // state is rejected, and a rand `real` (IEEE 1800-2023 18.4) is built
+    // as an instance one is.
+    let error = |members: &str| {
+        let source = format!(
+            "class C; rand int x; {members} endclass
+            module Top; C c; initial begin c = new; void'(c.randomize()); end endmodule"
+        );
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("class.sv"))], "Top")
+            .build()
+            .err()
+            .map(|error| error.to_string())
+    };
+    assert_eq!(error("logic [3:0] l = 2; constraint c { x < l; }"), None);
+    let shared = error("static logic [3:0] l = 2; constraint c { x < l; }");
+    assert!(
+        shared
+            .as_deref()
+            .is_some_and(|error| error.contains("4-state class property in a constraint")),
+        "{shared:?}"
+    );
+    assert_eq!(error("static rand real r;"), error("rand real r;"));
+    // With a constraint the solver builds the program, which takes a rand
+    // `real` it does not name as it takes an instance one, and a 4-state
+    // rand property as an instance one.
+    for (instance, shared) in [
+        (
+            "rand real r; constraint c { x > 0; }",
+            "static rand real r; constraint c { x > 0; }",
+        ),
+        ("rand logic [3:0] l;", "static rand logic [3:0] l;"),
+        (
+            "rand logic [3:0] l; constraint c { x > 0; }",
+            "static rand logic [3:0] l; constraint c { x > 0; }",
+        ),
+    ] {
+        assert_eq!(error(shared), error(instance), "{shared}");
+    }
+    assert_eq!(error("static rand real r; constraint c { x > 0; }"), None);
+    assert_eq!(error("static rand logic [3:0] l;"), None);
+}
+
+#[test]
+fn randomize_arguments_select_static_rand_properties_through_base_handles() {
+    // `b.randomize(s)` through a base handle selects the base's static rand
+    // property in the derived object it dispatches to (IEEE 1800-2023 8.20,
+    // 18.11), not a property the derived class adds.
+    let source = "class Base; static rand bit [7:0] s; rand int a; endclass
+    class Derived extends Base; rand int x, y; endclass
+    module Top;
+        Base b;
+        Derived d;
+        int ok, changed;
+        bit [7:0] previous;
+        initial begin
+            d = new;
+            b = d;
+            d.a = 7; d.x = 5; d.y = 6;
+            ok = 1;
+            repeat (8) begin
+                previous = Base::s;
+                ok &= b.randomize(s);
+                changed += Base::s != previous;
+            end
+            $display(\"%0d %0d %0d %0d %0d\", ok, changed >= 6, d.a, d.x, d.y);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1 1 7 5 6"]
+    );
+}
+
+#[test]
+fn locals_hide_static_rand_properties_in_rand_mode_calls() {
+    // A formal or local handle `p` of a method hides the class's static
+    // rand property `p` (IEEE 1800-2023 6.21): `p.rand_mode(0)` sets the
+    // modes of the object it refers to (18.8), every random variable of it.
+    let source = "class C;
+        static rand int p;
+        rand int q;
+        function void formal(C p); p.rand_mode(0); endfunction
+        function void local_(C other); C p = other; p.rand_mode(0); endfunction
+    endclass
+    module Top;
+        C c, o1, o2;
+        initial begin
+            c = new; o1 = new; o2 = new;
+            c.formal(o1);
+            $display(\"%0d %0d\", o1.q.rand_mode(), c.q.rand_mode());
+            o1.rand_mode(1);
+            c.local_(o2);
+            $display(\"%0d %0d\", o2.q.rand_mode(), c.q.rand_mode());
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["0 1", "0 1"]
+    );
+}
+
+#[test]
+fn scalar_locals_hide_static_rand_properties_in_rand_mode_calls() {
+    // Any nearer variable `p` of a method, not only a handle, hides the
+    // class's static rand property `p` (IEEE 1800-2023 6.21):
+    // `p.rand_mode(0)` is then a call on an integral variable, which has no
+    // rand_mode, not the static property's.
+    for method in [
+        "function void f(); int p; p.rand_mode(0); endfunction",
+        "function void f(int p); p.rand_mode(0); endfunction",
+        "function int f(); int p; return p.rand_mode(); endfunction",
+    ] {
+        let source = format!(
+            "class C; static rand int p; {method} endclass
+            module Top; C c; initial begin c = new; void'(c.f()); end endmodule"
+        );
+        let error = class_error(&source, method);
+        assert!(error.contains("rand_mode"), "{method}: {error}");
+    }
+}
+
+#[test]
+fn static_rand_mode_getters_are_ints() {
+    // The rand_mode getter of a static rand property is an `int` (IEEE
+    // 1800-2023 18.8), compared and added as a signed 32-bit value.
+    let source = "class C; static rand int p; endclass
+    module Top;
+        C c;
+        initial begin
+            c = new;
+            $display(\"%0d %0d %0d\", c.p.rand_mode() < -1, c.p.rand_mode() + -2, $bits(c.p.rand_mode()));
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["0 -1 32"]
+    );
+}
+
+#[test]
+fn object_property_expressions_name_the_static_property_that_hides() {
+    // `d.p` names the member `p` denotes in the class of `d` (IEEE 1800-2023
+    // 8.14): a derived static rand `p` that hides a base instance `p`, which
+    // a base handle still reaches.
+    let source = "class Base; int p; endclass
+    class Derived extends Base; static rand int p; endclass
+    module Top;
+        Derived d;
+        Base b;
+        initial begin
+            d = new;
+            b = d;
+            d.p = 5;
+            b.p = 9;
+            $display(\"%0d %0d %0d\", Derived::p, d.p, b.p);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["5 5 9"]);
+}
+
+#[test]
+fn static_properties_and_unpacked_structure_properties_hide_each_other() {
+    // One lookup decides the member `p` denotes in the class of `d` (IEEE
+    // 1800-2023 8.14), whether one of them is of unpacked structure type: a
+    // derived static `p` hides a base structure `p`, which a base handle
+    // still reaches, and a derived structure `p` hides a base static `p`.
+    let source = "typedef struct { int a; int b; } s_t;
+    class Base; s_t p; endclass
+    class Derived extends Base; static int p; endclass
+    class Root; static int p; endclass
+    class Leaf extends Root; s_t p; endclass
+    module Top;
+        Derived d;
+        Base b;
+        Leaf l;
+        initial begin
+            d = new;
+            b = d;
+            l = new;
+            d.p = 5;
+            b.p.a = 9;
+            l.p.a = 3;
+            Root::p = 4;
+            $display(\"%0d %0d %0d %0d %0d\", Derived::p, d.p, b.p.a, l.p.a, Root::p);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["5 5 9 3 4"]
+    );
+}
+
+#[test]
+fn wide_static_rand_properties_without_constraints_are_randomized() {
+    // A static rand scalar wider than 64 bits no constraint names is drawn
+    // as an instance one is, at its width (IEEE 1800-2023 18.4).
+    let source = "class C; static rand bit [99:0] w; endclass
+    module Top;
+        C c;
+        int ok, high;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (8) begin
+                ok &= c.randomize();
+                high += |C::w[99:64];
+            end
+            $display(\"%0d %0d\", ok, high >= 6);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1 1"]);
+}
+
+#[test]
+fn distributions_constrain_static_rand_properties() {
+    // A distribution over a static rand property constrains the variable
+    // the call solves for it (IEEE 1800-2023 18.4, 18.5.3).
+    let source = "class C;
+        static rand bit [7:0] s;
+        constraint c { s dist {[0:3] :/ 1, [10:13] :/ 1}; }
+    endclass
+    module Top;
+        C c;
+        int ok;
+        initial begin
+            c = new;
+            ok = 1;
+            repeat (20) ok &= c.randomize() && (C::s inside {[0:3], [10:13]});
+            $display(\"%0d\", ok);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["1"]);
+}
+
+#[test]
+fn static_rand_properties_without_constraints_are_randomized() {
+    // A class whose only random variables are static rand properties, and
+    // that has no constraints, still solves them (IEEE 1800-2023 18.4).
+    let source = "class C; static rand bit [15:0] s; endclass
+    module Top;
+        C c;
+        int ok, changed;
+        bit [15:0] previous;
+        initial begin
+            c = new;
+            repeat (8) begin
+                previous = C::s;
+                ok += c.randomize();
+                changed += C::s != previous;
+            end
+            $display(\"%0d %0d\", ok, changed >= 7);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["8 1"]);
+}
+
+#[test]
+fn fixed_size_array_properties_hold_their_elements() {
+    // A fixed-size array property (IEEE 1800-2023 7.4, 8.4): initialized,
+    // indexed by its range, compared and formatted as an array, iterated
+    // from left to right, reordered, and copied by a shallow copy and by an
+    // assignment, after which the copies are independent (8.12, 7.6).
+    let source = "typedef struct { int a; byte b; } pair_t;
+    class C;
+        int tab[5] = '{1, 2, 3, 4, 5};
+        int down[4:1] = '{40, 30, 20, 10};
+        int from[2:6] = '{1, 2, 3, 4, 5};
+        pair_t pairs[2];
+    endclass
+    module Top;
+        C c, d;
+        int s;
+        pair_t p;
+        initial begin
+            c = new;
+            $display(\"%0d %0d %0d %0d\", c.tab[0], c.tab[4], c.down[4], c.down[1]);
+            c.tab[2] = 33;
+            $display(\"%p\", c.tab);
+            d = new c;
+            d.tab[0] = 100;
+            $display(\"%0d %0d %0d %0d\", c.tab[0], d.tab[0], c.tab == d.tab, c.tab != d.tab);
+            d.tab = c.tab;
+            d.tab[1] = 7;
+            $display(\"%0d %0d %0d\", c.tab[1], d.tab[1], c.tab == d.tab);
+            s = 0;
+            foreach (c.down[i]) s += i * c.down[i];
+            $display(\"%0d\", s);
+            s = 0;
+            foreach (c.from[i]) s += i * c.from[i];
+            $display(\"%0d\", s);
+            c.tab.sort();
+            $display(\"%p %0d\", c.tab, c.tab.sum());
+            c.tab.shuffle();
+            $display(\"%0d %0d\", c.tab.sum(), c.tab.max()[0]);
+            p.a = 7; p.b = 8;
+            c.pairs[1] = p;
+            d = new c;
+            p.a = 9;
+            d.pairs[1] = p;
+            $display(\"%0d %0d %0d %0d\", c.pairs[1].a, c.pairs[1].b, c.pairs[0].a, d.pairs[1].a);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        [
+            "1 5 40 10",
+            "'{1, 2, 33, 4, 5}",
+            "1 100 0 1",
+            "2 7 0",
+            "300",
+            "70",
+            "'{1, 2, 4, 5, 33} 45",
+            "45 33",
+            "7 8 0 9",
+        ]
+    );
+}
+
+#[test]
+fn fixed_size_array_properties_take_unpacked_array_concatenations() {
+    // An unpacked array concatenation of one value for each element (IEEE
+    // 1800-2023 10.10) initializes and assigns a fixed-size array property,
+    // as sv-tests 18.14--random-stability_1 declares `int tab1[5] = {...}`.
+    let source = "class C;
+        int tab[5] = { 1, 2, 3, 4, 5 };
+        byte down[3:1] = { 8'd30, 8'd20, 8'd10 };
+    endclass
+    module Top;
+        C c;
+        int x = 6;
+        initial begin
+            c = new;
+            $display(\"%p %0d %0d\", c.tab, c.down[3], c.down[1]);
+            c.tab = { x, x + 1, 8, 9, 10 };
+            $display(\"%p %0d\", c.tab, c.tab.sum());
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["'{1, 2, 3, 4, 5} 30 10", "'{6, 7, 8, 9, 10} 40"]
+    );
+    // One of another size is no array of the property's type (7.6); one with
+    // an array among its items stays unsupported.
+    for (items, message) in [
+        (
+            "{ 1, 2, 3 }",
+            "an unpacked array concatenation of 3 elements",
+        ),
+        (
+            "{ q, 1, 2, 3, 4 }",
+            "an array in a concatenation for a fixed-size array class property",
+        ),
+        // A fixed-size array item stands for its elements too, so it is no
+        // single element of the five (10.10).
+        (
+            "{ f, 1, 2, 3, 4 }",
+            "an array in a concatenation for a fixed-size array class property",
+        ),
+    ] {
+        let source = format!(
+            "class C; int tab[5]; endclass
+            module Top; C c; int q[$]; int f[2]; initial begin c = new; c.tab = {items}; end endmodule"
+        );
+        let error = match celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        {
+            Err(error) => format!("{error:?}"),
+            Ok(_) => panic!("{items} accepted"),
+        };
+        assert!(error.contains(message), "{items}: {error}");
+    }
+}
+
+#[test]
+fn queries_of_fixed_size_array_properties_are_constants() {
+    // However an object holds them, the properties are of fixed-size array
+    // types (IEEE 1800-2023 20.7): their queries are constants, and size
+    // a declaration.
+    let source = "class C;
+        int tab[5];
+        bit [3:0] nib[4:1];
+    endclass
+    module Top;
+        C c;
+        bit [$bits(c.tab)-1:0] wide;
+        bit [$size(c.tab)-1:0] each;
+        initial begin
+            c = new;
+            $display(\"%0d %0d %0d %0d %0d %0d\", $left(c.tab), $right(c.tab), $size(c.tab),
+                $bits(c.tab), $dimensions(c.tab), $bits(wide) + $bits(each));
+            $display(\"%0d %0d %0d %0d %0d %0d\", $left(c.nib), $right(c.nib), $low(c.nib),
+                $high(c.nib), $increment(c.nib), $bits(c.nib));
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["0 4 5 160 2 165", "4 1 1 4 1 16"]
+    );
+}
+
+#[test]
+fn locators_of_fixed_size_array_properties_take_their_indices() {
+    // The index methods and `item.index` give the indices of the array's
+    // range, from its left bound to its right one (IEEE 1800-2023 7.4.6,
+    // 7.12.1, 7.12.4).
+    let source = "class C;
+        int from[2:5] = '{5, 7, 5, 9};
+        int down[4:1] = '{1, 2, 3, 2};
+        int tab[4] = '{5, 7, 5, 9};
+    endclass
+    module Top;
+        C c;
+        initial begin
+            c = new;
+            $display(\"%p %p %p\", c.from.find_index with (item == 5),
+                c.from.find_first_index with (item.index > 2 && item == 5),
+                c.from.unique_index);
+            $display(\"%p %p %p\", c.down.find_index with (item == 2),
+                c.down.find_last_index with (item == 2), c.down.find with (item.index == 3));
+            $display(\"%p %p\", c.tab.find_index with (item == 5), c.from.find with (item.index == 3));
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        [
+            "'{2, 4} '{4} '{2, 3, 5}",
+            "'{3, 1} '{1} '{2}",
+            "'{0, 2} '{7}",
+        ]
+    );
+}
+
+#[test]
+fn fixed_size_array_properties_take_dimension_queries_and_class_parameters() {
+    // A query names the array's own dimension as 1 (IEEE 1800-2023 20.7),
+    // and an element type sized by a class parameter keeps its size outside
+    // the class (8.25).
+    let source = "package p;
+        class C #(int W = 4);
+            bit [W-1:0] tab[3];
+            bit [3:0] nib[4:1];
+        endclass
+    endpackage
+    module Top;
+        p::C#(8) c;
+        initial begin
+            c = new;
+            $display(\"%0d %0d %0d %0d %0d %0d\", $size(c.tab, 1), $left(c.nib, 1), $bits(c.tab),
+                $bits(c.tab[0]), $size(c.nib, 2), $left(c.tab, 2));
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["3 4 24 8 4 7"]
+    );
+}
+
+#[test]
+fn const_fixed_size_array_properties_are_written_by_their_constructor_only() {
+    // Every write of an element of a const property, and every method that
+    // changes it, writes the property (IEEE 1800-2023 8.19): the
+    // constructor of its class writes one without an initializer, and
+    // nothing else writes either.
+    let source = "class C;
+        const int k[2] = '{1, 2};
+        const int m[2];
+        function new(); m[0] = 4; m[1] = 3; endfunction
+    endclass
+    module Top;
+        C c;
+        initial begin
+            c = new;
+            $display(\"%p %p\", c.k, c.m);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["'{1, 2} '{4, 3}"]
+    );
+    for statement in [
+        "c.k[0] = 3;",
+        "c.k[1] += 1;",
+        "c.m[0]++;",
+        "c.k.sort();",
+        "c.m.shuffle();",
+        "c.k.rsort with (item);",
+    ] {
+        let source = format!(
+            "class C;
+                const int k[2] = '{{1, 2}};
+                const int m[2];
+                function new(); m[0] = 4; endfunction
+            endclass
+            module Top;
+                C c;
+                initial begin c = new; {statement} end
+            endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        .expect_err(statement);
+        assert!(
+            error
+                .to_string()
+                .contains("assignment to const class property"),
+            "{statement}: {error}"
+        );
+    }
+}
+
+#[test]
+fn fixed_size_array_property_bounds_outside_int_are_rejected() {
+    // An index of a property is an `int`, as is a foreach index over it and
+    // one a locator method returns (IEEE 1800-2023 12.7.3, 7.12.1), so a
+    // bound outside `int` is rejected at the declaration.
+    for property in [
+        "int a[64'd4294967296:64'd4294967297];",
+        "int a[64'd4294967297:64'd4294967296];",
+        "int a[0:64'd2147483648];",
+    ] {
+        let source = format!(
+            "class C; {property} endclass
+            module Top;
+                C c;
+                initial begin c = new; $display(\"%p\", c.a.find with (item == 1)); end
+            endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        .expect_err(property);
+        assert!(
+            error
+                .to_string()
+                .contains("fixed-size array class property with a bound outside int"),
+            "{property}: {error}"
+        );
+    }
+}
+
+#[test]
+fn fixed_size_array_properties_are_not_written_through_other_places() {
+    // The formal of an output or inout argument would write the container
+    // that holds the property through a place that does not reach it (see
+    // `Property::storage`): it is rejected, never accepted and dropped. A
+    // member of a structure element is written through the element (see
+    // `members_of_class_container_elements_are_written`).
+    for (statement, message) in [
+        (
+            "out(c.tab);",
+            "fixed-size array class property as an output or inout argument",
+        ),
+        (
+            "both(c.tab);",
+            "fixed-size array class property as an output or inout argument",
+        ),
+        (
+            "both((c.tab));",
+            "fixed-size array class property as an output or inout argument",
+        ),
+        (
+            "x = get(c.tab);",
+            "fixed-size array class property as an output or inout argument",
+        ),
+        (
+            "c.fill(c.tab);",
+            "fixed-size array class property as an output or inout argument",
+        ),
+    ] {
+        let source = format!(
+            "typedef struct {{ int a; byte b; }} pair_t;
+            class C;
+                int tab[2];
+                pair_t pairs[2];
+                function void fill(output int a[2]); a = '{{1, 2}}; endfunction
+            endclass
+            task automatic out(output int a[2]); a = '{{3, 4}}; endtask
+            task automatic both(inout int a[2]); a[0] = 5; endtask
+            task automatic scalar(output int a); a = 6; endtask
+            function automatic int get(output int a[2]); a = '{{7, 8}}; return 1; endfunction
+            module Top;
+                C c;
+                int x;
+                initial begin c = new; {statement} end
+            endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        .expect_err(statement);
+        assert!(error.to_string().contains(message), "{statement}: {error}");
+    }
+    // The member of an element as the actual of an output argument is
+    // written, as an element of a dynamic container is (13.5.1).
+    let source = "typedef struct { int a; byte b; } pair_t;
+        class C; pair_t pairs[2]; endclass
+        task automatic scalar(output int a); a = 6; endtask
+        module Top;
+            C c;
+            initial begin c = new; scalar(c.pairs[1].a); $display(\"%p\", c.pairs); end
+        endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["'{'{a:0, b:0}, '{a:6, b:0}}"]
+    );
+}
+
+#[test]
+fn fixed_size_array_properties_meet_ordinary_arrays() {
+    // An ordinary array of as many elements of an equivalent type is
+    // compared with and assigned to the property element by element, from
+    // left to right (IEEE 1800-2023 7.6, 11.4.5), and `$bits` counts the
+    // members of structure elements (20.6.2).
+    let source = "typedef struct { int a; byte b; } pair_t;
+    class C;
+        int tab[2] = '{1, 2};
+        pair_t pairs[2];
+    endclass
+    module Top;
+        C c;
+        int m[1:2] = '{1, 2};
+        int d[2:1] = '{5, 6};
+        initial begin
+            c = new;
+            $display(\"%0d %0d %0d %0d\", c.tab == m, m == c.tab, c.tab != m, c.tab == d);
+            c.tab = d;
+            $display(\"%p %0d %0d\", c.tab, c.tab[0], $bits(c.pairs));
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["1 1 0 0", "'{5, 6} 5 80"]
+    );
+    for (statement, message) in [
+        (
+            "m = c.tab[1:0];",
+            "slice of a fixed-size array class property",
+        ),
+        (
+            "t(c.tab);",
+            "fixed-size array class property as a ref or const ref argument",
+        ),
+    ] {
+        let source = format!(
+            "class C; int tab[2]; endclass
+            module Top;
+                C c;
+                int m[2];
+                task automatic t(ref int a[2]); endtask
+                initial begin c = new; {statement} end
+            endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        .expect_err(statement);
+        assert!(error.to_string().contains(message), "{statement}: {error}");
+    }
+}
+
+#[test]
+fn fixed_size_array_properties_take_ordinary_array_checks() {
+    // `foreach` takes each index of a range up to a bound of `int`, of a
+    // property as of an ordinary array (IEEE 1800-2023 12.7.3), and of a
+    // range outside `int` of an ordinary array; stepping past the last
+    // index does not wrap into another iteration.
+    let source = "class C;
+        int w[2147483645:2147483647] = '{1, 2, 3};
+        int e[2147483647:2147483647] = '{9};
+    endclass
+    module Top;
+        C c;
+        int m[64'd4294967297:64'd4294967296] = '{4, 5};
+        int x[2147483647:2147483647] = '{7};
+        int y[-2147483647:-2147483648] = '{2, 3};
+        longint s, n, t, u;
+        initial begin
+            c = new;
+            foreach (c.w[i]) begin s += (i - 2147483645) * c.w[i]; n++; end
+            foreach (c.e[i]) begin s += c.e[i]; n++; end
+            foreach (m[i]) t += (i - 64'd4294967296) * m[i];
+            foreach (x[i]) u += x[i];
+            foreach (y[i]) u += y[i] * (i + 2147483647 + 2);
+            $display(\"%0d %0d %0d %0d\", s, n, t, u);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["17 4 4 14"]
+    );
+    // A count a container cannot hold, and elements whose members have
+    // initial values, which a container does not give them, are rejected.
+    for (property, message) in [
+        (
+            "int a[0:16777216];",
+            "fixed-size array class property of more than 16777216 elements",
+        ),
+        (
+            "row_t rows[1];",
+            "fixed-size array class property of an unpacked structure with member initial values",
+        ),
+    ] {
+        let source = format!(
+            "typedef struct {{ bit a = 1; }} row_t;
+            class C; {property} endclass
+            module Top; C c; initial c = new; endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        .expect_err(property);
+        assert!(error.to_string().contains(message), "{property}: {error}");
+    }
+}
+
+#[test]
+fn fixed_size_array_properties_keep_their_size_and_element_type() {
+    // `delete` is no method of a fixed-size array (IEEE 1800-2023 7.5.3),
+    // and arrays of unrelated enums are not of equivalent types, so neither
+    // is assigned or compared to the other (6.22.2, 7.6).
+    for (statement, message) in [
+        ("c.x.delete();", "delete"),
+        ("c.x = c.y;", "fixed-size array class property"),
+        (
+            "b = c.x == c.y;",
+            "comparison of a fixed-size array class property",
+        ),
+    ] {
+        let source = format!(
+            "typedef enum {{A, B}} e1;
+            typedef enum {{P, Q}} e2;
+            class C;
+                e1 x[2];
+                e2 y[2];
+            endclass
+            module Top;
+                C c;
+                bit b;
+                initial begin c = new; {statement} end
+            endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        .expect_err(statement);
+        assert!(error.to_string().contains(message), "{statement}: {error}");
+    }
+}
+
+#[test]
+fn constraints_read_fixed_size_array_properties() {
+    // A constraint iterates the elements of a state array (IEEE 1800-2023
+    // 18.5.8.1); only `x = 0` avoids them all.
+    let source = "class C;
+        rand int x;
+        int tab[3] = '{1, 2, 3};
+        constraint c { foreach (tab[i]) x != tab[i]; x inside {[0:3]}; }
+    endclass
+    module Top;
+        C c;
+        initial begin
+            c = new;
+            repeat (4) begin
+                void'(c.randomize());
+                $display(\"%0d\", c.x);
+            end
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["0", "0", "0", "0"]
+    );
+}
+
+#[test]
+fn inherited_properties_keep_the_types_their_class_declares() {
+    // A property of a base class has the type its declaration names in the
+    // base (IEEE 1800-2023 8.13): the base's own typedef or local parameter,
+    // not one of the same name of a derived specialization whose method
+    // first lays the base out (uvm-1.2's `uvm_callbacks_base::m_this_type`).
+    let source = "package p;
+        class Base;
+            typedef Base this_type;
+            localparam int W = 4;
+            this_type items[$];
+            bit [W-1:0] x;
+        endclass
+        class Mid #(type T = int) extends Base;
+            typedef Mid#(T) this_type;
+            localparam int W = 8;
+        endclass
+        class Leaf #(type T = int) extends Mid#(T);
+            static function int add();
+                Leaf#(T) me = new;
+                Mid#(T) base_inst = new;
+                base_inst.items.push_back(me);
+                base_inst.items.push_back(base_inst);
+                base_inst.x = 8'hff;
+                return base_inst.items.size() * 100 + base_inst.x;
+            endfunction
+        endclass
+        typedef Leaf#(byte) lb_t;
+        typedef Leaf#(shortint) ls_t;
+    endpackage
+    module Top;
+        import p::*;
+        initial $display(\"%0d %0d\", lb_t::add(), ls_t::add());
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["215 215"]
+    );
+    // The element type is the base's, which an unrelated class is not.
+    let source = "package p;
+        class Other; endclass
+        class Base; typedef Base this_type; this_type items[$]; endclass
+        class Mid #(type T = int) extends Base; typedef Mid#(T) this_type; endclass
+        class Leaf #(type T = int) extends Mid#(T);
+            static function void add(); Other o = new; Mid#(T) b = new; b.items.push_back(o); endfunction
+        endclass
+        typedef Leaf#(byte) lb_t;
+    endpackage
+    module Top; import p::*; initial lb_t::add(); endmodule";
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("other.sv"))], "Top")
+            .build_cranelift()
+    else {
+        panic!("an unrelated class was accepted as an element");
+    };
+    assert!(error.to_string().contains("`p::Base`"), "{error}");
+}
+
+#[test]
+fn package_classes_are_laid_out_in_the_package() {
+    // A class body names the types and constants of the scope that declares
+    // the class (IEEE 1800-2023 8.13, 8.25): `Base`'s `item_t` and `N` are
+    // the package's, though a derived specialization that first lays it out
+    // declares its own of those names.
+    let source = "package p;
+        typedef int item_t;
+        localparam int N = 12;
+        class Base; item_t x; bit [N-1:0] y; endclass
+        class Mid #(type T = int) extends Base; typedef byte item_t; localparam int N = 4; endclass
+        class Leaf #(type T = int) extends Mid#(T);
+            static function int f();
+                Mid#(T) m = new;
+                m.x = 300;
+                m.y = 12'hfff;
+                return m.x * 10000 + m.y;
+            endfunction
+        endclass
+        typedef Leaf#(byte) lb_t;
+        typedef Leaf#(shortint) ls_t;
+    endpackage
+    module Top; import p::*; initial $display(\"%0d %0d\", lb_t::f(), ls_t::f()); endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["3004095 3004095"]
+    );
+}
+
+#[test]
+fn local_classes_see_the_constants_their_module_imports() {
+    // A module's class sees the constants the module imports (IEEE 1800-2023
+    // 26.3), also when a function of the module lowers one of its static
+    // methods before the module's own constants are known.
+    let source = "package q; localparam int W = 12; endpackage
+    module Top;
+        import q::*;
+        class C;
+            bit [W-1:0] x;
+            static function int f(); C c = new; c.x = 16'hffff; return c.x; endfunction
+        endclass
+        function automatic int g(); return C::f(); endfunction
+        initial $display(\"%0d\", g());
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["4095"]);
+}
+
+sv_backends! {
+    // A scope randomize call seeds the object it solves in from the process
+    // RNG (IEEE 1800-2023 18.14.3), whose state a checkpoint keeps, so a
+    // restored run draws what the original did.
+    fn scope_randomize_checkpoint_replays_the_process_stream(sim) {
+        @setup {
+            let source = r#"module Top(output int value);
+                timeunit 1ps / 1ps;
+                int x;
+                initial begin
+                    #10; void'(std::randomize(x) with { x > 0; }); value = x;
+                    #10; void'(std::randomize(x) with { x > 0; }); value = x;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("scope_randomize_checkpoint.sv"))], "Top");
+        sim.run_until(15).unwrap();
+        let value = sim.signal("value");
+        let first = sim.get(value);
+        let bytes = sim.checkpoint().unwrap().to_bytes().unwrap();
+        // SAFETY: bytes were serialized by this simulation.
+        let saved = unsafe { sim.checkpoint_from_bytes(&bytes) }.unwrap();
+        sim.run_until(25).unwrap();
+        let expected = sim.get(value);
+        assert_ne!(expected, first);
+        sim.restore(&saved).unwrap();
+        sim.run_until(25).unwrap();
+        assert_eq!(sim.get(value), expected);
+    }
+}
+
+// The expression of an immediate assertion is evaluated as the condition of
+// an `if` is (IEEE 1800-2023 16.3): a `$cast` to a class property, or to an
+// element of one, and an increment run before the assertion checks it.
+#[test]
+fn immediate_assertions_run_casts_and_updates_of_their_expression() {
+    let source = "module Top;
+        class Base; virtual function Base copy(); return null; endfunction endclass
+        class Item extends Base;
+            int v;
+            virtual function Base copy(); Item c = new; c.v = v + 1; return c; endfunction
+        endclass
+        class Other extends Base; endclass
+        class Holder;
+            Item one;
+            Item many[3];
+            int checks;
+            function void fill(Item from, Other other);
+                assert($cast(one, from.copy()));
+                for (int i = 0; i < 3; i++) assert($cast(many[i], one.copy())) checks++;
+                assert($cast(many[0], other)) else checks += 10;
+                assert(checks++ == 13);
+            endfunction
+        endclass
+        initial begin
+            Holder h = new;
+            Item i = new;
+            Other o = new;
+            i.v = 4;
+            h.fill(i, o);
+            $display(\"%0d %0d %0d %0d\", h.one.v, h.many[0].v, h.many[2].v, h.checks);
+        end
+    endmodule";
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["5 6 6 14"]
+    );
+}
+
+/// A queue, dynamic or fixed-size array of enumeration values named in
+/// `randomize` is random for the call (IEEE 1800-2023 18.11); its elements take only the
+/// values of their enumeration (18.3).
+#[test]
+fn randomize_arguments_take_containers_of_enumerations() {
+    for (declaration, fill) in [
+        ("kind_e kinds[$];", "kinds = '{A, A, A};"),
+        ("kind_e kinds[];", "kinds = new[3];"),
+        ("rand kind_e kinds[];", "kinds = new[3];"),
+        ("kind_e kinds[3];", "kinds = '{A, A, A};"),
+    ] {
+        let source = format!(
+            "module Top(output int seen);
+                typedef enum {{A, B, C}} kind_e;
+                class Gen;
+                    {declaration}
+                    function new();
+                        {fill}
+                    endfunction
+                endclass
+                initial begin
+                    Gen g = new;
+                    void'(g.randomize(kinds));
+                    seen = 1;
+                    foreach (g.kinds[i]) if (!(g.kinds[i] inside {{A, B, C}})) seen = 0;
+                end
+            endmodule"
+        );
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("kinds.sv"))],
+            "Top",
+        )
+        .build()
+        .unwrap_or_else(|error| panic!("{declaration}: {error}"));
+        let seen = sim.signal("seen");
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            sim.get(seen),
+            num_bigint::BigUint::from(1u8),
+            "{declaration}"
+        );
+    }
+}
+
+/// A randc enumeration property cycles through its members (IEEE 1800-2023
+/// 18.4.2), and a rand handle makes `randomize` solve the object it refers
+/// to (18.4): both told by the property's type.
+#[test]
+fn randc_enumerations_and_rand_handles_are_told_by_their_types() {
+    let source = "module Top;
+        typedef enum {A, B, C} e_t;
+        class Inner;
+            rand bit [3:0] x;
+            constraint k { x == 5; }
+        endclass
+        class Outer;
+            randc e_t e;
+            rand Inner inner;
+            function new(); inner = new; endfunction
+        endclass
+        initial begin
+            Outer o = new;
+            int seen = 0;
+            repeat (3) begin
+                void'(o.randomize());
+                seen |= 1 << int'(o.e);
+            end
+            $display(\"%0d %0d\", seen, o.inner.x);
+        end
+    endmodule";
+    assert_eq!(super::hierarchical_references::displayed(source), ["7 5"]);
+}
+
+/// A stream fills no class handle (6.24.3), and a scope randomize with
+/// constraints takes integral variables only, as their types tell.
+#[test]
+fn streams_into_handles_and_constrained_scope_randomize_of_enums_are_unsupported() {
+    for (items, expected) in [
+        (
+            "class C; endclass C c; bit [63:0] b; initial {>>{c}} = b;",
+            "class handle",
+        ),
+        (
+            "typedef enum {A, B} e_t; e_t e; initial void'(std::randomize(e) with { e == A; });",
+            "scope randomize",
+        ),
+    ] {
+        let source = format!("module Top; {items} endmodule");
+        let error = match celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("rejected.sv"))],
+            "Top",
+        )
+        .build()
+        {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("`{items}` must be rejected"),
+        };
+        assert!(error.contains(expected), "{items}: {error}");
     }
 }

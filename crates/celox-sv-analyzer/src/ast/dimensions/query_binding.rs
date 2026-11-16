@@ -1,6 +1,6 @@
 //! Size and array queries consume native operands and semantic shape metadata.
 use super::*;
-use celox_sv_syntax::{DimensionKind, ExprId, ExprKind};
+use celox_sv_syntax::{DataTypeKind, DimensionKind, ExprId, ExprKind};
 
 fn integer(value: i128) -> Expr {
     Expr::Literal(value.to_string())
@@ -53,15 +53,143 @@ fn literal_operand(root: ExprId, native: &celox_sv_syntax::Declarations) -> bool
     true
 }
 
+/// A data type whose syntax names nothing: a built-in type whose packed
+/// dimensions are literal.
+fn builtin_type(id: celox_sv_syntax::TypeId, native: &celox_sv_syntax::Declarations) -> bool {
+    let data = native.data_type(id);
+    matches!(data.kind, DataTypeKind::Builtin(_))
+        && data
+            .packed_dimensions
+            .iter()
+            .all(|dimension| match dimension.kind {
+                DimensionKind::Unsized | DimensionKind::Wildcard | DimensionKind::Queue(None) => {
+                    true
+                }
+                DimensionKind::Index(index) | DimensionKind::Queue(Some(index)) => {
+                    literal_operand(index, native)
+                }
+                DimensionKind::Range { left, right } => {
+                    literal_operand(left, native) && literal_operand(right, native)
+                }
+                DimensionKind::Indexed { base, width, .. } => {
+                    literal_operand(base, native) && literal_operand(width, native)
+                }
+            })
+}
+
+/// Whether operand `root` is a type that `context` binds as it is where the
+/// operand is written, so that the declarations of the scope cannot change
+/// its shape: a built-in type, or a name that the tables give a type and
+/// that nothing around the operand declares otherwise (IEEE 1800-2023
+/// 20.6.2, 23.9). The scope's own typedefs are in the tables when their
+/// names are, which bind them before any operand names them.
+fn bound_type_operand(
+    root: ExprId,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+) -> Converted<bool> {
+    let native = tree.declarations();
+    let root = expression_binding::ungroup(root, native);
+    match &native.expression(root).kind {
+        ExprKind::Type(id) => Ok(builtin_type(*id, native)),
+        ExprKind::Name(name) => {
+            let name = instances::normalize_identifier(&name.spelling);
+            Ok(context.type_aliases.contains_key(&name)
+                // What [`shape`] finds before the type of that name.
+                && context.get(&name).is_none()
+                && !context.const_env.contains_key(&name)
+                && !context.parameter_values.contains_key(&name)
+                && !scope::imported(tree).interface_members.contains_key(&name)
+                && !discovery::hides_type_name(tree, native.expression(root).tokens, &name)?)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// The declared shape of operand `root` of a data query when it names a
+/// variable of the generate block around it that the block has already
+/// declared in `context` (its markers say so) and nothing nearer replaces
+/// ([`discovery::nearest_block_variable`]). The shape is that of the
+/// declaration's type, bound in the type table in the environment of the
+/// block, so the query reads the declaration without discovering the other
+/// declarations of the scope. The markers keep only the variable's ranges,
+/// not its type.
+fn block_variable_operand(
+    root: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Converted<Option<(String, VariableDimensions)>> {
+    let native = tree.declarations();
+    let root = expression_binding::ungroup(root, native);
+    let ExprKind::Name(name) = &native.expression(root).kind else {
+        return Ok(None);
+    };
+    let name = instances::normalize_identifier(&name.spelling);
+    if context.class_scope.is_some()
+        || context.class_base.is_some()
+        || !context
+            .const_env
+            .contains_key(&variable_dimensions_marker(&name))
+    {
+        return Ok(None);
+    }
+    let Some(declaration) =
+        discovery::nearest_block_variable(tree, native.expression(root).tokens, &name)?
+    else {
+        return Ok(None);
+    };
+    let mut signals = Vec::new();
+    signals_from_body_item(
+        declaration,
+        tree,
+        session,
+        &context.type_aliases,
+        None,
+        &context.const_env,
+        Some(&name),
+        &mut signals,
+    )?;
+    let Some(signal) = signals.iter().find(|signal| signal.name() == name) else {
+        return Ok(None);
+    };
+    let shape = procedural::bound_dimensions_from_type(
+        signal.r#type(),
+        &tree.functions,
+        &mut session.types,
+        &context.const_env,
+    );
+    Ok(Some((name, shape)))
+}
+
+/// The context that the operand `root` of a query is bound in: `context`
+/// with the declarations of the scope that the operand may name.
 pub(in crate::ast) fn query_context_for_operand(
     root: ExprId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<PackedDimensions> {
+    operand_context(root, None, tree, session, context)
+}
+
+/// [`query_context_for_operand`], for a context that expression `evaluated`
+/// is bound in as well, which may name any declaration of the scope.
+fn operand_context(
+    root: ExprId,
+    evaluated: Option<ExprId>,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Converted<PackedDimensions> {
+    let native = tree.declarations();
     // Aggregate port defaults commonly repeat literal arithmetic. Rediscovering
     // all declarations for each item repeatedly snapshots the growing prefix.
-    if context.scope_types_complete || literal_operand(root, tree.declarations()) {
+    if context.scope_types_complete
+        || literal_operand(root, native)
+        || (evaluated.is_none_or(|evaluated| literal_operand(evaluated, native))
+            && bound_type_operand(root, tree, context)?)
+    {
         return Ok(query_context(context));
     }
     Ok(query_context(&query_operand_dimensions_id(
@@ -122,7 +250,23 @@ pub(in crate::ast) fn query_value(
         return Err(unsupported(format!("arguments of `{}`", name.spelling)));
     }
     let argument = arguments[0].value.unwrap();
-    let context = query_context_for_operand(argument, tree, session, context)?;
+    let dimension = arguments.get(1).and_then(|argument| argument.value);
+    // The dimension number is bound in the context of the operand. A
+    // literal one names nothing that the scope declares.
+    let declared = if !context.scope_types_complete
+        && dimension.is_none_or(|dimension| literal_operand(dimension, native))
+    {
+        block_variable_operand(argument, tree, session, context)?
+    } else {
+        None
+    };
+    let context = if let Some((name, shape)) = declared {
+        let mut query = query_context(context);
+        query.insert(name, shape);
+        query
+    } else {
+        operand_context(argument, dimension, tree, session, context)?
+    };
     reject_unbounded(argument, function, tree, &context)?;
     if function == SystemFunction::Size
         && let Some(value) = interface_array_size(
@@ -741,7 +885,8 @@ pub(in crate::ast) fn shape(
 ) -> Converted<Option<VariableDimensions>> {
     enum Job {
         Enter(ExprId),
-        Index(ExprId),
+        /// An index, or `None` for `$`, the last element of a queue.
+        Index(Option<ExprId>),
         Range(ExprId, ExprId, bool),
         Member(String),
     }
@@ -755,6 +900,23 @@ pub(in crate::ast) fn shape(
                     array_reductions::bind(id, native, tree, session, context)?
                 {
                     values.push(shape);
+                    continue;
+                }
+                // A fixed-size array property has the shape of its type,
+                // though an object holds it in a container (see
+                // `classes::Property::storage`).
+                if let Some((property, _)) =
+                    expression_binding::object_property(tree, session, id, native, context)?
+                    && property.storage.is_some()
+                {
+                    // Bound, so an element of unpacked structure type
+                    // has the widths of its members.
+                    values.push(procedural::bound_dimensions_from_type(
+                        &property.r#type,
+                        &tree.functions,
+                        &mut session.types,
+                        &context.const_env,
+                    ));
                     continue;
                 }
                 let callee = match native.expression(id).kind {
@@ -865,7 +1027,8 @@ pub(in crate::ast) fn shape(
                         dimension,
                     } => {
                         match dimension.kind {
-                            DimensionKind::Index(index) => jobs.push(Job::Index(index)),
+                            DimensionKind::Index(index) => jobs.push(Job::Index(Some(index))),
+                            DimensionKind::Queue(None) => jobs.push(Job::Index(None)),
                             DimensionKind::Range { left, right } => {
                                 jobs.push(Job::Range(left, right, false))
                             }
@@ -957,7 +1120,9 @@ pub(in crate::ast) fn shape(
                 }
             }
             Job::Index(index) => {
-                validate_index(index, tree, session, context)?;
+                if let Some(index) = index {
+                    validate_index(index, tree, session, context)?;
+                }
                 let shape = values
                     .last_mut()
                     .ok_or_else(|| unsupported("query shape"))?;
@@ -1062,7 +1227,6 @@ mod tests {
                 chandle: false,
                 pattern_type: None,
                 enum_domain: None,
-                virtual_interface: None,
                 container: None,
             },
         );

@@ -65,7 +65,8 @@ impl ModuleIndex {
                     .iter()
                     .zip(index.names.iter().zip(&ansi))
                     .any(|(unit, (name, ansi))| {
-                        unit.name.spelling != *name || (unit.port_style == PortStyle::Ansi) != *ansi
+                        normalize_identifier(&unit.name.spelling) != *name
+                            || (unit.port_style == PortStyle::Ansi) != *ansi
                     })
             {
                 return Err(AnalyzerError::Parse(
@@ -74,7 +75,7 @@ impl ModuleIndex {
             }
             index.names = units
                 .iter()
-                .map(|unit| unit.name.spelling.clone())
+                .map(|unit| normalize_identifier(&unit.name.spelling))
                 .collect();
             for unit in units {
                 if unit.port_style != PortStyle::Ansi {
@@ -102,7 +103,7 @@ impl ModuleIndex {
                     .map(|parameter| parameter.name.spelling.clone())
                     .collect();
                 index.interfaces.insert(
-                    unit.name.spelling.clone(),
+                    normalize_identifier(&unit.name.spelling),
                     ModuleInterface { ports, parameters },
                 );
             }

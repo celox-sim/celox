@@ -30,6 +30,10 @@ pub(super) fn always_kind(
     };
     Ok(match procedure.kind {
         ProcedureKind::AlwaysComb | ProcedureKind::AlwaysLatch => AlwaysKind::Comb,
+        // The one event control of an `always_ff` need not name an edge
+        // (IEEE 1800-2023 9.2.2.4): `always_ff @(clk)` runs at each change
+        // of `clk`, as the same `always` does.
+        ProcedureKind::AlwaysFf if level_sensitive(procedure, native) => AlwaysKind::Process,
         ProcedureKind::AlwaysFf => AlwaysKind::Ff,
         ProcedureKind::Always => {
             let StatementKind::Timing { control, body } = native.statement(procedure.body).kind
@@ -39,7 +43,7 @@ pub(super) fn always_kind(
             let TimingControlKind::Event(event) = &native.timing_control(control).kind else {
                 return Ok(AlwaysKind::Process);
             };
-            if has_timing_control(body, native) {
+            if has_timing_control(body, native, true) {
                 return Ok(AlwaysKind::Process);
             }
             match event {
@@ -65,16 +69,66 @@ pub(super) fn always_kind(
     })
 }
 
+/// Whether `procedure` is an event control without an edge or an `iff`
+/// qualifier on any of its events, over a body without timing controls.
+fn level_sensitive(
+    procedure: &celox_sv_syntax::Procedure,
+    native: &celox_sv_syntax::Declarations,
+) -> bool {
+    use celox_sv_syntax::{EventControl, StatementKind, TimingControlKind, TimingEdge};
+    let StatementKind::Timing { control, body } = native.statement(procedure.body).kind else {
+        return false;
+    };
+    let TimingControlKind::Event(EventControl::Items(items)) = &native.timing_control(control).kind
+    else {
+        return false;
+    };
+    !items.is_empty()
+        && items
+            .iter()
+            .all(|item| item.edge == TimingEdge::Any && item.iff.is_none())
+        && !has_timing_control(body, native, true)
+}
+
 /// Timing controls, including delayed assignments, require process kernels.
-/// Typed leaf restrictions remain in their semantic binders.
+/// With `procedural_assigns`, so does a procedural continuous assignment,
+/// which starts or ends a driver that outlives the statement (IEEE 1800-2023
+/// 10.6.1). Typed leaf restrictions remain in their semantic binders.
 fn has_timing_control(
     root: celox_sv_syntax::StatementId,
     native: &celox_sv_syntax::Declarations,
+    procedural_assigns: bool,
 ) -> bool {
     use celox_sv_syntax::StatementKind;
     let mut pending = vec![root];
     while let Some(id) = pending.pop() {
         let statement = native.statement(id);
+        // An intra-assignment delay on a nonblocking assignment schedules
+        // the update without suspending the process (IEEE 1800-2023
+        // 9.4.5, 10.4.2), so it does not by itself make an edge-triggered
+        // `always` a timed process; the fused flip-flop lowering stages
+        // such updates for timed publication.
+        let intra_assignment_delay = match &statement.kind {
+            StatementKind::Assignment {
+                nonblocking: true,
+                timing_control: Some(control),
+                repeat_count: None,
+                ..
+            } => matches!(
+                native.timing_control(*control).kind,
+                celox_sv_syntax::TimingControlKind::Delay { .. }
+            ),
+            _ => false,
+        };
+        if intra_assignment_delay {
+            if !matches!(
+                statement.kind,
+                celox_sv_syntax::StatementKind::Unconverted { .. }
+            ) {
+                pending.extend(statement.kind.children());
+            }
+            continue;
+        }
         if matches!(
             statement.kind,
             StatementKind::Assignment {
@@ -89,7 +143,12 @@ fn has_timing_control(
                 | StatementKind::Wait { .. }
                 | StatementKind::WaitFork
                 | StatementKind::WaitOrder { .. }
-        ) {
+        ) || procedural_assigns
+            && matches!(
+                statement.kind,
+                StatementKind::ProceduralAssign(_) | StatementKind::ProceduralDeassign(_)
+            )
+        {
             return true;
         }
         if !matches!(
@@ -278,7 +337,7 @@ pub(super) fn reject_silently_ignored_constructs(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     parameter_dimensions: &ScopedMap<VariableDimensions>,
     parameter_values: &HashMap<String, Expr>,
 ) -> Converted<()> {
@@ -419,7 +478,7 @@ pub(crate) struct Facts {
 }
 
 impl Facts {
-    fn new(native: &celox_sv_syntax::Declarations) -> Self {
+    pub(crate) fn new(native: &celox_sv_syntax::Declarations) -> Self {
         use celox_sv_syntax::{BodyItemKind, ExprKind, ParameterKind, StatementKind};
         let controls = Ranges::new(native.body_items.iter().filter_map(|item| {
             matches!(
@@ -686,9 +745,7 @@ impl Facts {
     }
 
     pub(super) fn of(tree: &SyntaxTree) -> &Self {
-        tree.spans()
-            .validation
-            .get_or_init(|| Self::new(tree.declarations()))
+        &tree.spans().validation
     }
 }
 
@@ -806,7 +863,6 @@ fn validate_scope(
                 "bind" => Some("bind directive"),
                 "interconnect" => Some("interconnect net declaration"),
                 "specify" => Some("specify block"),
-                "defparam" => Some("defparam assignment"),
                 "assert" | "assume" | "cover" | "restrict" => {
                     let mut tokens = native.tokens[item.tokens.start..item.tokens.end]
                         .iter()
@@ -1119,6 +1175,11 @@ fn reject_constant_calls(
             }
             _ => continue,
         };
+        // A constant system function (IEEE 1800-2023 11.2.1) that the
+        // binders make a string operation of, not a cataloged function.
+        if name == "$sformatf" {
+            continue;
+        }
         if name.starts_with('$') {
             let presence = arguments
                 .iter()
@@ -1226,7 +1287,7 @@ mod traversal_tests {
                 &AnalysisContext::unspecialized(&tree),
                 session,
                 &ConstEnv::default(),
-                &HashMap::default(),
+                &TypeAliases::default(),
                 &ScopedMap::default(),
                 &HashMap::default(),
             );

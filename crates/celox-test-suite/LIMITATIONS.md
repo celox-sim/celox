@@ -2230,3 +2230,43 @@ cases. Reproduce with `--include-ignored --filter tb_queue::` on the respective
 verification runner. These exclusions apply only to external emission; Celox
 runs every case on all four backends, including native and Cranelift parallel
 configurations.
+### Disabling a block of concurrent task activations
+
+`procedural::disable_block_in_concurrent_task` calls an automatic task from
+two fork branches; one activation disables the task's named block while the
+other is suspended in it. Disabling a block inside an automatic task proceeds
+for all concurrent executions of the task (IEEE 1800-2023 9.6.2), so neither
+activation reaches the statement after the delay: Celox and Icarus 13.0 count
+no write.
+
+Verilator 5.052 ends only the activation that executes the `disable`; the
+other one resumes after its delay and performs the write. The executed
+mismatch is retained in
+[the Verilator procedural report](verification/sv/verilator/procedural.json).
+No assertion is weakened.
+
+### `randcase` statements
+
+`procedural::randcase_weights` and `procedural::randcase_in_always_comb` use
+the `randcase` statement (IEEE 1800-2023 18.16). Celox and Verilator 5.052
+execute both unchanged cases.
+
+Icarus 13.0 does not parse `randcase` and reports a syntax error at the
+statement. The executed compile errors are retained in
+[the Icarus procedural report](verification/sv/icarus/procedural.json). No
+assertion is weakened.
+
+### Coverage system functions
+
+`system_functions::coverage_without_instrumentation` and
+`system_functions::coverage_selectors_and_database_names` call the coverage
+system functions and tasks of IEEE 1800-2023 40.3.2 and 19.9 with the
+`` `SV_COV_* `` macros of Clause 40. Celox collects no coverage and gives
+their results without coverage.
+
+Neither reference simulator implements them: Verilator 5.052 reports each
+function as a reserved word that is not implemented, and Icarus 13.0 does not
+define the macros. The executed compile errors are retained in the
+[Verilator](verification/sv/verilator/system_functions.json) and
+[Icarus](verification/sv/icarus/system_functions.json) system function
+reports. No assertion is weakened.

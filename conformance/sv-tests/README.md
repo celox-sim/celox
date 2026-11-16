@@ -175,6 +175,10 @@ It remains in the dashboard-compatible denominator, with an `input_issue` report
 column and `upstream_input_issues` summary count; this is not a language-support
 failure. No generated source or metadata is repaired, and negative tests cannot
 use this exception to gain a false pass.
+`biquad_example` lists only the example's agent interfaces and packages, not its
+testbench top, so its files declare no module; its entry is marked `no_module`,
+and its run is classified as an input issue only when the driver fails with its
+missing-module message.
 The UVM submodules named by upstream `conf/runners/libs.json` must be available
 before any test runs. For simulation cases, each `simvariants` entry is forwarded
 as one plusarg
@@ -418,10 +422,17 @@ git -C ../sv-tests submodule update --init --depth 1 \
     third_party/tests/uvm third_party/tests/uvm-1.2 \
     third_party/tests/easyUVM third_party/tests/uvm-examples
 work/sv-tests-venv/bin/python conformance/sv-tests/prepare.py ../sv-tests
-CARGO_PROFILE_RELEASE_LTO=off cargo build --locked --release -p celox --features systemverilog --example sv_tests
+CARGO_PROFILE_RELEASE_LTO=off cargo build --locked --release -p celox --example sv_tests
+# The cases other than the UVM ones, four at a time.
 PYTHONDONTWRITEBYTECODE=1 work/sv-tests-venv/bin/python conformance/sv-tests/run.py ../sv-tests \
     --driver target/release/examples/sv_tests --out-dir work/sv-tests --jobs 4 \
+    --case-timeout 78 --exclude-library-cases \
     --expected conformance/sv-tests/expected.tsv --report work/sv-tests-report.tsv
+# The UVM cases one at a time: each may take 9 GB or more (see below).
+PYTHONDONTWRITEBYTECODE=1 work/sv-tests-venv/bin/python conformance/sv-tests/run.py ../sv-tests \
+    --driver target/release/examples/sv_tests --out-dir work/sv-tests-uvm --jobs 1 \
+    --case-timeout 480 --only-library-cases \
+    --expected conformance/sv-tests/expected.tsv --report work/sv-tests-uvm-report.tsv
 ```
 
 Use the release driver with LTO disabled to reproduce CI. LTO is unnecessary
@@ -439,10 +450,13 @@ expectations.
 
 `--case-timeout SECONDS` replaces each case's own `:timeout:` with one
 limit, through upstream `BaseRunner`'s `OVERRIDE_TEST_TIMEOUTS`; a case that
-reaches it fails with the runner's timeout diagnostic (`runner_timeout`). PR CI
-uses 78 seconds, three times the longest passing case of the main corpus with
-the CI driver (25.8 seconds), so that a change which lets a UVM testbench
-elaborate further cannot run each one to its own 300 or 900 seconds. The daily
+reaches it fails with the runner's timeout diagnostic (`runner_timeout`). CI
+uses 78 seconds, three times what the longest passing case of the main corpus
+took with the CI driver when the limit was set (25.8 seconds), so that a
+change which lets a UVM testbench elaborate further cannot run each one to its
+own 300 or 900 seconds. The longest passing cases are now UVM cases:
+`uvm/uvm_files.sv` takes about 17 seconds, and the negative tests that are
+rejected once `uvm_pkg` is analyzed about 35. The daily
 workflow keeps the upstream limits.
 
 `--shard INDEX/COUNT` runs and compares only one of COUNT disjoint shards
@@ -450,8 +464,29 @@ workflow keeps the upstream limits.
 neighbouring tests, such as the UVM testbenches, spread over the shards; a test
 that `expected.tsv` lists but the corpus lost belongs to one shard, which
 reports it missing. With `--update`, a shard replaces only its own rows. CI
-builds the driver once and runs five shards (`sv-tests conformance (N/5)`),
-each with 4 jobs, and retains one report per shard.
+builds the driver once; full runs (daily, release qualification and `ci:full`)
+run five shards of the cases other than the UVM ones (`sv-tests conformance
+(N/5)`), each with 4 jobs, and twelve shards of the UVM cases (`sv-tests
+conformance UVM (N/12)`), each with 1 job, and retain one report per shard.
+
+`--exclude-library-cases` leaves out the tests that the official runner
+compiles with a `conf/runners/libs.json` library, which it attaches when the
+library's name (`uvm`, `uvm-1.2`) is one of the case's tags: the 172 UVM
+cases. Their `expected.tsv` rows are neither compared nor replaced by
+`--update`. `--only-library-cases` runs only those cases, leaving the rows
+of the others alone. The UVM cases take nearly all of the corpus' CI time,
+while no other case takes more than a few seconds: each one that analyzes
+`uvm_pkg` takes 40-175 seconds with the release driver and typically peaks at
+5.5-9 GB, `uvm-examples/uvm_test_init` at 12.8 GB, so four at once do not fit
+a 16 GB runner or a local run of that size. Pull requests therefore run the
+other 1,478 cases in a single job (`sv-tests conformance (1/1)`), and the full
+runs above run the UVM cases one at a time with a case timeout of 480 seconds,
+the main shards keeping 78: the slowest passing UVM case usually takes about
+175 seconds on the CI runner (`testbenches/uvm_agent_active.sv`, 4-state), but
+`uvm-examples/uvm_test_init` (4-state, at its 12.8 GB peak) once took over 300.
+The timeout comes back down to 300 once the memory stack (#3881-#3883, #3886)
+lowers that peak. A change that moves a UVM case across the timeout
+shows up in the next daily full CI, whose failures open the Full CI issue.
 
 Both state modes run by default. Use `--state-mode 2state` or
 `--state-mode 4state` to run and compare only one; `--state-mode both` explicitly
@@ -832,3 +867,68 @@ which remains unsupported. A focused official run over 281 instance-heavy
 cases (chapters 6, 10, 23, generic and BlackParrot) reports no changed
 verdicts. The shared regression covers expansion, an explicit override and
 an explicitly empty connection.
+
+Type operands of size queries (20.6.2) update two rows: both modes of
+`uvm/uvm_files.sv` now pass. The case elaborates `uvm_pkg` alone, which
+finishes within the PR case timeout now that `$bits` of a built-in type or
+of a type name the scope already binds no longer discovers every declaration
+of the package (about 53 seconds with the CI driver, 78 before). The other
+UVM cases still reach the timeout or fail after analysis as before.
+
+`randcase` (18.16) updates four reviewed expectations: both `18.16`
+randcase cases pass in both state modes in a focused official invocation.
+The shared regression covers zero-weight and zero-total randcase items.
+Boundary: randcase weights are limited to 64 bits. A full official run
+over the 1,028 checked-in cases for the string, pattern, constraint,
+container, net and randcase changes changed only the corresponding
+checked-in verdicts, with no passing case regressing; this is not a new
+full-corpus measurement of the prepared 1,650 cases.
+
+`disable` of a named block (9.6.2) is supported in two forms: leaving an
+enclosing named block in the same process (including from loops, functions
+and `always_comb` bodies), and killing a sibling fork branch whose body is a
+named block. Six reviewed expectations update: `9.6.2--disable`,
+`9.6.2--disable_other` and `12.7.6--forever` pass in both state modes in a
+focused official invocation, with no other verdict changed among 88 cases of
+chapters 9, 12 and 13. The upstream cases only elaborate; the shared
+regression additionally checks that statements after the `disable` do not
+run, that a killed branch stops mid-schedule, and that a loop inside the
+block is left. Boundaries: hierarchical and task-name targets stay
+unsupported, a named block containing a fork is not a disable target, a
+block outside the executing process (such as a fork parent's block) is not
+lowered, and a sibling kill uses the branch's latest activation. A sibling
+`disable` that runs before the branch it names has started finds a block that
+is not executing and has no effect, so the branch then runs. A fork branch
+that a sibling `disable` names takes a process handle, so its process record
+is kept for the rest of the simulation as one a `process::self()` call
+exposes is; a branch that is only labelled takes none and its record is
+reused.
+
+The Clause 40 coverage system functions (`$coverage_control`,
+`$coverage_get_max`, `$coverage_get`, `$coverage_merge`, `$coverage_save`)
+and `$get_coverage` are bound for a simulator that collects no code
+coverage: they fold to their no-coverage results (`SV_COV_NOCOV,
+`SV_COV_OK for operations with nothing to do, `SV_COV_ERROR for invalid
+selector constants or a merge database that was never saved, and 100.0
+overall functional coverage on a design without covergroup instances per
+19.11). `$set_coverage_db_name` and `$load_coverage_db` are accepted and
+dropped. Two reviewed expectations update: `20.14--coverage` passes in both
+state modes in a focused official invocation, with no other verdict changed
+among 47 cases of chapter 20. Boundaries: selector arguments must be
+constant expressions; the scope and database name arguments of the functions
+are not resolved, validated or evaluated, so they must be a literal or a
+name, while the database tasks evaluate their name; no database is kept, so
+`$coverage_save` saves nothing (`SV_COV_NOCOV) and `$coverage_merge` finds
+none; and covergroups are not elaborated, so `$get_coverage` is rejected in
+a source that declares one. A coverage function is no constant system
+function (11.2.1): its call in a constant expression or in a constant
+function is rejected, and a constant function ignores the database tasks
+(13.4.3).
+
+In elaboration mode the driver now elaborates every module root in turn when
+no `--top` is given, as tools that elaborate all top-level modules do;
+simulation still requires a single root. Four reviewed expectations update:
+`5.12-attributes-module` and `5.6.4--compiler-directives-celldefine` pass in
+both state modes in a focused official invocation, with no other verdict
+changed among 172 cases of chapters 5, 20 and 22. Multi-root simulation
+cases (for example `20.4--printtimescale-hier`) remain unsupported.

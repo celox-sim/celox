@@ -138,7 +138,6 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("ok")),BigUint::from(1u8));
     }
 
-    fn fgets_invalid_descriptor_status_and_type(sim) { @case "file_io::fgets_invalid_descriptor_status_and_type"; }
 }
 
 #[test]

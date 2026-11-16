@@ -363,7 +363,6 @@ grep -qx -- '--locked' "$TMP/cargo-args" || fail "Celox build omitted --locked"
 if grep -qx -- '--features' "$TMP/cargo-args"; then
     fail "default Celox build unexpectedly passed --features"
 fi
-grep -qx -- 'celox-vpi' "$TMP/cargo-args" || fail "Celox build did not select celox-vpi"
 grep -qx -- 'celox' "$TMP/cargo-args" || fail "Celox build did not select celox"
 assert_eq "$(sed -n '1p' "$TMP/cargo-env")" unset "CARGO_TARGET_DIR neutralization"
 assert_eq "$(sed -n '2p' "$TMP/cargo-env")" unset "CARGO_BUILD_TARGET neutralization"
@@ -751,6 +750,16 @@ fi
 printf '%s\n' "$hotspot_stats" >"$hotspot_log"
 if validate_gate_tiered_stats "$hotspot_log" hot 2>/dev/null; then
     fail "gate accepted a missing tiered record"
+fi
+
+# Hotspot statistics snapshot the interpreting phase and survive whole-image
+# promotion, so both records together are valid generated-code evidence.
+promoted_stats='CELOX_TIERED_STATS test=hot tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=200 promoted_after_interpreted_evaluations=10 promotion_elapsed_ns=12 safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0'
+printf '%s\n' "$promoted_stats" "$hotspot_stats" >"$hotspot_log"
+validate_gate_tiered_stats "$hotspot_log" hot || fail "gate rejected promoted execution with hotspot evidence"
+printf '%s\n' "$promoted_stats" "${hotspot_stats/compiled_calls=20/compiled_calls=0}" >"$hotspot_log"
+if validate_gate_tiered_stats "$hotspot_log" hot 2>/dev/null; then
+    fail "gate accepted a promoted record with hotspot evidence of no generated-code execution"
 fi
 
 CELOX_ROOT="$REAL_CELOX_ROOT"

@@ -356,7 +356,9 @@ impl<B: SimBackend> Simulator<B> {
                         .collect::<Vec<_>>();
                     (initial.as_slice(), vec![None; frame.locals.len()])
                 } else {
-                    (activation.private.as_slice(), activation.locals.clone())
+                    let decoded = activation.private.values().collect::<Vec<_>>();
+                    initial = decoded;
+                    (initial.as_slice(), activation.locals.clone())
                 };
                 for (slot, value) in frame.private.iter().zip(values) {
                     let object = named(slot)?;
@@ -677,6 +679,21 @@ impl<B: SimBackend> Simulator<B> {
                     Ok((*kind, child_ids(ids)?))
                 })
                 .transpose()?;
+            let private = match frame {
+                Some(frame) if !private.is_empty() => {
+                    let signals: Vec<_> = frame
+                        .private
+                        .iter()
+                        .map(|slot| self.backend.resolve_signal(slot))
+                        .collect();
+                    let layout = std::sync::Arc::new(celox_runtime::ImageLayout::new(
+                        &signals,
+                        self.backend.layout().four_state,
+                    ));
+                    celox_runtime::FrameImage::from_values(&layout, &private)
+                }
+                _ => Default::default(),
+            };
             decoded[index] = Some(Activation {
                 control: Default::default(),
                 kernel,
@@ -855,15 +872,17 @@ impl<B: SimBackend> Simulator<B> {
                 .get(activation.kernel)
                 .and_then(Option::as_ref)
             {
-                for (slot, value) in frame.private.iter().zip(&mut activation.private) {
+                for (index, slot) in frame.private.iter().enumerate() {
                     if self
                         .program
                         .design
                         .state_objects
                         .get(slot)
                         .is_some_and(|m| m.value_kind == celox_design::ValueKind::StrRef)
+                        && let Some(mut value) = activation.private.get(index)
                     {
-                        bind(value);
+                        bind(&mut value);
+                        activation.private.set(index, &value);
                     }
                 }
             }

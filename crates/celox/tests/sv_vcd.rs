@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! Source-driven VCD controls exercise host requests and trace observation.
 use celox::{SimBackend, Simulation};
 use std::path::Path;

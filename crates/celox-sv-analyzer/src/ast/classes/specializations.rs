@@ -27,18 +27,22 @@ pub(in crate::ast) struct Specialization {
     /// The constants and types the class declares itself, which a class
     /// extending it inherits without the scope around the declaration.
     pub declared_env: HashMap<String, Option<i128>>,
-    pub declared_aliases: HashMap<String, Type>,
-    pub enum_constants: HashMap<String, semantic_types::ConstantType>,
+    pub declared_aliases: TypeAliases,
+    pub constant_types: HashMap<String, semantic_types::ConstantType>,
+    /// Properties and methods also hide inherited constants.
+    pub nonconstant_members: HashSet<String>,
     /// The literals that replace the value parameters.
     pub literals: HashMap<String, Expr>,
     /// The type parameters and typedefs, and the class name itself.
-    pub aliases: HashMap<String, Type>,
+    pub aliases: TypeAliases,
     /// The class the specialization extends, or the interface classes an
     /// interface class extends, whose parameters and typedefs it inherits
     /// (IEEE 1800-2023 8.13, 8.26.3).
     pub bases: Vec<String>,
     /// The parameters of the port list, for `$typename`.
     pub arguments: Vec<type_names::ClassArgument>,
+    /// The types visible in the class body, which its property types name.
+    pub type_declarations: Arc<types::TypeDeclarations>,
 }
 
 /// The types that a scope inside the class declared as `own` sees from
@@ -48,14 +52,10 @@ pub(in crate::ast) struct Specialization {
 fn inherited<'a>(
     own: &'a str,
     specialization: &'a Specialization,
-) -> impl Iterator<Item = (String, Type)> + 'a {
-    specialization
-        .aliases
-        .iter()
-        .filter(move |(key, _)| {
-            specialization.generic == own || **key != scope_key(&specialization.generic)
-        })
-        .map(|(key, ty)| (key.clone(), ty.clone()))
+) -> impl Iterator<Item = (&'a String, &'a Type)> + 'a {
+    specialization.aliases.iter().filter(move |(key, _)| {
+        specialization.generic == own || **key != scope_key(&specialization.generic)
+    })
 }
 
 /// The specialization `name` and the ones it inherits from, each after
@@ -143,8 +143,8 @@ pub(in crate::ast) fn scope(
     session: &mut Session,
     name: &str,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
-) -> (ConstEnv, HashMap<String, Type>) {
+    aliases: &TypeAliases,
+) -> (ConstEnv, TypeAliases) {
     let (env, aliases) = shared_scope(session, name, &env.clone().into(), &aliases.clone().into());
     (env.into_iter().collect(), aliases.into_iter().collect())
 }
@@ -155,68 +155,95 @@ pub(in crate::ast) fn shared_scope(
     session: &mut Session,
     name: &str,
     env: &SharedEnv,
-    aliases: &SharedMap<Type>,
-) -> (SharedEnv, SharedMap<Type>) {
+    aliases: &SharedAliases,
+) -> (SharedEnv, SharedAliases) {
     let mut env = env.clone();
     let mut aliases = aliases.clone();
-    let edits = ScopeEdits::of(session, name);
-    if !edits.env.is_empty() {
-        for (key, value) in edits.env {
-            match value {
-                Some(value) => env.insert(key, value),
-                None => env.remove(&key),
-            };
-        }
-    }
-    if !edits.aliases.is_empty() {
-        aliases.extend(edits.aliases);
-    }
+    ScopeEdits::default().apply(session, name, &mut env, &mut aliases);
     (env, aliases)
 }
 
-/// What class `name` adds to the scope around it, in order: its parameters
-/// and those it inherits, which may also hide a constant, and the types it
-/// inherits.
+/// The entries that the scope of a class changed in the tables around it,
+/// with the values they had before, in the order they were changed.
+#[derive(Default)]
 struct ScopeEdits {
     env: Vec<(String, Option<i128>)>,
-    aliases: Vec<(String, Type)>,
+    aliases: Vec<(String, Option<Type>)>,
 }
 
 impl ScopeEdits {
-    fn of(session: &mut Session, name: &str) -> Self {
-        let mut edits = Self {
-            env: Vec::new(),
-            aliases: Vec::new(),
-        };
+    /// Add what class `name` adds to the scope around it to `env` and
+    /// `aliases`, in order: its parameters and those it inherits, which may
+    /// also hide a constant, and the types it inherits. An entry that holds
+    /// its value already is left alone, so a shared table is copied only
+    /// when the class changes it.
+    fn apply(
+        &mut self,
+        session: &Session,
+        name: &str,
+        env: &mut SharedEnv,
+        aliases: &mut SharedAliases,
+    ) {
         let own = generic(session, name);
         for specialization in lineage(session, name) {
             for base in &specialization.bases {
                 if lookup(session, base).is_none()
                     && let Some(scope) = session.foreign.declarations(base)
                 {
-                    edits
-                        .env
-                        .extend(scope.env.iter().map(|(key, value)| (key.clone(), *value)));
-                    edits.aliases.extend(
-                        scope
-                            .types
-                            .iter()
-                            .map(|(key, ty)| (key.clone(), ty.clone())),
-                    );
+                    for (key, value) in &scope.env {
+                        self.set_constant(env, key, *value);
+                    }
+                    for (key, ty) in &scope.types {
+                        self.set_type(aliases, key, ty);
+                    }
                 }
             }
-            edits.env.extend(
-                specialization
-                    .env
-                    .iter()
-                    .map(|(key, value)| (key.clone(), Some(*value))),
-            );
-            edits
-                .env
-                .extend(specialization.hidden.iter().map(|key| (key.clone(), None)));
-            edits.aliases.extend(inherited(&own, &specialization));
+            for (key, value) in &specialization.env {
+                self.set_constant(env, key, Some(*value));
+            }
+            for key in &specialization.hidden {
+                self.set_constant(env, key, None);
+            }
+            for (key, ty) in inherited(&own, &specialization) {
+                self.set_type(aliases, key, ty);
+            }
         }
-        edits
+    }
+
+    fn set_constant(&mut self, env: &mut SharedEnv, key: &str, value: Option<i128>) {
+        let old = env.get(key).copied();
+        if old == value {
+            return;
+        }
+        match value {
+            Some(value) => env.insert(key.to_owned(), value),
+            None => env.remove(key),
+        };
+        self.env.push((key.to_owned(), old));
+    }
+
+    fn set_type(&mut self, aliases: &mut SharedAliases, key: &str, ty: &Type) {
+        if aliases.get(key) == Some(ty) {
+            return;
+        }
+        let old = aliases.insert(key.to_owned(), ty.clone());
+        self.aliases.push((key.to_owned(), old));
+    }
+
+    /// Take the changes back, the last one first.
+    fn undo(self, env: &mut SharedEnv, aliases: &mut SharedAliases) {
+        for (key, old) in self.env.into_iter().rev() {
+            match old {
+                Some(old) => env.insert(key, old),
+                None => env.remove(&key),
+            };
+        }
+        for (key, old) in self.aliases.into_iter().rev() {
+            match old {
+                Some(old) => aliases.insert(key, old),
+                None => aliases.remove(&key),
+            };
+        }
     }
 }
 
@@ -225,13 +252,13 @@ impl ScopeEdits {
 /// making the scope of each specialization costs what the class adds, not
 /// a copy of the tables around it.
 pub(in crate::ast) struct ClassScopes {
-    base: (SharedEnv, SharedMap<Type>),
+    base: (SharedEnv, SharedAliases),
     env: SharedEnv,
-    aliases: SharedMap<Type>,
+    aliases: SharedAliases,
 }
 
 impl ClassScopes {
-    pub(in crate::ast) fn new(env: &SharedEnv, aliases: &SharedMap<Type>) -> Self {
+    pub(in crate::ast) fn new(env: &SharedEnv, aliases: &SharedAliases) -> Self {
         Self {
             base: (env.clone(), aliases.clone()),
             env: env.clone(),
@@ -246,48 +273,25 @@ impl ClassScopes {
         session: &mut Session,
         name: &str,
         env: &SharedEnv,
-        aliases: &SharedMap<Type>,
-        f: impl FnOnce(&mut Session, &SharedEnv, &SharedMap<Type>) -> R,
+        aliases: &SharedAliases,
+        f: impl FnOnce(&mut Session, &SharedEnv, &SharedAliases) -> R,
     ) -> R {
         // The copy follows the tables it was made from.
         if self.base.0.identity() != env.identity() || self.base.1.identity() != aliases.identity()
         {
             *self = Self::new(env, aliases);
         }
-        let edits = ScopeEdits::of(session, name);
         #[cfg(test)]
-        if !edits.env.is_empty() && self.env.is_shared()
-            || !edits.aliases.is_empty() && self.aliases.is_shared()
-        {
+        let shared = (self.env.is_shared(), self.aliases.is_shared());
+        // The entries before each edit, restored in reverse.
+        let mut edits = ScopeEdits::default();
+        edits.apply(session, name, &mut self.env, &mut self.aliases);
+        #[cfg(test)]
+        if !edits.env.is_empty() && shared.0 || !edits.aliases.is_empty() && shared.1 {
             super::super::dimensions::CLASS_SCOPE_COPIES.with(|count| count.set(count.get() + 1));
         }
-        // The entries before each edit, restored in reverse.
-        let mut env_undo = Vec::with_capacity(edits.env.len());
-        for (key, value) in edits.env {
-            let old = match value {
-                Some(value) => self.env.insert(key.clone(), value),
-                None => self.env.remove(&key),
-            };
-            env_undo.push((key, old));
-        }
-        let mut aliases_undo = Vec::with_capacity(edits.aliases.len());
-        for (key, ty) in edits.aliases {
-            let old = self.aliases.insert(key.clone(), ty);
-            aliases_undo.push((key, old));
-        }
         let result = f(session, &self.env, &self.aliases);
-        for (key, old) in env_undo.into_iter().rev() {
-            match old {
-                Some(old) => self.env.insert(key, old),
-                None => self.env.remove(&key),
-            };
-        }
-        for (key, old) in aliases_undo.into_iter().rev() {
-            match old {
-                Some(old) => self.aliases.insert(key, old),
-                None => self.aliases.remove(&key),
-            };
-        }
+        edits.undo(&mut self.env, &mut self.aliases);
         result
     }
 }
@@ -301,7 +305,7 @@ fn inherit(
     name: &str,
     own: &str,
     env: &mut ConstEnv,
-    aliases: &mut HashMap<String, Type>,
+    aliases: &mut TypeAliases,
 ) {
     if lookup(session, name).is_none() {
         if let Some(scope) = session.foreign.declarations(name) {
@@ -346,19 +350,25 @@ pub(in crate::ast) fn class_base(
         constant_types: dimensions.constant_types.clone(),
         ..PackedDimensions::default()
     };
-    if let Some((env, aliases)) = session
+    if let Some(DeclaringScope { env, aliases, .. }) = session
         .class_declaration_scopes
         .get(&generic(session, name))
     {
+        // An entry that holds its value already is left alone: the tables
+        // are copied only when the declaring scope changes them.
         if env.identity() != outer.const_env.identity() {
-            outer
-                .const_env
-                .extend(env.iter().map(|(key, value)| (key.clone(), *value)));
+            for (key, value) in env.iter() {
+                if outer.const_env.get(key) != Some(value) {
+                    outer.const_env.insert(key.clone(), *value);
+                }
+            }
         }
         if aliases.identity() != outer.type_aliases.identity() {
-            outer
-                .type_aliases
-                .extend(aliases.iter().map(|(key, ty)| (key.clone(), ty.clone())));
+            for (key, ty) in aliases.iter() {
+                if outer.type_aliases.get(key) != Some(ty) {
+                    outer.type_aliases.insert(key.clone(), ty.clone());
+                }
+            }
         }
     }
     ClassBase::of(&outer)
@@ -382,9 +392,23 @@ pub(in crate::ast) fn body_scope(
                 && let Some(scope) = session.foreign.declarations(base)
             {
                 scope.apply(&mut dimensions.const_env, &mut dimensions.type_aliases);
+                extend_body_constant_types(
+                    &mut dimensions,
+                    &scope.env,
+                    scope.types.keys().map(String::as_str),
+                    &scope.constant_types,
+                    &scope.nonconstant_members,
+                );
                 literals.extend(scope.literals.clone());
             }
         }
+        extend_body_constant_types(
+            &mut dimensions,
+            &specialization.declared_env,
+            specialization.declared_aliases.keys().map(String::as_str),
+            &specialization.constant_types,
+            &specialization.nonconstant_members,
+        );
         dimensions.const_env.extend(specialization.env.clone());
         // The parameters hide constants of the scope around the class, also
         // the literals of those without an integral value.
@@ -395,9 +419,11 @@ pub(in crate::ast) fn body_scope(
         dimensions
             .parameter_values
             .extend(specialization.literals.clone());
-        dimensions
-            .type_aliases
-            .extend(inherited(&own, &specialization));
+        for (key, ty) in inherited(&own, &specialization) {
+            if dimensions.type_aliases.get(key) != Some(ty) {
+                dimensions.type_aliases.insert(key.clone(), ty.clone());
+            }
+        }
         literals.extend(specialization.literals.clone());
     }
     (dimensions, literals)
@@ -452,8 +478,28 @@ pub(in crate::ast) fn export_declarations(
                     {
                         scope.env.extend(parent.env.clone());
                         scope.literals.extend(parent.literals.clone());
+                        scope
+                            .nonconstant_members
+                            .extend(parent.nonconstant_members.iter().cloned());
+                        extend_constant_types(
+                            &mut scope.constant_types,
+                            &parent.env,
+                            parent.types.keys().map(String::as_str),
+                            &parent.constant_types,
+                            &parent.nonconstant_members,
+                        );
                     }
                 }
+                extend_constant_types(
+                    &mut scope.constant_types,
+                    &specialization.declared_env,
+                    specialization.declared_aliases.keys().map(String::as_str),
+                    &specialization.constant_types,
+                    &specialization.nonconstant_members,
+                );
+                scope
+                    .nonconstant_members
+                    .extend(specialization.nonconstant_members.iter().cloned());
                 scope.env.extend(specialization.declared_env.clone());
                 scope.literals.extend(specialization.literals.clone());
             }
@@ -616,17 +662,41 @@ fn bind_nested_specialization(
     session
         .class_specializations_building
         .push(pending.name.clone());
+    let scoped = push_class_scope(tree, session, generic, &pending.name);
     let name = bind_bases(tree, session, generic, &pending.env, &pending.aliases)
         .and_then(|bases| finish_specialization(tree, session, generic, pending, bases));
+    if scoped {
+        session.class_scopes.pop();
+    }
     session.class_specializations_building.pop();
     name.map(Binding::Ready)
+}
+
+/// Record that specialization `name` of class `generic` is being made, so
+/// that the types its declaration declares are its own (see
+/// [`types::declaring_scope`]); whether the class is declared in `tree`.
+fn push_class_scope(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    generic: &str,
+    name: &str,
+) -> bool {
+    let Some(tokens) =
+        super::declaration(tree, session, generic).map(|declaration| declaration.tokens)
+    else {
+        return false;
+    };
+    session
+        .class_scopes
+        .push(types::ClassScope::new(name, tree.declarations(), tokens));
+    true
 }
 
 struct PendingSpecialization {
     name: String,
     parameters: Parameters,
     env: ConstEnv,
-    aliases: HashMap<String, Type>,
+    aliases: TypeAliases,
 }
 
 enum Preparation {
@@ -642,12 +712,12 @@ enum Preparation {
 pub(in crate::ast) struct Named {
     arguments: BoundArguments,
     env: std::sync::Weak<ConstEnv>,
-    aliases: std::sync::Weak<HashMap<String, Type>>,
+    aliases: std::sync::Weak<TypeAliases>,
     name: String,
 }
 
 impl Named {
-    fn of(&self, env: &SharedEnv, aliases: &SharedMap<Type>) -> bool {
+    fn of(&self, env: &SharedEnv, aliases: &SharedAliases) -> bool {
         self.env.as_ptr() as usize == env.identity()
             && self.aliases.as_ptr() as usize == aliases.identity()
     }
@@ -661,25 +731,24 @@ impl Named {
 #[derive(Clone, Debug, Default)]
 pub(in crate::ast) struct BoundArguments {
     pub values: HashMap<String, ConstExpr>,
-    pub types: HashMap<String, Type>,
+    pub types: TypeAliases,
 }
 
-// Ordinary type equality ignores nominal declaration identity; specialization
-// matching must distinguish separately declared enum and aggregate types (8.25).
-impl PartialEq for BoundArguments {
-    fn eq(&self, other: &Self) -> bool {
+impl BoundArguments {
+    /// Whether `other` names the same specialization. Ordinary type equality
+    /// ignores nominal declaration identity; specialization matching must
+    /// distinguish separately declared enum and aggregate types (8.25).
+    pub(in crate::ast) fn same(&self, other: &Self, table: &semantic_types::TyTable) -> bool {
         self.values == other.values
             && self.types.len() == other.types.len()
             && self.types.iter().all(|(name, ty)| {
                 other
                     .types
                     .get(name)
-                    .is_some_and(|other| spelling(ty) == spelling(other))
+                    .is_some_and(|other| spelling(ty, table) == spelling(other, table))
             })
     }
 }
-
-impl Eq for BoundArguments {}
 
 pub(in crate::ast) fn bind_arguments(
     tree: &AnalysisContext<'_>,
@@ -699,7 +768,7 @@ pub(in crate::ast) fn bind_arguments(
         .filter(|parameter| !parameter.local)
         .collect::<Vec<_>>();
     let mut values = HashMap::<String, ConstExpr>::default();
-    let mut types = HashMap::<String, Type>::default();
+    let mut types = TypeAliases::default();
     // The formals assigned, also by an empty named assignment.
     let mut assigned = HashSet::<String>::default();
     let mut named = false;
@@ -812,9 +881,10 @@ fn prepare_bound(
         .class_specialization_names
         .get(generic)
         .and_then(|known| {
-            known
-                .iter()
-                .find(|known| known.of(&base_env, &base_aliases) && known.arguments == arguments)
+            known.iter().find(|known| {
+                known.of(&base_env, &base_aliases)
+                    && known.arguments.same(&arguments, &session.types)
+            })
         })
         .map(|known| known.name.clone())
         .filter(|name| named(session, name))
@@ -835,7 +905,8 @@ fn prepare_bound(
         spelled: Vec::new(),
         arguments: Vec::new(),
         own_env: HashMap::default(),
-        own_aliases: HashMap::default(),
+        own_aliases: TypeAliases::default(),
+        constant_types: HashMap::default(),
     };
     if let Some(id) = declaration.parameter_ports
         && let Some(name) =
@@ -898,7 +969,7 @@ fn bind_bases(
     session: &mut Session,
     generic: &str,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Vec<String>> {
     let native = tree.declarations();
     let declaration = super::declaration(tree, session, generic)
@@ -913,12 +984,60 @@ fn bind_bases(
     let mut bases = Vec::new();
     for id in inherited {
         if let Some(base) = type_binding::procedural_type(id, native, tree, session, env, aliases)?
-            .and_then(|ty| ty.class().map(str::to_owned))
+            .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
         {
             bases.push(base);
         }
     }
     Ok(bases)
+}
+
+/// The types visible in the body of class `declaration`, as a binding
+/// context records them: those of its scope, its own type parameters and
+/// typedefs, each after its declaration, and those of the classes it
+/// extends (IEEE 1800-2023 6.18, 8.13, 8.25). Of a class declared in
+/// another source, whose declarations this tree does not hold, the record
+/// has the types that source exports for it.
+fn class_type_declarations(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    declaration: &celox_sv_syntax::ClassDeclaration,
+    bases: &[String],
+) -> Converted<Arc<types::TypeDeclarations>> {
+    let native = tree.declarations();
+    let mut record = (*types::scope_type_declarations(tree)?).clone();
+    types::declare_class(native, declaration, true, &mut record);
+    let imported = scope::imported(tree);
+    let generics = bases
+        .iter()
+        .flat_map(|base| {
+            let lineage = lineage(session, base);
+            if lineage.is_empty() {
+                vec![base.clone()]
+            } else {
+                lineage
+                    .iter()
+                    .map(|specialization| specialization.generic.clone())
+                    .collect()
+            }
+        })
+        .collect::<Vec<_>>();
+    for generic in &generics {
+        match super::declaration(tree, session, generic) {
+            Some(base) => types::declare_class(native, base, false, &mut record),
+            None => {
+                for name in imported
+                    .class_member_types
+                    .get(generic)
+                    .into_iter()
+                    .flat_map(HashMap::keys)
+                {
+                    record.entry(name.clone()).or_insert(None);
+                }
+            }
+        }
+    }
+    Ok(Arc::new(record))
 }
 
 #[inline(never)]
@@ -955,7 +1074,7 @@ fn finish_specialization(
             .iter()
             .map(|(key, ty)| (key.clone(), ty.clone())),
     );
-    aliases.insert(scope_key(generic), super::handle(&name));
+    aliases.insert(scope_key(generic), super::handle(&mut session.types, &name));
     // The body parameters, typedefs and properties of an enumeration type it
     // declares in place, in the order the body declares them.
     let mut body = declaration
@@ -979,7 +1098,7 @@ fn finish_specialization(
         }))
         .collect::<Vec<_>>();
     body.sort_by_key(|(start, _)| *start);
-    let mut own_enum_constants = HashMap::default();
+    let declarations = class_type_declarations(tree, session, declaration, &bases)?;
     for (_, item) in body {
         match item {
             Ok(id) => {
@@ -1004,32 +1123,42 @@ fn finish_specialization(
                 // string values without an integral one it reads as their
                 // literals. A typedef that cannot be bound is left out; a
                 // use of it reports the type unknown.
+                // A name that no type visible in the class has is an error,
+                // also in a typedef no use binds (IEEE 1800-2023 6.18).
                 let mut context = PackedDimensions::new(HashMap::default(), &env, &aliases);
                 context.parameter_values = parameters.literals.clone().into();
-                let ty = type_binding::binding::bind_in(target, native, tree, session, &context)
-                    .ok()
-                    .flatten()
-                    .and_then(|ty| {
-                        // A typedef's unpacked dimensions may make it a
-                        // dynamic container (IEEE 1800-2023 7.5, 7.8, 7.10).
-                        let ty = match alias {
-                            Some(alias) => containers::with_dimensions(
-                                ty,
-                                &alias.dimensions,
-                                tree,
-                                session,
-                                &context,
-                            )
-                            .ok()?,
-                            None => ty,
-                        };
-                        type_parameters::resolve(&tree.functions, ty, &env)
-                    });
+                context.constant_types = Arc::new(parameters.constant_types.clone());
+                context.type_declarations = Some(declarations.clone());
+                let bound =
+                    match type_binding::binding::bind_in(target, native, tree, session, &context) {
+                        Ok(ty) => ty,
+                        Err(error @ AnalyzerError::UndeclaredIdentifier { .. }) => {
+                            return Err(error);
+                        }
+                        Err(_) => None,
+                    };
+                let ty = bound.and_then(|ty| {
+                    // A typedef's unpacked dimensions may make it a
+                    // dynamic container (IEEE 1800-2023 7.5, 7.8, 7.10).
+                    let ty = match alias {
+                        Some(alias) => containers::with_dimensions(
+                            ty,
+                            &alias.dimensions,
+                            tree,
+                            session,
+                            &context,
+                        )
+                        .ok()?,
+                        None => ty,
+                    };
+                    type_parameters::resolve(&tree.functions, ty, &env)
+                });
                 if let Some(mut ty) = ty {
                     let alias =
                         alias.map(|alias| instances::normalize_identifier(&alias.name.spelling));
                     if let Some(alias) = &alias {
-                        ty.name_declaration(|| {
+                        // A specialization names its typedefs apart already.
+                        ty.name_declaration(None, || {
                             (
                                 format!("{name}::{alias}"),
                                 type_names::TypedefName::Class {
@@ -1095,13 +1224,14 @@ fn finish_specialization(
                                 }
                                 parameters.literals.remove(&member);
                             }
-                            own_enum_constants.insert(
+                            parameters.constant_types.insert(
                                 instances::normalize_identifier(&member.name.spelling),
                                 binding.clone(),
                             );
                         }
                     }
                     if let Some(alias) = alias {
+                        parameters.constant_types.remove(&alias);
                         parameters.own_aliases.insert(alias.clone(), ty.clone());
                         aliases.insert(alias, ty);
                     }
@@ -1121,12 +1251,24 @@ fn finish_specialization(
                 .collect(),
             declared_env: parameters.own_env,
             declared_aliases: parameters.own_aliases,
-            enum_constants: own_enum_constants,
+            constant_types: parameters.constant_types,
+            nonconstant_members: declaration
+                .properties
+                .iter()
+                .flat_map(|property| &property.declaration.variables)
+                .map(|variable| instances::normalize_identifier(&variable.name.spelling))
+                .chain(declaration.methods.iter().map(|method| {
+                    instances::normalize_identifier(
+                        &native.subroutine(method.subroutine).name.spelling,
+                    )
+                }))
+                .collect(),
             env,
             literals: parameters.literals,
             aliases,
             bases,
             arguments: parameters.arguments,
+            type_declarations: declarations,
         }),
     ));
     Ok(name)
@@ -1136,7 +1278,7 @@ fn finish_specialization(
 struct Parameters {
     /// The values and types the assignment gives, until they are bound.
     values: HashMap<String, ConstExpr>,
-    types: HashMap<String, Type>,
+    types: TypeAliases,
     literals: HashMap<String, Expr>,
     lowered: Vec<Parameter>,
     /// The parameters of the port list as the name of the specialization
@@ -1147,7 +1289,8 @@ struct Parameters {
     /// The constants and types the class declares itself, which hide those
     /// of its bases; a constant without a value hides one of a base too.
     own_env: HashMap<String, Option<i128>>,
-    own_aliases: HashMap<String, Type>,
+    own_aliases: TypeAliases,
+    constant_types: HashMap<String, semantic_types::ConstantType>,
 }
 
 impl Parameters {
@@ -1171,7 +1314,7 @@ impl Parameters {
         parameter: &celox_sv_syntax::Parameter,
         first: usize,
         env: &ConstEnv,
-        aliases: &HashMap<String, Type>,
+        aliases: &TypeAliases,
     ) {
         let ParameterKind::Value {
             data_type,
@@ -1198,9 +1341,13 @@ impl Parameters {
             .is_some_and(|ty| {
                 matches!(
                     ty.kind(),
-                    TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+                    TypeKind::Bit
+                        | TypeKind::Chandle
+                        | TypeKind::Logic
+                        | TypeKind::Reg
+                        | TypeKind::Implicit
                 ) && ty.container.is_none()
-                    && ty.class().is_none()
+                    && ty.class_in(&session.types).is_none()
                     && ty.unpacked_ranges.is_empty()
             });
         let name = instances::normalize_identifier(&parameter.name.spelling);
@@ -1221,7 +1368,7 @@ impl Parameters {
         id: celox_sv_syntax::ParameterDeclarationId,
         port: bool,
         env: &mut ConstEnv,
-        aliases: &mut HashMap<String, Type>,
+        aliases: &mut TypeAliases,
     ) -> Converted<Option<String>> {
         let native = tree.declarations();
         for parameter in &native.parameter_declaration(id).parameters {
@@ -1249,10 +1396,12 @@ impl Parameters {
                     let ty = type_parameters::resolve(&tree.functions, ty, env)
                         .ok_or_else(|| unsupported(format!("type of type parameter `{name}`")))?;
                     if port {
-                        self.spelled.push(format!("{name}={}", spelling(&ty)));
+                        self.spelled
+                            .push(format!("{name}={}", spelling(&ty, &session.types)));
                         self.record_type(&ty);
                     }
                     aliases.insert(name.clone(), ty.clone());
+                    self.constant_types.remove(&name);
                     self.own_aliases.insert(name, ty);
                 }
                 ParameterKind::Value { .. } => {
@@ -1267,6 +1416,7 @@ impl Parameters {
                     if !local && let Some(value) = self.values.remove(&name) {
                         overrides.insert(name.clone(), value);
                     }
+                    self.constant_types.remove(&name);
                     let first = self.lowered.len();
                     parameters::parameters_from_native(
                         &[parameter],
@@ -1281,6 +1431,9 @@ impl Parameters {
                     let mut typed = true;
                     for parameter in self.lowered[first..].iter().cloned() {
                         typed &= parameter.has_declared_type;
+                        if let Some(ty) = &parameter.semantic_type {
+                            self.constant_types.insert(name.clone(), ty.clone());
+                        }
                         keys.extend(parameters::binding_keys(
                             &name,
                             env,
@@ -1320,35 +1473,89 @@ impl Parameters {
     }
 }
 
-/// Record `env` and `aliases`, those of the current scope, as the scope that
-/// declares each class of it, until [`collect`] finds the generate scopes
-/// around their declarations: elaborating those scopes binds the types they
-/// declare, specializations among them.
+/// Record `env` and `aliases`, the tables of the current scope as they stand,
+/// as the scope that declares each class of it, until [`collect`] finds the
+/// generate scopes around their declarations: elaborating those scopes binds
+/// the types they declare, specializations among them. The scope records
+/// them again whenever its tables change, before it lays out a class, so a
+/// class is laid out in the scope that declares it however it is first
+/// named (IEEE 1800-2023 8.13).
 pub(in crate::ast) fn declare_scopes(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    env: &SharedEnv,
+    aliases: &SharedAliases,
 ) {
     let native = tree.declarations();
     let scope = tree.root_unit().ok().map(|unit| unit.tokens);
-    let scopes = &mut session.class_declaration_scopes;
-    // The classes of the scope share its tables.
-    let tables = (
-        SharedMap::from(env.clone()),
-        SharedMap::from(aliases.clone()),
-    );
     for class in &native.classes {
         if super::enclosing_unit(native, class.tokens).map(|unit| unit.tokens) == scope {
-            scopes.insert(super::declared_name(tree, class), tables.clone());
+            record_scope(
+                session,
+                super::declared_name(tree, class),
+                env.clone(),
+                aliases.clone(),
+            );
         }
     }
 }
 
+/// The tables of the scope that declares a class, as the scope recorded
+/// them. Each recording has a number of its own, so that a layout of the
+/// class in tables the scope has replaced since is not used again.
+#[derive(Clone)]
+pub(in crate::ast) struct DeclaringScope {
+    env: SharedEnv,
+    aliases: SharedAliases,
+    recording: u64,
+}
+
+/// Record `env` and `aliases` as the tables of the scope that declares
+/// class `name`. Tables with the entries of the recorded ones keep that
+/// recording, and with it the layouts made in them.
+fn record_scope(session: &mut Session, name: String, env: SharedEnv, aliases: SharedAliases) {
+    if session
+        .class_declaration_scopes
+        .get(&name)
+        .is_some_and(|scope| scope.env == env && scope.aliases == aliases)
+    {
+        return;
+    }
+    session.class_scope_recordings += 1;
+    let recording = session.class_scope_recordings;
+    session.class_declaration_scopes.insert(
+        name,
+        DeclaringScope {
+            env,
+            aliases,
+            recording,
+        },
+    );
+}
+
 /// The constants and types of the scope that declares class `generic`,
-/// which [`collect`] records.
-fn declaration_scope(session: &mut Session, generic: &str) -> Option<(SharedEnv, SharedMap<Type>)> {
-    session.class_declaration_scopes.get(generic).cloned()
+/// which [`declare_scopes`] and [`collect`] record.
+fn declaration_scope(session: &Session, generic: &str) -> Option<(SharedEnv, SharedAliases)> {
+    let scope = session.class_declaration_scopes.get(generic)?;
+    Some((scope.env.clone(), scope.aliases.clone()))
+}
+
+/// The tables of the scope that declares class `name`, a specialization or
+/// not, once that scope has recorded them.
+pub(in crate::ast) fn declaring_tables(
+    session: &Session,
+    name: &str,
+) -> Option<(SharedEnv, SharedAliases)> {
+    declaration_scope(session, &generic(session, name))
+}
+
+/// Which recording of the tables of the scope that declares class `name`
+/// is the current one, if the scope has recorded them.
+pub(in crate::ast) fn declaring_recording(session: &Session, name: &str) -> Option<u64> {
+    session
+        .class_declaration_scopes
+        .get(&generic(session, name))
+        .map(|scope| scope.recording)
 }
 
 /// The type that argument `id` of a type parameter names, or `None` while a
@@ -1368,10 +1575,12 @@ pub(in crate::ast) fn type_argument(
                 Some(ty) => Some(ty.clone()),
                 None => match super::resolve(tree, session, &name) {
                     // A built-in class such as `process` has no declaration.
-                    Some(name) if super::builtin(&name) => Some(super::handle(&name)),
+                    Some(name) if super::builtin(&name) => {
+                        Some(super::handle(&mut session.types, &name))
+                    }
                     Some(name) => {
                         let name = specialize(tree, session, &name, &[], context)?;
-                        Some(super::handle(&name))
+                        Some(super::handle(&mut session.types, &name))
                     }
                     None => None,
                 },
@@ -1403,7 +1612,7 @@ pub(in crate::ast) fn type_argument(
             match super::super::mailboxes::named_type(&path, tree, session, context)? {
                 Some(ty) => Some(*ty),
                 None => expression_binding::named_class(tree, session, id, native, context)?
-                    .map(|name| super::handle(&name)),
+                    .map(|name| super::handle(&mut session.types, &name)),
             }
         }
         ExprKind::Member { separator, .. } if separator == "::" => {
@@ -1445,7 +1654,7 @@ pub(in crate::ast) fn scoped_type(
                     .type_aliases
                     .get(&scope_key(&scope))
                     .or_else(|| context.type_aliases.get(&scope_key(&class)))
-                    .and_then(|ty| ty.class().map(str::to_owned))
+                    .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
                 {
                     Some(specialization) => Some(specialization),
                     None if super::is_declared(tree, session, &class) => {
@@ -1457,8 +1666,14 @@ pub(in crate::ast) fn scoped_type(
                 let qualified = scope::qualified_name(tree, &scope, &member);
                 return Ok(context.type_aliases.get(&qualified).cloned().or_else(
                     || match qualified.as_str() {
-                        "std::process" => Some(super::handle(super::super::processes::CLASS)),
-                        "std::semaphore" => Some(super::handle(super::super::semaphores::CLASS)),
+                        "std::process" => Some(super::handle(
+                            &mut session.types,
+                            super::super::processes::CLASS,
+                        )),
+                        "std::semaphore" => Some(super::handle(
+                            &mut session.types,
+                            super::super::semaphores::CLASS,
+                        )),
                         _ => None,
                     },
                 ));
@@ -1567,7 +1782,7 @@ fn literal_parameter(
         .type_aliases
         .iter()
         .filter(|(key, _)| key.ends_with("::"))
-        .filter_map(|(_, ty)| lookup(session, ty.class()?))
+        .filter_map(|(_, ty)| lookup(session, &ty.class_in(&session.types)?))
         .find_map(|specialization| {
             if !specialization.hidden.iter().any(|hidden| hidden == name) {
                 return None;
@@ -1581,24 +1796,61 @@ fn literal_parameter(
 
 /// A spelling of type `ty` that tells it apart from other types, for the
 /// name of a specialization.
-pub(in crate::ast) fn spelling(ty: &Type) -> String {
+pub(in crate::ast) fn spelling(ty: &Type, table: &semantic_types::TyTable) -> String {
+    spelled(ty, ty.binding.get(table), table)
+}
+
+/// [`spelling`] of `ty`, whose semantic type is `id` if it has one.
+fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::TyTable) -> String {
     // A virtual interface type is its interface and modport (IEEE 1800-2023
     // 25.9), not the number that holds its value.
-    if let Some(interface) = ty.virtual_interface()
-        && ty.unpacked_ranges().is_empty()
-        && ty.container.is_none()
+    if let Some(id) = id
+        && let semantic_types::TyData::VirtualInterface { .. } = table.data(id)
     {
-        return interface.spelling();
+        return table.spell(id);
     }
+    debug_assert!(
+        ty.virtual_interface().is_none()
+            || !ty.unpacked_ranges().is_empty()
+            || ty.container.is_some(),
+        "a virtual interface type is spelled from its semantic type"
+    );
+    // A handle type is its class (8.4), which a container element without
+    // a binding of its own takes from the container's semantic type.
+    let class = id
+        .and_then(|id| table.handle_class(id))
+        .map(|class| &**class);
+    debug_assert_eq!(
+        class,
+        ty.class(),
+        "a handle type is spelled from its semantic type"
+    );
     let mut spelled = if let Some(container) = &ty.container {
+        // The element and key types of a container are those of its
+        // semantic type, where they are not bound themselves.
+        let (element, key) = match id.map(|id| table.data(id)) {
+            Some(semantic_types::TyData::Array { kind, element }) => (
+                Some(*element),
+                match kind {
+                    semantic_types::ArrayKind::Associative { key } => Some(*key),
+                    _ => None,
+                },
+            ),
+            _ => (None, None),
+        };
+        let element = container.element.binding.get(table).or(element);
         format!(
             "container({:?},{},{})",
             container.layout,
-            spelling(&container.element),
-            container.key.as_ref().map(spelling).unwrap_or_default()
+            spelled(&container.element, element, table),
+            container
+                .key
+                .as_ref()
+                .map(|ty| spelled(ty, ty.binding.get(table).or(key), table))
+                .unwrap_or_default()
         )
     } else {
-        match (ty.class(), ty.kind()) {
+        match (class, ty.kind()) {
             (Some(class), _) => class.to_owned(),
             (None, TypeKind::Real) => "real".to_owned(),
             (None, TypeKind::Shortreal) => "shortreal".to_owned(),
@@ -1606,13 +1858,14 @@ pub(in crate::ast) fn spelling(ty: &Type) -> String {
             (None, TypeKind::Object) => "object".to_owned(),
             (None, TypeKind::Process) => "process".to_owned(),
             (None, TypeKind::Event) => "event".to_owned(),
+            (None, TypeKind::Chandle) => "chandle".to_owned(),
             (None, TypeKind::Bit) => "bit".to_owned(),
             // `reg` is `logic` (6.11.2).
             (None, TypeKind::Logic | TypeKind::Implicit | TypeKind::Reg) => "logic".to_owned(),
         }
     };
     let integral = ty.container.is_none()
-        && ty.class().is_none()
+        && class.is_none()
         && !matches!(
             ty.kind(),
             TypeKind::Real
@@ -1648,6 +1901,8 @@ pub(in crate::ast) fn spelling(ty: &Type) -> String {
             bound(&range.right)
         ));
     }
+    // The spelling hashes the whole shape of the type, which stays its
+    // spelling until specializations are named by their semantic types.
     if ty.is_enum || !ty.members.is_empty() {
         // An aggregate is told apart by its whole structure.
         use std::hash::{Hash, Hasher};
@@ -1665,12 +1920,16 @@ pub(in crate::ast) fn spelling(ty: &Type) -> String {
 /// module name, and the default specialization of each parameterized
 /// interface class, which is checked even when nothing names it. A name
 /// inside a class is bound in each specialization of the class, until no
-/// new specialization appears.
+/// new specialization appears. The result is the first name that the scope's
+/// own class declarations or types name and no visible type has, which
+/// makes the scope illegal also where nothing uses the class (IEEE
+/// 1800-2023 6.18); a specialization that cannot be made otherwise reports
+/// why where it is used.
 pub(in crate::ast) fn collect(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     context: &PackedDimensions,
-) {
+) -> Option<AnalyzerError> {
     session.class_specializations_frozen = false;
     for (generic, arguments) in session.foreign_arguments.clone() {
         let pending = match prepare_bound(tree, session, &generic, arguments.clone(), context) {
@@ -1681,20 +1940,24 @@ pub(in crate::ast) fn collect(
             }
             Ok(Preparation::Deferred(error)) | Err(error) => {
                 session.foreign_error = Some(error);
-                return;
+                return None;
             }
         };
         session
             .class_specializations_building
             .push(pending.name.clone());
+        let scoped = push_class_scope(tree, session, &generic, &pending.name);
         let result = bind_bases(tree, session, &generic, &pending.env, &pending.aliases)
             .and_then(|bases| finish_specialization(tree, session, &generic, pending, bases));
+        if scoped {
+            session.class_scopes.pop();
+        }
         session.class_specializations_building.pop();
         match result {
             Ok(name) => session.foreign_names.push((generic, arguments, name)),
             Err(error) => {
                 session.foreign_error = Some(error);
-                return;
+                return None;
             }
         }
     }
@@ -1849,9 +2112,17 @@ pub(in crate::ast) fn collect(
         }
     }
     // Outside classes, an assignment is bound in each generate scope that
-    // contains it, which may give its genvars different values.
-    let items = generate::items(tree, session, &context.const_env, &context.type_aliases)
-        .unwrap_or_default();
+    // contains it, which may give its genvars different values. Elaborating
+    // the scopes also makes the specializations their declarations name.
+    // Without a class to declare or to name, the elaboration has nothing to
+    // place or make, and the scope is not elaborated for it: the discovery
+    // of every generate block of a module would elaborate the module again.
+    let items = if native.classes.is_empty() && session.foreign.names().is_empty() {
+        Vec::new()
+    } else {
+        generate::items(tree, session, &context.const_env, &context.type_aliases)
+            .unwrap_or_default()
+    };
     // The scope that declares each class: the innermost generate scope
     // around its declaration, or the module.
     for class in &classes {
@@ -1873,7 +2144,7 @@ pub(in crate::ast) fn collect(
         if item.is_some_and(|item| items.iter().filter(|other| other.id == item.id).count() > 1) {
             session.class_declarations_repeated.insert(name.clone());
         }
-        session.class_declaration_scopes.insert(name, scope);
+        record_scope(session, name, scope.0, scope.1);
     }
     // Whether `tokens` is in a block of a generate construct.
     let generated = |tokens: celox_sv_syntax::TokenRange| {
@@ -1967,6 +2238,7 @@ pub(in crate::ast) fn collect(
     // specialization: each is made once, in the scope's context built once.
     let mut spelled = HashSet::<(String, String, String)>::default();
     let mut contexts = HashMap::<String, Option<PackedDimensions>>::default();
+    let mut undeclared = None;
     loop {
         let before = session.class_specializations.len();
         for (index, (scope, name, arguments, tokens)) in references.iter().enumerate() {
@@ -1980,9 +2252,13 @@ pub(in crate::ast) fn collect(
                                 None => Some(context),
                             };
                             // A specialization that cannot be made reports
-                            // why where it is used.
-                            if let Some(context) = context {
-                                let _ = specialize(tree, session, name, arguments, &context);
+                            // why where it is used, unless it names no
+                            // visible type.
+                            if let Some(context) = context
+                                && let Err(error @ AnalyzerError::UndeclaredIdentifier { .. }) =
+                                    specialize(tree, session, name, arguments, &context)
+                            {
+                                undeclared.get_or_insert(error);
                             }
                         }
                     }
@@ -2035,6 +2311,7 @@ pub(in crate::ast) fn collect(
             break;
         }
     }
+    undeclared
 }
 
 /// The source text of the parameter value assignment `arguments`.
@@ -2055,9 +2332,59 @@ fn argument_spelling(native: &celox_sv_syntax::Declarations, arguments: &[Argume
         .join(",")
 }
 
-/// Enum constants belonging to the resolved class and its bases, never a scan
-/// of typedef contents. A derived declaration shadows the base binding.
-pub(in crate::ast) fn enum_constants(
+/// Remove enclosing layouts as well as constant types when entering a class
+/// method. A class parameter with no semantic type (such as `$`) cannot fall
+/// back to a module variable or parameter of the same name.
+fn extend_body_constant_types<'a>(
+    dimensions: &mut PackedDimensions,
+    env: &HashMap<String, Option<i128>>,
+    aliases: impl Iterator<Item = &'a str>,
+    bindings: &HashMap<String, semantic_types::ConstantType>,
+    nonconstant_members: &HashSet<String>,
+) {
+    let aliases: Vec<&str> = aliases.collect();
+    let prefix = crate::ast::parameters::unbounded_parameter_marker("");
+    for name in aliases
+        .iter()
+        .copied()
+        .chain(env.keys().filter_map(|key| key.strip_prefix(&prefix)))
+        .chain(nonconstant_members.iter().map(String::as_str))
+    {
+        dimensions.remove(name);
+    }
+    extend_constant_types(
+        Arc::make_mut(&mut dimensions.constant_types),
+        env,
+        aliases.iter().copied(),
+        bindings,
+        nonconstant_members,
+    );
+}
+
+/// Apply only the declarations of a class to a visible constant-type map.
+/// Hiding a parameter without a supported type must also hide an enclosing one.
+fn extend_constant_types<'a>(
+    target: &mut HashMap<String, semantic_types::ConstantType>,
+    env: &HashMap<String, Option<i128>>,
+    aliases: impl Iterator<Item = &'a str>,
+    bindings: &HashMap<String, semantic_types::ConstantType>,
+    nonconstant_members: &'a HashSet<String>,
+) {
+    for name in aliases.chain(nonconstant_members.iter().map(String::as_str)) {
+        target.remove(name);
+    }
+    let prefix = crate::ast::parameters::unbounded_parameter_marker("");
+    for key in env.keys() {
+        if let Some(name) = key.strip_prefix(&prefix) {
+            target.remove(name);
+        }
+    }
+    target.extend(bindings.iter().map(|(name, ty)| (name.clone(), ty.clone())));
+}
+
+/// Constant declaration types of the resolved class and its bases. A derived
+/// declaration hides the base binding, independently of its numeric value.
+pub(in crate::ast) fn constant_types(
     tree: &AnalysisContext<'_>,
     session: &Session,
     class: &str,
@@ -2065,50 +2392,57 @@ pub(in crate::ast) fn enum_constants(
     let imported = scope::imported(tree);
     let mut result = HashMap::default();
     let prefix = format!("{class}::");
-    for (name, binding) in &imported.enum_constants.declarations {
+    for (name, binding) in &imported.constant_types {
         if let Some(member) = name.strip_prefix(&prefix)
             && !member.contains("::")
         {
             result.insert(member.to_owned(), binding.clone());
         }
     }
+    if lookup(session, class).is_none()
+        && let Some(scope) = session.foreign.declarations(class)
+    {
+        extend_constant_types(
+            &mut result,
+            &scope.env,
+            scope.types.keys().map(String::as_str),
+            &scope.constant_types,
+            &scope.nonconstant_members,
+        );
+    }
     for specialization in lineage(session, class) {
         for base in &specialization.bases {
-            if lookup(session, base).is_none() {
-                let prefix = format!("{base}::");
-                for (name, binding) in &imported.enum_constants.declarations {
-                    if let Some(member) = name.strip_prefix(&prefix)
-                        && !member.contains("::")
-                    {
-                        result.insert(member.to_owned(), binding.clone());
-                    }
-                }
+            if lookup(session, base).is_none()
+                && let Some(scope) = session.foreign.declarations(base)
+            {
+                extend_constant_types(
+                    &mut result,
+                    &scope.env,
+                    scope.types.keys().map(String::as_str),
+                    &scope.constant_types,
+                    &scope.nonconstant_members,
+                );
             }
         }
-        result.retain(|member, _| {
-            !specialization.declared_aliases.contains_key(member)
-                && !specialization
-                    .declared_env
-                    .contains_key(&crate::ast::parameters::unbounded_parameter_marker(member))
-        });
-        result.extend(
-            specialization
-                .enum_constants
-                .iter()
-                .map(|(n, t)| (n.clone(), t.clone())),
+        extend_constant_types(
+            &mut result,
+            &specialization.declared_env,
+            specialization.declared_aliases.keys().map(String::as_str),
+            &specialization.constant_types,
+            &specialization.nonconstant_members,
         );
     }
     result
 }
 
-pub(in crate::ast) fn export_enum_constants(
+pub(in crate::ast) fn export_constant_types(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
 ) -> HashMap<String, semantic_types::ConstantType> {
     let mut result = HashMap::default();
     for declaration in super::scope_declarations(tree) {
         for class in super::specializations_of(tree, session, declaration) {
-            for (member, binding) in enum_constants(tree, session, &class) {
+            for (member, binding) in constant_types(tree, session, &class) {
                 result.insert(format!("{class}::{member}"), binding);
             }
         }
@@ -2120,6 +2454,76 @@ pub(in crate::ast) fn export_enum_constants(
 mod tests {
 
     use std::path::Path;
+
+    use super::super::super::shared_map::{SharedAliases, SharedEnv};
+    use super::super::super::virtual_interfaces::{VirtualInterface, value_type};
+    use super::super::super::{AnalysisContext, ConstEnv, Session, TypeAliases};
+    use super::super::super::{const_functions, semantic_types};
+    use super::spelling;
+
+    /// A virtual interface type argument is spelled by the semantic type it
+    /// was bound to: its interface and modport (IEEE 1800-2023 25.9), so two
+    /// modports of one interface name different specializations.
+    #[test]
+    fn virtual_interface_type_arguments_are_spelled_by_their_semantic_types() {
+        let mut table = semantic_types::TyTable::default();
+        let functions = const_functions::ConstantFunctions::default();
+        let env = ConstEnv::default();
+        let mut spelled = |modport: Option<&str>| {
+            let mut ty = value_type(VirtualInterface {
+                interface: "bus_if".into(),
+                modport: modport.map(Into::into),
+            });
+            semantic_types::bind_declared(&mut table, &functions, &mut ty, &env);
+            spelling(&ty, &table)
+        };
+        assert_eq!(spelled(None), "virtual bus_if");
+        assert_eq!(spelled(Some("m")), "virtual bus_if.m");
+    }
+
+    #[test]
+    fn a_class_is_laid_out_again_once_its_scope_records_new_tables() {
+        // A class laid out in tables its scope has since replaced, such as
+        // those before the scope's constants were all known, is not served
+        // again: the scope's new tables lay it out.
+        let session = &mut Session::default();
+        let tree = crate::source_tree::parse_scope_fixture(
+            "module Top; class C; bit [W-1:0] x; endclass endmodule",
+            Path::new("relaid-class.sv"),
+        )
+        .unwrap();
+        let module_scope = AnalysisContext::unspecialized(&tree)
+            .root_scopes()
+            .unwrap()
+            .into_iter()
+            .find(|handle| {
+                handle.unit(tree.declarations()).unwrap().kind == celox_sv_syntax::UnitKind::Module
+            })
+            .unwrap();
+        let tree = tree.scoped(module_scope).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let width = |session: &mut Session, w: i128| {
+            let env = SharedEnv::from(ConstEnv::from_iter([("W".to_owned(), w)]));
+            super::declare_scopes(&tree, session, &env, &SharedAliases::default());
+            let name = session
+                .class_declaration_scopes
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            let class = super::super::class(
+                &tree,
+                session,
+                &name,
+                &ConstEnv::default(),
+                &TypeAliases::default(),
+            )
+            .unwrap();
+            class.properties[0].field.width
+        };
+        assert_eq!(width(session, 4), 4);
+        assert_eq!(width(session, 12), 12);
+    }
 
     #[test]
     fn inheritance_specialization_uses_the_default_thread_stack() {

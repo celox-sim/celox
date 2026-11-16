@@ -167,66 +167,6 @@ sv_backends! {
         assert!(bare(sim.drain_runtime_events()).is_empty());
     }
 
-    fn casts_evaluate_destination_operands_once(sim) {
-        @case "system_functions::casts_evaluate_destination_operands_once";
-    }
-
-    fn casts_between_numeric_types(sim) {
-        @case "system_functions::casts_between_numeric_types";
-    }
-
-    fn casts_of_constants_to_enumerated_types(sim) {
-        @case "system_functions::casts_of_constants_to_enumerated_types";
-    }
-
-    fn casts_of_comparisons_and_cast_results(sim) {
-        @case "system_functions::casts_of_comparisons_and_cast_results";
-    }
-
-    fn casts_through_struct_members_and_string_keys(sim) {
-        @case "system_functions::casts_through_struct_members_and_string_keys";
-    }
-
-    fn casts_address_destinations_as_assignments(sim) {
-        @case "system_functions::casts_address_destinations_as_assignments";
-    }
-
-    fn casts_of_members_of_specialized_structures(sim) {
-        @case "system_functions::casts_of_members_of_specialized_structures";
-    }
-
-    fn wide_enumerated_types(sim) {
-        @case "system_functions::wide_enumerated_types";
-    }
-
-    fn casts_to_enumerated_types(sim) {
-        @case "system_functions::casts_to_enumerated_types";
-    }
-
-    fn casts_to_enumerated_types_reject_unknown_bits(sim) {
-        @case "system_functions::casts_to_enumerated_types_reject_unknown_bits";
-    }
-
-    fn casts_to_enumerated_types_check_whole_values(sim) {
-        @case "system_functions::casts_to_enumerated_types_check_whole_values";
-    }
-
-    fn casts_to_enumerated_types_size_sources_by_themselves(sim) {
-        @case "system_functions::casts_to_enumerated_types_size_sources_by_themselves";
-    }
-
-    fn casts_to_enumerated_types_reject_class_handles(sim) {
-        @case "system_functions::casts_to_enumerated_types_reject_class_handles";
-    }
-
-    fn scope_randomize_fills_arbitrary_packed_widths(sim) {
-        @case "system_functions::scope_randomize_fills_arbitrary_packed_widths";
-    }
-
-    fn scope_randomize_obeys_control_flow_and_statement_order(sim) {
-        @case "system_functions::scope_randomize_obeys_control_flow_and_statement_order";
-    }
-
     fn scope_randomize_preserves_four_state_storage_and_checkpoint(sim) {
         @setup { let source = r#"
             module Top(input bit clk, output logic signed [2048:0] value);
@@ -249,14 +189,6 @@ sv_backends! {
         assert_eq!(sim.get(value), first);
         sim.tick(clk).unwrap();
         assert_eq!(sim.get(value), second);
-    }
-
-    fn urandom_extends_signed_seed_values(sim) {
-        @case "system_functions::urandom_extends_signed_seed_values";
-    }
-
-    fn urandom_comb_executes_in_statement_order(sim) {
-        @case "system_functions::urandom_comb_executes_in_statement_order";
     }
 
     fn urandom_comb_uses_only_process_activations(sim) {
@@ -350,10 +282,6 @@ sv_backends! {
         assert_ne!(sim.get(b), first_b);
         assert_eq!(sim.get(sim.signal("initial_draw")), initial_draw);
         assert_eq!(sim.get(sim.signal("star_draw")), star_draw);
-    }
-
-    fn urandom_select_keeps_distinct_source_calls(sim) {
-        @case "system_functions::urandom_select_keeps_distinct_source_calls";
     }
 
     fn urandom_comb_tracks_static_bits_dead_branches_and_unknown_changes(sim) {
@@ -486,14 +414,6 @@ sv_backends! {
         assert_eq!(messages, vec![b"array=0".to_vec(), b"dynamic=0".to_vec()]);
     }
 
-    fn urandom_has_an_unsigned_self_determined_result(sim) {
-        @case "system_functions::urandom_has_an_unsigned_self_determined_result";
-    }
-
-    fn urandom_respects_short_circuits_and_evaluates_indices_once(sim) {
-        @case "system_functions::urandom_respects_short_circuits_and_evaluates_indices_once";
-    }
-
     fn urandom_checkpoint_restores_the_stream(sim) {
         @setup { let source = r#"
             module Top(input logic clk, reseed, output int unsigned value);
@@ -525,55 +445,10 @@ sv_backends! {
         }
     }
 
-    fn packed_string_literals_preserve_bytes_and_unsignedness(sim) {
-        @case "random_plusargs::packed_string_literals_preserve_bytes_and_unsignedness";
-    }
-    fn dist_uniform_converts_wide_and_signed_seeds_to_int_formals(sim) {
-        @case "random_plusargs::dist_uniform_converts_wide_and_signed_seeds_to_int_formals";
-    }
-    fn dist_uniform_bounds_seed_and_replay(sim) {
-        @case "random_plusargs::dist_uniform_bounds_seed_and_replay";
-    }
 }
 
 sv_backends! {
-    fn distribution_annex_n_reference_values(sim) {
-        @case "distributions::annex_n_reference_values";
-    }
-    fn distribution_replay_and_normal_parameters(sim) {
-        @case "distributions::replay_and_normal_parameters";
-    }
-    fn dist_uniform_reference_sequence(sim) {
-        @case "random_plusargs::dist_uniform_reference_sequence";
-    }
-    fn plusargs_absent_preserves_destination(sim) {
-        @case "random_plusargs::plusargs_absent_preserves_destination";
-    }
-    fn urandom_reseeds_and_shares_the_calling_process_stream(sim) {
-        @case "system_functions::urandom_reseeds_and_shares_the_calling_process_stream";
-    }
-    fn urandom_keeps_process_and_instance_streams_independent(sim) {
-        @case "system_functions::urandom_keeps_process_and_instance_streams_independent";
-    }
-    fn random_follows_annex_n_and_updates_its_seed(sim) {
-        @case "system_functions::random_follows_annex_n_and_updates_its_seed";
-    }
-    fn random_without_a_seed_continues_its_stream(sim) {
-        @case "system_functions::random_without_a_seed_continues_its_stream";
-    }
-    fn urandom_range_stays_within_its_bounds(sim) {
-        @case "system_functions::urandom_range_stays_within_its_bounds";
-    }
 
-    fn display_expressions_propagate_operand_widths(sim) { @case "system_functions::display_expressions_propagate_operand_widths"; }
-
-    fn character_formats_preserve_non_utf8_bytes(sim) { @case "system_functions::character_formats_preserve_non_utf8_bytes"; }
-    fn time_format_consumes_its_expression_argument(sim) { @case "system_functions::time_format_consumes_its_expression_argument"; }
-    fn time_format_defaults_to_the_smallest_precision(sim) { @case "system_functions::time_format_defaults_to_the_smallest_precision"; }
-    fn time_format_scales_each_scope_to_the_smallest_precision(sim) { @case "system_functions::time_format_scales_each_scope_to_the_smallest_precision"; }
-    fn time_format_scales_string_literals(sim) { @case "system_functions::time_format_scales_string_literals"; }
-    fn time_format_values_are_self_determined(sim) { @case "system_functions::time_format_values_are_self_determined"; }
-    fn string_literals_follow_numeric_format_specifiers(sim) { @case "system_functions::string_literals_follow_numeric_format_specifiers"; }
     // Veryl extension calls emitted unchanged into SV, not SV assert statements.
     fn veryl_assert_continue_ff_captures_arguments_before_reporting(sim) {
         @setup { let source = r#"
@@ -750,50 +625,6 @@ sv_backends! {
         ]);
     }
 
-    fn unpacked_dimensions_publishes_dependent_array_parameters(sim) { @case "system_functions::unpacked_dimensions_publishes_dependent_array_parameters"; }
-    fn unpacked_dimensions_accepts_function_result_arguments(sim) { @case "system_functions::unpacked_dimensions_accepts_function_result_arguments"; }
-    fn unpacked_dimensions_resolves_sibling_declarators(sim) { @case "system_functions::unpacked_dimensions_resolves_sibling_declarators"; }
-    fn unpacked_dimensions_selects_integral_atoms(sim) { @case "system_functions::unpacked_dimensions_selects_integral_atoms"; }
-    fn unpacked_dimensions_publishes_array_parameters_before_declarations(sim) { @case "system_functions::unpacked_dimensions_publishes_array_parameters_before_declarations"; }
-    fn unpacked_dimensions_resolves_preceding_module_declarations(sim) { @case "system_functions::unpacked_dimensions_resolves_preceding_module_declarations"; }
-    fn unpacked_dimensions_prefers_values_over_imported_types(sim) { @case "system_functions::unpacked_dimensions_prefers_values_over_imported_types"; }
-    fn unpacked_dimensions_checks_unevaluated_indices(sim) { @case "system_functions::unpacked_dimensions_checks_unevaluated_indices"; }
-
-    fn unpacked_dimensions_restores_shadowed_array_rank(sim) { @case "system_functions::unpacked_dimensions_restores_shadowed_array_rank"; }
-    fn unpacked_dimensions_accepts_explicit_default_omissions(sim) { @case "system_functions::unpacked_dimensions_accepts_explicit_default_omissions"; }
-    fn unpacked_dimensions_validates_writable_function_arguments(sim) { @case "system_functions::unpacked_dimensions_validates_writable_function_arguments"; }
-
-    fn unpacked_dimensions_accepts_defaulted_function_arguments(sim) { @case "system_functions::unpacked_dimensions_accepts_defaulted_function_arguments"; }
-
-    fn unpacked_dimensions_types_function_pattern_arguments(sim) { @case "system_functions::unpacked_dimensions_types_function_pattern_arguments"; }
-    fn unpacked_dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::unpacked_dimensions_resolves_preceding_block_declarations"; }
-
-    fn unpacked_dimensions_resolves_procedural_scopes(sim) {
-        @case "system_functions::unpacked_dimensions_resolves_procedural_scopes";
-    }
-    fn unpacked_dimensions_resolves_package_array_constants(sim) {
-        @case "system_functions::unpacked_dimensions_resolves_package_array_constants";
-    }
-
-    fn unpacked_dimensions_counts_declared_arrays(sim) {
-        @case "system_functions::unpacked_dimensions_counts_declared_arrays";
-    }
-
-    fn unpacked_dimensions_preserves_selection_and_return_types(sim) {
-        @case "system_functions::unpacked_dimensions_preserves_selection_and_return_types";
-    }
-
-    fn unpacked_dimensions_resolves_types_and_constant_scopes(sim) {
-        @case "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes";
-    }
-
-    fn unpacked_dimensions_is_independent_of_unknown_values(sim) {
-        @case "system_functions::unpacked_dimensions_is_independent_of_unknown_values";
-    }
-
-    fn printtimescale_displays_unit_and_global_precision(sim) { @case "system_functions::printtimescale_displays_unit_and_global_precision"; }
-    fn printtimescale_preserves_package_subroutine_scope(sim) { @case "system_functions::printtimescale_preserves_package_subroutine_scope"; }
-
     fn printtimescale_qualifies_current_and_relative_module_instances(sim) {
         @setup { let source = r#"
             module Child(input logic clk, input logic enabled);
@@ -892,16 +723,6 @@ sv_backends! {
             "Time scale of (Top.r_j.info) is 100ns / 10ps",
         ]);
     }
-    fn timescale_queries_resolve_hierarchical_interface_instances(sim) { @case "system_functions::timescale_queries_resolve_hierarchical_interface_instances"; }
-    fn timescale_queries_resolve_interface_instances_and_ports(sim) { @case "system_functions::timescale_queries_resolve_interface_instances_and_ports"; }
-    fn timescale_queries_accept_leading_zero_magnitudes(sim) { @case "system_functions::timescale_queries_accept_leading_zero_magnitudes"; }
-    fn timescale_queries_survive_type_parameter_specialization(sim) { @case "system_functions::timescale_queries_survive_type_parameter_specialization"; }
-    fn timescale_queries_resolve_packages_with_instantiated_namesakes(sim) { @case "system_functions::timescale_queries_resolve_packages_with_instantiated_namesakes"; }
-    fn timescale_queries_preserve_interface_scopes_when_flattened(sim) { @case "system_functions::timescale_queries_preserve_interface_scopes_when_flattened"; }
-    fn timescale_queries_accept_directives_before_unit_declarations(sim) { @case "system_functions::timescale_queries_accept_directives_before_unit_declarations"; }
-
-    fn timescale_queries_accept_separate_initial_declarations(sim) { @case "system_functions::timescale_queries_accept_separate_initial_declarations"; }
-    fn timescale_queries_keep_module_and_package_names_independent(sim) { @case "system_functions::timescale_queries_keep_module_and_package_names_independent"; }
 
     fn timescale_queries_keep_selected_root_despite_unreachable_instantiations(sim) {
         @setup {
@@ -958,62 +779,6 @@ sv_backends! {
         ], "Top");
         let ok = sim.signal("ok");
         assert_eq!(sim.get(ok), 1u32.into());
-    }
-
-    fn timescale_queries_resolve_declarations_and_return_types(sim) { @case "system_functions::timescale_queries_resolve_declarations_and_return_types"; }
-    fn timescale_queries_resolve_directives_and_hierarchy(sim) { @case "system_functions::timescale_queries_resolve_directives_and_hierarchy"; }
-    fn timescale_queries_distinguish_unit_and_global_precision(sim) { @case "system_functions::timescale_queries_distinguish_unit_and_global_precision"; }
-    fn timescale_queries_follow_partial_declarations_and_resetall(sim) { @case "system_functions::timescale_queries_follow_partial_declarations_and_resetall"; }
-    fn timescale_queries_preserve_procedural_and_package_scopes(sim) { @case "system_functions::timescale_queries_preserve_procedural_and_package_scopes"; }
-    fn timescale_queries_are_constant_in_unqualified_calls(sim) { @case "system_functions::timescale_queries_are_constant_in_unqualified_calls"; }
-
-    fn isunbounded_generate_guards_preserve_short_circuit_bounds(sim) { @case "system_functions::isunbounded_generate_guards_preserve_short_circuit_bounds"; }
-    fn isunbounded_restores_shadowed_function_arguments(sim) { @case "system_functions::isunbounded_restores_shadowed_function_arguments"; }
-    fn isunbounded_binds_procedural_aliases_in_declaration_order(sim) { @case "system_functions::isunbounded_binds_procedural_aliases_in_declaration_order"; }
-    fn isunbounded_restores_procedural_parameter_bindings(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_bindings"; }
-    fn isunbounded_restores_procedural_parameter_type_metadata(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_type_metadata"; }
-    fn isunbounded_preserves_lexical_scopes_and_short_circuits(sim) { @case "system_functions::isunbounded_preserves_lexical_scopes_and_short_circuits"; }
-    fn isunbounded_reports_bounded_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_parameters"; }
-    fn isunbounded_reports_bounded_array_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_array_parameters"; }
-    fn isunbounded_preserves_parameter_values_and_result_type(sim) { @case "system_functions::isunbounded_preserves_parameter_values_and_result_type"; }
-    fn isunbounded_handles_overrides_and_forwarding(sim) { @case "system_functions::isunbounded_handles_overrides_and_forwarding"; }
-    fn isunbounded_resolves_package_and_local_parameters(sim) { @case "system_functions::isunbounded_resolves_package_and_local_parameters"; }
-    fn dimensions_resolves_preceding_block_declarations(sim) { @case "system_functions::dimensions_resolves_preceding_block_declarations"; }
-    fn dimensions_types_function_pattern_arguments(sim) { @case "system_functions::dimensions_types_function_pattern_arguments"; }
-    fn dimensions_signing_conversions_are_vectors(sim) { @case "system_functions::dimensions_signing_conversions_are_vectors"; }
-    fn dimensions_resolves_procedural_parameters_and_indices(sim) { @case "system_functions::dimensions_resolves_procedural_parameters_and_indices"; }
-
-    fn dimensions_resolves_procedural_scopes(sim) {
-        @case "system_functions::dimensions_resolves_procedural_scopes";
-    }
-    fn dimensions_resolves_package_array_constants(sim) {
-        @case "system_functions::dimensions_resolves_package_array_constants";
-    }
-    fn dimensions_preserves_one_bit_vectors(sim) {
-        @case "system_functions::dimensions_preserves_one_bit_vectors";
-    }
-    fn dimensions_resolves_imported_function_returns(sim) {
-        @case "system_functions::dimensions_resolves_imported_function_returns";
-    }
-
-    fn dimensions_of_nonarray_handle_types(sim) {
-        @case "system_functions::dimensions_of_nonarray_handle_types";
-    }
-
-    fn dimensions_is_independent_of_unknown_values(sim) {
-        @case "system_functions::dimensions_is_independent_of_unknown_values";
-    }
-
-    fn dimensions_counts_declared_arrays(sim) {
-        @case "system_functions::dimensions_counts_declared_arrays";
-    }
-
-    fn dimensions_preserves_selected_and_expression_types(sim) {
-        @case "system_functions::dimensions_preserves_selected_and_expression_types";
-    }
-
-    fn dimensions_resolves_types_and_constant_scopes(sim) {
-        @case "system_functions::dimensions_resolves_types_and_constant_scopes";
     }
 
     fn array_query_evaluates_dimension_function_once(sim) {
@@ -1175,11 +940,6 @@ sv_backends! {
         let line = source_line(&source, "\", a);");
         assert!(rendered.contains(&format!("[calls.sv:{line}:29]")), "{rendered}");
     }
-    fn signed_casts_in_parameters(sim) { @case "system_functions::signed_casts_in_parameters"; }
-    fn array_queries_preserve_bounds_and_dimensions(sim) { @case "system_functions::array_queries_preserve_bounds_and_dimensions"; }
-    fn array_queries_handle_runtime_dimensions(sim) { @case "system_functions::array_queries_handle_runtime_dimensions"; }
-    fn immediate_cover_handles_unknown_conditions(sim) { @case "system_functions::immediate_cover_handles_unknown_conditions"; }
-    fn immediate_cover_executes_pass_statement(sim) { @case "system_functions::immediate_cover_executes_pass_statement"; }
 
     fn drain_runtime_events_returns_always_comb_fatal(sim) {
         @setup {
@@ -1206,61 +966,6 @@ sv_backends! {
         assert!(bare(sim.drain_runtime_events()).is_empty());
     }
 
-    fn display_field_flags(sim) { @case "system_functions::display_field_flags"; }
-
-    fn display_arguments_are_sized_as_ieee_specifies(sim) {
-        @case "system_functions::display_arguments_are_sized_as_ieee_specifies";
-    }
-
-    fn display_field_widths_expand_to_the_value(sim) {
-        @case "system_functions::display_field_widths_expand_to_the_value";
-    }
-
-    fn display_unknown_bits_as_ieee_specifies(sim) {
-        @case "system_functions::display_unknown_bits_as_ieee_specifies";
-    }
-
-    fn display_tasks_default_to_their_radix(sim) {
-        @case "system_functions::display_tasks_default_to_their_radix";
-    }
-
-    fn countbits_in_parameter_specializations_and_generate_scopes(sim) {
-        @case "system_functions::countbits_in_parameter_specializations_and_generate_scopes";
-    }
-
-    fn countbits_preserves_argument_and_return_types(sim) {
-        @case "system_functions::countbits_preserves_argument_and_return_types";
-    }
-    fn countbits_in_constant_expressions(sim) {
-        @case "system_functions::countbits_in_constant_expressions";
-    }
-    fn countbits_matches_four_states_and_variable_controls(sim) {
-        @case "system_functions::countbits_matches_four_states_and_variable_controls";
-    }
-
-    fn countones_preserves_argument_and_return_types(sim) {
-        @case "system_functions::countones_preserves_argument_and_return_types";
-    }
-
-    fn countones_ignores_unknown_bits_in_comb_and_ff(sim) {
-        @case "system_functions::countones_ignores_unknown_bits_in_comb_and_ff";
-    }
-
-    fn countones_in_constant_expressions(sim) {
-        @case "system_functions::countones_in_constant_expressions";
-    }
-
-    fn bit_vector_predicates_preserve_argument_and_return_types(sim) {
-        @case "system_functions::bit_vector_predicates_preserve_argument_and_return_types";
-    }
-
-    fn bit_vector_predicates_handle_unknown_bits_in_comb_ff_and_ports(sim) {
-        @case "system_functions::bit_vector_predicates_handle_unknown_bits_in_comb_ff_and_ports";
-    }
-
-    fn bit_vector_predicates_in_constant_expressions(sim) {
-        @case "system_functions::bit_vector_predicates_in_constant_expressions";
-    }
 }
 
 #[test]
@@ -1994,13 +1699,85 @@ fn rejects_unknown_system_functions_in_every_context() {
     }
 }
 
+/// A coverage function is no constant system function (IEEE 1800-2023
+/// 11.2.1), although Celox folds its calls to their no-coverage results.
+#[test]
+fn rejects_coverage_functions_in_constant_expressions() {
+    for declaration in [
+        "localparam int P = $coverage_get_max(`SV_COV_TOGGLE, `SV_COV_HIER, $root);",
+        "localparam real P = $get_coverage();",
+        "logic [$coverage_save(`SV_COV_TOGGLE, \"db\"):0] v;",
+        "function automatic int f(); return $coverage_get(`SV_COV_TOGGLE, `SV_COV_HIER, $root); endfunction
+         localparam int P = f();",
+    ] {
+        let source = format!(
+            "module Top(output logic y);
+                {declaration}
+                assign y = 1'b0;
+            endmodule"
+        );
+        let error = build_error(&source);
+        assert!(
+            error.contains("a coverage function is not a constant system function"),
+            "{declaration}: {error}"
+        );
+    }
+}
+
+/// The scope and database name arguments of a coverage function are not
+/// evaluated, so an argument that calls is not dropped, and the overall
+/// coverage of a source with covergroups, which are not elaborated, is not
+/// known (IEEE 1800-2023 19.11).
+#[test]
+fn rejects_coverage_calls_whose_result_is_not_known() {
+    for (body, want) in [
+        (
+            "function automatic string next_name(); return \"db\"; endfunction
+             int r; initial r = $coverage_save(`SV_COV_TOGGLE, next_name());",
+            "argument `next_name()` of `$coverage_save`",
+        ),
+        (
+            "function automatic string next_name(); return \"db\"; endfunction
+             int r; initial r = $coverage_merge(`SV_COV_TOGGLE, next_name());",
+            "argument `next_name()` of `$coverage_merge`",
+        ),
+        (
+            "covergroup cg; endgroup
+             real total; initial total = $get_coverage();",
+            "`$get_coverage` in a source that declares a covergroup",
+        ),
+    ] {
+        let source = format!("module Top(output logic y); {body} assign y = 1'b0; endmodule");
+        let error = build_error(&source);
+        assert!(error.contains(want), "{body}: {error}");
+    }
+}
+
+/// A constant function ignores its system task calls (IEEE 1800-2023
+/// 13.4.3), so a coverage database task in one does not evaluate its name.
+#[test]
+fn constant_functions_ignore_coverage_database_tasks() {
+    let source = "module Top(output logic [7:0] y);
+        function automatic string name(); return \"db\"; endfunction
+        function automatic int three();
+            $load_coverage_db(name());
+            $set_coverage_db_name(name());
+            return 3;
+        endfunction
+        localparam int P = three();
+        assign y = P;
+    endmodule";
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("system_functions.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 3u8.into());
+}
+
 #[test]
 fn reports_where_a_known_system_function_is_not_supported() {
     let cases = [
-        (
-            "system function `$get_coverage` in an expression",
-            "module Top(output logic [63:0] y); assign y = $get_coverage(); endmodule",
-        ),
         (
             "system function `$q_full` in an expression",
             "module Top(output logic y);
@@ -2243,6 +2020,143 @@ fn finish_in_an_initial_block_ends_the_simulation() {
             message: b"before".to_vec(),
         }],
     );
+}
+
+/// A units number of `$timeformat` computed outside 2 to -15, or a negative
+/// precision or field width, ends the simulation with an error, as a
+/// constant one fails the analysis, before the format changes (IEEE
+/// 1800-2023 20.4.3); so does a precision or field width above the most
+/// Celox prints, which it does not bound silently.
+#[test]
+fn time_format_arguments_computed_out_of_range_fail_the_simulation() {
+    const UNITS: &str = "units number is outside -15..2";
+    const PRECISION: &str = "precision number is outside 0..";
+    const WIDTH: &str = "minimum field width is outside 0..";
+    const MOST_PRECISION: &str = "precision number above 4096 is not supported";
+    const MOST_WIDTH: &str = "minimum field width above 4096 is not supported";
+    let units = "n, 0, \"\", 0";
+    let precision = "-9, n, \"\", 0";
+    let width = "-9, 0, \"\", n";
+    for (args, n, error) in [
+        (units, -15, None),
+        (units, 2, None),
+        (units, -16, Some(UNITS)),
+        (units, 3, Some(UNITS)),
+        (units, 1_000_000, Some(UNITS)),
+        (precision, 0, None),
+        (precision, 4096, None),
+        (precision, -1, Some(PRECISION)),
+        (precision, 4097, Some(MOST_PRECISION)),
+        (precision, i32::MAX, Some(MOST_PRECISION)),
+        (width, 0, None),
+        (width, 4096, None),
+        (width, -1, Some(WIDTH)),
+        (width, 4097, Some(MOST_WIDTH)),
+        (width, i32::MAX, Some(MOST_WIDTH)),
+    ] {
+        let source = format!(
+            r#"
+            module Top(output logic y);
+                int n = {n};
+                initial begin
+                    $timeformat(-9, 0, " ns", 0);
+                    $timeformat({args});
+                    $write("%t", 32'd7);
+                end
+                assign y = 1'b0;
+            endmodule
+            "#
+        );
+        let mut sim = initial_simulation(&source);
+        let result = sim.step();
+        let events = bare(sim.drain_runtime_events());
+        match error {
+            Some(error) => {
+                let message = result.unwrap_err().to_string();
+                assert!(message.contains(error), "{source}: {message}");
+                assert_eq!(events, Vec::new(), "{source}");
+            }
+            None => {
+                result.unwrap();
+                assert_eq!(events.len(), 1, "{source}");
+            }
+        }
+    }
+}
+
+/// The suffix of `$timeformat` keeps every byte it is written with, NUL
+/// bytes too: IEEE 1800-2023 20.4.3 does not make it a `string`, whose
+/// assignment would drop them (6.16).
+#[test]
+fn time_format_suffix_keeps_its_nul_bytes() {
+    let source = r#"
+        module Top(output logic y);
+            initial begin
+                $timeformat(-9, 0, "ns\000x", 0);
+                $write("%t|", 32'd7);
+                $timeformat(-9, 0, "\0ns", 0);
+                $write("%t|", 32'd7);
+                $timeformat(-9, 0, "", 0);
+                $write("%t|", 32'd7);
+            end
+            assign y = 1'b0;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.step().unwrap();
+    let written: Vec<u8> = bare(sim.drain_runtime_events())
+        .into_iter()
+        .flat_map(|event| match event {
+            celox::RuntimeEvent::Write { message } => message,
+            event => panic!("{event:?}"),
+        })
+        .collect();
+    assert_eq!(written, b"7ns\x00x|7\x00ns|7|".to_vec());
+}
+
+/// The escape sequences of a string literal (IEEE 1800-2023 5.9.1) are
+/// decoded in the format and the string arguments of a display, in a file
+/// output and in a `$timeformat` suffix, also those writing a byte that is
+/// not UTF-8 text.
+#[test]
+fn string_literal_escapes_decode_in_system_tasks() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("escapes.txt");
+    let source = format!(
+        r#"
+        module Top(output logic y);
+            int fd;
+            initial begin
+                $write("<\101\x42\v\f\a\\\">");
+                $write("%0d\377%0d|", 1, 2);
+                $write("%s", "\x43\104\n");
+                $timeformat(-9, 0, "ns\123", 0);
+                $write("%t\n", 32'd7);
+                fd = $fopen("{}", "w");
+                $fwrite(fd, "\x41\377%0d\102", 3);
+                $fclose(fd);
+            end
+            assign y = 1'b0;
+        endmodule
+        "#,
+        path.display()
+    );
+    let mut sim = initial_simulation(&source);
+    sim.step().unwrap();
+    let written: Vec<u8> = bare(sim.drain_runtime_events())
+        .into_iter()
+        .flat_map(|event| match event {
+            celox::RuntimeEvent::Write { message } => message,
+            event => panic!("{event:?}"),
+        })
+        .collect();
+    assert_eq!(
+        written,
+        b"<AB\x0b\x0c\x07\\\">1\xff2|CD\n7nsS\n".to_vec(),
+        "{}",
+        String::from_utf8_lossy(&written)
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"A\xff3B".to_vec());
 }
 
 #[test]
@@ -3423,16 +3337,6 @@ fn time_format_rejects_string_operands() {
 }
 
 sv_backends! {
-    fn scope_randomize_enum_values(sim) { @case "system_functions::scope_randomize_enum_values"; }
-    fn scope_randomize_enum_order(sim) { @case "system_functions::scope_randomize_enum_order"; }
-    fn typename_vectors_and_arrays(sim) { @case "system_functions::typename_vectors_and_arrays"; }
-    fn typename_aggregates(sim) { @case "system_functions::typename_aggregates"; }
-    fn typename_class_parameters(sim) { @case "system_functions::typename_class_parameters"; }
-    fn typename_elaboration_constant(sim) { @case "system_functions::typename_elaboration_constant"; }
-    fn typename_scopes_and_string_operands(sim) { @case "system_functions::typename_scopes_and_string_operands"; }
-}
-
-sv_backends! {
     fn scope_randomize_enum_checkpoint(sim) {
         @setup { let source = r#"
             module Top(input bit clk, output logic [63:0] value);
@@ -3490,6 +3394,84 @@ sv_backends! {
     }
 }
 
+// A signing cast or `$signed`/`$unsigned` of a call in a constant function
+// keeps the width of the callee's result (IEEE 1800-2023 6.24.1, 11.7,
+// 13.4.3), whether the callee is of the same package or module or of another
+// package, a static function of a class or a function of a generate block
+// whose result is sized by the block's parameter, as fpnew's format widths
+// take `unsigned'(maximum(...))`: a four-bit all-ones result is -1 signed,
+// not 15.
+#[test]
+fn constant_functions_cast_call_results_by_their_width() {
+    let source = r#"
+        `timescale 1ns/1ns
+        package p;
+            function automatic int unsigned maximum(int unsigned a, int unsigned b);
+                return a > b ? a : b;
+            endfunction
+            function automatic logic [3:0] ones();
+                return 4'hf;
+            endfunction
+            function automatic int unsigned widest();
+                int unsigned res = 0;
+                for (int i = 0; i < 4; i++) res = unsigned'(maximum(res, i * 3));
+                return res;
+            endfunction
+            function automatic int negative();
+                return signed'(ones());
+            endfunction
+        endpackage
+        module Top;
+            class C;
+                static function logic [3:0] ones();
+                    return 4'hf;
+                endfunction
+            endclass
+            function automatic int from_class();
+                return signed'(C::ones());
+            endfunction
+            if (1) begin : block
+                localparam int W = 4;
+                function automatic logic [W-1:0] ones();
+                    return '1;
+                endfunction
+                function automatic int block_negative();
+                    return signed'(ones());
+                endfunction
+                localparam int B = block_negative();
+                initial $display("block %0d", B);
+            end
+            localparam int K = from_class();
+            function automatic int unsigned twice(int unsigned x);
+                return $unsigned(p::maximum(x, 1)) * 2;
+            endfunction
+            function automatic int negative();
+                return $signed(p::ones()) + signed'(p::ones());
+            endfunction
+            localparam int unsigned W = p::widest();
+            localparam int N = p::negative();
+            localparam int unsigned T = twice(3);
+            localparam int M = negative();
+            logic [W-1:0] wide;
+            logic [T-1:0] doubled;
+            initial #1 $display("%0d %0d %0d %0d %0d", $bits(wide), N, $bits(doubled), M, K);
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("casts.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    sim.run_until(2).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["block -1", "9 -1 6 -2 -1"]);
+}
+
 /// The drained events without the time, scope, location and assertion of
 /// their reports, which these tests do not check.
 fn bare(events: Vec<celox::RuntimeEvent>) -> Vec<celox::RuntimeEvent> {
@@ -3502,4 +3484,79 @@ fn bare(events: Vec<celox::RuntimeEvent>) -> Vec<celox::RuntimeEvent> {
             event => event,
         })
         .collect()
+}
+
+/// A file whose name is a `string` variable is read when the task executes
+/// (IEEE 1800-2023 21.4): the words it does not give keep their values, a
+/// shorter file is a warning, and a file that cannot be read ends the run.
+#[test]
+fn readmem_reads_a_file_named_at_run_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let hex = dir.path().join("words.hex");
+    std::fs::write(&hex, "12 34 5x").unwrap();
+    let bin = dir.path().join("words.bin");
+    std::fs::write(&bin, "1010_0101\n0000_1111").unwrap();
+    let source = format!(
+        r#"`timescale 1ns/1ns
+        module top;
+            logic [7:0] up [0:3];
+            logic [7:0] down [3:0];
+            string path;
+            initial begin
+                up[3] = 8'hee;
+                down[3] = 8'h11; down[0] = 8'h22;
+                if (!$value$plusargs("words=%s", path)) path = "{}";
+                $readmemh(path, up);
+                path = "{}";
+                $readmemb(path, down, 2, 1);
+                #1 $display("%h %h %h %h", up[0], up[1], up[2], up[3]);
+                $display("%h %h %h %h", down[3], down[2], down[1], down[0]);
+                $finish;
+            end
+        endmodule"#,
+        hex.display(),
+        bin.display()
+    );
+    for (four_state, third) in [(false, "50"), (true, "5x")] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(&source, Path::new("readmem_run.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let mut lines = Vec::new();
+        let mut warnings = Vec::new();
+        for event in sim.drain_runtime_events() {
+            match event {
+                celox::RuntimeEvent::Display { message } => {
+                    lines.push(String::from_utf8_lossy(&message).into_owned())
+                }
+                celox::RuntimeEvent::Report(report) => {
+                    assert_eq!(report.severity, celox::Severity::Warning);
+                    warnings.push(String::from_utf8_lossy(&report.message).into_owned());
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            lines,
+            [format!("12 34 {third} ee"), "11 a5 0f 22".to_string()],
+            "four_state={four_state}"
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("$readmemh reading") && warnings[0].contains("words.hex"),
+            "{warnings:?}"
+        );
+    }
+    let missing = source.replace("words.bin", "missing.bin");
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(&missing, Path::new("readmem_run.sv"))], "top")
+            .build()
+            .unwrap();
+    let error = sim.run_until(10).unwrap_err().to_string();
+    assert!(
+        error.contains("$readmemb: failed to read") && error.contains("missing.bin"),
+        "{error}"
+    );
 }

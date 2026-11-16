@@ -48,6 +48,13 @@ pub(super) fn bind_generate_parameter_with_types(
         parameter_types,
         parameter_literals,
     );
+    parameters::bind_generate_parameter_members(
+        &tree.functions,
+        const_env,
+        &parameter,
+        resolved,
+        resolved_literal.as_ref(),
+    );
     let literal = if let Some(value) = resolved {
         const_env.insert(parameter.name().to_string(), value);
         Some(Expr::Literal(if let Some(ty) = resolved_type {
@@ -135,6 +142,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
         return CombProcess {
             delay: process.delay,
             net_delay: process.net_delay,
+            drive_strength: process.drive_strength,
             creation_order: process.creation_order,
             site: process.site,
             process_site: process.process_site,
@@ -161,6 +169,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
     );
     result.delay = process.delay;
     result.net_delay = process.net_delay;
+    result.drive_strength = process.drive_strength;
     result.creation_order = process.creation_order;
     result.site = process.site;
     result.process_site = process.process_site;
@@ -1252,13 +1261,37 @@ pub(super) fn unary_op_from_text(text: &str) -> Option<UnaryOp> {
     }
 }
 
-pub(super) fn unary_expr_from_text(text: &str, expr: Expr) -> Option<Expr> {
-    let reduction = match text {
+/// The reduction a negated reduction operator (`~&`, `~|`, `~^`, `^~`)
+/// complements (IEEE 1800-2023 11.4.9).
+pub(super) fn negated_reduction_from_text(text: &str) -> Option<UnaryOp> {
+    match text {
         "~&" => Some(UnaryOp::RedAnd),
         "~|" => Some(UnaryOp::RedOr),
         "~^" | "^~" => Some(UnaryOp::RedXor),
         _ => None,
-    };
+    }
+}
+
+/// The constant unary operation `text` applies to `expr`: a negated
+/// reduction is the complement of the reduction (11.4.9).
+pub(super) fn unary_const_expr_from_text(text: &str, expr: ConstExpr) -> Option<ConstExpr> {
+    if let Some(op) = negated_reduction_from_text(text) {
+        return Some(ConstExpr::Unary {
+            op: UnaryOp::BitNot,
+            expr: Box::new(ConstExpr::Unary {
+                op,
+                expr: Box::new(expr),
+            }),
+        });
+    }
+    Some(ConstExpr::Unary {
+        op: unary_op_from_text(text)?,
+        expr: Box::new(expr),
+    })
+}
+
+pub(super) fn unary_expr_from_text(text: &str, expr: Expr) -> Option<Expr> {
+    let reduction = negated_reduction_from_text(text);
     if let Some(op) = reduction {
         return Some(Expr::Unary {
             op: UnaryOp::BitNot,

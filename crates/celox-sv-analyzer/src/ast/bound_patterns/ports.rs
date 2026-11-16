@@ -37,6 +37,17 @@ impl ValueType {
         }
     }
 
+    fn expressions<'a>(&'a self, visit: &mut impl FnMut(&'a Expr)) {
+        match self {
+            Self::Known(_) => {}
+            Self::Call(expr) => visit(expr),
+            Self::Conditional(left, right) => {
+                left.expressions(visit);
+                right.expressions(visit);
+            }
+        }
+    }
+
     fn map_expressions(&mut self, map: &mut impl FnMut(Expr) -> Expr) {
         match self {
             Self::Known(_) => {}
@@ -100,6 +111,35 @@ impl BoundPattern {
         Ok(())
     }
 
+    /// Visit the expressions of the pattern, as [`Self::map_expressions`]
+    /// maps them.
+    pub(in crate::ast) fn expressions<'a>(&'a self, visit: &mut impl FnMut(&'a Expr)) {
+        fn value<'a>(value: &'a Value, visit: &mut impl FnMut(&'a Expr)) {
+            match value {
+                Value::Pattern(pattern) => pattern.expressions(visit),
+                Value::Expression {
+                    expr, value_type, ..
+                } => {
+                    visit(expr);
+                    value_type.expressions(visit);
+                }
+            }
+        }
+        match &self.items {
+            Items::Value(expr) | Items::ArrayValue { value: expr, .. } => visit(expr),
+            Items::List(items) | Items::Repeat(_, items) => {
+                for item in items {
+                    value(item, visit);
+                }
+            }
+            Items::Keyed(items) => {
+                for (_, item) in items {
+                    value(item, visit);
+                }
+            }
+        }
+    }
+
     pub(in crate::ast) fn map_expressions(&mut self, map: &mut impl FnMut(Expr) -> Expr) {
         fn value(value: &mut Value, map: &mut impl FnMut(Expr) -> Expr) {
             match value {
@@ -136,7 +176,7 @@ impl BoundPattern {
             .ok_or_else(|| unsupported("unpacked structure port type"))?;
         let syntax = SyntaxTree::empty();
         let tree = AnalysisContext::unspecialized(&syntax);
-        let shape = procedural::dimensions_from_type(target);
+        let shape = port_shape(session, &tree, target);
         let value = self.lower(&tree, session, &shape, &PackedDimensions::default())?;
         unpacked_structs::leaf_parts(aggregate, &value)
             .ok_or_else(|| unsupported("unpacked structure port pattern layout"))
@@ -147,7 +187,7 @@ impl BoundPattern {
         let session = &mut Session::default();
         let syntax = SyntaxTree::empty();
         let tree = AnalysisContext::unspecialized(&syntax);
-        let shape = procedural::dimensions_from_type(target);
+        let shape = port_shape(session, &tree, target);
         self.lower(&tree, session, &shape, &PackedDimensions::default())
             .map(Into::into)
     }
@@ -177,8 +217,7 @@ impl Type {
                 None => None,
             };
         }
-        ty.members = ty
-            .members
+        ty.members = std::mem::take(&mut ty.members)
             .into_iter()
             .map(|member| {
                 let ty = member.r#type().pattern_target(constants)?;
@@ -241,7 +280,9 @@ pub(super) fn native_value_type_plan(
                             shape
                                 .filter(|shape| {
                                     !shape.members.is_empty()
-                                        || shape.unpacked_struct.is_some()
+                                        || unpacked_structs::holds_struct(
+                                            shape, tree, session, dims,
+                                        )
                                         || !shape.unpacked.is_empty()
                                         || shape.packed.len() > 1
                                 })
@@ -305,4 +346,22 @@ impl VariableDimensions {
             functions,
         })
     }
+}
+
+/// The shape of a port of type `target`, bound to its semantic type in the
+/// table of `session`: the port's type is specialized, so it names no
+/// constant of a scope.
+fn port_shape(
+    session: &mut Session,
+    tree: &AnalysisContext<'_>,
+    target: &Type,
+) -> VariableDimensions {
+    let mut target = target.clone();
+    semantic_types::bind_declared(
+        &mut session.types,
+        &tree.functions,
+        &mut target,
+        &ConstEnv::default(),
+    );
+    procedural::dimensions_from_type(&target)
 }

@@ -1,232 +1,6 @@
 use super::*;
 
 sv_backends! {
-    fn wildcard_ports(sim) {
-        @case "hierarchy::wildcard_ports";
-    }
-    fn generated_string_array_element_methods(sim) {
-        @case "hierarchy::generated_string_array_element_methods";
-    }
-    fn hierarchical_string_variables(sim) {
-        @case "hierarchy::hierarchical_string_variables";
-    }
-    fn hierarchical_string_mutating_methods(sim) {
-        @case "hierarchy::hierarchical_string_mutating_methods";
-    }
-
-    fn coalesces_repeated_literal_net_drivers(sim) {
-        @case "hierarchy::coalesces_repeated_literal_net_drivers";
-    }
-    fn repeated_literal_net_drivers_preserve_four_state_equality(sim) {
-        @case "hierarchy::repeated_literal_net_drivers_preserve_four_state_equality";
-    }
-    fn coalesces_repeated_net_aliases(sim) {
-        @case "hierarchy::coalesces_repeated_net_aliases";
-    }
-    fn repeated_net_aliases_preserve_unknown_and_high_impedance_bits(sim) {
-        @case "hierarchy::repeated_net_aliases_preserve_unknown_and_high_impedance_bits";
-    }
-    fn packed_pattern_parameter_arguments_preserve_wide_values(sim) {
-        @case "hierarchy::packed_pattern_parameter_arguments_preserve_wide_values";
-    }
-
-    fn packed_pattern_parameters_forward_whole_values(sim) {
-        @case "hierarchy::packed_pattern_parameters_forward_whole_values";
-    }
-    fn packed_pattern_parameter_arguments_keep_types_and_unknown_bits(sim) {
-        @case "hierarchy::packed_pattern_parameter_arguments_keep_types_and_unknown_bits";
-    }
-
-    fn array_parameter_elements_select_conditional_whole_arrays(sim) {
-        @case "hierarchy::array_parameter_elements_select_conditional_whole_arrays";
-    }
-    fn array_parameter_elements_preserve_wide_specializations(sim) {
-        @case "hierarchy::array_parameter_elements_preserve_wide_specializations";
-    }
-    fn array_parameter_elements_forward_generated_values(sim) {
-        @case "hierarchy::array_parameter_elements_forward_generated_values";
-    }
-    fn array_parameter_elements_keep_signed_element_types(sim) {
-        @case "hierarchy::array_parameter_elements_keep_signed_element_types";
-    }
-    fn array_parameter_elements_select_package_multidimensional_values(sim) {
-        @case "hierarchy::array_parameter_elements_select_package_multidimensional_values";
-    }
-    fn array_parameter_elements_preserve_four_state_and_conversion(sim) {
-        @case "hierarchy::array_parameter_elements_preserve_four_state_and_conversion";
-    }
-
-    fn port_pattern_constant_unpacked_defaults(sim) {
-        @case "hierarchy::port_pattern_constant_unpacked_defaults";
-    }
-
-    fn port_pattern_constant_literal_defaults(sim) {
-        @case "hierarchy::port_pattern_constant_literal_defaults";
-    }
-
-    fn port_pattern_constant_mixed_state_defaults(sim) {
-        @case "hierarchy::port_pattern_constant_mixed_state_defaults";
-    }
-
-    fn port_pattern_constant_aggregate_defaults(sim) {
-        @case "hierarchy::port_pattern_constant_aggregate_defaults";
-    }
-    fn port_pattern_default_bounds_require_matching_types(sim) {
-        @case "hierarchy::port_pattern_default_bounds_require_matching_types";
-    }
-
-    fn port_pattern_review_packed_value_types(sim) {
-        @case "hierarchy::port_pattern_review_packed_value_types";
-    }
-    fn port_pattern_review_conditional_structs(sim) {
-        @case "hierarchy::port_pattern_review_conditional_structs";
-    }
-    fn port_pattern_review_subarray_items(sim) {
-        @case "hierarchy::port_pattern_review_subarray_items";
-    }
-
-    fn port_pattern_review_aggregate_defaults(sim) {
-        @case "hierarchy::port_pattern_review_aggregate_defaults";
-    }
-
-    fn port_pattern_review_mixed_state_structs(sim) {
-        @case "hierarchy::port_pattern_review_mixed_state_structs";
-    }
-    fn port_pattern_review_member_key_collisions(sim) {
-        @case "hierarchy::port_pattern_review_member_key_collisions";
-    }
-    fn port_pattern_review_packed_struct_arrays(sim) {
-        @case "hierarchy::port_pattern_review_packed_struct_arrays";
-    }
-    fn port_pattern_review_interface_inputs(sim) {
-        @case "hierarchy::port_pattern_review_interface_inputs";
-    }
-
-    fn port_patterns_preserve_four_state_elements(sim) {
-        @case "hierarchy::port_patterns_preserve_four_state_elements";
-    }
-    fn port_patterns_reject_incorrect_element_counts(sim) {
-        @case "hierarchy::port_patterns_reject_incorrect_element_counts";
-    }
-
-    fn port_patterns_use_specialized_formal_shapes(sim) {
-        @case "hierarchy::port_patterns_use_specialized_formal_shapes";
-    }
-    fn port_patterns_keep_caller_values_and_generated_names(sim) {
-        @case "hierarchy::port_patterns_keep_caller_values_and_generated_names";
-    }
-    fn port_patterns_bind_nested_structure_elements(sim) {
-        @case "hierarchy::port_patterns_bind_nested_structure_elements";
-    }
-
-    fn named_array_parameters_forward_whole_values(sim) {
-        @case "hierarchy::named_array_parameters_forward_whole_values";
-    }
-
-    fn named_array_parameters_forward_package_subarrays(sim) {
-        @case "hierarchy::named_array_parameters_forward_package_subarrays";
-    }
-
-    fn named_array_parameters_follow_caller_specialization(sim) {
-        @case "hierarchy::named_array_parameters_follow_caller_specialization";
-    }
-    fn named_array_parameters_keep_four_state_values(sim) {
-        @case "hierarchy::named_array_parameters_keep_four_state_values";
-    }
-
-    fn sized_parameter_actuals_follow_parent_specialization(sim) {
-        @case "hierarchy::sized_parameter_actuals_follow_parent_specialization";
-    }
-
-    fn generated_parameter_part_select_actuals(sim) {
-        @case "hierarchy::generated_parameter_part_select_actuals";
-    }
-
-    fn conditional_parameter_actuals_follow_parent_specialization(sim) {
-        @case "hierarchy::conditional_parameter_actuals_follow_parent_specialization";
-    }
-
-    fn concatenated_parameter_actuals_use_each_parent_specialization(sim) {
-        @case "hierarchy::concatenated_parameter_actuals_use_each_parent_specialization";
-    }
-
-    fn input_port_defaults_use_child_scope_and_only_omitted_connections(sim) {
-        @case "hierarchy::input_port_defaults_use_child_scope_and_only_omitted_connections";
-    }
-
-    fn bits_query_parameter_overrides_follow_caller_specialization(sim) {
-        @case "hierarchy::bits_query_parameter_overrides_follow_caller_specialization";
-    }
-
-    fn bits_query_parameter_overrides(sim) {
-        @case "hierarchy::bits_query_parameter_overrides";
-    }
-
-    fn parameter_patterns_keep_original_declarations_and_isolated_bindings(sim) { @case "hierarchy::parameter_patterns_keep_original_declarations_and_isolated_bindings"; }
-    fn parameter_patterns_preserve_enclosing_expressions(sim) { @case "hierarchy::parameter_patterns_preserve_enclosing_expressions"; }
-    fn widens_small_parameters_preserving_four_state_bits(sim) {
-        @case "hierarchy::widens_small_parameters_preserving_four_state_bits";
-    }
-    fn widens_small_parameters_into_child_int_outputs(sim) {
-        @case "hierarchy::widens_small_parameters_into_child_int_outputs";
-    }
-    fn parameter_patterns_preserve_packed_member_states(sim) { @case "hierarchy::parameter_patterns_preserve_packed_member_states"; }
-    fn parameter_patterns_transfer_packed_values(sim) { @case "hierarchy::parameter_patterns_transfer_packed_values"; }
-    fn parameter_patterns_override_scalar_defaults(sim) { @case "hierarchy::parameter_patterns_override_scalar_defaults"; }
-    fn parameter_patterns_evaluate_caller_constant_functions(sim) { @case "hierarchy::parameter_patterns_evaluate_caller_constant_functions"; }
-    fn parameter_patterns_override_body_declarations(sim) { @case "hierarchy::parameter_patterns_override_body_declarations"; }
-    fn parameter_patterns_keep_fill_and_arithmetic_context(sim) {
-        @case "hierarchy::parameter_patterns_keep_fill_and_arithmetic_context";
-    }
-    fn parameter_patterns_bind_caller_types(sim) {
-        @case "hierarchy::parameter_patterns_bind_caller_types";
-    }
-    fn parameter_patterns_bind_nested_caller_types(sim) {
-        @case "hierarchy::parameter_patterns_bind_nested_caller_types";
-    }
-    fn parameter_patterns_keep_unknown_fill(sim) {
-        @case "hierarchy::parameter_patterns_keep_unknown_fill";
-    }
-
-    fn drives_omitted_and_open_child_inputs_with_z(sim) {
-        @case "hierarchy::drives_omitted_and_open_child_inputs_with_z";
-    }
-
-    fn treats_child_outputs_as_explicit_net_drivers(sim) {
-        @case "hierarchy::treats_child_outputs_as_explicit_net_drivers";
-    }
-
-    fn simulates_systemverilog_named_port_hierarchy(sim) {
-        @case "hierarchy::simulates_systemverilog_named_port_hierarchy";
-    }
-
-    fn simulates_systemverilog_hierarchy_through_internal_signal(sim) {
-        @case "hierarchy::simulates_systemverilog_hierarchy_through_internal_signal";
-    }
-
-    fn simulates_veryl_generated_style_gray_encoder_hierarchy(sim) {
-        @case "hierarchy::simulates_veryl_generated_style_gray_encoder_hierarchy";
-    }
-
-    fn simulates_parameter_specialized_systemverilog_hierarchy(sim) {
-        @case "hierarchy::simulates_parameter_specialized_systemverilog_hierarchy";
-    }
-
-    fn simulates_systemverilog_hierarchical_always_ff(sim) {
-        @case "hierarchy::simulates_systemverilog_hierarchical_always_ff";
-    }
-
-    fn simulates_systemverilog_hierarchical_always_ff_with_constant_clear(sim) {
-        @case "hierarchy::simulates_systemverilog_hierarchical_always_ff_with_constant_clear";
-    }
-
-    fn settles_feedback_through_disjoint_bits_of_child_input(sim) {
-        @case "hierarchy::settles_feedback_through_disjoint_bits_of_child_input";
-    }
-
-    fn settles_feedback_beside_dynamic_child_reader(sim) {
-        @case "hierarchy::settles_feedback_beside_dynamic_child_reader";
-    }
 
     fn simulates_veryl_generated_countones_sv(sim) {
         @setup {
@@ -631,13 +405,19 @@ fn rejects_array_values_in_scalar_port_pattern_elements() {
     }
 }
 
+/// A default of a port pattern fills each packed union element as a whole
+/// (IEEE 1800-2023 10.9.2, 7.3.1), never by its overlapping fields one by
+/// one, for module and interface ports and parameters.
 #[test]
-fn rejects_recursive_port_pattern_defaults_for_packed_unions() {
-    for connection in [
-        "Child c(.cfg('{default:'x}));",
-        "Child c(.cfg(P::items_t'{default:'x}));",
-        "Cfg c(.cfg('{default:'x}));",
-        "WithParam #(.CFG('{default:'x})) c();",
+fn port_pattern_defaults_fill_packed_unions_whole() {
+    for (connection, value) in [
+        ("Child c(.cfg('{default:'x}), .o(o));", None),
+        (
+            "Child c(.cfg(P::items_t'{default:'1}), .o(o));",
+            Some(0b11u8),
+        ),
+        ("Cfg c(.cfg('{default:'x})); assign o = '0;", Some(0)),
+        ("WithParam #(.CFG('{default:'1})) c(.o(o));", Some(0b11)),
     ] {
         let source = format!(
             r#"
@@ -645,28 +425,33 @@ fn rejects_recursive_port_pattern_defaults_for_packed_unions() {
                 typedef union packed {{logic a; bit b;}} item_t;
                 typedef item_t items_t[2];
             endpackage
-            module Child(input P::item_t cfg[2]); endmodule
+            module Child(input P::item_t cfg[2], output logic [1:0] o);
+                assign o = {{cfg[1], cfg[0]}};
+            endmodule
             interface Cfg(input P::item_t cfg[2]); endinterface
-            module WithParam #(parameter P::item_t CFG[2]='{{'0,'0}})(); endmodule
-            module Top;
+            module WithParam #(parameter P::item_t CFG[2]='{{'0,'0}})(output logic [1:0] o);
+                assign o = {{CFG[1], CFG[0]}};
+            endmodule
+            module Top(output logic [1:0] o);
                 {connection}
             endmodule
             "#
         );
-        let error = match Simulator::from_sv_sources(
+        let mut sim = Simulator::from_sv_sources(
             vec![(&source, Path::new("union_pattern_default.sv"))],
             "Top",
         )
         .four_state(true)
         .build_cranelift()
-        {
-            Err(error) => error,
-            Ok(_) => panic!("unsupported union default must be rejected: {connection}"),
-        };
-        assert!(
-            error.to_string().contains("packed union"),
-            "{connection}: {error}"
-        );
+        .unwrap_or_else(|error| panic!("{connection}: {error}"));
+        let (bits, mask) = sim.get_four_state(sim.signal("o"));
+        match value {
+            // Each union element is X as a whole.
+            None => assert_eq!(mask, 0b11u8.into(), "{connection}"),
+            Some(value) => {
+                assert_eq!((bits, mask), (value.into(), 0u8.into()), "{connection}")
+            }
+        }
     }
 }
 
@@ -724,30 +509,6 @@ fn array_parameter_elements_check_unselected_conditional_branch_types() {
     }
 }
 
-sv_backends! {
-    fn non_ansi_ports_take_body_declarations(sim) {
-        @case "hierarchy::non_ansi_ports_take_body_declarations";
-    }
-    fn child_ports_keep_the_bit_ranges_they_read(sim) {
-        @case "hierarchy::child_ports_keep_the_bit_ranges_they_read";
-    }
-    fn child_ports_keep_the_bit_ranges_of_selected_connections(sim) {
-        @case "hierarchy::child_ports_keep_the_bit_ranges_of_selected_connections";
-    }
-    fn inout_tristate_driver_in_child_reaches_parent(sim) {
-        @case "hierarchy::inout_tristate_driver_in_child_reaches_parent";
-    }
-    fn inout_tristate_nets_read_zero_in_two_state(sim) {
-        @case "hierarchy::inout_tristate_nets_read_zero_in_two_state";
-    }
-    fn inout_tristate_driver_in_parent_reaches_child(sim) {
-        @case "hierarchy::inout_tristate_driver_in_parent_reaches_child";
-    }
-    fn inout_tristate_drivers_reach_implicit_nets(sim) {
-        @case "hierarchy::inout_tristate_drivers_reach_implicit_nets";
-    }
-}
-
 #[test]
 fn rejects_malformed_non_ansi_port_declarations() {
     for (source, message) in [
@@ -800,12 +561,165 @@ fn rejects_malformed_non_ansi_port_declarations() {
     }
 }
 
-sv_backends! {
-    fn many_sibling_parameter_specializations(sim) {
-        @case "hierarchy::many_sibling_parameter_specializations";
+/// A hierarchical name selects a member of a packed structure of another
+/// instance, of a package type or of a type the instance's module declares,
+/// to read it and to write it (IEEE 1800-2023 23.6, 7.2). Icarus Verilog
+/// 13.0 and Verilator 5.054 print the same lines.
+#[test]
+fn hierarchical_names_select_members_of_structures() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+  typedef struct packed { logic [1:0] hi; logic [1:0] lo; } s_t;
+endpackage
+module child(input logic [3:0] a);
+  typedef struct packed { logic en; logic [2:0] v; } l_t;
+  p::s_t s;
+  l_t l;
+  always_comb s = a;
+  initial begin
+  end
+endmodule
+module top;
+  logic [3:0] a = 4'd6;
+  child c(.a(a));
+  initial begin
+    #1 $display("A %b %b", c.s.lo, c.s.hi);
+    c.l.v = 3'd5; c.l.en = 1'b1;
+    #1 $display("B %b %b %b", c.l, c.l.v, c.l.en);
+    $finish;
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("members.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            ["A 10 01", "B 1101 101 1"],
+            "four_state={four_state}"
+        );
     }
+}
 
-    fn non_ansi_port_ranges_compare_bounds(sim) {
-        @case "hierarchy::non_ansi_port_ranges_compare_bounds";
+/// A hierarchical name of another instance's structure variable selects
+/// members of the elements of its packed array member by run-time indices,
+/// as Caliptra's testbench reads
+/// `key_vault1.kv_reg_hwif_out.KEY_ENTRY[kv_entry_id]` (IEEE 1800-2023
+/// 23.6, 7.4.5); the name is resolved although its scan ends at the index.
+/// Verilator 5.054 prints the same lines.
+#[test]
+fn hierarchical_names_select_member_elements_by_run_time_indices() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+  typedef struct packed { logic [3:0] data; logic v; } e_t;
+  typedef struct packed { logic [7:0] pre; e_t [3:0] KEY_ENTRY; } o_t;
+endpackage
+module kv;
+  p::o_t hwif_out;
+  initial begin
+    hwif_out = '0;
+    for (int k = 0; k < 4; k++) hwif_out.KEY_ENTRY[k].data = 4'(k + 9);
+  end
+endmodule
+module top;
+  kv key_vault1();
+  int id;
+  initial begin
+    #1;
+    for (id = 0; id < 4; id++) $display("R %0d %h", id, key_vault1.hwif_out.KEY_ENTRY[id].data);
+    id = 2;
+    key_vault1.hwif_out.KEY_ENTRY[id].v = 1'b1;
+    #1 $display("W %h", key_vault1.hwif_out);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("indices.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            ["R 0 9", "R 1 a", "R 2 b", "R 3 c", "W 00c5e92"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// The hierarchical name may select an element of an instance array by a
+/// constant index before the variable, as
+/// `key_vault[1].hwif_out.KEY_ENTRY[id]` (IEEE 1800-2023 23.6, 7.4.5).
+/// Verilator 5.054 prints the same lines.
+#[test]
+fn hierarchical_names_of_instance_array_elements_select_member_elements_by_run_time_indices() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+  typedef struct packed { logic [3:0] data; logic v; } e_t;
+  typedef struct packed { logic [7:0] pre; e_t [3:0] KEY_ENTRY; } o_t;
+endpackage
+module kv #(parameter int B = 0);
+  p::o_t hwif_out;
+  initial begin
+    hwif_out = '0;
+    for (int k = 0; k < 4; k++) hwif_out.KEY_ENTRY[k].data = 4'(k + B);
+  end
+endmodule
+module top;
+  kv #(.B(3)) key_vault[2] ();
+  int id;
+  initial begin
+    #1;
+    for (id = 0; id < 4; id++) $display("R %0d %h", id, key_vault[1].hwif_out.KEY_ENTRY[id].data);
+    id = 1;
+    key_vault[1].hwif_out.KEY_ENTRY[id].v = 1'b1;
+    #1 $display("W %h %h", key_vault[0].hwif_out, key_vault[1].hwif_out);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("indices.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            ["R 0 3", "R 1 4", "R 2 5", "R 3 6", "W 0062906 0062926"],
+            "four_state={four_state}"
+        );
     }
 }

@@ -44,6 +44,7 @@ pub(crate) fn signature() -> celox_design::ExternSignature {
         pure: false,
         result: Some(integer),
         arguments: vec![integer; 5],
+        directions: Vec::new(),
     }
 }
 
@@ -115,6 +116,8 @@ impl Metadata {
                             .design
                             .root_instance()
                             .map(|root| root.module_name.as_str())
+                            // The root of several tops is not part of a name.
+                            .filter(|_| !program.design.hidden_root)
                             .unwrap_or("");
                         std::iter::once(top)
                             .chain(instance.display_path.iter().map(String::as_str))
@@ -131,6 +134,12 @@ impl Metadata {
                     assertion: None,
                     deferred: None,
                     timestamp_arg: false,
+                    // The last value is the format of `%t` when the call
+                    // ran.
+                    time_format_arg: request
+                        .strings
+                        .get(1)
+                        .is_some_and(|text| text == celox_design::TIME_FORMAT_ARGUMENT),
                     arg_widths: Vec::new(),
                     arg_signed: Vec::new(),
                     arg_is_string: Vec::new(),
@@ -374,7 +383,15 @@ pub(super) struct Scope<'a> {
     pub state: *const u8,
     pub state_size: usize,
     pub files: &'a mut celox_runtime::file_io::FileIo,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the simulator's pending runtime events, which a RuntimeEventDrain handle on another thread also locks"
+    )]
     pub pending: &'a Arc<std::sync::Mutex<PendingRuntimeEvents>>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the runtime-event read sequence, which a RuntimeEventDrain handle on another thread also advances"
+    )]
     pub read_seq: &'a AtomicU64,
     pub error: Option<RuntimeErrorCode>,
     pub calls: u64,
@@ -691,7 +708,12 @@ impl Scope<'_> {
         Ok(())
     }
 
-    fn publish_nba(&mut self) -> Result<u64, RuntimeErrorCode> {
+    /// Publish the queued and flagged nonblocking updates at `timestamp`,
+    /// one at a time. A flagged site with a delay, such as a fused
+    /// flip-flop's `q <= #1 d`, is queued for its due time instead (IEEE
+    /// 1800-2023 9.4.5, 10.4.2), as the generated queues do where they
+    /// hold the updates.
+    fn publish_nba(&mut self, timestamp: u64) -> Result<u64, RuntimeErrorCode> {
         loop {
             let update = if let Some(update) = self.nbas.pop_front() {
                 Some(update)
@@ -706,12 +728,25 @@ impl Scope<'_> {
                         if site.width == 0 || site.lsb >= site.target.width {
                             continue;
                         }
-                        update = Some(celox_runtime::NbaUpdate {
+                        let flagged = celox_runtime::NbaUpdate {
                             target: site.target,
                             lsb: site.lsb,
                             width: site.width,
                             value: self.value(site.value)?,
-                        });
+                        };
+                        if site.delay > 0 {
+                            let due = timestamp.checked_add(site.delay).ok_or_else(|| {
+                                RuntimeErrorCode::Runtime {
+                                    message: "nonblocking assignment delay overflows simulation \
+                                              time"
+                                        .into(),
+                                    signals: Vec::new(),
+                                }
+                            })?;
+                            self.delayed.push_back((due, flagged));
+                            continue;
+                        }
+                        update = Some(flagged);
                         break;
                     }
                 }
@@ -854,6 +889,10 @@ impl Scope<'_> {
         let pointer = unsafe { self.state.add(offset).cast::<*const u8>().read_unaligned() };
         let layout = &self.metadata.layout;
         let mut read_seq = self.read_seq.load(Ordering::Acquire);
+        #[expect(
+            clippy::disallowed_types,
+            reason = "FFI/JIT: loads sequence words of the runtime-event ring buffer that JIT-compiled code publishes with release stores"
+        )]
         let mut events = if pointer.is_null() {
             Vec::new()
         } else {
@@ -1095,7 +1134,7 @@ pub(crate) extern "C" fn call(
         } else if encoded == COMB_AFTER {
             scope.after_comb();
         } else if encoded == NBA_PUBLISH {
-            return scope.publish_nba();
+            return scope.publish_nba(timestamp);
         } else {
             if encoded != CHECKPOINT {
                 if encoded & NBA_REQUEST != 0 {
@@ -1119,6 +1158,10 @@ pub(crate) extern "C" fn call(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_types,
+    reason = "test-only: the tests build the runtime-event queues the simulator shares with a drain thread"
+)]
 mod tests {
     use super::*;
 
@@ -1173,6 +1216,7 @@ mod tests {
                         value,
                         position: None,
                         pending: Some(pending),
+                        unit: false,
                     })
                     .collect(),
             ],
@@ -1217,13 +1261,13 @@ mod tests {
         }
         scope.store_value(dirty, &value(0, 0)).unwrap();
         scope.nbas.push_back(update(target, 0, 8, 0x55, 0));
-        assert_eq!(scope.publish_nba().unwrap(), 2);
+        assert_eq!(scope.publish_nba(0).unwrap(), 2);
         assert_eq!(scope.value(target).unwrap(), value(0xa5, 0));
         assert_eq!(scope.value(dirty).unwrap(), value(1, 0));
         for flag in flags {
             assert_eq!(scope.value(flag).unwrap(), value(0, 0));
         }
-        assert_eq!(scope.publish_nba().unwrap(), 0);
+        assert_eq!(scope.publish_nba(0).unwrap(), 0);
         assert!(scope.nbas.is_empty());
 
         scope.store_value(target, &value(0x55, 0)).unwrap();
@@ -1234,15 +1278,15 @@ mod tests {
             update(target, 4, 4, 0, 15),
             update(target, 4, 4, 0, 15),
         ]);
-        assert_eq!(scope.publish_nba().unwrap(), 2);
+        assert_eq!(scope.publish_nba(0).unwrap(), 2);
         assert_eq!(scope.value(target).unwrap(), value(0xf5, 0xf0));
         assert_eq!(scope.value(dirty).unwrap(), value(1, 0));
         scope.store_value(dirty, &value(0, 0)).unwrap();
-        assert_eq!(scope.publish_nba().unwrap(), 2);
+        assert_eq!(scope.publish_nba(0).unwrap(), 2);
         assert_eq!(scope.value(target).unwrap(), value(5, 0xf0));
         assert_eq!(scope.value(dirty).unwrap(), value(1, 0));
         scope.store_value(dirty, &value(0, 0)).unwrap();
-        assert_eq!(scope.publish_nba().unwrap(), 0);
+        assert_eq!(scope.publish_nba(0).unwrap(), 0);
         assert!(scope.nbas.is_empty());
 
         assert_eq!(scope.value(dirty).unwrap(), value(0, 0));
@@ -1250,6 +1294,6 @@ mod tests {
         // A target without a mask plane compares its stored representation.
         let bit_target = signal(10, 8, false);
         scope.nbas.push_back(update(bit_target, 0, 8, 0, 255));
-        assert_eq!(scope.publish_nba().unwrap(), 0);
+        assert_eq!(scope.publish_nba(0).unwrap(), 0);
     }
 }

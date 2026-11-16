@@ -3,9 +3,9 @@ use super::{
     conversion::of_type,
     relations::{Assignable, Castable, Mismatch},
 };
-use crate::ast::ConstEnv;
 use crate::ast::Session;
 use crate::ast::{AnalysisContext, types};
+use crate::ast::{ConstEnv, TypeAliases};
 use std::path::Path;
 
 /// The semantic types of the typedefs of module `M` in `items`.
@@ -27,6 +27,49 @@ fn typedefs(items: &str) -> (TyTable, HashMap<String, TyId>) {
         })
         .collect();
     (table, ids)
+}
+
+/// The typedefs of `items` in module `M`, bound by an analysis of
+/// elaborated scope `scope`, as types of `table`.
+fn typedefs_in(table: &mut TyTable, scope: &str, items: &str) -> HashMap<String, TyId> {
+    let session = &mut Session {
+        scope: Some(scope.into()),
+        ..Session::default()
+    };
+    let source = format!("module M; {items} endmodule");
+    let tree =
+        crate::source_tree::parse_scope_fixture(&source, Path::new("semantic_types.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let env = ConstEnv::default();
+    let aliases = types::type_aliases_from_scope_with_env(&tree, session, &env).unwrap();
+    aliases
+        .iter()
+        .map(|(name, ty)| {
+            let id = of_type(table, &tree.functions, ty, &env)
+                .unwrap_or_else(|| panic!("`{name}` has no semantic type"));
+            (name.clone(), id)
+        })
+        .collect()
+}
+
+#[test]
+fn each_module_analysis_declares_types_of_its_own() {
+    // IEEE 1800-2023 6.22: the enumeration, structure and union types an
+    // instance declares are its own. Instances with the same parameter
+    // values share one analysis, and so its types.
+    let items = "typedef enum logic [1:0] {X, Y} e_t; typedef struct packed {logic a;} p_t;
+                 typedef struct {int a;} u_t; typedef bit [3:0] nibble;";
+    let mut table = TyTable::default();
+    let first = typedefs_in(&mut table, "M#1", items);
+    let again = typedefs_in(&mut table, "M#1", items);
+    let other = typedefs_in(&mut table, "M#2", items);
+    for name in ["e_t", "p_t", "u_t"] {
+        assert_eq!(first[name], again[name], "{name}");
+        assert!(!table.matches(first[name], other[name]), "{name}");
+        // Diagnostics write a declaration without its scope.
+        assert_eq!(table.spell(first[name]), table.spell(other[name]), "{name}");
+    }
+    assert!(table.matches(first["nibble"], other["nibble"]));
 }
 
 /// Whether each pair of typedefs of `items` matches as expected.
@@ -113,6 +156,26 @@ fn named_aggregates_and_enumerations_match_only_their_own_declaration() {
 }
 
 #[test]
+fn enumerations_keep_their_members_named_or_anonymous() {
+    // IEEE 1800-2023 6.19: the members are part of the type, which a named
+    // enumeration's declaration names.
+    let (table, ids) =
+        typedefs("typedef enum {X, Y} e_t; typedef e_t e2_t; typedef e_t [1:0] ea_t;");
+    for name in ["e_t", "e2_t"] {
+        let domain = table
+            .enum_domain(ids[name])
+            .unwrap_or_else(|| panic!("{name}"));
+        let members = domain
+            .members
+            .iter()
+            .map(|member| member.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(members, ["X", "Y"], "{name}");
+    }
+    assert!(table.enum_domain(ids["ea_t"]).is_some());
+}
+
+#[test]
 fn interning_a_type_again_returns_its_id() {
     let mut table = TyTable::default();
     let packed = |keyword| {
@@ -159,7 +222,7 @@ fn aggregates_of_each_generate_scope_are_types_of_their_own() {
             session,
             &items,
             &env,
-            &HashMap::default(),
+            &TypeAliases::default(),
             path,
         )
         .unwrap();
@@ -170,6 +233,56 @@ fn aggregates_of_each_generate_scope_are_types_of_their_own() {
     for index in 0..2 {
         assert!(!table.matches(first[index], second[index]));
         assert_eq!(first[index], again[index]);
+    }
+}
+
+#[test]
+fn enumeration_constants_of_each_generate_scope_have_its_type() {
+    let session = &mut Session::default();
+    // IEEE 1800-2023 27.4: an enumeration typedef in a generate scope
+    // declares a type of its own in each iteration, which is the type of its
+    // constants there (6.19.3), also for an enumeration declared after
+    // another, whose typedefs are bound again with its constants.
+    let source = "module M; typedef enum {A, B} e_t; typedef enum {C, D} f_t; endmodule";
+    let tree =
+        crate::source_tree::parse_scope_fixture(source, Path::new("semantic_types.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let items = tree.body_membership().unwrap();
+    let env = ConstEnv::default();
+    let mut scope = |path| {
+        let aliases = types::type_aliases_of_generate_scope(
+            &tree,
+            session,
+            &items,
+            &env,
+            &TypeAliases::default(),
+            path,
+        )
+        .unwrap();
+        let constants = crate::ast::parameters::enum_member_constants_from_items(
+            &tree,
+            session,
+            &items,
+            &env,
+            &aliases,
+            &HashMap::default(),
+            Some(path),
+        )
+        .unwrap();
+        [("e_t", "A"), ("f_t", "C")].map(|(typedef, constant)| {
+            let typedef =
+                of_type(&mut session.types, &tree.functions, &aliases[typedef], &env).unwrap();
+            let constant = constants.declarations[constant]
+                .type_id(&mut session.types)
+                .unwrap();
+            (typedef, constant)
+        })
+    };
+    let (first, second) = (scope("g[0]"), scope("g[1]"));
+    for index in 0..2 {
+        assert_eq!(first[index].0, first[index].1);
+        assert_eq!(second[index].0, second[index].1);
+        assert!(!session.types.matches(first[index].1, second[index].0));
     }
 }
 #[test]
@@ -276,8 +389,9 @@ fn virtual_interfaces_take_their_interface_without_or_with_their_modport() {
     // interface with no modport or with its own modport.
     let mut table = TyTable::default();
     let mut vif = |interface: &str, modport: Option<&str>| {
+        let interface = table.interface(interface);
         table.intern(TyData::VirtualInterface {
-            interface: Decl::Interface(interface.into()),
+            interface,
             modport: modport.map(Into::into),
         })
     };
@@ -312,7 +426,10 @@ fn class_handles_assign_to_their_classes_bases_and_interfaces() {
     // IEEE 1800-2023 8.16: `class E extends C`; 8.26.5: `class Fifo extends
     // Base implements PutImp`; 6.11.1: `null` to any handle.
     let mut table = TyTable::default();
-    let mut class = |name: &str| table.intern(TyData::Class(Decl::Class(name.into())));
+    let mut class = |name: &str| {
+        let decl = table.class(name);
+        table.intern(TyData::Class(decl))
+    };
     let (c, e, base, fifo, put, other) = (
         class("C"),
         class("E"),
@@ -444,7 +561,10 @@ fn class_casts_check_derived_targets_at_run_time() {
     // IEEE 1800-2023 8.16: `$cast` to a derived class's handle checks the
     // object; to an unrelated class it cannot succeed.
     let mut table = TyTable::default();
-    let mut class = |name: &str| table.intern(TyData::Class(Decl::Class(name.into())));
+    let mut class = |name: &str| {
+        let decl = table.class(name);
+        table.intern(TyData::Class(decl))
+    };
     let (base, derived, other, interface) = (class("B"), class("D"), class("O"), class("I"));
     let supertypes = |base: Option<TyId>, interface: bool| Supertypes {
         base,
@@ -481,8 +601,9 @@ fn bit_stream_casts_reject_destinations_holding_associative_arrays() {
         kind: ArrayKind::Fixed(Range { left: 0, right: 1 }),
         element: ids["map_t"],
     });
+    let decl = table.declare("holder_t", None);
     let holder = table.intern(TyData::UnpackedStruct(Decl::Aggregate {
-        name: "holder_t".into(),
+        decl,
         members: Arc::new([("i".into(), int), ("m".into(), ids["map_t"])]),
     }));
     for target in [ids["map_t"], maps, holder] {
@@ -493,4 +614,271 @@ fn bit_stream_casts_reject_destinations_holding_associative_arrays() {
             table.spell(target)
         );
     }
+}
+
+#[test]
+fn declarations_are_one_per_name_and_scope() {
+    let mut table = TyTable::default();
+    let scopes = (0..64)
+        .map(|index| format!("M#{index}"))
+        .collect::<Vec<_>>();
+    let ids = scopes
+        .iter()
+        .map(|scope| table.declare("M::e_t", Some(scope)))
+        .collect::<Vec<_>>();
+    let unscoped = table.declare("M::e_t", None);
+    let mut distinct = ids.clone();
+    distinct.push(unscoped);
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), scopes.len() + 1);
+    for (scope, id) in scopes.iter().zip(&ids) {
+        assert_eq!(table.declare("M::e_t", Some(scope)), *id);
+        assert_eq!(table.decl(*id).scope.as_deref(), Some(scope.as_str()));
+    }
+    assert_eq!(table.declare("M::e_t", None), unscoped);
+    assert_ne!(table.declare("M::f_t", None), unscoped);
+}
+
+#[test]
+fn variables_keep_the_semantic_types_of_their_declarations() {
+    // IEEE 1800-2023 6.18: the names in a type resolve in the scope that
+    // declares it. A class property or a module variable with unpacked
+    // dimensions is bound to its semantic type where it is declared, and
+    // keeps the binding when its constants are substituted, so a reader
+    // neither resolves it again nor needs to see `W`.
+    let session = &mut Session::default();
+    let source = "module M;
+        class C; bit d [W]; logic [W-1:0] q [$:W]; endclass
+        logic [W-1:0] a [2][W];
+        endmodule";
+    let tree =
+        crate::source_tree::parse_scope_fixture(source, Path::new("semantic_types.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let declaring = ConstEnv::from_iter([("W".into(), 4)]);
+    let class =
+        crate::ast::classes::class(&tree, session, "C", &declaring, &TypeAliases::default())
+            .unwrap();
+    for property in &class.properties {
+        assert!(
+            property.r#type.binding.get(&session.types).is_some(),
+            "property `{}`",
+            property.name
+        );
+    }
+    let signals = crate::ast::declarations::signals_from_scope(
+        &tree,
+        session,
+        &declaring,
+        &TypeAliases::default(),
+    )
+    .unwrap();
+    let signal = signals.iter().find(|signal| signal.name() == "a").unwrap();
+    assert!(signal.r#type().binding.get(&session.types).is_some());
+}
+
+#[test]
+fn types_keep_their_semantic_types_when_their_bounds_take_values() {
+    // IEEE 1800-2023 6.18: the names in a type resolve in the scope that
+    // declares it. Replacing its bounds by their values there, as freezing
+    // them or resolving a type argument does, leaves its semantic type as it
+    // was, so the type keeps its binding.
+    let session = &mut Session::default();
+    let source = "module M; typedef logic [W-1:0] t [W]; endmodule";
+    let tree =
+        crate::source_tree::parse_scope_fixture(source, Path::new("semantic_types.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let declaring = ConstEnv::from_iter([("W".into(), 4)]);
+    let aliases = types::type_aliases_from_scope_with_env(&tree, session, &declaring).unwrap();
+    let mut ty = aliases["t"].clone();
+    bind_declared(&mut session.types, &tree.functions, &mut ty, &declaring);
+    let declared = ty.binding.get(&session.types).unwrap();
+    let mut frozen = ty.clone();
+    types::freeze_bounds(&mut frozen, &tree.functions, &declaring);
+    let resolved =
+        crate::ast::type_parameters::resolve(&tree.functions, ty.clone(), &declaring).unwrap();
+    for ty in [frozen, resolved] {
+        assert_eq!(ty.binding.get(&session.types), Some(declared));
+    }
+}
+
+#[test]
+fn a_container_alone_has_the_type_of_its_declaration() {
+    // IEEE 1800-2023 6.18, 7.10: a queue declared where `W` is 4 has
+    // `logic [3:0]` elements. A reader that has only the container, not the
+    // type that holds it, takes the type it was bound to instead of
+    // resolving it again, also where `W` is not known.
+    let session = &mut Session::default();
+    let source = "module M; class C; logic [W-1:0] q [$]; endclass endmodule";
+    let tree =
+        crate::source_tree::parse_scope_fixture(source, Path::new("semantic_types.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let declaring = ConstEnv::from_iter([("W".into(), 4)]);
+    let class =
+        crate::ast::classes::class(&tree, session, "C", &declaring, &TypeAliases::default())
+            .unwrap();
+    let ty = &class.properties[0].r#type;
+    let declared = of_type(&mut session.types, &tree.functions, ty, &declaring).unwrap();
+    let container = ty.container.as_deref().unwrap().clone();
+    let alone = crate::ast::containers::of(container);
+    let unbound = session.types.unbound_reads;
+    assert_eq!(
+        of_type(
+            &mut session.types,
+            &tree.functions,
+            &alone,
+            &ConstEnv::default()
+        ),
+        Some(declared)
+    );
+    assert_eq!(session.types.unbound_reads, unbound);
+}
+
+#[test]
+fn handles_and_fixed_size_arrays_of_them_name_their_class() {
+    // IEEE 1800-2023 8.4: a handle names its class; an element of an
+    // unpacked array of handles is one (7.4.2). A dynamic array is a
+    // container, whose elements its type does not name.
+    let mut table = TyTable::default();
+    let decl = table.class("C");
+    let class = table.intern(TyData::Class(decl));
+    let fixed = |element| TyData::Array {
+        kind: ArrayKind::Fixed(Range { left: 0, right: 1 }),
+        element,
+    };
+    let array = table.intern(fixed(class));
+    let nested = table.intern(fixed(array));
+    let dynamic = table.intern(TyData::Array {
+        kind: ArrayKind::Dynamic,
+        element: class,
+    });
+    let string = table.intern(TyData::String);
+    for (id, expected) in [
+        (class, Some("C")),
+        (array, Some("C")),
+        (nested, Some("C")),
+        (dynamic, None),
+        (string, None),
+    ] {
+        assert_eq!(table.handle_class(id).map(|class| &**class), expected);
+    }
+}
+
+#[test]
+fn class_handle_types_are_bound_where_they_are_made() {
+    let mut table = TyTable::default();
+    let handle = crate::ast::classes::handle(&mut table, "C");
+    assert_eq!(handle.class_in(&table).as_deref(), Some("C"));
+    assert_eq!(table.unbound_reads, 0);
+}
+
+#[test]
+fn enumerations_and_packed_arrays_of_them_are_told_by_their_types() {
+    // IEEE 1800-2023 6.19: an enumerated type; 7.4.1: a packed array of
+    // one; 7.4.2: an unpacked array of one, whose elements are of it.
+    let (table, ids) = typedefs(
+        "typedef enum logic [1:0] {A, B} e_t;
+         typedef e_t [1:0] pa_t;
+         typedef e_t ua_t [2];
+         typedef logic [1:0] v_t;",
+    );
+    let enumeration = |name: &str| table.enumeration(ids[name]);
+    assert_eq!(enumeration("e_t"), Some(false));
+    assert_eq!(enumeration("pa_t"), Some(true));
+    assert_eq!(enumeration("ua_t"), None);
+    assert_eq!(
+        table.enumeration(table.fixed_element(ids["ua_t"])),
+        Some(false)
+    );
+    assert_eq!(enumeration("v_t"), None);
+    let domain = table.enum_domain(ids["e_t"]).expect("the members of e_t");
+    assert_eq!(
+        domain
+            .members
+            .iter()
+            .map(|member| &*member.name)
+            .collect::<Vec<_>>(),
+        ["A", "B"]
+    );
+}
+
+#[test]
+fn unpacked_structures_and_fixed_size_arrays_of_them_are_told_by_their_types() {
+    // IEEE 1800-2023 7.2: an unpacked structure; 7.4.2: an element of a
+    // fixed-size array of them is one; a queue of them is a container.
+    let (table, ids) = typedefs(
+        "typedef struct {int a;} s_t;
+         typedef s_t sa_t [2];
+         typedef s_t sq_t [$];
+         typedef struct packed {int a;} p_t;",
+    );
+    let is_struct = |name: &str| table.is_unpacked_struct(table.fixed_element(ids[name]));
+    assert!(is_struct("s_t"));
+    assert!(is_struct("sa_t"));
+    assert!(!is_struct("sq_t"));
+    assert!(!is_struct("p_t"));
+}
+
+#[test]
+fn unpacked_structure_types_name_their_declarations() {
+    // IEEE 1800-2023 7.2: the members, defaults and layout of an unpacked
+    // structure type; 7.4.2: those of the elements of a fixed-size array of
+    // them. A queue of them is a container (whose elements take no member
+    // defaults), and a packed structure has no
+    // leaves of its own.
+    let (table, ids) = typedefs(
+        "typedef struct {int a; bit [3:0] b = 4'd5;} s_t;
+         typedef s_t sa_t [2];
+         typedef struct {int c;} t_t;
+         typedef t_t tq_t [$];
+         typedef struct packed {int a;} p_t;",
+    );
+    let declaration = |name: &str| table.unpacked_struct(ids[name]);
+    let aggregate = declaration("s_t").expect("the declaration of `s_t`");
+    assert_eq!(
+        aggregate
+            .members()
+            .iter()
+            .map(|member| (member.name.as_str(), member.width, member.default.is_some()))
+            .collect::<Vec<_>>(),
+        [("a", 32, false), ("b", 4, true)]
+    );
+    assert!(Arc::ptr_eq(
+        declaration("sa_t").expect("the declaration of the elements of `sa_t`"),
+        aggregate
+    ));
+    assert!(declaration("t_t").is_some());
+    assert!(declaration("tq_t").is_none());
+    assert!(declaration("p_t").is_none());
+}
+
+#[test]
+fn classes_and_interfaces_are_declarations_of_their_own() {
+    // IEEE 1800-2023 8.4, 25.9: a handle names its class and a virtual
+    // interface its interface, each one declaration however often a type
+    // names it, apart from a typedef or an interface of the same name.
+    let mut table = TyTable::default();
+    let class = table.class("C");
+    assert_eq!(table.class("C"), class);
+    let interface = table.interface("C");
+    assert_ne!(interface, class);
+    let typedef = table.declare("C", None);
+    let (Decl::Class(class), Decl::Interface(interface)) = (class, interface) else {
+        panic!("a class and an interface declaration");
+    };
+    assert!(typedef != class && typedef != interface);
+    assert_eq!(table.decl(class).name.as_ref(), "C");
+    // 8.25: the parameter values of a specialization, recorded once.
+    let int = table.intern(TyData::Packed(Packed {
+        element: PackedElement::Bits,
+        four_state: false,
+        signed: true,
+        signed_element_depth: None,
+        dims: Box::new([Range { left: 31, right: 0 }]),
+        keyword: Some("int"),
+    }));
+    let arguments: Arc<[ClassArgument]> =
+        Arc::from([ClassArgument::Type(int), ClassArgument::Value(Some(3))]);
+    table.record_class_arguments(class, arguments.clone());
+    assert_eq!(table.decl(class).arguments.as_ref(), Some(&arguments));
 }

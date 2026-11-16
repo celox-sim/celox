@@ -34,6 +34,14 @@ pub struct InterfacePrototype {
     pub warnings: Vec<crate::ir::AnalyzerWarning>,
 }
 
+/// The prototype of an interface, with what its public form leaves out.
+pub(super) struct Prototype {
+    pub(super) prototype: InterfacePrototype,
+    /// The types of the members of an enumeration type, by name, which the
+    /// ports of the prototype's `module` do not keep.
+    pub(super) enumerations: Vec<(String, super::Type)>,
+}
+
 pub fn interface_prototypes(
     sources: &[(&str, &Path)],
 ) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
@@ -53,7 +61,24 @@ pub fn interface_prototypes_with_options(
     selected: Option<&HashSet<String>>,
     options: crate::AnalysisOptions,
 ) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
-    prototypes(sources, selected, options, true)
+    Ok(prototypes(sources, selected, options, Packages::Full)?
+        .into_iter()
+        .map(|prototype| prototype.prototype)
+        .collect())
+}
+
+/// The prototypes of the interfaces in `selected`, analyzing the
+/// declarations of the packages and compilation units their declarations
+/// need, but no executable body of them: a virtual interface type is
+/// declared from these prototypes, which the packages' class methods use,
+/// as a bus functional model's package holds its driver's virtual
+/// interface; their declarations do not.
+pub(super) fn prototypes_with_packages(
+    sources: &[(&str, &Path)],
+    selected: Option<&HashSet<String>>,
+    options: crate::AnalysisOptions,
+) -> Result<Vec<Prototype>, AnalyzerError> {
+    prototypes(sources, selected, options, Packages::Declarations)
 }
 
 /// The prototypes of the interfaces in `selected`, built without analyzing
@@ -66,22 +91,40 @@ pub(super) fn prototypes_without_packages(
     sources: &[(&str, &Path)],
     selected: Option<&HashSet<String>>,
     options: crate::AnalysisOptions,
-) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
-    prototypes(sources, selected, options, false)
+) -> Result<Vec<Prototype>, AnalyzerError> {
+    prototypes(sources, selected, options, Packages::None)
+}
+
+/// What of the packages building prototypes analyzes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Packages {
+    None,
+    /// Their declarations, no executable body.
+    Declarations,
+    Full,
 }
 
 fn prototypes(
     sources: &[(&str, &Path)],
     selected: Option<&HashSet<String>>,
     options: crate::AnalysisOptions,
-    analyze_packages: bool,
-) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
+    analyze_packages: Packages,
+) -> Result<Vec<Prototype>, AnalyzerError> {
     if selected.is_some_and(HashSet::is_empty) {
         return Ok(Vec::new());
     }
+    // The declarations a `duplicate_module` diagnostic leaves out are not
+    // parsed for the interfaces either.
+    let mut declared = fxhash::FxHashSet::default();
     let files = sources
         .iter()
-        .map(|(code, path)| File::new(code, path))
+        .map(|(code, path)| {
+            if options.first_duplicate_module {
+                File::with_first_modules(code, path, &mut declared)
+            } else {
+                File::new(code, path)
+            }
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let declaration_warnings: Vec<_> = files
         .iter()
@@ -120,13 +163,37 @@ fn prototypes(
         .zip(sources)
         .map(|(file, (_, path))| (&file.syntax_tree, *path))
         .collect::<Vec<_>>();
-    let packages = if analyze_packages {
-        packages::Packages::analyze_with_options(&trees, None, options)
-            .map_err(|error| error.with_warnings(source_warnings))?
+    let packages = if analyze_packages != Packages::None {
+        // Only the packages the interfaces name, and those they depend on:
+        // the classes of others may use the virtual interface types these
+        // prototypes declare.
+        // Those the compilation units of their sources import are visible
+        // in them too (IEEE 1800-2023 3.12.1, 26.3); only those units are
+        // analyzed.
+        let mut needed = HashSet::default();
+        let mut units = HashSet::default();
+        for interface in &declarations {
+            let tree = &files[interface.file].syntax_tree;
+            let scoped = tree.scoped(interface.scope)?;
+            needed.extend(super::imports::ScopeImports::from_scope(&scoped)?.packages);
+            if units.insert(sources[interface.file].1.to_path_buf()) {
+                let unit = tree.compilation_scope();
+                needed.extend(super::imports::ScopeImports::from_scope(&unit)?.packages);
+            }
+        }
+        packages::Packages::analyze_needed(
+            &trees,
+            &needed,
+            &units,
+            options,
+            analyze_packages == Packages::Declarations,
+        )
+        .map_err(|error| error.with_warnings(source_warnings))?
     } else {
         packages::Packages::default()
     };
     let package_warnings = packages.warnings().to_vec();
+    let mut package_design = packages.design();
     let mut used_names = design
         .modules
         .keys()
@@ -142,7 +209,7 @@ fn prototypes(
                 .cloned()
                 .unwrap_or_default();
             super::warnings::append(&mut found, warnings.iter().cloned());
-            let prototype = (|| -> Result<InterfacePrototype, AnalyzerError> {
+            let prototype = (|| -> Result<Prototype, AnalyzerError> {
                 let prefix = format!("__celox_interface_{}", interface.name);
                 let mut probe_name = prefix.clone();
                 let mut index = 0;
@@ -168,29 +235,32 @@ fn prototypes(
                     .collect::<HashSet<_>>();
                 let behavior_captures =
                     interface.captured_members(&interface.function_closure(&behavior_functions));
-                Ok(InterfacePrototype {
+                let (module, enumerations) = {
+                    let file = &files[interface.file];
+                    let scoped = file.syntax_tree.scoped(interface.scope)?;
+                    let members = interface
+                        .members
+                        .iter()
+                        .map(|m| m.name.clone())
+                        .collect::<Vec<_>>();
+                    interface_ast::signature(
+                        &scoped,
+                        sources[interface.file].1,
+                        &packages,
+                        &mut package_design,
+                        probe_name.clone(),
+                        &members,
+                        &interface.names,
+                    )?
+                };
+                let prototype = InterfacePrototype {
                     name: interface.name.clone(),
                     warnings: warnings::components(&files[interface.file].syntax_tree)
                         .remove(&interface.name)
                         .unwrap_or_default(),
                     header_dependent_cast: interface
                         .header_dependent_cast(&files[interface.file])?,
-                    module: {
-                        let file = &files[interface.file];
-                        let scoped = file.syntax_tree.scoped(interface.scope)?;
-                        interface_ast::signature(
-                            &scoped,
-                            sources[interface.file].1,
-                            &packages,
-                            probe_name.clone(),
-                            &interface
-                                .members
-                                .iter()
-                                .map(|m| m.name.clone())
-                                .collect::<Vec<_>>(),
-                            &interface.names,
-                        )?
-                    },
+                    module,
                     time_declarations,
                     parameters: interface
                         .parameters
@@ -241,17 +311,22 @@ fn prototypes(
                             )
                         })
                         .collect(),
+                };
+                Ok(Prototype {
+                    prototype,
+                    enumerations,
                 })
             })();
             prototype
-                .map(|mut prototype| {
+                .map(|mut built| {
+                    let prototype = &mut built.prototype;
                     prototype.warnings = package_warnings.clone();
                     for warning in warnings {
                         if !prototype.warnings.contains(&warning) {
                             prototype.warnings.push(warning);
                         }
                     }
-                    prototype
+                    built
                 })
                 .map_err(|error| error.with_warnings(found.clone()))
         })
@@ -414,7 +489,26 @@ struct File<'a> {
 
 impl<'a> File<'a> {
     fn new(code: &'a str, path: &Path) -> Result<Self, AnalyzerError> {
-        let syntax_tree = crate::source_tree::parse_source(code, path)?;
+        Self::of_tree(code, path, crate::source_tree::parse_source(code, path)?)
+    }
+
+    /// The file without the later declarations of a module that `declared`
+    /// or an earlier one in it declares, as the sources are analyzed with
+    /// `first_duplicate_module`.
+    fn with_first_modules(
+        code: &'a str,
+        path: &Path,
+        declared: &mut fxhash::FxHashSet<String>,
+    ) -> Result<Self, AnalyzerError> {
+        let (tree, _) = crate::source_tree::parse_source_with_first_modules(code, path, declared)?;
+        Self::of_tree(code, path, tree)
+    }
+
+    fn of_tree(
+        code: &'a str,
+        path: &Path,
+        syntax_tree: crate::source_tree::SourceTree,
+    ) -> Result<Self, AnalyzerError> {
         let native = syntax_tree.declarations();
         let mut tokens = Vec::new();
         let mut identifiers = HashSet::default();
@@ -1300,11 +1394,22 @@ impl<'a> Design<'a> {
                 }
                 called.insert(item.clone());
             }
+            // An `output` of the modport lets the module drive the member;
+            // only a module that does is a driver of it (25.5). Several
+            // modports of one interface may list a member as an output
+            // that one of the modules connected through them assigns.
+            let mut driven: HashSet<String> = uses
+                .writes
+                .iter()
+                .filter(|(handle, _, _)| handle == port_name)
+                .map(|(_, member, _)| member.clone())
+                .collect();
             let functions = interface.function_closure(&called);
             for (member, direction) in interface.captured_members(&functions) {
-                let listed = listed.entry(member).or_insert(direction);
+                let listed = listed.entry(member.clone()).or_insert(direction);
                 if direction == Direction::Output {
                     *listed = Direction::Output;
+                    driven.insert(member);
                 }
             }
             for child in uses
@@ -1320,6 +1425,9 @@ impl<'a> Design<'a> {
                     &child.bindings,
                 )?;
                 for (member, direction) in child_expansion.members {
+                    if direction == Direction::Output {
+                        driven.insert(member.clone());
+                    }
                     let Some(access) = imported.get(&member) else {
                         continue;
                     };
@@ -1341,9 +1449,14 @@ impl<'a> Design<'a> {
                     .members
                     .iter()
                     .filter_map(|member| {
-                        listed
-                            .get(&member.name)
-                            .map(|direction| (member.name.clone(), *direction))
+                        listed.get(&member.name).map(|direction| {
+                            let direction = if driven.contains(&member.name) {
+                                *direction
+                            } else {
+                                Direction::Input
+                            };
+                            (member.name.clone(), direction)
+                        })
                     })
                     .collect(),
                 functions,
@@ -2349,6 +2462,7 @@ fn connections(
             .collect());
     }
     let mut connections = Vec::new();
+    let mut wildcard = None;
     for connection in &instance.connections {
         match &connection.kind {
             InstanceConnectionKind::Named { name, value } => {
@@ -2362,19 +2476,32 @@ fn connections(
                 connections.push((formal, actual));
             }
             InstanceConnectionKind::Wildcard if !strict => {}
-            InstanceConnectionKind::Wildcard => {
-                return Err(unsupported("wildcard port connection"));
-            }
+            InstanceConnectionKind::Wildcard => wildcard = Some(file.span(connection.tokens)?),
             _ => return Err(unsupported("mixed named and positional port connections")),
         }
     }
     if strict {
         for port in &module.ports {
-            if port.interface.is_some()
-                && !connections.iter().any(|(formal, _)| formal == &port.name)
-            {
-                connections.push((port.name.clone(), Connection::Explicit(None)));
+            let Some(interface) = &port.interface else {
+                continue;
+            };
+            if connections.iter().any(|(formal, _)| formal == &port.name) {
+                continue;
             }
+            // `.*` connects each port left unnamed as `.name` does
+            // (IEEE 1800-2023 23.3.2.4); an implicit connection cannot bind
+            // a generic interface port (25.3.3).
+            let actual = match wildcard {
+                Some(_) if interface.interface.is_none() => {
+                    return Err(unsupported(format!(
+                        "wildcard connection of generic interface port `{}`",
+                        port.name
+                    )));
+                }
+                Some(span) => Connection::Implicit(span),
+                None => Connection::Explicit(None),
+            };
+            connections.push((port.name.clone(), actual));
         }
     }
     Ok(connections)
@@ -2750,9 +2877,10 @@ impl InterfaceDecl {
                         self.name
                     )));
                 }
-                if subroutine.kind != native::SubroutineKind::Function {
+                // A constructor belongs to a class (IEEE 1800-2023 8.7).
+                if subroutine.kind == native::SubroutineKind::Constructor {
                     return Err(unsupported(format!(
-                        "task, class, or verification declaration in interface `{}`",
+                        "constructor in interface `{}`",
                         self.name
                     )));
                 }
@@ -2869,7 +2997,8 @@ impl InterfaceDecl {
             | native::BodyItemKind::Block { .. }
             | native::BodyItemKind::Conditional { .. }
             | native::BodyItemKind::Case { .. }
-            | native::BodyItemKind::Loop { .. } => self.items.push(Item::Process(span)),
+            | native::BodyItemKind::Loop { .. }
+            | native::BodyItemKind::Assertion(_) => self.items.push(Item::Process(span)),
             native::BodyItemKind::Unconverted { category, .. } => match category.as_str() {
                 ";" => {}
                 "genvar" => {
@@ -2901,7 +3030,8 @@ impl InterfaceDecl {
                         self.name
                     )));
                 }
-                "bind" | "alias" | "assert" | "assume" | "cover" | "restrict" => {
+                "assert" | "assume" | "cover" => self.items.push(Item::Process(span)),
+                "bind" | "alias" | "restrict" => {
                     return Err(unsupported(format!(
                         "instantiation, assertion, or alias in interface `{}`",
                         self.name
@@ -3170,9 +3300,27 @@ pub fn plan_interfaces_with_member_paths(
     sources: &[(&str, &Path)],
     bindings: &[(String, String, Vec<(String, String)>)],
 ) -> Converted<(NativeInterfacePlan, InterfaceMemberPaths)> {
+    plan_interfaces_of_first_modules(sources, bindings, false)
+}
+
+/// [`plan_interfaces_with_member_paths`], with only the first declaration
+/// of a module declared twice when `first_modules`
+/// ([`crate::AnalysisOptions::first_duplicate_module`]).
+pub fn plan_interfaces_of_first_modules(
+    sources: &[(&str, &Path)],
+    bindings: &[(String, String, Vec<(String, String)>)],
+    first_modules: bool,
+) -> Converted<(NativeInterfacePlan, InterfaceMemberPaths)> {
+    let mut declared = fxhash::FxHashSet::default();
     let files = sources
         .iter()
-        .map(|(code, path)| File::new(code, path))
+        .map(|(code, path)| {
+            if first_modules {
+                File::with_first_modules(code, path, &mut declared)
+            } else {
+                File::new(code, path)
+            }
+        })
         .collect::<Converted<Vec<_>>>()?;
     // Local interface instances are bound from their original declarations by
     // interface_binding. A structural plan is needed only for module interface

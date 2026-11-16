@@ -20,20 +20,39 @@ struct CaseState {
     items: Vec<CaseItemBase<Expr, LValue>>,
     default: Option<Vec<Stmt>>,
 }
+struct RandcaseState {
+    id: StatementId,
+    index: usize,
+    /// The hidden variables holding the evaluated weights, and the width
+    /// they and the pick share (18.16).
+    weights: Vec<String>,
+    width: usize,
+    items: Vec<Vec<Stmt>>,
+}
 enum Job {
     Enter(StatementId),
     EndScope,
+    /// Wrap the statements built since `start` as the named block `id`
+    /// when a `disable` in them named it; they stay flattened otherwise.
+    BlockEnd {
+        id: u64,
+        start: usize,
+    },
     ForkNext {
         items: Vec<StatementId>,
         index: usize,
         join: celox_design::ForkJoin,
         branches: Vec<Vec<Stmt>>,
+        /// Per item, the process-handle and armed variables of a named
+        /// branch block a sibling `disable` can kill (9.6.2).
+        handles: Vec<Option<(String, String)>>,
     },
     ForkBranch {
         items: Vec<StatementId>,
         index: usize,
         join: celox_design::ForkJoin,
         branches: Vec<Vec<Stmt>>,
+        handles: Vec<Option<(String, String)>>,
         start: usize,
         sensitivity: usize,
         parent_body: system_functions::Body,
@@ -52,6 +71,11 @@ enum Job {
     CaseBranch {
         state: CaseState,
         labels: Option<Vec<CaseLabel<Expr>>>,
+        start: usize,
+    },
+    RandcaseNext(RandcaseState),
+    RandcaseBranch {
+        state: RandcaseState,
         start: usize,
     },
     Loop {
@@ -89,6 +113,7 @@ enum Job {
         assertion: celox_design::AssertionSite,
         span: Option<crate::procedural::SourceSpan>,
         failure: Option<StatementId>,
+        prelude: Vec<Stmt>,
         start: usize,
     },
     AssertionFinish {
@@ -99,6 +124,7 @@ enum Job {
         then_body: Vec<Stmt>,
         assertion: celox_design::AssertionSite,
         default_failure: Option<(String, Option<crate::procedural::SourceSpan>)>,
+        prelude: Vec<Stmt>,
         start: usize,
     },
 }
@@ -147,7 +173,10 @@ impl BodyBuilder<'_, '_, '_> {
         }
         result
     }
-    fn native_body_machine(&mut self, ids: &[StatementId]) -> Result<Vec<Stmt>, AnalyzerError> {
+    pub(super) fn native_body_machine(
+        &mut self,
+        ids: &[StatementId],
+    ) -> Result<Vec<Stmt>, AnalyzerError> {
         let native = self.tree.declarations();
         let mut jobs = Vec::new();
         jobs.extend(ids.iter().rev().map(|id| Job::Enter(*id)));
@@ -161,7 +190,8 @@ impl BodyBuilder<'_, '_, '_> {
                     items,
                     index,
                     join,
-                    branches,
+                    mut branches,
+                    handles,
                 } => {
                     if let Some(&id) = items.get(index) {
                         if let StatementKind::Declaration(declaration) = &native.statement(id).kind
@@ -172,6 +202,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 index: index + 1,
                                 join,
                                 branches,
+                                handles,
                             });
                         } else {
                             jobs.push(Job::ForkBranch {
@@ -179,6 +210,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 index,
                                 join,
                                 branches,
+                                handles,
                                 start: output.len(),
                                 sensitivity: self.sensitivity_body.len(),
                                 parent_body: self.body,
@@ -191,6 +223,46 @@ impl BodyBuilder<'_, '_, '_> {
                             jobs.push(Job::Enter(id));
                         }
                     } else {
+                        // The branches' names leave scope with the fork.
+                        let registered = handles.iter().flatten().count();
+                        let named = self
+                            .fork_blocks
+                            .split_off(self.fork_blocks.len() - registered);
+                        // A branch a sibling `disable` names registers its
+                        // process as its first act (9.6.2). Other named
+                        // branches take no handle: an exposed process keeps
+                        // its record for as long as the simulation runs.
+                        let mut branch = 0;
+                        let mut named = named.into_iter();
+                        for (item, handle) in items.iter().zip(&handles) {
+                            if matches!(native.statement(*item).kind, StatementKind::Declaration(_))
+                            {
+                                continue;
+                            }
+                            if handle.is_some()
+                                && let Some((_, handle, armed, true)) = named.next()
+                            {
+                                let assign = |name: String, rhs: Expr| Stmt::Assign {
+                                    lhs: LValue::Ident(name),
+                                    rhs,
+                                    nonblocking: false,
+                                };
+                                branches[branch].splice(
+                                    0..0,
+                                    [
+                                        assign(
+                                            handle,
+                                            events::call(
+                                                celox_design::ProcessOp::SelfHandle,
+                                                Vec::new(),
+                                            ),
+                                        ),
+                                        assign(armed, Expr::Literal("1'b1".into())),
+                                    ],
+                                );
+                            }
+                            branch += 1;
+                        }
                         self.pop_scope();
                         output.push(Stmt::Fork { join, branches });
                     }
@@ -200,6 +272,7 @@ impl BodyBuilder<'_, '_, '_> {
                     index,
                     join,
                     mut branches,
+                    handles,
                     start,
                     sensitivity,
                     parent_body,
@@ -229,6 +302,7 @@ impl BodyBuilder<'_, '_, '_> {
                         index: index + 1,
                         join,
                         branches,
+                        handles,
                     });
                 }
                 Job::Enter(id) => match &native.statement(id).kind {
@@ -249,15 +323,71 @@ impl BodyBuilder<'_, '_, '_> {
                             "join_none" => celox_design::ForkJoin::None,
                             _ => return Err(disagreement()),
                         };
+                        // A branch that is a named block can be disabled
+                        // by name from a sibling branch (9.6.2): register
+                        // a process handle for each such branch.
+                        let mut handles = Vec::new();
+                        for item in items.iter() {
+                            let named = match &native.statement(*item).kind {
+                                StatementKind::Block {
+                                    label: Some(label), ..
+                                } => Some(instances::normalize_identifier(&label.spelling)),
+                                _ => None,
+                            };
+                            handles.push(named.map(|label| {
+                                let handle =
+                                    classes::handle(&mut self.session.types, processes::CLASS);
+                                let handle = self.hidden(handle).1;
+                                let armed = self.hidden(unsigned_type(1)).1;
+                                self.fork_blocks.push((
+                                    label,
+                                    handle.clone(),
+                                    armed.clone(),
+                                    false,
+                                ));
+                                (handle, armed)
+                            }));
+                        }
                         jobs.push(Job::ForkNext {
                             items: items.clone(),
                             index: 0,
                             join,
                             branches: Vec::new(),
+                            handles,
                         });
                     }
-                    StatementKind::Block { items, .. } => {
+                    StatementKind::Block { label, items, .. } => {
                         self.push_scope();
+                        // A named block is a candidate to stay a block in
+                        // the IR when a `disable` in its body can leave
+                        // it: no fork in the body, whose children a
+                        // disable would also have to kill. Others flatten
+                        // as before, and a `disable` naming them stays
+                        // unsupported. A candidate no `disable` names
+                        // flattens too (see `Job::BlockEnd`).
+                        let named = label.as_ref().filter(|_| {
+                            !native
+                                .tokens
+                                .get(
+                                    native.statement(id).tokens.start
+                                        ..native.statement(id).tokens.end,
+                                )
+                                .into_iter()
+                                .flatten()
+                                .any(|token| !token.is_trivia() && token.text == "fork")
+                        });
+                        if let Some(label) = named {
+                            let block_id = self.block_id(native.statement(id).tokens.start);
+                            self.named_blocks.push((
+                                instances::normalize_identifier(&label.spelling),
+                                block_id,
+                                false,
+                            ));
+                            jobs.push(Job::BlockEnd {
+                                id: block_id,
+                                start: output.len(),
+                            });
+                        }
                         jobs.push(Job::EndScope);
                         jobs.extend(items.iter().rev().map(|id| Job::Enter(*id)));
                     }
@@ -331,6 +461,40 @@ impl BodyBuilder<'_, '_, '_> {
                         });
                         jobs.push(Job::Enter(*body));
                     }
+                    // A randcase evaluates each weight once, as an
+                    // unsigned value at the widest weight's precision,
+                    // then picks a branch by a random number below their
+                    // sum (IEEE 1800-2023 18.16).
+                    StatementKind::Case {
+                        keyword,
+                        expression: None,
+                        arms,
+                        ..
+                    } if keyword == "randcase" => {
+                        let mut weight_ids = Vec::new();
+                        for arm in arms {
+                            match (arm.default, arm.matches.as_slice()) {
+                                (false, [celox_sv_syntax::CaseMatch::Expression(weight)]) => {
+                                    weight_ids.push(*weight);
+                                }
+                                _ => return Err(unsupported("randcase item")),
+                            }
+                        }
+                        if weight_ids.is_empty() {
+                            return Err(unsupported("randcase without items"));
+                        }
+                        let weight_ids = weight_ids.into_iter().map(Some).collect::<Vec<_>>();
+                        let (prelude, weights, width) =
+                            self.randcase_weights(&weight_ids, 1, 0, "randcase")?;
+                        output.extend(prelude);
+                        jobs.push(Job::RandcaseNext(RandcaseState {
+                            id,
+                            index: 0,
+                            weights,
+                            width,
+                            items: Vec::new(),
+                        }));
+                    }
                     // A case statement on a type reference selects its arm
                     // at elaboration: the first whose type matches, else the
                     // default one (IEEE 1800-2023 6.23).
@@ -359,53 +523,17 @@ impl BodyBuilder<'_, '_, '_> {
                         if mode.as_deref() == Some("matches") {
                             return Err(unsupported("pattern-matching case statement"));
                         }
-                        // A case statement compares with `===` (IEEE 1800-2023 12.5).
-                        let operator = match (mode.as_deref(), keyword.as_str()) {
-                            (Some("inside"), _) => "inside",
-                            (_, "case") => "===",
-                            (_, keyword) => keyword,
-                        };
-                        // Only `case` compares chandles, with chandle or
-                        // `null` items (6.14); the binder rejects them
-                        // elsewhere. A selector is a chandle also when only
-                        // a default arm compares nothing with it.
-                        let mut chandles = operator == "==="
-                            && expression_binding::native_chandle(
-                                self.tree,
-                                *value,
-                                native,
-                                &self.dims,
-                                self.session,
-                            );
-                        for case_match in arms.iter().flat_map(|arm| &arm.matches) {
-                            if let celox_sv_syntax::CaseMatch::Expression(label) = case_match {
-                                chandles |= expression_binding::check_chandle_equality(
-                                    operator,
-                                    *value,
-                                    *label,
-                                    self.tree,
-                                    native,
-                                    &self.dims,
-                                    self.session,
-                                )?;
-                            }
-                        }
-                        let kind = if mode.as_deref() == Some("inside") {
-                            CaseKind::Inside
-                        } else {
-                            match keyword.as_str() {
-                                "case" => CaseKind::Exact,
-                                "casez" => CaseKind::Z,
-                                "casex" => CaseKind::X,
-                                _ => return Err(disagreement()),
-                            }
-                        };
-                        output.extend(self.effects(&[*value])?);
-                        let selector = if chandles {
-                            self.native_chandle_value(*value)?
-                        } else {
-                            self.native_value(*value)?
-                        };
+                        let labels = arms
+                            .iter()
+                            .flat_map(|arm| &arm.matches)
+                            .filter_map(|case_match| match case_match {
+                                celox_sv_syntax::CaseMatch::Expression(label) => Some(*label),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        let (effects, kind, selector, chandles) =
+                            self.case_header(keyword, mode.as_deref(), *value, &labels)?;
+                        output.extend(effects);
                         jobs.push(Job::CaseNext(CaseState {
                             id,
                             index: 0,
@@ -459,11 +587,8 @@ impl BodyBuilder<'_, '_, '_> {
                                 start: output.len(),
                                 sensitivity: self.sensitivity_body.len(),
                             });
-                        } else if let Some(stmts) = self.virtual_event_control(*control)? {
-                            output.extend(stmts);
                         } else {
-                            let timing = self.native_timing_control(*control)?;
-                            output.push(timing);
+                            output.extend(self.timing_control_statements(*control)?);
                         }
                         jobs.push(Job::Enter(*body));
                     }
@@ -479,12 +604,27 @@ impl BodyBuilder<'_, '_, '_> {
                     } => {
                         let mut stages = None;
                         let mut expect = None;
+                        let mut prelude = Vec::new();
                         let (condition, deferred, concurrent) = match header {
-                            celox_sv_syntax::AssertionHeader::Immediate { deferred, .. } => (
-                                self.native_assertion_condition(keyword, header)?,
+                            celox_sv_syntax::AssertionHeader::Immediate {
                                 deferred,
-                                None,
-                            ),
+                                condition,
+                                ..
+                            } => {
+                                // The expression is evaluated as the
+                                // condition of an `if` is, when the
+                                // statement runs, a deferred one's too
+                                // (IEEE 1800-2023 16.3, 16.4): its
+                                // assignments and `$cast`s run first, and
+                                // not at all while assertions are off,
+                                // which start no attempt (20.11).
+                                prelude = self.effects(&[*condition])?;
+                                (
+                                    self.native_assertion_condition(keyword, header)?,
+                                    deferred,
+                                    None,
+                                )
+                            }
                             celox_sv_syntax::AssertionHeader::Concurrent { property, .. }
                                 if keyword == "expect" =>
                             {
@@ -519,16 +659,34 @@ impl BodyBuilder<'_, '_, '_> {
                                 if !matches!(keyword.as_str(), "assert" | "assume" | "cover") {
                                     return Err(unsupported("concurrent assertion directive"));
                                 }
-                                if let Some(sequence) = sequence {
-                                    let monitor = self.sequence_stages(*sequence)?;
-                                    // An attempt of one tick is disabled at that tick; a
-                                    // longer one would need the condition at each tick.
-                                    if disable.is_some() && monitor.ticks.is_some() {
+                                if let Some(sequence) = sequence
+                                    && multiclock::clocked(
+                                        &self.tree.declarations().sequence(*sequence).consequent,
+                                    )
+                                {
+                                    // A multiclocked sequence (16.13): its
+                                    // own decisions over each of its clocks.
+                                    if disable.is_some() {
                                         return Err(unsupported(
-                                            "disable iff of a sequence over cycles",
+                                            "disable iff of a multiclocked sequence",
                                         ));
                                     }
-                                    stages = Some(monitor);
+                                    let body = self.tree.declarations().sequence(*sequence).clone();
+                                    let multiclock = self.multiclock_monitor(
+                                        clock.expect("a leading clock"),
+                                        &body,
+                                    )?;
+                                    stages = Some(assertions::SequenceMonitor {
+                                        stages: Vec::new(),
+                                        ticks: None,
+                                        updates: Vec::new(),
+                                        start: Vec::new(),
+                                        disabled: None,
+                                        multiclock: Some(multiclock),
+                                    });
+                                    (Expr::Literal("1'b1".into()), &None, Some(None))
+                                } else if let Some(sequence) = sequence {
+                                    let mut monitor = self.sequence_stages(*sequence)?;
                                     let disable = disable
                                         .map(|id| {
                                             self.native_value(id).map(procedural_truth_condition)
@@ -537,7 +695,15 @@ impl BodyBuilder<'_, '_, '_> {
                                     if let Some(disable) = &disable {
                                         assertions::concurrent_operand(disable)?;
                                         assertions::concurrent_disable(disable)?;
+                                        // An attempt of one tick is disabled at that tick;
+                                        // a longer one whenever the condition is true
+                                        // until it ends.
+                                        if let Some((_, length)) = &monitor.ticks {
+                                            monitor.disabled =
+                                                Some(self.disable_history(disable, *length));
+                                        }
                                     }
+                                    stages = Some(monitor);
                                     (Expr::Literal("1'b1".into()), &None, Some(disable))
                                 } else {
                                     let mut operand = self.native_value(*condition)?;
@@ -631,11 +797,24 @@ impl BodyBuilder<'_, '_, '_> {
                             },
                             span: super::source_span(statement.tokens, self.tree),
                             failure: *failure,
+                            prelude,
                             start: output.len(),
                         });
                         if let Some(success) = success {
                             jobs.push(Job::Enter(*success));
                         }
+                    }
+                    // In a randsequence code block, `break` outside a loop
+                    // and `return` leave the statement or a production
+                    // (IEEE 1800-2023 18.17.6).
+                    StatementKind::Break | StatementKind::Return(_)
+                        if let Some(exit) = self.randsequence_exits.get(&id).cloned() =>
+                    {
+                        let value = match &native.statement(id).kind {
+                            StatementKind::Return(value) => *value,
+                            _ => None,
+                        };
+                        output.extend(self.randsequence_exit(value, exit)?);
                     }
                     StatementKind::Break => output.push(Stmt::Break),
                     StatementKind::Continue => output.push(Stmt::Continue),
@@ -664,7 +843,14 @@ impl BodyBuilder<'_, '_, '_> {
                                 .return_shape
                                 .as_ref()
                                 .filter(|shape| shape.unpacked.is_empty())
-                                .and_then(|shape| shape.class.clone())
+                                .and_then(|shape| {
+                                    expression_binding::objects::shape_class(
+                                        shape,
+                                        self.tree,
+                                        self.session,
+                                        &self.dims,
+                                    )
+                                })
                             {
                                 expression_binding::check_handle_assignment(
                                     self.tree,
@@ -708,9 +894,25 @@ impl BodyBuilder<'_, '_, '_> {
                             .transpose()?;
                         output.push(Stmt::Return(value));
                     }
+                    StatementKind::Unconverted { category, .. } if category == "randsequence" => {
+                        output.extend(self.randsequence(id)?)
+                    }
                     _ => output.extend(self.native_statement_leaf(&native.statement(id).kind)?),
                 },
                 Job::EndScope => self.pop_scope(),
+                Job::BlockEnd { id, start } => {
+                    let Some((_, registered, targeted)) = self.named_blocks.pop() else {
+                        return Err(disagreement());
+                    };
+                    debug_assert_eq!(registered, id);
+                    // A block no `disable` names is ordinary sequential
+                    // code: keeping it flat leaves every analysis of the
+                    // enclosing statement list as it is without the label.
+                    if targeted {
+                        let body = output.split_off(start);
+                        output.push(Stmt::Block { id, body });
+                    }
+                }
                 Job::ImplicitEvent { start, sensitivity } => {
                     let wait = timing::implicit_event(
                         &output[start..],
@@ -727,6 +929,7 @@ impl BodyBuilder<'_, '_, '_> {
                     assertion,
                     span,
                     failure,
+                    prelude,
                     start,
                 } => {
                     let then_body = output.split_off(start);
@@ -742,6 +945,7 @@ impl BodyBuilder<'_, '_, '_> {
                         } else {
                             None
                         },
+                        prelude,
                         start: output.len(),
                     });
                     if let Some(failure) = failure {
@@ -751,11 +955,12 @@ impl BodyBuilder<'_, '_, '_> {
                 Job::AssertionFinish {
                     concurrent,
                     condition,
-                    stages,
+                    mut stages,
                     expect,
                     mut then_body,
                     assertion,
                     default_failure,
+                    prelude,
                     start,
                 } => {
                     let mut else_body = output.split_off(start);
@@ -776,10 +981,13 @@ impl BodyBuilder<'_, '_, '_> {
                         &assertion,
                         celox_design::AssertionOutcome::Fail,
                     );
+                    // An `expect` statement is not an assertion the tasks
+                    // control (20.11).
                     if let Some(attempt) = expect {
                         output.extend(self.expect_statements(attempt, then_body, else_body));
                         continue;
                     }
+                    let controlled = self.controls_assertions();
                     if concurrent.is_some() {
                         // `timed_tasks::classify` checks the actions once
                         // every subroutine is known.
@@ -791,7 +999,58 @@ impl BodyBuilder<'_, '_, '_> {
                     }
                     // A sequence over cycles decides each step that an
                     // attempt reaches at this tick, the oldest attempt first.
+                    if let Some(multiclock) = stages
+                        .as_mut()
+                        .and_then(|monitor| monitor.multiclock.take())
+                    {
+                        // The wait for a tick of a clock, then in the
+                        // Observed region the decisions, then the actions of
+                        // the attempts that passed and failed, each once an
+                        // attempt. The process repeats them.
+                        debug_assert!(matches!(
+                            output.last(),
+                            Some(Stmt::AssertionRegion { reactive: false })
+                        ));
+                        let region = output.len() - 1;
+                        output.splice(region..region, multiclock.wake);
+                        output.extend(multiclock.observed);
+                        output.push(Stmt::AssertionRegion { reactive: true });
+                        for (count, body) in [
+                            (multiclock.passes, then_body),
+                            (multiclock.fails, else_body),
+                        ] {
+                            let index = self.declare("repeat@multiclock", int_type());
+                            output.push(Stmt::Loop {
+                                kind: LoopKind::For,
+                                init: vec![Stmt::Local {
+                                    name: index.clone(),
+                                    init: Some(Expr::Literal("0".into())),
+                                }],
+                                condition: Some(Expr::Binary {
+                                    left: Box::new(Expr::Ident(index.clone())),
+                                    op: BinaryOp::Lt,
+                                    right: Box::new(Expr::Ident(count)),
+                                }),
+                                step: vec![Stmt::Assign {
+                                    lhs: LValue::Ident(index.clone()),
+                                    rhs: Expr::Binary {
+                                        left: Box::new(Expr::Ident(index)),
+                                        op: BinaryOp::Add,
+                                        right: Box::new(Expr::Literal("1".into())),
+                                    },
+                                    nonblocking: false,
+                                }],
+                                body: body.into_iter().skip(1).collect(),
+                            });
+                        }
+                        continue;
+                    }
                     if let Some(monitor) = stages {
+                        // Whether assertions are on for the attempt that
+                        // starts at this tick, read in the Observed region
+                        // before any action (4.4.2.5, 20.11; see
+                        // `sequence_stages`).
+                        output.extend(monitor.start);
                         let mut decisions = Vec::new();
                         // Older attempts first; steps at one offset in their
                         // order, a `##0` sequence's calls before its action.
@@ -819,23 +1078,35 @@ impl BodyBuilder<'_, '_, '_> {
                                 then_body: on_match,
                                 else_body: on_miss,
                             };
-                            decisions.push(match stage.alive {
+                            let decision = match stage.alive {
                                 Some(alive) => Stmt::If {
                                     condition: alive,
                                     then_body: vec![decision],
                                     else_body: Vec::new(),
                                 },
                                 None => decision,
+                            };
+                            // A disabled attempt neither passes nor fails.
+                            decisions.push(match &monitor.disabled {
+                                Some(history) => Stmt::If {
+                                    condition: history.of_age(stage.offset),
+                                    then_body: Vec::new(),
+                                    else_body: vec![decision],
+                                },
+                                None => decision,
                             });
                         }
-                        if let Some(Some(disable)) = &concurrent {
-                            output.push(Stmt::If {
+                        match (&concurrent, &monitor.disabled, &monitor.ticks) {
+                            (Some(Some(disable)), Some(history), Some((_, length))) => {
+                                output.extend(history.tick(disable, *length));
+                                output.extend(decisions);
+                            }
+                            (Some(Some(disable)), _, _) => output.push(Stmt::If {
                                 condition: disable.clone(),
                                 then_body: Vec::new(),
                                 else_body: decisions,
-                            });
-                        } else {
-                            output.extend(decisions);
+                            }),
+                            _ => output.extend(decisions),
                         }
                         // The values later ticks read, once this tick
                         // decided its steps.
@@ -867,14 +1138,21 @@ impl BodyBuilder<'_, '_, '_> {
                         then_body,
                         else_body,
                     };
-                    if let Some(Some(disable)) = concurrent {
-                        output.push(Stmt::If {
+                    let decision = if let Some(Some(disable)) = concurrent {
+                        Stmt::If {
                             condition: disable,
                             then_body: Vec::new(),
                             else_body: vec![decision],
-                        });
+                        }
                     } else {
-                        output.push(decision);
+                        decision
+                    };
+                    let mut attempt = prelude;
+                    attempt.push(decision);
+                    if controlled {
+                        output.push(assertion_control::checked(attempt));
+                    } else {
+                        output.extend(attempt);
                     }
                 }
                 Job::IfNext(state) => {
@@ -982,6 +1260,26 @@ impl BodyBuilder<'_, '_, '_> {
                     state.index += 1;
                     jobs.push(Job::CaseNext(state));
                 }
+                Job::RandcaseNext(state) => {
+                    let StatementKind::Case { arms, .. } = &native.statement(state.id).kind else {
+                        return Err(disagreement());
+                    };
+                    if state.index == arms.len() {
+                        output.extend(self.randcase_finish(state));
+                    } else {
+                        let body = arms[state.index].body;
+                        jobs.push(Job::RandcaseBranch {
+                            state,
+                            start: output.len(),
+                        });
+                        jobs.push(Job::Enter(body));
+                    }
+                }
+                Job::RandcaseBranch { mut state, start } => {
+                    state.items.push(output.split_off(start));
+                    state.index += 1;
+                    jobs.push(Job::RandcaseNext(state));
+                }
                 Job::Loop {
                     kind,
                     init,
@@ -1058,7 +1356,67 @@ impl BodyBuilder<'_, '_, '_> {
         }
         Ok(output)
     }
-    fn native_case_labels(
+    /// The header of case statement `keyword` (`case`, `casez` or `casex`)
+    /// in mode `mode` (`inside` or none) on selector `value`, its label
+    /// expressions `labels`: the statements evaluating the selector's
+    /// effects, the kind, the selector, and whether the statement compares
+    /// chandles (IEEE 1800-2023 12.5, 6.14).
+    pub(super) fn case_header(
+        &mut self,
+        keyword: &str,
+        mode: Option<&str>,
+        value: celox_sv_syntax::ExprId,
+        labels: &[celox_sv_syntax::ExprId],
+    ) -> Converted<(Vec<Stmt>, CaseKind, Expr, bool)> {
+        let native = self.tree.declarations();
+        // A case statement compares with `===` (IEEE 1800-2023 12.5).
+        let operator = match (mode, keyword) {
+            (Some("inside"), _) => "inside",
+            (_, "case") => "===",
+            (_, keyword) => keyword,
+        };
+        // Only `case` compares chandles, with chandle or `null` items
+        // (6.14); the binder rejects them elsewhere. A selector is a
+        // chandle also when only a default arm compares nothing with it.
+        let mut chandles = operator == "==="
+            && expression_binding::native_chandle(
+                self.tree,
+                value,
+                native,
+                &self.dims,
+                self.session,
+            );
+        for label in labels {
+            chandles |= expression_binding::check_chandle_equality(
+                operator,
+                value,
+                *label,
+                self.tree,
+                native,
+                &self.dims,
+                self.session,
+            )?;
+        }
+        let kind = if mode == Some("inside") {
+            CaseKind::Inside
+        } else {
+            match keyword {
+                "case" => CaseKind::Exact,
+                "casez" => CaseKind::Z,
+                "casex" => CaseKind::X,
+                _ => return Err(disagreement()),
+            }
+        };
+        let effects = self.effects(&[value])?;
+        let selector = if chandles {
+            self.native_chandle_value(value)?
+        } else {
+            self.native_value(value)?
+        };
+        Ok((effects, kind, selector, chandles))
+    }
+
+    pub(super) fn native_case_labels(
         &mut self,
         labels: &[celox_sv_syntax::CaseMatch],
         inside: bool,
@@ -1102,6 +1460,8 @@ fn breaks(body: &[Stmt]) -> bool {
             items.iter().any(|item| breaks(&item.body)) || default.as_deref().is_some_and(breaks)
         }
         Stmt::WaitImplicit { reads, .. } => breaks(reads),
+        // A named block is no loop: a `break` in it leaves this one.
+        Stmt::Block { body, .. } => breaks(body),
         _ => false,
     })
 }
@@ -1150,13 +1510,205 @@ pub(super) fn mark_breaks(body: Vec<Stmt>, stop: &str) -> Vec<Stmt> {
                 reads: mark_breaks(reads, stop),
                 always_comb,
             }),
+            Stmt::Block { id, body } => marked.push(Stmt::Block {
+                id,
+                body: mark_breaks(body, stop),
+            }),
             stmt => marked.push(stmt),
         }
     }
     marked
 }
 
+/// An unsigned packed type of `width` bits, for hidden randcase values.
+pub(super) fn unsigned_type(width: usize) -> Type {
+    let mut ty = super::int_type();
+    ty.is_signed = false;
+    ty.packed_ranges = vec![PackedRange::new(
+        ConstExpr::Literal((width - 1).to_string()),
+        ConstExpr::Literal("0".to_string()),
+    )];
+    ty
+}
+
 impl BodyBuilder<'_, '_, '_> {
+    /// The statements that pick a randcase branch: when the weights sum
+    /// to a nonzero total, draw a number below it with the thread RNG
+    /// and take the first branch whose cumulative weight exceeds it; a
+    /// zero total takes no branch (IEEE 1800-2023 18.16).
+    /// Evaluate weights `weight_ids` once, in order, into hidden unsigned
+    /// variables at the widest weight's precision (IEEE 1800-2023 18.16,
+    /// 18.17.1), `headroom` bits wider: the statements that do, the
+    /// variables, and the width, at which they are summed. A weight `None`
+    /// is 1. The widest weight is taken at least `minimum` wide. `what`
+    /// names the construct in diagnostics.
+    pub(super) fn randcase_weights(
+        &mut self,
+        weight_ids: &[Option<celox_sv_syntax::ExprId>],
+        minimum: usize,
+        headroom: usize,
+        what: &str,
+    ) -> Converted<(Vec<Stmt>, Vec<String>, usize)> {
+        let native = self.tree.declarations();
+        let mut width = minimum;
+        for weight in weight_ids.iter().flatten() {
+            let ty =
+                expression_types::type_of(self.tree, self.session, *weight, native, &self.dims)?;
+            let semantic_types::TyData::Packed(packed) = self.session.types.data(ty).clone() else {
+                return Err(unsupported(format!("non-integral {what} weight")));
+            };
+            width = width.max(
+                usize::try_from(packed.bits())
+                    .map_err(|_| unsupported(format!("{what} weight width")))?,
+            );
+        }
+        if width > 64 {
+            return Err(unsupported(format!("{what} weights wider than 64 bits")));
+        }
+        let width = width + headroom;
+        if width > 64 {
+            return Err(unsupported(format!("{what} weight sum wider than 64 bits")));
+        }
+        let present = weight_ids.iter().flatten().copied().collect::<Vec<_>>();
+        let mut output = self.effects(&present)?;
+        let mut weights = Vec::new();
+        for weight in weight_ids {
+            let value = match weight {
+                Some(weight) => self.native_value(*weight)?,
+                None => Expr::Literal(format!("{width}'d1")),
+            };
+            let hidden = self.hidden(unsigned_type(width)).1;
+            output.push(Stmt::Assign {
+                lhs: LValue::Ident(hidden.clone()),
+                rhs: Expr::Resize {
+                    expr: Box::new(value),
+                    width,
+                    signed: false,
+                },
+                nonblocking: false,
+            });
+            weights.push(hidden);
+        }
+        Ok((output, weights, width))
+    }
+
+    fn randcase_finish(&mut self, state: RandcaseState) -> Vec<Stmt> {
+        self.weighted_choice(state.weights, state.width, state.items)
+    }
+
+    /// One of `items` picked at random with weights `weights` of width
+    /// `width` (see [`Self::randcase_weights`]), from the thread's random
+    /// number generator (IEEE 1800-2023 18.14.2, 18.16): none when the
+    /// weights sum to 0.
+    pub(super) fn weighted_choice(
+        &mut self,
+        weights: Vec<String>,
+        width: usize,
+        items: Vec<Vec<Stmt>>,
+    ) -> Vec<Stmt> {
+        struct Choice {
+            weights: Vec<String>,
+            width: usize,
+            items: Vec<Vec<Stmt>>,
+        }
+        let state = Choice {
+            weights,
+            width,
+            items,
+        };
+        let width = state.width;
+        let ty = unsigned_type(width);
+        let literal = |value: u32| Expr::Literal(format!("{width}'d{value}"));
+        let sum = |names: &[String]| {
+            names
+                .iter()
+                .map(|name| Expr::Ident(name.clone()))
+                .reduce(|left, right| Expr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::Add,
+                    right: Box::new(right),
+                })
+                .expect("a randcase has weights")
+        };
+        let total = self.hidden(ty.clone()).1;
+        let pick = self.hidden(ty).1;
+        let urandom = || Expr::Call {
+            callee: Callee::System(SystemFunction::Urandom),
+            args: Vec::new(),
+            arg_order: Vec::new(),
+        };
+        let draw = if width <= 32 {
+            Expr::Call {
+                callee: Callee::System(SystemFunction::UrandomRange),
+                args: vec![
+                    Some(Expr::Binary {
+                        left: Box::new(Expr::Ident(total.clone())),
+                        op: BinaryOp::Sub,
+                        right: Box::new(literal(1)),
+                    }),
+                    Some(literal(0)),
+                ],
+                arg_order: Vec::new(),
+            }
+        } else {
+            // Two 32-bit draws make a 64-bit one; the high half of its
+            // product with the total is uniform below the total, the
+            // scaling `$urandom_range` itself uses.
+            let widen = |expr: Expr| Expr::Resize {
+                expr: Box::new(expr),
+                width: 128,
+                signed: false,
+            };
+            Expr::Resize {
+                expr: Box::new(Expr::Binary {
+                    left: Box::new(Expr::Binary {
+                        left: Box::new(widen(Expr::Concat(vec![urandom(), urandom()]))),
+                        op: BinaryOp::Mul,
+                        right: Box::new(widen(Expr::Ident(total.clone()))),
+                    }),
+                    op: BinaryOp::Shr,
+                    right: Box::new(Expr::Literal("128'd64".into())),
+                }),
+                width,
+                signed: false,
+            }
+        };
+        let mut chain: Vec<Stmt> = Vec::new();
+        for (index, body) in state.items.into_iter().enumerate().rev() {
+            chain = vec![Stmt::If {
+                condition: Expr::Binary {
+                    left: Box::new(Expr::Ident(pick.clone())),
+                    op: BinaryOp::Lt,
+                    right: Box::new(sum(&state.weights[..=index])),
+                },
+                then_body: body,
+                else_body: chain,
+            }];
+        }
+        let mut guarded = vec![Stmt::Assign {
+            lhs: LValue::Ident(pick),
+            rhs: draw,
+            nonblocking: false,
+        }];
+        guarded.extend(chain);
+        vec![
+            Stmt::Assign {
+                lhs: LValue::Ident(total.clone()),
+                rhs: sum(&state.weights),
+                nonblocking: false,
+            },
+            Stmt::If {
+                condition: Expr::Binary {
+                    left: Box::new(Expr::Ident(total)),
+                    op: BinaryOp::Ne,
+                    right: Box::new(literal(0)),
+                },
+                then_body: guarded,
+                else_body: Vec::new(),
+            },
+        ]
+    }
+
     /// The body of the arm that a case statement on type reference `value`
     /// selects: the first whose type matches, else the default one (IEEE
     /// 1800-2023 6.23).
@@ -1209,15 +1761,13 @@ impl BodyBuilder<'_, '_, '_> {
             let ty = type_binding::bind(local.data_type, self.tree, self.session, &self.dims)?
                 .filter(|ty| {
                     // An integral variable, which a register can keep.
-                    matches!(
-                        ty.kind,
-                        TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
-                    ) && ty.container.is_none()
-                        && ty.unpacked_ranges.is_empty()
-                        && ty.unpacked_struct.is_none()
-                        && ty.class.is_none()
-                        && ty.virtual_interface.is_none()
-                        && !ty.chandle
+                    semantic_types::of_type(
+                        &mut self.session.types,
+                        &self.tree.functions,
+                        ty,
+                        &self.dims.const_env,
+                    )
+                    .is_some_and(|ty| self.session.types.is_integral(ty))
                 })
                 .ok_or_else(|| unsupported("type of a local variable of a sequence"))?;
             for name in &local.names {
@@ -1226,13 +1776,41 @@ impl BodyBuilder<'_, '_, '_> {
                 local_types.insert(unique, ty.clone());
             }
         }
+        // The ways the sequence matches; one is decided step by step, with
+        // its local variables and match items.
+        let mut consequent = assertions::sequence_paths(&sequence.consequent)?;
+        let antecedent = match &sequence.antecedent {
+            None => Vec::new(),
+            Some(antecedent) => {
+                let mut paths = assertions::sequence_paths(antecedent)?;
+                if paths.len() > 1 {
+                    return Err(unsupported(
+                        "implication whose antecedent sequence has more than one way to match",
+                    ));
+                }
+                paths.pop().expect("a sequence has a way to match")
+            }
+        };
+        if consequent.len() > 1 {
+            if sequence.antecedent.is_some() {
+                return Err(unsupported(
+                    "implication whose consequent sequence has more than one way to match",
+                ));
+            }
+            if !sequence.locals.is_empty() {
+                return Err(unsupported(
+                    "local variable of a sequence with more than one way to match",
+                ));
+            }
+            let monitor = self.sequence_alternatives(consequent, MAX_SEQUENCE_TICKS);
+            self.pop_scope();
+            return monitor;
+        }
+        let consequent = consequent.pop().expect("a sequence has a way to match");
         let mut steps = Vec::new();
         let mut offset = 0u32;
         let mut order = 0usize;
-        let parts = [
-            (true, sequence.antecedent.clone().unwrap_or_default()),
-            (false, sequence.consequent.clone()),
-        ];
+        let parts = [(true, antecedent), (false, consequent)];
         for (antecedent, part) in parts {
             for step in part {
                 offset = offset
@@ -1381,6 +1959,28 @@ impl BodyBuilder<'_, '_, '_> {
             });
             matches.push((matched, registers.len() - 1));
         }
+        // Whether assertions were on at the tick an attempt started, read
+        // once in the Observed region before any action of the tick runs
+        // (4.4.2.5): no new attempt starts while they are off, and one that
+        // started before `$assertoff` goes on with its pass or fail action
+        // (20.11), even when an action of this tick calls `$assertoff`.
+        let mut start = Vec::new();
+        let started = if self.controls_assertions() {
+            let on = self.declare("on@sequence", bit.clone());
+            start.push(Stmt::Assign {
+                lhs: LValue::Ident(on.clone()),
+                rhs: assertion_control::on(),
+                nonblocking: false,
+            });
+            registers.push(assertions::SequenceRegister {
+                now: Expr::Ident(on),
+                ty: bit.clone(),
+                chain: Vec::new(),
+            });
+            Some(registers.len() - 1)
+        } else {
+            None
+        };
         let count = steps.len();
         let mut stages = Vec::with_capacity(count);
         for (index, (antecedent, point, _, calls)) in steps.iter().enumerate() {
@@ -1409,6 +2009,21 @@ impl BodyBuilder<'_, '_, '_> {
                     },
                 });
             }
+            if let Some(started) = started {
+                let on = if point.at == 0 {
+                    registers[started].now.clone()
+                } else {
+                    Expr::Ident(self.sequence_register(&mut registers, started, point.at))
+                };
+                alive = Some(match alive {
+                    None => on,
+                    Some(previous) => Expr::Binary {
+                        left: Box::new(previous),
+                        op: BinaryOp::LogicAnd,
+                        right: Box::new(on),
+                    },
+                });
+            }
             stages.push(assertions::SequenceStage {
                 alive,
                 matched: matches[index].0.clone(),
@@ -1425,7 +2040,48 @@ impl BodyBuilder<'_, '_, '_> {
             stages,
             ticks: ticks.map(|ticks| (ticks, length)),
             updates,
+            start,
+            disabled: None,
+            multiclock: None,
         })
+    }
+
+    /// The record of disable condition `disable` of a concurrent assertion
+    /// over a sequence `length` ticks long (see
+    /// [`assertions::DisableHistory`]), and the process that records the
+    /// condition between the ticks: it wakes on each change of the
+    /// condition, current values rather than sampled ones (16.12).
+    fn disable_history(&mut self, disable: &Expr, length: u32) -> assertions::DisableHistory {
+        let mut bits = Type::new(TypeKind::Bit);
+        bits.packed_ranges = vec![PackedRange::new(
+            ConstExpr::Literal(length.to_string()),
+            ConstExpr::Literal("0".into()),
+        )];
+        let bits = self.declare("disabled@sequence", bits);
+        let seen = self.declare("seen@sequence", Type::new(TypeKind::Bit));
+        self.disable_watchers.push(vec![Stmt::Loop {
+            kind: crate::procedural::LoopKind::Forever,
+            init: Vec::new(),
+            condition: None,
+            step: Vec::new(),
+            body: vec![
+                Stmt::If {
+                    condition: disable.clone(),
+                    then_body: vec![Stmt::Assign {
+                        lhs: LValue::Ident(seen.clone()),
+                        rhs: Expr::Literal("1'b1".into()),
+                        nonblocking: false,
+                    }],
+                    else_body: Vec::new(),
+                },
+                Stmt::WaitEvent(vec![crate::procedural::EventItemBase {
+                    edge: crate::procedural::EventEdge::Any,
+                    expr: disable.clone(),
+                    iff: None,
+                }]),
+            ],
+        }]);
+        assertions::DisableHistory { bits, seen }
     }
 
     /// Rewrite the arguments of match-item call `statement` at `here`. An
@@ -1665,11 +2321,20 @@ impl BodyBuilder<'_, '_, '_> {
                         "local variable of a sequence in an expect statement",
                     ));
                 }
+                // One way to match, decided step by step.
+                let single = |expr: &celox_sv_syntax::SequenceExpr| {
+                    let mut paths = assertions::sequence_paths(expr)?;
+                    if paths.len() > 1 {
+                        return Err(unsupported(
+                            "sequence with more than one way to match in an expect statement",
+                        ));
+                    }
+                    Ok(paths.pop().expect("a sequence has a way to match"))
+                };
+                let antecedent = sequence.antecedent.as_ref().map(single).transpose()?;
+                let consequent = single(&sequence.consequent)?;
                 let mut offset = 0u32;
-                let parts = [
-                    (true, sequence.antecedent.unwrap_or_default()),
-                    (false, sequence.consequent),
-                ];
+                let parts = [(true, antecedent.unwrap_or_default()), (false, consequent)];
                 for (antecedent, part) in parts {
                     for native in part {
                         if !native.items.is_empty() {
@@ -1813,6 +2478,7 @@ mod tests {
             automatic: false,
             statics: Vec::new(),
             explicit_statics: HashSet::default(),
+            subroutine_statics: HashMap::default(),
             static_initializers: Vec::new(),
             constant_evaluation: false,
         };

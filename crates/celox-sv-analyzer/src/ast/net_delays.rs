@@ -3,6 +3,7 @@ use super::*;
 
 pub(super) fn lower(
     tree: &AnalysisContext<'_>,
+    table: &semantic_types::TyTable,
     dimensions: &mut PackedDimensions,
     ports: &[Port],
     instances: &[Instance],
@@ -59,11 +60,11 @@ pub(super) fn lower(
         })?;
         if shape.string
             || shape.real
-            || shape.class.is_some()
+            || shape.class_in(table).is_some()
             || shape.chandle
             || shape.container.is_some()
             || !shape.unpacked.is_empty()
-            || shape.unpacked_struct.is_some()
+            || shape.is_unpacked_struct_in(table)
         {
             return Err(unsupported(
                 "delayed continuous assignment: nonintegral or unpacked net delay",
@@ -132,6 +133,14 @@ pub(super) fn lower(
             .iter()
             .any(|signal| signal.name() == name && signal.unresolved_net)
             || target.is_some_and(|port| port.unresolved_net);
+        // The drivers move to the raw net, which resolves them as the
+        // declared net does (6.6).
+        let resolution = signals
+            .iter()
+            .find(|signal| signal.name() == name)
+            .map(|signal| signal.net_resolution)
+            .or_else(|| target.map(|port| port.net_resolution))
+            .unwrap_or_default();
         // The frontend addresses a one-dimensional packed vector with its
         // declared indices; multidimensional packed values use flat offsets.
         let range = match ty.packed_ranges.as_slice() {
@@ -150,7 +159,11 @@ pub(super) fn lower(
             }
             None => None,
         };
-        signals.push(Signal::new_net(raw.clone(), ty).with_unresolved_net(unresolved));
+        signals.push(
+            Signal::new_net(raw.clone(), ty)
+                .with_unresolved_net(unresolved)
+                .with_net_resolution(resolution),
+        );
         dimensions.insert(raw.clone(), shape.clone());
         dimensions
             .expression_signedness
@@ -181,7 +194,7 @@ pub(super) fn lower(
                 is_2state: shape.is_2state,
             };
             let lhs = select(name.into());
-            let rhs = expr_from_lvalue(tree, &select(raw.clone()), dimensions);
+            let rhs = expr_from_lvalue(tree, table, &select(raw.clone()), dimensions);
             let mut process = CombProcess::new(
                 CombProcessKind::ContinuousAssign,
                 delay.condition.clone(),

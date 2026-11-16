@@ -107,6 +107,9 @@ pub(super) struct HierarchicalReference {
 /// The specialized hierarchy, for following names through it.
 pub(super) struct Hierarchy<'a> {
     root: (&'a LoweredSvModuleKey, ModuleId),
+    /// The root is the generated root of several top-level modules, which
+    /// stands for `$root` (23.3.1).
+    hidden_root: bool,
     keys: &'a HashMap<ModuleId, &'a LoweredSvModuleKey>,
     module_ids: &'a HashMap<LoweredSvModuleKey, ModuleId>,
     elaborated: &'a HashMap<ModuleId, ElaboratedModule>,
@@ -118,6 +121,9 @@ pub(super) struct Hierarchy<'a> {
 /// A name followed to a signal, relative to where the following started.
 #[derive(Clone, PartialEq, Eq)]
 struct Found {
+    /// Whether the following started at the top instance: `path` is then the
+    /// path of the signal's instance in the design and `levels` is zero.
+    rooted: bool,
     /// How many instances above the name's module the following started.
     levels: usize,
     path: Vec<(String, usize)>,
@@ -151,6 +157,7 @@ impl Found {
     /// different specializations.
     fn same_object(&self, other: &Found) -> bool {
         (
+            self.rooted,
             self.levels,
             &self.path,
             self.length,
@@ -158,6 +165,7 @@ impl Found {
             &self.r#type,
             self.is_net,
         ) == (
+            other.rooted,
             other.levels,
             &other.path,
             other.length,
@@ -171,6 +179,7 @@ impl Found {
 impl<'a> Hierarchy<'a> {
     pub(super) fn new(
         root: (&'a LoweredSvModuleKey, ModuleId),
+        hidden_root: bool,
         keys: &'a HashMap<ModuleId, &'a LoweredSvModuleKey>,
         module_ids: &'a HashMap<LoweredSvModuleKey, ModuleId>,
         elaborated: &'a HashMap<ModuleId, ElaboratedModule>,
@@ -189,6 +198,7 @@ impl<'a> Hierarchy<'a> {
         }
         Self {
             root,
+            hidden_root,
             keys,
             module_ids,
             elaborated,
@@ -255,6 +265,7 @@ impl<'a> Hierarchy<'a> {
             ))
         })?;
         Ok(Some(Found {
+            rooted: false,
             levels: 0,
             path,
             length,
@@ -297,7 +308,8 @@ impl<'a> Hierarchy<'a> {
     /// Follow a name upwards from every instance of `module` (IEEE 1800-2023
     /// 23.8): at each enclosing instance, from an instance of its scope or
     /// from its module name. The name must denote the same relative object
-    /// from each instance; `None` if it denotes none from some instance.
+    /// from each instance, or the same object of the design (see
+    /// [`Self::rooted`]); `None` if it denotes none from some instance.
     fn upward(
         &self,
         module: ModuleId,
@@ -324,7 +336,9 @@ impl<'a> Hierarchy<'a> {
             let Some(mut from_parent) = from_parent else {
                 return Ok(None);
             };
-            from_parent.levels += 1;
+            if !from_parent.rooted {
+                from_parent.levels += 1;
+            }
             match &mut found {
                 None => found = Some(from_parent),
                 Some(found) if found.same_object(&from_parent) => {
@@ -334,17 +348,95 @@ impl<'a> Hierarchy<'a> {
                         }
                     }
                 }
+                // The instances are at different depths below the scope the
+                // name starts at, or below different scopes of that name.
                 Some(_) => {
-                    return Err(sv::AnalyzerError::Unsupported(format!(
-                        "upward hierarchical reference `{}` that denotes different relative \
-                         objects in instances of module `{}`",
-                        components.join("."),
-                        self.authored_name(module)
-                    )));
+                    return match self.rooted(module, components, &mut HashMap::default())? {
+                        Some(rooted) => Ok(Some(rooted)),
+                        None => Err(sv::AnalyzerError::Unsupported(format!(
+                            "upward hierarchical reference `{}` that denotes different \
+                             objects in instances of module `{}`",
+                            components.join("."),
+                            self.authored_name(module)
+                        ))),
+                    };
                 }
             }
         }
         Ok(found)
+    }
+
+    /// Follow a name upwards from every instance of `module` to one object
+    /// of the design: the scope the name starts at is found above each
+    /// instance, as [`Self::upward`] finds it, and is a single instance.
+    /// `None` if the instances denote different objects, or some none.
+    fn rooted(
+        &self,
+        module: ModuleId,
+        components: &[String],
+        memo: &mut HashMap<ModuleId, Option<Found>>,
+    ) -> Result<Option<Found>, sv::AnalyzerError> {
+        let mut found: Option<Found> = None;
+        for &parent in self.parents.get(&module).map_or(&[][..], Vec::as_slice) {
+            let from_parent = match memo.get(&parent) {
+                Some(cached) => cached.clone(),
+                None => {
+                    let resolved = match self.downward(parent, components)? {
+                        Some(mut found) => self.instance_path(parent).map(|mut path| {
+                            path.append(&mut found.path);
+                            Found {
+                                rooted: true,
+                                levels: 0,
+                                path,
+                                ..found
+                            }
+                        }),
+                        None => self.rooted(parent, components, memo)?,
+                    };
+                    memo.insert(parent, resolved.clone());
+                    resolved
+                }
+            };
+            let Some(from_parent) = from_parent else {
+                return Ok(None);
+            };
+            match &found {
+                None => found = Some(from_parent),
+                Some(found) if found.same_object(&from_parent) => {}
+                Some(_) => return Ok(None),
+            }
+        }
+        Ok(found)
+    }
+
+    /// The path of the only instance of `module` in the design, from the top
+    /// instance; `None` if it has several instances.
+    fn instance_path(&self, module: ModuleId) -> Option<Vec<(String, usize)>> {
+        if module == self.root.1 {
+            return Some(Vec::new());
+        }
+        let [parent] = self.parents.get(&module)?.as_slice() else {
+            return None;
+        };
+        let mut positions: HashMap<&str, usize> = HashMap::default();
+        let mut segments = Vec::new();
+        for instance in self.elaborated[parent].instances() {
+            // As `find_instance` numbers the elements of an instance array.
+            let position = positions.entry(&instance.instance_name).or_default();
+            let index = instance.array_index_base + *position;
+            *position += 1;
+            if self
+                .module_ids
+                .get(&LoweredSvModuleKey::instance_key(instance))
+                == Some(&module)
+            {
+                segments.push((instance.instance_name.clone(), index));
+            }
+        }
+        let [segment] = segments.try_into().ok()?;
+        let mut path = self.instance_path(*parent)?;
+        path.push(segment);
+        Some(path)
     }
 }
 
@@ -374,12 +466,18 @@ pub(super) fn resolve_name(
 ) -> Result<bool, sv::AnalyzerError> {
     let elaborated = &hierarchy.elaborated[&module];
     let resolved = if components[0] == "$root" {
-        // `$root.top. ...` (IEEE 1800-2023 23.3.1).
-        if components.get(1) != Some(&hierarchy.root.0.name) {
+        // `$root.top. ...` (IEEE 1800-2023 23.3.1). The root of several
+        // top-level modules stands for `$root`, and its instances are the
+        // tops.
+        let start = if hierarchy.hidden_root {
+            1
+        } else if components.get(1) == Some(&hierarchy.root.0.name) {
+            2
+        } else {
             return Ok(false);
-        }
+        };
         hierarchy
-            .walk(hierarchy.root.1, components, 2)?
+            .walk(hierarchy.root.1, components, start)?
             .map(|found| (HierarchicalStart::Root, found))
     } else if starts_at_instance(elaborated, components)
         || components[0] == hierarchy.authored_name(module)
@@ -393,7 +491,14 @@ pub(super) fn resolve_name(
     } else {
         hierarchy
             .upward(module, components, &mut HashMap::default())?
-            .map(|found| (HierarchicalStart::Ancestor(found.levels), found))
+            .map(|found| {
+                let start = if found.rooted {
+                    HierarchicalStart::Root
+                } else {
+                    HierarchicalStart::Ancestor(found.levels)
+                };
+                (start, found)
+            })
     };
     let Some((start, found)) = resolved else {
         return Ok(false);
@@ -489,6 +594,12 @@ pub(super) struct ForeignWrites {
     pub repeating: usize,
     /// Whether an `always_ff` process writes it.
     pub always_ff: bool,
+    /// Whether a process that is the only writer of what it writes does: an
+    /// `always_ff`, or a combinational process. A plain `always` that writes
+    /// through a hierarchical name runs as a process (see
+    /// `runs_as_process`), whose writes store into the variable as they
+    /// execute.
+    pub exclusive: bool,
 }
 
 /// Add the signals that the hierarchical names of `module` (`module_id`),
@@ -502,16 +613,22 @@ pub(super) fn collect_foreign_writes(
     let mut once = HashSet::default();
     let mut repeatedly = HashSet::default();
     let mut always_ff = HashSet::default();
+    let mut exclusive = HashSet::default();
     for process in module.initial_processes() {
-        let written = if process.repeats() {
+        let ordinary = process
+            .site()
+            .is_none_or(|site| site.construct != "always_ff");
+        let written = if !process.repeats() {
+            &mut once
+        } else if ordinary {
             &mut repeatedly
         } else {
-            &mut once
+            &mut exclusive
         };
         super::procedural::written_names_with_calls(module, process.body(), written);
     }
     for process in module.comb_processes() {
-        super::procedural::written_names_with_calls(module, process.body(), &mut repeatedly);
+        super::procedural::written_names_with_calls(module, process.body(), &mut exclusive);
     }
     for process in module.ff_processes() {
         let written = if process.is_always_ff() {
@@ -524,7 +641,8 @@ pub(super) fn collect_foreign_writes(
     for reference in references {
         let name = &reference.signal.name;
         let by_always_ff = always_ff.contains(name);
-        let repeating = by_always_ff || repeatedly.contains(name);
+        let by_exclusive = by_always_ff || exclusive.contains(name);
+        let repeating = by_exclusive || repeatedly.contains(name);
         if !repeating && !once.contains(name) {
             continue;
         }
@@ -536,6 +654,7 @@ pub(super) fn collect_foreign_writes(
                 .or_default();
             entry.repeating += usize::from(repeating);
             entry.always_ff |= by_always_ff;
+            entry.exclusive |= by_exclusive;
         }
     }
 }
@@ -560,6 +679,7 @@ pub(super) fn collect_virtual_writes(
                 .or_default();
             entry.repeating += foreign.repeating.min(1);
             entry.always_ff |= foreign.always_ff;
+            entry.exclusive |= foreign.exclusive;
         }
     }
 }
@@ -626,15 +746,36 @@ fn find_signal<'a>(
         .iter()
         .find(|(_, path)| path.segments.join(".") == name)
         .map_or(name, |(flat, _)| flat.as_str());
-    module
-        .signals
-        .iter()
-        .find(|(candidate, _, _)| candidate == flat)
-        .map(|(candidate, r#type, is_net)| (candidate.clone(), r#type, *is_net))
+    let signal = |flat: &str| {
+        module
+            .signals
+            .iter()
+            .find(|(candidate, _, _)| candidate == flat)
+            .map(|(candidate, r#type, is_net)| (candidate.clone(), r#type, *is_net))
+    };
+    signal(flat).or_else(|| {
+        // A member or a port of an interface instance of the module is the
+        // signal `instance$member` of the module.
+        module.interface_scopes.iter().find_map(|scope| {
+            let member = name.strip_prefix(scope.as_str())?.strip_prefix('.')?;
+            signal(&format!("{scope}${member}"))
+        })
+    })
 }
 
 /// `r#type` with the bounds it has in its specialization.
 fn resolved_type(module: &ElaboratedModule, r#type: &sv::ir::Type) -> Option<sv::ast::Type> {
+    // An associative or dynamic array or a queue is denoted by its handle;
+    // the name has the container type of the declaration.
+    if let Some(container) = r#type.container() {
+        return container.with_resolved_container_bounds(&|expr| {
+            sv::typecheck::eval_const_expr_with_types(
+                expr,
+                &module.constants,
+                &module.parameter_types,
+            )
+        });
+    }
     let kind = match r#type.kind() {
         sv::ir::TypeKind::Bit => sv::ast::TypeKind::Bit,
         sv::ir::TypeKind::Logic => sv::ast::TypeKind::Logic,
@@ -656,14 +797,17 @@ fn resolved_type(module: &ElaboratedModule, r#type: &sv::ir::Type) -> Option<sv:
         .iter()
         .map(|range| unpacked_range_bounds(range, &module.constants, &module.parameter_types))
         .collect::<Option<Vec<_>>>()?;
-    Some(
-        sv::ast::Type::resolved(
-            kind,
-            r#type.is_signed(),
-            r#type.signed_element_depth(),
-            &packed,
-            &unpacked,
-        )
-        .with_chandle(r#type.is_chandle()),
+    let resolved = sv::ast::Type::resolved(
+        kind,
+        r#type.is_signed(),
+        r#type.signed_element_depth(),
+        &packed,
+        &unpacked,
     )
+    .with_chandle(r#type.is_chandle());
+    // The members of a packed structure, which the name selects.
+    Some(match r#type.packed_structure() {
+        Some(structure) => resolved.with_members_of(structure),
+        None => resolved,
+    })
 }

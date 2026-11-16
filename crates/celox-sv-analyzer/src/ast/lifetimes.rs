@@ -306,6 +306,19 @@ fn keep_in<T>(
                     )?;
                 }
             }
+            Stmt::Block { body, .. } => {
+                keep_in(
+                    tree,
+                    session,
+                    body,
+                    statics,
+                    initialized,
+                    directions,
+                    kept,
+                    initializers,
+                    concurrent,
+                )?;
+            }
             _ => {}
         }
         index += 1;
@@ -394,6 +407,7 @@ pub(super) fn check_subroutine_statics(
                 check(step);
                 check(body);
             }
+            Stmt::Block { body, .. } => check(body),
             _ => {}
         });
     }
@@ -657,6 +671,12 @@ impl Flow<'_> {
                 self.read(rhs, written)?;
                 self.write(lhs, *nonblocking, written).map(Exits::next)
             }
+            // Neither names a local (see `BodyBuilder::procedural_assign`).
+            Stmt::ProceduralAssign { rhs, .. } => {
+                self.read(rhs, written)?;
+                Ok(Exits::next(written))
+            }
+            Stmt::Deassign { .. } => Ok(Exits::next(written)),
             Stmt::AssignConcat {
                 parts,
                 rhs,
@@ -769,6 +789,28 @@ impl Flow<'_> {
                 // A sibling's write need not precede another sibling's read.
                 Ok(Exits::next(written))
             }
+            Stmt::Block { id, body } => {
+                let exits = self.block(body, written)?;
+                // A `disable` of this block also reaches what follows it,
+                // with the local possibly unwritten (9.6.2).
+                let mut targeted = false;
+                for stmt in body {
+                    stmt.walk(&mut |stmt| {
+                        targeted |= matches!(stmt, Stmt::DisableBlock(disabled) if disabled == id)
+                    });
+                }
+                Ok(Exits {
+                    next: if targeted {
+                        merge(exits.next, Some(false))
+                    } else {
+                        exits.next
+                    },
+                    breaks: exits.breaks,
+                    continues: exits.continues,
+                })
+            }
+            // Leaving an enclosing block ends this path, like a return.
+            Stmt::DisableBlock(_) => Ok(Exits::default()),
             Stmt::Break => Ok(Exits {
                 breaks: Some(written),
                 ..Exits::default()
@@ -943,7 +985,9 @@ impl Flow<'_> {
 /// The expressions of `stmt` itself, not of the statements it contains.
 pub(super) fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
     match stmt {
-        Stmt::Assign { rhs, .. } | Stmt::AssignConcat { rhs, .. } => vec![rhs],
+        Stmt::Assign { rhs, .. }
+        | Stmt::AssignConcat { rhs, .. }
+        | Stmt::ProceduralAssign { rhs, .. } => vec![rhs],
         Stmt::If { condition, .. } => vec![condition],
         Stmt::Case {
             selector, items, ..
@@ -994,7 +1038,10 @@ pub(super) fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
         | Stmt::DisableFork
         | Stmt::WaitImplicit { .. }
         | Stmt::Break
-        | Stmt::Continue => Vec::new(),
+        | Stmt::Continue
+        | Stmt::Block { .. }
+        | Stmt::Deassign { .. }
+        | Stmt::DisableBlock(_) => Vec::new(),
     }
 }
 

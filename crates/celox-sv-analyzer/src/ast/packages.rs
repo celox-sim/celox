@@ -37,11 +37,21 @@ pub struct Packages {
     /// The compilation unit of each source file that declares items outside
     /// its modules and packages.
     units: HashMap<PathBuf, Arc<Unit>>,
+    /// What analyzing each interface that no source references found wrong
+    /// with it, by its name (see [`Self::check_unreferenced_interfaces`]).
+    unreferenced_interfaces: Vec<(String, AnalyzerError)>,
     /// What analyzing the packages warned about.
     warnings: Vec<super::warnings::AnalyzerWarning>,
     /// The virtual interfaces of the design, which the modules that use the
     /// packages are analyzed with.
     pub(crate) virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
+    /// The subroutines that call the tasks and functions of interfaces
+    /// through virtual interfaces (see [`Self::build_virtual_interface_calls`]).
+    pub(super) virtual_interface_calls: Arc<virtual_interface_calls::Subroutines>,
+    /// The assertion control state of the design, when a source calls
+    /// `$asserton` or `$assertoff` (IEEE 1800-2023 20.11): the state module
+    /// of a package no source declares, whose variable every module shares.
+    assertion_control: Option<crate::ir::Module>,
 }
 
 /// What the analyses of the modules of a design add to the packages they
@@ -54,6 +64,14 @@ pub struct Design {
     /// Source-call identities shared with modules importing these package bodies.
     pub(super) call_sites: usize,
     pub(super) types: semantic_types::TyTable,
+}
+
+impl Design {
+    /// Take back the types that an analysis of the design moved into its
+    /// [`Source`](super::Source) and published the IR with.
+    pub(crate) fn restore_publication(&mut self, publication: super::Publication) {
+        self.types = publication.0;
+    }
 }
 
 /// The compilation-unit scope of a source file.
@@ -82,6 +100,15 @@ impl Unit {
 
 /// The name of the compilation-unit scope.
 pub(super) const UNIT: &str = "$unit";
+
+/// The identity of item `name` of the compilation unit of source `path`:
+/// each source file's unit is a scope of its own (IEEE 1800-2023 3.12.1).
+pub(super) fn unit_item_identity(path: &std::path::Path, name: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = fxhash::FxHasher::default();
+    path.hash(&mut hasher);
+    format!("{UNIT}::{name}@{:016x}", hasher.finish())
+}
 
 /// What a module of a compilation unit sees of it (IEEE 1800-2023 3.12.1).
 #[derive(Debug, Default)]
@@ -179,6 +206,117 @@ impl Packages {
         paths
             .into_iter()
             .find_map(|path| self.units[path].scope.as_ref().err())
+            .or_else(|| self.unreferenced_interfaces.first().map(|(_, error)| error))
+    }
+
+    /// The first error analyzing a compilation unit found that makes the
+    /// design illegal, not a construct Celox does not support: an illegal
+    /// declaration is an error even where no module uses it (IEEE 1800-2023
+    /// 3.12.1), while an unsupported one waits for a use, as
+    /// [`Self::compilation_unit_error`] says.
+    pub fn compilation_unit_illegality(&self) -> Option<&AnalyzerError> {
+        let mut paths = self.units.keys().collect::<Vec<_>>();
+        paths.sort();
+        paths
+            .into_iter()
+            .find_map(|path| {
+                self.units[path]
+                    .scope
+                    .as_ref()
+                    .err()
+                    .filter(|error| !error.is_unsupported())
+            })
+            .or_else(|| {
+                self.unreferenced_interfaces
+                    .iter()
+                    .map(|(_, error)| error)
+                    .find(|error| !error.is_unsupported())
+            })
+    }
+
+    /// Build the subroutines through which classes and modules call the
+    /// tasks and functions of the interfaces virtual interfaces name, with
+    /// the analyzed packages (IEEE 1800-2023 25.9); every scope analyzed
+    /// with the packages imports them.
+    pub(crate) fn build_virtual_interface_calls(&mut self) -> Result<(), AnalyzerError> {
+        if let Some(declarations) = self.virtual_interfaces.clone() {
+            self.virtual_interface_calls =
+                Arc::new(virtual_interface_calls::build(self, &declarations)?);
+        }
+        Ok(())
+    }
+
+    /// Analyze each interface of `trees` that no source instantiates or
+    /// names, with the defaults of its parameters, for what is wrong with
+    /// it: no hierarchy elaborates one (IEEE 1800-2023 3.12.1), though its
+    /// body is compiled, and data are declared before they are used (6.6),
+    /// so a value its body reads that is not declared is reported (see
+    /// [`AnalysisContext::declared_values`]). One with a parameter without
+    /// a default, which only an instance can give, is left alone.
+    pub(crate) fn check_unreferenced_interfaces(
+        &mut self,
+        trees: &[(&SyntaxTree, &Path)],
+    ) -> Result<(), AnalyzerError> {
+        let referenced = trees
+            .iter()
+            .flat_map(|(tree, _)| {
+                let mut references = interfaces::body_component_references(tree);
+                for unit in tree.declarations().all_units() {
+                    references.extend(
+                        unit.interface_references(tree.declarations())
+                            .map(|name| name.spelling.clone()),
+                    );
+                }
+                references
+            })
+            .map(|name| normalize_identifier(&name))
+            .collect::<HashSet<_>>();
+        let mut found = Vec::new();
+        for (tree, path) in trees {
+            for handle in tree.root_scopes()? {
+                let scoped = tree.scoped(handle)?;
+                let unit = scoped.root_unit()?;
+                let defaulted = |parameter: &celox_sv_syntax::Parameter| match &parameter.kind {
+                    celox_sv_syntax::ParameterKind::Type { default } => default.is_some(),
+                    celox_sv_syntax::ParameterKind::Value { default, .. } => default.is_some(),
+                };
+                if unit.kind != celox_sv_syntax::UnitKind::Interface
+                    || unit.port_style != celox_sv_syntax::PortStyle::Ansi
+                    || !unit
+                        .parameters
+                        .iter()
+                        .flatten()
+                        .chain(&unit.body_parameters)
+                        .all(defaulted)
+                {
+                    continue;
+                }
+                let name = normalize_identifier(&scoped.root_name()?);
+                if referenced.contains(&name) {
+                    continue;
+                }
+                let overrides = HashMap::default();
+                let context = AnalysisContext {
+                    declared_values: true,
+                    ..AnalysisContext::unspecialized(&scoped)
+                };
+                let session = &mut Session::with_packages(self, &mut self.design());
+                if let Err(error) = interface_ast::analyze(
+                    &context.child(&scoped, &overrides),
+                    session,
+                    path,
+                    self,
+                    &overrides,
+                    &[],
+                    &ModuleInterfaces::default(),
+                    false,
+                ) {
+                    found.push((name, error));
+                }
+            }
+        }
+        self.unreferenced_interfaces = found;
+        Ok(())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -204,6 +342,13 @@ impl Packages {
                     .filter_map(|unit| unit.scope.as_ref().ok()),
             )
             .filter_map(|package| package.state_module.as_ref())
+            .chain(&self.assertion_control)
+    }
+
+    /// Whether a source of the design calls an assertion control task, so
+    /// that its assertions check the assertion control state.
+    pub(crate) fn controls_assertions(&self) -> bool {
+        self.assertion_control.is_some()
     }
 
     /// Package state after specialization requests made by importing scopes.
@@ -280,7 +425,40 @@ impl Packages {
         for (tree, _) in trees {
             super::warnings::append(&mut warnings, super::warnings::packages(tree));
         }
-        match Self::analyze_with_roots_impl(trees, roots, options) {
+        match Self::analyze_with_roots_impl(trees, roots, None, options, false) {
+            Ok(packages) => Ok(packages.with_warnings(warnings)),
+            Err(error) => Err(error.with_warnings(warnings)),
+        }
+    }
+
+    /// The packages `needed` of `trees` and those they depend on, with the
+    /// compilation units of the sources at `units`: what the declarations
+    /// that name only those need, such as the interfaces whose prototypes
+    /// are built before the types of virtual interfaces are known (see
+    /// `interfaces::interface_prototypes_with_options`). The other packages
+    /// and units, whose classes may use those types or import packages not
+    /// analyzed, are not analyzed.
+    ///
+    /// With `declarations_only`, the packages' declarations are analyzed, but
+    /// no executable body: no subroutine, class method or process.
+    pub(crate) fn analyze_needed(
+        trees: &[(&SyntaxTree, &Path)],
+        needed: &HashSet<String>,
+        units: &HashSet<std::path::PathBuf>,
+        options: crate::AnalysisOptions,
+        declarations_only: bool,
+    ) -> Result<Self, AnalyzerError> {
+        let mut warnings = Vec::new();
+        for (tree, _) in trees {
+            super::warnings::append(&mut warnings, super::warnings::packages(tree));
+        }
+        match Self::analyze_with_roots_impl(
+            trees,
+            None,
+            Some((needed, units)),
+            options,
+            declarations_only,
+        ) {
             Ok(packages) => Ok(packages.with_warnings(warnings)),
             Err(error) => Err(error.with_warnings(warnings)),
         }
@@ -289,31 +467,51 @@ impl Packages {
     fn analyze_with_roots_impl(
         trees: &[(&SyntaxTree, &Path)],
         roots: Option<&[&str]>,
+        needed: Option<(&HashSet<String>, &HashSet<std::path::PathBuf>)>,
         options: crate::AnalysisOptions,
+        declarations_only: bool,
     ) -> Result<Self, AnalyzerError> {
         let mut timescales = timescales::Timescales::collect_with_options(trees, options.clone())?;
         if let Some(roots) = roots {
             timescales.select_roots(roots);
         }
-        let mixed_timescales = timescales.has_mixed_timescales();
+        let defaulted_timescales = timescales.defaulted_elements();
         let timescales = Arc::new(timescales);
         let session = &mut Session {
             virtual_interfaces: options.virtual_interfaces.clone(),
+            declarations_only,
             ..Session::default()
         };
-        let mut packages = Self::analyze_packages(trees, timescales, session)?;
+        let mut packages =
+            Self::analyze_packages(trees, timescales, needed.map(|(needed, _)| needed), session)?;
         packages.virtual_interfaces = options.virtual_interfaces;
-        if mixed_timescales {
-            packages
-                .warnings
-                .push(super::warnings::AnalyzerWarning::MixedTimescale);
+        if trees
+            .iter()
+            .any(|(tree, _)| assertion_control::called(tree.declarations()))
+        {
+            packages.assertion_control = Some(assertion_control::state());
         }
+        packages
+            .warnings
+            .extend(
+                defaulted_timescales
+                    .into_iter()
+                    .map(|(element, unit, precision)| {
+                        super::warnings::AnalyzerWarning::MixedTimescale {
+                            element,
+                            unit,
+                            precision,
+                        }
+                    }),
+            );
         let units: Vec<_> = trees
             .iter()
             .map(|(tree, path)| (tree.compilation_scope(), *path))
             .collect();
         for (tree, path) in &units {
-            if tree.body_membership()?.is_empty() {
+            if tree.body_membership()?.is_empty()
+                || needed.is_some_and(|(_, units)| !units.contains(*path))
+            {
                 continue;
             }
             let visibility = unit_visibility(tree)?;
@@ -360,29 +558,16 @@ impl Packages {
         Ok(packages)
     }
 
+    /// The packages of `trees`, only those `needed` and those they depend
+    /// on if given.
     fn analyze_packages(
         trees: &[(&SyntaxTree, &Path)],
         timescales: Arc<timescales::Timescales>,
+        needed: Option<&HashSet<String>>,
         session: &mut Session,
     ) -> Result<Self, AnalyzerError> {
         let mut declarations: Vec<(String, SyntaxTree)> = Vec::new();
         for (tree, _) in trees {
-            // Only modules and packages are analyzed, so an import declared
-            // at compilation-unit scope would never be found.
-            for item in &tree.declarations().source_items {
-                if let celox_sv_syntax::SourceItemKind::Declaration(id) = item.kind
-                    && matches!(
-                        tree.declarations().body_item(id).kind,
-                        celox_sv_syntax::BodyItemKind::Dpi(_)
-                    )
-                {
-                    return Err(AnalyzerError::Unsupported(
-                        "DPI-C import or export at compilation-unit scope (declare it in a \
-                         module or package)"
-                            .to_string(),
-                    ));
-                }
-            }
             for handle in tree.root_scopes()? {
                 if handle
                     .unit(tree.declarations())
@@ -422,6 +607,19 @@ impl Packages {
         let mut active = Vec::new();
         for index in 0..declarations.len() {
             visit(index, &declarations, &dependencies, &mut order, &mut active)?;
+        }
+        if let Some(needed) = needed {
+            // Those needed, and what they depend on.
+            let mut kept = HashSet::default();
+            let mut pending = needed.iter().cloned().collect::<Vec<_>>();
+            while let Some(name) = pending.pop() {
+                if let Some(index) = declarations.iter().position(|(known, _)| *known == name)
+                    && kept.insert(index)
+                {
+                    pending.extend(dependencies[index].iter().cloned());
+                }
+            }
+            order.retain(|index| kept.contains(index));
         }
         // Package bodies can query selected hierarchy roots while they are
         // collected, before any module is analyzed.
@@ -536,6 +734,7 @@ fn analyze_package(
         active_interfaces: Arc::default(),
         timescale: Arc::default(),
         interface_instance: None,
+        declared_values: true,
     };
     let tree = &context;
     let timed = AnalysisContext {
@@ -547,10 +746,10 @@ fn analyze_package(
         // Inside the package, `p::x` names its own item `x`.
         analyze_package_scope(name, &tree.in_package(name), session, packages, None)?
     };
-    if !imports::ScopeImports::from_scope(tree)?
-        .qualified
-        .iter()
-        .any(|(package, _)| package == name)
+    // No class of another package can be a base in this one, which names
+    // none.
+    if self_qualified_names_are_plain(name, tree, |package| packages.get(package).is_some())?
+        .is_some()
     {
         return Ok(first);
     }
@@ -558,6 +757,224 @@ fn analyze_package(
     // function (IEEE 1800-2023 26.3). Analyze the package again with its
     // items from the first analysis under their qualified names.
     analyze_package_scope(name, tree, session, packages, Some(&first.symbols))
+}
+
+/// Whether each name that package `name` qualifies with its own name,
+/// `name::x`, is its item `x` also without the qualifier where it is
+/// written: nothing nested in the package around the reference declares
+/// `x`, and no class around it inherits a member `x` (IEEE 1800-2023 23.9,
+/// 26.3). One analysis of the package, which reads `name::x` as `x`, then
+/// binds them all.
+///
+/// A class whose base the syntax does not tell, such as a type parameter,
+/// may inherit a member of any class its package can name: of its own, when
+/// it names no other package, as far as the package itself makes its
+/// specializations. The classes of that kind around a reference are given
+/// back: a specialization that another scope asks of one of them may
+/// extend a class of that scope, whose members the package does not know.
+/// `is_package` tells the packages among the scopes of qualified names.
+pub(super) fn self_qualified_names_are_plain(
+    name: &str,
+    tree: &AnalysisContext<'_>,
+    is_package: impl Fn(&str) -> bool,
+) -> Result<Option<HashSet<String>>, AnalyzerError> {
+    use celox_sv_syntax::{DataTypeKind, TokenRange};
+    let imports = imports::ScopeImports::from_scope(tree)?;
+    let references = imports
+        .qualified
+        .iter()
+        .zip(&imports.qualified_tokens)
+        .filter(|((package, _), _)| package == name)
+        .map(|((_, item), token)| (item.as_str(), *token))
+        .collect::<Vec<_>>();
+    if references.is_empty() {
+        return Ok(Some(HashSet::default()));
+    }
+    let native = tree.declarations();
+    let item = |name: &celox_sv_syntax::Name| instances::normalize_identifier(&name.spelling);
+    // The members a class declares, by the name of the class. Classes of
+    // one name in several scopes of the source share their members here,
+    // which only hides more.
+    let mut members = HashMap::<String, HashSet<String>>::default();
+    for class in &native.classes {
+        let names = members.entry(item(&class.name)).or_default();
+        // The members of an enumeration are declared with its type (6.19).
+        let enumeration = |names: &mut HashSet<String>, id| {
+            if let DataTypeKind::Enum { items, .. } = &native.data_type(id).kind {
+                names.extend(items.iter().map(|member| item(&member.name)));
+            }
+        };
+        let parameters = class.parameter_ports.iter().chain(&class.parameters);
+        for parameter in parameters.flat_map(|id| &native.parameter_declaration(*id).parameters) {
+            names.insert(item(&parameter.name));
+            if let celox_sv_syntax::ParameterKind::Value { data_type, .. } = &parameter.kind {
+                enumeration(names, *data_type);
+            }
+        }
+        for alias in &class.type_aliases {
+            let alias = native.type_alias(*alias);
+            names.insert(item(&alias.name));
+            if let celox_sv_syntax::TypeAliasTarget::DataType(id) = alias.target {
+                enumeration(names, id);
+            }
+        }
+        for property in &class.properties {
+            let declaration = &property.declaration;
+            names.extend(
+                declaration
+                    .variables
+                    .iter()
+                    .map(|variable| item(&variable.name)),
+            );
+            enumeration(names, declaration.data_type);
+        }
+        for method in &class.methods {
+            names.insert(item(&native.subroutine(method.subroutine).name));
+        }
+        // The classes it declares (8.23).
+        names.extend(
+            native
+                .classes
+                .iter()
+                .filter(|nested| {
+                    class.tokens.start < nested.tokens.start
+                        && nested.tokens.end <= class.tokens.end
+                })
+                .map(|nested| item(&nested.name)),
+        );
+    }
+    // The scopes of qualified names that are packages; others are classes
+    // and types.
+    let foreign = imports
+        .packages
+        .iter()
+        .any(|package| package != name && is_package(package));
+    // The classes the package itself declares, by their names, which the
+    // plain name of one is in every scope of the package that declares no
+    // other of the name: a class of another scope of the source may share
+    // the name with a class the package imports.
+    let package = tree.root_unit().ok().map(|unit| unit.tokens);
+    let mut own = HashMap::<String, Option<&celox_sv_syntax::ClassDeclaration>>::default();
+    for class in native.classes.iter().filter(|class| {
+        classes::enclosing_unit(native, class.tokens).map(|unit| unit.tokens) == package
+            && !native.classes.iter().any(|outer| {
+                outer.tokens.start < class.tokens.start && class.tokens.end <= outer.tokens.end
+            })
+    }) {
+        own.entry(item(&class.name))
+            .and_modify(|known| *known = None)
+            .or_insert(Some(class));
+    }
+    // Whether `class` declares or inherits a member `wanted`, or else the
+    // classes it is or extends whose base the syntax does not tell.
+    let inherits = |class: &celox_sv_syntax::ClassDeclaration, wanted: &str| {
+        let mut seen = HashSet::default();
+        let mut pending = vec![class];
+        let mut unknown = Vec::new();
+        while let Some(class) = pending.pop() {
+            if members[&item(&class.name)].contains(wanted) {
+                return Err(());
+            }
+            if !seen.insert(class.tokens.start) {
+                continue;
+            }
+            // The class it extends; an interface class inherits the
+            // parameters and types of those it extends (8.26.3).
+            let parents = class.base.iter().map(|base| base.data_type).chain(
+                class
+                    .interface
+                    .then_some(&class.interfaces)
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            );
+            for parent in parents {
+                let known = match &native.data_type(parent).kind {
+                    DataTypeKind::Named(path) if path.len() == 1 => {
+                        let base = item(&path[0].name);
+                        // A parameter or type of the class hides a class of
+                        // its name.
+                        (!members[&item(&class.name)].contains(&base))
+                            .then(|| own.get(&base).copied().flatten())
+                            .flatten()
+                    }
+                    _ => None,
+                };
+                match known {
+                    Some(base) => pending.push(base),
+                    None if foreign || members.values().any(|names| names.contains(wanted)) => {
+                        return Err(());
+                    }
+                    None => unknown.push(item(&class.name)),
+                }
+            }
+        }
+        Ok(unknown)
+    };
+    let mut open = HashSet::default();
+    // The bodies of the methods declared out of their classes, which are in
+    // the scopes of those (8.24), by the names of the classes.
+    let methods = native
+        .subroutines
+        .iter()
+        .filter_map(|subroutine| Some((subroutine.tokens, item(&subroutine.scope.last()?.name))))
+        .collect::<Vec<_>>();
+    // The array methods with a clause that declares their iterators (7.12).
+    let scoped = native
+        .expressions
+        .iter()
+        .filter(|expression| {
+            matches!(
+                expression.kind,
+                celox_sv_syntax::ExprKind::ArrayMethodWith { .. }
+            )
+        })
+        .map(|expression| expression.tokens)
+        .collect::<Vec<_>>();
+    let around = |tokens: &TokenRange, token: usize| tokens.start <= token && token < tokens.end;
+    for (wanted, token) in references {
+        let target = TokenRange {
+            start: token,
+            end: token + 1,
+        };
+        if scoped.iter().any(|tokens| around(tokens, token))
+            || dimensions::hides_scope_item(tree, target, wanted)?
+        {
+            return Ok(None);
+        }
+        // The classes around the reference, and what they inherit.
+        for class in native
+            .classes
+            .iter()
+            .filter(|class| around(&class.tokens, token))
+        {
+            match inherits(class, wanted) {
+                Ok(unknown) => open.extend(unknown),
+                Err(()) => return Ok(None),
+            }
+        }
+        for (_, class) in methods.iter().filter(|(tokens, _)| around(tokens, token)) {
+            let mut declared = native
+                .classes
+                .iter()
+                .filter(|declared| item(&declared.name) == *class);
+            match (declared.next(), declared.next()) {
+                (Some(class), None) => match inherits(class, wanted) {
+                    Ok(unknown) => open.extend(unknown),
+                    Err(()) => return Ok(None),
+                },
+                _ => return Ok(None),
+            }
+        }
+    }
+    Ok(Some(open))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Analyses of the scopes of packages and compilation units, also for
+    /// the specializations other scopes ask of them.
+    static SCOPE_ANALYSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn analyze_package_scope(
@@ -568,9 +985,10 @@ fn analyze_package_scope(
     own_items: Option<&ScopeSymbols>,
 ) -> Result<Package, AnalyzerError> {
     let imports::ResolvedImports {
-        symbols: imported,
+        symbols: mut imported,
         exports,
     } = imports::resolve_imports(tree, packages, None)?;
+    imported.declarations_only |= session.declarations_only;
     if own_items.is_none() && name != UNIT {
         session.foreign.register(
             name,
@@ -590,6 +1008,8 @@ pub(super) fn analyze_package_with_symbols(
     exports: HashMap<String, String>,
     own_items: Option<&ScopeSymbols>,
 ) -> Result<Package, AnalyzerError> {
+    #[cfg(test)]
+    SCOPE_ANALYSES.with(|count| count.set(count.get() + 1));
     if let Some(own_items) = own_items {
         imported.extend(own_items);
     }
@@ -665,10 +1085,13 @@ pub(super) fn analyze_package_with_symbols(
     let state_module = if variables.is_empty() {
         None
     } else {
-        let ir = crate::analyze::analyze_source(Source {
+        let (ir, publication) = crate::analyze::analyze_source_keeping(Source {
             modules: vec![module],
             diagnostics: Vec::new(),
-        })?;
+            types: std::mem::take(&mut session.types),
+        });
+        session.types = publication.0;
+        let ir = ir?;
         ir.modules().first().cloned()
     };
     let qualified = |item: &String| format!("{name}::{item}");
@@ -732,6 +1155,182 @@ fn unit_visibility(tree: &SyntaxTree) -> Result<UnitVisibility, AnalyzerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How many times the scopes of the packages of `source` are analyzed.
+    fn scope_analyses(source: &str) -> usize {
+        SCOPE_ANALYSES.with(|count| count.set(0));
+        crate::analyze_source(source, std::path::Path::new("self-qualified.sv"))
+            .expect("the source analyzes");
+        SCOPE_ANALYSES.with(|count| count.get())
+    }
+
+    #[test]
+    fn plain_self_qualified_names_need_one_analysis() {
+        // A package that qualifies its own items where nothing hides them is
+        // analyzed once: `p::x` is `x` there (IEEE 1800-2023 26.3).
+        let plain = "package p;
+                localparam int X = 5;
+                typedef enum { NONE, LOW } level_e;
+                int counter;
+                function automatic int f(int a); return p::X + a + p::LOW; endfunction
+                class B; int v; endclass
+                class D extends B;
+                    function int g(); p::counter = p::f(1); return p::X; endfunction
+                endclass
+                class G #(type T = B) extends T;
+                    function int h(); p::B b; return p::X + p::NONE; endfunction
+                endclass
+            endpackage
+            module Top; endmodule";
+        assert_eq!(scope_analyses(plain), 1);
+    }
+
+    #[test]
+    fn foreign_specializations_lower_only_the_classes_they_change() {
+        // A package analyzed again for a specialization that another scope
+        // asks for takes over the methods its last analysis lowered, but
+        // for the new classes and those they extend, whose dispatchers are
+        // over one class more (IEEE 1800-2023 8.20, 8.25).
+        use crate::ast::procedural::{CLASS_LOWERINGS, LOWER_EVERY_CLASS};
+        let source = |classes: usize| {
+            let others = (0..classes)
+                .map(|i| {
+                    format!(
+                        "class K{i}; int v; function int get(); return v + {i}; endfunction endclass\n"
+                    )
+                })
+                .collect::<String>();
+            format!(
+                "package p;
+                    class B; virtual function int f(); return 1; endfunction endclass
+                    class C #(int N = 2) extends B;
+                        virtual function int f(); return N; endfunction
+                    endclass
+                    {others}
+                endpackage
+                module Top(output int o);
+                    p::C#(5) c;
+                    initial begin c = new; o = c.f(); end
+                endmodule"
+            )
+        };
+        let lowerings = |classes: usize, every: bool| {
+            LOWER_EVERY_CLASS.with(|flag| flag.set(every));
+            CLASS_LOWERINGS.with(|count| count.set(0));
+            let ir = crate::analyze_source(&source(classes), std::path::Path::new("lowerings.sv"));
+            LOWER_EVERY_CLASS.with(|flag| flag.set(false));
+            ir.expect("the source analyzes");
+            CLASS_LOWERINGS.with(|count| count.get())
+        };
+        // Each class of the package once, and the classes the module's
+        // specialization changes once more, however many others there are.
+        assert_eq!(lowerings(12, false) - lowerings(2, false), 10);
+        assert!(lowerings(12, true) - lowerings(2, true) > 10);
+    }
+
+    #[test]
+    fn foreign_specializations_analyze_a_plain_package_once_each() {
+        // A scope that asks for a specialization of a class of the package
+        // has the package analyzed for it: once, as the package itself is,
+        // unless the specialization extends a class of that scope, which
+        // may inherit members the package does not know that hide the names
+        // it qualifies (8.25, 26.3).
+        let analyses = |user: &str| {
+            scope_analyses(&format!(
+                "package p;
+                    localparam int X = 5;
+                    class B; int v; endclass
+                    class C #(type T = int);
+                        function int f(); return p::X; endfunction
+                    endclass
+                    class G #(type T = B) extends T;
+                        function int g(); return p::X; endfunction
+                    endclass
+                endpackage
+                {user}"
+            ))
+        };
+        // The package and the compilation unit alone.
+        let none = analyses("class U; int v; endclass module Top; endmodule");
+        // A class of the unit as an argument that no class extends.
+        let argument = analyses("class U; int v; endclass module Top; p::C#(U) c; endmodule");
+        // A class of the unit that a class of the package extends.
+        let base = analyses("class U; int v; endclass module Top; p::G#(U) g; endmodule");
+        assert!(argument > none, "{argument}");
+        assert!(base > argument, "{argument} {base}");
+        // An escaped name may hold the text that starts the arguments of a
+        // specialization.
+        let escaped = scope_analyses(
+            "package p;
+                localparam int X = 5;
+                class B; int v; endclass
+                class \\G#(x #(type T = B) extends T;
+                    function int g(); return p::X; endfunction
+                endclass
+            endpackage
+            class U; int v; endclass
+            module Top; p::\\G#(x #(U) g; endmodule",
+        );
+        let unescaped = scope_analyses(
+            "package p;
+                localparam int X = 5;
+                class B; int v; endclass
+                class G #(type T = B) extends T;
+                    function int g(); return p::X; endfunction
+                endclass
+            endpackage
+            class U; int v; endclass
+            module Top; p::G #(U) g; endmodule",
+        );
+        assert_eq!(escaped, unescaped);
+    }
+
+    #[test]
+    fn hidden_self_qualified_names_need_a_second_analysis() {
+        // A declaration around the reference that gives the name to
+        // something else hides the item from the plain name, not from the
+        // qualified one: a formal, a variable of a block, a member of the
+        // class or of a class it extends, and a member that a base which is
+        // a type parameter may bring (IEEE 1800-2023 23.9, 26.3).
+        for body in [
+            "function automatic int f(int X); return p::X + X; endfunction",
+            "function automatic int f(); int X; X = 1; return p::X + X; endfunction",
+            "function automatic int f(); begin int X; X = 1; return p::X + X; end endfunction",
+            "class C; int X; function int f(); return p::X + X; endfunction endclass",
+            "class B; int X; endclass
+             class D extends B; function int f(); return p::X + X; endfunction endclass",
+            "class B; int X; endclass
+             class G #(type T = B) extends T;
+                 function int f(); return p::X; endfunction
+             endclass",
+            "class C; typedef enum { X, Z } e; function int f(); return p::X; endfunction endclass",
+            // A method declared out of its class is in the scope of the
+            // class (8.24).
+            "class C; int X; extern function int f(); endclass
+             function int C::f(); return p::X + X; endfunction",
+            "class B; int X; endclass
+             class D extends B; extern function int f(); endclass
+             function int D::f(); return p::X + X; endfunction",
+            // An interface class inherits the parameters and types of the
+            // interface classes it extends (8.26.3).
+            "interface class J; localparam int X = 1; endclass
+             interface class I extends J;
+                 pure virtual function int f(int a = p::X);
+             endclass",
+            // The iterator of an array method (7.12).
+            "function automatic int f(int q[$]);
+                 int found[$];
+                 found = q.find(X) with (X == p::X);
+                 return found.size();
+             endfunction",
+        ] {
+            let source = format!(
+                "package p; localparam int X = 5; {body} endpackage
+                module Top; endmodule"
+            );
+            assert_eq!(scope_analyses(&source), 2, "{body}");
+        }
+    }
 
     #[test]
     fn package_and_module_select_calls_have_distinct_sites() {

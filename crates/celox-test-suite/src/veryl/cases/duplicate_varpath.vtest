@@ -1,5 +1,8 @@
 (group duplicate_varpath (category regression))
 
+; Minimal reproduction: two `for` loops in `always_comb` each declare `var tmp: logic`.
+; The Veryl analyzer assigns different VarIds but identical VarPaths to these scoped
+; variables. Without the fix this panics during JIT compilation.
 (case test_duplicate_scoped_var_in_always_comb
   (source "test.veryl" #"
         module Top (
@@ -45,6 +48,10 @@
   (assert_eq o 11))
   ; 10 + 1
 
+; Generate-for with same-named scoped variables in always_comb.
+; Mirrors the original AdcGroup MRE: generate-for creates instances with
+; internal vars, and always_comb inside uses `var flag: logic;` in multiple
+; for-loop scopes.
 (case test_duplicate_scoped_var_with_generate_for
   (source "test.veryl" #"
         module Top (

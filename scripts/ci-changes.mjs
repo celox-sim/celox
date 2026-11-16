@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { backendTestFilter } from "./ci-backend-tests.mjs";
+import { backendTestFilter, backendVtestExclusions } from "./ci-backend-tests.mjs";
 
 import { readWorkspace, rustTestScope } from "./ci-rust-scope.mjs";
 
@@ -47,7 +47,6 @@ const RUST_ONLY_CRATES = new Set([
   "celox-test-suite",
   "celox-bench",
   "celox-bench-sv",
-  "celox-vpi",
   "celox-wasm",
   "lydite",
   "lydite-celox",
@@ -60,6 +59,9 @@ const RUST_ONLY_CRATES = new Set([
 function isRustOnlyPath(path) {
   if (/(?:^|\/)Cargo\.(?:toml|lock)$/.test(path)) return false;
   if (startsWithAny(path, ["lydite/", "conformance/"])) return true;
+  // The `celox` command and its VPI host: celox-napi disables the `cli`
+  // feature that builds them.
+  if (/^crates\/celox\/src\/(?:bin|vpi)\//.test(path)) return true;
   const crate = /^crates\/([^/]+)\/(.+)$/.exec(path);
   if (!crate) return false;
   return (
@@ -85,12 +87,12 @@ export function affectsHeliodorArm64(files) {
           "crates/celox-backend-arm64/",
           "crates/celox-backend-common/",
           "crates/celox/src/backend/native/",
-          "crates/celox-vpi/src/bin/celox/",
+          "crates/celox/src/bin/celox/",
           "scripts/ci-changes.",
         ]) ||
         [
           "crates/celox/src/backend.rs",
-          "crates/celox-vpi/src/bin/celox.rs",
+          "crates/celox/src/bin/celox.rs",
           "scripts/run-heliodor-bench.sh",
           "scripts/heliodor-revision",
           "scripts/setup-arm64-backend-dev.sh",
@@ -283,20 +285,32 @@ if (
           ...classifyFiles(files, { releasePlease: !queue && process.env.RELEASE_PLEASE_PR === "true" }),
           heliodor_arm64: affectsHeliodorArm64(files),
         };
+  const scope = rustScopeOutputs(
+    process.env.GITHUB_EVENT_NAME === "pull_request" &&
+      !scheduledFull &&
+      affected.rust
+      ? files
+      : null,
+  );
   writeOutputs({
     queue,
     full_validation: scheduledFull,
     fast_queue: queue && !scheduledFull,
     rust_backend_filter: backendTestFilter(files, { full: scheduledFull }),
     ...affected,
-    ...rustScopeOutputs(
-      process.env.GITHUB_EVENT_NAME === "pull_request" &&
-        !scheduledFull &&
-        affected.rust
-        ? files
-        : null,
-    ),
+    ...scope,
+    rust_vtest: vtestScope(scope.rust_vtest, backendVtestExclusions(files, { full: scheduledFull })),
   });
+}
+
+/**
+ * The `--scope` of scripts/run-vtest.py: the suite cases of a Rust scope
+ * (`rust_vtest`, empty for none) without the backends the change leaves out.
+ */
+export function vtestScope(selection, excluded) {
+  if (!selection) return "";
+  const scope = JSON.parse(selection);
+  return JSON.stringify(excluded.length ? { ...scope, exclude_backends: excluded } : scope);
 }
 
 // Lydite core tests run independently; bridge CI is disabled.
@@ -341,13 +355,14 @@ export function rustScopeOutputs(files) {
       rust_vpi_e2e: true,
       rust_features: "",
       rust_filter: "",
+      rust_vtest: "{}",
       rust_libraries: "",
       rust_library_features: "",
     };
   }
   return {
     rust_full: false,
-    rust_vpi_e2e: scope.builds.some((build) => build.packages.includes("celox-vpi") &&
+    rust_vpi_e2e: scope.builds.some((build) => build.packages.includes("celox") &&
       (build.targets.length === 0 || build.targets.includes("cocotb_e2e"))),
     rust_packages: scope.packages.join(" "),
     rust_targets: scope.targets.join(" "),
@@ -362,6 +377,7 @@ export function rustScopeOutputs(files) {
       /^(?:\.\/)?(?:conformance\/sv-tests\/|crates\/celox\/examples\/sv_tests\.rs$)/.test(path)),
     rust_features: scope.features.join(","),
     rust_filter: scope.filter,
+    rust_vtest: scope.vtest ? JSON.stringify(scope.vtest) : "",
     rust_libraries: scope.libraries.join(" "),
     rust_library_features: scope.libraryFeatures.join(","),
   };

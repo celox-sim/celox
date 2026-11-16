@@ -87,9 +87,19 @@ fn operands(kind: &ExprKind) -> Vec<ExprId> {
             predicate,
         } => operands.extend([*expression, *predicate]),
         ExprKind::ConstraintForeach { array, body, .. } => operands.extend([*array, *body]),
+        ExprKind::SoftConstraint { expression } => operands.push(*expression),
+        ExprKind::DisableSoft {
+            variable,
+            condition,
+        } => {
+            operands.push(*variable);
+            operands.extend(*condition);
+        }
+        ExprKind::SolveBefore { before, after } => operands.extend(before.iter().chain(after)),
         ExprKind::RandomizeWith {
             expression,
             constraints,
+            ..
         } => {
             operands.push(*expression);
             operands.extend(constraints.iter().flatten());
@@ -121,6 +131,18 @@ fn operands(kind: &ExprKind) -> Vec<ExprId> {
         ExprKind::Set(dimensions) => {
             for dimension in dimensions {
                 dimension_operands(&dimension.kind, &mut operands);
+            }
+        }
+        ExprKind::Unique(items) => {
+            for item in items {
+                dimension_operands(&item.kind, &mut operands);
+            }
+        }
+        ExprKind::Dist { expression, items } => {
+            operands.push(*expression);
+            for item in items {
+                dimension_operands(&item.value.kind, &mut operands);
+                operands.extend(item.weight.map(|weight| weight.value));
             }
         }
         ExprKind::Streaming {
@@ -472,8 +494,7 @@ impl BodyBuilder<'_, '_, '_> {
         if domain.is_none()
             && dimensions::operand_shape(destination, self.tree, self.session, &self.dims)?
                 .as_ref()
-                .and_then(type_names::declared_type)
-                .is_some_and(|ty| ty.is_enum || ty.packed_enum)
+                .is_some_and(|shape| shape.enumeration_in(&self.session.types).enumeration)
         {
             return Ok(None);
         }
@@ -880,6 +901,7 @@ impl BodyBuilder<'_, '_, '_> {
             &container,
             &shape,
             self.tree,
+            self.session,
             &self.dims,
         )?;
         self.bind_effect(id, elements);
@@ -1230,8 +1252,8 @@ impl BodyBuilder<'_, '_, '_> {
         let shape = dimensions::operand_shape(left, self.tree, self.session, &self.dims)?;
         if shape.as_ref().is_some_and(|shape| {
             !shape.unpacked.is_empty()
-                || shape.container.is_some()
-                || shape.unpacked_struct.is_some()
+                || containers::holds_container(shape, self.tree, self.session, &self.dims)
+                || unpacked_structs::holds_struct(shape, self.tree, self.session, &self.dims)
         }) {
             return Err(unsupported(
                 "assignment expression to an unpacked aggregate",
@@ -1239,9 +1261,20 @@ impl BodyBuilder<'_, '_, '_> {
         }
         if !matches!(current, Expr::Ident(_))
             && shape.as_ref().is_some_and(|shape| {
-                shape.enum_domain.is_some()
-                    || shape.class.is_some()
-                    || shape.virtual_interface.is_some()
+                shape.enumeration_in(&self.session.types).domain.is_some()
+                    || expression_binding::objects::shape_class(
+                        shape,
+                        self.tree,
+                        self.session,
+                        &self.dims,
+                    )
+                    .is_some()
+                    || virtual_interfaces::holds_virtual_interface(
+                        shape,
+                        self.tree,
+                        self.session,
+                        &self.dims,
+                    )
                     || shape.chandle
                     || !shape.members.is_empty()
             })
@@ -1324,6 +1357,14 @@ impl BodyBuilder<'_, '_, '_> {
         {
             return Ok(self.hidden(property.r#type));
         }
+        // So does a member of a container element, whose selects are those
+        // of its declared range (`q[i].m[8]` of `bit [15:8] m`).
+        if let Some((ty, _)) =
+            containers::element_member(id, native, self.tree, self.session, &self.dims)?
+            && !ty.is_unpacked_struct_in(&self.session.types)
+        {
+            return Ok(self.hidden(ty));
+        }
         // A streaming concatenation that is unpacked into holds the bits of
         // its operands, a vector of their width (11.4.14.3).
         if let ExprKind::Streaming { expressions, .. } = &native
@@ -1349,7 +1390,7 @@ impl BodyBuilder<'_, '_, '_> {
             } else {
                 TypeKind::Bit
             });
-            ty.packed_ranges = vector_type(width, false).packed_ranges;
+            ty.packed_ranges = vector_type(width, false).packed_ranges.clone();
             return Ok(self.hidden(ty));
         }
         let semantic = expression_types::type_of(self.tree, self.session, id, native, &self.dims)?;
@@ -1380,7 +1421,8 @@ impl BodyBuilder<'_, '_, '_> {
             semantic_types::TyData::String => {
                 type_binding::builtin_type("string", None).expect("a builtin type")
             }
-            semantic_types::TyData::Class(semantic_types::Decl::Class(class)) => {
+            semantic_types::TyData::Class(semantic_types::Decl::Class(decl)) => {
+                let class = self.session.types.decl(decl).name.clone();
                 classes::handle_type(self.tree, self.session, &class)
                     .ok_or_else(|| unsupported(format!("class `{class}`")))?
             }
@@ -1433,7 +1475,7 @@ impl BodyBuilder<'_, '_, '_> {
     ) -> Converted<()> {
         let native = self.tree.declarations();
         self.reject_tagged_integral_target(operand)?;
-        if unpacked_structs::native_struct(operand, native, self.tree, self.session, &self.dims)?
+        if unpacked_structs::value_struct(operand, native, self.tree, self.session, &self.dims)
             .is_some()
         {
             return Err(unsupported(

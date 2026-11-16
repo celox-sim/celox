@@ -79,6 +79,105 @@ pub(super) struct SequenceMonitor {
     /// The statements that end each tick: they keep the values that later
     /// ticks read.
     pub updates: Vec<Stmt>,
+    /// The statements that start each tick in the Observed region, before
+    /// any action runs: they read whether assertions are on (20.11).
+    pub start: Vec<Stmt>,
+    /// The record of its disable condition, with `disable iff`.
+    pub disabled: Option<DisableHistory>,
+    /// For a multiclocked sequence (16.13), its decisions instead of the
+    /// stages of one clock.
+    pub multiclock: Option<super::multiclock::Multiclock>,
+}
+
+/// Whether the disable condition of a concurrent assertion over cycles was
+/// true since each attempt started (IEEE 1800-2023 16.12): an attempt is
+/// disabled when the condition is true at any time from its start in the
+/// Observed region to its end, over the current values of its variables,
+/// and then neither passes nor fails.
+pub(super) struct DisableHistory {
+    /// A vector of a bit for each age of an attempt, up to the sequence's
+    /// length: whether the attempt of that age was disabled so far. Each
+    /// tick shifts it by one age and sets the bits of the older attempts
+    /// when the condition was true since the previous tick; the bit of the
+    /// attempt that starts is the condition at this tick.
+    pub bits: String,
+    /// Whether the condition was true since the previous tick, which a
+    /// process that waits on its changes records (see
+    /// `BodyBuilder::disable_watchers`).
+    pub seen: String,
+}
+
+impl DisableHistory {
+    /// Whether the attempt `age` ticks old was disabled.
+    pub fn of_age(&self, age: u32) -> Expr {
+        Expr::Select {
+            expr: Box::new(Expr::Ident(self.bits.clone())),
+            msb: ConstExpr::Literal(age.to_string()),
+            lsb: ConstExpr::Literal(age.to_string()),
+            signed: false,
+        }
+    }
+
+    /// The statements of a tick, before its decisions, for a sequence
+    /// `length` ticks long and disable condition `disable`: each attempt
+    /// ages by one tick and is disabled if it was, or if the condition was
+    /// true since the previous tick or is now; the attempt that starts is
+    /// disabled if the condition is true now.
+    pub fn tick(&self, disable: &Expr, length: u32) -> Vec<Stmt> {
+        let bits = || Expr::Ident(self.bits.clone());
+        let width = u64::from(length) + 1;
+        let older = format!("{width}'b{}0", "1".repeat(length as usize));
+        vec![
+            Stmt::Assign {
+                lhs: LValue::Ident(self.bits.clone()),
+                rhs: Expr::Binary {
+                    left: Box::new(bits()),
+                    op: BinaryOp::Shl,
+                    right: Box::new(Expr::Literal("1".into())),
+                },
+                nonblocking: false,
+            },
+            Stmt::If {
+                condition: Expr::Binary {
+                    left: Box::new(Expr::Ident(self.seen.clone())),
+                    op: BinaryOp::LogicOr,
+                    right: Box::new(disable.clone()),
+                },
+                then_body: vec![Stmt::Assign {
+                    lhs: LValue::Ident(self.bits.clone()),
+                    rhs: Expr::Binary {
+                        left: Box::new(bits()),
+                        op: BinaryOp::BitOr,
+                        right: Box::new(Expr::Literal(older)),
+                    },
+                    nonblocking: false,
+                }],
+                else_body: Vec::new(),
+            },
+            Stmt::If {
+                condition: disable.clone(),
+                then_body: vec![Stmt::Assign {
+                    lhs: LValue::Select {
+                        name: self.bits.clone(),
+                        msb: ConstExpr::Literal("0".into()),
+                        lsb: ConstExpr::Literal("0".into()),
+                        signed: false,
+                        array_slice_width: None,
+                        array_slice_reversed: false,
+                        is_2state: true,
+                    },
+                    rhs: Expr::Literal("1'b1".into()),
+                    nonblocking: false,
+                }],
+                else_body: Vec::new(),
+            },
+            Stmt::Assign {
+                lhs: LValue::Ident(self.seen.clone()),
+                rhs: Expr::Literal("1'b0".into()),
+                nonblocking: false,
+            },
+        ]
+    }
 }
 
 /// A value of an attempt that a later tick reads, a step's match or a
@@ -346,6 +445,497 @@ pub(super) fn register_updates(
     }
     computed.extend(moves);
     computed
+}
+
+/// The default failure action of a native immediate assertion.
+/// The default fail action of an `assert` or `assume`: a call to `$error`
+/// at the assertion (IEEE 1800-2023 20.10).
+pub(super) fn assertion_failure(
+    keyword: &str,
+    site: Option<crate::procedural::SourceSpan>,
+) -> Vec<Stmt> {
+    vec![Stmt::SystemTask {
+        task: SystemTask::Severity(system_functions::Severity::Error),
+        args: vec![SystemTaskArg::Str(format!("{keyword} failed"))],
+        site,
+        assertion: None,
+    }]
+}
+
+/// Check the action of a deferred assertion: one subroutine call (IEEE
+/// 1800-2023 16.4). Only display and severity tasks are supported, since
+/// a user subroutine would run in the Reactive region and could wake
+/// processes there.
+pub(super) fn deferred_action(body: &[Stmt]) -> Result<(), AnalyzerError> {
+    match body {
+        [] => Ok(()),
+        [
+            Stmt::SystemTask {
+                task:
+                    SystemTask::Display(_)
+                    | SystemTask::Write(_)
+                    | SystemTask::Severity(_)
+                    | SystemTask::Fatal,
+                ..
+            },
+        ] => Ok(()),
+        _ => Err(unsupported(
+            "deferred assertion action other than one display or severity task call",
+        )),
+    }
+}
+
+/// Attribute the severity tasks of an assertion's action block to it, and
+/// for a deferred assertion its display tasks, which wait in the same
+/// queue. Tasks in subroutines the block calls are not attributed, and the
+/// tasks of a nested assertion keep its own attribution.
+pub(super) fn attribute_reports(
+    body: &mut [Stmt],
+    assertion: &celox_design::AssertionSite,
+    outcome: celox_design::AssertionOutcome,
+) {
+    for stmt in body {
+        stmt.walk_mut(&mut |stmt| {
+            let deferred = assertion.deferral != celox_design::AssertionDeferral::None;
+            if let Stmt::SystemTask {
+                task,
+                assertion: attributed @ None,
+                ..
+            } = stmt
+                && (matches!(task, SystemTask::Severity(_) | SystemTask::Fatal)
+                    || deferred && matches!(task, SystemTask::Display(_) | SystemTask::Write(_)))
+            {
+                *attributed = Some(celox_design::AssertionSite {
+                    outcome,
+                    ..assertion.clone()
+                });
+            }
+        });
+    }
+}
+
+/// The most Boolean operands of a sequence the analyzer expands.
+const MAX_SEQUENCE_OPERANDS: usize = 1024;
+
+/// The most terms of the decisions of a monitor of a sequence with several
+/// ways to match.
+const MAX_MONITOR_TERMS: u64 = 1 << 20;
+
+/// The longest way a monitor decides, in ticks.
+const MAX_THROUGHOUT_TICKS: u32 = 1024;
+
+/// The most ways to match that a monitor decides of one sequence.
+pub(super) const MAX_SEQUENCE_PATHS: usize = 1024;
+
+/// The ways sequence `expr` matches (IEEE 1800-2023 16.7, 16.9.5 to
+/// 16.9.7), each a linear sequence of steps a fixed number of ticks apart:
+/// a delay range is one way per delay, `or` the ways of either operand,
+/// `and` a way of each, matching at the later of their matches,
+/// `intersect` a way of each matching at one tick, and `throughout` a way
+/// of its sequence with its condition at each of its ticks.
+pub(super) fn sequence_paths(
+    expr: &celox_sv_syntax::SequenceExpr,
+) -> Result<Vec<Vec<celox_sv_syntax::SequenceStep>>, AnalyzerError> {
+    // The expansion follows the tree, as deep as it has operands.
+    if expr.booleans().len() > MAX_SEQUENCE_OPERANDS {
+        return Err(unsupported(format!(
+            "sequence with more than {MAX_SEQUENCE_OPERANDS} Boolean operands"
+        )));
+    }
+    expand_paths(expr)
+}
+
+fn expand_paths(
+    expr: &celox_sv_syntax::SequenceExpr,
+) -> Result<Vec<Vec<celox_sv_syntax::SequenceStep>>, AnalyzerError> {
+    use celox_sv_syntax::{SequenceExpr, SequenceStep};
+    let too_many = || {
+        unsupported(format!(
+            "sequence with more than {MAX_SEQUENCE_PATHS} ways to match"
+        ))
+    };
+    Ok(match expr {
+        SequenceExpr::Boolean(boolean) => vec![vec![SequenceStep {
+            delay: 0,
+            expression: boolean.expression,
+            items: boolean.items.clone(),
+            tokens: boolean.tokens,
+        }]],
+        SequenceExpr::Or(left, right) => {
+            let mut paths = expand_paths(left)?;
+            paths.extend(expand_paths(right)?);
+            if paths.len() > MAX_SEQUENCE_PATHS {
+                return Err(too_many());
+            }
+            paths
+        }
+        SequenceExpr::And(left, right) | SequenceExpr::Intersect(left, right) => {
+            let intersect = matches!(expr, SequenceExpr::Intersect(..));
+            let lefts = expand_paths(left)?;
+            let rights = expand_paths(right)?;
+            // The ways `and` combines are every pair; `intersect` combines
+            // only pairs of one length, which the cap counts.
+            let combined = if intersect {
+                let mut lengths = HashMap::<u64, usize>::default();
+                for left in &lefts {
+                    *lengths.entry(path_length(left)).or_default() += 1;
+                }
+                rights.iter().fold(0usize, |count, right| {
+                    count.saturating_add(lengths.get(&path_length(right)).copied().unwrap_or(0))
+                })
+            } else {
+                lefts.len().saturating_mul(rights.len())
+            };
+            if combined > MAX_SEQUENCE_PATHS {
+                return Err(too_many());
+            }
+            if lefts
+                .iter()
+                .chain(&rights)
+                .flatten()
+                .any(|step| !step.items.is_empty())
+            {
+                return Err(unsupported(if intersect {
+                    "match item in an operand of intersect"
+                } else {
+                    "match item in an operand of and"
+                }));
+            }
+            let mut paths = Vec::new();
+            for left in &lefts {
+                for right in &rights {
+                    if intersect && path_length(left) != path_length(right) {
+                        continue;
+                    }
+                    paths.push(merged_path(left, right));
+                }
+            }
+            // Ways of different lengths never intersect.
+            if paths.is_empty() {
+                return Err(unsupported(
+                    "intersect of sequences without ways to match of one length",
+                ));
+            }
+            paths
+        }
+        // A clocking event of a subsequence (16.13) joins only a
+        // concatenation of subsequences, which `multiclock` takes.
+        SequenceExpr::Clocked { .. } => {
+            return Err(unsupported(
+                "multiclocked sequence with a clock change other than one joined by ##0 or ##1 (IEEE 1800-2023 16.13.1)",
+            ));
+        }
+        SequenceExpr::Throughout {
+            condition,
+            sequence,
+        } => {
+            if !condition.items.is_empty() {
+                return Err(unsupported("match item in the left operand of throughout"));
+            }
+            let mut paths = expand_paths(sequence)?;
+            // `condition` at each tick of each way, from its start to its
+            // match.
+            for path in &mut paths {
+                if path.iter().any(|step| !step.items.is_empty()) {
+                    return Err(unsupported("match item in the right operand of throughout"));
+                }
+                let length = path_length(path);
+                // Each tick takes a step; a monitor decides no longer way.
+                if length > u64::from(MAX_THROUGHOUT_TICKS) {
+                    return Err(unsupported(format!(
+                        "sequence longer than {MAX_THROUGHOUT_TICKS} ticks"
+                    )));
+                }
+                let ticks = (0..=length)
+                    .map(|_| SequenceStep {
+                        delay: 1,
+                        expression: condition.expression,
+                        items: Vec::new(),
+                        tokens: condition.tokens,
+                    })
+                    .collect::<Vec<_>>();
+                let mut ticks = ticks;
+                ticks[0].delay = 0;
+                *path = merged_path(path, &ticks);
+            }
+            paths
+        }
+        SequenceExpr::Concat { left, delay, right } => {
+            let lefts = match left {
+                Some(left) => expand_paths(left)?,
+                None => vec![Vec::new()],
+            };
+            let rights = expand_paths(right)?;
+            let count = (delay.max - delay.min) as usize + 1;
+            if lefts
+                .len()
+                .saturating_mul(rights.len())
+                .saturating_mul(count)
+                > MAX_SEQUENCE_PATHS
+            {
+                return Err(too_many());
+            }
+            let mut paths = Vec::new();
+            for left in &lefts {
+                for ticks in delay.min..=delay.max {
+                    for right in &rights {
+                        let mut path = left.clone();
+                        let mut right = right.clone();
+                        right[0].delay = right[0]
+                            .delay
+                            .checked_add(ticks)
+                            .ok_or_else(|| unsupported("cycle delay longer than 2^32 - 1 ticks"))?;
+                        path.extend(right);
+                        paths.push(path);
+                    }
+                }
+            }
+            paths
+        }
+    })
+}
+
+/// The ticks way `path` spans after its start.
+fn path_length(path: &[celox_sv_syntax::SequenceStep]) -> u64 {
+    path.iter().map(|step| u64::from(step.delay)).sum()
+}
+
+/// Ways `left` and `right` started at one tick as one way: the steps of
+/// both at their ticks, so it matches when the later one matches.
+fn merged_path(
+    left: &[celox_sv_syntax::SequenceStep],
+    right: &[celox_sv_syntax::SequenceStep],
+) -> Vec<celox_sv_syntax::SequenceStep> {
+    let absolute = |path: &[celox_sv_syntax::SequenceStep]| {
+        let mut at = 0u64;
+        path.iter()
+            .map(|step| {
+                at += u64::from(step.delay);
+                (at, step.clone())
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut steps = absolute(left);
+    steps.extend(absolute(right));
+    // A stable sort keeps the left operand's steps of a tick first.
+    steps.sort_by_key(|(at, _)| *at);
+    let mut previous = 0u64;
+    steps
+        .into_iter()
+        .map(|(at, mut step)| {
+            // Too long a way is rejected by its length later.
+            step.delay = u32::try_from(at - previous).unwrap_or(u32::MAX);
+            previous = at;
+            step
+        })
+        .collect()
+}
+
+/// A Boolean conjunction of `terms`, true without any.
+fn all(terms: impl IntoIterator<Item = Expr>) -> Expr {
+    terms
+        .into_iter()
+        .reduce(|left, right| Expr::Binary {
+            left: Box::new(left),
+            op: BinaryOp::LogicAnd,
+            right: Box::new(right),
+        })
+        .unwrap_or_else(|| Expr::Literal("1'b1".into()))
+}
+
+/// A Boolean disjunction of `terms`, false without any.
+fn any(terms: impl IntoIterator<Item = Expr>) -> Expr {
+    terms
+        .into_iter()
+        .reduce(|left, right| Expr::Binary {
+            left: Box::new(left),
+            op: BinaryOp::LogicOr,
+            right: Box::new(right),
+        })
+        .unwrap_or_else(|| Expr::Literal("1'b0".into()))
+}
+
+fn not(expr: Expr) -> Expr {
+    Expr::Unary {
+        op: UnaryOp::LogicNot,
+        expr: Box::new(expr),
+    }
+}
+
+impl BodyBuilder<'_, '_, '_> {
+    /// The monitor of a sequence with several ways to match, `paths`
+    /// (see [`sequence_paths`]), without local variables or match items.
+    ///
+    /// An attempt matches at the first tick one of its ways matches, and
+    /// fails at the first tick none of them can match any more (16.7,
+    /// 16.12.2, 16.14.1); each tick decides the attempt of each age it
+    /// reaches from the matches of the Boolean expressions of its earlier
+    /// ticks, so a decided attempt needs no state of its own.
+    pub(super) fn sequence_alternatives(
+        &mut self,
+        paths: Vec<Vec<celox_sv_syntax::SequenceStep>>,
+        max_ticks: u32,
+    ) -> Converted<SequenceMonitor> {
+        // The assertion control tasks stop new attempts while assertions are
+        // off and let started ones finish (20.11). This monitor decides each
+        // age from history registers alone and keeps no per-attempt state
+        // to tell the two apart.
+        if self.controls_assertions() {
+            return Err(unsupported(
+                "sequence with more than one way to match in a design that calls $assertoff or $asserton",
+            ));
+        }
+        // Each way as the offsets of its Boolean expressions from the start.
+        let mut offsets: Vec<Vec<(u32, celox_sv_syntax::ExprId)>> = Vec::new();
+        for path in &paths {
+            let mut at = 0u32;
+            let mut steps = Vec::new();
+            for step in path {
+                if !step.items.is_empty() {
+                    return Err(unsupported(
+                        "match item in a sequence with more than one way to match",
+                    ));
+                }
+                at = at
+                    .checked_add(step.delay)
+                    .ok_or_else(|| unsupported("sequence longer than 2^32 ticks"))?;
+                steps.push((at, step.expression));
+            }
+            offsets.push(steps);
+        }
+        let ends: Vec<u32> = offsets
+            .iter()
+            .map(|steps| steps.last().map_or(0, |(at, _)| *at))
+            .collect();
+        let length = ends.iter().copied().max().unwrap_or(0);
+        if length > max_ticks {
+            return Err(unsupported(format!(
+                "sequence longer than {max_ticks} ticks"
+            )));
+        }
+        // Each tick decides each age from the expressions of each way up to
+        // it, three times over: bound the monitor, not just the ways.
+        let terms = offsets
+            .iter()
+            .flatten()
+            .map(|(at, _)| 3 * u64::from(length - at + 1))
+            .sum::<u64>();
+        if terms > MAX_MONITOR_TERMS {
+            return Err(unsupported(format!(
+                "sequence whose monitor takes more than {MAX_MONITOR_TERMS} terms"
+            )));
+        }
+        let ticks = (length > 0).then(|| self.declare("ticks@sequence", super::int_type()));
+        // Each Boolean expression's match at this tick, kept for the later
+        // ticks of the attempts.
+        let mut bit = Type::new(TypeKind::Bit);
+        bit.is_signed = false;
+        let mut registers = Vec::new();
+        let mut register_of = HashMap::default();
+        for (_, expression) in offsets.iter().flatten() {
+            if register_of.contains_key(expression) {
+                continue;
+            }
+            let condition = self.native_value(*expression)?;
+            concurrent_operand(&condition)?;
+            registers.push(SequenceRegister {
+                now: procedural_truth_condition(sampled(condition)),
+                ty: bit.clone(),
+                chain: Vec::new(),
+            });
+            register_of.insert(*expression, registers.len() - 1);
+        }
+        // Whether way `path` of the attempt `age` ticks old has matched each
+        // of its expressions up to its tick `upto`.
+        let mut matched = |this: &mut Self, path: usize, age: u32, upto: u32| {
+            let terms = offsets[path]
+                .iter()
+                .filter(|(at, _)| *at <= upto)
+                .map(|(at, expression)| {
+                    let register = register_of[expression];
+                    let ago = age - at;
+                    if ago == 0 {
+                        registers[register].now.clone()
+                    } else {
+                        Expr::Ident(this.sequence_register(&mut registers, register, ago))
+                    }
+                })
+                .collect::<Vec<_>>();
+            all(terms)
+        };
+        let mut stages = Vec::new();
+        for age in 0..=length {
+            // A way that ends earlier matched before this tick.
+            let mut earlier = Vec::new();
+            for (path, &end) in ends.iter().enumerate() {
+                if end < age {
+                    earlier.push(matched(self, path, age, end));
+                }
+            }
+            let passed_before = any(earlier);
+            // Every way ended or failed by the previous tick.
+            let failed_before = if age == 0 {
+                Expr::Literal("1'b0".into())
+            } else {
+                let mut dead = Vec::new();
+                for (path, &end) in ends.iter().enumerate() {
+                    if end >= age {
+                        dead.push(not(matched(self, path, age, age - 1)));
+                    }
+                }
+                all(dead)
+            };
+            let mut exists = vec![not(passed_before), not(failed_before)];
+            if age > 0
+                && let Some(ticks) = &ticks
+            {
+                exists.insert(
+                    0,
+                    Expr::Binary {
+                        left: Box::new(Expr::Ident(ticks.clone())),
+                        op: BinaryOp::Ge,
+                        right: Box::new(Expr::Literal(age.to_string())),
+                    },
+                );
+            }
+            let undecided = all(exists);
+            let mut ending = Vec::new();
+            let mut alive = Vec::new();
+            for (path, &end) in ends.iter().enumerate() {
+                if end == age {
+                    ending.push(matched(self, path, age, age));
+                } else if end > age {
+                    alive.push(matched(self, path, age, age));
+                }
+            }
+            let pass = any(ending);
+            stages.push(SequenceStage {
+                alive: Some(all([undecided.clone(), pass.clone()])),
+                matched: Expr::Literal("1'b1".into()),
+                antecedent: false,
+                last: true,
+                calls: Vec::new(),
+                offset: age,
+            });
+            stages.push(SequenceStage {
+                alive: Some(all([undecided, not(pass), not(any(alive))])),
+                matched: Expr::Literal("1'b0".into()),
+                antecedent: false,
+                last: true,
+                calls: Vec::new(),
+                offset: age,
+            });
+        }
+        let updates = register_updates(registers, |ty| self.declare("now@sequence", ty.clone()));
+        Ok(SequenceMonitor {
+            stages,
+            ticks: ticks.map(|ticks| (ticks, length)),
+            updates,
+            start: Vec::new(),
+            disabled: None,
+            multiclock: None,
+        })
+    }
 }
 
 #[cfg(test)]

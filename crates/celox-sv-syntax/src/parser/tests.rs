@@ -141,6 +141,131 @@ fn opaque_randsequence_owns_code_blocks_and_assignment_event_payloads() {
 }
 
 #[test]
+fn randsequence_productions_are_read_with_their_code_blocks() {
+    // IEEE 1800-2023 18.17, A.6.12: the productions of a randsequence, its
+    // code blocks the statement's items in order.
+    let syntax = parse(
+        "module M;initial randsequence(top)
+            top : a b := 2 {x=1;} | rand join (0.5) a b | if (c) a else b;
+            a : repeat (3) b | case (s) 0, 1 : a; default : b; endcase;
+            int b(int v) : {x=v;} add(v + 1);
+          endsequence endmodule",
+    );
+    let root = syntax.procedures[0].body;
+    let StatementKind::Unconverted { items, .. } = &syntax.statement(root).kind else {
+        panic!()
+    };
+    let randsequence = syntax.randsequence(root).expect("the productions parse");
+    assert_eq!(randsequence.main.as_ref().unwrap().spelling, "top");
+    let names = randsequence
+        .productions
+        .iter()
+        .map(|production| production.name.spelling.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["top", "a", "b"]);
+    let top = &randsequence.productions[0].rules;
+    assert_eq!(top.len(), 3);
+    assert!(matches!(
+        top[0].items.as_slice(),
+        [RsProd::Item(_), RsProd::Item(_)]
+    ));
+    assert!(top[0].weight.is_some());
+    assert_eq!(top[0].weight_code, Some(items[0]));
+    assert!(matches!(top[1].join, Some(Some(_))));
+    assert!(matches!(
+        top[2].items.as_slice(),
+        [RsProd::If {
+            otherwise: Some(_),
+            ..
+        }]
+    ));
+    let a = &randsequence.productions[1].rules;
+    assert!(matches!(a[0].items.as_slice(), [RsProd::Repeat { .. }]));
+    let [RsProd::Case { items: cases, .. }] = a[1].items.as_slice() else {
+        panic!()
+    };
+    assert_eq!(cases[0].labels.len(), 2);
+    assert!(cases[1].labels.is_empty());
+    let b = &randsequence.productions[2];
+    assert!(matches!(
+        &syntax.data_type(b.return_type.unwrap()).kind,
+        DataTypeKind::Builtin(name) if name == "int"
+    ));
+    let [formal] = b.formals.as_deref().unwrap() else {
+        panic!()
+    };
+    assert_eq!(formal.name.as_ref().unwrap().spelling, "v");
+    assert_eq!(syntax.token_text(formal.tokens), "int v");
+    let [RsProd::Code(code), RsProd::Item(call)] = b.rules[0].items.as_slice() else {
+        panic!()
+    };
+    assert_eq!(*code, items[1]);
+    assert!(matches!(
+        syntax.expression(*call).kind,
+        ExprKind::Call { .. }
+    ));
+}
+
+#[test]
+fn randsequence_weights_follow_their_grammar() {
+    // IEEE 1800-2023 A.6.12: rs_weight_specification ::= integral_number |
+    // ps_identifier | ( expression ).
+    for weight in ["3", "8'h10", "W", "p::W", "(1 + 1)", "(W * 2)"] {
+        let syntax = parse(&format!(
+            "module M;initial randsequence() top : a := {weight} | b; a : {{}}; b : {{}}; endsequence endmodule"
+        ));
+        let root = syntax.procedures[0].body;
+        let randsequence = syntax.randsequence(root).expect(weight);
+        let rules = &randsequence.productions[0].rules;
+        assert_eq!(rules.len(), 2, "{weight}");
+        assert!(rules[0].weight.is_some(), "{weight}");
+    }
+    for weight in ["1 + 1", "-1", "'1", "1.5", "f(1)", "a.b", "a[0]"] {
+        let source = format!(
+            "module M;initial randsequence() top : a := {weight} | b; a : {{}}; b : {{}}; endsequence endmodule"
+        );
+        assert!(
+            Declarations::parse(&source, Path::new("weight.sv")).is_err(),
+            "{weight}"
+        );
+    }
+}
+
+#[test]
+fn randsequence_productions_are_read_past_directives_and_need_an_item() {
+    // A compiler directive among the productions is skipped as elsewhere
+    // (22.12), not read as a production's result type; an
+    // rs_production_list has at least one rs_prod (A.6.12).
+    let syntax = parse(
+        "module M;initial randsequence() top : a b;
+            `line 7 \"other.sv\" 0
+            a : {x=1;};
+            `celldefine
+            b : a | a;
+          endsequence endmodule",
+    );
+    let root = syntax.procedures[0].body;
+    let randsequence = syntax.randsequence(root).expect("the productions parse");
+    let names = randsequence
+        .productions
+        .iter()
+        .map(|production| {
+            assert!(production.return_type.is_none());
+            production.name.spelling.as_str()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["top", "a", "b"]);
+    assert_eq!(randsequence.productions[2].rules.len(), 2);
+    for productions in ["main : a | ; a : {};", "main : ;", "main : | a; a : {};"] {
+        let source = format!("module M;initial randsequence() {productions} endsequence endmodule");
+        assert!(
+            Declarations::parse(&source, Path::new("empty.sv")).is_err(),
+            "{productions}"
+        );
+    }
+}
+
+#[test]
 fn deeply_nested_opaque_code_blocks_parse_clone_and_drop_without_native_stack_recursion() {
     let source = format!(
         "module M;initial {}x=1;{}endmodule",
@@ -375,6 +500,21 @@ fn deep_and_long_expressions_parse_clone_and_drop_on_the_default_stack() {
         ")".repeat(depth - 1)
     );
     assert!(Declarations::parse(&invalid, Path::new("deep-invalid.sv")).is_err());
+}
+
+// Arenas grow with the source: a compilation unit of a large design holds
+// millions of expression nodes, and ids past any fixed count stay valid.
+#[test]
+fn expression_arena_grows_with_the_source() {
+    let terms = 600_000;
+    let syntax = parse(&format!(
+        "module M; int x; initial x = {}; initial x = 42; endmodule",
+        vec!["1"; terms].join("+")
+    ));
+    assert!(syntax.expressions.len() > 1_000_000);
+    let last = ExprId(syntax.expressions.len() - 1);
+    let range = syntax.expression(last).tokens;
+    assert!(range.start < range.end);
 }
 
 #[test]
@@ -2570,6 +2710,19 @@ fn class_property_payloads_validate_while_opaque_nonproperty_items_keep_boundari
 }
 
 #[test]
+fn solve_before_keeps_its_ordered_variables() {
+    let tree = parse(
+        "class C; rand int a, b; rand byte q[$]; constraint c { solve a, q.size() before b; a < b; } endclass",
+    );
+    let expressions = tree.classes[0].constraints[0].expressions.as_ref().unwrap();
+    assert_eq!(expressions.len(), 2);
+    let ExprKind::SolveBefore { before, after } = &tree.expression(expressions[0]).kind else {
+        panic!("a solve before");
+    };
+    assert_eq!((before.len(), after.len()), (2, 1));
+}
+
+#[test]
 fn constraint_declarations_validate_control_sets_ranges_and_prototypes() {
     for declaration in [
         "constraint c;",
@@ -3105,8 +3258,48 @@ fn constraints_retain_simple_expressions_and_mark_other_forms() {
     assert!(
         matches!(&tree.expression(guarded[0]).kind, ExprKind::Binary { operator, .. } if operator == "||")
     );
-    assert!(blocks[2].expressions.is_none());
+    // A soft constraint and `disable soft` are retained (18.5.13).
+    let soft = blocks[2].expressions.as_ref().unwrap();
+    assert!(matches!(
+        &tree.expression(soft[0]).kind,
+        ExprKind::SoftConstraint { .. }
+    ));
     assert!(blocks[3].expressions.as_ref().unwrap().is_empty());
+    let tree = parse(
+        "class C; rand bit p; rand int x; constraint e { p -> soft x == 1; if (p) soft x == 2; soft p -> x == 3; disable soft x; } endclass",
+    );
+    let retained = tree.classes[0].constraints[0].expressions.as_ref().unwrap();
+    assert_eq!(retained.len(), 4);
+    for &guarded in &retained[..3] {
+        let ExprKind::SoftConstraint { expression } = tree.expression(guarded).kind else {
+            panic!("a soft constraint");
+        };
+        assert!(
+            matches!(&tree.expression(expression).kind, ExprKind::Binary { operator, .. } if operator == "||")
+        );
+    }
+    assert!(matches!(
+        tree.expression(retained[3]).kind,
+        ExprKind::DisableSoft {
+            condition: None,
+            ..
+        }
+    ));
+    // A guarded `disable soft` keeps the condition under which it applies.
+    let tree = parse(
+        "class C; rand bit p; rand int x; constraint e { if (p) disable soft x; p -> disable soft x; } endclass",
+    );
+    let retained = tree.classes[0].constraints[0].expressions.as_ref().unwrap();
+    assert_eq!(retained.len(), 2);
+    for &guarded in retained {
+        assert!(matches!(
+            tree.expression(guarded).kind,
+            ExprKind::DisableSoft {
+                condition: Some(_),
+                ..
+            }
+        ));
+    }
 }
 
 #[test]
@@ -3120,15 +3313,64 @@ fn external_constraints_track_unsupported_definitions_and_static_prototypes() {
         )
         .is_err()
     );
-    // A static prototype completed externally stays static and so keeps
-    // no executable expressions (18.5.10).
+    // A static prototype completed externally stays static, with its
+    // expressions (18.5.10, 18.5.11).
     let tree = parse(
         "class C; rand int x; extern static constraint c; endclass constraint C::c { x > 0; }",
     );
     let block = &tree.classes[0].constraints[0];
     assert!(block.defined);
     assert!(block.is_static);
-    assert!(block.expressions.is_none());
+    assert_eq!(block.expressions.as_ref().map(Vec::len), Some(1));
+}
+
+/// A restricted constraint block keeps its identifier list, which may be
+/// empty; an array method's `with (...)` stays a predicate (IEEE 1800-2023
+/// 18.7, 7.12).
+#[test]
+fn restricted_inline_constraints_keep_their_identifier_lists() {
+    let restricted = |source: &str| {
+        let syntax = parse(source);
+        syntax
+            .expression_nodes()
+            .find_map(|(_, node)| match &node.kind {
+                ExprKind::RandomizeWith { restricted, .. } => {
+                    Some(restricted.as_ref().map(|names| {
+                        names
+                            .iter()
+                            .map(|name| name.value().to_owned())
+                            .collect::<Vec<_>>()
+                    }))
+                }
+                _ => None,
+            })
+            .expect("a randomize with")
+    };
+    assert_eq!(
+        restricted("module M; initial ok = obj.randomize() with (x, y) { x < y; }; endmodule"),
+        Some(vec!["x".to_owned(), "y".to_owned()])
+    );
+    assert_eq!(
+        restricted("module M; initial ok = obj.randomize() with () { x < 1; }; endmodule"),
+        Some(Vec::new())
+    );
+    assert_eq!(
+        restricted("module M; initial ok = obj.randomize() with { x < 1; }; endmodule"),
+        None
+    );
+    let syntax = parse("module M; initial n = q.sum() with (item * 2); endmodule");
+    assert!(
+        syntax
+            .expression_nodes()
+            .any(|(_, node)| matches!(node.kind, ExprKind::ArrayMethodWith { .. }))
+    );
+    assert!(
+        Declarations::parse(
+            "module M; initial ok = obj.randomize() with (x) x < 1; endmodule",
+            Path::new("restricted.sv")
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -3222,6 +3464,66 @@ fn intra_assignment_delays_have_native_operands() {
 }
 
 #[test]
+fn identifier_delays_leave_parentheses_to_the_delayed_expression() {
+    // `#Tp (c) ? a : b`: the delay value is the identifier, also with a
+    // package scope (IEEE 1800-2023 A.2.2.3, A.9.3), the parentheses begin
+    // the conditional.
+    let syntax = parse(
+        "package P; parameter Tp = 1; endpackage
+         module M; parameter Tp = 1; bit a, c;
+         initial a <= #Tp (c) ? 1 : 0;
+         initial a <= #P::Tp (c) ? 1 : 0;
+         initial a <= #$unit::Tq (c) ? 1 : 0;
+         endmodule",
+    );
+    for (index, delay) in ["Tp", "P::Tp", "$unit::Tq"].into_iter().enumerate() {
+        let StatementKind::Assignment {
+            timing_control: Some(control),
+            right,
+            ..
+        } = syntax.statement(syntax.procedures[index].body).kind
+        else {
+            panic!()
+        };
+        let TimingControlKind::Delay { value, .. } = syntax.timing_control(control).kind else {
+            panic!()
+        };
+        assert_eq!(syntax.token_text(syntax.expression(value).tokens), delay);
+        assert!(matches!(
+            syntax.expression(right).kind,
+            ExprKind::Conditional { .. }
+        ));
+    }
+}
+
+#[test]
+fn timing_controls_leave_parentheses_to_the_controlled_expression() {
+    // `#1 (a | b)`, `#(1) (a | b)` and `@e (a | b)`: a delay value or event
+    // name takes no arguments (IEEE 1800-2023 A.2.2.3, A.6.5).
+    let syntax = parse(
+        "module M; bit [3:0] a, b, q; event e;
+         initial q <= #1 (a | b);
+         initial q = #(1) (a | b) & 4'h3;
+         initial q = @e (a | b);
+         initial q = #1 f(a);
+         endmodule",
+    );
+    for (index, control) in ["#1", "#(1)", "@e", "#1"].into_iter().enumerate() {
+        let StatementKind::Assignment {
+            timing_control: Some(id),
+            right,
+            ..
+        } = syntax.statement(syntax.procedures[index].body).kind
+        else {
+            panic!()
+        };
+        assert_eq!(syntax.token_text(syntax.timing_control(id).tokens), control);
+        let call = matches!(syntax.expression(right).kind, ExprKind::Call { .. });
+        assert_eq!(call, index == 3);
+    }
+}
+
+#[test]
 fn clocked_overlapped_implication_retains_both_boolean_operands() {
     let syntax = parse(
         "module M; p: assert property (@(posedge clk) disable iff (reset) (a && ready) |-> b == 3) else $error; endmodule",
@@ -3250,7 +3552,6 @@ fn clocked_overlapped_implication_retains_both_boolean_operands() {
     assert!(syntax.expression(antecedent).tokens.end < syntax.expression(condition).tokens.start);
     for property in [
         "a |-> b |-> c",
-        "a ##[1:2] b |-> c",
         "a |=> b[*2]",
         "a |-> b[*2]",
         "a[->1] ##1 b",
@@ -3389,14 +3690,13 @@ fn named_sequence_and_property_instances_are_substituted() {
 #[test]
 fn named_assertion_declarations_outside_the_subset_keep_their_boundary() {
     for declaration in [
-        "sequence s; @(posedge clk) a ##[1:2] b; endsequence",
         "sequence s; a ##1 b[*2]; endsequence",
         "sequence s(x); x; endsequence",
         "property p; a |-> b ##[0:$] c; endproperty",
         "sequence s; disable iff (r) a; endsequence",
         "sequence s; a |-> b; endsequence",
-        "property p; a and b; endproperty",
-        "property p; @(posedge clk or negedge rst) a or b; endproperty",
+        "property p; a until b; endproperty",
+        "property p; @(posedge clk or negedge rst) a within b; endproperty",
         "property p; a; endproperty : q",
     ] {
         let syntax = parse(&format!("module M; {declaration} endmodule"));
@@ -3405,9 +3705,9 @@ fn named_assertion_declarations_outside_the_subset_keep_their_boundary() {
     // Assertions with property operators outside the subset stay opaque,
     // also after a clock using event operators.
     for property in [
-        "a or b",
+        "a within b",
         "not a",
-        "@(posedge clk or negedge rst) a and b",
+        "@(posedge clk or negedge rst) a within b",
         "@(posedge clk) a |-> b |-> c",
     ] {
         let syntax = parse(&format!(
@@ -3434,6 +3734,149 @@ fn named_assertion_declarations_outside_the_subset_keep_their_boundary() {
     assert_eq!(declaration.name.value(), "p");
 }
 
+/// A sequence is a tree of its operators (IEEE 1800-2023 16.7, 16.9.7):
+/// `or` binds looser than a cycle delay, which may be a range, also leading
+/// one, and a parenthesized sequence is an operand.
+#[test]
+fn sequences_keep_their_operators() {
+    fn show(syntax: &Declarations, expr: &SequenceExpr) -> String {
+        match expr {
+            SequenceExpr::Boolean(boolean) => syntax
+                .token_text(syntax.expression(boolean.expression).tokens)
+                .to_owned(),
+            SequenceExpr::Concat { left, delay, right } => format!(
+                "({}##[{}:{}] {})",
+                left.as_deref()
+                    .map(|left| format!("{} ", show(syntax, left)))
+                    .unwrap_or_default(),
+                delay.min,
+                delay.max,
+                show(syntax, right)
+            ),
+            SequenceExpr::Or(left, right) => {
+                format!("({} or {})", show(syntax, left), show(syntax, right))
+            }
+            SequenceExpr::And(left, right) => {
+                format!("({} and {})", show(syntax, left), show(syntax, right))
+            }
+            SequenceExpr::Intersect(left, right) => {
+                format!("({} intersect {})", show(syntax, left), show(syntax, right))
+            }
+            SequenceExpr::Throughout {
+                condition,
+                sequence,
+            } => format!(
+                "({} throughout {})",
+                syntax.token_text(syntax.expression(condition.expression).tokens),
+                show(syntax, sequence)
+            ),
+            SequenceExpr::Clocked { clock, sequence } => format!(
+                "({} {})",
+                syntax.token_text(syntax.timing_control(*clock).tokens),
+                show(syntax, sequence)
+            ),
+        }
+    }
+    let shown = |source: &str| {
+        let syntax = parse(source);
+        let property = syntax
+            .statements
+            .iter()
+            .find_map(|stmt| match &stmt.kind {
+                StatementKind::Assertion {
+                    header: AssertionHeader::Concurrent { property, .. },
+                    ..
+                } => Some(*property),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{source}"));
+        let id = property.sequence.unwrap_or_else(|| panic!("{source}"));
+        show(&syntax, &syntax.sequence(id).consequent)
+    };
+    assert_eq!(
+        shown(
+            "module M; sequence s; @(posedge clk) (a ##1 b) or c ##[2:3] d or ##[0:1] e; endsequence assert property (s); endmodule"
+        ),
+        "(((a ##[1:1] b) or (c ##[2:3] d)) or (##[0:1] e))"
+    );
+    assert_eq!(
+        shown(
+            "module M; assert property (@(posedge clk) a ##1 (b or c ##2 d) ##[1:4] e); endmodule"
+        ),
+        "((a ##[1:1] (b or (c ##[2:2] d))) ##[1:4] e)"
+    );
+    // Redundant parentheses around a sequence.
+    assert_eq!(
+        shown("module M; assert property (@(posedge clk) ((a or b)) ##1 (((c ##1 d)))); endmodule"),
+        "((a or b) ##[1:1] (c ##[1:1] d))"
+    );
+    // `intersect` binds tighter than `and`, which binds tighter than `or`.
+    assert_eq!(
+        shown(
+            "module M; assert property (@(posedge clk) a or b and c ##1 d intersect e ##[0:2] f or ((g and h) ##0 i)); endmodule"
+        ),
+        "((a or (b and ((c ##[1:1] d) intersect (e ##[0:2] f)))) or ((g and h) ##[0:0] i))"
+    );
+    // `throughout` binds looser than `##` and tighter than `intersect`,
+    // to the right.
+    assert_eq!(
+        shown(
+            "module M; assert property (@(posedge clk) a throughout b throughout c ##1 d intersect e); endmodule"
+        ),
+        "((a throughout (b throughout (c ##[1:1] d))) intersect e)"
+    );
+    // A clocking event clocks the rest of the sequence (16.13); one written
+    // as the clock around it is no clock change (16.13.1).
+    assert_eq!(
+        shown("module M; assert property (@(posedge c0) a ##1 @(posedge c1) b ##1 c); endmodule"),
+        "(a ##[1:1] (@(posedge c1) (b ##[1:1] c)))"
+    );
+    assert_eq!(
+        shown("module M; assert property (@(posedge c0) a ##1 @(posedge c0) b); endmodule"),
+        "(a ##[1:1] b)"
+    );
+    // A clocked subsequence in parentheses of its own is a sequence too.
+    assert_eq!(
+        shown("module M; assert property (@(posedge c0) a ##1 (@(posedge c1) b)); endmodule"),
+        "(a ##[1:1] (@(posedge c1) b))"
+    );
+    assert_eq!(
+        shown(
+            "module M; assert property (@(posedge c0) a ##1 ((@(posedge c1) b ##1 c))); endmodule"
+        ),
+        "(a ##[1:1] (@(posedge c1) (b ##[1:1] c)))"
+    );
+    // A named sequence in a sequence is its body, clocked as the assertion
+    // or leading it with its clock (16.8, 16.16.1).
+    assert_eq!(
+        shown(
+            "module M; sequence s; @(posedge clk) a ##2 b; endsequence assert property (@(posedge clk) g throughout s); endmodule"
+        ),
+        "(g throughout (a ##[2:2] b))"
+    );
+    assert_eq!(
+        shown(
+            "module M; sequence s; @(posedge clk) a ##2 b; endsequence assert property (s or c ##1 d); endmodule"
+        ),
+        "((a ##[2:2] b) or (c ##[1:1] d))"
+    );
+    // So is one written with its optional empty argument list.
+    assert_eq!(
+        shown(
+            "module M; sequence s; @(posedge clk) a ##2 b; endsequence assert property (@(posedge clk) g throughout s()); endmodule"
+        ),
+        "(g throughout (a ##[2:2] b))"
+    );
+    // A local variable of a sequence hides a named sequence of its name in
+    // the sequence (16.10): `x` stays the variable.
+    assert_eq!(
+        shown(
+            "module M; sequence x; @(posedge clk) a ##2 b; endsequence sequence t; int x; @(posedge clk) (x == 0) ##1 x; endsequence assert property (@(posedge clk) t); endmodule"
+        ),
+        "((x == 0) ##[1:1] x)"
+    );
+}
+
 /// A sequence over cycles keeps its steps, their delays and match items,
 /// and the local variables of its declaration (IEEE 1800-2023 16.7, 16.10).
 #[test]
@@ -3453,10 +3896,29 @@ fn sequences_over_cycles_keep_steps_and_local_variables() {
             .unwrap_or_else(|| panic!("{source}"));
         let id = property.sequence.unwrap_or_else(|| panic!("{source}"));
         let sequence = syntax.sequence(id).clone();
-        let steps = |steps: &[SequenceStep]| {
-            steps
-                .iter()
-                .map(|step| {
+        // The steps of a linear sequence, each with its delay.
+        fn linear(expr: &SequenceExpr) -> Vec<(u32, SequenceBoolean)> {
+            match expr {
+                SequenceExpr::Boolean(boolean) => vec![(0, boolean.clone())],
+                SequenceExpr::Concat { left, delay, right } => {
+                    assert_eq!(delay.min, delay.max, "a fixed delay");
+                    let mut steps = left.as_deref().map(linear).unwrap_or_default();
+                    let mut right = linear(right);
+                    right[0].0 += delay.min;
+                    steps.extend(right);
+                    steps
+                }
+                SequenceExpr::Or(..)
+                | SequenceExpr::And(..)
+                | SequenceExpr::Intersect(..)
+                | SequenceExpr::Throughout { .. }
+                | SequenceExpr::Clocked { .. } => panic!("a linear sequence"),
+            }
+        }
+        let steps = |expr: &SequenceExpr| {
+            linear(expr)
+                .into_iter()
+                .map(|(delay, step)| {
                     let items = step
                         .items
                         .iter()
@@ -3480,7 +3942,7 @@ fn sequences_over_cycles_keep_steps_and_local_variables() {
                         .collect::<Vec<_>>();
                     format!(
                         "{}:{}{}",
-                        step.delay,
+                        delay,
                         syntax.token_text(syntax.expression(step.expression).tokens),
                         items
                             .iter()
@@ -3496,7 +3958,7 @@ fn sequences_over_cycles_keep_steps_and_local_variables() {
             .flat_map(|local| local.names.iter().map(|name| name.spelling.clone()))
             .collect::<Vec<_>>();
         (
-            sequence.antecedent.as_deref().map(steps),
+            sequence.antecedent.as_ref().map(steps),
             steps(&sequence.consequent),
             locals,
         )
@@ -3552,15 +4014,10 @@ fn sequences_over_cycles_keep_steps_and_local_variables() {
             Vec::new()
         )
     );
-    // The tick `|=>` adds may not overflow the first delay.
-    let error = Declarations::parse(
-        "module M; assert property (@(posedge clk) a |=> ##4294967295 b); endmodule",
-        Path::new("overflow.sv"),
-    )
-    .unwrap_err();
-    assert!(
-        format!("{error:?}").contains("cycle delay longer"),
-        "{error:?}"
+    // `|=>` is `|-> ##1`.
+    assert_eq!(
+        sequence("module M; assert property (@(posedge clk) a |=> ##2 b); endmodule"),
+        (Some(strings(&["0:a"])), strings(&["3:b"]), Vec::new())
     );
 }
 
@@ -3715,4 +4172,162 @@ fn external_constraints_resolve_unqualified_names_in_their_lexical_scope() {
     // The package class finishes first, the nested one second.
     assert!(classes[0].constraints[0].expressions.is_some());
     assert!(classes[1].constraints[0].expressions.is_none());
+}
+
+/// The parser records the names that covergroups (IEEE 1800-2023 19.3) and
+/// user-defined nettypes (6.6.7) declare, whose declarations stay
+/// unconverted.
+#[test]
+fn unconverted_type_declarations_record_their_names() {
+    let syntax = parse(
+        "module M; bit x; covergroup cg @(posedge x); Label: coverpoint x; endgroup \
+         nettype logic [3:0] wide with resolve; nettype wide alias_t; endmodule",
+    );
+    let covergroups = syntax
+        .covergroups
+        .iter()
+        .map(|declaration| declaration.name.value())
+        .collect::<Vec<_>>();
+    assert_eq!(covergroups, ["cg"]);
+    let nettypes = syntax
+        .nettypes
+        .iter()
+        .map(|declaration| declaration.name.value())
+        .collect::<Vec<_>>();
+    assert_eq!(nettypes, ["wide", "alias_t"]);
+}
+
+#[test]
+fn defparam_keeps_each_hierarchical_name_and_value() {
+    let syntax = parse(
+        r#"
+        module M;
+          defparam a.P = 1, g[2].u.Q = 3 + 4;
+          if (1) begin : b
+            defparam $root.M.a.R = 5;
+          end
+        endmodule
+    "#,
+    );
+    let unit = &syntax.units[0];
+    let BodyItemKind::Defparam(assignments) = &syntax.body_item(unit.items[0]).kind else {
+        panic!("{:?}", syntax.body_item(unit.items[0]).kind)
+    };
+    let names = |assignment: &DefparamAssignment| {
+        assignment
+            .path
+            .iter()
+            .map(|segment| (segment.name.value().to_string(), segment.index.is_some()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(assignments.len(), 2);
+    assert!(!assignments[0].rooted);
+    assert_eq!(
+        names(&assignments[0]),
+        [("a".to_string(), false), ("P".to_string(), false)]
+    );
+    assert_eq!(
+        names(&assignments[1]),
+        [
+            ("g".to_string(), true),
+            ("u".to_string(), false),
+            ("Q".to_string(), false)
+        ]
+    );
+    assert!(matches!(
+        syntax.expression(assignments[1].value).kind,
+        ExprKind::Binary { .. }
+    ));
+    // In a generate block, and from `$root`.
+    let nested = syntax
+        .body_items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            BodyItemKind::Defparam(assignments) => Some(assignments),
+            _ => None,
+        })
+        .nth(1)
+        .expect("the generate block has a defparam");
+    assert!(nested[0].rooted);
+    assert_eq!(names(&nested[0]).len(), 3);
+}
+
+#[test]
+fn procedural_continuous_assignments_keep_their_target_and_value() {
+    // 10.6.1: `assign variable_assignment;` and `deassign variable_lvalue;`.
+    let syntax = parse("module M; initial begin assign q = d; deassign q; end endmodule");
+    let kinds: Vec<_> = syntax
+        .statements
+        .iter()
+        .filter_map(|statement| match statement.kind {
+            StatementKind::ProceduralAssign(id) => {
+                let [assignment] = syntax.assign_statement(id).assignments.as_slice() else {
+                    panic!("one assignment");
+                };
+                Some((assignment.left, Some(assignment.right)))
+            }
+            StatementKind::ProceduralDeassign(target) => Some((target, None)),
+            _ => None,
+        })
+        .collect();
+    let name = |id: ExprId| match &syntax.expression(id).kind {
+        ExprKind::Name(name) => name.spelling.clone(),
+        kind => panic!("{kind:?}"),
+    };
+    let [(assigned, Some(value)), (deassigned, None)] = kinds.as_slice() else {
+        panic!("{kinds:?}");
+    };
+    assert_eq!(
+        [name(*assigned), name(*value), name(*deassigned)],
+        ["q", "d", "q"]
+    );
+    // The target of a `deassign` is a variable lvalue.
+    assert!(
+        Declarations::parse(
+            "module M; initial deassign 1 + q; endmodule",
+            Path::new("deassign.sv")
+        )
+        .is_err()
+    );
+}
+
+/// A `let` declaration is recorded with its formals, their types and
+/// defaults, and its body, from its attributes on; its calls stay call
+/// expressions (IEEE 1800-2023 11.12).
+#[test]
+fn let_declarations_are_recorded_and_calls_stay_calls() {
+    let tree = parse(
+        "module M; logic a; (* keep *) let f(bit [1:0] x, untyped y = 1) = x + y; \
+         initial a = f(.x(a)); endmodule",
+    );
+    let [declaration] = tree.lets.as_slice() else {
+        panic!("one `let`: {:?}", tree.lets);
+    };
+    assert_eq!(declaration.name.value(), "f");
+    let ports = declaration
+        .ports
+        .iter()
+        .map(|port| {
+            (
+                port.name.value(),
+                port.data_type.is_some(),
+                port.default.is_some(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ports, [("x", true, false), ("y", false, true)]);
+    assert!(matches!(
+        tree.expression(declaration.body).kind,
+        ExprKind::Binary { .. }
+    ));
+    let start = &tree.tokens[declaration.tokens.start..];
+    assert_eq!(
+        start.iter().find(|token| !token.is_trivia()).unwrap().text,
+        "(*"
+    );
+    assert!(tree.expression_nodes().any(|(_, node)| matches!(
+        &node.kind,
+        ExprKind::Call { expression, .. }
+            if matches!(&tree.expression(*expression).kind, ExprKind::Name(name) if name.value() == "f")
+    )));
 }

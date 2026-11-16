@@ -26,6 +26,8 @@ pub(super) struct ScopeImports {
     pub packages: Vec<String>,
     /// Every `p::x` reference, as `(p, x)`. `p` may also name a class.
     pub qualified: Vec<(String, String)>,
+    /// The first token of each reference of `qualified`.
+    pub qualified_tokens: Vec<usize>,
     /// The package exports (IEEE 1800-2023 26.6).
     pub exports: Vec<Export>,
     /// The source offset of each `export p::x;` item, by `(p, x)`.
@@ -147,6 +149,7 @@ impl ScopeImports {
                     imports
                         .qualified
                         .push((package, normalize_identifier(&name.spelling)));
+                    imports.qualified_tokens.push(offset);
                 }
             }
         }
@@ -167,6 +170,7 @@ impl ScopeImports {
                     imports
                         .qualified
                         .push((package, normalize_identifier(&name.name.spelling)));
+                    imports.qualified_tokens.push(ty.tokens.start);
                 }
             }
         }
@@ -360,6 +364,28 @@ pub(super) fn item_names(id: celox_sv_syntax::BodyItemId, tree: &SyntaxTree) -> 
                 }
             }
         }
+        // The type a covergroup or a user-defined nettype declares (IEEE
+        // 1800-2023 19.3, 6.6.7), which Celox keeps unconverted.
+        BodyItemKind::Unconverted { category, .. }
+            if matches!(category.as_str(), "covergroup" | "nettype") =>
+        {
+            let tokens = native.body_item(id).tokens.range();
+            for name in native
+                .covergroups
+                .iter()
+                .map(|covergroup| (&covergroup.name, covergroup.tokens))
+                .chain(
+                    native
+                        .nettypes
+                        .iter()
+                        .map(|nettype| (&nettype.name, nettype.tokens)),
+                )
+                .filter(|(_, declared)| tokens.contains(&declared.start))
+                .map(|(name, _)| name)
+            {
+                add(name);
+            }
+        }
         _ => {}
     }
     for id in types {
@@ -511,9 +537,13 @@ pub(crate) struct Facts {
 
 impl Facts {
     fn of(tree: &SyntaxTree) -> &Self {
+        &tree.spans().imports
+    }
+
+    /// The facts of the file whose arenas `native` are.
+    pub(crate) fn new(native: &celox_sv_syntax::Declarations) -> Self {
         use celox_sv_syntax::{DataTypeKind, ExprKind};
-        tree.spans().imports.get_or_init(|| {
-            let native = tree.declarations();
+        {
             let name = |id| {
                 matches!(native.expression(id).kind, ExprKind::Name(_))
                     .then_some(native.expression(id).tokens)
@@ -552,7 +582,7 @@ impl Facts {
                 qualified_bases,
                 pattern_keys,
             }
-        })
+        }
     }
 }
 
@@ -1054,6 +1084,58 @@ pub(super) fn resolve_imports(
                 .any(|known| known.name == signal.name)
             {
                 symbols.state_signals.push(signal);
+            }
+        }
+        // The subroutines that call interface tasks and functions through
+        // virtual interfaces, which a scope copies when it calls them.
+        for subroutine in &packages.virtual_interface_calls.subroutines {
+            if symbols
+                .subroutines
+                .iter()
+                .any(|known| known.name == subroutine.name)
+            {
+                continue;
+            }
+            symbols.subroutine_params.insert(
+                subroutine.name.clone(),
+                subroutine
+                    .params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect(),
+            );
+            if let Some(shapes) = packages
+                .virtual_interface_calls
+                .shapes
+                .get(&subroutine.name)
+            {
+                symbols
+                    .subroutine_shapes
+                    .insert(subroutine.name.clone(), shapes.clone());
+            }
+            symbols.subroutines.push(subroutine.clone());
+        }
+        for (name, metadata) in &packages.virtual_interface_calls.function_return_types {
+            symbols
+                .function_return_types
+                .entry(name.clone())
+                .or_insert_with(|| metadata.clone());
+        }
+        for signal in &packages.virtual_interface_calls.statics {
+            if !symbols
+                .state_signals
+                .iter()
+                .any(|known| known.name == signal.name)
+            {
+                symbols.state_signals.push(signal.clone());
+            }
+        }
+        if let Some(initializer) = &packages.virtual_interface_calls.static_initializer {
+            symbols.initial_processes.push(initializer.clone());
+        }
+        for local in &packages.virtual_interface_calls.locals {
+            if !symbols.locals.iter().any(|known| known.name == local.name) {
+                symbols.locals.push(local.clone());
             }
         }
     }
@@ -1655,10 +1737,29 @@ fn resolve_scope_imports(
             symbols.alias(&format!("{own}::{name}"), target);
         }
     }
-    if let Some(unit) = unit
-        && uses_unit
-    {
-        symbols.extend(&unit.scope.as_ref().map_err(Clone::clone)?.symbols);
+    if let Some(unit) = unit {
+        if uses_unit {
+            symbols.extend(&unit.scope.as_ref().map_err(Clone::clone)?.symbols);
+        } else {
+            // A specialization the scope takes may still name a class of the
+            // unit, such as a class a package's factory creates: one the
+            // scope sees, declared before it (3.12.1). A unit that cannot be
+            // analyzed is reported when one does.
+            symbols.unit = Some(Arc::new(crate::ast::scope::DeferredUnit {
+                items: unit
+                    .visibility
+                    .declared_at
+                    .keys()
+                    .filter(|name| unit.declares_before(name, start))
+                    .map(|name| packages::unit_item_identity(tree.compilation_path(), name))
+                    .collect(),
+                symbols: unit
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.symbols.clone())
+                    .map_err(Clone::clone),
+            }));
+        }
     }
     for binding in &bindings {
         symbols.alias(&binding.name, &binding.target);

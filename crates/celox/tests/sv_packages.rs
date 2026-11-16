@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! Packages resolved as scopes (IEEE 1800-2023 26).
 
 use celox::{ParserError, Simulator, SimulatorErrorKind};
@@ -433,6 +432,64 @@ fn self_qualified_names_are_not_hidden_by_formals() {
         ),
         51
     );
+}
+
+#[test]
+fn self_qualified_enumerators_are_constants() {
+    // Nothing hides the items the package qualifies, so it is analyzed
+    // once, in which `p::LOW` is the constant `LOW` (IEEE 1800-2023 6.19,
+    // 26.3).
+    assert_eq!(
+        output(
+            "package p;
+               typedef enum { NONE, LOW, HIGH } level_e;
+               localparam int X = 5;
+               function automatic int f(input int a);
+                 level_e level;
+                 level = p::HIGH;
+                 return p::X * 10 + p::LOW + (level == p::HIGH ? a : 0);
+               endfunction
+             endpackage
+             module Top(output logic [7:0] y); assign y = 8'(p::f(3)); endmodule"
+        ),
+        54
+    );
+}
+
+#[test]
+fn a_member_of_an_imported_base_hides_the_item_from_the_plain_name_only() {
+    // `D` extends the class `q::Base` that the package imports, not the
+    // class of that name in another scope of the same source, so that `X`
+    // is the member it inherits and `p::X` the item of the package (IEEE
+    // 1800-2023 8.13, 26.3).
+    let mut simulator = Simulator::from_sv_sources(
+        vec![
+            (
+                "package q; class Base; localparam int X = 2; endclass endpackage",
+                std::path::Path::new("q.sv"),
+            ),
+            (
+                "package r; class Base; endclass endpackage
+                 package p;
+                   import q::*;
+                   localparam int X = 5;
+                   class D extends Base;
+                     static function int f(); return p::X * 10 + X; endfunction
+                   endclass
+                 endpackage
+                 module Top(output logic [7:0] y);
+                   localparam int A = p::D::f();
+                   assign y = 8'(A);
+                 endmodule",
+                std::path::Path::new("p.sv"),
+            ),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap_or_else(|error| panic!("{error}"));
+    let y = simulator.signal("y");
+    assert_eq!(u64::try_from(simulator.get(y)).unwrap(), 52);
 }
 
 #[test]
@@ -1226,6 +1283,23 @@ fn generate_scopes_declare_loop_body_names_and_keep_inner_imports() {
 /// A generate block can import a type or subroutine that is another
 /// declaration than the one its module sees under that name (#1206).
 #[test]
+fn a_generate_block_signal_has_the_width_its_block_imports_give() {
+    // `v` is declared in `g`, where `f` is `p::f`: ten bits, not the three
+    // that the module's `q::f` would give it (IEEE 1800-2023 26.3).
+    assert_eq!(
+        output(
+            "package p; function automatic int f(int a); return a * 10; endfunction endpackage
+             package q; function automatic int f(int b); return b * 3; endfunction endpackage
+             module Top(output logic [7:0] y); import q::*; logic [7:0] a;
+               if (1) begin : g import p::*; logic [f(1)-1:0] v; assign v = '1; assign a = v; end
+               assign y = a + f(0);
+             endmodule"
+        ),
+        255
+    );
+}
+
+#[test]
 fn generate_block_imports_bind_their_own_subroutines() {
     // `f` takes its formals in another order in each package.
     let functions = "package p; function automatic int f(int a, int b = 0); return a * 10 + b; endfunction
@@ -1696,4 +1770,74 @@ fn restricted_processes_may_share_disjoint_package_slices() {
     .unwrap_or_else(|error| panic!("{error}"));
     sim.run_until(1).unwrap();
     assert_eq!(sim.get(sim.signal("y")) >> 4u32, 5u32.into());
+}
+
+/// A select of a parameter wider than 128 bits whose value is another
+/// parameter, such as OpenTitan's `RndCnstTriviumLfsrSeed` defaulting to its
+/// package's `RndCnstTriviumLfsrSeedDefault`, reads the bits of that value
+/// (IEEE 1800-2023 6.20.2, 11.5.1), imported, qualified or overridden.
+#[test]
+fn selects_of_wide_parameters_valued_by_package_parameters() {
+    let source = r#"
+        package p;
+            parameter int W = 288;
+            typedef logic [W-1:0] seed_t;
+            parameter seed_t SeedDefault = {32'h758a4420, 256'h31e1c461_6ea343ec_153282a3_0c132b57_23c5a4cf_4743b3c7_c32d580f_74f1713a};
+            parameter seed_t Other = {32'h01234567, 256'h0};
+            // A chain longer than any fixed bound.
+            parameter seed_t C0 = SeedDefault;
+            parameter seed_t C1 = C0, C2 = C1, C3 = C2, C4 = C3, C5 = C4, C6 = C5, C7 = C6,
+                C8 = C7, C9 = C8, C10 = C9, C11 = C10, C12 = C11, C13 = C12, C14 = C13,
+                C15 = C14, C16 = C15, C17 = C16, C18 = C17, C19 = C18, C20 = C19;
+        endpackage
+        module Imported import p::*; #(parameter seed_t Seed = SeedDefault) (output logic [63:0] low);
+            localparam logic [63:0] Low = Seed[63:0];
+            assign low = Low;
+        endmodule
+        module Qualified #(parameter p::seed_t Seed = p::SeedDefault, parameter int unsigned SW = 288)
+            (output logic [31:0] top);
+            localparam logic [SW-1:0] State = Seed[SW-1:0];
+            assign top = State[287:256];
+        endmodule
+        module Top(output logic [63:0] low, output logic [31:0] top, overridden, chained);
+            Imported imported(.low);
+            Qualified qualified(.top);
+            Qualified #(.Seed(p::Other)) other(.top(overridden));
+            Qualified #(.Seed(p::C20)) chain(.top(chained));
+        endmodule
+    "#;
+    assert_eq!(
+        outputs(source, &["low", "top", "overridden", "chained"]),
+        [0xc32d_580f_74f1_713a, 0x758a_4420, 0x0123_4567, 0x758a_4420]
+    );
+}
+
+// The element type of a container formal of a package function is that of
+// the package (IEEE 1800-2023 26.3, 7.6), also where the caller declares a
+// constant of the parameter's name (Verilator, Icarus: abc).
+#[test]
+fn package_function_container_formals_take_package_parameters() {
+    let source = "package p;
+          parameter int W = 12;
+          function automatic logic [W-1:0] last(input logic [W-1:0] v []);
+            return v[v.size() - 1];
+          endfunction
+        endpackage
+        module Top(output logic [11:0] y);
+          localparam int W = 4;
+          logic [11:0] a [];
+          initial begin
+            a = new[3];
+            a[2] = 12'habc;
+            y = p::last(a);
+          end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("packages.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap_or_else(|error| panic!("{error}"));
+    sim.run_until(0).unwrap();
+    assert_eq!(u64::try_from(sim.get(sim.signal("y"))).unwrap(), 0xabc);
 }

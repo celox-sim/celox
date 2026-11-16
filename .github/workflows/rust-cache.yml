@@ -17,7 +17,7 @@ on:
       - ".github/actions/setup-rust/**"
       - ".github/workflows/rust-cache.yml"
       - ".github/workflows/ci.yml"
-      - "scripts/run-vtest.mjs"
+      - "scripts/run-vtest.py"
   # Eviction does not change Cargo files, so push path filters cannot repair it.
   schedule:
     - cron: "17 * * * *"
@@ -54,8 +54,8 @@ jobs:
         id: cache
         with:
           # The vtest executor's build plan (profile, scope, features) lives in
-          # run-vtest.mjs; a change of it is a different cache.
-          key: vtest-${{ hashFiles('scripts/run-vtest.mjs') }}
+          # run-vtest.py; a change of it is a different cache.
+          key: vtest-${{ hashFiles('scripts/run-vtest.py') }}
       - name: Install cargo-nextest
         if: steps.cache.outputs.cache-hit != 'true'
         uses: taiki-e/install-action@v2
@@ -65,12 +65,12 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         env:
           CELOX_RUST_FULL: "true"
-        run: node scripts/run-vtest.mjs --prepare-ci
+        run: python3 scripts/run-vtest.py --build-only
       - name: Build test targets to populate dependencies
         if: steps.cache.outputs.cache-hit != 'true'
         run: >-
           cargo nextest list --locked --workspace --exclude 'lydite*' --cargo-profile vtest --message-format json
-          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
+          --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
           > /dev/null
 
   rust-default-tests:
@@ -130,7 +130,7 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: >-
           cargo clippy --locked --workspace --exclude lydite-celox --all-targets
-          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim
+          --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim
           --no-deps
       - name: Build documentation dependencies with the CI command
         if: steps.cache.outputs.cache-hit != 'true'
@@ -150,7 +150,7 @@ jobs:
         id: cache
       - name: Build the Celox single-case driver with the CI command
         if: steps.cache.outputs.cache-hit != 'true'
-        run: cargo build --locked --release -p celox --features systemverilog --example sv_tests
+        run: cargo build --locked --release -p celox --example sv_tests
 
   common-cells:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
@@ -166,7 +166,7 @@ jobs:
         id: cache
       - name: Build the SystemVerilog CLI with the CI command
         if: steps.cache.outputs.cache-hit != 'true'
-        run: cargo build --locked -p celox-vpi --features systemverilog --bin celox
+        run: cargo build --locked -p celox --bin celox
 
   rtlmeter:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
@@ -182,7 +182,7 @@ jobs:
         id: cache
       - name: Build the SystemVerilog CLI with the CI command
         if: steps.cache.outputs.cache-hit != 'true'
-        run: cargo build --locked --release -p celox-vpi --features systemverilog --bin celox
+        run: cargo build --locked --release -p celox --bin celox
 
   napi-linux:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
@@ -267,7 +267,7 @@ jobs:
           cargo test --locked -p celox-backend-common -p celox-backend-arm64 --no-run
           cargo check --locked -p celox -p celox-bench
           cargo test --locked -p celox --lib --test native_exec --no-run
-          cargo test --locked -p celox --features systemverilog,cranelift,wasm-runtime,wasm-component --test systemverilog --no-run
+          cargo test --locked -p celox --features cranelift,wasm-runtime,wasm-component --test systemverilog --no-run
           cargo check --locked -p celox -p celox-bench --no-default-features --features x86_64-codegen
 
   napi-linux-arm64:

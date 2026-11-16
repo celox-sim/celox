@@ -72,6 +72,7 @@ assign o = 16'h1 << (8'hff + 8'h1);
   (top Top)
   (assert_eq o 1 "Constant shift RHS failed self-determination boundary"))
 
+; Constant folding should also respect self-determination.
 (case test_concatenation_constant_self_determination
   (source "test.veryl" #"
         module Top (
@@ -90,6 +91,7 @@ assign o = 16'h1 << (8'hff + 8'h1);
   (assert_eq o2 256 "Normal addition should not be self-determined")
   (assert_eq o3 0xf000 "Concatenation should be self-determined"))
 
+; Constant folding should also respect self-determination.
 (case test_concatenation_constant_self_determination_runtime
   (source "test.veryl" #"
         module Top (

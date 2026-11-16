@@ -194,6 +194,7 @@ pub(super) fn lvalue_from_indices(
 /// both operands determine the conditional width and signedness (11.4.11).
 pub(super) fn invalid_unpacked_read(
     tree: &AnalysisContext<'_>,
+    table: &semantic_types::TyTable,
     lhs: &LValue,
     dimensions: &PackedDimensions,
 ) -> Option<Expr> {
@@ -210,7 +211,7 @@ pub(super) fn invalid_unpacked_read(
         return None;
     };
     let variable = dimensions.get(name)?;
-    if variable.unpacked.is_empty() || variable.real || variable.class.is_some() {
+    if variable.unpacked.is_empty() || variable.real || variable.class_in(table).is_some() {
         return None;
     }
     let full_width =
@@ -1110,19 +1111,32 @@ fn substitute_indexed_parameter_values(
     // Known values come from the current environment, which may include a
     // generate index shadowing a parameter. Supply expressions only for values
     // absent from that numeric environment, including X/Z parameters.
-    let values = dimensions
+    let values: HashMap<String, Expr> = dimensions
         .parameter_values
         .iter()
         .filter(|(name, _)| !dimensions.const_env.contains_key(*name))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
-    substitute_expr_constants_with_parameter_literals(
-        tree,
-        session,
-        expression,
-        &dimensions.const_env,
-        &values,
-    )
+    // A value may name another parameter wider than 128 bits, such as a
+    // default `Seed = SeedDefault` of a package (6.20.2): substitute until
+    // no name is left. A chain of distinct parameters takes at most one step
+    // for each of them; one that takes more repeats a parameter, which no
+    // valid design does (6.20.2), and stops there.
+    let mut expression = expression;
+    for _ in 0..=values.len() {
+        let next = substitute_expr_constants_with_parameter_literals(
+            tree,
+            session,
+            expression.clone(),
+            &dimensions.const_env,
+            &values,
+        );
+        if next == expression {
+            break;
+        }
+        expression = next;
+    }
+    expression
 }
 
 // Parameter arithmetic receives the assignment width after self-determined
@@ -1215,6 +1229,7 @@ fn unknown_indexed_range_literal(
 /// must call this only for its declared leaf classes, never as an error retry.
 pub(super) fn indexed_parameter_indices(
     tree: &AnalysisContext<'_>,
+    table: &semantic_types::TyTable,
     name: String,
     indices: Vec<ConstExpr>,
     dimensions: &PackedDimensions,
@@ -1268,7 +1283,7 @@ pub(super) fn indexed_parameter_indices(
     if matches!(selected, LValue::Ident(_)) && !indices_were_empty {
         return Err(unsupported(format!("constant select of `{name}`")));
     }
-    Ok(expr_from_lvalue(tree, &selected, dimensions))
+    Ok(expr_from_lvalue(tree, table, &selected, dimensions))
 }
 
 /// Already-bound range coordinates; syntax/source ownership remains outside
@@ -1299,6 +1314,7 @@ fn parameter_range_bounds(
 }
 pub(super) fn indexed_parameter_range(
     tree: &AnalysisContext<'_>,
+    table: &semantic_types::TyTable,
     name: String,
     indices: Vec<ConstExpr>,
     range: ParameterRange,
@@ -1315,7 +1331,7 @@ pub(super) fn indexed_parameter_range(
         })?;
         // Clip to the selected element before its final range, without cloning
         // or altering original syntax to manufacture an element view.
-        let element = indexed_parameter_indices(tree, name.clone(), indices, dimensions)?;
+        let element = indexed_parameter_indices(tree, table, name.clone(), indices, dimensions)?;
         let stride = product_expr(
             &variable.packed[index_count + 1..]
                 .iter()
@@ -1364,7 +1380,7 @@ pub(super) fn indexed_parameter_range(
     }
     let (msb, lsb) = parameter_range_bounds(tree, range, (Some(&name), index_count), dimensions)?;
     let selected = lvalue_from_range(tree, name, indices, msb, lsb, false, dimensions)?;
-    Ok(expr_from_lvalue(tree, &selected, dimensions))
+    Ok(expr_from_lvalue(tree, table, &selected, dimensions))
 }
 
 pub(super) enum AggregateSelection {

@@ -7,7 +7,12 @@
 
 use crate::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: process-wide component registries and library cache shared by every host thread that registers components or builds a simulator"
+)]
+use std::sync::Mutex;
 use thiserror::Error;
 use veryl_component_sys as sys;
 
@@ -159,6 +164,10 @@ pub(crate) fn library_export_names(path: &Path) -> Vec<String> {
 
 /// The `&'static` in the value is sound because registered vtables either
 /// live in a leaked (never-unloaded) library or in guest `static` tables.
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: process-wide static component registry; any host thread may register components or build a simulator that looks them up"
+)]
 static STATIC_REGISTRY: LazyLock<Mutex<HashMap<String, &'static sys::VrlComponentVTable>>> =
     LazyLock::new(|| Mutex::new(HashMap::default()));
 
@@ -170,6 +179,10 @@ pub fn register_static_component(name: &str, vtable: &'static sys::VrlComponentV
 }
 
 /// Per-type manifest JSON registered alongside static components.
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: process-wide static component manifests; any host thread may register them or build a simulator that reads them"
+)]
 static STATIC_MANIFESTS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::default()));
 
@@ -276,6 +289,10 @@ pub fn lookup_component(
 /// component code mid-process is never safe.
 #[cfg(not(target_family = "wasm"))]
 fn get_library(path: &Path) -> Result<&'static libloading::Library, ComponentError> {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: process-wide cache of leaked component libraries, loaded from whichever host thread builds a simulator"
+    )]
     static LIBRARIES: LazyLock<Mutex<HashMap<PathBuf, &'static libloading::Library>>> =
         LazyLock::new(|| Mutex::new(HashMap::default()));
 

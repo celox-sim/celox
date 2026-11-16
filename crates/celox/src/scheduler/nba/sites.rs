@@ -34,7 +34,10 @@ impl Sites {
         let mut global = Vec::new();
         let mut processes = vec![Vec::new(); program.runtime.runtime_schema.processes.len()];
         for (id, site) in program.runtime.runtime_schema.nba_sites.iter().enumerate() {
-            if compiled.contains(&site.process) {
+            // A flip-flop domain's sites are staged by its commit unit, not
+            // by the named process's kernel, so they publish even though
+            // that kernel never runs.
+            if compiled.contains(&site.process) || site.unit {
                 processes[site.process].push(sites.len());
             }
             sites.push(site.clone());

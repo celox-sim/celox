@@ -1,97 +1,6 @@
 use super::*;
 
 sv_backends! {
-    fn wildcard_index(sim) { @case "containers::wildcard_index"; }
-    fn pattern_type_keys(sim) { @case "containers::pattern_type_keys"; }
-
-    fn shuffle_integral(sim) { @case "containers::shuffle_integral"; }
-    fn shuffle_four_state(sim) { @case "containers::shuffle_four_state"; }
-    fn shuffle_handles(sim) { @case "containers::shuffle_handles"; }
-    fn shuffle_wide(sim) { @case "containers::shuffle_wide"; }
-    fn shuffle_nested_receivers(sim) { @case "containers::shuffle_nested_receivers"; }
-
-    fn functions_returning_containers(sim) { @case "containers::functions_returning_containers"; }
-    fn returned_patterns_take_the_result_type(sim) { @case "containers::returned_patterns_take_the_result_type"; }
-    fn containers_received_from_any_expression(sim) { @case "containers::containers_received_from_any_expression"; }
-    fn nested_bounded_queues_are_assigned_elementwise(sim) { @case "containers::nested_bounded_queues_are_assigned_elementwise"; }
-    fn container_values_are_converted_on_every_path(sim) { @case "containers::container_values_are_converted_on_every_path"; }
-    fn associative_patterns_with_keys(sim) { @case "containers::associative_patterns_with_keys"; }
-    fn ambiguous_conditions_of_containers(sim) { @case "containers::ambiguous_conditions_of_containers"; }
-    fn conversions_before_ambiguous_merges(sim) { @case "containers::conversions_before_ambiguous_merges"; }
-    fn untargeted_and_nested_container_merges(sim) { @case "containers::untargeted_and_nested_container_merges"; }
-    fn conditionals_received_by_containers(sim) { @case "containers::conditionals_received_by_containers"; }
-    fn associative_default_strings(sim) { @case "containers::associative_default_strings"; }
-    fn fixed_size_arrays_take_dynamic_array_elements(sim) { @case "containers::fixed_size_arrays_take_dynamic_array_elements"; }
-    fn fixed_size_arrays_take_wide_dynamic_array_elements(sim) { @case "containers::fixed_size_arrays_take_wide_dynamic_array_elements"; }
-    fn fixed_size_arrays_take_dynamic_arrays_of_any_element_type(sim) { @case "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type"; }
-    fn casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size(sim) { @case "containers::casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size"; }
-    fn associative_default_copy(sim) { @case "containers::associative_default_copy"; }
-    fn associative_default_four_state(sim) { @case "containers::associative_default_four_state"; }
-    fn associative_default_wide(sim) { @case "containers::associative_default_wide"; }
-
-    fn queue_40bit_pop_result(sim) {
-        @case "containers::queue_40bit_pop_result";
-    }
-    fn queue_slice_runtime_bounds(sim) { @case "containers::queue_slice_runtime_bounds"; }
-    fn queue_slice_updates_and_copies(sim) { @case "containers::queue_slice_updates_and_copies"; }
-    fn queue_slice_wide_and_unknown_bounds(sim) { @case "containers::queue_slice_wide_and_unknown_bounds"; }
-    fn class_container_inheritance_static(sim) { @case "containers::class_container_inheritance_static"; }
-    fn nested_container_foreach(sim) { @case "containers::nested_container_foreach"; }
-    fn multidimensional_foreach_break(sim) { @case "containers::multidimensional_foreach_break"; }
-    fn nested_container_foreach_skipped_index(sim) { @case "containers::nested_container_foreach_skipped_index"; }
-    fn wide_associative_keys(sim) { @case "containers::wide_associative_keys"; }
-    fn wide_signed_associative_keys(sim) { @case "containers::wide_signed_associative_keys"; }
-    fn wide_associative_keys_with_unknown_bits(sim) { @case "containers::wide_associative_keys_with_unknown_bits"; }
-    fn package_scoped_container_methods(sim) { @case "containers::package_scoped_container_methods"; }
-    fn nested_containers_and_class_keys(sim) { @case "containers::nested_containers_and_class_keys"; }
-    fn methods_of_nested_container_elements(sim) { @case "containers::methods_of_nested_container_elements"; }
-    fn nested_updates_evaluate_indices_once(sim) { @case "containers::nested_updates_evaluate_indices_once"; }
-    fn class_keys_survive_heap_collections(sim) { @case "containers::class_keys_survive_heap_collections"; }
-    fn class_container_receiver_evaluation(sim) { @case "containers::class_container_receiver_evaluation"; }
-    fn class_container_properties(sim) { @case "containers::class_container_properties"; }
-    fn class_container_queue_pool(sim) { @case "containers::class_container_queue_pool"; }
-    fn class_container_strings_handles(sim) { @case "containers::class_container_strings_handles"; }
-    fn class_container_four_state(sim) { @case "containers::class_container_four_state"; }
-    fn class_container_copy_and_gc(sim) { @case "containers::class_container_copy_and_gc"; }
-    fn ordering_integral(sim) { @case "containers::ordering_integral"; }
-    fn ordering_strings(sim) { @case "containers::ordering_strings"; }
-    fn ordering_four_state(sim) { @case "containers::ordering_four_state"; }
-    fn ordering_handles(sim) { @case "containers::ordering_handles"; }
-    fn ordering_events(sim) { @case "containers::ordering_events"; }
-    fn optional_parentheses_packed_result(sim) { @case "containers::optional_parentheses_packed_result"; }
-    fn optional_parentheses(sim) { @case "containers::optional_parentheses"; }
-    fn optional_parentheses_queries(sim) { @case "containers::optional_parentheses_queries"; }
-    fn optional_parentheses_four_state(sim) { @case "containers::optional_parentheses_four_state"; }
-    fn array_reduction_empty_identities(sim) { @case "containers::array_reduction_empty_identities"; }
-    fn array_reduction_type_queries(sim) { @case "containers::array_reduction_type_queries"; }
-    fn array_reduction_fixed(sim) { @case "containers::array_reduction_fixed"; }
-    fn array_reduction_dynamic_queue(sim) { @case "containers::array_reduction_dynamic_queue"; }
-    fn array_reduction_associative(sim) { @case "containers::array_reduction_associative"; }
-    fn array_reduction_four_state(sim) { @case "containers::array_reduction_four_state"; }
-    fn queue_argument_side_effects(sim) { @case "containers::queue_argument_side_effects"; }
-    fn queue_argument_four_state(sim) { @case "containers::queue_argument_four_state"; }
-    fn string_associative_foreach(sim) { @case "containers::string_associative_foreach"; }
-    fn object_elements_keep_handle_semantics(sim) { @case "containers::object_elements_keep_handle_semantics"; }
-    fn runtime_queries_and_traversal_conversion(sim) { @case "containers::runtime_queries_and_traversal_conversion"; }
-    fn equal_updates_preserve_event_waits(sim) { @case "containers::equal_updates_preserve_event_waits"; }
-    fn bounded_queue_and_equality(sim) { @case "containers::bounded_queue_and_equality"; }
-    fn four_state_container_equality(sim) { @case "containers::four_state_container_equality"; }
-    fn string_elements_and_gc(sim) { @case "containers::string_elements_and_gc"; }
-    fn foreach_and_control_flow(sim) { @case "containers::foreach_and_control_flow"; }
-    fn dynamic_resize_and_copy(sim) { @case "containers::dynamic_resize_and_copy"; }
-    fn queue_methods(sim) { @case "containers::queue_methods"; }
-    fn associative_integer_keys(sim) { @case "containers::associative_integer_keys"; }
-    fn associative_string_keys(sim) { @case "containers::associative_string_keys"; }
-    fn four_state_elements_and_indices(sim) { @case "containers::four_state_elements_and_indices"; }
-    fn declaration_initializers_and_locals(sim) { @case "containers::declaration_initializers_and_locals"; }
-    fn compound_element_assignments(sim) { @case "containers::compound_element_assignments"; }
-    fn string_indices_from_calls(sim) { @case "containers::string_indices_from_calls"; }
-    fn array_items_in_concatenations(sim) { @case "containers::array_items_in_concatenations"; }
-    fn foreach_enumeration_index_methods(sim) { @case "containers::foreach_enumeration_index_methods"; }
-    fn element_part_selects(sim) { @case "containers::element_part_selects"; }
-}
-
-sv_backends! {
     fn popped_nested_queue_elements_are_containers(sim) {
         @setup {
             let source = r#"module Top(output int value);
@@ -607,6 +516,37 @@ fn fixed_size_arrays_of_other_elements_check_dynamic_array_sizes() {
 }
 
 #[test]
+fn casts_to_containers_assigned_to_fixed_size_arrays_are_unsupported() {
+    // A cast to a queue type is a queue value (6.24.1, 6.24.3), which a
+    // fixed-size array takes element by element (7.6). That assignment reads
+    // the elements of a container variable only; a cast value is rejected,
+    // not lowered as some other assignment.
+    for body in [
+        "typedef int queue_t [$]; int q [$]; int f [2]; initial f = queue_t'(q);",
+        "typedef bit queue_t [$]; bit [7:0] a; bit f [8]; initial f = queue_t'(a);",
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("casts.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("a cast to a container was assigned to a fixed-size array: {body}");
+        };
+        let error = error
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            error.contains("assignment of an array that is not dynamically sized"),
+            "{body}: {error}"
+        );
+    }
+}
+
+#[test]
 fn fixed_size_arrays_of_container_typedefs_are_unsupported() {
     // A fixed-size array whose elements are queues, dynamic or associative
     // arrays has no lowering yet; declared through a typedef it is rejected
@@ -649,4 +589,273 @@ fn fixed_size_arrays_of_container_typedefs_are_unsupported() {
         .unwrap();
     sim.run_until(1).unwrap();
     assert_eq!(sim.get(sim.signal("out")), 7u32.into());
+}
+
+sv_backends! {
+    // The initializer of `new[size](init)` may be an assignment pattern: it
+    // is an array of the target's type, copied into the new array, which
+    // keeps `size` elements (IEEE 1800-2023 7.5.1, 10.9.1).
+    fn dynamic_array_new_takes_pattern_initializers(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            module Top(output int sizes, output logic [3:0] strb, output logic [23:0] three,
+                       output logic [7:0] one);
+              logic [7:0] data = 8'h5a;
+              initial begin
+                automatic logic [3:0] s[] = new[1]('{{4{1'b1}}});
+                automatic logic [7:0] t[] = new[3]('{8'h11, data});
+                automatic logic [7:0] o[] = new[1]('{8'h21, 8'h22, 8'h23});
+                sizes = s.size() * 100 + t.size() * 10 + o.size();
+                strb = s[0];
+                three = {t[0], t[1], t[2]};
+                one = o[0];
+              end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("new_patterns.sv"))], "Top");
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("sizes")), BigUint::from(131u32));
+        assert_eq!(sim.get(sim.signal("strb")), BigUint::from(0xfu8));
+        assert_eq!(sim.get(sim.signal("three")), BigUint::from(0x115a00u32));
+        assert_eq!(sim.get(sim.signal("one")), BigUint::from(0x21u8));
+    }
+}
+
+sv_backends! {
+    // `new[size]('{default: v})` gives each of the `size` elements the
+    // value `v` (IEEE 1800-2023 7.5.1, 10.9.1: every element is covered),
+    // as Caliptra's AXI BFM sizes its write strobes; growing the array
+    // later fills the new elements with the type's default (Verilator: the
+    // same values).
+    fn dynamic_array_new_takes_default_patterns(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            module Top(output int sizes, output logic [11:0] strb, output logic [15:0] data,
+                       output logic [7:0] grown);
+              localparam W = 32;
+              logic [7:0] fill = 8'h5a;
+              initial begin
+                automatic logic [3:0] a[] = new[3]('{default: {W/8{1'b1}}});
+                automatic logic [7:0] b[];
+                automatic logic [3:0] c[] = new[0]('{default: 4'h1});
+                b = new[2]('{default: fill});
+                sizes = a.size() * 100 + b.size() * 10 + c.size();
+                strb = {a[0], a[1], a[2]};
+                data = {b[0], b[1]};
+                a = new[5](a);
+                grown = {a[2], a[4]};
+              end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("new_default.sv"))], "Top");
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("sizes")), BigUint::from(320u32));
+        assert_eq!(sim.get(sim.signal("strb")), BigUint::from(0xfffu32));
+        assert_eq!(sim.get(sim.signal("data")), BigUint::from(0x5a5au32));
+        assert_eq!(sim.get(sim.signal("grown")), BigUint::from(0xf0u32));
+    }
+}
+
+sv_backends! {
+    fn members_of_container_elements_are_written_through_the_element(sim) {
+        @setup {
+            // A member write of a container element rewrites the element
+            // with the member's bits replaced (IEEE 1800-2023 7.2, 7.10):
+            // elements of records (string members), of integral structures
+            // and of packed structures; through `$`, a run-time index, a
+            // nested container and an associative array; whole, by an
+            // operator, by a part-select and as a whole unpacked structure.
+            // A copy of the container keeps its own elements.
+            let source = r#"module Top(output int strings, output int counts,
+                                    output int bits, output int others);
+                typedef struct packed { logic [3:0] hi; logic [3:0] lo; } pk_t;
+                typedef struct { int a; byte b; } in_t;
+                typedef struct { string arg; int unsigned used; in_t s; pk_t p; bit [7:0] v; } e_t;
+                e_t q[$], c[$];
+                e_t m[string];
+                in_t nq[$][$];
+                pk_t pq[$];
+                in_t plain[$];
+                initial begin
+                    e_t t;
+                    in_t i;
+                    t.arg = "one"; t.used = 5; t.s.a = 7; t.s.b = 3; t.p = 8'h12; t.v = 8'hf0;
+                    q.push_back(t); q.push_back(t);
+                    q[0].used++;
+                    q[1].used += 10;
+                    for (int k = 0; k < 2; k++) q[k].used += k;
+                    q[0].arg = "uno";
+                    q[1].arg = {q[0].arg, "!"};
+                    q[0].s.a = -2;
+                    q[1].s = '{a: 40, b: 4};
+                    q[0].p.hi = 4'h9;
+                    q[1].v[3:0] = 4'ha;
+                    q[$].v[7] = 1'b0;
+                    q[$].used *= 2;
+                    c = q;
+                    c[0].used = 99;
+                    c[0].arg = "copy";
+                    m["k"] = t; m["k"].used = 77;
+                    i.a = 1; i.b = 2;
+                    nq = '{'{i, i}, '{i}};
+                    nq[0][1].a = 70;
+                    pq.push_back(8'h34); pq[0].hi = 4'hf;
+                    plain.push_back(i); plain[0].a = -5; plain[0].b[2] = 1'b1;
+                    strings = (q[0].arg == "uno") + 2 * (q[1].arg == "uno!")
+                        + 4 * (c[0].arg == "copy") + 8 * (t.arg == "one");
+                    counts = q[0].used * 1000000 + q[1].used * 1000 + c[0].used;
+                    bits = {q[0].p, q[1].v, q[0].s.b, q[1].s.b};
+                    others = q[0].s.a * 1000000 + q[1].s.a * 10000 + m["k"].used * 100
+                        + nq[0][1].a + nq[0][0].a + pq[0] - 8'hf4 + plain[0].a + plain[0].b;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("element_members.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let strings = sim.signal("strings");
+        assert_eq!(sim.get(strings), BigUint::from(15u8));
+        // q[0]: 5 + 1 + 0; q[1]: (5 + 10 + 1) * 2; the copy's change stays there.
+        let counts = sim.signal("counts");
+        assert_eq!(sim.get(counts), BigUint::from(6_032_099u32));
+        let bits = sim.signal("bits");
+        assert_eq!(sim.get(bits), BigUint::from(0x92_7a_03_04u32));
+        // -2, 40, 77, 70 + 1, 0, -5 + 6.
+        let expected: i64 = -2 * 1_000_000 + 40 * 10_000 + 77 * 100 + 70 + 1 - 5 + 6;
+        let others = sim.signal("others");
+        assert_eq!(sim.get(others), BigUint::from(expected as u32));
+    }
+}
+
+sv_backends! {
+    fn members_of_class_container_elements_are_written(sim) {
+        @setup {
+            // Elements of a fixed-size array property, of a queue property
+            // and of a static queue property, written by member in methods
+            // and through a handle; the static queue of structures with a
+            // string member is UVM 1.2's `m_uvm_applied_cl_action`.
+            let source = r#"module Top(output int pairs, output int records, output int statics);
+                typedef struct { int a; byte b; } pair_t;
+                typedef struct { string arg; int unsigned used; } rec_t;
+                class C;
+                    pair_t pairs[2];
+                    rec_t recs[$];
+                    static rec_t applied[$];
+                    function void bump(int i); pairs[i].b += 2; recs[i].used++; endfunction
+                    static function void apply(string arg);
+                        rec_t t;
+                        t.arg = arg;
+                        applied.push_back(t);
+                        foreach (applied[i]) applied[i].used++;
+                    endfunction
+                endclass
+                initial begin
+                    C c = new;
+                    rec_t r;
+                    r.arg = "r"; r.used = 10;
+                    c.recs.push_back(r); c.recs.push_back(r);
+                    c.pairs[0].a = 1; c.pairs[1].a++; c.pairs[0].b += 1;
+                    c.bump(1);
+                    c.recs[0].arg = "zero";
+                    C::apply("a"); C::apply("b");
+                    pairs = c.pairs[0].a * 1000 + c.pairs[0].b * 100 + c.pairs[1].a * 10 + c.pairs[1].b;
+                    records = (c.recs[0].arg == "zero") * 1000 + c.recs[0].used * 10 + c.recs[1].used - 10;
+                    statics = C::applied[0].used * 10 + C::applied[1].used + (C::applied[1].arg == "b") * 100;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("class_element_members.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let pairs = sim.signal("pairs");
+        assert_eq!(sim.get(pairs), BigUint::from(1112u32));
+        let records = sim.signal("records");
+        assert_eq!(sim.get(records), BigUint::from(1101u32));
+        let statics = sim.signal("statics");
+        assert_eq!(sim.get(statics), BigUint::from(121u32));
+    }
+}
+
+sv_backends! {
+    fn selects_of_container_element_members_use_their_declared_ranges(sim) {
+        @setup {
+            // A bit-select or part-select written into a member of a
+            // container element takes the positions of the member's declared
+            // range (IEEE 1800-2023 7.4.6, 11.5.1), descending or ascending.
+            let source = r#"module Top(output bit [15:0] value);
+                typedef struct { bit [15:8] hi; string s; logic [0:7] up; } h_t;
+                h_t q[$];
+                initial begin
+                    h_t t;
+                    t.hi = 8'h00; t.up = 8'h00;
+                    q.push_back(t);
+                    q[0].hi[8] = 1;
+                    q[0].hi[15:12] = 4'hc;
+                    q[0].hi[9] ^= 1;
+                    q[0].up[0] = 1;
+                    q[0].up[6:7] = 2'b11;
+                    value = {q[0].hi, q[0].up};
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("element_member_ranges.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(0xc383u16));
+    }
+}
+
+sv_backends! {
+    fn compound_member_updates_of_the_last_element_fix_its_index_first(sim) {
+        @setup {
+            // `q[$].m op= f()` reads and writes the element that `$` named
+            // before `f()` appended to the queue: the address of the target
+            // is evaluated once (IEEE 1800-2023 11.4.1), for elements of any
+            // type.
+            let source = r#"module Top(output int structs, output int records, output int ints);
+                typedef struct { int a; byte b; } pair_t;
+                typedef struct { string s; int n; } rec_t;
+                pair_t q[$];
+                rec_t r[$];
+                int v[$];
+                function automatic int grow_q();
+                    pair_t p;
+                    p.a = 100;
+                    q.push_back(p);
+                    return 5;
+                endfunction
+                function automatic int grow_r();
+                    rec_t e;
+                    e.n = 100;
+                    r.push_back(e);
+                    return 5;
+                endfunction
+                function automatic int grow_v();
+                    v.push_back(100);
+                    return 5;
+                endfunction
+                initial begin
+                    pair_t p;
+                    rec_t e;
+                    p.a = 1;
+                    e.n = 1;
+                    q.push_back(p);
+                    r.push_back(e);
+                    v.push_back(1);
+                    q[$].a += grow_q();
+                    r[$].n += grow_r();
+                    v[$] += grow_v();
+                    structs = q[0].a * 1000 + q[1].a;
+                    records = r[0].n * 1000 + r[1].n;
+                    ints = v[0] * 1000 + v[1];
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("last_element_updates.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let structs = sim.signal("structs");
+        assert_eq!(sim.get(structs), BigUint::from(6100u32));
+        let records = sim.signal("records");
+        assert_eq!(sim.get(records), BigUint::from(6100u32));
+        let ints = sim.signal("ints");
+        assert_eq!(sim.get(ints), BigUint::from(6100u32));
+    }
 }

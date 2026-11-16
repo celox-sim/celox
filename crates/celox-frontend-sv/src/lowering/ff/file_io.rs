@@ -27,7 +27,7 @@ impl Ff<'_, '_> {
                 )
             }
             sv::ir::SystemTaskArg::Str(text) => {
-                let bytes = unescape(text).into_bytes();
+                let bytes = unescape(text)?;
                 let reg = self.b.alloc_bit((bytes.len() * 8).max(8), false);
                 self.b.emit(SIRInstruction::Imm(
                     reg,
@@ -81,11 +81,12 @@ impl Ff<'_, '_> {
             return Err(unsupported("file I/O outside a scheduled process"));
         }
         let site = self
-            .host_request_sites
+            .sites
+            .host_request
             .iter()
             .filter(|site| site.kind == HostRequestKind::FileIo)
             .count() as u32;
-        self.host_request_sites.push(HostRequestSite {
+        self.sites.host_request.push(HostRequestSite {
             process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::FileIo,
             operation,
@@ -302,6 +303,72 @@ impl Ff<'_, '_> {
         Ok(sv::ir::Expr::Ident(name))
     }
 
+    /// `$readmemh`/`$readmemb` of a file whose name the task evaluates when
+    /// it executes (IEEE 1800-2023 21.4): the host reads the file into a
+    /// copy of the memory, which is then assigned to it.
+    pub(super) fn readmem_request(
+        &mut self,
+        format: sv::ir::MemoryFormat,
+        args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+    ) -> Result<(), sv::AnalyzerError> {
+        let task = sv::ir::SystemTask::Readmem(format);
+        if !self.can_request() {
+            return Err(unsupported(format!(
+                "`{task}` with a file name that is not a constant string outside a scheduled process"
+            )));
+        }
+        let Some(sv::ir::SystemTaskArg::Expr(destination @ sv::ir::Expr::Ident(name))) =
+            args.get(1)
+        else {
+            return Err(unsupported(format!(
+                "`{task}` with a file name that is not a constant string into a destination that is not a whole array"
+            )));
+        };
+        let id = self
+            .m
+            .id(name)
+            .ok_or_else(|| unsupported(format!("`{task}` destination `{name}`")))?;
+        if self.m.var(id).array_dims.is_empty() {
+            return Err(unsupported(format!(
+                "`{task}` destination that is not an unpacked array"
+            )));
+        }
+        let (left, right, element_width) = self.m.file_memory_shape(id)?;
+        let width = self.m.var(id).width;
+        let mut values = vec![self.file_io_arg(&args[0])?];
+        // The memory is a reference operand: its words that the file does
+        // not give keep the values they have after the address arguments
+        // are evaluated.
+        let (lvalues, captured, guards) = self.capture_system_actual(destination)?;
+        for arg in args.iter().skip(2) {
+            values.push(self.file_io_arg(arg)?);
+        }
+        let (data_id, data) = self.host_hidden("readmem_data", &captured, width, false, true)?;
+        self.file_io_request(
+            if format == sv::ir::MemoryFormat::Binary {
+                22
+            } else {
+                21
+            },
+            values,
+            vec![HostRequestValue {
+                value_kind: celox_design::ValueKind::Bits,
+                float_precision: None,
+                id: data_id,
+                width,
+                signed: false,
+                is_string: false,
+            }],
+            vec![
+                left.to_string(),
+                right.to_string(),
+                element_width.to_string(),
+            ],
+        )?;
+        self.check_tagged_guards(&guards)?;
+        self.write_system_actual(&lvalues, &data)
+    }
+
     pub(super) fn file_task(
         &mut self,
         task: sv::ir::SystemTask,
@@ -326,11 +393,18 @@ impl Ff<'_, '_> {
             SystemTask::Fdisplay(radix) | SystemTask::Fwrite(radix) => {
                 let descriptor = self.file_io_arg(&args[0])?;
                 let kind = SystemTaskKind::Print(RuntimeEventKind::Write, radix.letter());
-                let (template, mut args) = system_task_template(self.m, &kind, &args[1..]);
+                let (template, mut args) = system_task_template(self.m, &kind, &args[1..])?;
                 prepare_time_operands(self.m, template.as_deref(), &mut args)?;
                 let mut values = vec![descriptor];
                 for arg in &args {
                     values.push(self.file_io_arg(arg)?);
+                }
+                // The format of `%t` when the call runs (IEEE 1800-2023
+                // 20.4.3), the last value.
+                let time_format =
+                    time_format_operand(self.m, template.as_deref().is_some_and(converts_time));
+                if let Some(format) = &time_format {
+                    values.push(self.file_io_arg(&sv::ir::SystemTaskArg::Expr(format.clone()))?);
                 }
                 let operation = if matches!(task, SystemTask::Fdisplay(_)) {
                     3
@@ -341,7 +415,13 @@ impl Ff<'_, '_> {
                     operation,
                     values,
                     Vec::new(),
-                    vec![template.unwrap_or_default()],
+                    std::iter::once(template.unwrap_or_default())
+                        .chain(
+                            time_format
+                                .is_some()
+                                .then(|| celox_design::TIME_FORMAT_ARGUMENT.to_string()),
+                        )
+                        .collect(),
                 )?;
             }
             SystemTask::Writemem(format) => {

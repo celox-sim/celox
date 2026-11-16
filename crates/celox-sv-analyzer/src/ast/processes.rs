@@ -42,7 +42,7 @@ pub(super) fn scope(
         ExprKind::Name(name) => {
             let name = instances::normalize_identifier(&name.spelling);
             if let Some(ty) = dimensions.type_aliases.get(&name) {
-                return ty.class() == Some(CLASS);
+                return ty.class_in(&session.types).as_deref() == Some(CLASS);
             }
             if dimensions.get(&name).is_some() {
                 return false;
@@ -73,7 +73,7 @@ pub(super) fn builtin_type(
     session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Option<Box<Type>>> {
-    if let Some(ty) = qualified_type(path) {
+    if let Some(ty) = qualified_type(path, &mut session.types) {
         return Ok(Some(Box::new(ty)));
     }
     if path
@@ -85,18 +85,21 @@ pub(super) fn builtin_type(
     Ok(None)
 }
 
-pub(super) fn qualified_type(path: &[celox_sv_syntax::TypeSegment]) -> Option<Type> {
+pub(super) fn qualified_type(
+    path: &[celox_sv_syntax::TypeSegment],
+    table: &mut semantic_types::TyTable,
+) -> Option<Type> {
     if path.iter().any(|part| part.arguments.is_some()) {
         return None;
     }
     match path {
         [std, process] if std.name.spelling == "std" && process.name.spelling == "process" => {
-            Some(classes::handle(CLASS))
+            Some(classes::handle(table, CLASS))
         }
         [std, semaphore]
             if std.name.spelling == "std" && semaphore.name.spelling == "semaphore" =>
         {
-            Some(classes::handle(super::semaphores::CLASS))
+            Some(classes::handle(table, super::semaphores::CLASS))
         }
         [std, process, state]
             if std.name.spelling == "std"
@@ -148,7 +151,7 @@ pub(super) fn state(
         }
         _ => false,
     };
-    state.then(|| state_type().enum_domain).flatten()
+    state.then(|| state_type().enum_domain.clone()).flatten()
 }
 
 pub(super) fn value(

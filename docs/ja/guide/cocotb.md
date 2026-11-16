@@ -5,13 +5,22 @@ CeloxはVerylまたはSystemVerilogの設計を、VPI経由で通常の
 コンパイルできます。生成物にはコンパイル済み設計とCeloxランタイムが含まれるため、
 実行時にHDLソースは不要です。
 
-## CLIをビルドする
+## CLIをインストールする
 
-現在、CLIはCeloxのソースツリーからビルドします。
+crates.ioから`celox`コマンドをインストールします。
 
 ```sh
-cargo build --release -p celox-vpi --features systemverilog --bin celox
+cargo install celox
 ```
+
+`cargo binstall celox`を使うと、コンパイルせずにリリースのビルド済みバイナリを取得します。
+ビルド済みバイナリは各[GitHub Release](https://github.com/celox-sim/celox/releases)にも
+Linux、macOS、Windows向けの`celox-<target>`アーカイブとして添付されています。
+対応するホストはx86-64とAArch64です。Celoxのソースツリーにあるコマンドを使う場合は、
+`cargo build --release -p celox --bin celox`でビルドすると`target/release/celox`ができます。
+
+インストールすると`veryl-celox`も入るため、Veryl 0.20.3以降ではVerylのサブコマンドとして
+実行できます。`veryl celox run ...`は`celox run ...`と同じで、`veryl --list`にも`celox`が表示されます。
 
 後述の`run`コマンドにはPythonは不要です。VPIテストを使う場合は、利用するPython環境へcocotbをインストールします。
 
@@ -26,8 +35,8 @@ python3 -m pip install cocotb
 SystemVerilogのテストベンチとVerylのnative `#[test]`モジュールを、同じコマンドで実行できます。
 
 ```sh
-target/release/celox run src/types.sv src/Dut.sv test/Top.sv --top Top
-target/release/celox run test/Top.veryl --top Top
+celox run src/types.sv src/Dut.sv test/Top.sv --top Top
+celox run test/Top.veryl --top Top
 ```
 
 SVは`.sv`または`.v`をコンパイル順に指定します。既定では2値シミュレーションを使い、
@@ -59,6 +68,19 @@ SVのtestbenchでは、`+`で始まる位置引数（または繰り返し指定
 
 ```sh
 celox run tb.v --top tb +iterations=9 --plusarg +trace
+```
+
+DPI-C で C 関数を import する SystemVerilog 設計では、関数を提供する共有ライブラリを
+`--dpi-lib PATH`（繰り返し可）、または`celox.toml`のルートかターゲットの
+`dpi_libs = ["lib/model.so"]`で指定します。import はその C 名を定義する最初の
+ライブラリにリンクします。順序はルート、ターゲット、コマンドラインです。
+C ソースからのライブラリのビルドはプロジェクト側で行います（`svdpi.h`は Celox に
+含まれません）。対応する引数型は
+[DPI-C imports](./systemverilog-reference#dpi-c-imports)を参照してください。
+
+```sh
+cc -shared -fPIC -o model.so model.c
+celox run tb.sv --top tb --dpi-lib model.so
 ```
 
 両言語とも`--backend native|tiered|interpreter|cranelift|wasm`で実行方式を選べます（既定native）。
@@ -183,14 +205,14 @@ celox vpi build -f rtl/design.f --top Dut -o build/dut-sim
 環境変数・ワイルドカード・シェルの展開は行いません。
 未対応オプション、未知のTOMLフィールド、一覧の循環参照はエラーにします。
 CLIからも`-I`/`--include-dir`と`-D`/`--define`を直接指定できます。
-include・マクロ指定にはSV入力と`--features systemverilog`によるビルドが必要です。
+include・マクロ指定にはSV入力が必要です。
 
 ## 設計をコンパイルする
 
 Verylプロジェクト内のソースを1つ指定し、トップレベルモジュール名を渡します。
 
 ```sh
-target/release/celox vpi build src/Top.veryl --top Top -o build/top-sim
+celox vpi build src/Top.veryl --top Top -o build/top-sim
 ```
 
 Celoxはソースの位置から`Veryl.toml`を探し、プロジェクトのソースと依存関係を
@@ -200,14 +222,13 @@ Celoxはソースの位置から`Veryl.toml`を探し、プロジェクトのソ
 SystemVerilogでは1つ以上の`.sv`ファイルをコンパイル順に指定します。
 
 ```sh
-target/release/celox vpi build src/types.sv src/Child.sv src/Top.sv --top Top -o build/top-sim
+celox vpi build src/types.sv src/Child.sv src/Top.sv --top Top -o build/top-sim
 ```
 
 Celoxが対応するSystemVerilogの範囲で、指定したファイルをコンパイルします。
 package定義は利用側より先に指定してください。`Veryl.toml`や追加のSystemVerilog
 ソースは自動探索しません。複数指定時はすべて`.sv`ファイルにする必要があります。
 Verylではプロジェクトの入口となるファイルを1つ指定します。
-`celox-vpi-compile`も同じソース一覧を受け付けます。
 
 ### プロセスを含む設計
 
@@ -243,10 +264,6 @@ cocotbからの書き込みは現在時刻のブロッキング代入です。�
 たとえば`Timer`コールバックの中での読み出しは格納された値を返します。同じコール
 バックでの書き込みから組み合わせ回路が導く値は、タイムステップが落ち着くまで
 以前の値のままです。
-
-プロセスを含む設計に対応しているのは`celox vpi build`だけです。`celox-vpi-compile`
-とその`celox-vpi-runtime`は引き続きこれらを拒否します
-([#1983](https://github.com/celox-sim/celox/issues/1983))。
 
 実行ファイルには対話モードがないため、`$stop`は`vpiStop`と同様に実行を終了します。
 一時停止への対応は[#1886](https://github.com/celox-sim/celox/issues/1886)で

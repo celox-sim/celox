@@ -28,12 +28,13 @@ impl Message {
     /// The message type of `mailbox #(ty)`.
     fn of(
         functions: &const_functions::ConstantFunctions,
+        table: &semantic_types::TyTable,
         ty: &Type,
         env: &ConstEnv,
     ) -> Converted<Self> {
         if !ty.unpacked_ranges.is_empty()
             || ty.container.is_some()
-            || ty.unpacked_struct().is_some()
+            || ty.is_unpacked_struct_in(table)
             || matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal)
         {
             return Err(unsupported(
@@ -59,19 +60,19 @@ impl Message {
             two_state: handle.is_some()
                 || matches!(
                     ty.kind(),
-                    TypeKind::Bit | TypeKind::Process | TypeKind::Event
+                    TypeKind::Bit | TypeKind::Chandle | TypeKind::Process | TypeKind::Event
                 ),
             handle,
-            class: ty.class().map(str::to_owned),
+            class: ty.class_in(table).map(|class| class.to_string()),
         })
     }
 
     /// The class name of `mailbox #(ty)`: the spelling of the type, then the
     /// shape its methods use.
-    fn class_name(&self, ty: &Type) -> String {
+    fn class_name(&self, ty: &Type, table: &semantic_types::TyTable) -> String {
         format!(
             "{PREFIX}{})@{},{},{},{}",
-            classes::specializations::spelling(ty),
+            classes::specializations::spelling(ty, table),
             self.width,
             u8::from(self.signed),
             u8::from(self.two_state),
@@ -158,8 +159,14 @@ pub(super) fn named_type(
     else {
         return Ok(None);
     };
-    let name = Message::of(&tree.functions, &message, &context.const_env)?.class_name(&message);
-    Ok(Some(Box::new(classes::handle(&name))))
+    let name = Message::of(
+        &tree.functions,
+        &session.types,
+        &message,
+        &context.const_env,
+    )?
+    .class_name(&message, &session.types);
+    Ok(Some(Box::new(classes::handle(&mut session.types, &name))))
 }
 
 /// `new(bound)` of mailbox class `class` (15.4.1).

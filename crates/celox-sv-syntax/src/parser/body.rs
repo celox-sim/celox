@@ -103,11 +103,6 @@ impl Parser<'_> {
             LocalDeclaration::Unconverted(range) => DataDeclaration::Unconverted(range),
             _ => unreachable!("body data classification only recognizes variable/typed forms"),
         };
-        if self.data_declarations.len() >= 1_000_000 {
-            return Err(
-                self.unsupported("native data-declaration arena exceeds one million entries")
-            );
-        }
         let id = DataDeclarationId(self.data_declarations.len());
         self.data_declarations.push(declaration);
         Ok(id)

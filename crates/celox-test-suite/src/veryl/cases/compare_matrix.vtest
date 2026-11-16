@@ -1,5 +1,7 @@
 (group compare_matrix (category regression))
 
+; Tests that two different packages can instantiate the same generic module,
+; each getting a unique ModuleId.
 (case test_generic_module_instantiation
   (source "test.veryl" #"
 proto package DataType {
@@ -51,6 +53,7 @@ inst wp: WordPass (i: c, o: d);
   (assert_eq b 0xFF)
   (assert_eq d 0xFFFF))
 
+; Tests proto package function resolution (E::gt → IntElement::gt).
 (case test_proto_function_basic
   (source "test.veryl" #"
 proto package Element {
@@ -98,6 +101,7 @@ inst inner: GenericCompare::<IntElement> (a, b, r);
   (assert_eq r 0))
   ; 3 > 7 is false
 
+; Tests proto constant (E::max_value) resolution.
 (case test_proto_const_max_value
   (source "test.veryl" #"
 proto package Element {

@@ -20,7 +20,10 @@ impl ConstantType {
         env: &ConstEnv,
     ) -> Option<Self> {
         types::freeze_bounds(&mut declared, functions, env);
-        let id = super::of_type(table, functions, &declared, env)?;
+        // `env` is the scope that declares the constant: its type is bound
+        // there, as a declaration's is.
+        super::bind_declared(table, functions, &mut declared, env);
+        let id = declared.binding.get(table)?;
         Some(Self {
             declared: Arc::new(declared),
             semantic: table.retain(id),
@@ -65,7 +68,7 @@ impl ConstantType {
             let mut domain = (*domain).clone();
             domain.width = expr_type_from_type(functions, &base, env)?.width;
             domain.signed = base.is_signed;
-            domain.four_state = base.kind != TypeKind::Bit;
+            domain.four_state = !matches!(base.kind, TypeKind::Bit | TypeKind::Chandle);
             Some(Arc::new(domain))
         });
         Self::of_type(base, functions, table, env)

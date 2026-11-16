@@ -211,8 +211,8 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
     }
 
     fn set_compiled_host_budgets(&mut self, rounds: u64, returns: u64) {
-        self.native_host_return_budget = returns;
-        self.native_host_round_budget = rounds;
+        self.native.return_budget = returns;
+        self.native.round_budget = rounds;
     }
 
     fn compiled_host_inputs(&self) -> bool {
@@ -250,21 +250,21 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         ready: Vec<celox_runtime::NbaUpdate>,
         delayed: Vec<(u64, celox_runtime::NbaUpdate)>,
     ) -> Result<(), celox_runtime::SimulatorErrorCode> {
-        self.native_nba_queue.extend(ready);
-        self.native_delayed_nbas.extend(delayed);
+        self.native.nba_queue.extend(ready);
+        self.native.delayed_nbas.extend(delayed);
         Ok(())
     }
 
     fn take_compiled_delayed_nbas(&mut self) -> Vec<(u64, celox_runtime::NbaUpdate)> {
-        self.native_delayed_nbas.drain(..).collect()
+        self.native.delayed_nbas.drain(..).collect()
     }
 
     fn has_compiled_nbas(&self) -> bool {
-        !self.native_nba_queue.is_empty() || !self.native_delayed_nbas.is_empty()
+        !self.native.nba_queue.is_empty() || !self.native.delayed_nbas.is_empty()
     }
 
     fn take_compiled_nbas(&mut self) -> Vec<celox_runtime::NbaUpdate> {
-        self.native_nba_queue.drain(..).collect()
+        self.native.nba_queue.drain(..).collect()
     }
 
     fn host_request(
@@ -363,18 +363,18 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
     }
 
     fn take_slot_writes(&mut self) -> bool {
-        std::mem::take(&mut self.slot_writes)
+        std::mem::take(&mut self.observation.writes)
     }
 
     #[inline]
     fn observes_updates(&self) -> bool {
-        self.observes_updates && !self.frozen
+        self.observation.observes_updates && !self.frozen
     }
 
     fn after_update(&mut self, timestamp: u64) -> Result<bool, Halt> {
         // The value change points of the kernels since the last update
         // point: the observer may have written there, or asked to finish.
-        let changed = std::mem::take(&mut self.value_changed);
+        let changed = std::mem::take(&mut self.observation.value_changed);
         if changed & 4 != 0 {
             return Err(Halt::Finish);
         }
@@ -393,7 +393,7 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         // A scheduler generated without update points cannot show the
         // host each update.
         if self.frozen
-            || (self.observes_updates
+            || (self.observation.observes_updates
                 && !self
                     .program
                     .runtime_schema
@@ -408,14 +408,24 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         // Waveforms record, the heap collects, deferred assertions mature
         // and a slot observer looks at every slot boundary.
         let vcd = &self.sv_vcd;
-        if self.postponed_output
-            || self.deferred_assertions
-            || self.slot_observer.is_some()
+        if self.slot_end.postponed_output
+            || self.slot_end.deferred_assertions
+            || self.observation.observer.is_some()
             || self.vcd_writer.is_some()
             || vcd.path.is_some()
             || vcd.started.is_some()
             || vcd.pending
             || !self.handle_slots().is_empty()
+            // A fused flip-flop's delayed updates are collected by the
+            // runtime at each slot boundary, at their capture time, when
+            // no generated queue publishes them instead.
+            || (!self.compiled_nba_queues()
+                && self
+                    .program
+                    .runtime_schema
+                    .nba_sites
+                    .iter()
+                    .any(|site| site.unit))
         {
             return CompiledSlots::One;
         }
@@ -424,16 +434,15 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
 
     fn retain_process_values(&mut self, values: &[(SignalRef, celox_runtime::timing::Value)]) {
         let slots = self.handle_slots();
-        self.process_heap_roots.clear();
+        self.heap.process_roots.clear();
         for (signal, (value, _)) in values {
-            for &(offset, kind) in slots.iter().filter(|&&(offset, _)| {
-                offset >= signal.offset && offset < signal.offset + signal.width.div_ceil(8)
-            }) {
+            let end = signal.offset + signal.width.div_ceil(8);
+            for &(offset, kind) in slots_within(&slots, signal.offset, end) {
                 let bytes = (value >> ((offset - signal.offset) * 8)).to_bytes_le();
                 let mut raw = [0; celox_heap::HANDLE_BYTES];
                 let count = bytes.len().min(raw.len());
                 raw[..count].copy_from_slice(&bytes[..count]);
-                self.process_heap_roots.push(celox_heap::Root {
+                self.heap.process_roots.push(celox_heap::Root {
                     kind,
                     handle: celox_heap::Handle::from_le_bytes(raw),
                 });
@@ -453,7 +462,7 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
                 };
                 let mut raw = [0; celox_heap::HANDLE_BYTES];
                 raw.copy_from_slice(&saved.stack[offset..offset + celox_heap::HANDLE_BYTES]);
-                self.process_heap_roots.push(celox_heap::Root {
+                self.heap.process_roots.push(celox_heap::Root {
                     kind,
                     handle: celox_heap::Handle::from_le_bytes(raw),
                 });
@@ -504,7 +513,7 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         self.try_dump_unless_rewound(timestamp)
             .map_err(|error| Halt::Error(vcd_dump_runtime_error(error)))?;
         if !self.frozen {
-            self.slot_writes |= self.show_slot(timestamp, |observer, io, time| {
+            self.observation.writes |= self.show_slot(timestamp, |observer, io, time| {
                 observer.end_of_slot(io, time)
             })?;
         }
@@ -520,7 +529,7 @@ impl<B: SimBackend> Simulator<B> {
         time: u64,
         show: impl FnOnce(&mut dyn SlotObserver<B>, &mut crate::SlotIo<'_, B>, u64),
     ) -> Result<bool, Halt> {
-        let Some(observer) = self.slot_observer.as_deref_mut() else {
+        let Some(observer) = self.observation.observer.as_deref_mut() else {
             return Ok(false);
         };
         let mut io = crate::SlotIo::new(crate::IOContext {
@@ -578,7 +587,6 @@ impl Simulation {
     }
 
     /// Build a timed simulation directly from SystemVerilog sources.
-    #[cfg(feature = "systemverilog")]
     pub fn from_sv_sources<'a>(
         sources: Vec<(&'a str, &'a std::path::Path)>,
         top: &'a str,
@@ -923,8 +931,8 @@ impl<B: SimBackend> Simulation<B> {
     /// simulation stops checking: the shadow does not see the observer's
     /// writes.
     pub fn observe_slots(&mut self, observer: Box<dyn SlotObserver<B>>, signals: &[SignalRef]) {
-        self.simulator.observes_updates = observer.observes_updates();
-        self.simulator.slot_observer = Some(observer);
+        self.simulator.observation.observes_updates = observer.observes_updates();
+        self.simulator.observation.observer = Some(observer);
         let signals = self.reference_observed(signals);
         self.state.set_observed_signals(signals.iter().copied());
         if self.shadow.take().is_some() {
@@ -941,7 +949,7 @@ impl<B: SimBackend> Simulation<B> {
     /// The observed signals whose changes keep slots in the reference loop:
     /// none when the compiled scheduler shows the observer every update.
     fn reference_observed<'a>(&self, signals: &'a [SignalRef]) -> &'a [SignalRef] {
-        let shown = self.simulator.observes_updates
+        let shown = self.simulator.observation.observes_updates
             && self
                 .simulator
                 .program
@@ -956,8 +964,8 @@ impl<B: SimBackend> Simulation<B> {
     /// [`Self::observe_slots`], and return it.
     pub fn stop_observing_slots(&mut self) -> Option<Box<dyn SlotObserver<B>>> {
         self.state.set_observed_signals([]);
-        self.simulator.observes_updates = false;
-        self.simulator.slot_observer.take()
+        self.simulator.observation.observes_updates = false;
+        self.simulator.observation.observer.take()
     }
 
     /// Register a clock signal and its period, enqueuing the first edge.
@@ -1012,7 +1020,7 @@ impl<B: SimBackend> Simulation<B> {
     /// run at that time.
     #[inline]
     fn end_idle_slot(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
-        if (!self.simulator.host_slot_work && !self.simulator.timestamped_reports)
+        if (!self.simulator.slot_end.work && !self.simulator.timestamped_reports)
             || end_time <= self.state.time()
             || self.state.next_event_time() == Some(self.state.time())
         {
@@ -1141,7 +1149,7 @@ impl<B: SimBackend> Simulation<B> {
         // The run leaves the time or ends at it: the slot is over, and the
         // deferred actions waiting from any settle at that time mature
         // before the reports are watched.
-        let mature = self.simulator.deferred_assertions
+        let mature = self.simulator.slot_end.deferred_assertions
             && self.state.next_event_time() != Some(self.state.time());
         if !self.simulator.dirty && !mature {
             return Ok(());
@@ -1475,7 +1483,7 @@ impl<B: SimBackend> Simulation<B> {
         // the initial settle of combinational logic belongs to time zero.
         // A fatal action is drained as a fatal report.
         if !self.state.is_finished()
-            && self.simulator.deferred_assertions
+            && self.simulator.slot_end.deferred_assertions
             && self.state.next_event_time() != Some(self.state.time())
         {
             if let Err(error) = self.simulator.mature_deferred_assertions() {
@@ -1563,6 +1571,12 @@ impl<B: SimBackend> Simulation<B> {
     /// Returns the full instance hierarchy starting from the top module.
     pub fn named_hierarchy(&self) -> InstanceHierarchy {
         self.simulator.named_hierarchy()
+    }
+
+    /// The instance hierarchy of each top-level module, by its name (see
+    /// [`Simulator::named_hierarchies`]).
+    pub fn named_hierarchies(&self) -> Vec<(String, InstanceHierarchy)> {
+        self.simulator.named_hierarchies()
     }
 
     /// Returns all signals for the instance at the given hierarchical path.
@@ -1701,650 +1715,9 @@ impl<B: SimBackend, F: FnMut() -> bool> celox_runtime::StepObserver<Simulator<B>
 }
 
 #[cfg(all(test, feature = "host-runtime"))]
-mod process_tests {
-    use celox_frontend_sdk::{
-        BinaryOp, Constant, Edge, ExprId, FrontendArtifact, ModuleBuilder, Statement, UnaryOp,
-        ValueType,
-    };
+mod process_tests;
 
-    use super::Simulation;
-    use crate::{SimBackend, Simulator, SimulatorBuilder};
-
-    fn constant(module: &mut ModuleBuilder, value: u64, width: usize) -> ExprId {
-        module.constant(Constant::two_state(value, width).unwrap())
-    }
-
-    /// `forever #5 clk = ~clk;` drives a counter, and a second process counts
-    /// `steps` one-unit delays into `ticks` before finishing the simulation.
-    fn design(four_state: bool, steps: usize) -> FrontendArtifact {
-        let bit = ValueType::new(1, false, four_state).unwrap();
-        let word = ValueType::new(16, false, four_state).unwrap();
-        let mut module = ModuleBuilder::new("Processes").unwrap();
-        let clk = module.internal("clk", bit).unwrap();
-        let count = module.output("count", word).unwrap();
-        let ticks = module.output("ticks", word).unwrap();
-        for signal in [clk, count, ticks] {
-            let width = if signal == clk { 1 } else { 16 };
-            module
-                .set_initial(signal, Constant::two_state(0u8, width).unwrap())
-                .unwrap();
-        }
-        let count_expr = module.read(count).unwrap();
-        let one = constant(&mut module, 1, 16);
-        let next = module.binary(BinaryOp::Add, count_expr, one, word).unwrap();
-        let count_target = module.whole(count).unwrap();
-        module
-            .register(count_target, next, clk, Edge::Posedge, None, None)
-            .unwrap();
-
-        let five = constant(&mut module, 5, 8);
-        let clk_expr = module.read(clk).unwrap();
-        let toggled = module.unary(UnaryOp::BitNot, clk_expr, bit).unwrap();
-        let clk_target = module.whole(clk).unwrap();
-        module
-            .process(vec![Statement::Forever {
-                body: vec![
-                    Statement::Delay { amount: five },
-                    Statement::Assign {
-                        target: clk_target,
-                        value: toggled,
-                    },
-                ],
-            }])
-            .unwrap();
-
-        // Straight-line suspensions, so a long body needs the two-level
-        // resume dispatch.
-        let unit = constant(&mut module, 1, 8);
-        let ticks_expr = module.read(ticks).unwrap();
-        let incremented = module.binary(BinaryOp::Add, ticks_expr, one, word).unwrap();
-        let ticks_target = module.whole(ticks).unwrap();
-        let mut body = Vec::new();
-        for _ in 0..steps {
-            body.push(Statement::Delay { amount: unit });
-            body.push(Statement::Assign {
-                target: ticks_target,
-                value: incremented,
-            });
-        }
-        body.push(Statement::Finish);
-        module.process(body).unwrap();
-        module.finish()
-    }
-
-    fn check<B: SimBackend>(mut sim: Simulation<B>, steps: u64) {
-        let count = sim.signal("count");
-        let ticks = sim.signal("ticks");
-        // Rising edges at 5, 15 and 25.
-        sim.run_until(30).unwrap();
-        assert!(!sim.is_finished());
-        assert_eq!(sim.get(count), 3u16.into());
-        assert_eq!(sim.get(ticks), 30u16.into());
-        sim.run_until(u64::MAX - 1).unwrap();
-        assert!(sim.is_finished());
-        assert_eq!(sim.time(), steps);
-        assert_eq!(sim.get(ticks), steps.into());
-        assert_eq!(
-            sim.get_four_state(count),
-            (((steps + 5) / 10).into(), 0u8.into())
-        );
-    }
-
-    fn builder(four_state: bool, steps: usize) -> SimulatorBuilder<'static, Simulator> {
-        Simulator::from_frontend(design(four_state, steps))
-            .four_state(four_state)
-            .emit_triggers()
-    }
-
-    fn check_all_backends(four_state: bool, steps: usize) {
-        let timed = || Simulation::from_frontend(design(four_state, steps)).four_state(four_state);
-        check(timed().build_interpreter().unwrap(), steps as u64);
-        #[cfg(feature = "cranelift")]
-        check(timed().build_cranelift().unwrap(), steps as u64);
-        #[cfg(feature = "wasm-runtime")]
-        check(timed().build_wasm().unwrap(), steps as u64);
-        #[cfg(feature = "cranelift")]
-        check(
-            timed()
-                .threads(4)
-                .parallel_partition(crate::ParallelPartition::Always)
-                .build_cranelift()
-                .unwrap(),
-            steps as u64,
-        );
-        check(timed().build_tiered().unwrap(), steps as u64);
-        #[cfg(any(
-            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-        ))]
-        {
-            check(timed().build_native().unwrap(), steps as u64);
-            check(
-                timed()
-                    .threads(4)
-                    .parallel_partition(crate::ParallelPartition::Always)
-                    .build_native()
-                    .unwrap(),
-                steps as u64,
-            );
-            // A native image starts an untimed Simulator, which runs no
-            // process.
-            let error = builder(four_state, steps)
-                .compile_native()
-                .map(|_| ())
-                .unwrap_err();
-            assert!(matches!(
-                error.kind(),
-                crate::SimulatorErrorKind::ProcessRequiresSimulation(_)
-            ));
-        }
-    }
-
-    #[cfg(feature = "systemverilog")]
-    #[test]
-    fn timed_tiered_promotion_preserves_suspended_processes_and_nba() {
-        let source = r#"
-            `timescale 1fs/1fs
-            module Top(output logic [7:0] count);
-                logic clk = 0;
-                initial count = 0;
-                always #5 clk = ~clk;
-                always @(posedge clk) count <= count + 1;
-                initial begin #36; $finish; end
-            endmodule
-        "#;
-        for four_state in [false, true] {
-            for threads in [1, 4] {
-                let mut sim = Simulation::from_sv_sources(
-                    vec![(source, std::path::Path::new("tiered.sv"))],
-                    "Top",
-                )
-                .four_state(four_state)
-                .threads(threads)
-                .parallel_partition(crate::ParallelPartition::Always)
-                .tier_promotion(crate::TierPromotion::AfterSteps(1000))
-                .build_tiered()
-                .unwrap();
-                let count = sim.signal("count");
-                sim.run_until(10).unwrap();
-                assert!(!sim.simulator.is_compiled());
-                assert_eq!(sim.get(count), 1u8.into());
-                // Poll at the same simulation time while future delayed processes
-                // remain suspended. The tier transition must retain their resume
-                // positions and subsequent Active/NBA ordering (IEEE 1800-2023 4.5).
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-                while !sim.simulator.is_compiled() {
-                    sim.eval_comb().unwrap();
-                    assert!(
-                        sim.simulator.promotion_error().is_none(),
-                        "{:?}",
-                        sim.simulator.promotion_error()
-                    );
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "tiered compilation timed out"
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                assert_eq!(sim.time(), 10);
-                assert_eq!(sim.get_four_state(count), (1u8.into(), 0u8.into()));
-                sim.run_until(40).unwrap();
-                assert!(sim.is_finished());
-                assert_eq!(sim.get_four_state(count), (4u8.into(), 0u8.into()));
-                assert!(sim.simulator.tiered_execution_stats().compiled_evaluations > 0);
-            }
-        }
-    }
-
-    #[test]
-    fn processes_run_on_every_backend() {
-        check_all_backends(false, 37);
-    }
-
-    #[test]
-    fn four_state_processes_run_on_every_backend() {
-        check_all_backends(true, 37);
-    }
-
-    #[test]
-    fn long_processes_dispatch_through_two_switch_levels() {
-        check_all_backends(false, 300);
-    }
-    #[test]
-    fn odd_clock_phase_survives_checkpoint_across_backends() {
-        fn check<B: crate::SimBackend>(mut backend: crate::Simulator<B>) {
-            // Use a known low initial clock in both state representations.
-            let clock = backend.signal("clk");
-            let count = backend.signal("count");
-            backend
-                .modify(|io| {
-                    io.set(clock, 0u8);
-                    io.set(count, 0u8);
-                })
-                .unwrap();
-            let mut sim = Simulation::new(backend);
-            sim.add_clock("clk", 3, 5);
-            sim.run_until(11).unwrap();
-            assert_eq!(sim.get(count), 3u8.into());
-            assert_eq!(sim.get(clock), 1u8.into());
-            assert_eq!(sim.next_event_time(), Some(13));
-            let saved = sim.checkpoint().unwrap();
-            sim.run_until(12).unwrap();
-            assert_eq!(sim.get(clock), 1u8.into());
-            sim.run_until(13).unwrap();
-            assert_eq!(sim.get(clock), 0u8.into());
-            sim.run_until(14).unwrap();
-            assert_eq!(sim.get(count), 4u8.into());
-            sim.restore(&saved).unwrap();
-            assert_eq!(sim.time(), 11);
-            assert_eq!(sim.get(count), 3u8.into());
-            assert_eq!(sim.get(clock), 1u8.into());
-            assert_eq!(sim.next_event_time(), Some(13));
-            sim.run_until(12).unwrap();
-            assert_eq!(sim.get(clock), 1u8.into());
-            sim.run_until(13).unwrap();
-            assert_eq!(sim.get(clock), 0u8.into());
-            sim.run_until(14).unwrap();
-            assert_eq!(sim.get(count), 4u8.into());
-        }
-        let code = "module Top (clk: input clock, count: output logic<8>) { always_ff (clk) { count += 1; } }";
-        for four_state in [false, true] {
-            let build = || {
-                crate::Simulator::builder(code, "Top")
-                    .four_state(four_state)
-                    .emit_triggers()
-            };
-            check(build().build_interpreter().unwrap());
-            #[cfg(feature = "cranelift")]
-            check(build().build_cranelift().unwrap());
-            #[cfg(feature = "wasm-runtime")]
-            check(build().build_wasm().unwrap());
-            check(build().build_tiered().unwrap());
-            #[cfg(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            ))]
-            check(build().build_native().unwrap());
-        }
-    }
-    /// A clock taken from one bit of a register is edge-sensed on that bit on
-    /// every backend, not on the register as a whole. In four-state mode the
-    /// WebAssembly backend leaves the X-initialized bits above the one-bit
-    /// clock set, which the scheduler must not read as a high level.
-    #[test]
-    fn register_bit_clocks_follow_the_selected_bit_on_every_backend() {
-        fn check<B: crate::SimBackend>(backend: crate::Simulator<B>, step: u64, bit: u64) {
-            let mut sim = Simulation::new(backend);
-            let a = sim.signal("cnt1");
-            let b = sim.signal("cnt2");
-            sim.schedule("rst", 0, 0).unwrap();
-            sim.schedule("clk", 0, 0).unwrap();
-            sim.step().unwrap();
-            sim.schedule("rst", 5, 1).unwrap();
-            sim.step().unwrap();
-            let mut count = 0u64;
-            for edge in 1..=12u64 {
-                sim.schedule("clk", edge * 20 - 10, 1).unwrap();
-                sim.step().unwrap();
-                let (before, after) = (((edge - 1) * step) >> bit, (edge * step) >> bit);
-                count += u64::from(before & 1 == 0 && after & 1 == 1);
-                assert_eq!(sim.get(a), ((edge * step) & 0xff).into());
-                assert_eq!(sim.get(b), count.into(), "a[{bit}] after edge {edge}");
-                sim.schedule("clk", edge * 20, 0).unwrap();
-                sim.step().unwrap();
-            }
-        }
-        for (step, bit) in [(1, 0), (2, 0), (1, 2)] {
-            let code = format!(
-                "module Top (clk: input '_ clock, rst: input '_ reset_async_low,
-                             cnt1: output logic<8>, cnt2: output logic<8>) {{
-                    var a: logic<8>;
-                    var b: logic<8>;
-                    always_ff (clk, rst) {{ if_reset {{ a = 0; }} else {{ a = a + 8'd{step}; }} }}
-                    let divided: '_ clock = a[{bit}];
-                    always_ff (divided, rst) {{ if_reset {{ b = 0; }} else {{ b = b + 8'd1; }} }}
-                    assign cnt1 = a;
-                    assign cnt2 = b;
-                }}"
-            );
-            for four_state in [false, true] {
-                let build = || {
-                    crate::Simulator::builder(&code, "Top")
-                        .four_state(four_state)
-                        .emit_triggers()
-                };
-                check(build().build_interpreter().unwrap(), step, bit);
-                #[cfg(feature = "cranelift")]
-                check(build().build_cranelift().unwrap(), step, bit);
-                #[cfg(feature = "wasm-runtime")]
-                check(build().build_wasm().unwrap(), step, bit);
-                check(build().build_tiered().unwrap(), step, bit);
-                #[cfg(any(
-                    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-                ))]
-                check(build().build_native().unwrap(), step, bit);
-            }
-        }
-    }
-
-    /// Clocks computed from `clk` share its edge: `clk & en` is gated by the
-    /// enable from before the edge (here a register of `clk`'s own domain)
-    /// and its domain reads the state from before `clk`'s domain commits; an
-    /// edge raising `en` raises the gate after the commit, a further edge
-    /// that reads the committed state. `~clk` rises when `clk` falls. Timed
-    /// steps and event-based ticks, one clock period each, agree on every
-    /// backend, in both state modes; the four-state ticks judge the gate by
-    /// settling the design.
-    #[test]
-    fn gated_clocks_share_their_source_edge_on_every_backend() {
-        const CODE: &str = "module Top (clk: input '_ clock, rst: input '_ reset_async_low,
-                en_in: input logic, cnt1: output logic<8>, sampled: output logic<8>,
-                fired: output logic<8>, inverted_sampled: output logic<8>) {
-            var a: logic<8>;
-            var en: logic;
-            var b: logic<8>;
-            var c: logic<8>;
-            var d: logic<8>;
-            always_ff (clk, rst) {
-                if_reset { a = 0; en = 1; } else { a = a + 8'd1; en = en_in; }
-            }
-            let gated: '_ clock = clk & en;
-            always_ff (gated, rst) {
-                if_reset { b = 0; c = 0; } else { b = a; c = c + 8'd1; }
-            }
-            let inverted: '_ clock = ~clk;
-            always_ff (inverted, rst) { if_reset { d = 0; } else { d = a; } }
-            assign cnt1 = a;
-            assign sampled = b;
-            assign fired = c;
-            assign inverted_sampled = d;
-        }";
-        const ENABLES: [u8; 8] = [1, 1, 0, 0, 1, 1, 0, 1];
-        fn expected() -> Vec<[u64; 4]> {
-            let (mut gate, mut sampled, mut fired) = (1, 0, 0);
-            ENABLES
-                .iter()
-                .zip(1u64..)
-                .map(|(&enable, edge)| {
-                    if gate == 1 {
-                        // The edge passes the open gate before any commit.
-                        sampled = edge - 1;
-                        fired += 1;
-                    } else if enable == 1 {
-                        // The commit raises `en` while `clk` is high.
-                        sampled = edge;
-                        fired += 1;
-                    }
-                    gate = enable;
-                    [edge, sampled, fired, edge]
-                })
-                .collect()
-        }
-        fn observe<B: crate::SimBackend>(sim: &mut crate::Simulator<B>) -> [u64; 4] {
-            ["cnt1", "sampled", "fired", "inverted_sampled"].map(|name| {
-                let signal = sim.signal(name);
-                sim.get(signal).try_into().unwrap()
-            })
-        }
-        fn timed<B: crate::SimBackend>(backend: crate::Simulator<B>) -> Vec<[u64; 4]> {
-            let mut sim = Simulation::new(backend);
-            let en_in = sim.signal("en_in");
-            // Assert the reset with an edge, then release it.
-            for (port, time, value) in [("rst", 0, 1), ("clk", 0, 0), ("rst", 2, 0), ("rst", 5, 1)]
-            {
-                sim.schedule(port, time, value).unwrap();
-                sim.step().unwrap();
-            }
-            ENABLES
-                .iter()
-                .zip(1u64..)
-                .map(|(&enable, edge)| {
-                    sim.modify(|io| io.set(en_in, enable)).unwrap();
-                    sim.schedule("clk", edge * 20 - 10, 1).unwrap();
-                    sim.step().unwrap();
-                    sim.schedule("clk", edge * 20, 0).unwrap();
-                    sim.step().unwrap();
-                    observe(&mut sim.simulator)
-                })
-                .collect()
-        }
-        fn ticked<B: crate::SimBackend>(mut sim: crate::Simulator<B>) -> Vec<[u64; 4]> {
-            let clk = sim.event("clk");
-            let (rst, en_in) = (sim.signal("rst"), sim.signal("en_in"));
-            sim.modify(|io| io.set(rst, 0u8)).unwrap();
-            sim.tick(clk).unwrap();
-            sim.modify(|io| io.set(rst, 1u8)).unwrap();
-            ENABLES
-                .iter()
-                .map(|&enable| {
-                    sim.modify(|io| io.set(en_in, enable)).unwrap();
-                    sim.tick(clk).unwrap();
-                    observe(&mut sim)
-                })
-                .collect()
-        }
-        let want = expected();
-        for four_state in [false, true] {
-            let build = || {
-                crate::Simulator::builder(CODE, "Top")
-                    .four_state(four_state)
-                    .emit_triggers()
-            };
-            let context = |mode: &str| format!("{mode}, four_state={four_state}");
-            assert_eq!(
-                timed(build().build_interpreter().unwrap()),
-                want,
-                "{}",
-                context("interp timed")
-            );
-            assert_eq!(
-                ticked(build().build_interpreter().unwrap()),
-                want,
-                "{}",
-                context("interp tick")
-            );
-            #[cfg(feature = "cranelift")]
-            assert_eq!(
-                timed(build().build_cranelift().unwrap()),
-                want,
-                "{}",
-                context("cranelift timed")
-            );
-            #[cfg(feature = "cranelift")]
-            assert_eq!(
-                ticked(build().build_cranelift().unwrap()),
-                want,
-                "{}",
-                context("cranelift tick")
-            );
-            #[cfg(feature = "wasm-runtime")]
-            assert_eq!(
-                timed(build().build_wasm().unwrap()),
-                want,
-                "{}",
-                context("wasm timed")
-            );
-            #[cfg(feature = "wasm-runtime")]
-            assert_eq!(
-                ticked(build().build_wasm().unwrap()),
-                want,
-                "{}",
-                context("wasm tick")
-            );
-            assert_eq!(
-                timed(build().build_tiered().unwrap()),
-                want,
-                "{}",
-                context("tiered timed")
-            );
-            assert_eq!(
-                ticked(build().build_tiered().unwrap()),
-                want,
-                "{}",
-                context("tiered tick")
-            );
-            #[cfg(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            ))]
-            {
-                assert_eq!(
-                    timed(build().build_native().unwrap()),
-                    want,
-                    "{}",
-                    context("native timed")
-                );
-                assert_eq!(
-                    ticked(build().build_native().unwrap()),
-                    want,
-                    "{}",
-                    context("native tick")
-                );
-            }
-        }
-    }
-
-    #[cfg(feature = "systemverilog")]
-    const GENERATED_ALIAS_SOURCE: &str = r#"
-module Generator(input logic clk, output logic g);
-    initial g = 0;
-    always_ff @(posedge clk) g <= ~g;
-endmodule
-module Top(input logic cp, cn, output logic [7:0] p, n);
-    logic gp, gn;
-    Generator up(.clk(cp), .g(gp));
-    Generator un(.clk(cn), .g(gn));
-    initial begin p = 0; n = 0; end
-    always_ff @(posedge gp) p <= p + 1;
-    always_ff @(negedge gn) n <= n + 1;
-endmodule
-"#;
-
-    #[cfg(feature = "systemverilog")]
-    #[test]
-    fn generated_alias_edges_keep_their_instances_and_stable_phases() {
-        fn check<B: crate::SimBackend>(mut backend: crate::Simulator<B>) {
-            for (expected, address) in backend
-                .program
-                .design
-                .events
-                .ordered_events
-                .iter()
-                .enumerate()
-            {
-                let event = backend.backend.resolve_event(address);
-                assert_eq!(
-                    celox_runtime::backend::EventHandle::id(&event),
-                    expected,
-                    "event handles must match IDs embedded in trigger instructions"
-                );
-            }
-            let cp = backend.signal("cp");
-            let cn = backend.signal("cn");
-            backend
-                .modify(|io| {
-                    io.set(cp, 0u8);
-                    io.set(cn, 0u8);
-                })
-                .unwrap();
-            let mut sim = Simulation::new(backend);
-            sim.add_clock("cp", 10, 2);
-            sim.add_clock("cn", 10, 7);
-            sim.run_until(27).unwrap();
-            assert_eq!(sim.get(sim.signal("p")), 2u8.into());
-            assert_eq!(sim.get(sim.signal("n")), 1u8.into());
-        }
-        let source = GENERATED_ALIAS_SOURCE;
-        for four_state in [false, true] {
-            let build = || {
-                crate::Simulator::from_sv_sources(
-                    vec![(source, std::path::Path::new("generated_alias.sv"))],
-                    "Top",
-                )
-                .four_state(four_state)
-                .emit_triggers()
-            };
-            check(build().build_interpreter().unwrap());
-            #[cfg(feature = "cranelift")]
-            check(build().build_cranelift().unwrap());
-            #[cfg(feature = "wasm-runtime")]
-            check(build().build_wasm().unwrap());
-            check(build().build_tiered().unwrap());
-            #[cfg(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            ))]
-            check(build().build_native().unwrap());
-        }
-    }
-    #[cfg(all(
-        feature = "systemverilog",
-        any(
-            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-        )
-    ))]
-    #[test]
-    fn timed_alias_edges_and_checkpoint_survive_tiered_promotion() {
-        for four_state in [false, true] {
-            let mut backend = crate::Simulator::from_sv_sources(
-                vec![(
-                    GENERATED_ALIAS_SOURCE,
-                    std::path::Path::new("promoted_alias.sv"),
-                )],
-                "Top",
-            )
-            .four_state(four_state)
-            .emit_triggers()
-            .tier_promotion(crate::TierPromotion::AfterSteps(32))
-            .build_tiered()
-            .unwrap();
-            let cp = backend.signal("cp");
-            let cn = backend.signal("cn");
-            backend
-                .modify(|io| {
-                    io.set(cp, 0u8);
-                    io.set(cn, 0u8);
-                })
-                .unwrap();
-            let mut sim = Simulation::new(backend);
-            sim.add_clock("cp", 10, 2);
-            sim.add_clock("cn", 10, 7);
-            let saved = sim.checkpoint().unwrap();
-            assert!(!sim.simulator.is_compiled());
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            let mut until = 27u64;
-            loop {
-                sim.run_until(until).unwrap();
-                assert_eq!(
-                    sim.get(sim.signal("p")),
-                    (((until - 2) / 20 + 1) & 255).into()
-                );
-                assert_eq!(
-                    sim.get(sim.signal("n")),
-                    (((until - 17) / 20 + 1) & 255).into()
-                );
-                if sim.simulator.is_compiled() {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "timed tiered backend did not promote"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(5));
-                until += 10;
-            }
-            sim.restore(&saved).unwrap();
-            assert!(sim.simulator.is_compiled());
-            sim.run_until(27).unwrap();
-            assert_eq!(sim.get(sim.signal("p")), 2u8.into());
-            assert_eq!(sim.get(sim.signal("n")), 1u8.into());
-        }
-    }
-}
-
-#[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+#[cfg(all(test, feature = "host-runtime"))]
 mod process_control_tests;
 #[cfg(all(test, feature = "host-runtime"))]
 mod runtime_core_tests;
@@ -2354,479 +1727,63 @@ mod runtime_core_tests;
 /// posedge leaves 0 or reaches 1, a negedge leaves 1 or reaches 0, and a
 /// change between x and z is neither.
 #[cfg(all(test, feature = "host-runtime"))]
-mod four_state_edge_tests {
-    use celox_frontend_sdk::{
-        BinaryOp, Constant, Edge, EventEdge, EventTerm, ExprId, FrontendArtifact, ModuleBuilder,
-        Statement, ValueType,
-    };
-    use num_bigint::BigUint;
-
-    use super::Simulation;
-    use crate::SimBackend;
-
-    /// The levels of a clock walking all twelve changes between 0, 1, x and
-    /// z (an Euler circuit from 0), as (value, mask), with the posedges and
-    /// negedges counted after each change.
-    const WALK: [((u8, u8), u8, u8); 12] = [
-        ((1, 0), 1, 0),
-        ((0, 0), 1, 1),
-        ((1, 1), 2, 1),
-        ((0, 0), 2, 2),
-        ((0, 1), 3, 2),
-        ((1, 0), 4, 2),
-        ((1, 1), 4, 3),
-        ((1, 0), 5, 3),
-        ((0, 1), 5, 4),
-        ((1, 1), 5, 4),
-        ((0, 1), 5, 4),
-        ((0, 0), 5, 5),
-    ];
-
-    /// Build `$check` against a timed simulation of each backend.
-    macro_rules! on_every_backend {
-        ($builder:expr, $check:ident) => {{
-            let builder = || $builder.four_state(true).emit_triggers();
-            $check(builder().build_interpreter().unwrap());
-            #[cfg(feature = "cranelift")]
-            $check(builder().build_cranelift().unwrap());
-            #[cfg(feature = "wasm-runtime")]
-            $check(builder().build_wasm().unwrap());
-            $check(builder().build_tiered().unwrap());
-            #[cfg(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            ))]
-            $check(builder().build_native().unwrap());
-        }};
-    }
-
-    fn set<B: SimBackend>(sim: &mut Simulation<B>, name: &str, (value, mask): (u8, u8)) {
-        let signal = sim.signal(name);
-        sim.modify(|io| io.set_four_state(signal, value.into(), mask.into()))
-            .unwrap();
-    }
-
-    fn get<B: SimBackend>(sim: &mut Simulation<B>, name: &str) -> BigUint {
-        let signal = sim.signal(name);
-        sim.get(signal)
-    }
-
-    /// Two processes drive `cp` and `cn` through [`WALK`], one change per
-    /// time unit; registers count the posedges of `cp` and the negedges of
-    /// `cn`.
-    fn process_design() -> FrontendArtifact {
-        let bit = ValueType::new(1, false, true).unwrap();
-        let word = ValueType::new(8, false, true).unwrap();
-        let mut module = ModuleBuilder::new("Top").unwrap();
-        let cp = module.internal("cp", bit).unwrap();
-        let cn = module.internal("cn", bit).unwrap();
-        let pos = module.output("pos", word).unwrap();
-        let neg = module.output("neg", word).unwrap();
-        for (signal, width) in [(cp, 1), (cn, 1), (pos, 8), (neg, 8)] {
-            module
-                .set_initial(signal, Constant::two_state(0u8, width).unwrap())
-                .unwrap();
-        }
-        let one = module.constant(Constant::two_state(1u8, 8).unwrap());
-        for (counter, clock, edge) in [(pos, cp, Edge::Posedge), (neg, cn, Edge::Negedge)] {
-            let read = module.read(counter).unwrap();
-            let next = module.binary(BinaryOp::Add, read, one, word).unwrap();
-            let target = module.whole(counter).unwrap();
-            module
-                .register(target, next, clock, edge, None, None)
-                .unwrap();
-        }
-        let delay = module.constant(Constant::two_state(1u8, 8).unwrap());
-        for clock in [cp, cn] {
-            let target = module.whole(clock).unwrap();
-            let mut body = Vec::new();
-            for ((value, mask), _, _) in WALK {
-                let level: ExprId = module.constant(Constant::four_state(value, mask, 1).unwrap());
-                body.push(Statement::Delay { amount: delay });
-                body.push(Statement::Assign {
-                    target,
-                    value: level,
-                });
-            }
-            module.process(body).unwrap();
-        }
-        module.finish()
-    }
-
-    /// A process drives `d` through [`WALK`] and pulses `clk` after each
-    /// change; registers `c` and `c2` follow `d` on the rising edges of
-    /// `clk`. Event-control waits `@(posedge c)` and `@(negedge c)` and
-    /// registers on the posedges of `c` and the negedges of `c2` count the
-    /// edges of the register clock.
-    fn wait_design() -> FrontendArtifact {
-        let bit = ValueType::new(1, false, true).unwrap();
-        let word = ValueType::new(8, false, true).unwrap();
-        let mut module = ModuleBuilder::new("Top").unwrap();
-        let clk = module.internal("clk", bit).unwrap();
-        let d = module.internal("d", bit).unwrap();
-        let c = module.internal("c", bit).unwrap();
-        let c2 = module.internal("c2", bit).unwrap();
-        let counters = ["wait_pos", "wait_neg", "ff_pos", "ff_neg"]
-            .map(|name| module.output(name, word).unwrap());
-        for signal in [clk, d, c, c2] {
-            module
-                .set_initial(signal, Constant::two_state(0u8, 1).unwrap())
-                .unwrap();
-        }
-        for counter in counters {
-            module
-                .set_initial(counter, Constant::two_state(0u8, 8).unwrap())
-                .unwrap();
-        }
-        let d_expr = module.read(d).unwrap();
-        for register in [c, c2] {
-            let target = module.whole(register).unwrap();
-            module
-                .register(target, d_expr, clk, Edge::Posedge, None, None)
-                .unwrap();
-        }
-        let one = module.constant(Constant::two_state(1u8, 8).unwrap());
-        let increment = |module: &mut ModuleBuilder, counter| {
-            let read = module.read(counter).unwrap();
-            let next = module.binary(BinaryOp::Add, read, one, word).unwrap();
-            (module.whole(counter).unwrap(), next)
-        };
-        let [wait_pos, wait_neg, ff_pos, ff_neg] = counters;
-        for (counter, clock, edge) in [(ff_pos, c, Edge::Posedge), (ff_neg, c2, Edge::Negedge)] {
-            let (target, next) = increment(&mut module, counter);
-            module
-                .register(target, next, clock, edge, None, None)
-                .unwrap();
-        }
-        for (counter, edge) in [
-            (wait_pos, EventEdge::Posedge),
-            (wait_neg, EventEdge::Negedge),
-        ] {
-            let (target, value) = increment(&mut module, counter);
-            module
-                .process(vec![Statement::Forever {
-                    body: vec![
-                        Statement::WaitEvent {
-                            terms: vec![EventTerm { signal: c, edge }],
-                        },
-                        Statement::Assign { target, value },
-                    ],
-                }])
-                .unwrap();
-        }
-        let delay = module.constant(Constant::two_state(1u8, 8).unwrap());
-        let high = module.constant(Constant::two_state(1u8, 1).unwrap());
-        let low = module.constant(Constant::two_state(0u8, 1).unwrap());
-        let d_target = module.whole(d).unwrap();
-        let clk_target = module.whole(clk).unwrap();
-        let mut body = Vec::new();
-        for ((value, mask), _, _) in WALK {
-            let level = module.constant(Constant::four_state(value, mask, 1).unwrap());
-            body.push(Statement::Assign {
-                target: d_target,
-                value: level,
-            });
-            body.push(Statement::Delay { amount: delay });
-            body.push(Statement::Assign {
-                target: clk_target,
-                value: high,
-            });
-            body.push(Statement::Delay { amount: delay });
-            body.push(Statement::Assign {
-                target: clk_target,
-                value: low,
-            });
-        }
-        module.process(body).unwrap();
-        module.finish()
-    }
-
-    /// Event-control waits and flip-flop domains see the same Table 9-2
-    /// edges of a register clock.
-    #[test]
-    fn waits_on_register_clocks_follow_table_9_2() {
-        fn check<B: SimBackend>(mut sim: Simulation<B>) {
-            for (step, (_, pos, neg)) in (0u64..).zip(WALK) {
-                let time = 2 * step + 1;
-                sim.run_until(time).unwrap();
-                let counts =
-                    ["wait_pos", "wait_neg", "ff_pos", "ff_neg"].map(|name| get(&mut sim, name));
-                assert_eq!(
-                    counts,
-                    [pos, neg, pos, neg].map(BigUint::from),
-                    "wait_pos, wait_neg, ff_pos, ff_neg at {time}"
-                );
-            }
-        }
-        on_every_backend!(Simulation::from_frontend(wait_design()), check);
-    }
-
-    #[test]
-    fn process_driven_clocks_follow_table_9_2() {
-        fn check<B: SimBackend>(mut sim: Simulation<B>) {
-            for (time, (_, pos, neg)) in (1..).zip(WALK) {
-                sim.run_until(time).unwrap();
-                assert_eq!(get(&mut sim, "pos"), pos.into(), "posedges at {time}");
-                assert_eq!(get(&mut sim, "neg"), neg.into(), "negedges at {time}");
-            }
-        }
-        on_every_backend!(Simulation::from_frontend(process_design()), check);
-    }
-
-    const REGISTER_CLOCK: &str = r#"
-module Top (
-    clk: input '_ clock,
-    rst: input '_ reset_async_low,
-    d  : input logic,
-    pos: output logic<8>,
-    neg: output logic<8>,
-) {
-    var c: logic;
-    always_ff (clk) {
-        c = d;
-    }
-    let cp: '_ clock         = c;
-    let cn: '_ clock_negedge = c;
-    var p : logic<8>;
-    var n : logic<8>;
-    always_ff (cp, rst) {
-        if_reset {
-            p = 0;
-        } else {
-            p = p + 8'd1;
-        }
-    }
-    always_ff (cn, rst) {
-        if_reset {
-            n = 0;
-        } else {
-            n = n + 8'd1;
-        }
-    }
-    assign pos = p;
-    assign neg = n;
-}
-"#;
-
-    /// A clock that is a register follows `d` through [`WALK`], one change
-    /// per rising edge of `clk`. `clk` starts at x, so its first rise, x to
-    /// 1, is a posedge too.
-    #[test]
-    fn register_clocks_follow_table_9_2() {
-        fn check<B: SimBackend>(mut sim: Simulation<B>) {
-            // x -> 0 asserts the reset.
-            sim.schedule("rst", 0, 0).unwrap();
-            sim.schedule("rst", 1, 1).unwrap();
-            set(&mut sim, "d", (0, 0));
-            sim.add_clock("clk", 10, 5);
-            // The register leaves x for 0: a negedge.
-            sim.run_until(5).unwrap();
-            assert_eq!(get(&mut sim, "pos"), 0u8.into());
-            assert_eq!(get(&mut sim, "neg"), 1u8.into());
-            for (time, (level, pos, neg)) in (15..).step_by(10).zip(WALK) {
-                set(&mut sim, "d", level);
-                sim.run_until(time).unwrap();
-                assert_eq!(get(&mut sim, "pos"), pos.into(), "posedges at {time}");
-                assert_eq!(get(&mut sim, "neg"), (neg + 1).into(), "negedges at {time}");
-            }
-        }
-        on_every_backend!(Simulation::builder(REGISTER_CLOCK, "Top"), check);
-    }
-
-    /// A clock computed combinationally from a register, `e ? a & b : 'z`,
-    /// with the register written whole so the clock changes once per edge.
-    #[test]
-    fn combinational_clocks_follow_table_9_2() {
-        const SOURCE: &str = r#"
-module Top (
-    clk: input '_ clock,
-    rst: input '_ reset_async_low,
-    d  : input logic<3>,
-    pos: output logic<8>,
-    neg: output logic<8>,
-) {
-    var r: logic<3>;
-    always_ff (clk) {
-        r = d;
-    }
-    let cp: '_ clock         = if r[2] ? r[1] & r[0] : 1'bz;
-    let cn: '_ clock_negedge = if r[2] ? r[1] & r[0] : 1'bz;
-    var p : logic<8>;
-    var n : logic<8>;
-    always_ff (cp, rst) {
-        if_reset {
-            p = 0;
-        } else {
-            p = p + 8'd1;
-        }
-    }
-    always_ff (cn, rst) {
-        if_reset {
-            n = 0;
-        } else {
-            n = n + 8'd1;
-        }
-    }
-    assign pos = p;
-    assign neg = n;
-}
-"#;
-        /// `{e, a, b}` for each level of [`WALK`], as (value, mask).
-        const INPUTS: [(u8, u8); 12] = [
-            (0b111, 0),
-            (0b100, 0),
-            (0b110, 0b001), // 1 & z
-            (0b110, 0),
-            (0b011, 0), // e = 0
-            (0b111, 0),
-            (0b111, 0b010), // 1 & x
-            (0b111, 0),
-            (0b000, 0),     // e = 0
-            (0b111, 0b100), // e = x
-            (0b001, 0b010), // e = 0
-            (0b101, 0),
-        ];
-        fn check<B: SimBackend>(mut sim: Simulation<B>) {
-            sim.schedule("rst", 0, 0).unwrap();
-            sim.schedule("rst", 1, 1).unwrap();
-            set(&mut sim, "d", (0b101, 0));
-            sim.add_clock("clk", 10, 5);
-            sim.run_until(5).unwrap();
-            assert_eq!(get(&mut sim, "pos"), 0u8.into());
-            assert_eq!(get(&mut sim, "neg"), 1u8.into());
-            for (time, (input, (_, pos, neg))) in
-                (15..).step_by(10).zip(INPUTS.into_iter().zip(WALK))
-            {
-                set(&mut sim, "d", input);
-                sim.run_until(time).unwrap();
-                assert_eq!(get(&mut sim, "pos"), pos.into(), "posedges at {time}");
-                assert_eq!(get(&mut sim, "neg"), (neg + 1).into(), "negedges at {time}");
-            }
-        }
-        on_every_backend!(Simulation::builder(SOURCE, "Top"), check);
-    }
-
-    /// Asynchronous resets that are registers. An edge to x or z runs the
-    /// register's clocked branch (+1), an edge to the active level clears
-    /// it, and every clear follows an increment.
-    #[test]
-    fn register_async_resets_follow_table_9_2() {
-        const SOURCE: &str = r#"
-module Top (
-    clk   : input '_ clock,
-    k     : input '_ clock,
-    clr   : input logic,
-    dh    : input logic,
-    dl    : input logic,
-    hits_h: output logic<8>,
-    hits_l: output logic<8>,
-) {
-    var qh: logic;
-    var ql: logic;
-    always_ff (clk) {
-        qh = dh;
-        ql = dl;
-    }
-    let rh: '_ reset_async_high = qh;
-    let rl: '_ reset_async_low  = ql;
-    var h : logic<8>;
-    var l : logic<8>;
-    always_ff (k, rh) {
-        if_reset {
-            h = 0;
-        } else if clr {
-            h = 8'h80;
-        } else {
-            h = h + 8'h01;
-        }
-    }
-    always_ff (k, rl) {
-        if_reset {
-            l = 0;
-        } else if clr {
-            l = 8'h80;
-        } else {
-            l = l + 8'h01;
-        }
-    }
-    assign hits_h = h;
-    assign hits_l = l;
-}
-"#;
-        /// `rh` levels 1, 0, x, 1, x, 0, z, 1, z, x, z, 0 (`rl` has 0 and 1
-        /// swapped), and the counter after each change.
-        const STEPS: [((u8, u8), u8); 12] = [
-            ((1, 0), 0),
-            ((0, 0), 0),
-            ((1, 1), 1),
-            ((1, 0), 0),
-            ((1, 1), 0),
-            ((0, 0), 0),
-            ((0, 1), 1),
-            ((1, 0), 0),
-            ((0, 1), 0),
-            ((1, 1), 0),
-            ((0, 1), 0),
-            ((0, 0), 0),
-        ];
-        fn check<B: SimBackend>(mut sim: Simulation<B>) {
-            set(&mut sim, "dh", (0, 0));
-            set(&mut sim, "dl", (1, 0));
-            set(&mut sim, "clr", (1, 0));
-            sim.schedule("k", 0, 0).unwrap();
-            sim.add_clock("clk", 10, 5);
-            // x -> 0 is no posedge of `rh`, x -> 1 no negedge of `rl`.
-            sim.schedule("k", 7, 1).unwrap();
-            sim.run_until(7).unwrap();
-            set(&mut sim, "clr", (0, 0));
-            assert_eq!(get(&mut sim, "hits_h"), 0x80u8.into());
-            assert_eq!(get(&mut sim, "hits_l"), 0x80u8.into());
-            for (time, ((value, mask), hits)) in (15..).step_by(10).zip(STEPS) {
-                let low = if mask == 0 { value ^ 1 } else { value };
-                set(&mut sim, "dh", (value, mask));
-                set(&mut sim, "dl", (low, mask));
-                sim.run_until(time).unwrap();
-                assert_eq!(get(&mut sim, "hits_h"), hits.into(), "rh at {time}");
-                assert_eq!(get(&mut sim, "hits_l"), hits.into(), "rl at {time}");
-            }
-        }
-        on_every_backend!(Simulation::builder(SOURCE, "Top"), check);
-    }
-
-    /// The edge baseline of a clock left at x survives a checkpoint: the
-    /// following rise, x to 1, is a posedge.
-    #[test]
-    fn unknown_edge_baselines_survive_checkpoints() {
-        fn check<B: SimBackend>(mut sim: Simulation<B>) {
-            sim.schedule("rst", 0, 0).unwrap();
-            sim.schedule("rst", 1, 1).unwrap();
-            set(&mut sim, "d", (1, 1));
-            sim.add_clock("clk", 10, 5);
-            // The register leaves x for x: no edge.
-            sim.run_until(5).unwrap();
-            assert_eq!(get(&mut sim, "pos"), 0u8.into());
-            let saved = sim.checkpoint().unwrap();
-            let state = sim.save_state().unwrap();
-            set(&mut sim, "d", (1, 0));
-            sim.run_until(15).unwrap();
-            assert_eq!(get(&mut sim, "pos"), 1u8.into());
-            sim.restore(&saved).unwrap();
-            set(&mut sim, "d", (1, 0));
-            sim.run_until(15).unwrap();
-            assert_eq!(get(&mut sim, "pos"), 1u8.into(), "after a restore");
-            sim.load_state(&state).unwrap();
-            set(&mut sim, "d", (1, 0));
-            sim.run_until(15).unwrap();
-            assert_eq!(get(&mut sim, "pos"), 1u8.into(), "after a state load");
-        }
-        on_every_backend!(Simulation::builder(REGISTER_CLOCK, "Top"), check);
-    }
-}
+mod four_state_edge_tests;
 
 #[cfg(hotspot_jit)]
 impl Simulation<crate::backend::TieredBackend> {
     /// Counts for incremental JIT execution, or `None` for whole-image tiering.
     pub fn hotspot_stats(&self) -> Option<crate::backend::HotspotStats> {
         self.simulator.hotspot_stats()
+    }
+}
+
+/// The handle slots of `slots`, which are sorted by offset, whose offsets lie
+/// in `start..end`: a range of them, found by bisection rather than by a scan
+/// of every slot for every value.
+fn slots_within(
+    slots: &[(usize, celox_heap::HandleKind)],
+    start: usize,
+    end: usize,
+) -> &[(usize, celox_heap::HandleKind)] {
+    let first = slots.partition_point(|&(offset, _)| offset < start);
+    let last = slots.partition_point(|&(offset, _)| offset < end);
+    &slots[first..last.max(first)]
+}
+
+#[cfg(test)]
+mod slots_within_tests {
+    use celox_heap::HandleKind;
+
+    #[test]
+    fn slots_within_are_those_a_scan_finds() {
+        // Sorted, gapped and adjacent offsets of both kinds; ranges inside,
+        // across, before, after and between them, and empty ones.
+        let slots: Vec<(usize, HandleKind)> = [0, 8, 16, 40, 48, 49, 100, 108]
+            .into_iter()
+            .enumerate()
+            .map(|(index, offset)| {
+                let kind = if index % 3 == 0 {
+                    HandleKind::String
+                } else {
+                    HandleKind::Object
+                };
+                (offset, kind)
+            })
+            .collect();
+        for start in 0..120 {
+            for end in 0..120 {
+                let scanned: Vec<_> = slots
+                    .iter()
+                    .filter(|&&(offset, _)| offset >= start && offset < end)
+                    .copied()
+                    .collect();
+                assert_eq!(
+                    super::slots_within(&slots, start, end),
+                    &scanned[..],
+                    "{start}..{end}"
+                );
+            }
+        }
+        assert!(super::slots_within(&[], 0, 8).is_empty());
     }
 }

@@ -56,12 +56,19 @@ fn lower_methods(
         .ok_or_else(|| unsupported("class randomization receiver"))?;
     let convert_type =
         |session: &mut Session, ty| crate::ast::ir_type(session, &tree.functions, ty, env);
+    // The types the methods declare are bound to their semantic types where
+    // they are made, as a declaration's are.
+    let bound = |session: &mut Session, ty| {
+        semantic_types::bound_builtin(&mut session.types, &tree.functions, ty)
+    };
+    let int = bound(session, int_type());
+    let string = bound(session, string_type());
     let mut result = Vec::new();
-    for method in ["randomize", "srandom", "rand_mode"] {
+    for method in RANDOMIZATION_METHODS {
         if inline.is_some() && method != "randomize" {
             continue;
         }
-        if method == "randomize" && class.check_randomize().is_err() {
+        if method == "randomize" && class.check_randomize(&session.types).is_err() {
             continue;
         }
         let mut builder = BodyBuilder::new(
@@ -72,33 +79,38 @@ fn lower_methods(
             system_functions::Body::Subroutine,
         );
         builder.automatic = true;
+        builder.set_owner(method_name(&class.name, method));
         let first_local = builder.state.locals.len();
         let this = builder.declare(classes::THIS, handle.clone());
-        let (argument, argument_type) = match method {
-            "randomize" => ("$selection", class.selection_type()),
-            "srandom" => ("seed", int_type()),
-            _ => ("on_off", classes::unsigned_type(1)),
+        let mut params = vec![SubroutineParam {
+            name: this.clone(),
+            source_name: classes::THIS.into(),
+            direction: ParamDirection::Input,
+            r#type: convert_type(builder.session, handle.clone()),
+            default: None,
+            leaves: Vec::new(),
+        }];
+        // `get_randstate` has no argument but the object.
+        let argument = match randomization_method_argument(method, || class.selection_type()) {
+            Some((argument, argument_type)) => {
+                let argument_type = bound(builder.session, argument_type);
+                let argument = builder.declare(argument, argument_type.clone());
+                params.push(SubroutineParam {
+                    name: argument.clone(),
+                    source_name: argument.clone(),
+                    direction: ParamDirection::Input,
+                    r#type: convert_type(builder.session, argument_type),
+                    default: None,
+                    leaves: Vec::new(),
+                });
+                argument
+            }
+            None => String::new(),
         };
-        let argument = builder.declare(argument, argument_type.clone());
-        let mut params = vec![
-            SubroutineParam {
-                name: this.clone(),
-                source_name: classes::THIS.into(),
-                direction: ParamDirection::Input,
-                r#type: convert_type(builder.session, handle.clone()),
-                default: None,
-                leaves: Vec::new(),
-            },
-            SubroutineParam {
-                name: argument.clone(),
-                source_name: argument.clone(),
-                direction: ParamDirection::Input,
-                r#type: convert_type(builder.session, argument_type),
-                default: None,
-                leaves: Vec::new(),
-            },
-        ];
         let mut input_values = Vec::new();
+        // The masks of the X and Z bits of the 4-state ones, by their
+        // positions among them (see `Program::unknown_inputs`).
+        let mut input_masks = Vec::new();
         if let Some(inline) = inline.filter(|_| !prepare) {
             for (index, ty) in inline.inputs.iter().enumerate() {
                 let name = builder.declare(&format!("$input{index}"), ty.clone());
@@ -110,14 +122,24 @@ fn lower_methods(
                     default: None,
                     leaves: Vec::new(),
                 });
-                input_values.push(Expr::Ident(name));
+                if ty.kind() == TypeKind::Logic {
+                    let (value, mask) = classes::known_bits(Expr::Ident(name));
+                    input_masks.push((input_values.len(), mask));
+                    input_values.push(value);
+                } else {
+                    input_values.push(Expr::Ident(name));
+                }
             }
         }
         // Faults are consumed after the kernel completes. Return immediately
         // on rejection, before hooks, draws or property/mode updates.
         let mut body = vec![Stmt::If {
             condition: classes::object_call(
-                ObjectOp::Check(if method == "srandom" { 0 } else { class.id }),
+                ObjectOp::Check(if matches!(method, "randomize" | "rand_mode") {
+                    class.id
+                } else {
+                    0
+                }),
                 vec![Expr::Ident(this.clone())],
             ),
             then_body: Vec::new(),
@@ -126,6 +148,26 @@ fn lower_methods(
             )],
         }];
         let return_var = match method {
+            // The state of the object's RNG (IEEE 1800-2023 18.13.4, 18.13.5).
+            "get_randstate" => {
+                let state = builder.declare("get_randstate", string.clone());
+                body.push(Stmt::Assign {
+                    lhs: LValue::Ident(state.clone()),
+                    rhs: classes::object_call(
+                        ObjectOp::GetRandstate,
+                        vec![Expr::Ident(this.clone())],
+                    ),
+                    nonblocking: false,
+                });
+                Some(state)
+            }
+            "set_randstate" => {
+                body.push(Stmt::Eval(classes::object_call(
+                    ObjectOp::SetRandstate,
+                    vec![Expr::Ident(this.clone()), Expr::Ident(argument.clone())],
+                )));
+                None
+            }
             "srandom" => {
                 body.push(Stmt::Eval(classes::object_call(
                     ObjectOp::Seed,
@@ -134,6 +176,18 @@ fn lower_methods(
                 None
             }
             "rand_mode" => {
+                // That of a static rand property is the bit every object
+                // shares (IEEE 1800-2023 18.8).
+                for slot in &class.static_slots {
+                    body.push(Stmt::Assign {
+                        lhs: LValue::Ident(slot.mode.clone()),
+                        rhs: Expr::Unary {
+                            op: UnaryOp::LogicNot,
+                            expr: Box::new(Expr::Ident(argument.clone())),
+                        },
+                        nonblocking: false,
+                    });
+                }
                 for property in &class.properties {
                     let update = Stmt::Eval(classes::object_call(
                         ObjectOp::ModeSet(property.field.offset),
@@ -163,14 +217,14 @@ fn lower_methods(
                 // the objects visited. post_randomize runs on the objects the
                 // solve took, begun right after it, before any hook can
                 // change a handle.
-                let visits = if class.has_rand_objects() {
+                let visits = if class.has_rand_objects(&builder.session.types) {
                     let members =
                         classes::rand_member_classes(tree, builder.session, class, env, &aliases)?;
                     let targets = ["pre_randomize", "post_randomize"]
                         .map(|hook| classes::hook_targets(&members, hook));
                     Some((
-                        builder.declare("$visits", int_type()),
-                        builder.declare("$visit", int_type()),
+                        builder.declare("$visits", int.clone()),
+                        builder.declare("$visit", int.clone()),
                         builder.declare("$visited", handle.clone()),
                         targets,
                     ))
@@ -286,7 +340,7 @@ fn lower_methods(
                         left: Box::new(Expr::Binary {
                             left: Box::new(Expr::Ident(argument.clone())),
                             op: BinaryOp::Shr,
-                            right: Box::new(Expr::Literal((index + 1).to_string())),
+                            right: Box::new(Expr::Literal(class.property_bits[index].to_string())),
                         }),
                         op: BinaryOp::BitAnd,
                         right: Box::new(Expr::Literal("1'b1".into())),
@@ -296,6 +350,23 @@ fn lower_methods(
                             property.field.offset,
                             property.rand || property.randc,
                         ),
+                        vec![Expr::Ident(this.clone()), selected],
+                    )));
+                }
+                // The bits of the static rand properties (see
+                // `classes::Class::property_bits`).
+                for (index, slot) in class.static_slots.iter().enumerate() {
+                    let selected = Expr::Binary {
+                        left: Box::new(Expr::Binary {
+                            left: Box::new(Expr::Ident(argument.clone())),
+                            op: BinaryOp::Shr,
+                            right: Box::new(Expr::Literal(class.slot_bits[index].to_string())),
+                        }),
+                        op: BinaryOp::BitAnd,
+                        right: Box::new(Expr::Literal("1'b1".into())),
+                    };
+                    select.push(Stmt::Eval(classes::object_call(
+                        ObjectOp::ModeSelect(slot.field.offset, true),
                         vec![Expr::Ident(this.clone()), selected],
                     )));
                 }
@@ -311,10 +382,232 @@ fn lower_methods(
                     body.push(Stmt::Return(Some(Expr::Ident(this.clone()))));
                     Some(builder.declare("$prepared", handle.clone()))
                 } else {
-                    if class.solved() || inline.is_some() {
+                    // A static rand property is solved in the object's slot
+                    // for it, seeded from the property and random while the
+                    // bit all objects share says so (IEEE 1800-2023 18.4,
+                    // 18.8); the solution is written back below.
+                    let shadows = static_shadows(class);
+                    for (field, variable, off) in &shadows {
+                        body.push(Stmt::Eval(classes::object_call(
+                            ObjectOp::Store(*field),
+                            vec![Expr::Ident(this.clone()), Expr::Ident(variable.clone())],
+                        )));
+                        // A call with arguments names its random variables
+                        // itself, whatever their modes (18.11).
+                        body.push(Stmt::If {
+                            condition: Expr::Unary {
+                                op: UnaryOp::LogicNot,
+                                expr: Box::new(Expr::Ident(argument.clone())),
+                            },
+                            then_body: vec![Stmt::Eval(classes::object_call(
+                                ObjectOp::ModeSet(field.offset),
+                                vec![
+                                    Expr::Ident(this.clone()),
+                                    Expr::Unary {
+                                        op: UnaryOp::LogicNot,
+                                        expr: Box::new(Expr::Ident(off.clone())),
+                                    },
+                                ],
+                            ))],
+                            else_body: Vec::new(),
+                        });
+                    }
+                    // The static properties the constraints read, then the
+                    // values of the call (see `classes::StaticInput`).
+                    // The masks of the 4-state values follow them.
+                    let solve_inputs = class
+                        .static_inputs
+                        .iter()
+                        .map(|input| Expr::Ident(input.variable.clone()))
+                        .chain(input_values.iter().cloned())
+                        .chain(input_masks.iter().map(|(_, mask)| mask.clone()))
+                        .collect::<Vec<_>>();
+                    if class.solved(&builder.session.types) || inline.is_some() {
                         let mut program = class.constraint_program()?;
+                        let first_value = class.static_inputs.len();
+                        let first_mask = first_value + input_values.len();
+                        program.unknown_inputs = input_masks
+                            .iter()
+                            .enumerate()
+                            .map(|(position, (input, _))| {
+                                (first_value + input, first_mask + position)
+                            })
+                            .collect();
                         if let Some(inline) = inline {
-                            program.constraints.extend(inline.constraints.clone());
+                            // The inline constraints were bound for the class
+                            // of the handle, whose static inputs this class's
+                            // start with; the call's values follow this
+                            // class's (see `classes::static_inputs`).
+                            let first = inline.class.static_inputs.len();
+                            let by = class.static_inputs.len() - first;
+                            // Its static rand properties are the first of
+                            // this class's, whose slots follow the fields
+                            // of the properties.
+                            let slots = program.fields.len() - class.static_slots.len();
+                            program
+                                .constraints
+                                .extend(inline.constraints.iter().cloned().map(
+                                    |mut constraint| {
+                                        shift_inputs(&mut constraint, first, by);
+                                        classes::constraints::resolve_statics(
+                                            &mut constraint,
+                                            slots,
+                                        );
+                                        constraint
+                                    },
+                                ));
+                        }
+                        // A call fails, changing nothing, when the
+                        // constraints have no solution.
+                        let failure = vec![
+                            Stmt::If {
+                                condition: Expr::Ident(argument.clone()),
+                                then_body: vec![Stmt::Eval(classes::object_call(
+                                    ObjectOp::ModePop,
+                                    vec![Expr::Ident(this.clone())],
+                                ))],
+                                else_body: Vec::new(),
+                            },
+                            Stmt::Return(Some(Expr::Literal("32'sd0".into()))),
+                        ];
+                        let check = Expr::Binary {
+                            left: Box::new(Expr::Ident(argument.clone())),
+                            op: BinaryOp::Eq,
+                            right: Box::new(Expr::Literal("1".into())),
+                        };
+                        let mut solve_inputs = solve_inputs;
+                        // The functions the constraints call (IEEE 1800-2023
+                        // 18.5.11): the random variables in their arguments
+                        // are solved first, by the constraints that name only
+                        // them; then each function is called, as the object's
+                        // class calls it, with the values of its arguments,
+                        // and its value is an input of the solve of the rest.
+                        if !class.constraint_calls.is_empty() {
+                            let first = solve_inputs.len();
+                            program.constraints = std::mem::take(&mut program.constraints)
+                                .into_iter()
+                                .map(|constraint| {
+                                    classes::constraints::call_results(constraint, first)
+                                })
+                                .collect();
+                            let solved = builder.declare("$arguments_solved", int_type());
+                            body.push(Stmt::Assign {
+                                lhs: LValue::Ident(solved.clone()),
+                                rhs: classes::object_call(
+                                    ObjectOp::SolveArguments(program.clone()),
+                                    [
+                                        vec![Expr::Ident(this.clone()), check.clone()],
+                                        solve_inputs.clone(),
+                                    ]
+                                    .concat(),
+                                ),
+                                nonblocking: false,
+                            });
+                            body.push(Stmt::If {
+                                condition: Expr::Ident(solved),
+                                then_body: Vec::new(),
+                                else_body: failure.clone(),
+                            });
+                            let mut argument_index = 0u32;
+                            // A 4-state value passes its known bits, and
+                            // after the values, the mask of its X and Z
+                            // bits (see `Program::unknown_inputs`).
+                            let mut result_masks = Vec::new();
+                            for (index, call) in class.constraint_calls.iter().enumerate() {
+                                // A block a derived class overrides makes no
+                                // call; its value is never read.
+                                if !call.live {
+                                    solve_inputs.push(Expr::Literal("64'd0".into()));
+                                    continue;
+                                }
+                                // A virtual method runs the override of
+                                // the object's class, and another the
+                                // method the constraint's class sees (8.20).
+                                let owner = if call.is_virtual {
+                                    &class
+                                        .method(&call.method)
+                                        .ok_or_else(|| {
+                                            unsupported(format!(
+                                                "function `{}` of a constraint",
+                                                call.method
+                                            ))
+                                        })?
+                                        .owner
+                                } else {
+                                    &call.owner
+                                };
+                                let mut args = vec![Some(Expr::Ident(this.clone()))];
+                                // An omitted actual takes its default.
+                                for argument in &call.arguments {
+                                    args.push(argument.as_ref().map(|&(_, width, signed)| {
+                                        let value = Expr::Resize {
+                                            expr: Box::new(classes::object_call(
+                                                ObjectOp::ArgumentValue(argument_index),
+                                                Vec::new(),
+                                            )),
+                                            width: width as usize,
+                                            signed,
+                                        };
+                                        argument_index += 1;
+                                        value
+                                    }));
+                                }
+                                // A block that is on makes its calls (18.9),
+                                // a guarded one while its guard holds, as
+                                // its flag says (18.5.13).
+                                let mut condition = classes::object_call(
+                                    ObjectOp::ConstraintModeGet(call.block),
+                                    vec![Expr::Ident(this.clone())],
+                                );
+                                if call.guard.is_some() {
+                                    condition = Expr::Binary {
+                                        left: Box::new(condition),
+                                        op: BinaryOp::LogicAnd,
+                                        right: Box::new(classes::object_call(
+                                            ObjectOp::ArgumentValue(argument_index),
+                                            Vec::new(),
+                                        )),
+                                    };
+                                    argument_index += 1;
+                                }
+                                let mut ty = classes::unsigned_type(call.width as usize);
+                                ty.is_signed = call.signed;
+                                if call.four_state {
+                                    ty.kind = TypeKind::Logic;
+                                }
+                                let result =
+                                    builder.declare(&format!("$constraint_call{index}"), ty);
+                                // The value of a call not made is never read.
+                                body.push(Stmt::If {
+                                    condition,
+                                    then_body: vec![Stmt::Assign {
+                                        lhs: LValue::Ident(result.clone()),
+                                        rhs: Expr::Call {
+                                            callee: Callee::Subroutine(
+                                                classes::Class::subroutine_name(
+                                                    owner,
+                                                    &call.method,
+                                                ),
+                                            ),
+                                            args,
+                                            arg_order: Vec::new(),
+                                        },
+                                        nonblocking: false,
+                                    }],
+                                    else_body: Vec::new(),
+                                });
+                                if call.four_state {
+                                    let (value, mask) = classes::known_bits(Expr::Ident(result));
+                                    result_masks.push((solve_inputs.len(), mask));
+                                    solve_inputs.push(value);
+                                } else {
+                                    solve_inputs.push(Expr::Ident(result));
+                                }
+                            }
+                            for (result, mask) in result_masks {
+                                program.unknown_inputs.push((result, solve_inputs.len()));
+                                solve_inputs.push(mask);
+                            }
                         }
                         let success = builder.declare("$constraint_success", int_type());
                         body.push(Stmt::Assign {
@@ -330,7 +623,7 @@ fn lower_methods(
                                             right: Box::new(Expr::Literal("1".into())),
                                         },
                                     ],
-                                    input_values.clone(),
+                                    solve_inputs,
                                 ]
                                 .concat(),
                             ),
@@ -396,8 +689,10 @@ fn lower_methods(
                             }
                             if property.constant
                                 || property.field.handle.is_some()
-                                || (property.r#type.is_enum
-                                    && property.r#type.enum_domain.is_none())
+                                || property
+                                    .r#type
+                                    .enumeration_in(&builder.session.types)
+                                    .unresolved()
                             {
                                 continue;
                             }
@@ -421,6 +716,43 @@ fn lower_methods(
                                 else_body: Vec::new(),
                             });
                         }
+                        // A static rand property no constraint names is
+                        // drawn in its slot as an instance one is, at any
+                        // width (18.4).
+                        for slot in &class.static_slots {
+                            body.push(Stmt::If {
+                                condition: Expr::Binary {
+                                    left: Box::new(Expr::Binary {
+                                        left: Box::new(Expr::Ident(argument.clone())),
+                                        op: BinaryOp::Ne,
+                                        right: Box::new(Expr::Literal("1".into())),
+                                    }),
+                                    op: BinaryOp::LogicAnd,
+                                    right: Box::new(classes::object_call(
+                                        ObjectOp::ModeGet(slot.field.offset, true),
+                                        vec![Expr::Ident(this.clone())],
+                                    )),
+                                },
+                                then_body: random_field(
+                                    &mut builder,
+                                    slot.field,
+                                    &slot.r#type,
+                                    None,
+                                    &this,
+                                ),
+                                else_body: Vec::new(),
+                            });
+                        }
+                    }
+                    for (field, variable, _) in &shadows {
+                        body.push(Stmt::Assign {
+                            lhs: LValue::Ident(variable.clone()),
+                            rhs: classes::object_call(
+                                ObjectOp::Load(*field),
+                                vec![Expr::Ident(this.clone())],
+                            ),
+                            nonblocking: false,
+                        });
                     }
                     body.extend(hook("post_randomize"));
                     body.push(Stmt::If {
@@ -431,7 +763,7 @@ fn lower_methods(
                         ))],
                         else_body: Vec::new(),
                     });
-                    let returned = builder.declare("randomize", int_type());
+                    let returned = builder.declare("randomize", int.clone());
                     body.push(Stmt::Assign {
                         lhs: LValue::Ident(returned.clone()),
                         rhs: Expr::Literal("32'sd1".into()),
@@ -441,7 +773,7 @@ fn lower_methods(
                 }
             }
         };
-        if method != "srandom" {
+        if matches!(method, "randomize" | "rand_mode") {
             // randomize is virtual, while its pre/post hooks are not (18.6.2).
             // Object-wide rand_mode also covers the dynamic object's members.
             let mut items = Vec::new();
@@ -457,7 +789,8 @@ fn lower_methods(
                     continue;
                 }
                 if (inline.is_some() && derived.check_constraint_program().is_err())
-                    || (method == "randomize" && derived.check_randomize().is_err())
+                    || (method == "randomize"
+                        && derived.check_randomize(&builder.session.types).is_err())
                     || !derived.derives_from(tree, builder.session, &class.name, env, &aliases)
                 {
                     continue;
@@ -522,7 +855,13 @@ fn lower_methods(
             return_type: return_var.as_ref().map(|_| {
                 convert_type(
                     builder.session,
-                    if prepare { handle.clone() } else { int_type() },
+                    if prepare {
+                        handle.clone()
+                    } else if method == "get_randstate" {
+                        string.clone()
+                    } else {
+                        int.clone()
+                    },
                 )
             }),
             params,
@@ -534,6 +873,37 @@ fn lower_methods(
     Ok(result)
 }
 
+/// The built-in methods of every class that randomizes its objects or
+/// controls their RNG (IEEE 1800-2023 18.6, 18.8, 18.13), which each class
+/// is given as subroutines.
+pub(in crate::ast) const RANDOMIZATION_METHODS: [&str; 5] = [
+    "randomize",
+    "srandom",
+    "rand_mode",
+    "get_randstate",
+    "set_randstate",
+];
+
+/// The argument of built-in method `method` besides the object, with its
+/// type; `selection` is the type of the selection of `randomize`.
+pub(in crate::ast) fn randomization_method_argument(
+    method: &str,
+    selection: impl FnOnce() -> Type,
+) -> Option<(&'static str, Type)> {
+    match method {
+        "randomize" => Some(("$selection", selection())),
+        "srandom" => Some(("seed", int_type())),
+        "set_randstate" => Some(("state", string_type())),
+        "get_randstate" => None,
+        _ => Some(("on_off", classes::unsigned_type(1))),
+    }
+}
+
+/// The `string` type (IEEE 1800-2023 6.16).
+pub(in crate::ast) fn string_type() -> Type {
+    crate::ast::type_binding::builtin_type("string", None).expect("string is a built-in type")
+}
+
 /// Select a declared enum value with rejection sampling, so non-power-of-two
 /// domains are uniform (IEEE 1800-2023 18.3, 18.4.1). Keep the draws inside the
 /// mode guard: a disabled property must not consume its object's random stream.
@@ -542,30 +912,47 @@ fn random_property(
     property: &classes::Property,
     this: &str,
 ) -> Vec<Stmt> {
+    let cycle = property.randc.then(|| {
+        property
+            .cyclic_domain_size(&builder.session.types)
+            .expect("validated randc domain")
+    });
+    random_field(builder, property.field, &property.r#type, cycle, this)
+}
+
+/// The statements that store a random value of `ty` in `field` of `this`,
+/// the next of its cycle of `cycle` values for a randc one (IEEE 1800-2023
+/// 18.4.1, 18.4.2): a member of an enumeration, or as many random bits as
+/// the field has.
+fn random_field(
+    builder: &mut BodyBuilder<'_, '_, '_>,
+    field: system_functions::ObjectField,
+    ty: &Type,
+    cycle: Option<u32>,
+    this: &str,
+) -> Vec<Stmt> {
+    let randc = cycle.is_some();
     let random = || {
-        let op = if property.randc {
-            ObjectOp::RandomCyclic {
-                offset: property.field.offset,
-                count: property
-                    .cyclic_domain_size()
-                    .expect("validated randc domain"),
-            }
-        } else {
-            ObjectOp::Random
+        let op = match cycle {
+            Some(count) => ObjectOp::RandomCyclic {
+                offset: field.offset,
+                count,
+            },
+            None => ObjectOp::Random,
         };
         classes::object_call(op, vec![Expr::Ident(this.into())])
     };
     let mut body = Vec::new();
-    let value = if let Some(values) = property
-        .r#type
-        .enum_domain
+    let value = if let Some(values) = ty
+        .enumeration_in(&builder.session.types)
+        .domain
         .as_ref()
         .map(|domain| domain.values())
     {
         let count = values.len() as u64;
         let threshold = count.wrapping_neg() % count;
         let draw = builder.declare("$enum_draw", classes::unsigned_type(64));
-        if property.randc {
+        if randc {
             body.push(Stmt::Assign {
                 lhs: LValue::Ident(draw.clone()),
                 rhs: random(),
@@ -598,33 +985,39 @@ fn random_property(
             });
         }
         let literal = |value: crate::ast::enums::MemberValue| {
-            Expr::Literal(value.literal(property.field.width as usize, property.field.signed))
+            Expr::Literal(value.literal(field.width as usize, field.signed))
         };
-        let mut value = literal(*values.last().unwrap());
-        for (index, &member) in values.iter().enumerate().rev().skip(1) {
-            value = Expr::Mux {
+        // The member of index `draw`, by halves: a randc enumeration may
+        // have up to 65536 members, which a chain would nest as deep.
+        fn member(
+            draw: &str,
+            values: &[crate::ast::enums::MemberValue],
+            first: usize,
+            literal: &impl Fn(crate::ast::enums::MemberValue) -> Expr,
+        ) -> Expr {
+            if let [only] = values {
+                return literal(*only);
+            }
+            let half = values.len() / 2;
+            Expr::Mux {
                 condition: Box::new(Expr::Binary {
-                    left: Box::new(Expr::Ident(draw.clone())),
-                    op: BinaryOp::Eq,
-                    right: Box::new(Expr::Literal(format!("64'd{index}"))),
+                    left: Box::new(Expr::Ident(draw.to_owned())),
+                    op: BinaryOp::Lt,
+                    right: Box::new(Expr::Literal(format!("64'd{}", first + half))),
                 }),
-                then_expr: Box::new(literal(member)),
-                else_expr: Box::new(value),
-            };
+                then_expr: Box::new(member(draw, &values[..half], first, literal)),
+                else_expr: Box::new(member(draw, &values[half..], first + half, literal)),
+            }
         }
-        value
-    } else if property.field.width > 64 && !property.randc {
+        member(&draw, &values, 0, &literal)
+    } else if field.width > 64 && !randc {
         // Each draw gives 64 random bits.
-        Expr::Concat(
-            (0..property.field.width.div_ceil(64))
-                .map(|_| random())
-                .collect(),
-        )
+        Expr::Concat((0..field.width.div_ceil(64)).map(|_| random()).collect())
     } else {
         random()
     };
     body.push(Stmt::Eval(classes::object_call(
-        ObjectOp::Store(property.field),
+        ObjectOp::Store(field),
         vec![Expr::Ident(this.into()), value],
     )));
     body
@@ -667,7 +1060,7 @@ pub(in crate::ast) fn inline_subroutines(
             };
             if !class.is_abstract
                 && !class.is_interface
-                && class.check_randomize().is_ok()
+                && class.check_randomize(&session.types).is_ok()
                 && class.check_constraint_program().is_ok()
                 && class.derives_from(
                     tree,
@@ -706,4 +1099,30 @@ pub(in crate::ast) fn inline_subroutines(
         }
     }
     Ok((result, exported))
+}
+
+/// Shift the inputs of constraint `expr` from index `first` on by `by`.
+fn shift_inputs(expr: &mut celox_heap::randomization::Expr, first: usize, by: usize) {
+    use celox_heap::randomization::Expr;
+    expr.rewrite(&mut |expr| {
+        if let Expr::Input { index, .. }
+        | Expr::Member {
+            input: Some(index), ..
+        } = expr
+            && *index >= first
+        {
+            *index += by;
+        }
+    });
+}
+
+/// The static rand properties of `class` (see `classes::StaticProperty::rand`):
+/// the field of an object that a randomize call solves each in, its
+/// variable, and the variable of the bit that turns it off.
+fn static_shadows(class: &classes::Class) -> Vec<(system_functions::ObjectField, String, String)> {
+    class
+        .static_slots
+        .iter()
+        .map(|slot| (slot.field, slot.variable.clone(), slot.mode.clone()))
+        .collect()
 }

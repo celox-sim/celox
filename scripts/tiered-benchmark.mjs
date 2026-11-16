@@ -44,9 +44,16 @@ export function parseTiered(log, top, runner) {
     const names = ['interpreted_calls', 'compiled_calls', 'compiled_block_calls',
       'compiled_entries', 'rejected_entries', 'failed_entries', 'code_bytes',
       'compile_ns', 'frame_bytes_transferred'];
+    // Hotspot statistics snapshot the interpreting phase and survive
+    // whole-image promotion, so they may accompany either record.
+    const mixed = fields.tier === 'interpreter' && fields.promotion === 'disabled' &&
+      fields.compiled_evaluations === '0';
+    const promoted = fields.tier === 'compiled' && fields.promotion === 'promoted' &&
+      /^\d+$/.test(fields.compiled_evaluations ?? '') &&
+      Number.isSafeInteger(Number(fields.compiled_evaluations)) &&
+      Number(fields.compiled_evaluations) > 0;
     if (runner !== 'celox-tiered' || fields.hotspot_test !== top ||
-        fields.tier !== 'interpreter' || fields.promotion !== 'disabled' ||
-        fields.compiled_evaluations !== '0' ||
+        (!mixed && !promoted) ||
         !/^\d+$/.test(fields.interpreted_evaluations ?? '') ||
         !Number.isSafeInteger(Number(fields.interpreted_evaluations)) ||
         !names.every(n => /^\d+$/.test(fields[`hotspot_${n}`] ?? '') &&

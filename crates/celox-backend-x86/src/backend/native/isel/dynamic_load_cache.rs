@@ -46,7 +46,7 @@ pub(super) fn block_dynamic_load_cache_plans(
         match instruction {
             SIRInstruction::Load(_, address, offset, width)
                 if *width <= 64
-                    && matches!(offset, SIROffset::Dynamic(_) | SIROffset::Element { .. }) =>
+                    && matches!(offset, SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. }) =>
             {
                 *counts.entry(*address).or_default() += 1;
             }

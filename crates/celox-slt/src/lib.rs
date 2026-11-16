@@ -10,6 +10,7 @@ use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 pub mod const_inline;
 mod lower;
+pub mod net_inline;
 mod node;
 mod node_facts;
 mod node_rules;

@@ -243,6 +243,11 @@ pub struct PackageBinding {
     /// [`SymbolicRtl::packages`].
     pub package: ModuleId,
     pub var_id: SourceVarId,
+    /// The variable is simulator state that the design's tasks set, such
+    /// as the assertion control state of `$assertoff` (IEEE 1800-2023
+    /// 20.11), rather than a variable of the design: any process may write
+    /// it, so its drivers are not checked.
+    pub simulator_state: bool,
 }
 
 impl SimModule {
@@ -365,6 +370,9 @@ pub struct SymbolicRtl {
     pub modules: HashMap<ModuleId, SimModule>,
     pub module_names: HashMap<ModuleId, String>,
     pub root_id: ModuleId,
+    /// The root module is one the frontend generated to instantiate several
+    /// top-level modules (see [`celox_design::ElaboratedDesign::hidden_root`]).
+    pub hidden_root: bool,
     /// Modules holding the variables of a package, by package name. Each is
     /// instantiated once, outside the instance hierarchy, and the
     /// [`SimModule::package_bindings`] of other modules refer to its

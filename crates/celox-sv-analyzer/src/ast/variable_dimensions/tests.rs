@@ -31,7 +31,7 @@ fn assert_width(table: &TyTable, id: TyId, width: u128) {
 fn declarations_keep_their_type_when_a_caller_shadows_a_parameter() {
     // 7.4: a declaration's bounds, not the referencing scope's names,
     // determine its array type. Preserve symbolic metadata for lowering.
-    let shape = symbolic_shape();
+    let mut shape = symbolic_shape();
     let mut table = TyTable::default();
     let functions = const_functions::ConstantFunctions::default();
     let id = shape.bind_type(&mut table, &functions, &env(5)).unwrap();
@@ -41,7 +41,7 @@ fn declarations_keep_their_type_when_a_caller_shadows_a_parameter() {
     assert!(matches!(shape.packed[0].left, ConstExpr::Binary { .. }));
 
     // A new specialization constructs a new declaration from the same syntax.
-    let specialized = VariableDimensions::new(shape.clone_shape());
+    let mut specialized = VariableDimensions::new(shape.clone_shape());
     let specialized_id = specialized
         .bind_type(&mut table, &functions, &env(11))
         .unwrap();
@@ -51,7 +51,7 @@ fn declarations_keep_their_type_when_a_caller_shadows_a_parameter() {
 
 #[test]
 fn unresolved_shapes_are_not_frozen_by_provisional_queries() {
-    let shape = symbolic_shape();
+    let mut shape = symbolic_shape();
     let mut table = TyTable::default();
     let functions = const_functions::ConstantFunctions::default();
     assert!(
@@ -69,7 +69,7 @@ fn unresolved_shapes_are_not_frozen_by_provisional_queries() {
 
 #[test]
 fn editing_a_cloned_shape_invalidates_only_its_own_binding() {
-    let shape = symbolic_shape();
+    let mut shape = symbolic_shape();
     let mut table = TyTable::default();
     let functions = const_functions::ConstantFunctions::default();
     let original = shape.bind_type(&mut table, &functions, &env(5)).unwrap();
@@ -100,13 +100,13 @@ fn class_identity_changes_cannot_reuse_a_previous_binding() {
         .unwrap();
     assert_ne!(first, second);
     assert!(
-        matches!(table.data(second), TyData::Class(semantic_types::Decl::Class(name)) if name.as_ref()=="D")
+        matches!(table.data(second), TyData::Class(semantic_types::Decl::Class(decl)) if table.decl(*decl).name.as_ref() == "D")
     );
 }
 
 #[test]
 fn renaming_references_preserves_the_evaluated_declaration_type() {
-    let shape = symbolic_shape();
+    let mut shape = symbolic_shape();
     let mut table = TyTable::default();
     let functions = const_functions::ConstantFunctions::default();
     let id = shape.bind_type(&mut table, &functions, &env(5)).unwrap();
@@ -122,7 +122,7 @@ fn table_prefix_clones_share_bindings_but_independent_appends_do_not() {
     let functions = const_functions::ConstantFunctions::default();
     let mut original = TyTable::default();
     let mut independent = original.clone();
-    let shape = symbolic_shape();
+    let mut shape = symbolic_shape();
     let id = shape.bind_type(&mut original, &functions, &env(5)).unwrap();
     let mut prefix = original.clone();
     assert_eq!(shape.type_id(&mut prefix, &functions, &env(11)), Some(id));
@@ -144,7 +144,7 @@ fn name_and_element_queries_read_the_declarations_bound_type() {
     let tree = AnalysisContext::unspecialized(&syntax);
     let id = tree.declarations().assign_statements[0].assignments[0].right;
     let mut session = Session::default();
-    let input = PackedDimensions::new(HashMap::default(), &env(5), &HashMap::default());
+    let input = PackedDimensions::new(HashMap::default(), &env(5), &TypeAliases::default());
     let mut dims =
         dimensions::query_operand_dimensions_id(id, &tree, &mut session, &input).unwrap();
     dims.const_env.insert("N".into(), 11);
@@ -163,7 +163,7 @@ fn formal_publication_observes_changed_bindings_with_identical_symbolic_ranges()
     let tree = AnalysisContext::unspecialized(&syntax);
     let id = tree.declarations().assign_statements[0].assignments[0].right;
     let mut session = Session::default();
-    let input = PackedDimensions::new(HashMap::default(), &env(5), &HashMap::default());
+    let input = PackedDimensions::new(HashMap::default(), &env(5), &TypeAliases::default());
     let mut dims =
         dimensions::query_operand_dimensions_id(id, &tree, &mut session, &input).unwrap();
     let old = dims.subroutine_param_shapes["f"][0].clone();
@@ -185,12 +185,12 @@ fn formal_publication_observes_changed_bindings_with_identical_symbolic_ranges()
 fn many_declarations_share_interned_type_nodes() {
     let functions = const_functions::ConstantFunctions::default();
     let mut table = TyTable::default();
-    let shapes = (0..1024).map(|_| symbolic_shape()).collect::<Vec<_>>();
+    let mut shapes = (0..1024).map(|_| symbolic_shape()).collect::<Vec<_>>();
     let first = shapes[0]
         .bind_type(&mut table, &functions, &env(5))
         .unwrap();
     let count = table.len();
-    for shape in &shapes {
+    for shape in &mut shapes {
         assert_eq!(
             shape.bind_type(&mut table, &functions, &env(5)),
             Some(first)
@@ -222,4 +222,93 @@ fn generated_formals_keep_their_declaration_scope_bounds() {
         panic!("not an array")
     };
     assert_width(&session.types, *element, 7);
+}
+
+/// A shape whose bounds are literals has the same type in every context:
+/// another declaration of that shape takes the type the first resolved, in
+/// any environment, and a shape that differs does not.
+#[test]
+fn closed_shapes_share_their_type_across_declarations() {
+    let closed = || {
+        let mut ty = Type::new(TypeKind::Bit);
+        ty.packed_ranges.push(PackedRange::new(
+            ConstExpr::Literal("7".into()),
+            ConstExpr::Literal("0".into()),
+        ));
+        procedural::dimensions_from_type(&ty)
+    };
+    let mut table = TyTable::default();
+    let functions = const_functions::ConstantFunctions::default();
+    let first = closed().type_id(&mut table, &functions, &env(5)).unwrap();
+    assert_width(&table, first, 8);
+    assert_eq!(
+        closed().type_id(&mut table, &functions, &env(11)),
+        Some(first)
+    );
+    let mut signed = closed();
+    signed.signed = true;
+    let other = signed.type_id(&mut table, &functions, &env(5)).unwrap();
+    assert_ne!(other, first);
+    assert!(matches!(table.data(other), TyData::Packed(packed) if packed.signed));
+    // A shape with a name in its bounds is still typed in each context.
+    let symbolic = symbolic_shape();
+    let five = symbolic.type_id(&mut table, &functions, &env(5)).unwrap();
+    let eleven = symbolic.type_id(&mut table, &functions, &env(11)).unwrap();
+    assert_width(&table, five, 5);
+    assert_width(&table, eleven, 11);
+}
+
+#[test]
+fn declarator_dimensions_are_in_the_type_a_shape_is_bound_to() {
+    // 7.4: `int a[2]`, its unpacked range from the declarator, is an array
+    // of `int`. A type whose dimensions change is bound afresh.
+    let mut table = TyTable::default();
+    let functions = const_functions::ConstantFunctions::default();
+    let mut base = Type::new(TypeKind::Bit);
+    base.packed_ranges.push(PackedRange::new(
+        ConstExpr::Literal("31".into()),
+        ConstExpr::Literal("0".into()),
+    ));
+    semantic_types::bind_declared(&mut table, &functions, &mut base, &ConstEnv::default());
+    let scalar = base
+        .binding
+        .get(&table)
+        .expect("the semantic type of the base");
+    let array = types::type_with_unpacked_ranges(
+        base.clone(),
+        vec![UnpackedRange::new(
+            ConstExpr::Literal("0".into()),
+            ConstExpr::Literal("1".into()),
+        )],
+    )
+    .unwrap();
+    assert!(array.binding.get(&table).is_none());
+    let mut shape = procedural::dimensions_from_type(&array);
+    let id = shape
+        .bind_type(&mut table, &functions, &ConstEnv::default())
+        .unwrap();
+    assert!(matches!(
+        table.data(id),
+        TyData::Array { element, .. } if *element == scalar
+    ));
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "a shape is bound to a type with its unpacked dimensions")]
+fn a_shape_bound_to_its_base_type_is_caught() {
+    let mut table = TyTable::default();
+    let functions = const_functions::ConstantFunctions::default();
+    let mut base = Type::new(TypeKind::Bit);
+    semantic_types::bind_declared(&mut table, &functions, &mut base, &ConstEnv::default());
+    let mut array = base.clone();
+    array
+        .shape_keeping_binding()
+        .unpacked_ranges
+        .push(UnpackedRange::new(
+            ConstExpr::Literal("0".into()),
+            ConstExpr::Literal("1".into()),
+        ));
+    // A change that keeps the binding but adds a dimension.
+    procedural::dimensions_from_type(&array).bound(&table);
 }

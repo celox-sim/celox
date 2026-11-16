@@ -26,6 +26,15 @@ impl<'a> Selection<'a> {
         }
         tree.with_header_membership(self.ports.clone())
     }
+    /// The selected ports of the header, in the order [`Self::retain`]
+    /// takes: those of a non-ANSI header too, whose declarations are in the
+    /// body.
+    pub(super) fn header_ports(&self) -> Converted<Vec<&'a celox_sv_syntax::Port>> {
+        self.ports
+            .iter()
+            .map(|id| self.unit.ports.get(*id).ok_or_else(mismatch))
+            .collect()
+    }
     pub(super) fn retain(&mut self, kept: &[bool]) -> Converted<()> {
         if kept.len() != self.ports.len() {
             return Err(mismatch());
@@ -125,7 +134,7 @@ mod tests {
             &AnalysisContext::unspecialized(&tree),
             session,
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
             None,
         )
         .unwrap();
@@ -154,7 +163,7 @@ mod tests {
             &AnalysisContext::unspecialized(&tree),
             session,
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
             Some(&selection),
         )
         .unwrap();

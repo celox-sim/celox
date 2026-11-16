@@ -1,5 +1,7 @@
 (group test_unimplemented_paths (category regression))
 
+; Wide dynamic shift (a >> idx with 128-bit a) is handled by the runtime
+; shift select chain, NOT by lower_wide_extract. Verify it works correctly.
 (case wide_dynamic_shift_works
   (source "test.veryl" #"
         module Top (
@@ -17,6 +19,8 @@
     (set idx 64))
   (assert_eq y 0xDEAD))
 
+; Dynamic offset Store with 4-state mask: array write with variable index
+; on a logic (4-state) type must correctly store the mask.
 (case dynamic_mask_store
   (four_state)
   (source "test.veryl" #"

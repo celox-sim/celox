@@ -165,6 +165,8 @@ arr[1][2] = 8'hAB;
   (tick i_clk)
   (assert_eq o 0))
 
+; '{default: 0} with no explicit elements: must produce exactly target_len elements.
+; Regression test for off-by-one where remaining was target_len - (x.len()-1).
 (case test_array_literal_default_only
   (source "test.veryl" #"
 module Top (
@@ -240,6 +242,7 @@ assign o3 = a[3];
   (assert_eq o2 0xDD)
   (assert_eq o3 0xDD))
 
+; '{default: 0} in always_ff if_reset: array reset via default fill.
 (case test_array_literal_default_in_ff_reset
   (source "test.veryl" #"
 module Top (

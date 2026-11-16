@@ -121,7 +121,6 @@ fn benchmark_simulation_overhead(c: &mut Criterion) {
     // Benchmark 3: Simulation::step of SystemVerilog counters at the rising
     // edge only, half at each edge of `clk`, and half at the falling edge of
     // a copy of `clk`.
-    #[cfg(feature = "systemverilog")]
     for (name, falling) in [
         ("sv_simulation_step_posedge_x20000", "posedge clk"),
         ("sv_simulation_step_both_edges_x20000", "negedge clk"),

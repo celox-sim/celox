@@ -6,8 +6,16 @@ use crate::procedural::SourceSpan;
 /// A non-fatal source diagnostic, independent of constant evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnalyzerWarning {
-    /// Explicit and implementation-default time scales occur in one design.
-    MixedTimescale,
+    /// Design element `element` takes the default time unit (`unit`) or
+    /// precision (`precision`) while others declare theirs (IEEE 1800-2023
+    /// 3.14.2.3).
+    MixedTimescale {
+        element: String,
+        unit: bool,
+        precision: bool,
+    },
+    /// A later declaration of module `name` was ignored for the first one.
+    DuplicateModule { name: String },
     /// `$size` on an interface array is a compatibility extension to 20.7.
     InterfaceArrayQuery { site: Option<SourceSpan> },
     /// Omitted interface array selections are an extension to 23.6.

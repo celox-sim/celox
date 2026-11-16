@@ -36,6 +36,87 @@ pub(super) struct Property {
     pub randc: bool,
     /// The initializer of the declaration, evaluated by the constructor.
     pub initializer: Option<celox_sv_syntax::ExprId>,
+    /// The container an object holds a fixed-size unpacked array property
+    /// in, one element for each index (IEEE 1800-2023 7.4): its type stays
+    /// the array, which every type check and query sees, and an assignment
+    /// or a copy of the object copies the elements.
+    pub storage: Option<Arc<ContainerType>>,
+}
+
+/// Where a randomize call solves a static rand property (see
+/// [`StaticProperty::rand`]): a slot of each object of the class, which is
+/// no member of it, keyed by the declaration of the property, its variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StaticSlot {
+    /// The variable that holds the property.
+    pub variable: String,
+    /// The variable of the bit that turns it off for every object (18.8).
+    pub mode: String,
+    pub r#type: Type,
+    /// The bytes of the object the call solves it in.
+    pub field: ObjectField,
+}
+
+/// The member of a class that a name denotes in it (IEEE 1800-2023 8.14):
+/// the one the most derived of the class and its bases declares, an
+/// instance property, one of unpacked structure type, or a static
+/// property, which hide each other alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Member {
+    /// Property `0` of [`Class::properties`].
+    Instance(usize),
+    /// Property `0` of [`Class::aggregates`], of unpacked structure type.
+    Aggregate(usize),
+    /// Property `0` of [`Class::statics`].
+    Static(usize),
+}
+
+/// The member that `name` denotes in a class whose lineage, from the class
+/// itself to its root, is `lineage`, with `properties`, `aggregates` and
+/// `statics` (see [`Member`]).
+pub(super) fn member(
+    name: &str,
+    lineage: &[String],
+    properties: &[Property],
+    aggregates: &[AggregateProperty],
+    statics: &[StaticProperty],
+) -> Option<Member> {
+    let instance = |owner: Option<&str>| {
+        properties
+            .iter()
+            .rposition(|property| {
+                property.name == name && owner.is_none_or(|owner| property.owner == owner)
+            })
+            .map(Member::Instance)
+    };
+    let aggregate = |owner: Option<&str>| {
+        aggregates
+            .iter()
+            .rposition(|aggregate| {
+                aggregate.name == name && owner.is_none_or(|owner| aggregate.owner == owner)
+            })
+            .map(Member::Aggregate)
+    };
+    let shared = |owner: Option<&str>| {
+        statics
+            .iter()
+            .rposition(|property| {
+                property.name == name
+                    && property.mode_of.is_none()
+                    && owner.is_none_or(|owner| property.owner == owner)
+            })
+            .map(Member::Static)
+    };
+    let declared = |owner: Option<&str>| {
+        instance(owner)
+            .or_else(|| aggregate(owner))
+            .or_else(|| shared(owner))
+    };
+    lineage
+        .iter()
+        .find_map(|owner| declared(Some(owner)))
+        // A class whose lineage is not known names its members as declared.
+        .or_else(|| declared(None))
 }
 
 impl Property {
@@ -54,36 +135,61 @@ impl Property {
             })
     }
 
-    /// Whether the property is a rand dynamic array or queue.
-    pub fn rand_array(&self) -> bool {
-        (self.rand || self.randc) && self.sequence()
+    /// The container that holds the elements of an array property a
+    /// constraint program sees as an array: a dynamic array or queue, or a
+    /// fixed-size array (see `Property::storage`).
+    pub fn array_storage(&self) -> Option<&Arc<ContainerType>> {
+        self.storage
+            .as_ref()
+            .or_else(|| self.r#type.container.as_ref().filter(|_| self.sequence()))
     }
 
-    pub fn rand_object(&self) -> bool {
+    /// Whether a constraint program holds the property as an array.
+    pub fn constraint_array(&self) -> bool {
+        self.array_storage().is_some()
+    }
+
+    /// Whether the property is a rand array: a dynamic array or queue, or
+    /// a fixed-size array (18.4).
+    pub fn rand_array(&self) -> bool {
+        (self.rand || self.randc) && (self.sequence() || self.storage.is_some())
+    }
+
+    pub fn rand_object(&self, table: &semantic_types::TyTable) -> bool {
         self.rand
-            && self.r#type.class().is_some()
+            && self.r#type.class_in(table).is_some()
             && self.r#type.container.is_none()
             && self.r#type.unpacked_ranges.is_empty()
     }
 
-    pub fn cyclic_domain_size(&self) -> Option<u16> {
+    /// The number of values of the cycle of a randc property: the members
+    /// of its enumeration, or every value of its width. Implementations
+    /// may limit the size of a randc variable to no less than 8 bits
+    /// (IEEE 1800-2023 18.4.2); Celox keeps cycles of up to 16 bits, as
+    /// UVM's `uvm_sequence_library::select_randc` (`bit [15:0]`) needs.
+    pub fn cyclic_domain_size(&self, table: &semantic_types::TyTable) -> Option<u32> {
         if self.field.handle.is_some() {
             return None;
         }
-        if self.r#type.is_enum {
-            self.r#type.enum_domain.as_ref().and_then(|domain| {
+        let enumeration = self.r#type.enumeration_in(table);
+        if enumeration.enumeration {
+            enumeration.domain.as_ref().and_then(|domain| {
                 let values = &domain.members;
-                (1..=256)
+                (1..=MAX_CYCLE)
                     .contains(&values.len())
-                    .then_some(values.len() as u16)
+                    .then_some(values.len() as u32)
             })
         } else {
-            (1..=8)
+            (1..=16)
                 .contains(&self.field.width)
-                .then(|| 1u16 << self.field.width)
+                .then(|| 1u32 << self.field.width)
         }
     }
 }
+
+/// The most values the cycle of a randc property holds (see
+/// [`Property::cyclic_domain_size`]).
+const MAX_CYCLE: usize = 1 << 16;
 
 /// A property of unpacked structure type, or a member of one that is itself
 /// an unpacked structure. It is not laid out: its leaf members are
@@ -114,6 +220,134 @@ pub(super) struct StaticProperty {
     /// The name of the variable that holds the property.
     pub variable: String,
     pub initializer: Option<celox_sv_syntax::ExprId>,
+    /// A `static rand` property, one variable of the class that every
+    /// randomize call of an object of it solves (IEEE 1800-2023 18.4): the
+    /// call solves it in the object's [`StaticSlot`] for it, seeded from it,
+    /// and writes it back; whether it is random is a static bit all objects
+    /// share (18.8).
+    pub rand: bool,
+    /// For the bit that turns static rand property `name` off, `name`: a
+    /// variable of the class no source names (see [`static_rand_mode`]).
+    pub mode_of: Option<String>,
+}
+
+/// The static properties the constraints of class `owner` read as inputs
+/// of its program: those of its base, at the indices the base's constraints
+/// read them at, then those it declares that the solver holds, as it holds
+/// a property (see `constraints::solver_type`). An input is its variable:
+/// a static the class redeclares is another input (8.14, 18.5).
+fn static_inputs(
+    owner: &str,
+    base: Option<&[StaticInput]>,
+    statics: &[StaticProperty],
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Vec<StaticInput> {
+    let mut inputs = base.map(<[_]>::to_vec).unwrap_or_default();
+    for property in statics {
+        if property.owner != owner || property.rand || property.mode_of.is_some() {
+            continue;
+        }
+        // A class handle, which a guard compares (18.5.13), by its handle.
+        if property.r#type.class_in(&session.types).is_some() {
+            inputs.push(StaticInput {
+                name: property.name.clone(),
+                variable: property.variable.clone(),
+                width: 8 * celox_heap::HANDLE_BYTES as u32,
+                signed: false,
+            });
+            continue;
+        }
+        if constraints::solver_type(&property.r#type, tree, session, env).is_err() {
+            continue;
+        }
+        let Some(shape) = casts::expr_type_from_type(&tree.functions, &property.r#type, env) else {
+            continue;
+        };
+        inputs.push(StaticInput {
+            name: property.name.clone(),
+            variable: property.variable.clone(),
+            width: shape.width as u32,
+            signed: shape.signed,
+        });
+    }
+    inputs
+}
+
+/// Whether constraint `expr` reads an input of its program.
+fn reads_input(expr: &celox_heap::randomization::Expr) -> bool {
+    use celox_heap::randomization::Expr;
+    expr.any(&mut |expr| {
+        matches!(
+            expr,
+            Expr::Input { .. } | Expr::Member { input: Some(_), .. }
+        )
+    })
+}
+
+/// The name of the static bit that turns static rand property `name` off,
+/// for every object: a `$` starts it, as no identifier of a source starts
+/// once normalized, so that it names no property of the class.
+fn static_rand_mode(name: &str) -> String {
+    format!("$rand_mode${name}")
+}
+
+/// The change key of the slot of static rand property `name` (see
+/// [`StaticSlot`]), which no identifier of a source is either (see
+/// [`static_rand_mode`]).
+fn static_rand_slot(name: &str) -> String {
+    format!("$slot${name}")
+}
+
+/// The variable of the bit that turns static rand property `name` of class
+/// `owner` off (see [`StaticSlot::mode`]).
+pub(super) fn static_rand_mode_variable(owner: &str, name: &str) -> String {
+    Class::subroutine_name(owner, &static_rand_mode(name))
+}
+
+/// A static property that a constraint reads: the value of its variable,
+/// input `index` of the program when a randomize call starts (IEEE
+/// 1800-2023 18.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StaticInput {
+    pub name: String,
+    pub variable: String,
+    pub width: u32,
+    pub signed: bool,
+}
+
+/// A call of a function of the class in a constraint (IEEE 1800-2023
+/// 18.5.11): the function, by the name the class's randomize call calls it
+/// by, so that an override of the object's class runs, each argument with
+/// its width and signedness, which the call converts as any call does, and
+/// the width and signedness of the function's value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConstraintCall {
+    pub method: String,
+    /// The class that declares the method the class of the constraint
+    /// sees, which a call of a non-virtual method runs; a call of a
+    /// virtual one runs the override of the object's class (IEEE
+    /// 1800-2023 8.20).
+    pub owner: String,
+    pub is_virtual: bool,
+    /// The actual of each formal, none for an omitted one, which takes its
+    /// default as in any call (13.5.3).
+    pub arguments: Vec<Option<(celox_heap::randomization::Expr, u32, bool)>>,
+    /// The guard under which the call is made: it runs only while the guard
+    /// holds, which a solve of arguments decides (18.5.13).
+    pub guard: Option<celox_heap::randomization::Expr>,
+    pub width: u32,
+    pub signed: bool,
+    /// Whether the function's value is 4-state: its X and Z bits reach the
+    /// constraints with it (see `Program::unknown_inputs`).
+    pub four_state: bool,
+    /// The constraint block that makes the call, by index among
+    /// [`Class::constraints`], whose constraint mode its arguments follow.
+    pub block: u32,
+    /// Whether the block is the class's: a block a derived class overrides
+    /// makes no call.
+    pub live: bool,
 }
 
 /// A method of a class.
@@ -170,6 +404,35 @@ pub(super) struct Class {
     pub aggregates: Vec<AggregateProperty>,
     /// Static properties of the class and its bases.
     pub statics: Vec<StaticProperty>,
+    /// The static properties its constraints read, input `n` of its program
+    /// the `n`th (see [`StaticInput`]).
+    pub static_inputs: Vec<StaticInput>,
+    /// The number of classes it derives from, whose constraints are below
+    /// its own (IEEE 1800-2023 18.5.13.1).
+    pub depth: usize,
+    /// The slots its randomize calls solve its static rand properties in,
+    /// those of its base first, [`Expr::Static`] `n` the `n`th.
+    ///
+    /// [`Expr::Static`]: celox_heap::randomization::Expr::Static
+    pub static_slots: Vec<StaticSlot>,
+    /// The bit of the argument of a randomize call that selects each of
+    /// `properties` and each of `static_slots` (see
+    /// [`Class::selection_type`]): a base's bits are those of the base, so
+    /// that a mask a call through a base handle builds selects the same
+    /// members in the class it dispatches to.
+    pub property_bits: Vec<usize>,
+    pub slot_bits: Vec<usize>,
+    /// The class and its bases, from the class to its root.
+    pub lineage: Vec<String>,
+    /// The static constraint blocks of the class, by index among
+    /// [`Class::constraints`], each with the identifier of the class that
+    /// declares it, whose objects share its constraint mode (IEEE 1800-2023
+    /// 18.5.11); the heap keeps the mode (see `program_registration`).
+    pub static_constraints: Vec<(u32, u32)>,
+    /// The calls of functions its constraints make, those of its base
+    /// first, value `k` of a constraint the input
+    /// [`constraints::RESULT_INPUTS`]` + k` (IEEE 1800-2023 18.5.11).
+    pub constraint_calls: Vec<ConstraintCall>,
     /// Methods visible in the class, overrides replacing inherited ones.
     pub methods: Vec<Method>,
     /// The parameters and typedefs of an interface class, its own and
@@ -185,6 +448,53 @@ pub(super) struct Class {
     pub program: Converted<celox_heap::randomization::Program>,
 }
 
+/// 4-state value `value` that constraints read as the solver takes it (see
+/// `Program::unknown_inputs`): its 2-state value, which has 0 for each X or
+/// Z bit, and the mask of those, as a known bit and its complement are 1
+/// once (IEEE 1800-2023 18.3).
+pub(in crate::ast) fn known_bits(value: Expr) -> (Expr, Expr) {
+    let two_state = |value: Expr| Expr::Unary {
+        op: UnaryOp::ToTwoState,
+        expr: Box::new(value),
+    };
+    let known = Expr::Binary {
+        left: Box::new(two_state(value.clone())),
+        op: BinaryOp::BitXor,
+        right: Box::new(two_state(Expr::Unary {
+            op: UnaryOp::BitNot,
+            expr: Box::new(value.clone()),
+        })),
+    };
+    let mask = Expr::Unary {
+        op: UnaryOp::BitNot,
+        expr: Box::new(known),
+    };
+    (two_state(value), mask)
+}
+
+/// The identifier that declares each class of `lineage`, whose names are
+/// canonical, as `pkg::Base`: a class scope names the class by it, as
+/// `Base::f` in the classes of its package (IEEE 1800-2023 8.23).
+pub(in crate::ast) fn scope_identifiers(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    lineage: &[String],
+) -> Vec<String> {
+    lineage
+        .iter()
+        .map(|class| {
+            let generic = specializations::lookup(session, class).map_or_else(
+                || class.clone(),
+                |specialization| specialization.generic.clone(),
+            );
+            match declaration(tree, session, &generic) {
+                Some(declaration) => instances::normalize_identifier(&declaration.name.spelling),
+                None => generic.rsplit("::").next().unwrap_or(&generic).to_owned(),
+            }
+        })
+        .collect()
+}
+
 /// An internal unsigned packed argument of a generated method.
 pub(super) fn unsigned_type(width: usize) -> Type {
     let mut ty = procedural::int_type();
@@ -197,8 +507,50 @@ pub(super) fn unsigned_type(width: usize) -> Type {
 }
 
 impl Class {
+    /// The bits of the selection of a randomize call: whether it has
+    /// arguments, then whether it names each property, then each static
+    /// rand property, by its slot (18.11).
     pub fn selection_type(&self) -> Type {
-        unsigned_type(self.properties.len() + 1)
+        unsigned_type(self.properties.len() + self.static_slots.len() + 1)
+    }
+
+    /// The bits of a selection for the members a class adds to those of
+    /// `base`: its new properties and slots take the bits after the base's
+    /// (see [`Class::property_bits`]).
+    fn selection_bits(
+        base: Option<&Class>,
+        properties: usize,
+        slots: usize,
+    ) -> (Vec<usize>, Vec<usize>) {
+        let (mut property_bits, mut slot_bits) = base
+            .map(|base| (base.property_bits.clone(), base.slot_bits.clone()))
+            .unwrap_or_default();
+        let mut next = 1 + property_bits.len() + slot_bits.len();
+        for bits in [(&mut property_bits, properties), (&mut slot_bits, slots)] {
+            while bits.0.len() < bits.1 {
+                bits.0.push(next);
+                next += 1;
+            }
+        }
+        (property_bits, slot_bits)
+    }
+
+    /// The member that `name` denotes in the class (see [`Member`]).
+    pub(super) fn member(&self, name: &str) -> Option<Member> {
+        member(
+            name,
+            &self.lineage,
+            &self.properties,
+            &self.aggregates,
+            &self.statics,
+        )
+    }
+
+    /// The slot of static rand property `property` (see [`StaticSlot`]).
+    pub(super) fn static_slot(&self, property: &StaticProperty) -> Option<usize> {
+        self.static_slots
+            .iter()
+            .position(|slot| slot.variable == property.variable)
     }
 
     /// Register the class's constraint program once, from its constructor,
@@ -206,15 +558,36 @@ impl Class {
     /// those are is known only at run time (IEEE 1800-2023 18.4). A class
     /// with nothing random registers nothing; one the solver cannot take
     /// registers why, which faults only when such an object is reached.
-    pub fn program_registration(&self) -> Option<Stmt> {
+    pub fn program_registration(&self, table: &semantic_types::TyTable) -> Option<Stmt> {
         use celox_heap::randomization::Registered;
-        if !self.has_constraints && !self.properties.iter().any(|p| p.rand || p.randc) {
+        if !self.has_constraints
+            && !self.properties.iter().any(|p| p.rand || p.randc)
+            && self.static_slots.is_empty()
+        {
             return None;
         }
         let program = match self
-            .check_randomize()
+            .check_randomize(table)
             .and_then(|()| self.constraint_program())
         {
+            // The static properties of the class are read and written by
+            // its own randomize call (see `StaticInput`), which an object a
+            // rand handle reaches does not make.
+            // Its own randomize call still visits the members its rand
+            // handles reach (18.6.2).
+            Ok(program)
+                if !self.static_slots.is_empty() || program.constraints.iter().any(reads_input) =>
+            {
+                Registered::Own {
+                    program: program.into(),
+                    reason: if self.constraint_calls.is_empty() {
+                        "a rand object member whose constraints name static properties"
+                    } else {
+                        "a rand object member whose constraints call functions"
+                    }
+                    .into(),
+                }
+            }
             Ok(program) => Registered::Program(program.into()),
             Err(error) => Registered::Unsupported(error.to_string()),
         };
@@ -227,48 +600,70 @@ impl Class {
                 op: BinaryOp::Eq,
                 right: Box::new(Expr::Literal("1'b0".into())),
             },
-            then_body: vec![Stmt::Eval(object_call(
+            then_body: std::iter::once(Stmt::Eval(object_call(
                 ObjectOp::RegisterProgram(self.id, program),
                 Vec::new(),
-            ))],
+            )))
+            // The heap keeps the modes of its static blocks, which every
+            // constraint_mode call and randomize call of an object of the
+            // class reads by the object's class (18.5.11).
+            .chain((!self.static_constraints.is_empty()).then(|| {
+                Stmt::Eval(object_call(
+                    ObjectOp::RegisterStaticBlocks(self.id, self.static_constraints.clone()),
+                    Vec::new(),
+                ))
+            }))
+            .collect(),
             else_body: Vec::new(),
         })
     }
 
     /// Whether a rand object handle of the class makes `randomize` solve the
     /// objects it refers to (IEEE 1800-2023 18.4).
-    pub fn has_rand_objects(&self) -> bool {
-        self.properties.iter().any(Property::rand_object)
+    pub fn has_rand_objects(&self, table: &semantic_types::TyTable) -> bool {
+        self.properties
+            .iter()
+            .any(|property| property.rand_object(table))
     }
 
     /// Whether `randomize` solves the class's constraint program: it has
-    /// constraints, rand object handles or rand arrays.
-    pub fn solved(&self) -> bool {
+    /// constraints, rand object handles or rand arrays. Otherwise each
+    /// random property, and each static rand one in its slot (see
+    /// `Class::static_slots`), is drawn on its own.
+    pub fn solved(&self, table: &semantic_types::TyTable) -> bool {
         self.has_constraints
-            || self.has_rand_objects()
+            || self.has_rand_objects(table)
             || self.properties.iter().any(Property::rand_array)
     }
 
     /// Validate the supported unconstrained subset before binding a call.
-    pub fn check_randomize(&self) -> Converted<()> {
-        if self.solved() {
+    pub fn check_randomize(&self, table: &semantic_types::TyTable) -> Converted<()> {
+        if self.solved(table) {
             self.check_constraint_program()?;
         }
         for property in &self.properties {
-            if property.randc && property.cyclic_domain_size().is_none() {
+            if property.randc && property.cyclic_domain_size(table).is_none() {
                 return Err(unsupported(
-                    "randc requires a 1-8 bit integer or an enum with at most 256 declared values",
+                    "randc requires a 1-16 bit integer or an enum with at most 65536 declared values",
                 ));
-            }
-            if (property.rand || property.randc) && property.field.four_state {
-                return Err(unsupported("randomization of a 4-state class property"));
             }
             if (property.rand || property.randc)
                 && ((property.field.handle.is_some()
-                    && !property.rand_object()
+                    && !property.rand_object(table)
                     && !property.rand_array())
                     || property.r#type.holds_chandle()
-                    || (property.r#type.is_enum && property.r#type.enum_domain.is_none()))
+                    || property.r#type.enumeration_in(table).unresolved())
+            {
+                return Err(unsupported(
+                    "class randomize requires integral rand properties with a supported enum domain",
+                ));
+            }
+        }
+        // A static rand property is checked as an instance one.
+        for slot in &self.static_slots {
+            if slot.field.handle.is_some()
+                || slot.r#type.holds_chandle()
+                || slot.r#type.enumeration_in(table).unresolved()
             {
                 return Err(unsupported(
                     "class randomize requires integral rand properties with a supported enum domain",
@@ -294,6 +689,12 @@ impl Class {
     /// The property `name`; one the class declares hides one of a base
     /// (IEEE 1800-2023 8.14).
     pub fn property(&self, name: &str) -> Option<&Property> {
+        // The member the first name of a path denotes, a static property of
+        // a derived class hiding an instance one of a base too (8.14).
+        let root = name.split('.').next().unwrap_or(name);
+        if matches!(self.member(root), Some(Member::Static(_))) {
+            return None;
+        }
         let (index, property) = self
             .properties
             .iter()
@@ -305,6 +706,12 @@ impl Class {
 
     /// The property or member of unpacked structure type `name`.
     pub fn aggregate(&self, name: &str) -> Option<&AggregateProperty> {
+        // The member the first name of a path denotes, a static property of
+        // a derived class hiding one of a base too (8.14).
+        let root = name.split('.').next().unwrap_or(name);
+        if matches!(self.member(root), Some(Member::Static(_))) {
+            return None;
+        }
         let aggregate = self
             .aggregates
             .iter()
@@ -332,8 +739,13 @@ impl Class {
             })
     }
 
+    /// The static property `name` denotes in the class (see [`member`]):
+    /// none when an instance property of a more derived class hides it.
     pub fn static_property(&self, name: &str) -> Option<&StaticProperty> {
-        self.statics.iter().find(|property| property.name == name)
+        match self.member(name)? {
+            Member::Static(index) => Some(&self.statics[index]),
+            Member::Instance(_) | Member::Aggregate(_) => None,
+        }
     }
 
     pub fn method(&self, name: &str) -> Option<&Method> {
@@ -393,7 +805,7 @@ impl Class {
         session: &mut Session,
         ancestor: &str,
         env: &ConstEnv,
-        aliases: &HashMap<String, Type>,
+        aliases: &TypeAliases,
     ) -> bool {
         let class = self.record_lineage(tree, session, env, aliases);
         let ancestor = handle_type_id(&mut session.types, ancestor);
@@ -406,7 +818,7 @@ impl Class {
         tree: &AnalysisContext<'_>,
         session: &mut Session,
         env: &ConstEnv,
-        aliases: &HashMap<String, Type>,
+        aliases: &TypeAliases,
     ) -> HashSet<String> {
         let class = self.record_lineage(tree, session, env, aliases);
         session
@@ -425,7 +837,7 @@ impl Class {
         tree: &AnalysisContext<'_>,
         session: &mut Session,
         env: &ConstEnv,
-        aliases: &HashMap<String, Type>,
+        aliases: &TypeAliases,
     ) -> semantic_types::TyId {
         let class = handle_type_id(&mut session.types, &self.name);
         if session.types.supertypes(class).is_none() {
@@ -510,30 +922,64 @@ pub(super) fn declaration<'a>(
 ) -> Option<&'a celox_sv_syntax::ClassDeclaration> {
     let name = specializations::generic(session, name);
     let classes = &tree.declarations().classes;
-    let index = tree.spans().classes.get_or_init(|| ClassIndex {
-        path: tree.compilation_path().to_owned(),
-        by_name: classes
-            .iter()
-            .enumerate()
-            .rev()
-            .map(|(index, class)| (declared_name(tree, class), index))
-            .collect(),
-    });
-    // The names of `$unit` classes depend on the compilation path.
-    if index.path != tree.compilation_path() {
-        return classes
-            .iter()
-            .find(|class| declared_name(tree, class) == name);
+    let index = &tree.spans().classes;
+    // The name of a `$unit` class tells the compilation path too, which the
+    // file's index does not know.
+    if let Some(identifier) = unit_class_identifier(&name) {
+        return index
+            .unit
+            .get(identifier)
+            .map(|index| &classes[*index])
+            .filter(|class| declared_name(tree, class) == name);
     }
     index.by_name.get(&name).map(|index| &classes[*index])
 }
 
-/// The class declarations of a file by [`declared_name`], the first of each
-/// name, indexed once per file.
+/// Whether class declaration `declaration` of `native` declares a
+/// covergroup `member` (IEEE 1800-2023 19.4).
+pub(super) fn declares_covergroup(
+    native: &celox_sv_syntax::Declarations,
+    declaration: &celox_sv_syntax::ClassDeclaration,
+    member: &str,
+) -> bool {
+    let within = declaration.tokens.range();
+    native.covergroups.iter().any(|covergroup| {
+        within.contains(&covergroup.tokens.start)
+            && instances::normalize_identifier(&covergroup.name.spelling) == member
+    })
+}
+
+/// The class declarations of a file, the first of each name, indexed when
+/// its arenas are built: by [`declared_name`], and those of the compilation
+/// unit, whose declared names tell the compilation path too, by their
+/// identifiers.
 #[derive(Debug)]
 pub(crate) struct ClassIndex {
-    path: std::path::PathBuf,
     by_name: HashMap<String, usize>,
+    unit: HashMap<String, usize>,
+}
+
+impl ClassIndex {
+    pub(crate) fn new(native: &celox_sv_syntax::Declarations) -> Self {
+        let mut by_name = HashMap::default();
+        let mut unit = HashMap::default();
+        for (index, class) in native.classes.iter().enumerate().rev() {
+            let name = instances::normalize_identifier(&class.name.spelling);
+            match enclosing_unit(native, class.tokens) {
+                Some(enclosing) if enclosing.kind == celox_sv_syntax::UnitKind::Package => {
+                    let package = instances::normalize_identifier(&enclosing.name.spelling);
+                    by_name.insert(format!("{package}::{name}"), index);
+                }
+                Some(_) => {
+                    by_name.insert(name, index);
+                }
+                None => {
+                    unit.insert(name, index);
+                }
+            }
+        }
+        Self { by_name, unit }
+    }
 }
 
 /// The name of class declaration `declaration`: qualified by the package
@@ -551,13 +997,18 @@ pub(super) fn declared_name(
             instances::normalize_identifier(&unit.name.spelling)
         ),
         Some(_) => name,
-        None => {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = fxhash::FxHasher::default();
-            tree.compilation_path().hash(&mut hasher);
-            format!("{}::{name}@{:016x}", packages::UNIT, hasher.finish())
-        }
+        None => packages::unit_item_identity(tree.compilation_path(), &name),
     }
+}
+
+/// The identifier that names class `name` of the compilation unit, which
+/// [`declared_name`] made: `C` of `$unit::C@<hash>`.
+pub(super) fn unit_class_identifier(name: &str) -> Option<&str> {
+    let (identifier, hash) = name
+        .strip_prefix(packages::UNIT)?
+        .strip_prefix("::")?
+        .rsplit_once('@')?;
+    (hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(identifier)
 }
 
 /// The class declarations of the current scope, not those of the scopes
@@ -586,10 +1037,10 @@ pub(super) fn scope_classes(
     names
         .into_iter()
         .filter_map(|name| {
-            let mut class = Class::clone(session.classes.get(&name)?);
+            let mut class = Class::clone(&*laid_out(session, &name)?);
             // The types are fixed in the scope that declares the class,
             // whose names another scope does not see.
-            let (env, _) = specializations::scope(session, &name, env, &HashMap::default());
+            let (env, _) = specializations::scope(session, &name, env, &TypeAliases::default());
             let resolve = |ty: &mut Type| {
                 if let Some(resolved) = type_parameters::resolve(&tree.functions, ty.clone(), &env)
                 {
@@ -610,13 +1061,16 @@ pub(super) fn scope_classes(
 /// The classes the current scope declares as types of the scope, by the
 /// names it declares them with. A parameterized class is a type only with
 /// a specialization.
-pub(super) fn scope_class_types(tree: &AnalysisContext<'_>) -> Vec<(String, Type)> {
+pub(super) fn scope_class_types(
+    tree: &AnalysisContext<'_>,
+    table: &mut semantic_types::TyTable,
+) -> Vec<(String, Type)> {
     scope_declarations(tree)
         .filter(|declaration| declaration.parameter_ports.is_none())
         .map(|declaration| {
             (
                 instances::normalize_identifier(&declaration.name.spelling),
-                handle(&declared_name(tree, declaration)),
+                handle(table, &declared_name(tree, declaration)),
             )
         })
         .collect()
@@ -658,12 +1112,12 @@ pub(super) fn resolve(
         let class = imported
             .type_aliases
             .get(alias)
-            .and_then(Type::class)
-            .unwrap_or(alias);
+            .and_then(|ty| ty.class_in(&session.types))
+            .map_or_else(|| alias.clone(), |class| class.to_string());
         if imported.classes.iter().any(|known| known.name == class)
-            || session.foreign.contains(class)
+            || session.foreign.contains(&class)
         {
-            return Some(class.to_owned());
+            return Some(class);
         }
     }
     unit_class
@@ -675,8 +1129,8 @@ pub(super) fn resolve(
             imported
                 .type_aliases
                 .get(&alias)
-                .and_then(Type::class)
-                .map(str::to_owned)
+                .and_then(|ty| ty.class_in(&session.types))
+                .map(|class| class.to_string())
         })
         .or_else(|| match name {
             "process" => Some(super::processes::CLASS.to_owned()),
@@ -799,7 +1253,7 @@ pub(super) fn item_statics(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Vec<StaticProperty> {
     item_classes(item, tree, session)
         .into_iter()
@@ -847,9 +1301,8 @@ pub(super) fn handle_type_id(
     table: &mut semantic_types::TyTable,
     name: &str,
 ) -> semantic_types::TyId {
-    table.intern(semantic_types::TyData::Class(semantic_types::Decl::Class(
-        name.into(),
-    )))
+    let decl = table.class(name);
+    table.intern(semantic_types::TyData::Class(decl))
 }
 
 /// The handle type of class `name`, if it is a class.
@@ -859,7 +1312,7 @@ pub(super) fn handle_type(
     name: &str,
 ) -> Option<Type> {
     (builtin(name) || declaration(tree, session, name).is_some() || imported(tree, name).is_some())
-        .then(|| handle(name))
+        .then(|| handle(&mut session.types, name))
 }
 
 /// Class `name` as the scope that declares it laid it out, when the current
@@ -869,7 +1322,7 @@ fn imported(tree: &AnalysisContext<'_>, name: &str) -> Option<Rc<Class>> {
         .classes
         .iter()
         .find(|class| class.name == name)
-        .map(|class| Rc::new(class.clone()))
+        .map(|class| Rc::new((**class).clone()))
 }
 
 /// The classes whose objects the current scope may see: those it declares
@@ -886,8 +1339,18 @@ pub(super) fn visible_classes(tree: &AnalysisContext<'_>, session: &mut Session)
     names
 }
 
-/// The handle type of class `name`.
-pub(super) fn handle(name: &str) -> Type {
+/// The handle type of class `name`, bound to its semantic type in `table`:
+/// a handle names its class whatever scope reads it.
+pub(super) fn handle(table: &mut semantic_types::TyTable, name: &str) -> Type {
+    let mut ty = handle_shape(name);
+    let id = handle_type_id(table, name);
+    ty.binding.set(table, id);
+    ty
+}
+
+/// [`handle`] without its semantic type, for the built-in types of
+/// [`super::type_binding::builtin_type`], which their readers bind.
+pub(super) fn handle_shape(name: &str) -> Type {
     let mut ty = Type::new(
         // A semaphore is a heap object, which collection reclaims.
         if name == super::processes::CLASS {
@@ -906,16 +1369,31 @@ pub(super) fn handle(name: &str) -> Type {
     ty
 }
 
+/// Class `name` as it was laid out, unless the scope that declares it has
+/// recorded other tables since: a layout in tables the scope has replaced,
+/// such as those before its constants were all known, is not served again.
+fn laid_out(session: &Session, name: &str) -> Option<Rc<Class>> {
+    let (class, recording) = session.classes.get(name)?;
+    (*recording == specializations::declaring_recording(session, name)).then(|| class.clone())
+}
+
+/// Keep `class`, laid out as class `name`, with the recording of the tables
+/// of its declaring scope it was laid out in.
+fn keep_layout(session: &mut Session, name: &str, class: Rc<Class>) {
+    let recording = specializations::declaring_recording(session, name);
+    session.classes.insert(name.to_owned(), (class, recording));
+}
+
 /// The class `name`, laid out with its bases.
 pub(super) fn class(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     name: &str,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Rc<Class>> {
-    if let Some(class) = session.classes.get(name) {
-        return Ok(class.clone());
+    if let Some(class) = laid_out(session, name) {
+        return Ok(class);
     }
     shared_class(
         tree,
@@ -932,12 +1410,33 @@ pub(super) fn shared_class(
     tree: &AnalysisContext<'_>,
     name: &str,
     env: &SharedEnv,
-    aliases: &SharedMap<Type>,
+    aliases: &SharedAliases,
     session: &mut Session,
 ) -> Converted<Rc<Class>> {
-    if let Some(class) = session.classes.get(name) {
-        return Ok(class.clone());
+    if let Some(class) = laid_out(session, name) {
+        return Ok(class);
     }
+    // The types the class declares are those of this specialization.
+    let Some(tokens) = declaration(tree, session, name).map(|declaration| declaration.tokens)
+    else {
+        return lay_out_shared_class(tree, name, env, aliases, session);
+    };
+    session
+        .class_scopes
+        .push(types::ClassScope::new(name, tree.declarations(), tokens));
+    let class = lay_out_shared_class(tree, name, env, aliases, session);
+    session.class_scopes.pop();
+    class
+}
+
+/// [`shared_class`] of a class not laid out yet.
+fn lay_out_shared_class(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    env: &SharedEnv,
+    aliases: &SharedAliases,
+    session: &mut Session,
+) -> Converted<Rc<Class>> {
     // A class of another scope is laid out in its own scope, where the
     // names it uses are declared.
     let declaration = declaration(tree, session, name).filter(|declaration| {
@@ -947,10 +1446,43 @@ pub(super) fn shared_class(
     });
     let Some(declaration) = declaration else {
         let class = imported(tree, name).ok_or_else(|| unsupported(format!("class `{name}`")))?;
-        session.classes.insert(name.to_owned(), class.clone());
+        keep_layout(session, name, class.clone());
         return Ok(class);
     };
-    let (scope_env, scope_aliases) = specializations::shared_scope(session, name, env, aliases);
+    // It is laid out in the tables of the scope that declares it, not in
+    // those of the scope that first names it, such as the method of another
+    // class with names of its own (IEEE 1800-2023 8.13, 8.25).
+    let declaring = specializations::declaring_tables(session, name);
+    let (env, aliases) = declaring
+        .as_ref()
+        .map_or((env, aliases), |(env, aliases)| (env, aliases));
+    let (mut scope_env, mut scope_aliases) =
+        specializations::shared_scope(session, name, env, aliases);
+    // A class no specialization records declares its typedefs and
+    // parameters in its body, which hide a type or constant of that name in
+    // the tables it is laid out in, such as one of a class whose method
+    // names it (IEEE 1800-2023 8.13, 8.25).
+    if specializations::lookup(session, name).is_none() {
+        let native = tree.declarations();
+        for &id in &declaration.type_aliases {
+            let own = instances::normalize_identifier(&native.type_alias(id).name.spelling);
+            if scope_aliases.contains_key(&own) {
+                scope_aliases.remove(&own);
+            }
+        }
+        for &id in &declaration.parameters {
+            for parameter in &native.parameter_declaration(id).parameters {
+                let own = instances::normalize_identifier(&parameter.name.spelling);
+                if matches!(parameter.kind, celox_sv_syntax::ParameterKind::Type { .. }) {
+                    if scope_aliases.contains_key(&own) {
+                        scope_aliases.remove(&own);
+                    }
+                } else if scope_env.contains_key(&own) {
+                    scope_env.remove(&own);
+                }
+            }
+        }
+    }
     // The types of the class are bound in one context of its scope, which
     // the declarations of the scope around it are discovered without.
     let outer = PackedDimensions {
@@ -962,6 +1494,9 @@ pub(super) fn shared_class(
         const_env: scope_env.clone(),
         type_aliases: scope_aliases.clone(),
         class_base: Some(specializations::class_base(session, name, &outer)),
+        // The property types name the types visible in the class body.
+        type_declarations: specializations::lookup(session, name)
+            .map(|specialization| specialization.type_declarations.clone()),
         ..PackedDimensions::default()
     };
     let (env, aliases) = (&*scope_env, &*scope_aliases);
@@ -1002,15 +1537,17 @@ pub(super) fn shared_class(
                 Some(ty) => ty,
                 None => {
                     type_binding::binding::bind_in(base.data_type, native, tree, session, &context)?
-                        .and_then(|ty| ty.class().map(str::to_owned))
+                        .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
                         .ok_or_else(|| unsupported("base class type"))?
                 }
             };
+            // The base is declared outside the class, so the names the
+            // class declares do not reach it.
             Some(shared_class(
                 tree,
                 &ty,
-                &scope_env,
-                &scope_aliases,
+                &outer.const_env,
+                &outer.type_aliases,
                 session,
             )?)
         }
@@ -1028,15 +1565,21 @@ pub(super) fn shared_class(
         .as_ref()
         .map(|base| base.statics.clone())
         .unwrap_or_default();
+    let mut static_slots = base
+        .as_ref()
+        .map(|base| base.static_slots.clone())
+        .unwrap_or_default();
+    let lineage = std::iter::once(name.to_owned())
+        .chain(base.iter().flat_map(|base| base.lineage.iter().cloned()))
+        .collect::<Vec<_>>();
     let mut size = base.as_ref().map_or(0, |base| base.size);
     for property in &declaration.properties {
         if property.declaration.constant && (property.qualifiers.rand || property.qualifiers.randc)
         {
             return Err(unsupported("const random class property"));
         }
-        if property.qualifiers.is_static && (property.qualifiers.rand || property.qualifiers.randc)
-        {
-            return Err(unsupported("static random class property"));
+        if property.qualifiers.is_static && property.qualifiers.randc {
+            return Err(unsupported("randc static class property"));
         }
         let ty = type_binding::binding::bind_in(
             property.declaration.data_type,
@@ -1054,14 +1597,38 @@ pub(super) fn shared_class(
                 session,
                 &context,
             )?;
-            if !ty.unpacked_ranges.is_empty() {
-                return Err(unsupported("class property with unpacked dimensions"));
-            }
+            // A fixed-size unpacked array is held in a container of its
+            // elements (see `Property::storage`).
+            let storage = if ty.unpacked_ranges.is_empty() {
+                None
+            } else {
+                if property.qualifiers.is_static {
+                    return Err(unsupported(
+                        "static class property with unpacked dimensions",
+                    ));
+                }
+                // A rand one is a random array of its size (18.4); a
+                // cyclic one would cycle each element.
+                if property.qualifiers.randc {
+                    return Err(unsupported("randc fixed-size array class property"));
+                }
+                // Its element type keeps its meaning outside the class too.
+                Some(containers::fixed_storage(
+                    &procedural::scoped_type(ty.clone(), env),
+                    &session.types,
+                    tree,
+                    &context,
+                )?)
+            };
             if ty.container.is_some() && property.declaration.constant {
                 return Err(unsupported("const dynamic container class property"));
             }
             let property_name = instances::normalize_identifier(&variable.name.spelling);
-            if let Some(aggregate) = ty.unpacked_struct() {
+            if let Some(aggregate) = ty
+                .unpacked_struct_in(&session.types)
+                .filter(|_| storage.is_none())
+                .cloned()
+            {
                 if property.qualifiers.is_static {
                     return Err(unsupported(
                         "static class property of unpacked structure type",
@@ -1092,7 +1659,18 @@ pub(super) fn shared_class(
                         position: properties.len(),
                     });
                 }
-                for leaf in aggregate.leaves() {
+                for mut leaf in aggregate.leaves() {
+                    // A leaf has the type of its member in the structure's
+                    // semantic type (7.2).
+                    if leaf.r#type.binding.get(&session.types).is_none()
+                        && let Some(id) = ty.binding.get(&session.types).and_then(|id| {
+                            leaf.path
+                                .iter()
+                                .try_fold(id, |id, member| session.types.member(id, member))
+                        })
+                    {
+                        leaf.r#type.binding.set(&session.types, id);
+                    }
                     let mut field = field(&tree.functions, &leaf.r#type, env, size)?;
                     size = field.offset + field.storage();
                     let leaf_name = leaf.name(&property_name);
@@ -1110,26 +1688,64 @@ pub(super) fn shared_class(
                         rand: false,
                         randc: false,
                         initializer: None,
+                        storage: None,
                     });
                 }
                 continue;
             }
             if property.qualifiers.is_static {
-                statics.retain(|known| known.name != property_name);
+                let rand = property.qualifiers.rand;
+                let variable_name = Class::subroutine_name(name, &property_name);
+                statics.retain(|known| known.mode_of.is_some() || known.name != property_name);
                 statics.push(StaticProperty {
                     local: property.qualifiers.local,
                     protected: property.qualifiers.protected,
-                    variable: Class::subroutine_name(name, &property_name),
-                    name: property_name,
+                    variable: variable_name.clone(),
+                    name: property_name.clone(),
                     owner: name.to_owned(),
                     r#type: ty.clone(),
                     initializer: variable.value,
+                    rand,
+                    mode_of: None,
                 });
+                if rand {
+                    // The bit and the field are the class's own: a derived
+                    // class that redeclares the property solves both.
+                    let mode = static_rand_mode_variable(name, &property_name);
+                    statics.push(StaticProperty {
+                        local: true,
+                        protected: false,
+                        variable: mode.clone(),
+                        name: static_rand_mode(&property_name),
+                        owner: name.to_owned(),
+                        r#type: unsigned_type(1),
+                        initializer: None,
+                        rand: false,
+                        mode_of: Some(property_name.clone()),
+                    });
+                    // The slot is laid out as an instance property of the
+                    // type is, and named by no member (see `StaticSlot`).
+                    let mut field = field(&tree.functions, &ty, env, size)?;
+                    size = field.offset + field.storage();
+                    field.key = crate::system_functions::ChangeKey::Property(property_key(
+                        name,
+                        &static_rand_slot(&property_name),
+                    ));
+                    static_slots.push(StaticSlot {
+                        variable: variable_name,
+                        mode,
+                        r#type: procedural::scoped_type(ty.clone(), env),
+                        field,
+                    });
+                }
                 continue;
             }
             let owner = name.to_owned();
             let name = property_name;
-            let mut field = field(&tree.functions, &ty, env, size)?;
+            let layout_type = storage
+                .as_ref()
+                .map_or_else(|| ty.clone(), |storage| containers::of((**storage).clone()));
+            let mut field = field(&tree.functions, &layout_type, env, size)?;
             size = field.offset + field.storage();
             field.key = crate::system_functions::ChangeKey::Property(property_key(&owner, &name));
             properties.push(Property {
@@ -1145,6 +1761,7 @@ pub(super) fn shared_class(
                 rand: property.qualifiers.rand,
                 randc: property.qualifiers.randc,
                 initializer: variable.value,
+                storage,
             });
         }
     }
@@ -1160,7 +1777,12 @@ pub(super) fn shared_class(
         let method_name = instances::normalize_identifier(&subroutine.name.spelling);
         if matches!(
             method_name.as_str(),
-            "randomize" | "srandom" | "rand_mode" | "constraint_mode"
+            "randomize"
+                | "srandom"
+                | "rand_mode"
+                | "constraint_mode"
+                | "get_randstate"
+                | "set_randstate"
         ) {
             return Err(unsupported(
                 "overriding built-in class randomization methods",
@@ -1249,11 +1871,58 @@ pub(super) fn shared_class(
         .as_ref()
         .map(|base| base.constraints.clone())
         .unwrap_or_default();
+    // A constraint reads a static property as an input of the program, and
+    // solves a static rand property in the object's slot for it (see
+    // `StaticProperty::rand`).
+    let static_inputs = static_inputs(
+        name,
+        base.as_ref().map(|base| base.static_inputs.as_slice()),
+        &statics,
+        tree,
+        session,
+        env,
+    );
+    let scopes = scope_identifiers(tree, session, &lineage);
+    let names = constraints::Names {
+        lineage: &lineage,
+        scopes: &scopes,
+        aggregates: &aggregates,
+        statics: &statics,
+        inputs: &static_inputs,
+        slots: &static_slots,
+        receiver: None,
+    };
     let scope = (name.to_owned(), base.as_ref().map(|base| base.name.clone()));
     session.constraint_owners.push(scope.clone());
     session.constraint_scopes.push(scope);
-    for block in &declaration.constraints {
+    session.constraint_methods.push((
+        methods.clone(),
+        base.as_ref()
+            .map(|base| base.constraint_calls.clone())
+            .unwrap_or_default(),
+        0,
+    ));
+    // The classes above this one, whose constraints are below its own
+    // (IEEE 1800-2023 18.5.13.1).
+    let depth = base.as_ref().map_or(0, |base| base.depth + 1);
+    let mut static_constraints = base
+        .as_ref()
+        .map(|base| base.static_constraints.clone())
+        .unwrap_or_default();
+    for (position, block) in declaration.constraints.iter().enumerate() {
         let block_name = block.name.spelling.clone();
+        // The index the block takes, which the calls it makes record; a
+        // block it overrides makes none (IEEE 1800-2023 18.5.11).
+        let block_index = constraints
+            .iter()
+            .position(|(name, _)| *name == block_name)
+            .unwrap_or(constraints.len()) as u32;
+        if let Some((_, calls, current)) = session.constraint_methods.last_mut() {
+            *current = block_index;
+            for call in calls.iter_mut().filter(|call| call.block == block_index) {
+                call.live = false;
+            }
+        }
 
         let expressions = block
             .expressions
@@ -1262,18 +1931,50 @@ pub(super) fn shared_class(
             .and_then(|expressions| {
                 expressions
                     .iter()
-                    .map(|&id| constraints::bind(id, tree, session, &properties, env))
+                    .enumerate()
+                    .map(|(index, &id)| {
+                        constraints::bind_inputs(
+                            id,
+                            tree,
+                            session,
+                            &properties,
+                            &names,
+                            env,
+                            &HashMap::default(),
+                        )
+                        .map(|constraint| {
+                            constraints::prioritize(
+                                constraint,
+                                constraints::class_priority(depth, position, index),
+                            )
+                        })
+                    })
                     .collect()
             });
         // Constraint indices survive overrides, including calls via base handles.
-        if let Some((_, inherited)) = constraints.iter_mut().find(|(name, _)| *name == block_name) {
-            *inherited = expressions;
-        } else {
-            constraints.push((block_name, expressions));
+        let index = match constraints.iter().position(|(name, _)| *name == block_name) {
+            Some(index) => {
+                constraints[index].1 = expressions;
+                index
+            }
+            None => {
+                constraints.push((block_name.clone(), expressions));
+                constraints.len() - 1
+            }
+        } as u32;
+        // A static block has one constraint mode, which every object of
+        // the class that declares it shares (IEEE 1800-2023 18.5.11); a
+        // block that overrides it is the overriding class's.
+        static_constraints.retain(|(known, _)| *known != index);
+        if block.is_static {
+            static_constraints.push((index, class_id(name)));
         }
     }
     session.constraint_owners.pop();
     session.constraint_scopes.pop();
+    let (_, constraint_calls, _) = session.constraint_methods.pop().unwrap_or_default();
+    let (property_bits, slot_bits) =
+        Class::selection_bits(base.as_deref(), properties.len(), static_slots.len());
     let mut class = Class {
         name: name.to_owned(),
         id: class_id(name),
@@ -1289,13 +1990,21 @@ pub(super) fn shared_class(
         base_properties,
         aggregates,
         statics,
+        static_inputs,
+        depth,
+        static_slots,
+        property_bits,
+        slot_bits,
+        lineage,
+        static_constraints,
+        constraint_calls,
         methods,
         declarations: Vec::new(),
         size: size.max(1),
     };
     class.program = class.build_constraint_program(tree, session, env);
     let class = Rc::new(class);
-    session.classes.insert(name.to_owned(), class.clone());
+    keep_layout(session, name, class.clone());
     Ok(class)
 }
 
@@ -1306,11 +2015,11 @@ fn interface_name(
     session: &mut Session,
     interface: celox_sv_syntax::TypeId,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<String> {
     let native = tree.declarations();
     let name = type_binding::procedural_type(interface, native, tree, session, env, aliases)?
-        .and_then(|ty| ty.class().map(str::to_owned))
+        .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
         .ok_or_else(|| unsupported("implemented interface class type"))?;
     // An interface class of another scope is known by its layout.
     let interface = match imported(tree, &name) {
@@ -1409,11 +2118,19 @@ fn interface_class(
         base_properties: 0,
         aggregates: Vec::new(),
         statics: Vec::new(),
+        static_inputs: Vec::new(),
+        depth: 0,
+        static_slots: Vec::new(),
+        property_bits: Vec::new(),
+        slot_bits: Vec::new(),
+        lineage: vec![name.to_owned()],
+        static_constraints: Vec::new(),
+        constraint_calls: Vec::new(),
         methods,
         declarations,
         size: 1,
     });
-    session.classes.insert(name.to_owned(), class.clone());
+    keep_layout(session, name, class.clone());
     Ok(class)
 }
 
@@ -1544,7 +2261,11 @@ pub(super) fn field(
         TypeKind::String => (HANDLE_WIDTH, false, Some(HandleProperty::String)),
         TypeKind::Object => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::Process | TypeKind::Event => (HANDLE_WIDTH, false, None),
-        TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => {
+        TypeKind::Chandle
+        | TypeKind::Bit
+        | TypeKind::Logic
+        | TypeKind::Reg
+        | TypeKind::Implicit => {
             let shape = casts::expr_type_from_type(functions, ty, env)
                 .ok_or_else(|| unsupported("class property type"))?;
             (shape.width, shape.signed, None)
@@ -1601,7 +2322,7 @@ fn object_classes(
     session: &mut Session,
     ancestor: &str,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Vec<Rc<Class>>> {
     let concrete = ConcreteClasses::of(tree, session, env, aliases);
     let mut classes = Vec::new();
@@ -1636,7 +2357,7 @@ impl ConcreteClasses {
         tree: &AnalysisContext<'_>,
         session: &mut Session,
         env: &ConstEnv,
-        aliases: &HashMap<String, Type>,
+        aliases: &TypeAliases,
     ) -> Rc<Self> {
         let generation =
             |session: &Session| (session.classes.len(), session.class_specializations.len());
@@ -1678,17 +2399,22 @@ pub(super) fn rand_member_classes(
     session: &mut Session,
     class: &Class,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Vec<Rc<Class>>> {
-    let handle_classes = |class: &Class| {
+    let handle_classes = |class: &Class, table: &semantic_types::TyTable| {
         class
             .properties
             .iter()
-            .filter(|property| property.rand_object())
-            .filter_map(|property| property.r#type.class().map(str::to_owned))
+            .filter(|property| property.rand_object(table))
+            .filter_map(|property| {
+                property
+                    .r#type
+                    .class_in(table)
+                    .map(|class| class.to_string())
+            })
             .collect::<Vec<_>>()
     };
-    let mut pending = handle_classes(class);
+    let mut pending = handle_classes(class, &session.types);
     let mut seen = HashSet::default();
     let mut ids = HashSet::default();
     let mut classes = Vec::new();
@@ -1698,7 +2424,7 @@ pub(super) fn rand_member_classes(
         }
         for member in object_classes(tree, session, &name, env, aliases)? {
             if ids.insert(member.id) {
-                pending.extend(handle_classes(&member));
+                pending.extend(handle_classes(&member, &session.types));
                 classes.push(member);
             }
         }
@@ -1729,7 +2455,7 @@ pub(super) fn dispatch_targets(
     owner: &str,
     method: &str,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Vec<(String, Vec<u32>)>> {
     let mut targets: Vec<(String, Vec<u32>)> = Vec::new();
     for class in object_classes(tree, session, owner, env, aliases)? {
@@ -1752,7 +2478,7 @@ pub(super) fn cast_targets(
     session: &mut Session,
     name: &str,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Vec<u32>> {
     Ok(object_classes(tree, session, name, env, aliases)?
         .iter()

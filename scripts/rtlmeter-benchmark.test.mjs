@@ -19,7 +19,7 @@ function report(name = "e902") {
     rtlmeterRevision: manifest.revision, celoxCommit: commit, dirty: false,
     requestedSamples: 3, maxCycles: spec.maxCycles, host: { architecture: 'x86_64', cpu: 'test CPU', affinityCpu: 0 },
     xezimRelease: locked.original.ref, xezimRevision: locked.locked.rev,
-    versions: { celox: 'celox 0.12.0', verilator: 'Verilator 5.052', xezim: `xezim version ${locked.original.ref.replace(/^v/, '')}\ngit unknown` },
+    versions: { celox: 'celox 0.12.0', verilator: 'Verilator 5.054', xezim: `xezim version ${locked.original.ref.replace(/^v/, '')}\ngit unknown` },
     binarySha256: { celox: 'a'.repeat(64), verilator: 'b'.repeat(64), xezim: 'c'.repeat(64) },
     configuration: { celox: 'tiered hotspot JIT O2; threads=1; cold source-to-finish',
       verilator: '--binary --timing --assert; -O3; C++ -O3; -j1; fresh Mdir',
@@ -77,7 +77,7 @@ test('RTLMeter runs daily/manual with locked tools, raw failures and master-only
   assert.match(workflow, /fail-fast: false/);
   assert.match(workflow, /case: \[e902, e906, e203\]/);
   assert.match(workflow, /nix build --no-update-lock-file \.#xezim/);
-  assert.match(workflow, /revision: ea338be98e1e838d3518809ce8899f85a009963c/);
+  assert.match(workflow, /revision: bbb60a403932a9f695cb6ff001ceb73de6ad9234/);
   assert.match(workflow, /needs: comparison\n    if: github.ref == 'refs\/heads\/master'/);
   assert.doesNotMatch(workflow, /continue-on-error|--no-verify/);
   assert.match(workflow, /if: always\(\)[\s\S]+retention-days: 30/);
@@ -109,7 +109,7 @@ function steadyReport(name = "e902") {
     rtlmeterRevision: steadyManifest.revision, celoxCommit: commit, dirty: false,
     requestedSamples: 3, maxCycles: spec.maxCycles, host: { architecture: 'x86_64', cpu: 'test CPU', affinityCpu: 0 },
     xezimRelease: locked.original.ref, xezimRevision: locked.locked.rev,
-    versions: { celox: 'celox 0.12.0', verilator: 'Verilator 5.052', xezim: `xezim version ${locked.original.ref.replace(/^v/, '')}\ngit unknown` },
+    versions: { celox: 'celox 0.12.0', verilator: 'Verilator 5.054', xezim: `xezim version ${locked.original.ref.replace(/^v/, '')}\ngit unknown` },
     binarySha256: { celox: 'a'.repeat(64), verilator: 'b'.repeat(64), xezim: 'c'.repeat(64) },
     configuration: { celox: 'native O2; threads=1; steady-state simulation',
       verilator: '--binary --timing --assert; -O3; C++ -O3; -j1; steady-state simulation',

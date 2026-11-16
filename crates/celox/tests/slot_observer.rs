@@ -1,7 +1,6 @@
 //! A host that observes the regions inside a time slot, as a VPI driver
 //! does (#1730): edges before the flip-flop domains commit, and settled
 //! slots.
-#![cfg(feature = "systemverilog")]
 
 use std::path::Path;
 use std::sync::mpsc;

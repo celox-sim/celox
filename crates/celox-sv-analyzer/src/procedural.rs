@@ -59,6 +59,18 @@ pub enum StmtBase<E, L> {
         rhs: E,
         nonblocking: bool,
     },
+    /// `assign lhs = rhs;` in a procedure: the procedural continuous
+    /// assignment of a variable (IEEE 1800-2023 10.6.1). The analyzer lowers
+    /// it with the module's other writes of the variable
+    /// (`ast::procedural_assigns`), so it does not reach the IR.
+    ProceduralAssign {
+        lhs: L,
+        rhs: E,
+    },
+    /// `deassign lhs;` (10.6.1), lowered with [`StmtBase::ProceduralAssign`].
+    Deassign {
+        lhs: L,
+    },
     /// A nonblocking assignment scheduled by an intra-assignment delay.
     /// The control describes the delay; it does not suspend the caller.
     DelayedNonblocking {
@@ -150,6 +162,18 @@ pub enum StmtBase<E, L> {
     },
     WaitFork,
     DisableFork,
+    /// A named block that a `disable` in its body can leave (IEEE
+    /// 1800-2023 9.6.2). Only blocks a `disable` names are kept; other
+    /// blocks are flattened into their enclosing statement list. `id`
+    /// names the declaration among those of every scope a module lowers
+    /// (see `BodyBuilder::block_id`).
+    Block {
+        id: u64,
+        body: Vec<StmtBase<E, L>>,
+    },
+    /// `disable block`: leave the enclosing named block `id`, ending its
+    /// execution in this process (9.6.2).
+    DisableBlock(u64),
     /// An internal scheduling boundary in the current Active region (4.7).
     DeferActive,
     /// Internal region boundary of a concurrent assertion monitor.
@@ -320,6 +344,11 @@ impl<E, L> StmtBase<E, L> {
                 rhs: fe(rhs),
                 nonblocking,
             },
+            StmtBase::ProceduralAssign { lhs, rhs } => StmtBase::ProceduralAssign {
+                lhs: fl(lhs),
+                rhs: fe(rhs),
+            },
+            StmtBase::Deassign { lhs } => StmtBase::Deassign { lhs: fl(lhs) },
             StmtBase::If {
                 condition,
                 then_body,
@@ -440,11 +469,151 @@ impl<E, L> StmtBase<E, L> {
             StmtBase::DeferActive => StmtBase::DeferActive,
             StmtBase::WaitFork => StmtBase::WaitFork,
             StmtBase::DisableFork => StmtBase::DisableFork,
+            StmtBase::Block { id, body: stmts } => StmtBase::Block {
+                id,
+                body: body(stmts, fe, fl),
+            },
+            StmtBase::DisableBlock(id) => StmtBase::DisableBlock(id),
             StmtBase::Wait(condition) => StmtBase::Wait(fe(condition)),
             StmtBase::WaitImplicit { reads, always_comb } => StmtBase::WaitImplicit {
                 reads: body(reads, fe, fl),
                 always_comb,
             },
+        }
+    }
+
+    /// Visit every expression and lvalue of this statement tree, the reads
+    /// of an `@*` included. The names of the subroutines a call statement
+    /// calls are passed to `fcall`.
+    pub fn visit<'a>(
+        &'a self,
+        fe: &mut impl FnMut(&'a E),
+        fl: &mut impl FnMut(&'a L),
+        fcall: &mut impl FnMut(&'a str),
+    ) {
+        fn body<'a, E, L>(
+            stmts: &'a [StmtBase<E, L>],
+            fe: &mut impl FnMut(&'a E),
+            fl: &mut impl FnMut(&'a L),
+            fcall: &mut impl FnMut(&'a str),
+        ) {
+            for stmt in stmts {
+                stmt.visit(fe, fl, fcall);
+            }
+        }
+        match self {
+            StmtBase::DelayedNonblocking {
+                control,
+                assignment,
+            } => {
+                control.visit(fe, fl, fcall);
+                assignment.visit(fe, fl, fcall);
+            }
+            StmtBase::Assign { lhs, rhs, .. } | StmtBase::ProceduralAssign { lhs, rhs } => {
+                fl(lhs);
+                fe(rhs);
+            }
+            StmtBase::Deassign { lhs } => fl(lhs),
+            StmtBase::AssignConcat { parts, rhs, .. } => {
+                parts.iter().for_each(&mut *fl);
+                fe(rhs);
+            }
+            StmtBase::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                fe(condition);
+                body(then_body, fe, fl, fcall);
+                body(else_body, fe, fl, fcall);
+            }
+            StmtBase::Case {
+                selector,
+                items,
+                default,
+                ..
+            } => {
+                fe(selector);
+                for item in items {
+                    for label in &item.labels {
+                        match label {
+                            CaseLabel::Value(value) => fe(value),
+                            CaseLabel::Range { low, high } => {
+                                fe(low);
+                                fe(high);
+                            }
+                        }
+                    }
+                    body(&item.body, fe, fl, fcall);
+                }
+                if let Some(default) = default {
+                    body(default, fe, fl, fcall);
+                }
+            }
+            StmtBase::Loop {
+                kind,
+                init,
+                condition,
+                step,
+                body: loop_body,
+            } => {
+                if let LoopKind::Repeat(count) = kind {
+                    fe(count);
+                }
+                body(init, fe, fl, fcall);
+                if let Some(condition) = condition {
+                    fe(condition);
+                }
+                body(step, fe, fl, fcall);
+                body(loop_body, fe, fl, fcall);
+            }
+            StmtBase::Fork { branches, .. } => {
+                for branch in branches {
+                    body(branch, fe, fl, fcall);
+                }
+            }
+            StmtBase::Break | StmtBase::Continue => {}
+            StmtBase::Return(value) => {
+                if let Some(value) = value {
+                    fe(value);
+                }
+            }
+            StmtBase::Call { name, args, .. } => {
+                fcall(name);
+                for arg in args.iter().flatten() {
+                    fe(arg);
+                }
+            }
+            StmtBase::Eval(expr) => fe(expr),
+            StmtBase::SystemTask { args, .. } => {
+                for arg in args {
+                    if let SystemTaskArg::Expr(expr) = arg {
+                        fe(expr);
+                    }
+                }
+            }
+            StmtBase::Local { init, .. } => {
+                if let Some(init) = init {
+                    fe(init);
+                }
+            }
+            StmtBase::Delay { amount, .. } => fe(amount),
+            StmtBase::WaitEvent(items) => {
+                for item in items {
+                    fe(&item.expr);
+                    if let Some(iff) = &item.iff {
+                        fe(iff);
+                    }
+                }
+            }
+            StmtBase::Block { body: stmts, .. } => body(stmts, fe, fl, fcall),
+            StmtBase::DeferActive
+            | StmtBase::WaitFork
+            | StmtBase::DisableFork
+            | StmtBase::DisableBlock(_)
+            | StmtBase::AssertionRegion { .. } => {}
+            StmtBase::Wait(condition) => fe(condition),
+            StmtBase::WaitImplicit { reads, .. } => body(reads, fe, fl, fcall),
         }
     }
 
@@ -474,10 +643,11 @@ impl<E, L> StmtBase<E, L> {
                 control.visit_mut(fe, fl, fname);
                 assignment.visit_mut(fe, fl, fname);
             }
-            StmtBase::Assign { lhs, rhs, .. } => {
+            StmtBase::Assign { lhs, rhs, .. } | StmtBase::ProceduralAssign { lhs, rhs } => {
                 fl(lhs);
                 fe(rhs);
             }
+            StmtBase::Deassign { lhs } => fl(lhs),
             StmtBase::AssignConcat { parts, rhs, .. } => {
                 parts.iter_mut().for_each(&mut *fl);
                 fe(rhs);
@@ -571,9 +741,11 @@ impl<E, L> StmtBase<E, L> {
                     }
                 }
             }
+            StmtBase::Block { body: stmts, .. } => body(stmts, fe, fl, fname),
             StmtBase::DeferActive
             | StmtBase::WaitFork
             | StmtBase::DisableFork
+            | StmtBase::DisableBlock(_)
             | StmtBase::AssertionRegion { .. } => {}
             StmtBase::Wait(condition) => fe(condition),
             StmtBase::WaitImplicit { reads, .. } => body(reads, fe, fl, fname),
@@ -624,6 +796,7 @@ impl<E, L> StmtBase<E, L> {
                     visit(branch);
                 }
             }
+            StmtBase::Block { body, .. } => visit(body),
             _ => {}
         }
     }
@@ -688,6 +861,7 @@ impl<E, L> StmtBase<E, L> {
                     visit(branch);
                 }
             }
+            StmtBase::Block { body, .. } => visit(body),
             _ => {}
         }
     }
@@ -700,6 +874,11 @@ pub struct LocalVariableBase<T> {
     pub name: String,
     pub source_name: String,
     pub r#type: T,
+    /// Whether its subroutine and declaration name it, so that every
+    /// analysis lowering the subroutine names it the same; otherwise the
+    /// count of one analysis named it. Escaped identifiers may hold any
+    /// character, so the name itself cannot tell.
+    pub owned: bool,
 }
 
 /// A function or task; tasks may suspend their calling process.

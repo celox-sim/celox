@@ -35,7 +35,7 @@ workload recipes are in `benchmarks/collection.json`. The logikbench Veryl port
 is pinned to `6179df1cd15e13600a36621fc6b57de521a93d9f`.
 
 ```sh
-cargo build --release --locked -p celox-vpi --bin celox
+cargo build --release --locked -p celox --bin celox
 cargo build --release --locked -p celox-bench --bin veryl-heliodor
 node scripts/benchmark-collection.mjs list
 node scripts/benchmark-collection.mjs prepare all work/circuits/sources

@@ -19,6 +19,23 @@ impl Plusargs {
         })
     }
 
+    /// The text after the matched prefix of a `%s` query, for a `string`
+    /// target; no value for an unmatched query.
+    pub fn text(&self, query: &[u8]) -> Result<Option<&[u8]>, String> {
+        let percent = query
+            .iter()
+            .position(|b| *b == b'%')
+            .ok_or("$value$plusargs requires a conversion")?;
+        let mut format = &query[percent + 1..];
+        if format.first() == Some(&b'0') {
+            format = &format[1..];
+        }
+        if !matches!(format, [b's' | b'S']) {
+            return Err("$value$plusargs into a string requires the %s conversion".into());
+        }
+        Ok(self.find(&query[..percent]))
+    }
+
     /// Return no value for an unmatched query, preserving the caller's target.
     /// A conversion containing an illegal character returns an all-X value.
     pub fn value(&self, query: &[u8], width: usize) -> Result<Option<(BigUint, BigUint)>, String> {

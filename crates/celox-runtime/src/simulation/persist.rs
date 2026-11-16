@@ -62,6 +62,10 @@ impl<B: SimBackend> SimulationState<B> {
         self.process_wakeups.clone_from(&snapshot.process_wakeups);
         self.process_state.clone_from(&snapshot.process_state);
         self.rebuild_activation_models();
+        // A checkpoint is taken between steps, when the children released
+        // in the last one have all started; those a `$stop`, `$finish` or
+        // error left to start here are not the checkpoint's.
+        self.spawned.clear();
         self.declarations_pending = snapshot.declarations_pending;
         self.host_pending = snapshot.host_pending;
         self.finished = snapshot.finished;
@@ -194,6 +198,7 @@ impl<B: SimBackend> SimulationState<B> {
             .collect();
         self.process_state = parts.process_state;
         self.rebuild_activation_models();
+        self.spawned.clear();
         self.declarations_pending = self.process_wakeups.iter().any(|Reverse((_, index))| {
             self.model.processes[*index].kind == celox_design::ProcessKind::Initializer
         }) || self.process_state.ready.iter().any(|&index| {

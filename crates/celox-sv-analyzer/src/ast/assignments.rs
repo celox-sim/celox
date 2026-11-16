@@ -215,6 +215,11 @@ pub(super) fn union_member(
     else {
         return Ok(false);
     };
+    // A container element of unpacked structure type, such as `q[i][j]` of
+    // a queue of queues, whose shape the operand's does not describe.
+    if containers::native_struct_element(*receiver, native, tree, session, dims)?.is_some() {
+        return Ok(false);
+    }
     let Some(shape) = dimensions::operand_shape(*receiver, tree, session, dims)? else {
         return Ok(false);
     };

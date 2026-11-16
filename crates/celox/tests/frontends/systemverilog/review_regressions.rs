@@ -93,12 +93,6 @@ fn rejects_self_reads_hidden_in_comb_function_calls() {
     );
 }
 
-sv_backends! {
-    fn nested_block_local_declarations_shadow_ports(sim) {
-        @case "synthesizable::nested_block_locals_shadow_ports";
-    }
-}
-
 #[test]
 fn substitutes_prior_comb_values_into_function_bodies() {
     let source = r#"
@@ -413,7 +407,7 @@ fn rejects_overlapping_always_ff_variable_drivers() {
 #[test]
 fn rejects_loop_indices_shared_with_always_ff() {
     // Only plain always processes may share a variable (IEEE 1800-2023
-    // 9.2.2.4); nonblocking writes from several processes stay rejected.
+    // 9.2.2.4): one written by an `always_ff` stays rejected.
     for (first, second) in [
         ("always_ff", "always_ff"),
         ("always_ff", "always"),
@@ -436,20 +430,6 @@ fn rejects_loop_indices_shared_with_always_ff() {
             "{first}/{second}: unexpected error: {error}"
         );
     }
-    let error = cranelift_build_error(
-        r#"
-        module Top(input logic clk, a, b, output wire y);
-            logic q;
-            always @(posedge clk) q <= a;
-            always @(posedge clk) q = b;
-            assign y = q;
-        endmodule
-        "#,
-    );
-    assert!(
-        error.contains("multiple variable drivers for `q`"),
-        "unexpected error: {error}"
-    );
 }
 
 #[test]
@@ -699,7 +679,7 @@ fn rejects_generate_local_typedefs_instead_of_leaking_them() {
         "#,
     );
     assert!(
-        error.contains("combinational expression assigned to `y`"),
+        error.contains("`T` is not declared"),
         "unexpected error: {error}"
     );
 }
@@ -4276,12 +4256,46 @@ fn substitutes_enum_members_after_expanding_instance_connection_functions() {
     assert_eq!(sim.get(sim.signal("y")), 2u8.into());
 }
 
+// `name[N]` declares `name0` to `nameN-1` and `name[N:M]` `nameN` to `nameM`
+// (IEEE 1800-2023 6.19.2); a value initializes the first of them.
 #[test]
-fn rejects_ranged_enum_members_instead_of_registering_the_base_name() {
+fn ranged_enum_members_declare_their_sequence() {
+    let source = r#"
+        module Top(output logic [31:0] first, second, after, up, down, last, more);
+            typedef enum logic [63:0] {
+                S[2] = 4, Next, Up[3:5] = 10, Down[3'd5:'h3], Last,
+                // Sized numbers are truncated to their size; a wide signed
+                // unsized one keeps a sign bit above its value (5.7.1).
+                B[8'h1_0000_0000_0000_0001], C['sh1_0000_0000:'sh1_0000_0000]
+            } E;
+            assign more = {B0[15:0], C4294967296[15:0]};
+            assign first = S0;
+            assign second = S1;
+            assign after = Next;
+            assign up = {Up3[7:0], Up4[7:0], Up5[7:0], 8'h0};
+            assign down = {Down5[7:0], Down4[7:0], Down3[7:0], 8'h0};
+            assign last = Last;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("ranged_enum.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    for (name, value) in [
+        ("first", 4u32),
+        ("second", 5),
+        ("after", 6),
+        ("up", 0x0a0b_0c00),
+        ("down", 0x0d0e_0f00),
+        ("last", 16),
+        ("more", 0x0011_0012),
+    ] {
+        assert_eq!(sim.get(sim.signal(name)), value.into(), "{name}");
+    }
+    // A range that is not a number of members is not expanded.
     let error = cranelift_build_error(
         r#"
         module Top(output logic [31:0] y);
-            typedef enum int { S[2] = 4 } E;
+            typedef enum int { S[2'bx1] = 4 } E;
             assign y = S0;
         endmodule
         "#,
@@ -5573,7 +5587,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         (
             "multiple net drivers for `y`",
             r#"
-            module Top(output wire y);
+            module Top(output uwire y);
                 assign y = 1'b0;
                 assign y = 1'b1;
             endmodule
@@ -5866,17 +5880,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "width-dependent complement in parameter expression",
-            r#"
-            module Top #(
-                parameter logic [7:0] P = 8'hff,
-                parameter FLAG = (~P == 0)
-            ) (output logic y);
-                assign y = FLAG;
-            endmodule
-        "#,
-        ),
-        (
             "operator on a real operand",
             r#"
             module Top(input logic [1:0] a, output logic [1:0] y);
@@ -5895,18 +5898,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                     return;
                 endfunction
                 assign y = f();
-            endmodule
-        "#,
-        ),
-        (
-            "defparam assignment",
-            r#"
-            module Child #(parameter W = 1) (output logic [W-1:0] y);
-                assign y = '0;
-            endmodule
-            module Top(output logic y);
-                Child child(.y(y));
-                defparam child.W = 8;
             endmodule
         "#,
         ),
@@ -6275,19 +6266,86 @@ fn sizes_unbased_shift_amounts_as_self_determined() {
     assert_eq!(sim.get(sim.signal("ff_y")), 2u8.into());
 }
 
+// A conditional expression is a select index like any other expression
+// (IEEE 1800-2023 11.5.1); an unknown condition merges its operands (11.4.11).
 #[test]
-fn rejects_unrepresentable_dynamic_selects_instead_of_dropping_them() {
-    let error = cranelift_build_error(
-        r#"
-        module Top(input logic [1:0] a, input logic sel, output logic y);
+fn conditional_expressions_are_select_indices() {
+    let source = r#"
+        module Top(
+            input logic clk, sel, input logic [1:0] a, i, j, input logic [15:0] w,
+            input logic [3:0][7:0] m,
+            output logic y, output logic [3:0] part, output logic [7:0] q, r,
+            output logic [3:0][7:0] written
+        );
             assign y = a[sel ? 1 : 0];
+            assign part = w[(sel ? i : j) * 4 +: 4];
+            always_comb r = m[sel ? 2'd3 : i];
+            always_ff @(posedge clk) begin
+                q <= m[sel ? i : j];
+                written[sel ? i : j] <= 8'h55;
+            end
         endmodule
-        "#,
-    );
-    assert!(
-        error.contains("select index `sel ? 1 : 0`"),
-        "unexpected error: {error}"
-    );
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            Simulator::from_sv_sources(vec![(source, Path::new("conditional_index.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        let clk = sim.event("clk");
+        let signal = |name| sim.signal(name);
+        let (sel, a, i, j, w, m) = (
+            signal("sel"),
+            signal("a"),
+            signal("i"),
+            signal("j"),
+            signal("w"),
+            signal("m"),
+        );
+        let (y, part, q, r, written) = (
+            signal("y"),
+            signal("part"),
+            signal("q"),
+            signal("r"),
+            signal("written"),
+        );
+        sim.modify(|io| {
+            io.set(sel, 0u8);
+            io.set(a, 0b10u8);
+            io.set(i, 1u8);
+            io.set(j, 2u8);
+            io.set(w, 0xabcdu16);
+            io.set(m, 0x1312_1110u32);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(y), 0u8.into());
+        assert_eq!(sim.get(part), 0xbu8.into());
+        assert_eq!(sim.get(r), 0x11u8.into());
+        assert_eq!(sim.get(q), 0x12u8.into());
+        macro_rules! element {
+            ($index:literal) => {
+                (sim.get(written) >> (8u32 * $index)) & BigUint::from(0xffu8)
+            };
+        }
+        assert_eq!(element!(2), 0x55u8.into());
+        sim.modify(|io| io.set(sel, 1u8)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(y), 1u8.into());
+        assert_eq!(sim.get(part), 0xcu8.into());
+        assert_eq!(sim.get(r), 0x13u8.into());
+        assert_eq!(sim.get(q), 0x11u8.into());
+        assert_eq!(element!(1), 0x55u8.into());
+        if four_state {
+            sim.modify(|io| io.set_four_state(sel, 0u8.into(), 1u8.into()))
+                .unwrap();
+            sim.tick(clk).unwrap();
+            // Indices 1 and 0 differ, so the selected bit is unknown.
+            assert_eq!(sim.get_four_state(y).1, 1u8.into());
+            assert_eq!(sim.get_four_state(r).1, 0xffu8.into());
+            assert_eq!(sim.get_four_state(q).1, 0xffu8.into());
+        }
+    }
 }
 
 #[test]
@@ -7622,92 +7680,6 @@ fn coerces_function_returns_in_procedural_lvalue_indices() {
     assert_eq!(sim.get(x), 2u8.into());
 }
 
-sv_backends! {
-    fn preserves_use_site_dimensions_in_parameter_alias_types(sim) {
-        @case "review_regressions::preserves_use_site_dimensions_in_parameter_alias_types";
-    }
-
-    fn body_parameters_are_local_with_a_parameter_port_list(sim) {
-        @case "review_regressions::body_parameters_are_local_with_a_parameter_port_list";
-    }
-
-    fn preserves_four_state_arithmetic_case_constants(sim) {
-        @case "review_regressions::preserves_four_state_arithmetic_case_constants";
-    }
-
-    fn preserves_four_state_shift_and_bit_select_constants(sim) {
-        @case "review_regressions::preserves_four_state_shift_and_bit_select_constants";
-    }
-
-    fn preserves_unsigned_128_bit_enum_arithmetic(sim) {
-        @case "review_regressions::preserves_unsigned_128_bit_enum_arithmetic";
-    }
-
-    fn preserves_four_state_reduction_case_constants(sim) {
-        @case "review_regressions::preserves_four_state_reduction_case_constants";
-    }
-
-    fn preserves_use_site_dimensions_in_function_alias_types(sim) {
-        @case "review_regressions::preserves_use_site_dimensions_in_function_alias_types";
-    }
-
-    fn preserves_four_state_relational_case_selectors(sim) {
-        @case "review_regressions::preserves_four_state_relational_case_selectors";
-    }
-
-    fn folds_compound_four_state_case_labels(sim) {
-        @case "review_regressions::folds_compound_four_state_case_labels";
-    }
-
-    fn preserves_four_state_equality_case_selectors(sim) {
-        @case "review_regressions::preserves_four_state_equality_case_selectors";
-    }
-
-    fn preserves_constant_case_selector_context(sim) {
-        @case "review_regressions::preserves_constant_case_selector_context";
-    }
-
-    fn preserves_size_cast_dimensions_in_declarations_and_selections(sim) {
-        @case "review_regressions::preserves_size_cast_dimensions_in_declarations_and_selections";
-    }
-
-    fn resolves_generate_local_alias_casts_for_all_processes(sim) {
-        @case "review_regressions::resolves_generate_local_alias_casts_for_all_processes";
-    }
-
-    fn covers_single_bit_bitwise_complementary_guards(sim) {
-        @case "review_regressions::covers_single_bit_bitwise_complementary_guards";
-    }
-
-    fn normalizes_function_parameter_cast_dimensions(sim) {
-        @case "review_regressions::normalizes_function_parameter_cast_dimensions";
-    }
-
-    fn lowers_parameter_casts_in_conditional_generate(sim) {
-        @case "review_regressions::lowers_parameter_casts_in_conditional_generate";
-    }
-
-    fn lowers_parameter_casts_in_loop_generate(sim) {
-        @case "review_regressions::lowers_parameter_casts_in_loop_generate";
-    }
-
-    fn default_pattern_fills_each_element_of_unpacked_subarrays(sim) {
-        @case "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays";
-    }
-
-    fn int_parameters_are_signed_in_comparisons_and_loop_bounds(sim) {
-        @case "review_regressions::int_parameters_are_signed_in_comparisons_and_loop_bounds";
-    }
-
-    fn run_time_for_condition_uses_the_relational_operand_context(sim) {
-        @case "review_regressions::run_time_for_condition_uses_the_relational_operand_context";
-    }
-
-    fn size_of_a_type_uses_the_dimension_argument(sim) {
-        @case "review_regressions::size_of_a_type_uses_the_dimension_argument";
-    }
-}
-
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn collapses_unknown_initializers_in_two_state_native_images() {
@@ -8719,10 +8691,6 @@ fn timed_task_edge_processes_preserve_driver_checks() {
             "multiple variable drivers for `q`",
         ),
         (
-            "always @(posedge clk) begin pause(); q = a; end always @(negedge clk) begin pause(); q = a; end",
-            "multiple variable drivers for `q`",
-        ),
-        (
             "always @(posedge clk) copy(q); assign q = a;",
             "multiple variable drivers for `q`",
         ),
@@ -8833,35 +8801,6 @@ fn timed_task_edge_processes_of_several_instances_may_write_a_package_variable()
     )
     .build()
     .unwrap_or_else(|error| panic!("{error}"));
-}
-
-mod aggregate_regressions {
-    #[test]
-    fn wide_unpacked_ff_array_masks_interpreter() {
-        crate::suite::run_case(
-            "aggregate_regressions::wide_unpacked_ff_array_masks",
-            "interpreter",
-        );
-    }
-
-    sv_backends! {
-        fn wide_unpacked_ff_array_masks(sim) { @case "aggregate_regressions::wide_unpacked_ff_array_masks"; }
-    }
-    sv_backends! {
-        fn continuous_function_dynamic_scratch_write(sim) { @case "aggregate_regressions::continuous_function_dynamic_scratch_write"; }
-        fn masked_feed_forward_dependencies(sim) { @case "aggregate_regressions::masked_feed_forward_dependencies"; }
-        fn shared_memory_reads_pre_edge_values(sim) { @case "aggregate_regressions::shared_memory_reads_pre_edge_values"; }
-        fn coincident_disjoint_byte_writers(sim) { @case "aggregate_regressions::coincident_disjoint_byte_writers"; }
-        fn independent_clock_byte_writers(sim) { @case "aggregate_regressions::independent_clock_byte_writers"; }
-
-        fn continuous_nested_concatenated_targets(sim) { @case "aggregate_regressions::continuous_nested_concatenated_targets"; }
-        fn concatenated_runtime_index(sim) { @case "aggregate_regressions::concatenated_runtime_index"; }
-        fn concatenated_static_loop_initializer(sim) { @case "aggregate_regressions::concatenated_static_loop_initializer"; }
-        fn parameter_element_forwarding(sim) { @case "aggregate_regressions::parameter_element_forwarding"; }
-        fn parameter_runtime_element_bit(sim) { @case "aggregate_regressions::parameter_runtime_element_bit"; }
-        fn independent_clock_memory_writers(sim) { @case "aggregate_regressions::independent_clock_memory_writers"; }
-        fn wide_concatenated_procedural_targets(sim) { @case "aggregate_regressions::wide_concatenated_procedural_targets"; }
-    }
 }
 
 #[test]
@@ -9041,6 +8980,8 @@ fn masked_reads_preserve_observer_sensitivity_and_real_self_dependencies() {
     }
 }
 
+// Distinct drivers of a `wire` resolve (`sv_net_resolution.rs`); an unresolved
+// net, a variable and a driver that is not a plain value keep their identity.
 #[test]
 fn net_alias_coalescing_retains_distinct_and_variable_drivers() {
     for (source, diagnostic) in [
@@ -9057,14 +8998,6 @@ fn net_alias_coalescing_retains_distinct_and_variable_drivers() {
             "multiple variable drivers",
         ),
         (
-            "module Top(output wire y); assign y=1'b0; assign y=1'b0; assign y=1'b1; endmodule",
-            "multiple net drivers",
-        ),
-        (
-            "module Top(input logic a, output wire y); assign y=a; assign y=1'b1; endmodule",
-            "multiple net drivers",
-        ),
-        (
             "module Top(input logic a, output uwire y); assign y=a; assign y=a; endmodule",
             "multiple net drivers",
         ),
@@ -9079,10 +9012,6 @@ fn net_alias_coalescing_retains_distinct_and_variable_drivers() {
         (
             "module Top(input logic a, output logic y); assign y=a; assign y=a; endmodule",
             "multiple variable drivers",
-        ),
-        (
-            "module Top(input logic a,b, output wire y); assign y=a; assign y=a; assign y=b; endmodule",
-            "multiple net drivers",
         ),
         (
             "module Top(output wire [31:0] y); assign y=$random; assign y=$random; endmodule",
@@ -9163,11 +9092,6 @@ fn exhaustive_case_preserves_fixed_unknown_selector_bits() {
     }
 }
 
-sv_backends! {
-    fn exhaustive_case_preserves_fixed_selector_bits(sim) { @case "review_regressions::exhaustive_case_preserves_fixed_selector_bits"; }
-    fn fixed_case_bits_preserve_unknown_input_fallback(sim) { @case "review_regressions::fixed_case_bits_preserve_unknown_input_fallback"; }
-}
-
 #[test]
 fn fixed_selector_bits_do_not_hide_incomplete_cases() {
     for source in [
@@ -9190,11 +9114,74 @@ fn rejects_hierarchical_unpacked_arrays_of_nonequivalent_elements() {
     assert!(error.contains("is not assignment compatible"), "{error}");
 }
 
-sv_backends! {
-    fn blocking_write_preserves_extracted_snapshot(sim) {
-        @case "review_regressions::blocking_write_preserves_extracted_snapshot";
-    }
-    fn blocking_write_preserves_extracted_snapshot_four_state(sim) {
-        @case "review_regressions::blocking_write_preserves_extracted_snapshot_four_state";
+// The complement of a parameter has the width of the parameter (IEEE
+// 1800-2023 11.6.1), so its initializer is evaluated with its types.
+#[test]
+fn complements_of_parameters_keep_the_parameter_width() {
+    let source = r#"
+        package cfg_pkg;
+            localparam int XLEN = 64;
+            localparam bit IS_XLEN64 = (XLEN == 32) ? 1'b0 : 1'b1;
+            localparam logic [63:0] SD = {IS_XLEN64, 31'h0, ~IS_XLEN64, 31'h0};
+        endpackage
+        module Top #(
+            parameter logic [7:0] P = 8'hf0,
+            parameter FLAG = (~P == 8'h0f),
+            parameter int Q = 5,
+            parameter int NQ = ~Q
+        ) (output logic [63:0] sd, output logic flag, output logic [31:0] nq,
+           output logic [8:0] wide);
+            localparam logic [8:0] WIDE = ~P;
+            assign sd = cfg_pkg::SD;
+            assign flag = FLAG;
+            assign nq = NQ;
+            assign wide = WIDE;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("complement.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("sd")), 0x8000_0000_0000_0000u64.into());
+    assert_eq!(sim.get(sim.signal("flag")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("nq")), 0xffff_fffau32.into());
+    // The operand is extended to the width of the assignment before it is
+    // complemented (11.6.1).
+    assert_eq!(sim.get(sim.signal("wide")), 0x10fu16.into());
+}
+
+// `$clog2` of a constant wider than 128 bits, such as a field of a wide
+// address mask, is a constant (IEEE 1800-2023 20.8.1), also as the value
+// of a module or interface parameter override.
+#[test]
+fn clog2_of_wide_constants_in_parameter_overrides() {
+    let source = r#"
+        `define MASK {32'h0000_FFFF, 32'h0001_FFFF, 32'h0000_00FF, 32'h0000_0001, 32'h0000_0000, 32'h0000_000F, 32'h0000_FFFF, 32'hFFFF_FFFF}
+        `define WIDTH(n) $clog2((`MASK >> (32 * n)) & {32{1'b1}})
+        interface bus_if #(parameter integer AW = 1) ();
+          logic [AW-1:0] addr;
+        endinterface
+        module Leaf #(parameter integer AW = 1) (output logic [31:0] aw);
+          assign aw = AW;
+        endmodule
+        module Top(output logic [31:0] six, five, bits, zero, all);
+          bus_if #(.AW(`WIDTH(6))) bus();
+          Leaf #(.AW(`WIDTH(5))) leaf(.aw(five));
+          Leaf #(.AW(`WIDTH(3))) low(.aw(zero));
+          Leaf #(.AW($clog2(256'h1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000))) wide(.aw(all));
+          assign six = $bits(bus.addr);
+          assign bits = `WIDTH(5);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("clog2.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    for (name, value) in [
+        ("six", 17u32),
+        ("five", 8),
+        ("bits", 8),
+        ("zero", 0),
+        ("all", 160),
+    ] {
+        assert_eq!(sim.get(sim.signal(name)), value.into(), "{name}");
     }
 }

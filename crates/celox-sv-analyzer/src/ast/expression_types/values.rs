@@ -504,9 +504,10 @@ fn conditional(
         (TyData::Shortreal, TyData::Packed(_)) | (TyData::Packed(_), TyData::Shortreal) => {
             Some(table.intern(TyData::Shortreal))
         }
-        // 11.4.11 b: null does not change the other branch's class type.
-        (TyData::Null, TyData::Class(_)) => Some(right),
-        (TyData::Class(_), TyData::Null) => Some(left),
+        // 11.4.11 b: null does not change the other branch's class type,
+        // nor a chandle's, which only another chandle or null joins (6.14).
+        (TyData::Null, TyData::Class(_) | TyData::Chandle) => Some(right),
+        (TyData::Class(_) | TyData::Chandle, TyData::Null) => Some(left),
         // 11.4.11 c, d: the class of the arm the other assigns to; e: else
         // the closest base class both derive from.
         (TyData::Class(_), TyData::Class(_)) => {

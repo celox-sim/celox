@@ -150,7 +150,7 @@ fn program_functions_do_not_corrupt_native_function_query_scope() {
     let local = module
         .locals()
         .iter()
-        .find(|local| local.name.starts_with("x@"))
+        .find(|local| local.source_name == "x")
         .unwrap();
     assert_eq!(local.r#type.resolved_width(), Some(4));
 }

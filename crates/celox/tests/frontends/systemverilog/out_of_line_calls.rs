@@ -3082,6 +3082,73 @@ endmodule
 }
 
 #[test]
+fn forks_after_the_writes_of_an_array_go_out_of_line() {
+    // `fill` writes its array `items` only before the loop whose fork reads
+    // it, so each child, which starts in a copy of the frame (IEEE 1800-2023
+    // 9.3.2), reads what the parent does: the task goes out of line as
+    // uvm-1.2's mbus_pipelined_check_seq::body must, which is recursive
+    // through `uvm_sequence_base::start` and cannot be inlined. `refill`
+    // writes its array in the loop of its fork, so the children would have
+    // to share it: it stays inlined. Both pass an element of a class
+    // handle array to a task, as the UVM sequence does.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    class item;
+        int v;
+    endclass
+    int sum, pending;
+    task automatic check(item it, int i);
+        #1;
+        sum += it.v * 10 + i;
+        pending--;
+    endtask
+    task automatic fill();
+        item items[4];
+        for (int i = 0; i < 4; i++) begin
+            items[i] = new;
+            items[i].v = i + 1;
+        end
+        pending = 4;
+        for (int i = 0; i < 4; i++) begin
+            items[i].v = items[i].v * 2;
+            fork
+                check(items[i], i);
+            join_none
+            #2;
+        end
+        wait (pending == 0);
+    endtask
+    task automatic refill();
+        item items[2];
+        pending = 2;
+        for (int i = 0; i < 2; i++) begin
+            items[i] = new;
+            items[i].v = i + 5;
+            fork
+                check(items[i], i);
+            join_none
+            #2;
+        end
+        wait (pending == 0);
+    endtask
+    initial begin
+        fill();
+        a = sum;
+        b = pending;
+        refill();
+        c = sum;
+    end
+endmodule
+"#;
+    // `fill`, `check` and the constructor of `item`.
+    same_as_inlined(source, 3, 20, &["a", "b", "c"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 20, &["a", "b", "c"]),
+        Ok(vec![value(206), value(0), value(317)])
+    );
+}
+
+#[test]
 fn forks_in_a_loop_give_each_child_its_own_variable() {
     // Each execution of the fork's declaration makes a new `k`, which the
     // child started then keeps.
@@ -5538,4 +5605,238 @@ endmodule
         vec![value(100)],
         "the reset reached the flip-flop"
     );
+}
+
+#[test]
+fn defaults_no_call_uses_do_not_stop_a_unit() {
+    // A default is evaluated only by a call that uses it (IEEE 1800-2023
+    // 13.5.3). This one reads another formal, as UVM's `uvm_report` does,
+    // which the scope of the declaration does not resolve; no call omits
+    // it, so the recursive function still runs out of line.
+    let source = r#"module Top(output int f);
+    function automatic int depth(int severity, int verbosity = (severity == 1) ? 0 : 200, int n = 0);
+        if (n == 0) return verbosity + severity;
+        return depth(severity, verbosity, n - 1) + 1;
+    endfunction
+    initial f = depth(1, 5, 3);
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 1);
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, false, backend, 0, &["f"]),
+                Ok(vec![value(9)]),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+    // A call that uses it is an error.
+    let omits = source.replace("depth(1, 5, 3)", "depth(1)");
+    let built = simulate(&omits, false, false, "interpreter", 0, &["f"]);
+    assert!(built.is_err(), "{built:?}");
+}
+
+#[test]
+fn deferred_assertions_of_units_wait_in_the_queue_of_their_process() {
+    // A recursive function goes out of line; the actions of its deferred
+    // assertions wait in the queue of the process that calls it and mature
+    // as those of the looped reference, inlined, do (IEEE 1800-2023
+    // 16.4.1). The assertions keep their lines.
+    let recursive = r#"`timescale 1ns/1ns
+module Top(output int r);
+    function automatic int count(int n);
+        if (n == 0) return 0;
+        assert #0 (n != 2) else $error("deep %0d", n);
+        assert final (n != 3) else $warning("top %0d", n);
+        return count(n - 1) + 1;
+    endfunction
+    int k = 3;
+    initial begin
+        r = count(k);
+        #1 r = count(k - 1);
+    end
+endmodule
+"#;
+    let looped = recursive
+        .replace("int count(int n);", "int count(int n0);")
+        .replace(
+            "        if (n == 0) return 0;",
+            "        for (int n = n0; n > 0; n--) begin",
+        )
+        .replace("$warning(\"top %0d\", n);", "$warning(\"top %0d\", n); end")
+        .replace("return count(n - 1) + 1;", "return n0;");
+    assert_ne!(looped, recursive);
+    assert_eq!(function_units(recursive, false), 1, "function units");
+    for four_state in [false, true] {
+        let expected = simulate_run(&looped, four_state, false, "interpreter", 2, &["r"])
+            .expect("the looped design runs");
+        assert!(!expected.1.is_empty(), "the looped design reports");
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(recursive, four_state, false, backend, 2, &["r"]),
+                Ok(expected.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn flush_points_of_a_process_discard_the_deferred_actions_of_its_units() {
+    // The unit queues a `$fatal` in the queue of the process; the resume
+    // from the event control comes before the Observed region, a flush
+    // point of the process, which discards it (IEEE 1800-2023 16.4.2).
+    // Without the wait it matures.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit sig;
+    function automatic int count(int n);
+        if (n == 0) return 0;
+        assert #0 (n != 2) else $fatal(1, "not flushed");
+        return count(n - 1) + 1;
+    endfunction
+    initial begin
+        void'(count(3));
+        @(posedge sig);
+        done = 1;
+    end
+    initial #0 sig = 1;
+endmodule
+"#;
+    let matured = source.replace("        @(posedge sig);\n", "");
+    assert_ne!(matured, source);
+    assert_eq!(function_units(source, false), 1, "function units");
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, false, backend, 5, &["done"]),
+                Ok(vec![value(1)]),
+                "{backend}, four-state {four_state}"
+            );
+            assert_eq!(
+                simulate(&matured, four_state, false, backend, 5, &["done"]),
+                Err("not flushed".to_string()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn units_call_the_dpi_c_functions_of_uvm_that_celox_provides() {
+    // UVM's regular expressions and tool queries are heap calls: a
+    // recursive function goes out of line with them and gives what the
+    // looped reference, inlined, gives.
+    let recursive = r#"`timescale 1ns/1ns
+module Top(output int r, output int matched);
+    import "DPI-C" function bit uvm_re_compexecfree(string re, string str, bit deglob, output int exec_ret);
+    import "DPI-C" function string uvm_dpi_get_tool_name_c ();
+    function automatic int count(int n, string s);
+        int ret;
+        if (n == 0) return 0;
+        if (uvm_re_compexecfree("a*b", s, 1, ret) && ret == 0) matched++;
+        return count(n - 1, {s, "b"}) + (uvm_dpi_get_tool_name_c() == "Celox");
+    endfunction
+    initial r = count(3, "a");
+endmodule
+"#;
+    let looped = recursive
+        .replace(
+            "        if (n == 0) return 0;\n",
+            "        int k = 0;\n        for (int i = 0; i < n; i++) begin\n",
+        )
+        .replace(
+            "        return count(n - 1, {s, \"b\"}) + (uvm_dpi_get_tool_name_c() == \"Celox\");",
+            "        k += uvm_dpi_get_tool_name_c() == \"Celox\"; s = {s, \"b\"}; end\n        return k;",
+        );
+    assert_ne!(looped, recursive);
+    assert_eq!(function_units(recursive, false), 1, "function units");
+    for four_state in [false, true] {
+        let expected = simulate(
+            &looped,
+            four_state,
+            false,
+            "interpreter",
+            0,
+            &["r", "matched"],
+        )
+        .expect("the looped design runs");
+        // "a" does not match the glob, "ab" and "abb" do.
+        assert_eq!(expected, vec![value(3), value(2)], "the looped reference");
+        for backend in backends() {
+            assert_eq!(
+                simulate(recursive, four_state, false, backend, 0, &["r", "matched"]),
+                Ok(expected.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn processes_blocked_in_one_task_keep_their_own_messages() {
+    // IEEE 1800-2023 15.4.3, 15.4.5, 15.4.7: processes that block in the
+    // same task, each on its own mailbox, and are served in the same time
+    // slot each go on with their own message, and only once: the peeked
+    // message is the one taken, and a later put waits for room of its own,
+    // also after another process's put in the task went through. The tasks
+    // are recursive, so they go out of line without the switch and every
+    // process shares their request sites.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int got1, output int got2, output int left1, output int left2,
+           output int order3, output int order4);
+ mailbox #(int) m1, m2, m3, m4, spare;
+ task automatic peek_in(mailbox #(int) m, output int v, input int depth);
+  if (depth > 0) peek_in(m, v, depth - 1);
+  else m.peek(v);
+ endtask
+ task automatic put_in(mailbox #(int) m, input int v, input int depth);
+  if (depth > 0) put_in(m, v, depth - 1);
+  else m.put(v);
+ endtask
+ task automatic take(mailbox #(int) m, output int v, output int left);
+  int p, t;
+  peek_in(m, p, 1);
+  #1;
+  void'(m.try_get(t));
+  v = p * 100 + t;
+  left = m.num();
+ endtask
+ task automatic give(mailbox #(int) m, input int base);
+  put_in(m, base + 1, 1);
+  put_in(spare, base, 1);
+  #1;
+  put_in(m, base + 2, 1);
+ endtask
+ task automatic drain(mailbox #(int) m, output int order);
+  int v;
+  repeat (3) begin #2 m.get(v); order = order * 10 + v; end
+ endtask
+ initial begin
+  m1 = new(1); m2 = new(1); m3 = new(1); m4 = new(1); spare = new;
+  void'(m3.try_put(0)); void'(m4.try_put(5));
+  fork
+   take(m1, got1, left1);
+   take(m2, got2, left2);
+   begin #1 void'(m1.try_put(3)); void'(m2.try_put(4)); end
+   give(m3, 0);
+   give(m4, 5);
+   drain(m3, order3);
+   drain(m4, order4);
+  join
+ end
+endmodule
+"#;
+    let names = ["got1", "got2", "left1", "left2", "order3", "order4"];
+    assert!(function_units(source, false) > 0, "function units");
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, false, backend, 10, &names),
+                Ok([303, 404, 0, 0, 12, 567].map(value).to_vec()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
 }

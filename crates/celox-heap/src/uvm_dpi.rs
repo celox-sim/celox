@@ -33,7 +33,33 @@ pub(crate) struct UvmDpi {
     /// The tool's arguments, which `uvm_dpi_get_next_arg_c` returns in turn.
     arguments: Vec<String>,
     next_argument: usize,
+    /// The report the last function that reports recorded, not yet read.
+    #[serde(default)]
+    pending: Option<Report>,
+    /// The report being read.
+    #[serde(default)]
+    report: Option<Report>,
 }
+
+/// A report of UVM's C library, which it makes through `m_uvm_report_dpi`
+/// (`uvm_common.c`) and Celox passes to the UVM package's
+/// `m__uvm_report_dpi` (see the analyzer's `procedural::dpi_reports`).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct Report {
+    severity: u64,
+    id: Vec<u8>,
+    message: Vec<u8>,
+    verbosity: u64,
+    file: Vec<u8>,
+    line: u64,
+}
+
+/// `M_UVM_INFO` and `M_UVM_ERROR` of `uvm_dpi.h`.
+const M_UVM_INFO: u64 = 0;
+const M_UVM_ERROR: u64 = 2;
+/// `M_UVM_NONE` and `M_UVM_LOW`.
+const M_UVM_NONE: u64 = 0;
+const M_UVM_LOW: u64 = 100;
 
 /// Compiled expressions, rebuilt on demand; not part of the heap's state.
 #[derive(Clone, Debug, Default)]
@@ -56,17 +82,158 @@ fn compile(pattern: &str) -> Result<regex::bytes::Regex, regex::Error> {
         .build()
 }
 
-/// The pattern text of expression bytes `re`, each byte that is not UTF-8
-/// written as an escape matching that byte.
-fn pattern_text(re: &[u8]) -> String {
-    let mut text = String::with_capacity(re.len());
+/// One element of an expression: a character, or a byte that is not
+/// UTF-8.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Unit {
+    Char(char),
+    Byte(u8),
+}
+
+/// The pattern of the `regex` crate that matches what POSIX extended
+/// expression `re` does (IEEE Std 1003.1 9.4), which UVM compiles with
+/// `regcomp`. Bracket expressions differ: in POSIX a `]` first in the list
+/// and a `[` that starts no class, collating symbol or equivalence class are
+/// characters of the list, and `\` is one too; the `regex` crate reads them
+/// as the end of the class, a nested class and an escape. Outside brackets
+/// the syntax is shared. A byte that is not UTF-8 is written as an escape
+/// matching that byte. A list that is not terminated or names an unknown
+/// class is an error, with the message of glibc's `regerror`.
+fn pattern_text(re: &[u8]) -> Result<String, &'static str> {
+    let mut units = Vec::with_capacity(re.len());
     for chunk in re.utf8_chunks() {
-        text.push_str(chunk.valid());
-        for byte in chunk.invalid() {
-            text.push_str(&format!("\\x{byte:02X}"));
+        units.extend(chunk.valid().chars().map(Unit::Char));
+        units.extend(chunk.invalid().iter().map(|&byte| Unit::Byte(byte)));
+    }
+    let mut text = String::with_capacity(re.len());
+    let mut index = 0;
+    while index < units.len() {
+        match units[index] {
+            Unit::Char('\\') if index + 1 < units.len() => {
+                text.push('\\');
+                push_unit(&mut text, units[index + 1]);
+                index += 2;
+            }
+            Unit::Char('[') => {
+                let (class, end) = bracket(&units, index)?;
+                text.push_str(&class);
+                index = end;
+            }
+            unit => {
+                push_unit(&mut text, unit);
+                index += 1;
+            }
         }
     }
-    text
+    Ok(text)
+}
+
+fn push_unit(text: &mut String, unit: Unit) {
+    match unit {
+        Unit::Char(character) => text.push(character),
+        Unit::Byte(byte) => text.push_str(&format!("\\x{byte:02X}")),
+    }
+}
+
+/// A character of a class of the `regex` crate that matches `unit` alone.
+fn class_unit(unit: Unit) -> String {
+    match unit {
+        Unit::Char(character) if "\\[]^-&~".contains(character) => format!("\\{character}"),
+        unit => {
+            let mut text = String::new();
+            push_unit(&mut text, unit);
+            text
+        }
+    }
+}
+
+/// The class of the `regex` crate for the POSIX bracket expression that
+/// starts at `units[start]`, and the index after it.
+fn bracket(units: &[Unit], start: usize) -> Result<(String, usize), &'static str> {
+    const UNMATCHED: &str = "Unmatched [, [^, [:, [., or [=";
+    const INVALID_RANGE_END: &str = "Invalid range end";
+    /// The character classes POSIX defines, which the crate knows too.
+    const CLASSES: &[&str] = &[
+        "alnum", "alpha", "blank", "cntrl", "digit", "graph", "lower", "print", "punct", "space",
+        "upper", "xdigit",
+    ];
+    let char_at = |index: usize| match units.get(index) {
+        Some(Unit::Char(character)) => Some(*character),
+        _ => None,
+    };
+    let mut index = start + 1;
+    let mut class = String::from("[");
+    if char_at(index) == Some('^') {
+        class.push('^');
+        index += 1;
+    }
+    // One character of the list, which may be a collating symbol or an
+    // equivalence class (`[.x.]`, `[=x=]`) of a single character.
+    let element = |index: usize| -> Result<(Unit, usize), &'static str> {
+        let unit = *units.get(index).ok_or(UNMATCHED)?;
+        if unit == Unit::Char('[')
+            && let Some(delimiter @ ('.' | '=')) = char_at(index + 1)
+        {
+            let symbol = *units.get(index + 2).ok_or(UNMATCHED)?;
+            (char_at(index + 3) == Some(delimiter) && char_at(index + 4) == Some(']'))
+                .then_some((symbol, index + 5))
+                .ok_or("Invalid collation character")
+        } else {
+            Ok((unit, index + 1))
+        }
+    };
+    let mut first = true;
+    loop {
+        let unit = *units.get(index).ok_or(UNMATCHED)?;
+        if unit == Unit::Char(']') && !first {
+            class.push(']');
+            return Ok((class, index + 1));
+        }
+        // A `-` that starts an element is a character only as the first
+        // or the last one of the list: after a range or a class it would
+        // start a range from neither.
+        if unit == Unit::Char('-')
+            && !first
+            && units
+                .get(index + 1)
+                .is_some_and(|next| *next != Unit::Char(']'))
+        {
+            return Err(INVALID_RANGE_END);
+        }
+        first = false;
+        if unit == Unit::Char('[') && char_at(index + 1) == Some(':') {
+            let name_start = index + 2;
+            let name_end = (name_start..units.len())
+                .find(|&end| char_at(end) == Some(':') && char_at(end + 1) == Some(']'))
+                .ok_or(UNMATCHED)?;
+            let name = units[name_start..name_end]
+                .iter()
+                .map(|unit| match unit {
+                    Unit::Char(character) => Some(*character),
+                    Unit::Byte(_) => None,
+                })
+                .collect::<Option<String>>()
+                .filter(|name| CLASSES.contains(&name.as_str()))
+                .ok_or("Invalid character class name")?;
+            class.push_str(&format!("[:{name}:]"));
+            index = name_end + 2;
+            continue;
+        }
+        let (low, after) = element(index)?;
+        // A range, unless the `-` is the last character of the list.
+        if char_at(after) == Some('-') && char_at(after + 1) != Some(']') && after + 1 < units.len()
+        {
+            if char_at(after + 1) == Some('[') && char_at(after + 2) == Some(':') {
+                return Err(INVALID_RANGE_END);
+            }
+            let (high, end) = element(after + 1)?;
+            class.push_str(&format!("{}-{}", class_unit(low), class_unit(high)));
+            index = end;
+        } else {
+            class.push_str(&class_unit(low));
+            index = after;
+        }
+    }
 }
 
 /// The glob-to-ERE translation of `uvm_re_deglobbed`, or the message it
@@ -121,6 +288,43 @@ pub fn deglob(glob: &[u8], with_brackets: bool) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// The longest glob UVM 1.2's `uvm_glob_to_re` translates.
+const UVM_12_GLOB_LENGTH: usize = 2040;
+
+/// UVM 1.2's `uvm_glob_to_re` (`src/dpi/uvm_regex.cc`): "" for an empty glob
+/// or a lone `/`, a bracketed glob as it is, and otherwise the bracketed
+/// ERE of the glob, `^` and `$` added. The C writes the expression into a
+/// 2052-byte buffer without bounds checks, so a translation longer than
+/// that is undefined there; it is given in full here, never the glob
+/// itself, and `uvm_re_match` then takes it as longer than it compiles.
+pub fn uvm_12_glob_to_re(glob: &[u8]) -> Vec<u8> {
+    const BRACKET: u8 = b'/';
+    if glob.is_empty() || glob == [BRACKET] {
+        return Vec::new();
+    }
+    if glob[0] == BRACKET && glob[glob.len() - 1] == BRACKET {
+        return glob.to_vec();
+    }
+    let mut out = Vec::with_capacity(glob.len() * 2 + 4);
+    out.push(BRACKET);
+    if glob[0] != b'^' {
+        out.push(b'^');
+    }
+    for &byte in glob {
+        match byte {
+            b'*' | b'+' => out.extend([b'.', byte]),
+            b'.' | b'[' | b']' | b'(' | b')' => out.extend([b'\\', byte]),
+            b'?' => out.push(b'.'),
+            _ => out.push(byte),
+        }
+    }
+    if out.last() != Some(&b'$') {
+        out.push(b'$');
+    }
+    out.push(BRACKET);
+    out
+}
+
 impl Heap {
     /// Set the tool's command line: the program name, then its arguments.
     pub fn set_tool_arguments(&mut self, arguments: Vec<String>) {
@@ -152,7 +356,19 @@ impl Heap {
         } else {
             re
         };
-        let pattern = pattern_text(&pattern);
+        self.compile_handle(&pattern)
+    }
+
+    /// The handle of POSIX extended expression `pattern` compiled, or `0`
+    /// when it does not compile, with the reason in the buffer.
+    fn compile_handle(&mut self, pattern: &[u8]) -> u64 {
+        let pattern = match pattern_text(pattern) {
+            Ok(pattern) => pattern,
+            Err(message) => {
+                self.uvm.buffer = message.as_bytes().to_vec();
+                return 0;
+            }
+        };
         match compile(&pattern) {
             Ok(compiled) => {
                 self.uvm.last_handle += 1;
@@ -195,8 +411,38 @@ impl Heap {
         self.uvm.compiled.0.remove(&rexp);
     }
 
+    /// Record a report of UVM's C library, as file `file` at `line` makes
+    /// it.
+    fn record(
+        &mut self,
+        severity: u64,
+        id: &str,
+        message: Vec<u8>,
+        verbosity: u64,
+        file: &str,
+        line: u64,
+    ) {
+        self.uvm.pending = Some(Report {
+            severity,
+            id: id.as_bytes().to_vec(),
+            message,
+            verbosity,
+            file: file.as_bytes().to_vec(),
+            line,
+        });
+    }
+
     /// Perform UVM DPI operation `op` on `a`, `b` and `c`.
     pub(crate) fn uvm_call(&mut self, op: u64, a: u64, b: u64, c: u64) -> u64 {
+        // A report belongs to the call that makes it: a function that may
+        // report starts without one, so a report a call left that nothing
+        // read never reaches a later call's reader.
+        if matches!(
+            op,
+            ops::UVM_RE_MATCH | ops::UVM_GLOB_TO_RE | ops::UVM_DPI_REGCOMP | ops::UVM_DUMP_RE_CACHE
+        ) {
+            self.uvm.pending = None;
+        }
         match op {
             ops::UVM_RE_COMP => self.re_comp(a as Handle, b & 1 != 0),
             ops::UVM_RE_EXEC => self.re_exec(a, b as Handle),
@@ -256,6 +502,131 @@ impl Heap {
             }
             ops::UVM_TOOL_NAME => self.uvm_string(b"Celox"),
             ops::UVM_TOOL_VERSION => self.uvm_string(env!("CARGO_PKG_VERSION").as_bytes()),
+            // UVM 1.2 compiles `re`, without the brackets of `/re/`, and
+            // matches `str` in one call; an expression it cannot compile
+            // does not match (`regcomp`'s nonzero code).
+            ops::UVM_RE_MATCH => {
+                let re = self.string(a as Handle).to_vec();
+                if re.len() > MAX_LENGTH {
+                    let mut message = format!(
+                        "uvm_re_match : regular expression greater than max {MAX_LENGTH}: |"
+                    )
+                    .into_bytes();
+                    message.extend_from_slice(&re);
+                    message.push(b'|');
+                    self.record(
+                        M_UVM_ERROR,
+                        "UVM/DPI/REGEX_MAX",
+                        message,
+                        M_UVM_NONE,
+                        "uvm_regex.cc",
+                        59,
+                    );
+                    return REG_NOMATCH;
+                }
+                let rexp = self.re_comp(a as Handle, false);
+                if rexp == 0 {
+                    let mut message =
+                        b"uvm_re_match : invalid glob or regular expression: |".to_vec();
+                    message.extend_from_slice(&re);
+                    message.extend_from_slice(b"||");
+                    // `regerror`'s one line: the last of the parser's
+                    // message, as `unclosed group`.
+                    let reason = String::from_utf8_lossy(&self.uvm.buffer).into_owned();
+                    let reason = reason
+                        .lines()
+                        .rfind(|line| !line.trim().is_empty())
+                        .unwrap_or("");
+                    message
+                        .extend_from_slice(reason.trim().trim_start_matches("error: ").as_bytes());
+                    message.push(b'|');
+                    self.record(
+                        M_UVM_ERROR,
+                        "UVM/DPI/REGEX_INV",
+                        message,
+                        M_UVM_NONE,
+                        "uvm_regex.cc",
+                        94,
+                    );
+                    return REG_NOMATCH;
+                }
+                let matched = self.re_exec(rexp, b as Handle);
+                self.re_free(rexp);
+                matched
+            }
+            // UVM 1.2's `uvm_dpi_regcomp` compiles `regex` as it is written
+            // (`regcomp(REG_NOSUB | REG_EXTENDED)`), without `/re/` brackets
+            // or a length limit; `uvm_dpi_regexec` and `uvm_dpi_regfree` are
+            // `uvm_re_exec` and `uvm_re_free`.
+            ops::UVM_DPI_REGCOMP => {
+                let regex = self.string(a as Handle).to_vec();
+                let rexp = self.compile_handle(&regex);
+                if rexp == 0 {
+                    let mut message = b"uvm_dpi_regcomp : Unable to compile regex: |".to_vec();
+                    message.extend_from_slice(&regex);
+                    message.extend_from_slice(b"|, Element 0 is: ");
+                    message.extend(regex.first().copied());
+                    self.record(
+                        M_UVM_ERROR,
+                        "UVM/DPI/REGCOMP",
+                        message,
+                        M_UVM_NONE,
+                        "uvm_svcmd_dpi.c",
+                        107,
+                    );
+                }
+                rexp
+            }
+            ops::UVM_DUMP_RE_CACHE => {
+                self.record(
+                    M_UVM_INFO,
+                    "UVM/DPI/REGEX_MAX",
+                    b"uvm_dump_re_cache: cache not implemented".to_vec(),
+                    M_UVM_LOW,
+                    "uvm_regex.cc",
+                    249,
+                );
+                0
+            }
+            ops::UVM_REPORT_FIELD => {
+                if a == 0 {
+                    self.uvm.report = self.uvm.pending.take();
+                    return u64::from(self.uvm.report.is_some());
+                }
+                let Some(report) = self.uvm.report.clone() else {
+                    return 0;
+                };
+                match a {
+                    1 => report.severity,
+                    2 => self.uvm_string(&report.id),
+                    3 => self.uvm_string(&report.message),
+                    4 => report.verbosity,
+                    5 => self.uvm_string(&report.file),
+                    _ => report.line,
+                }
+            }
+            // UVM 1.2 returns a glob longer than it takes as it is, after
+            // its error, and translates any other one in full.
+            ops::UVM_GLOB_TO_RE => {
+                let glob = self.string(a as Handle).to_vec();
+                if glob.len() > UVM_12_GLOB_LENGTH {
+                    let mut message =
+                        b"uvm_re_match : glob expression greater than max 2040: |".to_vec();
+                    message.extend_from_slice(&glob);
+                    message.push(b'|');
+                    self.record(
+                        M_UVM_ERROR,
+                        "UVM/DPI/REGEX_MAX",
+                        message,
+                        M_UVM_NONE,
+                        "uvm_regex.cc",
+                        137,
+                    );
+                    return a;
+                }
+                let regex = uvm_12_glob_to_re(&glob);
+                self.uvm_string(&regex)
+            }
             _ => unreachable!("UVM DPI operation {op}"),
         }
     }
@@ -283,6 +654,226 @@ mod tests {
                 "{glob}"
             );
         }
+    }
+
+    #[test]
+    fn bracket_expressions_read_as_posix_reads_them() {
+        let matches = |re: &[u8], text: &[u8]| {
+            let pattern = pattern_text(re).expect("a valid expression");
+            compile(&pattern)
+                .unwrap_or_else(|error| panic!("{pattern}: {error}"))
+                .is_match(text)
+        };
+        // UVM's component names (`uvm_component::m_set_cl_msg_args`,
+        // `uvm_object::set_name`): a `]` first in the list and a `[` that
+        // starts no class are characters of it.
+        let name = br"^[][[:alnum:](){}_:-]([][[:alnum:](){} _:-]*[][[:alnum:](){}_:-])?$";
+        for (text, expected) in [
+            (&b"env"[..], true),
+            (b"uvm_test_top", true),
+            (b"agent[0]", true),
+            (b"a b", true),
+            (b" a", false),
+            (b"a.b", false),
+        ] {
+            assert_eq!(
+                matches(name, text),
+                expected,
+                "{}",
+                String::from_utf8_lossy(text)
+            );
+        }
+        // A `]` first after `^` is in the negated list.
+        assert!(matches(b"^[^]a]$", b"b"));
+        assert!(!matches(b"^[^]a]$", b"]"));
+        assert!(!matches(b"^[^]a]$", b"a"));
+        // `\` is a character of a list, not an escape.
+        assert!(matches(br"^[\]$", br"\"));
+        assert!(matches(br"^[\n]$", b"n"));
+        assert!(!matches(br"^[\n]$", b"\n"));
+        // Collating symbols and equivalence classes of one character.
+        assert!(matches(b"^[[.-.]a]$", b"-"));
+        assert!(matches(b"^[[=e=]]$", b"e"));
+        // The crate's class operators are characters, as are a `-` last and
+        // a range's ends.
+        assert!(matches(b"^[&&]$", b"&"));
+        assert!(matches(b"^[~~-]$", b"~"));
+        assert!(matches(b"^[a-c-]$", b"-"));
+        assert!(matches(b"^[a-c]$", b"b"));
+        assert!(!matches(b"^[a-c]$", b"d"));
+        assert!(matches(b"^[!-[]$", b"["));
+        // A byte that is not UTF-8, in a list and outside one.
+        assert!(matches(b"^[\xff]\xfe$", b"\xff\xfe"));
+        // An unterminated list or an unknown class is rejected, as
+        // `regcomp` rejects it, with its message.
+        assert_eq!(pattern_text(b"[abc"), Err("Unmatched [, [^, [:, [., or [="));
+        assert_eq!(pattern_text(b"[]"), Err("Unmatched [, [^, [:, [., or [="));
+        assert_eq!(
+            pattern_text(b"[[:word:]]"),
+            Err("Invalid character class name")
+        );
+        // A class is no end of a range; a `-` after one that ends the list
+        // is a character.
+        assert_eq!(pattern_text(b"[[:alpha:]-z]"), Err("Invalid range end"));
+        assert_eq!(pattern_text(b"[a-[:alpha:]]"), Err("Invalid range end"));
+        assert!(matches(b"^[[:digit:]-]$", b"-"));
+        // Nor does a range start one; a `-` after it that ends the list is
+        // a character too.
+        assert_eq!(pattern_text(b"[a-b-c]"), Err("Invalid range end"));
+        assert_eq!(pattern_text(b"[a-b-\xff]"), Err("Invalid range end"));
+        assert!(matches(b"^[a-b-]$", b"-"));
+        assert!(matches(b"^[-a]$", b"-"));
+        assert!(matches(b"^[^-a]$", b"b"));
+        let mut heap = Heap::new();
+        let bad = heap.intern(b"[[:word:]]") as u64;
+        assert_eq!(heap.call(ops::UVM_RE_COMP, bad, 0, 0), 0);
+        let message = heap.call(ops::UVM_RE_BUFFER, 0, 0, 0);
+        assert_eq!(
+            heap.string(message as Handle),
+            b"Invalid character class name"
+        );
+    }
+
+    #[test]
+    fn uvm_12_globs_translate_in_full_at_the_length_limits() {
+        let mut heap = Heap::new();
+        let translate = |heap: &mut Heap, glob: &[u8]| -> Vec<u8> {
+            let glob = heap.intern(glob) as u64;
+            let regex = heap.call(ops::UVM_GLOB_TO_RE, glob, 0, 0);
+            heap.string(regex as Handle).to_vec()
+        };
+        // 1023 dots: a 2050-byte expression, every dot escaped, though more
+        // than UVM 1.2's 2048 that `uvm_re_match` compiles, which then
+        // fails it.
+        let regex = translate(&mut heap, &[b'.'; 1023]);
+        assert_eq!(regex.len(), 2050);
+        assert!(regex.starts_with(b"/^") && regex.ends_with(b"$/"));
+        assert_eq!(regex[2..2048], b"\\.".repeat(1023)[..]);
+        let pattern = heap.intern(&regex) as u64;
+        let dots = heap.intern(&[b'.'; 1023]) as u64;
+        assert_ne!(heap.call(ops::UVM_RE_MATCH, pattern, dots, 0), 0);
+        // 1022 dots: 2048 bytes with the brackets, which it compiles and
+        // matches.
+        let regex = translate(&mut heap, &[b'.'; 1022]);
+        assert_eq!(regex.len(), 2048);
+        let pattern = heap.intern(&regex) as u64;
+        let dots = heap.intern(&[b'.'; 1022]) as u64;
+        assert_eq!(heap.call(ops::UVM_RE_MATCH, pattern, dots, 0), 0);
+        // A glob longer than 2040 bytes comes back as it is, as UVM 1.2
+        // returns it after its error; an empty one and `/` give "".
+        assert_eq!(translate(&mut heap, &[b'a'; 2041]), vec![b'a'; 2041]);
+        assert_eq!(translate(&mut heap, b""), b"");
+        assert_eq!(translate(&mut heap, b"/"), b"");
+    }
+
+    #[test]
+    fn uvm_12_functions_record_their_reports() {
+        // What UVM 1.2's C functions report through `m_uvm_report_dpi`:
+        // severity, ID, message, verbosity, file and line, each read once.
+        let mut heap = Heap::new();
+        let string = |heap: &mut Heap, text: &[u8]| heap.intern(text) as u64;
+        let take = |heap: &mut Heap| -> Option<(u64, Vec<u8>, Vec<u8>, u64, u64)> {
+            if heap.call(ops::UVM_REPORT_FIELD, 0, 0, 0) == 0 {
+                return None;
+            }
+            let text = |heap: &mut Heap, field| {
+                let handle = heap.call(ops::UVM_REPORT_FIELD, field, 0, 0);
+                heap.string(handle as Handle).to_vec()
+            };
+            Some((
+                heap.call(ops::UVM_REPORT_FIELD, 1, 0, 0),
+                text(heap, 2),
+                text(heap, 3),
+                heap.call(ops::UVM_REPORT_FIELD, 4, 0, 0),
+                heap.call(ops::UVM_REPORT_FIELD, 6, 0, 0),
+            ))
+        };
+        let open = string(&mut heap, b"(");
+        let a = string(&mut heap, b"a");
+        assert_eq!(heap.call(ops::UVM_RE_MATCH, open, a, 0), REG_NOMATCH);
+        let (severity, id, message, verbosity, line) = take(&mut heap).unwrap();
+        assert_eq!((severity, verbosity, line), (M_UVM_ERROR, M_UVM_NONE, 94));
+        assert_eq!(id, b"UVM/DPI/REGEX_INV");
+        assert_eq!(
+            message,
+            b"uvm_re_match : invalid glob or regular expression: |(||unclosed group|"
+        );
+        // Read once; a match reports nothing.
+        assert_eq!(take(&mut heap), None);
+        let plain = string(&mut heap, b"^a$");
+        assert_eq!(heap.call(ops::UVM_RE_MATCH, plain, a, 0), 0);
+        assert_eq!(take(&mut heap), None);
+        // A report nothing read is not one of the next call: after a
+        // failing call, a match reports nothing.
+        assert_eq!(heap.call(ops::UVM_RE_MATCH, open, a, 0), REG_NOMATCH);
+        assert_eq!(heap.call(ops::UVM_RE_MATCH, plain, a, 0), 0);
+        assert_eq!(take(&mut heap), None);
+        let long = string(&mut heap, &[b'a'; MAX_LENGTH + 1]);
+        assert_eq!(heap.call(ops::UVM_RE_MATCH, long, a, 0), REG_NOMATCH);
+        let (_, id, message, _, line) = take(&mut heap).unwrap();
+        assert_eq!((id.as_slice(), line), (&b"UVM/DPI/REGEX_MAX"[..], 59));
+        assert!(
+            message.starts_with(b"uvm_re_match : regular expression greater than max 2048: |a")
+        );
+        let glob = string(&mut heap, &[b'a'; UVM_12_GLOB_LENGTH + 1]);
+        assert_eq!(heap.call(ops::UVM_GLOB_TO_RE, glob, 0, 0), glob);
+        let (_, id, _, _, line) = take(&mut heap).unwrap();
+        assert_eq!((id.as_slice(), line), (&b"UVM/DPI/REGEX_MAX"[..], 137));
+        assert_eq!(heap.call(ops::UVM_DPI_REGCOMP, open, 0, 0), 0);
+        let (severity, id, message, _, line) = take(&mut heap).unwrap();
+        assert_eq!(
+            (severity, id.as_slice(), line),
+            (M_UVM_ERROR, &b"UVM/DPI/REGCOMP"[..], 107)
+        );
+        assert_eq!(
+            message,
+            b"uvm_dpi_regcomp : Unable to compile regex: |(|, Element 0 is: ("
+        );
+        heap.call(ops::UVM_DUMP_RE_CACHE, 0, 0, 0);
+        let (severity, id, message, verbosity, line) = take(&mut heap).unwrap();
+        assert_eq!((severity, verbosity, line), (M_UVM_INFO, M_UVM_LOW, 249));
+        assert_eq!(id, b"UVM/DPI/REGEX_MAX");
+        assert_eq!(message, b"uvm_dump_re_cache: cache not implemented");
+    }
+
+    #[test]
+    fn uvm_12_command_line_expressions_compile_as_written() {
+        let mut heap = Heap::new();
+        let string = |heap: &mut Heap, text: &[u8]| heap.intern(text) as u64;
+        let regcomp = |heap: &mut Heap, regex: u64| heap.call(ops::UVM_DPI_REGCOMP, regex, 0, 0);
+        let regexec =
+            |heap: &mut Heap, rexp: u64, text: u64| heap.call(ops::UVM_RE_EXEC, rexp, text, 0);
+        // UVM 1.2's component name check
+        // (`uvm_component_name_check_visitor::get_name_constraint`).
+        let names = string(
+            &mut heap,
+            b"^[][[:alnum:](){}_:-]([][[:alnum:](){} _:-]*[][[:alnum:](){}_:-])?$",
+        );
+        let rexp = regcomp(&mut heap, names);
+        assert_ne!(rexp, 0);
+        for good in [&b"env"[..], b"agent[0]", b"a b", b"x:y-z"] {
+            let good = string(&mut heap, good);
+            assert_eq!(regexec(&mut heap, rexp, good), 0);
+        }
+        for bad in [&b" env"[..], b"env ", b"a.b", b""] {
+            let bad = string(&mut heap, bad);
+            assert_eq!(regexec(&mut heap, rexp, bad), REG_NOMATCH);
+        }
+        heap.call(ops::UVM_RE_FREE, rexp, 0, 0);
+        // The expression is compiled as written: `/a/` matches the
+        // slashes, unlike `uvm_re_comp`'s `/re/`.
+        let slashed = string(&mut heap, b"/a/");
+        let rexp = regcomp(&mut heap, slashed);
+        let with = string(&mut heap, b"x/a/y");
+        let without = string(&mut heap, b"a");
+        assert_eq!(regexec(&mut heap, rexp, with), 0);
+        assert_eq!(regexec(&mut heap, rexp, without), REG_NOMATCH);
+        // An expression that does not compile gives `null`, which matches
+        // nothing and frees as nothing.
+        let bad = string(&mut heap, b"(");
+        assert_eq!(regcomp(&mut heap, bad), 0);
+        assert_eq!(regexec(&mut heap, 0, with), REG_NOMATCH);
+        heap.call(ops::UVM_RE_FREE, 0, 0, 0);
     }
 
     #[test]

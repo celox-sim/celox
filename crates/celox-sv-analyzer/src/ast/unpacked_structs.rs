@@ -77,12 +77,31 @@ impl UnpackedStruct {
         self.owner == other.owner
     }
 
+    /// Whether `other` declares the same members, defaults and layout.
+    pub(in crate::ast) fn same_layout(&self, other: &Self) -> bool {
+        self.owner == other.owner
+            && self.members.len() == other.members.len()
+            && self
+                .members
+                .iter()
+                .zip(&other.members)
+                .all(|(a, b)| a.name == b.name && a.width == b.width && a.default == b.default)
+    }
+
     pub(in crate::ast) fn members(&self) -> &[Member] {
         &self.members
     }
 
     pub(in crate::ast) fn member(&self, name: &str) -> Option<&Member> {
         self.members.iter().find(|member| member.name == name)
+    }
+
+    /// Whether a member, at any depth, is a dynamic array, queue or
+    /// associative array (7.2.1), which the structure holds by its handle.
+    pub(in crate::ast) fn holds_container(&self) -> bool {
+        self.leaves()
+            .iter()
+            .any(|leaf| leaf.r#type.container.is_some())
     }
 
     pub(in crate::ast) fn has_array_members(&self) -> bool {
@@ -142,13 +161,19 @@ pub(in crate::ast) fn member_default(
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
+    // A member's type is read while its structure is bound, before the
+    // member has a semantic type of its own.
     if ty.is_enum
-        || ty.unpacked_struct().is_some()
-        || ty.class().is_some()
-        || ty.chandle
+        || ty.is_unpacked_struct_in(&session.types)
+        || ty.class_in(&session.types).is_some()
+        || ty.is_chandle()
         || !matches!(
             ty.kind(),
-            TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+            TypeKind::Bit
+                | TypeKind::Chandle
+                | TypeKind::Logic
+                | TypeKind::Reg
+                | TypeKind::Implicit
         )
     {
         return Err(unsupported(
@@ -208,9 +233,19 @@ pub(in crate::ast) fn native_type(
     let members = fields
         .into_iter()
         .map(|(name, ty, default)| {
+            // A dynamic array, queue or associative array member is held by
+            // its handle (7.2.1, 7.4).
+            if ty.container.is_some() {
+                return Some(Member {
+                    name,
+                    r#type: ty,
+                    default,
+                    width: classes::HANDLE_WIDTH,
+                })
+                .filter(|member| member.default.is_none());
+            }
             // A chandle is no packed array element (IEEE 1800-2023 6.14).
-            if ty.container.is_some()
-                || (ty.chandle && ty.packed_ranges.len() > 1)
+            if (ty.is_chandle() && ty.packed_ranges.len() > 1)
                 // Each event member would need its own synchronization
                 // object (IEEE 1800-2023 15.5).
                 || matches!(
@@ -233,12 +268,16 @@ pub(in crate::ast) fn native_type(
             } else {
                 if ty.unpacked_struct().is_some()
                     || !ty.members.is_empty()
-                    || ty.chandle
+                    || ty.is_chandle()
                     || ty.is_enum
                     || ty.packed_enum
                     || !matches!(
                         ty.kind,
-                        TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+                        TypeKind::Bit
+                            | TypeKind::Chandle
+                            | TypeKind::Logic
+                            | TypeKind::Reg
+                            | TypeKind::Implicit
                     )
                     || default.is_some()
                 {
@@ -302,15 +341,19 @@ pub(in crate::ast) fn array_storage(ty: Type) -> Converted<Type> {
     let leaves = aggregate.leaves();
     let two_state = leaves
         .first()
-        .is_some_and(|leaf| leaf.r#type.kind == TypeKind::Bit);
+        .is_some_and(|leaf| matches!(leaf.r#type.kind, TypeKind::Bit | TypeKind::Chandle));
     if leaves.iter().any(|leaf| {
         leaf.default.is_some()
             || !matches!(
                 leaf.r#type.kind,
-                TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+                TypeKind::Bit
+                    | TypeKind::Chandle
+                    | TypeKind::Logic
+                    | TypeKind::Reg
+                    | TypeKind::Implicit
             )
-            || leaf.r#type.chandle
-            || (leaf.r#type.kind == TypeKind::Bit) != two_state
+            || leaf.r#type.is_chandle()
+            || (matches!(leaf.r#type.kind, TypeKind::Bit | TypeKind::Chandle)) != two_state
     }) {
         return Err(unsupported(
             "array of unpacked structures with non-integral, mixed-state or defaulted members",
@@ -400,11 +443,15 @@ pub(in crate::ast) fn targets(name: &str, dims: &PackedDimensions) -> Option<Vec
 
 /// Join the leading names of a member path that select within a variable of
 /// unpacked structure type: they name one of its member variables.
-pub(in crate::ast) fn collapse(parts: &mut Vec<String>, dims: &PackedDimensions) {
+pub(in crate::ast) fn collapse(
+    parts: &mut Vec<String>,
+    table: &semantic_types::TyTable,
+    dims: &PackedDimensions,
+) {
     if parts.len() < 2
         || !dims
             .get(&parts[0])
-            .is_some_and(|shape| shape.unpacked_struct.is_some())
+            .is_some_and(|shape| shape.is_unpacked_struct_in(table))
     {
         return;
     }
@@ -448,7 +495,7 @@ pub(in crate::ast) fn native_struct(
 ) -> Converted<Option<Arc<UnpackedStruct>>> {
     let id = expression_binding::ungroup(id, native);
     if let Some((container, _)) = locators::record_iterator(id, native, dims) {
-        return Ok(container.element.unpacked_struct().cloned());
+        return Ok(container.element_struct(&session.types).cloned());
     }
     let mut base = id;
     let mut indices = 0;
@@ -469,17 +516,19 @@ pub(in crate::ast) fn native_struct(
         && indices == shape.unpacked.len()
         && !shape.unpacked.is_empty()
     {
-        return Ok(shape.unpacked_struct.clone());
+        return Ok(shape.unpacked_struct_in(&session.types).cloned());
     }
     if let Some(element) = expression_binding::fixed_array_member(id, native, tree, session, dims)
+        // An array that is a member of a packed structure has packed elements.
+        && element.prefix.is_empty()
         && let Ok((_, ty)) = packed_structs::element_member(&element.name, &element.members, dims)
     {
-        return Ok(ty.unpacked_struct().cloned());
+        return Ok(ty.unpacked_struct_in(&session.types).cloned());
     }
     Ok(match &native.expression(id).kind {
         ExprKind::Name(_) | ExprKind::Member { .. } => match member_path(id, native)
             .map(|mut parts| {
-                collapse(&mut parts, dims);
+                collapse(&mut parts, &session.types, dims);
                 parts
             })
             .filter(|parts| parts.len() == 1)
@@ -488,27 +537,27 @@ pub(in crate::ast) fn native_struct(
                 shape
                     .unpacked
                     .is_empty()
-                    .then(|| shape.unpacked_struct.clone())
+                    .then(|| shape.unpacked_struct_in(&session.types).cloned())
                     .flatten()
             }) {
             Some(aggregate) => Some(aggregate),
             None if let Some((ty, _)) =
                 containers::element_member(id, native, tree, session, dims)? =>
             {
-                ty.unpacked_struct().cloned()
+                ty.unpacked_struct_in(&session.types).cloned()
             }
             // A class property of unpacked structure type.
             None if let Some((aggregate, _, _)) =
                 expression_binding::object_aggregate_property(tree, session, id, native, dims)? =>
             {
-                aggregate.r#type.unpacked_struct().cloned()
+                aggregate.r#type.unpacked_struct_in(&session.types).cloned()
             }
             // A class method called without parentheses (13.5.5).
             None if matches!(native.expression(id).kind, ExprKind::Member { .. })
                 && let Some(ty) =
                     expression_binding::object_method_result(tree, session, id, native, dims)? =>
             {
-                ty.unpacked_struct().cloned()
+                ty.unpacked_struct_in(&session.types).cloned()
             }
             // An element popped by `q.pop_front` without parentheses.
             None => containers::native_struct_element(id, native, tree, session, dims)?,
@@ -531,7 +580,7 @@ pub(in crate::ast) fn native_struct(
             target: Some(_), ..
         } if std::ptr::eq(native, tree.declarations()) => patterns::typed_shape(id, tree, dims)?
             .filter(|shape| shape.unpacked.is_empty())
-            .and_then(|shape| shape.unpacked_struct.clone()),
+            .and_then(|shape| shape.unpacked_struct_in(&session.types).cloned()),
         _ if containers::native_struct_element(id, native, tree, session, dims)?.is_some() => {
             containers::native_struct_element(id, native, tree, session, dims)?
         }
@@ -539,15 +588,30 @@ pub(in crate::ast) fn native_struct(
         // as call binding resolves it.
         ExprKind::Call { expression, .. } => {
             match expression_binding::object_method_result(tree, session, id, native, dims)? {
-                Some(ty) => ty.unpacked_struct().cloned(),
+                Some(ty) => ty.unpacked_struct_in(&session.types).cloned(),
                 None => expression_binding::callable_name(tree, *expression, native)
                     .and_then(|name| dims.functions.get(&name))
                     .and_then(|function| function.return_type.as_ref())
-                    .and_then(|ty| ty.unpacked_struct().cloned()),
+                    .and_then(|ty| ty.unpacked_struct_in(&session.types).cloned()),
             }
         }
         _ => None,
     })
+}
+
+/// The unpacked structure type of native expression `id`, as its type
+/// tells, or `None` when it is not a value of such a type or its type is
+/// not known.
+pub(in crate::ast) fn value_struct(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Option<semantic_types::TyId> {
+    expression_types::type_of(tree, session, id, native, dims)
+        .ok()
+        .filter(|ty| session.types.is_unpacked_struct(*ty))
 }
 
 /// The names of a native `a.b.c` path, or `None` for another expression.
@@ -580,13 +644,14 @@ fn member_path(mut id: ExprId, native: &celox_sv_syntax::Declarations) -> Option
 pub(in crate::ast) fn native_member(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
+    table: &semantic_types::TyTable,
     dims: &PackedDimensions,
 ) -> Option<String> {
     let mut parts = member_path(id, native)?;
     if parts.len() < 2 {
         return None;
     }
-    collapse(&mut parts, dims);
+    collapse(&mut parts, table, dims);
     (parts.len() == 1).then(|| parts.pop().expect("one part"))
 }
 
@@ -600,12 +665,72 @@ pub(in crate::ast) fn check_assignment(
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<()> {
-    let target = dims
+    let shape = dims
         .get(name)
-        .filter(|shape| shape.unpacked_struct.is_some())
-        .and_then(|shape| shape.type_id(&mut session.types, &tree.functions, &dims.const_env))
+        .filter(|shape| shape.unpacked.is_empty())
+        .ok_or_else(|| unsupported("unpacked structure target"))?;
+    let target = shape_struct(shape, tree, session, dims)?
         .ok_or_else(|| unsupported("unpacked structure target"))?;
     check_value(target, right, tree.declarations(), tree, session, dims)
+}
+
+/// The unpacked structure type declared shape `shape` holds: its own type,
+/// or the element type of a fixed-size array of structures (7.2, 7.4), as
+/// the shape's type tells. A structure whose type cannot be formed with the
+/// constants of `dims` is unsupported here.
+pub(in crate::ast) fn shape_struct(
+    shape: &VariableDimensions,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<semantic_types::TyId>> {
+    struct_of(shape, &mut session.types, &tree.functions, &dims.const_env)
+}
+
+/// [`shape_struct`] with the constants of `env`.
+fn struct_of(
+    shape: &VariableDimensions,
+    table: &mut semantic_types::TyTable,
+    functions: &const_functions::ConstantFunctions,
+    env: &ConstEnv,
+) -> Converted<Option<semantic_types::TyId>> {
+    // Every shape keeps its structure metadata until declarations bind
+    // their types.
+    let metadata = shape.unpacked_struct.is_some() && shape.container.is_none();
+    let Some(mut ty) = shape.type_id(table, functions, env) else {
+        return match metadata {
+            true => Err(unsupported(
+                "unpacked structure whose type is not formed in this scope",
+            )),
+            false => Ok(None),
+        };
+    };
+    while let semantic_types::TyData::Array {
+        kind: semantic_types::ArrayKind::Fixed(_),
+        element,
+    } = table.data(ty)
+    {
+        ty = *element;
+    }
+    let found = table.is_unpacked_struct(ty).then_some(ty);
+    debug_assert_eq!(
+        found.is_some(),
+        metadata,
+        "the type and the structure metadata of a shape disagree"
+    );
+    Ok(found)
+}
+
+/// Whether declared shape `shape` holds unpacked structures, as
+/// [`shape_struct`] tells, or, when their type cannot be formed, as its
+/// metadata does.
+pub(in crate::ast) fn holds_struct(
+    shape: &VariableDimensions,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> bool {
+    !matches!(shape_struct(shape, tree, session, dims), Ok(None))
 }
 
 /// The semantic type of a place of unpacked structure type `ty`.
@@ -674,11 +799,11 @@ pub(in crate::ast) fn check_operands(
             right,
         } => {
             if matches!(operator.as_str(), "==" | "!=" | "===" | "!==") {
-                let left_type = native_struct(*left, native, tree, session, dims)?;
-                let right_type = native_struct(*right, native, tree, session, dims)?;
+                let left_type = value_struct(*left, native, tree, session, dims);
+                let right_type = value_struct(*right, native, tree, session, dims);
                 return match (left_type, right_type) {
                     (None, None) => Ok(()),
-                    (Some(left), Some(right)) if left.same_type(&right) => Ok(()),
+                    (Some(left), Some(right)) if session.types.matches(left, right) => Ok(()),
                     _ => Err(unsupported(format!(
                         "operator `{operator}` comparing an unpacked structure with a value of another type"
                     ))),
@@ -693,7 +818,7 @@ pub(in crate::ast) fn check_operands(
         _ => return Ok(()),
     };
     for operand in operands {
-        if native_struct(operand, native, tree, session, dims)?.is_some() {
+        if value_struct(operand, native, tree, session, dims).is_some() {
             return Err(unsupported(
                 "operator, select or cast applied to an unpacked structure",
             ));
@@ -753,12 +878,17 @@ pub(in crate::ast) fn record(
     let two_state = |leaf: &Leaf| {
         matches!(
             leaf.r#type.kind,
-            TypeKind::Bit | TypeKind::String | TypeKind::Object | TypeKind::Process
+            TypeKind::Bit
+                | TypeKind::Chandle
+                | TypeKind::String
+                | TypeKind::Object
+                | TypeKind::Process
         )
     };
-    let handles = leaves
-        .iter()
-        .any(|leaf| matches!(leaf.r#type.kind, TypeKind::String | TypeKind::Object));
+    let handles = leaves.iter().any(|leaf| {
+        leaf.r#type.container.is_some()
+            || matches!(leaf.r#type.kind, TypeKind::String | TypeKind::Object)
+    });
     let uniform = leaves.iter().all(two_state) || !leaves.iter().any(two_state);
     if aggregate.width() <= 64 && !handles && uniform {
         return Ok(None);
@@ -802,4 +932,145 @@ pub(in crate::ast) fn member_leaves(
         .filter(|leaf| leaf.path.starts_with(path))
         .collect();
     Some((ty, leaves))
+}
+
+/// Whether a type whose semantic type in `table` is `id`, and whose
+/// conversion input field tells `field`, is an unpacked structure type or
+/// a fixed-size unpacked array of them (7.2, 7.4.2). Without a semantic
+/// type, as the field tells.
+pub(super) fn is_struct(
+    id: Option<semantic_types::TyId>,
+    table: &semantic_types::TyTable,
+    field: bool,
+) -> bool {
+    // A type that cannot be formed in its scope has no semantic type; its
+    // metadata tells (see `struct_of`).
+    let Some(id) = id else {
+        return field;
+    };
+    let is_struct = table.is_unpacked_struct(table.fixed_element(id));
+    debug_assert_eq!(
+        is_struct, field,
+        "the semantic type of an unpacked structure type"
+    );
+    is_struct
+}
+
+/// The declaration of the unpacked structure type, or of the elements of a
+/// fixed-size unpacked array of them (7.2, 7.4.2), of a type whose semantic
+/// type in `table` is `id` and whose conversion input field holds `field`.
+/// Without a semantic type, as the field tells (see [`is_struct`]).
+pub(super) fn declaration_of<'a>(
+    id: Option<semantic_types::TyId>,
+    table: &'a semantic_types::TyTable,
+    field: Option<&'a Arc<UnpackedStruct>>,
+) -> Option<&'a Arc<UnpackedStruct>> {
+    let Some(id) = id else {
+        return field;
+    };
+    let aggregate = table.unpacked_struct(id);
+    debug_assert_eq!(
+        aggregate.map(|aggregate| aggregate.identity()),
+        field.map(|aggregate| aggregate.identity()),
+        "the declaration of an unpacked structure type"
+    );
+    aggregate
+}
+
+#[cfg(test)]
+mod shape_struct_tests {
+    use super::*;
+
+    /// Structure `S` of one bit member `a` with initial value `default`.
+    fn one_bit(default: Option<Expr>) -> Arc<UnpackedStruct> {
+        Arc::new(UnpackedStruct {
+            owner: "S".into(),
+            members: vec![Member {
+                name: "a".into(),
+                r#type: Type::new(TypeKind::Bit),
+                default,
+                width: 1,
+            }],
+        })
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "one declaration of unpacked structure type")]
+    fn one_structure_type_with_two_layouts_is_caught() {
+        let mut table = semantic_types::TyTable::default();
+        let bit = table.intern(semantic_types::TyData::Packed(semantic_types::Packed {
+            element: semantic_types::PackedElement::Bits,
+            four_state: false,
+            signed: false,
+            signed_element_depth: None,
+            dims: Box::new([]),
+            keyword: None,
+        }));
+        let decl = table.declare("S", None);
+        let id = table.intern(semantic_types::TyData::UnpackedStruct(
+            semantic_types::Decl::Aggregate {
+                decl,
+                members: Arc::new([("a".into(), bit)]),
+            },
+        ));
+        table.record_struct(id, &one_bit(None));
+        table.record_struct(id, &one_bit(Some(Expr::Literal("1'b1".into()))));
+    }
+
+    /// `[N-1:0]`, a range that names `N`.
+    fn symbolic_range() -> UnpackedRange {
+        UnpackedRange::new(
+            ConstExpr::Binary {
+                left: Box::new(ConstExpr::Ident("N".into())),
+                op: BinaryOp::Sub,
+                right: Box::new(ConstExpr::Literal("1".into())),
+            },
+            ConstExpr::Literal("0".into()),
+        )
+    }
+
+    #[test]
+    fn structures_whose_type_is_not_formed_are_unsupported() {
+        // `S items[N]` where the scope has no `N`: a structure, but no
+        // type to check a value against.
+        let mut ty = Type::new(TypeKind::Bit);
+        ty.unpacked_struct = Some(Arc::new(UnpackedStruct {
+            owner: "S".into(),
+            members: vec![Member {
+                name: "a".into(),
+                r#type: Type::new(TypeKind::Bit),
+                default: None,
+                width: 1,
+            }],
+        }));
+        ty.unpacked_ranges.push(symbolic_range());
+        let shape = procedural::dimensions_from_type(&ty);
+        let functions = const_functions::ConstantFunctions::default();
+        let mut table = semantic_types::TyTable::default();
+        assert!(
+            shape
+                .type_id(&mut table, &functions, &ConstEnv::default())
+                .is_none()
+        );
+        let error = struct_of(&shape, &mut table, &functions, &ConstEnv::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not formed in this scope"), "{error}");
+        let env = ConstEnv::from_iter([("N".into(), 2)]);
+        assert!(
+            struct_of(&shape, &mut table, &functions, &env)
+                .unwrap()
+                .is_some()
+        );
+        // A vector is no structure, formed or not.
+        let mut vector = Type::new(TypeKind::Bit);
+        vector.unpacked_ranges.push(symbolic_range());
+        let vector = procedural::dimensions_from_type(&vector);
+        assert!(
+            struct_of(&vector, &mut table, &functions, &ConstEnv::default())
+                .unwrap()
+                .is_none()
+        );
+    }
 }

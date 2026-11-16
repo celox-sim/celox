@@ -45,7 +45,16 @@ pub(in crate::ast) fn classify<'a>(
         }
     }
     for subroutine in &subroutines {
-        let is_timed = timed.contains(&subroutine.name);
+        // A task suspends through what it calls too; a function never
+        // suspends, and only a fork of its own body outlives the call with
+        // its formals: a fork that one of its callees spawns reads none of
+        // them, as UVM 1.2's `uvm_create_random_seed` reaches the fork of
+        // `uvm_component::m_set_cl_verb`.
+        let is_timed = if subroutine.is_task {
+            timed.contains(&subroutine.name)
+        } else {
+            own_effects(&subroutine.body, &definitions).0.suspends
+        };
         if !subroutine.is_task {
             let (blocking, _, calls, _) = super::final_procedures::effects(
                 subroutine.body.iter().chain(&subroutine.sensitivity_body),
@@ -113,13 +122,12 @@ pub(in crate::ast) fn classify<'a>(
             ));
         }
     }
-    for process in processes.iter().filter(|process| process.is_initializer()) {
-        if body_effects(&process.body, &known, &definitions).suspends {
-            return Err(unsupported(
-                "background process scheduled by a declaration initializer; IEEE 1800-2023 13.4.4 requires an initial/always process",
-            ));
-        }
-    }
+    // A declaration initializer may call a function that forks a
+    // background process on some path only, as UVM 1.2's factory
+    // registration reaches `uvm_component::m_set_cl_verb`, whose fork its
+    // condition never lets an initializer run. 13.4.4 lets the error be
+    // issued at run time: an initializer that forks or suspends stops the
+    // simulation then (see `celox_runtime`).
     let initial_count = processes.len();
     let mut retained = Vec::new();
     for process in std::mem::take(comb) {
@@ -133,6 +141,44 @@ pub(in crate::ast) fn classify<'a>(
                 // always_latch executes once at time zero, then rearms its
                 // implicit sensitivity before the queued NBA updates land.
                 body.push(wait);
+                processes.push(InitialProcess {
+                    creation_order: process.creation_order,
+                    site: process.process_site,
+                    condition: process.condition,
+                    body: vec![Stmt::Loop {
+                        kind: LoopKind::Forever,
+                        init: Vec::new(),
+                        condition: None,
+                        step: Vec::new(),
+                        body,
+                    }],
+                    kind: celox_design::ProcessKind::Regular,
+                    validation_body: Vec::new(),
+                    synthetic: false,
+                    repeats: true,
+                });
+                continue;
+            }
+            // `$timeformat` sets the format of every `%t` in the design's
+            // state, which a combinational process does not write. Such a
+            // process runs as a process instead: `always_comb` and
+            // `always_latch` once at time zero, then after each change of
+            // their implicit sensitivity (IEEE 1800-2023 9.2.2.2.1), and
+            // `always @*` after each change of its implicit event list
+            // (9.4.2.2).
+            if effects.time_format && process.kind != CombProcessKind::ContinuousAssign {
+                let always_star = process.kind == CombProcessKind::AlwaysStar;
+                let wait = timing::implicit_event_kind(
+                    &process.body,
+                    &process.sensitivity_body,
+                    !always_star,
+                );
+                let mut body = process.body;
+                if always_star {
+                    body.insert(0, wait);
+                } else {
+                    body.push(wait);
+                }
                 processes.push(InitialProcess {
                     creation_order: process.creation_order,
                     site: process.process_site,
@@ -205,10 +251,63 @@ pub(in crate::ast) fn classify<'a>(
         });
     }
     *comb = retained;
+    // An `always_ff` whose event control names no edge runs as a process
+    // already. Like every `always_ff` it has that one event control and no
+    // blocking timing control (IEEE 1800-2023 9.2.2.4), also none of a
+    // task it calls.
+    for process in processes.iter().filter(|process| {
+        process.repeats
+            && process
+                .site
+                .as_ref()
+                .is_some_and(|site| site.construct == "always_ff")
+    }) {
+        for statement in &process.body {
+            let Stmt::Loop { body, .. } = statement else {
+                continue;
+            };
+            // The event control is a leading wait, the event block a
+            // virtual-interface event control lowers to (25.9), or the
+            // process wait on a named event (15.5); none is a blocking
+            // timing control of the body.
+            let controlled = match body.split_first() {
+                Some((Stmt::WaitEvent(_), controlled)) => controlled,
+                Some((
+                    Stmt::Loop {
+                        kind: LoopKind::EventBlock,
+                        ..
+                    },
+                    controlled,
+                )) => controlled,
+                Some((
+                    Stmt::Eval(Expr::Call {
+                        callee:
+                            Callee::System(SystemFunction::Process(celox_design::ProcessOp::WaitEvent)),
+                        ..
+                    }),
+                    controlled,
+                )) => controlled,
+                _ => body.as_slice(),
+            };
+            // An intra-assignment delay of a nonblocking assignment
+            // schedules its update without suspending the procedure
+            // (9.4.5, 10.4.2), as in the `always_ff` processes below.
+            let effects = body_effects(controlled, &known, &definitions);
+            if effects.suspends && !delayed_nonblocking_only(controlled, &timed, &definitions) {
+                return Err(unsupported("timed task call in always_ff"));
+            }
+        }
+    }
     let mut retained = Vec::new();
     for process in std::mem::take(ff) {
         let effects = body_effects(&process.body, &known, &definitions);
-        let blocks = effects.suspends;
+        // An intra-assignment delay schedules its update without suspending
+        // the caller (IEEE 1800-2023 9.4.5, 10.4.2), so a process whose
+        // only timing controls are such delays keeps its fused form, an
+        // `always_ff` as well as a plain `always`; the lowering stages the
+        // delayed updates for timed publication.
+        let blocks =
+            effects.suspends && !delayed_nonblocking_only(&process.body, &timed, &definitions);
         if !blocks && !effects.uses_kernel() {
             retained.push(process);
             continue;
@@ -255,6 +354,106 @@ pub(in crate::ast) fn classify<'a>(
         processes.sort_by_key(|process| (!process.is_initializer(), process.creation_order));
     }
     Ok(())
+}
+
+/// Whether nothing in `body` suspends its caller except the delay controls
+/// of delayed nonblocking assignments, which schedule an update at a future
+/// time instead of suspending (IEEE 1800-2023 9.4.5). A delayed assignment
+/// with an event control, any other timing statement, and a call of a timed
+/// subroutine all suspend.
+fn delayed_nonblocking_only(
+    body: &[Stmt],
+    timed: &HashSet<String>,
+    definitions: &HashMap<&str, &Subroutine>,
+) -> bool {
+    let mut exempt: HashSet<*const Stmt> = HashSet::default();
+    for stmt in body {
+        stmt.walk(&mut |stmt| {
+            if let Stmt::DelayedNonblocking { control, .. } = stmt
+                && matches!(&**control, Stmt::Delay { .. })
+            {
+                exempt.insert(std::ptr::from_ref(&**control));
+            }
+        });
+    }
+    let mut suspends = false;
+    for stmt in body {
+        stmt.walk(&mut |stmt| {
+            match stmt {
+                Stmt::Delay { .. } => {
+                    if !exempt.contains(&std::ptr::from_ref(stmt)) {
+                        suspends = true;
+                    }
+                }
+                Stmt::WaitEvent(_)
+                | Stmt::WaitImplicit { .. }
+                | Stmt::Wait(_)
+                | Stmt::WaitFork
+                | Stmt::Fork { .. }
+                | Stmt::DeferActive
+                | Stmt::AssertionRegion { .. } => suspends = true,
+                Stmt::Call { name, .. } if timed.contains(name) => suspends = true,
+                Stmt::Call { name, .. }
+                    if definitions.get(name.as_str()).is_some_and(|subroutine| {
+                        subroutine_contains_delayed(
+                            subroutine,
+                            definitions,
+                            &mut HashSet::default(),
+                        )
+                    }) =>
+                {
+                    suspends = true
+                }
+                _ => {}
+            }
+            for expr in lifetimes::stmt_exprs(stmt) {
+                suspends |= expression_effects(expr).suspends;
+                // A call in an expression suspends as a call statement
+                // does when the callee is timed or contains a delayed
+                // nonblocking assignment in its own units.
+                const_functions::visit_expr_calls(expr, &mut |callee, _| {
+                    if let Callee::Subroutine(name) = callee
+                        && (timed.contains(name)
+                            || definitions.get(name.as_str()).is_some_and(|subroutine| {
+                                subroutine_contains_delayed(
+                                    subroutine,
+                                    definitions,
+                                    &mut HashSet::default(),
+                                )
+                            }))
+                    {
+                        suspends = true;
+                    }
+                });
+            }
+        });
+    }
+    !suspends
+}
+
+/// Whether a subroutine body contains a delayed nonblocking assignment,
+/// directly or through the subroutines it calls: those run in their own
+/// units, which cannot stage a flip-flop's delayed update.
+fn subroutine_contains_delayed(
+    subroutine: &Subroutine,
+    definitions: &HashMap<&str, &Subroutine>,
+    visited: &mut HashSet<String>,
+) -> bool {
+    let mut found = false;
+    for stmt in subroutine.body.iter().chain(&subroutine.sensitivity_body) {
+        stmt.walk(&mut |stmt| match stmt {
+            Stmt::DelayedNonblocking { .. } => found = true,
+            Stmt::Call { name, .. } => {
+                if visited.insert(name.clone())
+                    && let Some(callee) = definitions.get(name.as_str())
+                {
+                    found |= subroutine_contains_delayed(callee, definitions, visited);
+                }
+            }
+            _ => {}
+        });
+    }
+    found
 }
 
 /// The subroutines for which `holds` is true, given those already found:
@@ -307,6 +506,9 @@ struct Effects {
     /// process kernel can run.
     reads_process: bool,
     nonblocking: bool,
+    /// They call `$timeformat`, which sets the format of every module's
+    /// `%t` in the design's state.
+    time_format: bool,
 }
 
 impl Effects {
@@ -316,6 +518,7 @@ impl Effects {
             controls: self.controls || other.controls,
             reads_process: self.reads_process || other.reads_process,
             nonblocking: self.nonblocking || other.nonblocking,
+            time_format: self.time_format || other.time_format,
         }
     }
 
@@ -345,6 +548,8 @@ fn statement_effects(statement: &Stmt) -> Effects {
         | Stmt::DeferActive
         | Stmt::AssertionRegion { .. } => effects.suspends = true,
         Stmt::DisableFork => effects.controls = true,
+        Stmt::Block { .. } | Stmt::DisableBlock(_) => {}
+        Stmt::ProceduralAssign { .. } | Stmt::Deassign { .. } => {}
         Stmt::If { .. }
         | Stmt::Case { .. }
         | Stmt::Loop { .. }
@@ -355,6 +560,13 @@ fn statement_effects(statement: &Stmt) -> Effects {
         | Stmt::Eval(_)
         | Stmt::SystemTask { .. }
         | Stmt::Local { .. } => {}
+    }
+    if let Stmt::SystemTask {
+        task: SystemTask::Timeformat,
+        ..
+    } = statement
+    {
+        effects.time_format = true;
     }
     for expr in lifetimes::stmt_exprs(statement) {
         effects = effects.union(expression_effects(expr));

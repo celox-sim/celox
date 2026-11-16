@@ -333,7 +333,7 @@ impl<B: SimBackend> SimulationState<B> {
                                 process,
                                 gate.signal,
                             )
-                            .cloned()
+                            .map(std::borrow::Cow::into_owned)
                             .unwrap_or_else(|| read(backend, gate.signal))
                         };
                         value.0.bit(0) && !value.1.bit(0)
@@ -384,8 +384,8 @@ impl<B: SimBackend> SimulationState<B> {
                     term.signal,
                 ) {
                     if let Baseline::Value(last) = baseline {
-                        wake |= occurs(term.kind, last, value) & gate_holds;
-                        *last = value.clone();
+                        wake |= occurs(term.kind, last, &value) & gate_holds;
+                        *last = value.into_owned();
                         continue;
                     }
                 }

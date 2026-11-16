@@ -3,49 +3,6 @@ use super::*;
 #[path = "packed_structs/port_connections.rs"]
 mod port_connections;
 
-sv_backends! {
-fn packed_struct_array_unknown_indices(sim) { @case "packed_structs::packed_struct_array_unknown_indices"; }
-fn packed_struct_array_dynamic_members(sim) { @case "packed_structs::packed_struct_array_dynamic_members"; }
-fn packed_struct_array_ascending_members(sim) { @case "packed_structs::packed_struct_array_ascending_members"; }
-    fn packed_struct_layout_and_nested_fields(sim) {
-        @case "packed_structs::packed_struct_layout_and_nested_fields";
-    }
-
-    fn packed_struct_field_assignments_and_registers(sim) {
-        @case "packed_structs::packed_struct_field_assignments_and_registers";
-    }
-
-    fn packed_struct_mixed_state_members(sim) {
-        @case "packed_structs::packed_struct_mixed_state_members";
-    }
-
-    fn packed_struct_parameterized_ports(sim) {
-        @case "packed_structs::packed_struct_parameterized_ports";
-    }
-
-    fn packed_struct_bounds_and_type_queries(sim) {
-        @case "packed_structs::packed_struct_bounds_and_type_queries";
-    }
-
-    fn packed_struct_wide_four_state_layout(sim) {
-        @case "packed_structs::packed_struct_wide_four_state_layout";
-    }
-
-    fn packed_struct_whole_value_signedness(sim) {
-        @case "packed_structs::packed_struct_whole_value_signedness";
-    }
-
-    fn packed_struct_typedef_bounds_survive_generate_shadowing(sim) {
-        @case "packed_structs::packed_struct_typedef_bounds_survive_generate_shadowing";
-    }
-}
-
-sv_backends! {
-    fn packed_struct_alias_packed_dimensions(sim) {
-        @case "packed_structs::packed_struct_alias_packed_dimensions";
-    }
-}
-
 /// Members of packed structure elements of unpacked arrays, such as
 /// `m[i].y`, selected with run-time indices: the index selects take an
 /// element and the member selects then select from it (IEEE 1800-2023
@@ -266,6 +223,72 @@ sv_backends! {
     }
 }
 
+/// Members of the elements of packed array members of a packed structure,
+/// such as `s.arr[0].f` (IEEE 1800-2023 7.2.1, 7.4.1), read and written,
+/// of descending, ascending and multidimensional arrays.
+const ARRAY_MEMBER_ELEMENTS: &str = r#"
+    module Top(input logic clk, input logic [7:0] d,
+               output logic [3:0] f0, g1, h, a3, output logic [31:0] tw, uw);
+        typedef struct packed { logic [3:0] f; logic [3:0] g; } in_t;
+        typedef struct packed { in_t [1:0] arr; in_t [0:1] asc; } s_t;
+        typedef struct packed { in_t [1:0][1:0] grid; } m_t;
+        s_t s;
+        m_t m;
+        assign s = 32'h1234_5678;
+        assign m = 32'h89ab_cdef;
+        assign f0 = s.arr[0].f;
+        assign g1 = s.arr[1].g;
+        assign h = s.asc[0].g;
+        assign a3 = m.grid[1][0].f;
+        s_t t, u;
+        always_comb begin
+            t = '0;
+            t.arr[1].f = d[3:0];
+            t.asc[1].g = d[7:4];
+        end
+        always_ff @(posedge clk) begin
+            u.arr[0].g <= d[3:0];
+            u.asc[0].f <= d[7:4];
+        end
+        initial u = '0;
+        assign tw = t;
+        assign uw = u;
+    endmodule
+"#;
+
+fn array_member_elements<B: celox::SimBackend>(sim: &mut celox::Simulator<B>) {
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let f0 = sim.signal("f0");
+    let g1 = sim.signal("g1");
+    let h = sim.signal("h");
+    let a3 = sim.signal("a3");
+    let tw = sim.signal("tw");
+    let uw = sim.signal("uw");
+    assert_eq!(sim.get(f0), 0x3u8.into(), "s.arr[0].f");
+    assert_eq!(sim.get(g1), 0x2u8.into(), "s.arr[1].g");
+    assert_eq!(sim.get(h), 0x6u8.into(), "s.asc[0].g");
+    assert_eq!(sim.get(a3), 0xau8.into(), "m.grid[1][0].f");
+    sim.set(d, 0xc5u8);
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(tw), 0x5000_000cu32.into(), "t.arr[1].f, t.asc[1].g");
+    assert_eq!(sim.get(uw), 0x0005_c000u32.into(), "u.arr[0].g, u.asc[0].f");
+}
+
+sv_backends! {
+    fn packed_struct_members_of_packed_array_member_elements(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(vec![(ARRAY_MEMBER_ELEMENTS, Path::new("array_member_elements.sv"))], "Top");
+        array_member_elements(&mut sim);
+    }
+
+    fn packed_struct_members_of_packed_array_member_elements_four_state(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(vec![(ARRAY_MEMBER_ELEMENTS, Path::new("array_member_elements.sv"))], "Top").four_state(true);
+        array_member_elements(&mut sim);
+    }
+}
+
 /// The known bits and the mask of signal `name`.
 fn known_and_mask<B: celox::SimBackend>(sim: &mut celox::Simulator<B>, name: &str) -> (u64, u64) {
     let signal = sim.signal(name);
@@ -318,5 +341,488 @@ sv_backends! {
             assert_eq!(known_and_mask(&mut sim, "w0"), (w0, 0), "w[0] after w[{value}].b");
             assert_eq!(known_and_mask(&mut sim, "w1"), (w1, 0), "w[1] after w[{value}].b");
         }
+    }
+}
+
+// The second and third operands of a conditional are in the assignment-like
+// context of the conditional itself (IEEE 1800-2023 10.8), so an assignment
+// pattern there takes the type of the target, also of a selected element.
+sv_backends! {
+    fn conditional_patterns_take_the_type_of_a_selected_target(sim) {
+        @setup {
+            let source = r#"
+    package pad_pkg;
+      typedef struct packed { logic [1:0] drive; logic schmitt; logic pull; } attr_t;
+    endpackage
+    module Top(
+      input  logic sel,
+      input  pad_pkg::attr_t [3:0] core,
+      output pad_pkg::attr_t [3:0] pad,
+      output pad_pkg::attr_t [1:0] staged,
+      output pad_pkg::attr_t nested
+    );
+      for (genvar k = 0; k < 4; k++) begin : gen
+        if (k == 1) begin : schmitt
+          assign pad[k] = (sel) ? '{schmitt: 1'b1, default: '0} : core[k];
+        end else begin : plain
+          assign pad[k] = sel ? '0 : core[k];
+        end
+      end
+      always_comb begin
+        staged[0] = sel ? core[0] : '{drive: 2'b10, default: '1};
+        staged[1] = '{default: '0};
+        if (!sel) staged[1] = (sel ? '{default: '1} : ('{pull: 1'b1, default: '0}));
+      end
+      assign nested = sel ? (core[3].pull ? '{default: '1} : '{drive: 2'b01, default: '0}) : core[2];
+    endmodule
+  "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("conditional_patterns.sv"))], "Top");
+        let sel = sim.signal("sel");
+        let core = sim.signal("core");
+        sim.modify(|io| {
+            io.set(core, 0xfa51u16);
+            io.set(sel, 1u8);
+        })
+        .unwrap();
+        assert_eq!(u64::try_from(sim.get(sim.signal("pad"))).unwrap(), 0x0020);
+        assert_eq!(u64::try_from(sim.get(sim.signal("staged"))).unwrap(), 0x01);
+        assert_eq!(u64::try_from(sim.get(sim.signal("nested"))).unwrap(), 0xf);
+        sim.modify(|io| io.set(sel, 0u8)).unwrap();
+        assert_eq!(u64::try_from(sim.get(sim.signal("pad"))).unwrap(), 0xfa51);
+        assert_eq!(u64::try_from(sim.get(sim.signal("staged"))).unwrap(), 0x1b);
+        assert_eq!(u64::try_from(sim.get(sim.signal("nested"))).unwrap(), 0xa);
+        sim.modify(|io| {
+            io.set(core, 0x0a51u16);
+            io.set(sel, 1u8);
+        })
+        .unwrap();
+        assert_eq!(u64::try_from(sim.get(sim.signal("nested"))).unwrap(), 0x4);
+    }
+}
+
+// A cast in an item of a pattern-valued parameter is evaluated by the
+// pattern, in the type of its member, as any other item is. The parameter
+// is initialized at time zero, so the design runs as a timed simulation.
+macro_rules! pattern_parameter_casts_backend {
+    ($name:ident, $backend:ident) => {
+        #[test]
+        fn $name() {
+            let source = r#"
+    package tl_pkg;
+      typedef enum logic [2:0] { PutFull = 3'h0, Get = 3'h4 } op_e;
+      typedef struct packed { logic [1:0] rsvd; logic [3:0] instr; } user_t;
+      localparam user_t USER_DEFAULT = '{ instr: 4'h9, default: '0 };
+      localparam logic [7:0] Blanked = {8{1'b1}};
+      typedef struct packed {
+        logic       d_ready;
+        op_e        a_opcode;
+        user_t      a_user;
+        logic [7:0] a_data;
+        logic       a_valid;
+      } h2d_t;
+      localparam h2d_t H2D_DEFAULT = '{
+        d_ready:  1'b1,
+        a_opcode: op_e'('0),
+        a_user:   USER_DEFAULT,
+        a_data:   Blanked,
+        default:  '0
+      };
+    endpackage
+    module Sink(input tl_pkg::h2d_t tl_i, output logic [18:0] seen);
+      assign seen = tl_i;
+    endmodule
+    module Top(output logic [18:0] through_port, output logic [18:0] assigned);
+      Sink sink(.tl_i(tl_pkg::H2D_DEFAULT), .seen(through_port));
+      assign assigned = tl_pkg::H2D_DEFAULT;
+    endmodule
+  "#;
+            let mut sim = celox::Simulation::from_sv_sources(
+                vec![(source, Path::new("pattern_parameter_casts.sv"))],
+                "Top",
+            )
+            .$backend()
+            .unwrap();
+            sim.run_until(0).unwrap();
+            for name in ["through_port", "assigned"] {
+                let signal = sim.signal(name);
+                assert_eq!(
+                    u64::try_from(sim.get(signal)).unwrap(),
+                    0b1_000_001001_11111111_0,
+                    "{name}"
+                );
+            }
+        }
+    };
+}
+pattern_parameter_casts_backend!(pattern_parameter_casts_interpreter, build_interpreter);
+pattern_parameter_casts_backend!(pattern_parameter_casts_cranelift, build);
+#[cfg(target_arch = "x86_64")]
+pattern_parameter_casts_backend!(pattern_parameter_casts_native, build_native);
+pattern_parameter_casts_backend!(pattern_parameter_casts_wasm, build_wasm);
+
+// An enumeration member wider than the numeric constant environment is known
+// by its literal, also for the signedness a pattern item needs.
+sv_backends! {
+    fn wide_enumeration_members_are_pattern_items(sim) {
+        @setup {
+            let source = r#"
+    package st_pkg;
+      parameter logic [79:0] A = 80'h1234_5678_9abc_def0_1357;
+      parameter logic [79:0] B = 80'hbeef_0000_0000_0000_cafe;
+      typedef logic [159:0] state_t;
+      typedef enum state_t {
+        StRaw      = {160{1'b0}},
+        StUnlocked = {A, B}
+      } state_e;
+    endpackage
+    package data_pkg;
+      typedef struct packed {
+        logic valid;
+        st_pkg::state_t state;
+      } data_t;
+      parameter data_t DATA_DEFAULT = '{valid: 1'b1, state: st_pkg::StUnlocked};
+    endpackage
+    module Top(input logic sel, output logic valid, output logic [15:0] low, high,
+               output logic same);
+      data_pkg::data_t d;
+      assign d = sel ? data_pkg::DATA_DEFAULT : '{valid: 1'b0, state: st_pkg::StRaw};
+      assign valid = d.valid;
+      assign low = d.state[15:0];
+      assign high = d.state[159:144];
+      assign same = d.state == st_pkg::StUnlocked;
+    endmodule
+  "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("wide_enum_pattern_items.sv"))], "Top");
+        let sel = sim.signal("sel");
+        sim.modify(|io| io.set(sel, 1u8)).unwrap();
+        assert_eq!(u64::try_from(sim.get(sim.signal("valid"))).unwrap(), 1);
+        assert_eq!(u64::try_from(sim.get(sim.signal("low"))).unwrap(), 0xcafe);
+        assert_eq!(u64::try_from(sim.get(sim.signal("high"))).unwrap(), 0x1234);
+        assert_eq!(u64::try_from(sim.get(sim.signal("same"))).unwrap(), 1);
+        sim.modify(|io| io.set(sel, 0u8)).unwrap();
+        assert_eq!(u64::try_from(sim.get(sim.signal("valid"))).unwrap(), 0);
+        assert_eq!(u64::try_from(sim.get(sim.signal("same"))).unwrap(), 0);
+    }
+}
+
+/// The bounds of a select of a member of a packed structure are expressions
+/// of the scope: they may query the variable that holds the member, also
+/// through the same path, as BaseJump's
+/// `bsg_manycore_ruche_x_link_fwd_inject_src_y` does with
+/// `link[0][E].fwd[$bits(link[0][E].fwd)-1:...]` (IEEE 1800-2023 7.2.1,
+/// 20.6.2). Verilator 5.054 prints the same line.
+#[test]
+fn bounds_of_member_selects_query_the_holding_variable() {
+    let source = r#"`timescale 1ns/1ns
+package noc_pkg;
+  typedef enum logic [2:0] {P = 3'd0, W, E, N, S} Dirs;
+endpackage
+module top;
+  import noc_pkg::*;
+  typedef struct packed { logic [5:0] fwd; logic [2:0] rev; } link_s;
+  localparam int R = 3;
+  link_s [R-1:0][E:W] l;
+  logic [2:0] hi;
+  assign hi = l[0][E].fwd[$bits(l[0][E].fwd)-1:3];
+  initial begin
+    l = '0;
+    l[0][E].fwd = 6'h2a;
+    l[1][W].fwd[$bits(l[1][W].fwd)-1:$bits(l[1][W].rev)] = 3'h6;
+    #1 $display("%0d %0d %h %h %h", $bits(l[0][E].fwd), $bits(l[0]), hi, l[1][W].fwd, l[0][E].fwd[$bits(l[0])-13:3]);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("member_select_bounds.sv"))],
+            "top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["6 18 5 30 5"], "four_state={four_state}");
+    }
+}
+
+/// A `default` of a structure pattern reaches the members of nested
+/// structures only (IEEE 1800-2023 10.9.2): a packed union member takes the
+/// value as a whole, as BlackParrot's command structures with an operand
+/// union do (Verilator: 000, 1ff).
+const UNION_MEMBER_DEFAULTS: &str = r#"
+    module Top(output logic [11:0] zero, ones, named);
+        typedef struct packed { logic [3:0] a; logic [3:0] b; } ab_t;
+        typedef struct packed { logic [7:0] c; } c_t;
+        typedef union packed { ab_t ab; c_t c; } u_t;
+        typedef struct packed { logic [3:0] npc; u_t operands; } s_t;
+        s_t z, o, n;
+        assign z = '{default: '0};
+        assign o = '{npc: 4'h1, default: '1};
+        assign n = '{npc: 4'h2, operands: 8'h5a};
+        assign zero = z;
+        assign ones = o;
+        assign named = n;
+    endmodule
+"#;
+
+sv_backends! {
+    fn pattern_defaults_fill_packed_union_members(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(vec![(UNION_MEMBER_DEFAULTS, Path::new("union_defaults.sv"))], "Top");
+        for (name, value) in [("zero", 0x000u16), ("ones", 0x1ff), ("named", 0x25a)] {
+            assert_eq!(sim.get(sim.signal(name)), value.into(), "{name}");
+        }
+    }
+
+    fn pattern_defaults_fill_packed_union_members_four_state(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(vec![(UNION_MEMBER_DEFAULTS, Path::new("union_defaults.sv"))], "Top").four_state(true);
+        for (name, value) in [("zero", 0x000u16), ("ones", 0x1ff), ("named", 0x25a)] {
+            assert_eq!(sim.get_four_state(sim.signal(name)), (value.into(), 0u8.into()), "{name}");
+        }
+    }
+}
+
+/// A member of an element of a packed array member is driven by a
+/// continuous assignment and by an output port, each of which drives only
+/// the bits it selects (IEEE 1800-2023 6.5, 23.3.2.2): OpenTitan's register
+/// slices connect `.q(reg2hw.regs[0].q)` of many instances to one
+/// structure.
+#[test]
+fn ports_and_assignments_drive_members_of_array_member_elements() {
+    let source = r#"
+        `timescale 1ns/1ns
+        package Regs;
+            typedef struct packed { logic [7:0] q; } reg_t;
+            typedef struct packed { logic [3:0] a; reg_t [2:0] regs; logic b; } file_t;
+        endpackage
+        module Nibble(input logic [3:0] d, output logic [3:0] q);
+            assign q = d;
+        endmodule
+        module Byte(input logic [7:0] d, output logic [7:0] q);
+            assign q = d;
+        endmodule
+        module Top;
+            Regs::file_t ports;
+            Nibble u_low(.d(4'h5), .q(ports.regs[1].q[3:0]));
+            Nibble u_high(.d(4'ha), .q(ports.regs[1].q[7:4]));
+            Nibble u_a(.d(4'h3), .q(ports.a));
+            Byte u_two(.d(8'h77), .q(ports.regs[2].q));
+            assign ports.regs[0].q = 8'h11;
+            assign ports.b = 1'b1;
+            initial #1 $display("ports=%h element=%h q=%h nibble=%h", ports, ports.regs[1],
+                                ports.regs[1].q, ports.regs[1].q[7:4]);
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("element_ports.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            ["ports=06ef4a23 element=a5 q=a5 nibble=a"],
+            "four-state {four_state}"
+        );
+    }
+}
+
+/// Two output ports that drive the same member of an element are multiple
+/// drivers of those bits (6.5).
+#[test]
+fn rejects_overlapping_port_drivers_of_array_member_elements() {
+    let source = r#"
+        package Regs;
+            typedef struct packed { logic [7:0] q; } reg_t;
+            typedef struct packed { reg_t [1:0] regs; } file_t;
+        endpackage
+        module Byte(input logic [7:0] d, output logic [7:0] q);
+            assign q = d;
+        endmodule
+        module Top;
+            Regs::file_t ports;
+            Byte u_a(.d(8'h01), .q(ports.regs[0].q));
+            Byte u_b(.d(8'h02), .q(ports.regs[0].q[3:0]));
+        endmodule
+    "#;
+    let error = celox::Simulation::from_sv_sources(vec![(source, Path::new("overlap.sv"))], "Top")
+        .build()
+        .map(|_| ())
+        .expect_err("overlapping drivers are rejected")
+        .to_string();
+    assert!(error.contains("multiple variable drivers"), "{error}");
+}
+
+/// A port that drives a select of a member of an array member element
+/// selects by the member's declared indices, ascending or not starting at 0
+/// (IEEE 1800-2023 7.4.6). Verilator 5.054 prints the same.
+#[test]
+fn ports_drive_members_of_array_member_elements_by_their_declared_indices() {
+    let source = r#"
+        `timescale 1ns/1ns
+        package Regs;
+            typedef struct packed { logic [0:7] q; logic [15:8] r; } reg_t;
+            typedef struct packed { logic [3:0] a; reg_t [1:0] regs; } file_t;
+        endpackage
+        module Nibble(input logic [3:0] d, output logic [3:0] q);
+            assign q = d;
+        endmodule
+        module Top;
+            Regs::file_t ports;
+            Nibble u_q0(.d(4'h5), .q(ports.regs[1].q[4:7]));
+            Nibble u_q1(.d(4'ha), .q(ports.regs[1].q[0:3]));
+            Nibble u_r0(.d(4'h3), .q(ports.regs[1].r[11:8]));
+            Nibble u_r1(.d(4'hc), .q(ports.regs[1].r[15:12]));
+            Nibble u_a(.d(4'h7), .q(ports.a));
+            assign ports.regs[0] = 16'h1234;
+            initial #1 $display("%h %h %h", ports, ports.regs[1].q, ports.regs[1].r);
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("element_port_indices.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["7a5c31234 a5 c3"], "four-state {four_state}");
+    }
+}
+
+/// A member of an element of a packed array member of a structure of an
+/// interface instance is read and written at a run-time index through the
+/// instance (IEEE 1800-2023 25.5, 7.4.5). Verilator 5.054 prints the same
+/// line.
+#[test]
+fn members_of_packed_array_member_elements_of_interfaces_at_run_time_indices() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+  typedef struct packed { logic [3:0] q; logic qe; } k_t;
+  typedef struct packed { logic [7:0] pre; k_t [3:0] key_share0; } r_t;
+endpackage
+interface regs_if;
+  p::r_t reg2hw;
+endinterface
+module top;
+  regs_if ifc();
+  int i;
+  logic [3:0] v;
+  initial begin
+    ifc.reg2hw = '0;
+    for (i = 0; i < 4; i++) ifc.reg2hw.key_share0[i].q = 4'(i + 3);
+    i = 2; v = ifc.reg2hw.key_share0[i].q;
+    $display("A %h %h", v, ifc.reg2hw);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("members.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["A 5 0062906"], "four_state={four_state}");
+    }
+}
+
+/// A member of an element of a packed array member of a structure, at a
+/// run-time index, such as Caliptra's `reg2hw.key_share0[i].q`, is read and
+/// written (IEEE 1800-2023 7.2.1, 7.4.5); an index outside the array reads
+/// X and writes nothing, also of the members next to the array.
+#[test]
+fn members_of_packed_array_member_elements_at_run_time_indices() {
+    let source = r#"`timescale 1ns/1ns
+module top;
+  typedef struct packed { logic [3:0] q; logic qe; } k_t;
+  typedef struct packed { logic [7:0] pre; k_t [3:0] key_share0; logic [7:0] post; } r_t;
+  r_t reg2hw;
+  logic [3:0] out [4];
+  int i;
+  initial begin
+    reg2hw = '0;
+    reg2hw.pre = 8'haa; reg2hw.post = 8'h55;
+    for (i = 0; i < 4; i++) reg2hw.key_share0[i].q = 4'(i + 3);
+    for (i = 0; i < 4; i++) out[i] = reg2hw.key_share0[i].q;
+    $display("A %h %h %h %h", out[0], out[1], out[2], out[3]);
+    i = 5;
+    i = -1; reg2hw.key_share0[i].qe = 1'b1; i = 5;
+    reg2hw.key_share0[i].q = 4'hf;
+    $display("B %h %h %b", reg2hw.pre, reg2hw.post, reg2hw.key_share0[i].q);
+    $display("C %h", reg2hw);
+  end
+endmodule"#;
+    for (four_state, unknown) in [(false, "0000"), (true, "xxxx")] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("members.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "A 3 4 5 6".to_string(),
+                format!("B aa 55 {unknown}"),
+                "C aa6290655".to_string()
+            ],
+            "four_state={four_state}"
+        );
     }
 }

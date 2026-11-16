@@ -146,6 +146,6 @@ test("Celox archive checks enable cross-backend and SV integration features", as
   assert.equal(result.code, 1); // The mock registry rejects the eventual publish.
   const calls = await readFile(join(result.root, "cargo.log"), "utf8");
   assert.match(calls, /package --locked -p celox\n/);
-  assert.match(calls, /check --locked --all-targets --features cranelift,wasm-runtime,systemverilog --manifest-path .*celox-0.8.0\/Cargo.toml/);
+  assert.match(calls, /check --locked --all-targets --features cranelift,wasm-runtime --manifest-path .*celox-0.8.0\/Cargo.toml/);
   assert.equal(calls.split("\n").filter(line => line.startsWith("package ")).length, 1);
 });

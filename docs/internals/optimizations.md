@@ -31,6 +31,18 @@ explicit.
   whole-value work when only a slice is required.
 - **Cost-directed mux lowering** chooses between eager selection and control flow
   before expression structure is lost.
+- **Net inlining** removes combinational nets that only carry a value between
+  paths: a net one path reads becomes part of that path's expression, a small
+  net several paths read is copied into each, and a net nothing reads is
+  dropped with its driver. A stored net costs a store and a load, and in a
+  partitioned settle a comparison and a mark of its readers as well, because a
+  partition forwards nothing to another one. The pass runs only for pure
+  SystemVerilog designs in two-state mode whose dead-store policy lets signals
+  go, and only on nets nothing but combinational paths reads: every net a
+  flip-flop, a process, an event or the runtime reads, every port the policy
+  keeps, and every net of a combinational loop stays. A waveform, a live or
+  forced signal and a watched object turn it off, as does
+  `-sir:net_inlining` (`SirPass::NetInlining`).
 
 This layer may use design dependency facts, but it does not know physical memory
 offsets or target instructions.
@@ -121,6 +133,17 @@ unnecessary:
   simulation). A run that changed nothing compared is work the settle could
   have skipped, such as unrelated logic sharing a partition with state that
   changes every cycle.
+- partition sizing in estimated mode is a heuristic, not a derived optimum
+  (`SETTLE_PARTITION_COST`, `TARGET_ESTIMATED_SETTLE_PARTITIONS` in the
+  frontend's assembly). It pays off only for large designs whose per-cycle
+  activity is sparse and localized, with shallow dependency propagation;
+  densely toggling logic pays the flag tests and extra runs for nothing.
+  The current values were tuned on the RTLMeter designs (E906: ~10%
+  steady-state gain from target cost 51 to 32, 2,610 to 3,900 partitions;
+  E902 unchanged; finer and coarser targets both slower). Treat them as
+  due for re-examination with `--settle-profile` evidence when a design
+  with different activity characteristics appears; an activity-adaptive
+  choice would be preferable to retuning the constants by hand.
 - in the time slots a compiled scheduler runs, a combinational settle waits
   until its results are read: it runs, where the reference loop last
   settled, before a process kernel or domain that reads combinational outputs

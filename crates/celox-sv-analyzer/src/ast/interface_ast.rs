@@ -98,15 +98,33 @@ pub(super) fn analyze(
     Ok(module)
 }
 
+/// The signature of the interface `tree` declares, analyzed with the types,
+/// specializations and call sites of `design`, the design of `packages`,
+/// which the declarations it imports refer to.
 pub(super) fn signature(
+    tree: &SyntaxTree,
+    path: &Path,
+    packages: &packages::Packages,
+    design: &mut packages::Design,
+    name: String,
+    members: &[String],
+    names: &HashSet<String>,
+) -> Converted<(crate::ir::Module, Vec<(String, Type)>)> {
+    let mut session = Session::with_packages(packages, design);
+    let signature = signature_in(&mut session, tree, path, packages, name, members, names);
+    session.restore(design);
+    signature
+}
+
+fn signature_in(
+    session: &mut Session,
     tree: &SyntaxTree,
     path: &Path,
     packages: &packages::Packages,
     name: String,
     members: &[String],
     names: &HashSet<String>,
-) -> Converted<crate::ir::Module> {
-    let session = &mut Session::default();
+) -> Converted<(crate::ir::Module, Vec<(String, Type)>)> {
     let projected_tree = interface_binding::declaration_view(tree)?;
     let context = AnalysisContext::unspecialized(&projected_tree);
     let tree = &context;
@@ -140,6 +158,26 @@ pub(super) fn signature(
     let declarations = declarations::signals_from_scope_with_declaration_ranges(
         tree, session, &env, &aliases, true,
     )?;
+    // The members of an enumeration type, header ports included, whose type
+    // the module's ports do not keep. An enumeration type is declared outside
+    // the interface (one inside it is rejected, see
+    // `interfaces::InterfaceDecl::collect`), whose bounds took their values
+    // where it was declared.
+    let enumerations = module
+        .ports
+        .iter()
+        .map(|port| (port.name.as_str(), &port.r#type))
+        .chain(
+            declarations
+                .iter()
+                .map(|signal| (signal.name(), signal.r#type())),
+        )
+        .filter(|(name, ty)| {
+            members.iter().any(|member| member == name)
+                && ty.enumeration_in(&session.types).domain.is_some()
+        })
+        .map(|(name, ty)| (name.to_owned(), ty.clone()))
+        .collect::<Vec<_>>();
     let names = names
         .iter()
         .map(|name| (name.clone(), format!("h${name}")))
@@ -157,7 +195,8 @@ pub(super) fn signature(
                     rename.r#type(port.r#type.clone()),
                     port.is_net,
                 )
-                .with_unresolved_net(port.unresolved_net));
+                .with_unresolved_net(port.unresolved_net)
+                .with_net_resolution(port.net_resolution));
             }
             let signal = declarations
                 .iter()
@@ -169,7 +208,8 @@ pub(super) fn signature(
                 rename.r#type(signal.r#type.clone()),
                 signal.is_net,
             )
-            .with_unresolved_net(signal.unresolved_net))
+            .with_unresolved_net(signal.unresolved_net)
+            .with_net_resolution(signal.net_resolution))
         })
         .collect::<Converted<_>>()?;
     module
@@ -230,12 +270,17 @@ pub(super) fn signature(
     module.subroutines.clear();
     module.locals.clear();
     module.instances.clear();
-    let ir = crate::analyze::analyze_source(Source {
+    let (ir, publication) = crate::analyze::analyze_source_keeping(Source {
         modules: vec![module],
         diagnostics: Vec::new(),
-    })?;
-    ir.modules()
+        types: std::mem::take(&mut session.types),
+    });
+    session.types = publication.0;
+    let ir = ir?;
+    let module = ir
+        .modules()
         .first()
         .cloned()
-        .ok_or_else(|| unsupported("interface signature"))
+        .ok_or_else(|| unsupported("interface signature"))?;
+    Ok((module, enumerations))
 }

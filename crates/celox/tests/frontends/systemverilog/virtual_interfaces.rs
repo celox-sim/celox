@@ -1,143 +1,5 @@
 use super::*;
 
-sv_backends! {
-    fn properties_arguments_and_member_writes(sim) {
-        @case "virtual_interfaces::properties_arguments_and_member_writes";
-    }
-
-    fn null_equality_and_assignment(sim) {
-        @case "virtual_interfaces::null_equality_and_assignment";
-    }
-
-    fn interface_ports_and_array_elements(sim) {
-        @case "virtual_interfaces::interface_ports_and_array_elements";
-    }
-
-    fn four_state_members(sim) {
-        @case "virtual_interfaces::four_state_members";
-    }
-
-    fn function_results(sim) {
-        @case "virtual_interfaces::function_results";
-    }
-
-    fn rejects_call_results_of_other_types(sim) {
-        @case "virtual_interfaces::rejects_call_results_of_other_types";
-    }
-
-    fn modport_ports_and_constant_sized_members(sim) {
-        @case "virtual_interfaces::modport_ports_and_constant_sized_members";
-    }
-
-    fn rejects_modport_ports_to_full_interface(sim) {
-        @case "virtual_interfaces::rejects_modport_ports_to_full_interface";
-    }
-
-    fn rejects_integers_in_arrays_of_virtual_interfaces(sim) {
-        @case "virtual_interfaces::rejects_integers_in_arrays_of_virtual_interfaces";
-    }
-
-    fn member_selects(sim) {
-        @case "virtual_interfaces::member_selects";
-    }
-
-    fn rejects_integers_in_conditional_array_elements(sim) {
-        @case "virtual_interfaces::rejects_integers_in_conditional_array_elements";
-    }
-
-    fn increments_arrays_and_package_variables(sim) {
-        @case "virtual_interfaces::increments_arrays_and_package_variables";
-    }
-
-    fn multidimensional_and_package_arrays(sim) {
-        @case "virtual_interfaces::multidimensional_and_package_arrays";
-    }
-
-    fn class_call_arguments_and_package_results(sim) {
-        @case "virtual_interfaces::class_call_arguments_and_package_results";
-    }
-
-    fn rejects_package_results_of_other_interfaces(sim) {
-        @case "virtual_interfaces::rejects_package_results_of_other_interfaces";
-    }
-
-    fn rejects_integers_as_class_call_arguments(sim) {
-        @case "virtual_interfaces::rejects_integers_as_class_call_arguments";
-    }
-
-    fn rejects_integers_as_constructor_arguments(sim) {
-        @case "virtual_interfaces::rejects_integers_as_constructor_arguments";
-    }
-
-    fn writes_from_instances_of_one_module(sim) {
-        @case "virtual_interfaces::writes_from_instances_of_one_module";
-    }
-
-    fn rejects_virtual_interfaces_as_integral_references(sim) {
-        @case "virtual_interfaces::rejects_virtual_interfaces_as_integral_references";
-    }
-
-    fn increments_in_expressions(sim) {
-        @case "virtual_interfaces::increments_in_expressions";
-    }
-
-    fn queue_pops_and_output_arguments(sim) {
-        @case "virtual_interfaces::queue_pops_and_output_arguments";
-    }
-
-    fn rejects_another_interface(sim) {
-        @case "virtual_interfaces::rejects_another_interface";
-    }
-
-    fn rejects_modport_to_full_interface(sim) {
-        @case "virtual_interfaces::rejects_modport_to_full_interface";
-    }
-
-    fn waits_on_member_edges(sim) {
-        @case "virtual_interfaces::waits_on_member_edges";
-    }
-
-    fn waits_on_member_levels(sim) {
-        @case "virtual_interfaces::waits_on_member_levels";
-    }
-
-    fn waits_with_guards_signed_members_and_automatic_tasks(sim) {
-        @case "virtual_interfaces::waits_with_guards_signed_members_and_automatic_tasks";
-    }
-
-    fn mixed_event_controls(sim) {
-        @case "virtual_interfaces::mixed_event_controls";
-    }
-
-    fn retargets_with_ordinary_events(sim) {
-        @case "virtual_interfaces::retargets_with_ordinary_events";
-    }
-
-    fn member_pulses_within_one_activation(sim) {
-        @case "virtual_interfaces::member_pulses_within_one_activation";
-    }
-
-    fn always_on_member_edges(sim) {
-        @case "virtual_interfaces::always_on_member_edges";
-    }
-
-    fn type_parameter_values(sim) {
-        @case "virtual_interfaces::type_parameter_values";
-    }
-
-    fn package_generic_member_reads(sim) {
-        @case "virtual_interfaces::package_generic_member_reads";
-    }
-
-    fn package_configuration_database(sim) {
-        @case "virtual_interfaces::package_configuration_database";
-    }
-
-    fn unit_import_package_variables(sim) {
-        @case "virtual_interfaces::unit_import_package_variables";
-    }
-}
-
 /// A `wait` through a handle that a class property, an automatic variable
 /// or an argument holds would have to follow changes of the handle while
 /// its condition is evaluated (IEEE 1800-2023 9.4.3), which is not
@@ -190,6 +52,128 @@ fn event_waits_through_task_arguments() {
     let seen = sim.signal("seen");
     sim.run_until(30).unwrap();
     assert_eq!(sim.get(seen), num_bigint::BigUint::from(15u8));
+}
+
+/// An assignment pattern of handles gives each element of an array of
+/// virtual interfaces its handle (10.9.1, 25.9), in a declaration and in a
+/// procedural assignment.
+#[test]
+fn assignment_patterns_fill_arrays_of_virtual_interfaces() {
+    let source = "`timescale 1ns/1ns
+        interface bus_if; logic [7:0] data; endinterface
+        module top(output logic [7:0] seen);
+            bus_if a();
+            bus_if b();
+            virtual bus_if v = a;
+            virtual bus_if dst[2] = '{v, v};
+            virtual bus_if later[2];
+            initial begin
+                a.data = 8'd3;
+                b.data = 8'd7;
+                later = '{b, a};
+                #1 seen = dst[1].data * 16 + later[0].data;
+            end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build()
+        .unwrap();
+    let seen = sim.signal("seen");
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(seen), num_bigint::BigUint::from(0x37u8));
+}
+
+/// An assignment pattern connected to an input port that is an array of
+/// virtual interfaces fills its elements with the handles (10.9.1, 23.3.3).
+#[test]
+fn assignment_patterns_connect_ports_that_are_arrays_of_virtual_interfaces() {
+    let source = "`timescale 1ns/1ns
+        interface bus_if; logic [7:0] data; endinterface
+        module sink(input virtual bus_if dst[2], output logic [7:0] seen);
+            initial #1 seen = dst[0].data * 16 + dst[1].data;
+        endmodule
+        module top(output logic [7:0] seen);
+            bus_if a();
+            bus_if b();
+            virtual bus_if v = a;
+            virtual bus_if w = b;
+            sink s(.dst('{w, v}), .seen(seen));
+            initial begin
+                a.data = 8'd3;
+                b.data = 8'd7;
+            end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build()
+        .unwrap();
+    let seen = sim.signal("seen");
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(seen), num_bigint::BigUint::from(0x73u8));
+}
+
+/// An output argument copies the formal out to the actual (13.5.1): the
+/// actual handle takes the instance the task chose, and receives no value
+/// of the formal's type on the way in.
+#[test]
+fn output_arguments_copy_handles_out() {
+    let source = "`timescale 1ns/1ns
+        interface bus_if(input logic clk); logic [7:0] data; endinterface
+        module top(output logic [7:0] seen);
+            logic clk = 0;
+            bus_if a(clk);
+            bus_if b(clk);
+            virtual bus_if chosen;
+            task automatic pick(input bit second, output virtual bus_if v);
+                if (second) v = b; else v = a;
+            endtask
+            initial begin
+                a.data = 8'd3;
+                b.data = 8'd7;
+                pick(1'b1, chosen);
+                #1 seen = chosen.data;
+            end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build()
+        .unwrap();
+    let seen = sim.signal("seen");
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(seen), num_bigint::BigUint::from(7u8));
+}
+
+/// The formal of an output or inout argument is copied out to its actual
+/// (13.5.1), so an array of virtual interfaces is only copied to an actual
+/// array of a compatible virtual interface type (25.9, 7.6).
+#[test]
+fn output_arrays_of_virtual_interfaces_need_compatible_actuals() {
+    for (direction, actual, accepted) in [
+        ("output", "virtual bus_if", true),
+        ("output", "virtual other_if", false),
+        ("inout", "virtual other_if", false),
+    ] {
+        let source = format!(
+            "interface bus_if(input logic clk); logic data; endinterface
+             interface other_if(input logic clk); logic data; endinterface
+             module top;
+                 logic clk = 0;
+                 bus_if a(clk);
+                 {actual} chosen[2];
+                 task automatic pick({direction} virtual bus_if v[2]);
+                     v[0] = a;
+                     v[1] = a;
+                 endtask
+                 initial pick(chosen);
+             endmodule"
+        );
+        let result =
+            celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("vif.sv"))], "top")
+                .build();
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "{direction} {actual}: {:?}",
+            result.err()
+        );
+    }
 }
 
 /// A member access compares the handle with each instance, so a handle
@@ -261,6 +245,65 @@ fn writes_to_input_modport_members_are_rejected() {
         assert!(
             error.contains("an input of `virtual bus_if.mon`"),
             "{write}: {error}"
+        );
+    }
+}
+
+/// A chandle member read through a virtual interface is a chandle (IEEE
+/// 1800-2023 6.14, 25.9): it compares with null, and is no integral operand.
+#[test]
+fn chandle_members_through_virtual_interfaces_are_chandles() {
+    let source = |test: &str| {
+        format!(
+            "interface bus_if; chandle h; endinterface
+             module Top;
+                 bus_if bus();
+                 virtual bus_if v;
+                 int n;
+                 initial begin v = bus; n = {test} ? 1 : 0; end
+             endmodule"
+        )
+    };
+    let build = |test: &str| {
+        let source = source(test);
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("vif.sv"))], "Top")
+            .build_interpreter()
+            .map(drop)
+            .map_err(|error| error.to_string())
+    };
+    build("v.h == null").unwrap();
+    let error = build("v.h + 1 != 0").unwrap_err();
+    assert!(error.contains("chandle"), "{error}");
+}
+
+/// An element of a queue of virtual interfaces, indexed or popped, is a
+/// virtual interface of the queue's element type (IEEE 1800-2023 7.10,
+/// 25.9): it is assigned to a virtual interface of that type, and only of
+/// that type.
+#[test]
+fn queue_elements_of_virtual_interfaces_are_virtual_interfaces() {
+    let build = |target: &str, value: &str| {
+        let source = format!(
+            "interface bus_if(input logic clk); logic [7:0] data; endinterface
+             interface other_if(input logic clk); logic [7:0] data; endinterface
+             module Top;
+                 logic clk = 0;
+                 bus_if bus(clk);
+                 virtual bus_if q[$];
+                 virtual {target} v;
+                 initial begin q.push_back(bus); v = {value}; end
+             endmodule"
+        );
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("vif.sv"))], "Top")
+            .build_interpreter()
+            .map(drop)
+            .map_err(|error| error.to_string())
+    };
+    for value in ["q[0]", "q.pop_front()", "q.pop_back()"] {
+        build("bus_if", value).unwrap_or_else(|error| panic!("{value}: {error}"));
+        assert!(
+            build("other_if", value).is_err(),
+            "{value} assigned to other_if"
         );
     }
 }
@@ -694,4 +737,337 @@ fn virtual_interface_members_keep_package_and_unit_types() {
     sim.run_until(2).unwrap();
     assert_eq!(sim.get(sim.signal("data")), 0xabu8.into());
     assert_eq!(sim.get(sim.signal("wide")), 0xcdeu16.into());
+}
+
+sv_backends! {
+    // An enclosing `@*` reads only the statements, not the handle and member
+    // of an event control nested in a named block that a `disable` names
+    // (IEEE 1800-2023 9.4.2.2, 9.6.2): the clock the nested control waits
+    // for does not rerun the statements.
+    fn implicit_event_ignores_nested_control_in_disabled_block(sim) {
+        @setup { let source = r#"`timescale 1ns/1ns
+interface bus_if(input logic clk); endinterface
+module Top(output int outs, output int last);
+    logic tick = 0;
+    always #2 tick = ~tick;
+    bus_if ticking(tick);
+    virtual bus_if clocked;
+    logic [7:0] data = 0;
+    always @* begin : sample
+        @(posedge clocked.clk);
+        if (data == 8'h00) disable sample;
+        outs = outs + 1;
+        last = int'($time);
+    end
+    initial begin
+        clocked = ticking;
+        #3 data = 8'haa;
+    end
+endmodule
+"#; }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("implicit_event_in_disabled_block.sv"))], "Top");
+        sim.run_until(12).unwrap();
+        assert_eq!(sim.get(sim.signal("outs")), 1u32.into());
+        assert_eq!(sim.get(sim.signal("last")), 6u32.into());
+    }
+}
+
+/// A class of a package reads and writes members through a virtual
+/// interface at the widths and signedness the interface declares (IEEE
+/// 1800-2023 25.9), though the package does not see the instance's
+/// signals, as a UVM driver does.
+#[test]
+fn package_classes_read_members_at_their_declared_widths() {
+    let source = "`timescale 1ns/1ns
+        interface bus_if;
+            logic clk;
+            logic ready;
+            logic valid;
+            logic [31:0] read_data;
+            logic signed [7:0] offset;
+        endinterface
+        package p;
+            class drv;
+                virtual bus_if BUS;
+                int data;
+                task run();
+                    BUS.valid <= 1;
+                    while (BUS.ready != 1) @(posedge BUS.clk);
+                    data = BUS.read_data;
+                    $display(\"%0t %h %0d %0d\", $time, data, BUS.valid, BUS.offset);
+                endtask
+            endclass
+        endpackage
+        module top;
+            import p::*;
+            bus_if b();
+            drv d;
+            initial begin b.clk = 0; b.ready = 0; b.offset = -3; forever #5 b.clk = ~b.clk; end
+            initial begin #22 b.ready = 1; b.read_data = 32'hdeadbeef; end
+            initial begin d = new; d.BUS = b; d.run(); end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build()
+        .unwrap();
+    sim.run_until(40).unwrap();
+    let lines: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines, ["25 deadbeef 1 -3"]);
+}
+
+/// The members of an interface that names a package (IEEE 1800-2023 26.3)
+/// reach the methods of a class of another package through a virtual
+/// interface of it, each in its own source, as the uvm-1.2 example
+/// `uvm_use_models_pipelined_item_done` declares `mbus_if`
+/// (`import mbus_types_pkg::*;`) and its driver: the declarations of the
+/// interface are built analyzing only the packages it names.
+#[test]
+fn interfaces_naming_packages_reach_classes_through_virtual_interfaces() {
+    let interface = "`timescale 1ns/1ns
+        package types_pkg;
+            typedef enum logic [1:0] {IDLE, SINGLE, BURST} op_e;
+        endpackage
+        interface bus_if;
+            import types_pkg::*;
+            logic clk;
+            logic resetn;
+            op_e opcode;
+            types_pkg::op_e last;
+        endinterface";
+    let driver = "`timescale 1ns/1ns
+        package driver_pkg;
+            import types_pkg::*;
+            class driver;
+                virtual bus_if bus;
+                int seen;
+                task run();
+                    @(posedge bus.resetn);
+                    bus.opcode = BURST;
+                    @(posedge bus.clk);
+                    seen = bus.opcode + bus.last;
+                endtask
+            endclass
+        endpackage";
+    let top = "`timescale 1ns/1ns
+        module Top(output int seen);
+            import driver_pkg::*;
+            bus_if bus();
+            driver d;
+            initial begin
+                d = new;
+                d.bus = bus;
+                bus.last = types_pkg::SINGLE;
+                bus.resetn = 0;
+                bus.clk = 0;
+                fork d.run(); join_none
+                #1 bus.resetn = 1;
+                #1 bus.clk = 1;
+                #1 seen = d.seen;
+            end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![
+            (interface, Path::new("bus_if.sv")),
+            (driver, Path::new("driver_pkg.sv")),
+            (top, Path::new("top.sv")),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(5).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 3u32.into());
+}
+
+/// So does one that names a package through an import of its source's
+/// compilation unit (IEEE 1800-2023 3.12.1, 26.3), in a design whose other
+/// sources import packages at their compilation unit's scope too.
+#[test]
+fn interfaces_naming_packages_through_unit_imports_reach_classes() {
+    let interface = "`timescale 1ns/1ns
+        package types_pkg;
+            typedef enum logic [1:0] {IDLE, SINGLE, BURST} op_e;
+        endpackage
+        import types_pkg::*;
+        interface bus_if;
+            logic resetn;
+            op_e opcode;
+        endinterface";
+    let driver = "`timescale 1ns/1ns
+        package driver_pkg;
+            import types_pkg::*;
+            class driver;
+                virtual bus_if bus;
+                task run();
+                    @(posedge bus.resetn);
+                    bus.opcode = BURST;
+                endtask
+            endclass
+        endpackage";
+    let top = "`timescale 1ns/1ns
+        import driver_pkg::*;
+        module Top(output int seen);
+            bus_if bus();
+            driver d;
+            initial begin
+                d = new;
+                d.bus = bus;
+                bus.resetn = 0;
+                fork d.run(); join_none
+                #1 bus.resetn = 1;
+                #1 seen = bus.opcode;
+            end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![
+            (interface, Path::new("bus_if.sv")),
+            (driver, Path::new("driver_pkg.sv")),
+            (top, Path::new("top.sv")),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(5).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
+}
+
+/// A member of an enumeration type keeps its type through a virtual
+/// interface: its value is assigned to a variable of that type without a
+/// cast and has the enumeration's methods (IEEE 1800-2023 6.19.3, 6.19.5),
+/// as the uvm-1.2 example `uvm_use_models_pipelined_item_done` reads
+/// `req.MRESP = MBUS.MRESP;`.
+#[test]
+fn enumeration_members_keep_their_type_through_virtual_interfaces() {
+    let source = "`timescale 1ns/1ns
+        package types_pkg;
+            typedef enum logic [2:0] {NONE, READ_VALID, WRITE_COMPLETE} resp_e;
+        endpackage
+        interface bus_if;
+            import types_pkg::*;
+            resp_e resp;
+        endinterface
+        module Top(output int code, output bit named);
+            import types_pkg::*;
+            class item;
+                resp_e resp;
+            endclass
+            bus_if bus();
+            virtual bus_if vif;
+            item it;
+            initial begin
+                it = new;
+                vif = bus;
+                bus.resp = WRITE_COMPLETE;
+                #1;
+                it.resp = vif.resp;
+                code = it.resp;
+                named = vif.resp.name() == \"WRITE_COMPLETE\";
+            end
+        endmodule";
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("vif_enum.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("code")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("named")), 1u8.into());
+}
+
+// A header port of an enumeration type keeps it too, and the bounds of an
+// enumeration type take the values of the constants where it is declared,
+// not those of a reader's constants of the same name.
+#[test]
+fn header_ports_and_package_constant_bounds_keep_their_enumeration_through_virtual_interfaces() {
+    let source = "`timescale 1ns/1ns
+        package types_pkg;
+            localparam int W = 3;
+            typedef enum logic [2:0] {NONE, READ_VALID, WRITE_COMPLETE} resp_e;
+            typedef enum logic [W-1:0] {IDLE = 0, BUSY = 5} state_e;
+        endpackage
+        interface bus_if(input types_pkg::resp_e resp);
+            types_pkg::state_e state;
+        endinterface
+        module Top(output int code, output bit named, output int width, output bit state_named);
+            import types_pkg::*;
+            localparam int W = 8;
+            class item;
+                resp_e resp;
+            endclass
+            resp_e driven;
+            bus_if bus(driven);
+            virtual bus_if vif;
+            item it;
+            initial begin
+                it = new;
+                vif = bus;
+                driven = READ_VALID;
+                bus.state = BUSY;
+                #1;
+                it.resp = vif.resp;
+                code = it.resp;
+                named = vif.resp.name() == \"READ_VALID\";
+                width = $bits(vif.state);
+                state_named = vif.state.name() == \"BUSY\";
+            end
+        endmodule";
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("vif_enum_ports.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("code")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("named")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("width")), 3u32.into());
+    assert_eq!(sim.get(sim.signal("state_named")), 1u8.into());
+}
+
+/// `$typename` writes a virtual interface type as it is declared (IEEE
+/// 1800-2023 25.9; 20.6.1 has no rule for one), not as the bits that hold
+/// it, so `%m` in a method of a class specialized with one (21.2.1.5) tells
+/// it apart from the specialization with a vector of those bits.
+#[test]
+fn typename_writes_virtual_interface_types_as_declared() {
+    let source = "interface bus_if(input logic clk); modport mp(input clk); endinterface
+        module Top;
+            class Db #(type T = int);
+                static function void show(); $display(\"[%m]\"); endfunction
+            endclass
+            logic clk = 0;
+            bus_if bus(clk);
+            virtual bus_if v;
+            virtual bus_if.mp m;
+            initial begin
+                $display(\"%s %s\", $typename(v), $typename(m));
+                Db#(virtual bus_if)::show();
+                Db#(bit [31:0])::show();
+            end
+        endmodule";
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("vif_typename.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(1).unwrap();
+    // Before, both were `bit[31:0]`, and both specializations were named
+    // `Db#(bit[31:0])`.
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: b"virtual bus_if virtual bus_if.mp".to_vec()
+            },
+            celox::RuntimeEvent::Display {
+                message: b"[Top.Db#(virtual bus_if)::show]".to_vec()
+            },
+            celox::RuntimeEvent::Display {
+                message: b"[Top.Db#(bit[31:0])::show]".to_vec()
+            },
+        ]
+    );
 }

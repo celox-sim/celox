@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! Portable state files are a Celox API, not a language conformance fixture.
 use celox::{SimBackend, Simulation, StateFile};
 use celox_runtime::ProcessRef;

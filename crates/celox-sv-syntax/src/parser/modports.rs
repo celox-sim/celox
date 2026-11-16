@@ -152,11 +152,6 @@ impl Parser<'_> {
                 ports,
                 tokens: self.range(item_start),
             });
-            if modports.len() >= 1_000_000 {
-                return Err(
-                    self.unsupported("native modport declaration exceeds one million items")
-                );
-            }
             if !self.eat(",") {
                 break;
             }

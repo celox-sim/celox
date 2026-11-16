@@ -13,11 +13,39 @@ use expression_binding::{objects, ungroup};
 use semantic_types::{ArrayKind, Decl, PackedElement, Range, TyData, TyId};
 
 mod builtins;
+mod constants;
+pub(super) use constants::constant_binding;
 mod memo;
 mod values;
 pub(super) use memo::Memo;
 #[cfg(test)]
 mod tests;
+
+/// The types found while one outermost [`type_of`] runs, for the scope,
+/// declarations and dimensions it was asked with. Typing a member
+/// expression tries several readings of it, and each asks for the type of
+/// its receiver again, so without them the work grows with the depth of a
+/// path.
+#[derive(Debug)]
+pub(super) struct Query {
+    /// The addresses of the outermost call's scope, declarations and
+    /// dimensions, which live while it runs.
+    key: (usize, usize, usize),
+    version: (u64, usize),
+    types: HashMap<ExprId, Option<TyId>>,
+}
+
+fn query_key(
+    tree: &AnalysisContext<'_>,
+    native: &Declarations,
+    dims: &PackedDimensions,
+) -> (usize, usize, usize) {
+    (
+        std::ptr::from_ref(tree).cast::<()>() as usize,
+        std::ptr::from_ref(native) as usize,
+        std::ptr::from_ref(dims) as usize,
+    )
+}
 
 /// The type of native expression `id`.
 pub(super) fn type_of(
@@ -27,18 +55,56 @@ pub(super) fn type_of(
     native: &Declarations,
     dims: &PackedDimensions,
 ) -> Converted<TyId> {
+    let unknown = || unsupported("semantic type of native expression");
+    let key = query_key(tree, native, dims);
+    let version = (
+        session.foreign.revision(),
+        session.class_specializations.len(),
+    );
+    if let Some(query) = &session.type_query
+        && query.key == key
+        && query.version == version
+        && let Some(found) = query.types.get(&id)
+    {
+        return found.ok_or_else(unknown);
+    }
     if let Some(ty) = session
         .expression_types
         .get(tree, session, id, native, dims)
     {
         return Ok(ty);
     }
-    let ty = resolve(tree, session, id, native, dims)
-        .ok_or_else(|| unsupported("semantic type of native expression"))?;
+    let outermost = session.type_query.is_none();
+    if outermost {
+        session.type_query = Some(Query {
+            key,
+            version,
+            types: HashMap::default(),
+        });
+    }
+    let ty = resolve(tree, session, id, native, dims);
     let version = (
         session.foreign.revision(),
         session.class_specializations.len(),
     );
+    if outermost {
+        session.type_query = None;
+    } else if let Some(query) = &mut session.type_query
+        && query.key == key
+    {
+        // What a new specialization or foreign class changes is typed anew.
+        if query.version != version {
+            query.types.clear();
+            query.version = version;
+        }
+        query.types.insert(id, ty);
+    }
+    let ty = ty.ok_or_else(|| {
+        unsupported(format!(
+            "semantic type of native expression `{}`",
+            native.token_text(native.expression(id).tokens).trim()
+        ))
+    })?;
     session
         .expression_types
         .insert(tree, id, native, dims, version, ty);
@@ -59,11 +125,30 @@ fn resolve(
         shape.type_id(&mut session.types, &tree.functions, &dims.const_env)
     };
     let class = |session: &mut Session, name: &str| {
-        session
-            .types
-            .intern(TyData::Class(Decl::Class(name.into())))
+        let decl = session.types.class(name);
+        session.types.intern(TyData::Class(decl))
     };
     let id = ungroup(id, native);
+    // An iterator over a container whose elements are kept as records has
+    // the container's element type (7.12.1); its members are typed from it.
+    if !dims.locator_iterators.is_empty()
+        && let Some((container, _)) = locators::record_iterator(id, native, dims)
+    {
+        return of_type(session, &container.element);
+    }
+    // The index query of an array locator method's iterator, `item.index`
+    // or `item.index(1)`, which `locators::index` resolves in either form,
+    // has the index type of its array (7.12.4).
+    if !dims.locator_iterators.is_empty()
+        && matches!(
+            native.expression(id).kind,
+            ExprKind::Member { .. } | ExprKind::Call { .. }
+        )
+        && let Ok(Some(Expr::Ident(index))) = locators::index(id, native, tree, session, dims)
+        && let Some(shape) = dims.get(&index)
+    {
+        return of_shape(session, shape);
+    }
     if matches!(
         native.expression(id).kind,
         ExprKind::Literal(_)
@@ -126,6 +211,14 @@ fn resolve(
     {
         return of_shape(session, shape);
     }
+    // A member of an element of an array of interface instances or ports,
+    // such as `bus[0].data` (25.3).
+    if let Ok(Some(name)) =
+        expression_binding::interface_member_name(tree, session, id, native, dims)
+        && let Some(shape) = dims.get(&name)
+    {
+        return of_shape(session, shape);
+    }
     let resolved = match &native.expression(id).kind {
         ExprKind::Name(name) => {
             let name = instances::normalize_identifier(&name.spelling);
@@ -184,6 +277,11 @@ fn resolve(
             if let Some(ty) = property_type(tree, session, id, native, dims) {
                 return Some(ty);
             }
+            if let Some(binding) =
+                classes::specializations::constant_types(tree, session, &owner).get(&member)
+            {
+                return binding.type_id(&mut session.types);
+            }
             // A method called without parentheses (13.5.5).
             let receiver = match handle {
                 Some(handle) => objects::Receiver::Handle(handle),
@@ -231,9 +329,13 @@ fn resolve(
         // A min:typ:max expression has the type of the value it selects
         // (11.11).
         ExprKind::MinTypMax { typical, .. } => type_of(tree, session, *typical, native, dims).ok(),
-        // A member of a property of unpacked structure type, or of another
-        // scope.
-        ExprKind::Member { .. } => property_type(tree, session, id, native, dims),
+        // A member of a property of unpacked structure type, or a signal of
+        // another scope, such as an interface instance, named by its path
+        // (25.5).
+        ExprKind::Member { .. } => property_type(tree, session, id, native, dims).or_else(|| {
+            let signal = expression_binding::path_signal(tree, session, id, native, dims)?;
+            of_shape(session, dims.get(&signal)?)
+        }),
         // `randomize() with {...}` returns int (18.7).
         ExprKind::RandomizeWith { .. } => values::integral(&mut session.types, 32, true, false),
         // A typed assignment pattern has its type (10.9).
@@ -254,7 +356,10 @@ fn resolve(
         | ExprKind::Call { .. }
         | ExprKind::Group(_)
         | ExprKind::ArrayMethodWith { .. }
-        | ExprKind::ConstraintForeach { .. } => None,
+        | ExprKind::ConstraintForeach { .. }
+        | ExprKind::SoftConstraint { .. }
+        | ExprKind::DisableSoft { .. }
+        | ExprKind::SolveBefore { .. } => None,
         // No self-determined type of their own: a type; a set, a tagged
         // union value and an untyped assignment pattern take their context's
         // (11.4.13, 11.9, 10.9); a streaming concatenation and its select
@@ -262,6 +367,8 @@ fn resolve(
         // specialization names a scope.
         ExprKind::Type(_)
         | ExprKind::Set(_)
+        | ExprKind::Dist { .. }
+        | ExprKind::Unique(_)
         | ExprKind::Tagged { .. }
         | ExprKind::Pattern { target: None, .. }
         | ExprKind::Streaming { .. }
@@ -269,7 +376,7 @@ fn resolve(
         | ExprKind::Parameterized { .. } => None,
     };
     resolved.or_else(|| {
-        enums::constant_binding(tree, session, id, native, dims)
+        constant_binding(tree, session, id, native, dims)
             .ok()??
             .type_id(&mut session.types)
     })
@@ -309,7 +416,7 @@ fn named_function_result(name: &str, dims: &PackedDimensions) -> Option<TyId> {
 
 /// Self-determined selection types, independent of an assignment context
 /// (IEEE 1800-2023 7.4.5, 7.4.6 and 11.5.1).
-fn select(
+pub(super) fn select(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     base: TyId,
@@ -336,11 +443,10 @@ fn select(
             // A string character has type byte, as does getc (6.16,
             // Table 6-9). The index and runtime string length do not
             // affect its self-determined type.
-            TyData::String => semantic_types::of_type(
+            TyData::String => semantic_types::of_builtin(
                 &mut session.types,
                 &tree.functions,
                 &type_binding::builtin_type("byte", None)?,
-                &dims.const_env,
             ),
             TyData::Packed(mut packed) if !packed.dims.is_empty() => {
                 // 11.5.1, 11.8.1: a bit-select of any packed integral value,
@@ -396,9 +502,14 @@ fn select(
     // those and any discovery caches in a disposable session: only the value
     // of the bound expression may escape this query. Resolved declarations
     // and the semantic-table prefix retain the caller's identities.
-    let mut constants = constant_session(session);
+    // A plain decimal bound is its own value and needs no session.
+    let mut constants = None;
     let mut constant = |id| {
-        let value = constant_binding::bind_in(id, native, tree, &mut constants, dims).ok()??;
+        if let Some(value) = decimal_literal(id, native) {
+            return Some(value);
+        }
+        let constants = constants.get_or_insert_with(|| constant_session(session));
+        let value = constant_binding::bind_in(id, native, tree, constants, dims).ok()??;
         eval_ast_const_expr(&tree.functions, &value, &dims.const_env)
     };
     let count = match *selection {
@@ -494,7 +605,25 @@ pub(super) fn cast_type(
 /// The class of a handle of type `id`.
 pub(super) fn class_name(table: &semantic_types::TyTable, id: TyId) -> Option<String> {
     match table.data(id) {
-        TyData::Class(Decl::Class(name)) => Some(name.to_string()),
+        TyData::Class(Decl::Class(decl)) => Some(table.decl(*decl).name.to_string()),
+        _ => None,
+    }
+}
+
+/// The value of expression `id` when it is an unsized decimal literal that
+/// fits its 32 bits as a positive number, such as the `7` of `[7:0]`, with
+/// or without parentheses (IEEE 1800-2023 5.7.1).
+fn decimal_literal(id: ExprId, native: &Declarations) -> Option<i128> {
+    let mut id = id;
+    while let ExprKind::Group(inner) = &native.expression(id).kind {
+        id = *inner;
+    }
+    match &native.expression(id).kind {
+        ExprKind::Literal(text)
+            if (1..=9).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            text.parse().ok()
+        }
         _ => None,
     }
 }
@@ -503,11 +632,12 @@ pub(super) fn class_name(table: &semantic_types::TyTable, id: TyId) -> Option<St
 /// session. Only its evaluated integer escapes; runtime call identities and
 /// temporary declaration/type caches never enter the caller's session. It
 /// reads the scopes the caller has settled instead of settling them again.
-fn constant_session(session: &Session) -> Session {
+pub(super) fn constant_session(session: &Session) -> Session {
     Session {
         foreign: session.foreign.clone(),
         classes: session.classes.clone(),
         class_declaration_scopes: session.class_declaration_scopes.clone(),
+        class_scope_recordings: session.class_scope_recordings,
         class_declarations_repeated: session.class_declarations_repeated.clone(),
         class_specializations: session.class_specializations.clone(),
         class_specializations_frozen: true,
@@ -527,7 +657,7 @@ fn enum_constant(
     native: &Declarations,
     dims: &PackedDimensions,
 ) -> Option<TyId> {
-    enums::constant_binding(tree, session, id, native, dims)
+    constant_binding(tree, session, id, native, dims)
         .ok()??
         .type_id(&mut session.types)
 }
@@ -572,6 +702,7 @@ fn member_of(
     else {
         return None;
     };
+    let interface = session.types.decl(interface).name.clone();
     let ty = session
         .virtual_interfaces
         .as_ref()?

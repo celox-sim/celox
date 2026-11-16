@@ -149,7 +149,7 @@ pub(in crate::ast) fn operands(
 }
 
 /// A declared name, including constant indices within an instance path.
-fn alias_name(
+pub(in crate::ast) fn alias_name(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     id: ExprId,
@@ -266,10 +266,15 @@ pub(in crate::ast) fn native_string(
         }
         // A string member of an unpacked structure variable.
         ExprKind::Member { .. }
-            if unpacked_structs::native_member(ungroup(id, native), native, dimensions)
-                .is_some() =>
+            if unpacked_structs::native_member(
+                ungroup(id, native),
+                native,
+                &session.types,
+                dimensions,
+            )
+            .is_some() =>
         {
-            unpacked_structs::native_member(ungroup(id, native), native, dimensions)
+            unpacked_structs::native_member(ungroup(id, native), native, &session.types, dimensions)
                 .and_then(|name| dimensions.get(&name))
                 .is_some_and(|ty| ty.string)
         }

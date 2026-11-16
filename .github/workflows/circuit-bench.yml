@@ -27,7 +27,7 @@ jobs:
         run: node --test scripts/benchmark-collection.test.mjs scripts/publish-collection-bench.test.mjs scripts/tiered-benchmark.test.mjs
       - name: Build runner
         run: |
-          cargo build --release --locked -p celox-vpi --bin celox
+          cargo build --release --locked -p celox --bin celox
           cargo build --release --locked -p celox-bench --bin veryl-heliodor
       - name: Prepare pinned sources
         run: node scripts/benchmark-collection.mjs prepare all work/circuits/sources

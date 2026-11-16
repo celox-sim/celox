@@ -1,14 +1,6 @@
 use crate::*;
 
 sv_backends! {
-    fn monitor_coalesces_and_ignores_unchanged_values(sim) { @case "file_io::monitor_coalesces_and_ignores_unchanged_values"; }
-    fn monitor_reports_transient_changes(sim) { @case "file_io::monitor_reports_transient_changes"; }
-    fn monitor_replacement_and_on_off(sim) { @case "file_io::monitor_replacement_and_on_off"; }
-    fn fmonitor_is_independent_of_console_monitor_off(sim) { @case "file_io::fmonitor_is_independent_of_console_monitor_off"; }
-    fn monitor_time_queries_do_not_trigger_output(sim) { @case "file_io::monitor_time_queries_do_not_trigger_output"; }
-}
-
-sv_backends! {
     fn monitor_observes_idle_host_writes(sim) {
         @setup { let source=r#"module Top;
             timeunit 1ps; timeprecision 1ps;

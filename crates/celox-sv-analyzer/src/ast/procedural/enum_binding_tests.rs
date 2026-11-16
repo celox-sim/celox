@@ -29,6 +29,7 @@ fn local_values_hide_enum_bindings_and_scope_exit_restores_them() {
         automatic: true,
         statics: Vec::new(),
         explicit_statics: HashSet::default(),
+        subroutine_statics: HashMap::default(),
         static_initializers: Vec::new(),
         constant_evaluation: false,
     };
@@ -43,7 +44,7 @@ fn local_values_hide_enum_bindings_and_scope_exit_restores_them() {
     builder.declare("A", int_type());
     assert!(!builder.dims.constant_types.contains_key("A"));
     assert!(
-        enums::constant_binding(
+        expression_types::constant_binding(
             &tree,
             builder.session,
             id,
@@ -64,7 +65,7 @@ fn local_values_hide_enum_bindings_and_scope_exit_restores_them() {
         .insert(parameters::unbounded_parameter_marker("A"), 0);
     builder.names.scopes.last_mut().unwrap().entries.push(entry);
     assert!(
-        enums::constant_binding(
+        expression_types::constant_binding(
             &tree,
             builder.session,
             id,
@@ -76,4 +77,49 @@ fn local_values_hide_enum_bindings_and_scope_exit_restores_them() {
     );
     builder.pop_scope();
     assert_eq!(builder.dims.constant_types["A"], original);
+}
+
+#[test]
+fn locals_are_bound_where_they_are_declared() {
+    // IEEE 1800-2023 6.18: the names in a type resolve in the scope that
+    // declares it. A local the body declares, such as a temporary of a type
+    // made for it, is bound there, so reading its type, as publishing it
+    // does, resolves nothing again.
+    let syntax = crate::source_tree::parse_scope_fixture(
+        "module M; endmodule",
+        Path::new("local-binding.sv"),
+    )
+    .unwrap();
+    let tree = AnalysisContext::unspecialized(&syntax);
+    let mut session = Session::default();
+    let env = ConstEnv::from_iter([("W".to_string(), 4)]);
+    let dims = PackedDimensions::new(HashMap::default(), &env, &TypeAliases::default());
+    let mut locals = Vec::new();
+    let mut counter = 0;
+    let mut state = BodyState {
+        locals: &mut locals,
+        counter: &mut counter,
+        subroutine_params: &HashMap::default(),
+        subroutine_directions: &HashMap::default(),
+        subroutine_statics: HashMap::default(),
+        automatic: true,
+        statics: Vec::new(),
+        explicit_statics: HashSet::default(),
+        static_initializers: Vec::new(),
+        constant_evaluation: false,
+    };
+    let mut builder = BodyBuilder::new(
+        &tree,
+        &mut session,
+        &dims,
+        &mut state,
+        system_functions::Body::Initial,
+    );
+    builder.push_scope();
+    let mut ty = int_type();
+    ty.packed_ranges[0].left = ConstExpr::Ident("W".into());
+    builder.declare("x", ty);
+    builder.pop_scope();
+    drop(builder);
+    assert_eq!(session.types.unbound_reads, 0);
 }

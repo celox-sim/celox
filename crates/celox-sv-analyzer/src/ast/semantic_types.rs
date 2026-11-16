@@ -20,7 +20,9 @@ mod streams;
 mod tests;
 
 pub(super) use bindings::ConstantType;
-pub(super) use conversion::{of_shape, of_type};
+pub(super) use conversion::{
+    bind_declared, bound_builtin, of_builtin, of_declared, of_shape, of_type,
+};
 
 /// The bounds of the packed dimensions of `ty`, outermost first, as the
 /// type table resolves them with the constants of `env` (an element's, for
@@ -32,7 +34,26 @@ pub(super) fn packed_bounds(
     ty: &crate::ast::Type,
     env: &crate::ast::ConstEnv,
 ) -> Option<Vec<(i128, i128)>> {
-    let mut id = of_type(table, functions, ty, env)?;
+    let id = of_type(table, functions, ty, env)?;
+    packed_bounds_of(table, id)
+}
+
+/// The bounds of the packed dimensions of `ty` as [`packed_bounds`] tells
+/// them, for a type that `env` may not name the way its declaring scope does
+/// (see [`of_declared`]).
+pub(super) fn declared_packed_bounds(
+    table: &mut TyTable,
+    functions: &crate::ast::const_functions::ConstantFunctions,
+    ty: &crate::ast::Type,
+    env: &crate::ast::ConstEnv,
+) -> Option<Vec<(i128, i128)>> {
+    let id = of_declared(table, functions, ty, env)?;
+    packed_bounds_of(table, id)
+}
+
+/// The bounds of the packed dimensions of semantic type `id`, as
+/// [`packed_bounds`] gives them.
+pub(super) fn packed_bounds_of(table: &TyTable, mut id: TyId) -> Option<Vec<(i128, i128)>> {
     loop {
         match table.data(id) {
             TyData::Packed(packed) => {
@@ -74,26 +95,73 @@ impl Range {
     }
 }
 
+/// A declaration of a named enumeration, structure or union type
+/// ([`TyTable::declare`]), of a class or class specialization
+/// ([`TyTable::class`]) or of an interface ([`TyTable::interface`]), as the
+/// table interns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) struct DeclId(u32);
+
+/// What tells a declaration apart: its typedef or its source position, and
+/// the elaborated scope that declares it. Each instance of a module,
+/// interface or program declares types of its own (IEEE 1800-2023 6.22);
+/// instances with the same parameter values share one analysis and so one
+/// scope here.
+#[derive(Debug, Clone)]
+pub(super) struct DeclData {
+    pub name: Arc<str>,
+    pub scope: Option<Arc<str>>,
+    /// The members of an enumeration the declaration declares (6.19),
+    /// once a type of it has been converted with them.
+    pub domain: Option<Arc<super::enums::EnumDomain>>,
+    /// The name `$typename` gives the typedef that declares the type, with
+    /// the scope that declares it (20.6.1 rule f), once a type of it has
+    /// been converted with it. `None` for an anonymous type.
+    pub typename: Option<super::type_names::TypedefName>,
+    /// `struct` or `union` of a structure or union type other than a soft
+    /// or tagged union, which `$typename` writes.
+    pub aggregate: Option<&'static str>,
+    /// The parameter values of a class specialization, in the order of its
+    /// parameter port list, which `$typename` writes (20.6.1, 8.25), once
+    /// they have been recorded.
+    pub arguments: Option<Arc<[ClassArgument]>>,
+}
+
+/// A parameter value of a class specialization (8.25).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) enum ClassArgument {
+    Type(TyId),
+    /// The value of a value parameter, or `None` for one without an
+    /// integral value.
+    Value(Option<i128>),
+}
+
 /// The identity of the declaration of a named type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum Decl {
-    /// A declaration identified by its typedef or its source position.
-    Named(Arc<str>),
-    /// An enumeration whose declaration is not recorded, identified by its
-    /// members.
-    AnonymousEnum(Arc<super::enums::EnumDomain>),
+    /// An enumeration declared by a typedef.
+    Named(DeclId),
+    /// An enumeration no typedef names: identified by its declaration, the
+    /// source position of the `enum` (IEEE 1800-2023 6.22.1 c), where the
+    /// type records it, else by its members. The members are `None` where
+    /// they are not resolved or the type is a packed array of it.
+    AnonymousEnum {
+        decl: Option<DeclId>,
+        domain: Option<Arc<super::enums::EnumDomain>>,
+    },
     /// A structure or union declaration, identified by its typedef or its
     /// source position together with the types of its members as its scope
     /// gives them (7.2, 7.3): each specialization of a parameterized scope
     /// declares a type of its own.
     Aggregate {
-        name: Arc<str>,
+        decl: DeclId,
         members: Arc<[(Arc<str>, TyId)]>,
     },
-    /// A class, or a specialization of a parameterized class.
-    Class(Arc<str>),
+    /// A class, or a specialization of a parameterized class, by the name
+    /// the analysis gives it (`DeclData::name`).
+    Class(DeclId),
     /// An interface.
-    Interface(Arc<str>),
+    Interface(DeclId),
 }
 
 /// What the bits of a packed type are made of.
@@ -182,6 +250,30 @@ pub(super) struct TyTable {
     /// The base class and the interface classes of each class whose
     /// declaration has been resolved (8.13, 8.26).
     supertypes: HashMap<TyId, Supertypes>,
+    /// The type of each variable shape whose bounds are all literals, by
+    /// the hash of the shape: such a shape has the same type in every
+    /// context (see `VariableShape::is_closed`).
+    closed_shapes: HashMap<u64, Vec<(crate::ast::variable_dimensions::VariableShape, TyId)>>,
+    /// Whether a `chandle` type has been interned (6.14).
+    chandle: bool,
+    /// The members, defaults and layout of each unpacked structure type
+    /// (7.2), as the declaration of the first value converted to it gives
+    /// them.
+    structs: HashMap<TyId, Arc<super::unpacked_structs::UnpackedStruct>>,
+    /// The declarations the types of the table name.
+    decls: Vec<DeclData>,
+    /// The declarations by name, then by scope (`""` for none, which no
+    /// elaborated scope is called): a lookup allocates nothing, as types
+    /// are converted at every reference.
+    decl_ids: HashMap<Arc<str>, HashMap<Arc<str>, DeclId>>,
+    /// The classes and class specializations by name.
+    class_ids: HashMap<Arc<str>, DeclId>,
+    /// The interfaces by name.
+    interface_ids: HashMap<Arc<str>, DeclId>,
+    /// How many times a reader resolved a type that was not bound where it
+    /// was declared, which tests check producers against.
+    #[cfg(test)]
+    pub(super) unbound_reads: usize,
 }
 
 /// The classes a class extends and implements.
@@ -194,6 +286,49 @@ pub(super) struct Supertypes {
     pub interfaces: Arc<[TyId]>,
     /// Whether the class is an interface class (8.26).
     pub interface: bool,
+}
+
+/// The semantic type a [`crate::ast::Type`] was bound to, kept until the
+/// type changes: the one the scope that declares it tells (see
+/// [`bind_declared`]). Whoever builds a type binds it; a copy of the type
+/// keeps the binding, and any change of its shape forgets it.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Binding(Option<RetainedType>);
+
+/// A binding never tells two types apart: their shapes do.
+impl PartialEq for Binding {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Binding {}
+
+impl std::hash::Hash for Binding {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+}
+
+impl Binding {
+    /// Forget the semantic type, as the type changes.
+    pub(super) fn forget(&mut self) {
+        self.0 = None;
+    }
+
+    /// The semantic type in `table`, if bound to one of its types.
+    pub(super) fn get(&self, table: &TyTable) -> Option<TyId> {
+        self.0.as_ref()?.in_table(table)
+    }
+
+    /// Bind to type `id` of `table`.
+    pub(super) fn set(&mut self, table: &TyTable, id: TyId) {
+        self.0 = Some(table.retain(id));
+    }
+
+    /// The retained semantic type, for a holder of the same type, such as
+    /// the shape of a variable declared with it.
+    pub(super) fn retained(&self) -> Option<RetainedType> {
+        self.0.clone()
+    }
 }
 
 /// A declaration's ID together with its immutable interned node. A cloned
@@ -287,6 +422,97 @@ impl TyTable {
         }
     }
 
+    /// The type of the closed shape `shape` of hash `key`, once it is known.
+    pub(super) fn closed_shape(
+        &self,
+        key: u64,
+        shape: &crate::ast::variable_dimensions::VariableShape,
+    ) -> Option<TyId> {
+        self.closed_shapes
+            .get(&key)?
+            .iter()
+            .find(|(known, _)| known.same_closed(shape))
+            .map(|(_, id)| *id)
+    }
+
+    /// Remember the type `id` of the closed shape `shape` of hash `key`.
+    pub(super) fn insert_closed_shape(
+        &mut self,
+        key: u64,
+        shape: crate::ast::variable_dimensions::VariableShape,
+        id: TyId,
+    ) {
+        self.closed_shapes.entry(key).or_default().push((shape, id));
+    }
+
+    /// The declaration `name` of elaborated scope `scope`, or of a package or
+    /// compilation unit when `scope` is `None`.
+    pub fn declare(&mut self, name: &str, scope: Option<&str>) -> DeclId {
+        if let Some(&id) = self
+            .decl_ids
+            .get(name)
+            .and_then(|scopes| scopes.get(scope.unwrap_or("")))
+        {
+            return id;
+        }
+        let id = DeclId(self.decls.len() as u32);
+        let data = DeclData {
+            name: name.into(),
+            scope: scope.map(Into::into),
+            domain: None,
+            typename: None,
+            aggregate: None,
+            arguments: None,
+        };
+        self.decl_ids
+            .entry(data.name.clone())
+            .or_default()
+            .insert(data.scope.clone().unwrap_or_else(|| "".into()), id);
+        self.decls.push(data);
+        id
+    }
+
+    /// The declaration of class or class specialization `name`.
+    pub fn class(&mut self, name: &str) -> Decl {
+        Decl::Class(Self::named_decl(&mut self.decls, &mut self.class_ids, name))
+    }
+
+    /// The declaration of interface `name`.
+    pub fn interface(&mut self, name: &str) -> Decl {
+        Decl::Interface(Self::named_decl(
+            &mut self.decls,
+            &mut self.interface_ids,
+            name,
+        ))
+    }
+
+    fn named_decl(
+        decls: &mut Vec<DeclData>,
+        ids: &mut HashMap<Arc<str>, DeclId>,
+        name: &str,
+    ) -> DeclId {
+        if let Some(&id) = ids.get(name) {
+            return id;
+        }
+        let id = DeclId(decls.len() as u32);
+        let name: Arc<str> = name.into();
+        decls.push(DeclData {
+            name: name.clone(),
+            scope: None,
+            domain: None,
+            typename: None,
+            aggregate: None,
+            arguments: None,
+        });
+        ids.insert(name, id);
+        id
+    }
+
+    /// Declaration `id`.
+    pub fn decl(&self, id: DeclId) -> &DeclData {
+        &self.decls[id.0 as usize]
+    }
+
     /// The id of type `data`.
     pub fn intern(&mut self, data: TyData) -> TyId {
         if let Some(&id) = self.ids.get(&data) {
@@ -297,15 +523,81 @@ impl TyTable {
             None => TyId(self.types.len() as u32),
         };
         let id = TyId(self.types.len() as u32);
+        self.chandle |= matches!(data, TyData::Chandle);
         let data = Arc::new(data);
         self.types.push((data.clone(), canonical));
         self.ids.insert(data, id);
         id
     }
 
+    /// Whether some type of the analysis is a `chandle` (6.14): binding the
+    /// `chandle` type, a DPI formal of it or a type parameter bound to one
+    /// interns it ([`Self::declare_chandle`]), as typing any value of it does.
+    pub fn has_chandle(&self) -> bool {
+        self.chandle
+    }
+
+    /// Record that the analysis has a `chandle` type: a declaration, a
+    /// formal or a type argument names one.
+    pub fn declare_chandle(&mut self) {
+        self.intern(TyData::Chandle);
+    }
+
     /// The type `id` names.
     pub fn data(&self, id: TyId) -> &TyData {
         &self.types[id.0 as usize].0
+    }
+
+    /// Record the declaration `aggregate` of unpacked structure type `id`.
+    pub(super) fn record_struct(
+        &mut self,
+        id: TyId,
+        aggregate: &Arc<super::unpacked_structs::UnpackedStruct>,
+    ) {
+        let Some(known) = self.structs.get(&id) else {
+            self.structs.insert(id, aggregate.clone());
+            return;
+        };
+        debug_assert!(
+            known.same_layout(aggregate),
+            "one declaration of unpacked structure type {:?}: {known:?} and {aggregate:?}",
+            match self.data(id) {
+                TyData::UnpackedStruct(Decl::Aggregate { decl, .. }) => Some(self.decl(*decl)),
+                _ => None,
+            }
+        );
+    }
+
+    /// The declaration of unpacked structure type `id`, or of the elements
+    /// of a fixed-size unpacked array of them (7.2, 7.4.2), once a value of
+    /// it has been converted.
+    pub(super) fn unpacked_struct(
+        &self,
+        id: TyId,
+    ) -> Option<&Arc<super::unpacked_structs::UnpackedStruct>> {
+        self.structs.get(&self.fixed_element(id))
+    }
+
+    /// The class of handle type `id`, or of the elements of a fixed-size
+    /// unpacked array of handles (IEEE 1800-2023 8.4, 7.4.2).
+    pub fn handle_class(&self, id: TyId) -> Option<&Arc<str>> {
+        match self.data(self.fixed_element(id)) {
+            TyData::Class(Decl::Class(decl)) => Some(&self.decl(*decl).name),
+            _ => None,
+        }
+    }
+
+    /// The element of `id` if it is a fixed-size unpacked array, through
+    /// every dimension, else `id` (7.4.2).
+    pub fn fixed_element(&self, mut id: TyId) -> TyId {
+        while let TyData::Array {
+            kind: ArrayKind::Fixed(_),
+            element,
+        } = self.data(id)
+        {
+            id = *element;
+        }
+        id
     }
 
     /// Whether `a` and `b` are matching types (IEEE 1800-2023 6.22.1).
