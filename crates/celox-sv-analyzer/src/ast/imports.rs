@@ -1068,6 +1068,7 @@ pub(super) fn resolve_imports(
     unit: Option<&packages::Unit>,
 ) -> Result<ResolvedImports, AnalyzerError> {
     let mut resolved = resolve_scope_imports(tree, packages, unit)?;
+    resolved.symbols.design_subroutines = packages.design_subroutines.clone();
     // Every scope may reach the interface instances through virtual
     // interfaces (IEEE 1800-2023 25.9), but those of an interface would be
     // bound into each instance of it.
