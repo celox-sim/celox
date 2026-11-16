@@ -54,6 +54,40 @@ export declare const ${moduleName}: ModuleDefinition<${moduleName}Ports>;
 `;
 }
 
+/** Port information as reported by `genTsFromSource` JSON. */
+export interface JsonPortInfoLike {
+	direction: string;
+	type?: string;
+	kind?: string;
+	width: number;
+	is4state?: boolean;
+	is_4state?: boolean;
+}
+
+/** Convert compiler-reported ports to the virtual-module port shape. */
+export function virtualPortsFromJson(
+	ports: Record<string, JsonPortInfoLike>,
+): Record<string, VirtualPortInfo> {
+	const result: Record<string, VirtualPortInfo> = {};
+	for (const [name, port] of Object.entries(ports)) {
+		const kindName = port.kind ?? port.type ?? "logic";
+		const kind: VirtualPortKind =
+			kindName === "clock" || kindName === "reset" || kindName === "bit"
+				? kindName
+				: "logic";
+		result[name] = {
+			direction:
+				port.direction === "output" || port.direction === "inout"
+					? port.direction
+					: "input",
+			kind,
+			width: port.width || 1,
+			is4state: port.is4state ?? port.is_4state ?? kind !== "bit",
+		};
+	}
+	return result;
+}
+
 export function extractPortsFromSource(
 	source: string,
 ): Record<string, VirtualPortInfo> {

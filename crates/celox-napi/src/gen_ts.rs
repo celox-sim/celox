@@ -238,12 +238,158 @@ pub fn gen_ts(
         .map_err(|e| Error::from_reason(format!("Failed to serialize JSON: {e}")))
 }
 
-/// Generate TypeScript type information from in-memory Veryl sources.
+/// Generate TypeScript type information from in-memory HDL sources.
 ///
 /// Like `gen_ts()` but does not require a Veryl.toml or filesystem access.
-/// Works on both native and wasm32 targets.
+/// Works on both native and wasm32 targets. Sources are dispatched by
+/// extension: `.sv`/`.svh` files go to the SystemVerilog analyzer and every
+/// other source to the Veryl analyzer; a mixed set merges both results.
 #[napi]
 pub fn gen_ts_from_source(
+    sources: Vec<NapiSourceFile>,
+    components: Option<Vec<NapiInjectedManifest>>,
+) -> Result<String> {
+    let (veryl_sources, sv_sources): (Vec<NapiSourceFile>, Vec<NapiSourceFile>) = sources
+        .into_iter()
+        .partition(|source| !is_sv_path(std::path::Path::new(&source.path)));
+    match (veryl_sources.is_empty(), sv_sources.is_empty()) {
+        (false, true) => gen_ts_from_veryl_sources(veryl_sources, components),
+        (true, false) => gen_ts_from_sv_sources(&sv_sources),
+        (true, true) => Err(Error::from_reason("No source files provided")),
+        (false, false) => {
+            let veryl_json = gen_ts_from_veryl_sources(veryl_sources, components)?;
+            let sv_json = gen_ts_from_sv_sources(&sv_sources)?;
+            merge_gen_ts_json(&veryl_json, &sv_json)
+        }
+    }
+}
+
+/// Merge two `gen_ts` JSON outputs, concatenating their modules.
+fn merge_gen_ts_json(veryl_json: &str, sv_json: &str) -> Result<String> {
+    let mut merged: serde_json::Value = serde_json::from_str(veryl_json)
+        .map_err(|e| Error::from_reason(format!("Failed to merge genTs output: {e}")))?;
+    let sv: serde_json::Value = serde_json::from_str(sv_json)
+        .map_err(|e| Error::from_reason(format!("Failed to merge genTs output: {e}")))?;
+    if let (Some(modules), Some(sv_modules)) = (
+        merged.get_mut("modules").and_then(|m| m.as_array_mut()),
+        sv.get("modules").and_then(|m| m.as_array()),
+    ) {
+        modules.extend(sv_modules.iter().cloned());
+    }
+    if let (Some(file_modules), Some(sv_file_modules)) = (
+        merged
+            .get_mut("fileModules")
+            .and_then(|m| m.as_object_mut()),
+        sv.get("fileModules").and_then(|m| m.as_object()),
+    ) {
+        for (file, modules) in sv_file_modules {
+            file_modules.insert(file.clone(), modules.clone());
+        }
+    }
+    serde_json::to_string(&merged)
+        .map_err(|e| Error::from_reason(format!("Failed to serialize JSON: {e}")))
+}
+
+/// Generate TypeScript type information from in-memory SystemVerilog sources.
+///
+/// All sources are parsed together and their packages are analyzed once, so
+/// a module may use typedefs and constants from a package declared in
+/// another file. Each declared module is then analyzed with that shared
+/// package context and the module interfaces of the whole source set.
+fn gen_ts_from_sv_sources(sources: &[NapiSourceFile]) -> Result<String> {
+    use celox_sv_analyzer::ir::{PortDirection, TypeKind};
+    use celox_ts_gen::{JsonModuleEntry, JsonOutput, JsonPortInfo};
+
+    let mut parsed = Vec::new();
+    for src in sources {
+        let path = std::path::PathBuf::from(&src.path);
+        parsed.push(
+            celox_sv_analyzer::ParsedSource::parse(&src.content, &path)
+                .map_err(|e| Error::from_reason(format!("{e}")))?,
+        );
+    }
+    let packages =
+        celox_sv_analyzer::ParsedSource::analyze_packages(&parsed.iter().collect::<Vec<_>>())
+            .map_err(|e| Error::from_reason(format!("{e}")))?;
+    let mut interfaces = celox_sv_analyzer::ModuleInterfaces::default();
+    for source in &parsed {
+        interfaces.extend(source.module_interfaces().clone());
+    }
+
+    let mut all_modules = Vec::new();
+    let mut file_modules: HashMap<String, Vec<String>> = HashMap::default();
+
+    for (src, source) in sources.iter().zip(&parsed) {
+        let source_file = src.path.replace('\\', "/");
+        let mut module_names = Vec::new();
+        for name in source.module_names() {
+            let mut design = celox_sv_analyzer::Design::default();
+            let ir = source
+                .analyze_module(
+                    name,
+                    &HashMap::default(),
+                    &[],
+                    &[],
+                    &interfaces,
+                    &packages,
+                    &mut design,
+                )
+                .map_err(|e| Error::from_reason(format!("{e}")))?;
+            let Some(module) = ir.modules().iter().find(|m| m.name() == name) else {
+                continue;
+            };
+            let mut ports: HashMap<String, JsonPortInfo> = HashMap::default();
+            for port in module.ports() {
+                let (r#type, is4state) = match port.r#type().kind() {
+                    TypeKind::Bit => ("bit", false),
+                    _ => ("logic", true),
+                };
+                ports.insert(
+                    port.name().to_string(),
+                    JsonPortInfo {
+                        direction: match port.direction() {
+                            PortDirection::Input => "input",
+                            PortDirection::Output => "output",
+                            _ => "inout",
+                        },
+                        r#type,
+                        width: port.r#type().resolved_width().unwrap_or(1),
+                        is4state,
+                        array_dims: None,
+                        interface: None,
+                    },
+                );
+            }
+            module_names.push(module.name().to_string());
+            all_modules.push(JsonModuleEntry {
+                module_name: module.name().to_string(),
+                source_file: source_file.clone(),
+                dts_content: String::new(),
+                md_content: String::new(),
+                ports,
+                events: Vec::new(),
+                instances: Vec::new(),
+                is_test: false,
+            });
+        }
+        if !module_names.is_empty() {
+            file_modules.insert(source_file, module_names);
+        }
+    }
+
+    all_modules.sort_by(|a, b| a.module_name.cmp(&b.module_name));
+    let output = JsonOutput {
+        project_path: String::new(),
+        modules: all_modules,
+        file_modules,
+        warnings: Vec::new(),
+        diagnostics: Vec::new(),
+    };
+    serde_json::to_string(&output)
+        .map_err(|e| Error::from_reason(format!("Failed to serialize JSON: {e}")))
+}
+
+fn gen_ts_from_veryl_sources(
     sources: Vec<NapiSourceFile>,
     components: Option<Vec<NapiInjectedManifest>>,
 ) -> Result<String> {
