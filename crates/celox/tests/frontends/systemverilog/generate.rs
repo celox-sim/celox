@@ -872,3 +872,141 @@ endmodule"#;
         );
     }
 }
+
+// A set membership test of constants is a constant (IEEE 1800-2023 11.2.1,
+// 11.4.13): it selects generate branches and initializes parameters. An
+// item matches by wildcard equality, a range by its bounds. OpenTitan's
+// register slices select their write logic by
+// `SwAccess inside {SwAccessRW, SwAccessWO}`.
+#[test]
+fn set_membership_tests_of_constants_are_constants() {
+    let source = r#"
+        `timescale 1ns/1ns
+        package Access;
+            typedef enum logic [2:0] { RW = 3'd0, RO = 3'd1, WO = 3'd2 } access_e;
+        endpackage
+        module Arb import Access::*; #(parameter int DW = 4, parameter access_e Sw = RW)
+                (output logic [3:0] w);
+            localparam bit Narrow = DW inside {[1:3], 8};
+            if (Sw inside {RW, WO}) begin : gen_w
+                assign w[0] = 1'b1;
+            end else begin : gen_ro
+                assign w[0] = 1'b0;
+            end
+            assign w[1] = Narrow;
+            assign w[2] = Sw inside {3'b?1?};
+            assign w[3] = !(Sw inside {RO});
+        endmodule
+        module Top;
+            logic [3:0] a, b, c, d;
+            Arb u_a(.w(a));
+            Arb #(.Sw(Access::RO), .DW(2)) u_b(.w(b));
+            Arb #(.Sw(Access::WO), .DW(8)) u_c(.w(c));
+            Arb #(.Sw(Access::RW), .DW(5)) u_d(.w(d));
+            initial #1 $display("%b %b %b %b", a, b, c, d);
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("inside.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["1001 0010 1111 1001"], "four-state {four_state}");
+    }
+}
+
+// An unbased unsized literal in a constant set membership test fills the
+// width of the comparison (IEEE 1800-2023 5.7.1, 11.4.13).
+#[test]
+fn set_membership_tests_of_constants_fill_unsized_literals() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+            localparam logic [3:0] Z = 4'd0;
+            localparam logic [3:0] O = 4'hf;
+            localparam bit ZeroIn = Z inside {'0};
+            localparam bit OnesIn = O inside {'1};
+            localparam bit OneIn = 4'd1 inside {'1};
+            if (O inside {'1, 4'd3}) begin : gen_ones
+                initial #1 $display("%b%b%b", ZeroIn, OnesIn, OneIn);
+            end
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("fill.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["110"], "four-state {four_state}");
+    }
+}
+
+// A set membership test is not folded to a constant when an unbased unsized
+// literal sits beside a constant function call, whose width sizes the whole
+// test (IEEE 1800-2023 5.7.1, 11.4.13; Verilator 5.054 prints `011`), or when
+// an item is an unpacked array, which matches by its elements (Verilator
+// prints `101`). Folding either one by pairwise comparisons would give
+// `111` and `000`; such a test stays unsupported.
+#[test]
+fn set_membership_tests_of_calls_and_arrays_beside_fills_are_not_folded() {
+    let fill = r#"
+        `timescale 1ns/1ns
+        module Top;
+            function automatic logic [11:0] wide(input logic [11:0] a);
+                return a;
+            endfunction
+            localparam logic [7:0] V = 8'hff;
+            localparam bit Wide = V inside {'1, wide(12'h3)};
+            localparam bit Ones = 12'hfff inside {'1, wide(12'h3)};
+            localparam bit Hit = V inside {wide(12'h0ff), '0};
+            initial #1 $display("%b%b%b", Wide, Ones, Hit);
+        endmodule
+    "#;
+    let array = r#"
+        `timescale 1ns/1ns
+        module Top;
+            localparam int A [3] = '{1, 2, 5};
+            localparam bit Two = 2 inside {A};
+            localparam bit Four = 4 inside {A, 7};
+            localparam bit Five = 5 inside {0, A};
+            initial #1 $display("%b%b%b", Two, Four, Five);
+        endmodule
+    "#;
+    for (name, source) in [("fill_call.sv", fill), ("inside_array.sv", array)] {
+        for four_state in [false, true] {
+            let error = celox::Simulation::from_sv_sources(vec![(source, Path::new(name))], "Top")
+                .four_state(four_state)
+                .build()
+                .err()
+                .unwrap_or_else(|| panic!("{name} four-state {four_state} was folded"));
+            assert!(
+                format!("{error:?}").contains("Unsupported"),
+                "{name} four-state {four_state}: {error:?}"
+            );
+        }
+    }
+}
