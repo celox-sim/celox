@@ -56,7 +56,7 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
   （[#460](https://github.com/celox-sim/celox/issues/460)）。
   ただし独立遅延のあるネットの未駆動ビットは `z` を読みます。
 - ゲート・スイッチプリミティブは、遅延・強度の無いスカラ `and`、`nand`、`or`、
-  `nor`、`xor`、`xnor` のみ対応します（Clause 28）。ゲートの遅延・強度・
+  `nor`、`xor`、`xnor`、`buf`、`not` のみ対応します（Clause 28）。ゲートの遅延・強度・
   インスタンス配列も未対応です（[#457](https://github.com/celox-sim/celox/issues/457)）。
 - 負の下限を持つインスタンス配列。
 - 階層参照 <a id="hierarchical-references"></a>: 継続代入でネットや変数を駆動する参照、
