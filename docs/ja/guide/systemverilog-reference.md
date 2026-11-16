@@ -32,7 +32,8 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 ### デザイン構造
 
 - `bind`、`checker`、`config`、`covergroup`、clocking ブロックと clocking drive、
-  ユーザー定義プリミティブ（UDP）、`specify` ブロック。
+  ユーザー定義プリミティブ（UDP）、`specify` ブロック。クラスは構築しない covergroup を
+  宣言できます。構築やメソッド呼び出しはエラーです。
 - 文を持つモジュール自身のモジュールインスタンス（generate ブロック内でも可）の
   パラメータ以外への `defparam` 代入: 子インスタンスを経由する名前、`$root` から
   始まる名前、インスタンス配列の要素、インタフェースインスタンス、文自身の
