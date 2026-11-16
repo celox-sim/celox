@@ -810,7 +810,11 @@ fn parameter_override(
             session,
             packed_dimensions,
         )?
-        .ok_or_else(|| unsupported("parameter override expression"))?
+        .ok_or_else(|| {
+            let k = format!("{:?}", declarations.expression(native).kind);
+            eprintln!("PROBE override name={name} kind={}", k.chars().take(800).collect::<String>());
+            unsupported("parameter override expression")
+        })?
     };
     // A bare name that denotes a type (a typedef, or the instantiating
     // module's own `parameter type`) is passed on as that type.
