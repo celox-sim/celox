@@ -587,6 +587,36 @@ impl TyTable {
         }
     }
 
+    /// Type `id` without the integer type keyword that declared it, which
+    /// only `$typename` tells apart (20.6.1, 6.22.1 e).
+    pub fn without_keyword(&mut self, id: TyId) -> TyId {
+        match self.data(id) {
+            TyData::Packed(packed) if packed.keyword.is_some() => {
+                let packed = Packed {
+                    keyword: None,
+                    ..packed.clone()
+                };
+                self.intern(TyData::Packed(packed))
+            }
+            _ => id,
+        }
+    }
+
+    /// The element of `id` through `dimensions` fixed-size unpacked
+    /// dimensions (7.4.2), if it has as many.
+    pub fn unpacked_element(&self, mut id: TyId, dimensions: usize) -> Option<TyId> {
+        for _ in 0..dimensions {
+            match self.data(id) {
+                TyData::Array {
+                    kind: ArrayKind::Fixed(_),
+                    element,
+                } => id = *element,
+                _ => return None,
+            }
+        }
+        Some(id)
+    }
+
     /// The element of `id` if it is a fixed-size unpacked array, through
     /// every dimension, else `id` (7.4.2).
     pub fn fixed_element(&self, mut id: TyId) -> TyId {

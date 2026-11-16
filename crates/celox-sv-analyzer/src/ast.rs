@@ -434,6 +434,10 @@ pub enum PortDirection {
 pub struct Type {
     shape: Arc<TypeShape>,
     binding: semantic_types::Binding,
+    /// The semantic type of an element of the type's unpacked dimensions
+    /// (IEEE 1800-2023 7.4), which a change of those dimensions keeps
+    /// (see [`Type::unpacked_ranges_mut`]) and any other change forgets.
+    element: semantic_types::Binding,
 }
 
 /// What a [`Type`] is made of.
@@ -496,6 +500,7 @@ impl std::ops::DerefMut for Type {
     /// A change of the shape may change its semantic type.
     fn deref_mut(&mut self) -> &mut TypeShape {
         self.binding.forget();
+        self.element.forget();
         Arc::make_mut(&mut self.shape)
     }
 }
@@ -507,6 +512,28 @@ impl Type {
     pub(in crate::ast) fn shape_keeping_binding(&mut self) -> &mut TypeShape {
         Arc::make_mut(&mut self.shape)
     }
+
+    /// The unpacked dimensions of the type, for a change that keeps the
+    /// type of its elements: the type forgets its binding but not that of
+    /// its elements, which the conversion of the changed type takes.
+    pub(in crate::ast) fn unpacked_ranges_mut(&mut self) -> &mut Vec<UnpackedRange> {
+        self.binding.forget();
+        &mut Arc::make_mut(&mut self.shape).unpacked_ranges
+    }
+
+    /// Bind the type to semantic type `id` of `table`, and its elements to
+    /// the type of an element of its unpacked dimensions.
+    pub(in crate::ast) fn bind(
+        &mut self,
+        table: &semantic_types::TyTable,
+        id: semantic_types::TyId,
+    ) {
+        self.binding.set(table, id);
+        match table.unpacked_element(id, self.unpacked_ranges.len()) {
+            Some(element) => self.element.set(table, element),
+            None => self.element.forget(),
+        }
+    }
 }
 
 impl From<TypeShape> for Type {
@@ -514,6 +541,7 @@ impl From<TypeShape> for Type {
         Self {
             shape: Arc::new(shape),
             binding: semantic_types::Binding::default(),
+            element: semantic_types::Binding::default(),
         }
     }
 }

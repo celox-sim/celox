@@ -387,6 +387,18 @@ pub(super) fn value_type(interface: VirtualInterface) -> Type {
     ty
 }
 
+/// [`value_type`] bound to its semantic type in `table`, which an array of
+/// it keeps as the type of its elements.
+pub(super) fn bound_value_type(
+    table: &mut semantic_types::TyTable,
+    interface: VirtualInterface,
+) -> Type {
+    let id = interface.type_id(table);
+    let mut ty = value_type(interface);
+    ty.bind(table, id);
+    ty
+}
+
 /// The declarations of the design's virtual interfaces, if it has any.
 pub(super) fn declarations(state: &Session) -> Option<&VirtualInterfaces> {
     state.virtual_interfaces.as_deref()
@@ -394,7 +406,7 @@ pub(super) fn declarations(state: &Session) -> Option<&VirtualInterfaces> {
 
 /// The type `virtual name[.modport]`, checked against the interface.
 pub(super) fn bind_type(
-    state: &Session,
+    state: &mut Session,
     name: &celox_sv_syntax::Name,
     arguments: Option<&[celox_sv_syntax::Argument]>,
     modport: Option<&celox_sv_syntax::Name>,
@@ -404,7 +416,10 @@ pub(super) fn bind_type(
     // The packages are analyzed once to find the interfaces before the
     // declarations exist; the analysis that uses the types checks them.
     let Some(declarations) = declarations(state) else {
-        return Ok(value_type(VirtualInterface { interface, modport }));
+        return Ok(bound_value_type(
+            &mut state.types,
+            VirtualInterface { interface, modport },
+        ));
     };
     // The declarations hold every interface that a virtual interface type
     // of any source names (see `VirtualInterfaces::declarations_of`), so one
@@ -427,7 +442,10 @@ pub(super) fn bind_type(
             "modport `{modport}` of interface `{interface}`"
         )));
     }
-    Ok(value_type(VirtualInterface { interface, modport }))
+    Ok(bound_value_type(
+        &mut state.types,
+        VirtualInterface { interface, modport },
+    ))
 }
 
 /// The member `member` that a virtual interface of type `ty` reaches, with
@@ -503,7 +521,10 @@ pub(super) fn check_write(
 /// selects are bound against, and per interface the placeholders of the
 /// selected instance's members and id, which the frontend replaces with the
 /// signals of each instance (see [`crate::ir::Module::expand_virtual_interface_instances`]).
-pub(super) fn member_signals(declarations: &VirtualInterfaces) -> Vec<Signal> {
+pub(super) fn member_signals(
+    declarations: &VirtualInterfaces,
+    table: &mut semantic_types::TyTable,
+) -> Vec<Signal> {
     let mut interfaces = declarations.interfaces.iter().collect::<Vec<_>>();
     interfaces.sort_by(|left, right| left.0.cmp(right.0));
     let mut signals = Vec::new();
@@ -528,10 +549,13 @@ pub(super) fn member_signals(declarations: &VirtualInterfaces) -> Vec<Signal> {
         signals.push(Signal {
             hierarchical: Some(instance.clone()),
             name: instance,
-            r#type: value_type(VirtualInterface {
-                interface: interface.clone(),
-                modport: None,
-            }),
+            r#type: bound_value_type(
+                table,
+                VirtualInterface {
+                    interface: interface.clone(),
+                    modport: None,
+                },
+            ),
             is_net: false,
             unresolved_net: false,
             net_resolution: NetResolution::Wire,
@@ -1059,17 +1083,24 @@ pub(super) fn dispatch(
 /// The signal that holds the id of the interface instance that interface
 /// instance or port `handle` of interface `interface` denotes, if a virtual
 /// interface may denote it.
-pub(super) fn identity_signal(state: &Session, handle: &str, interface: &str) -> Option<Signal> {
+pub(super) fn identity_signal(
+    state: &mut Session,
+    handle: &str,
+    interface: &str,
+) -> Option<Signal> {
     declarations(state)?.interfaces.get(interface)?;
     Some(Signal {
         name: VirtualInterfaceSignal::Identity {
             handle: handle.to_owned(),
         }
         .name(),
-        r#type: value_type(VirtualInterface {
-            interface: interface.to_owned(),
-            modport: None,
-        }),
+        r#type: bound_value_type(
+            &mut state.types,
+            VirtualInterface {
+                interface: interface.to_owned(),
+                modport: None,
+            },
+        ),
         is_net: false,
         unresolved_net: false,
         net_resolution: NetResolution::Wire,
@@ -1084,7 +1115,7 @@ pub(super) fn identity_signal(state: &Session, handle: &str, interface: &str) ->
 /// interface declares no members: the frontend finds the instance a port
 /// denotes by the connections of its members.
 pub(super) fn port_identity_signal(
-    state: &Session,
+    state: &mut Session,
     handle: &str,
     interface: &str,
 ) -> Option<Signal> {
@@ -1870,5 +1901,40 @@ mod holds_virtual_interface_tests {
         assert!(shape_holds_virtual_interface(
             &shape, &mut table, &functions, &env
         ));
+    }
+
+    /// An array keeps the semantic type of its virtual interface elements
+    /// (IEEE 1800-2023 25.9, 7.4) when its unpacked dimensions change, and
+    /// its shapes and selected elements keep it too; another change of the
+    /// type forgets it.
+    #[test]
+    fn arrays_keep_the_semantic_type_of_their_virtual_interface_elements() {
+        let mut table = semantic_types::TyTable::default();
+        let functions = const_functions::ConstantFunctions::default();
+        let env = ConstEnv::default();
+        let interface = VirtualInterface {
+            interface: "bus_if".into(),
+            modport: Some("mp".into()),
+        };
+        let element = interface.type_id(&mut table);
+        let mut ty = bound_value_type(&mut table, interface);
+        let literal = |value: &str| ConstExpr::Literal(value.into());
+        ty.unpacked_ranges_mut()
+            .push(UnpackedRange::new(literal("0"), literal("3")));
+        assert!(ty.binding.get(&table).is_none());
+        assert_eq!(ty.element.get(&table), Some(element));
+        let id = semantic_types::of_type(&mut table, &functions, &ty, &env).unwrap();
+        assert_eq!(table.unpacked_element(id, 1), Some(element));
+        // The shape of a variable of the array, and an element selected
+        // from it before the shape is bound.
+        let shape = procedural::dimensions_from_type(&ty);
+        assert_eq!(shape.element_type(&table), Some(element));
+        assert_eq!(
+            shape.unpacked_element(&table).element_type(&table),
+            Some(element)
+        );
+        // Any other change of the type may change its elements.
+        ty.is_signed = true;
+        assert!(ty.element.get(&table).is_none());
     }
 }

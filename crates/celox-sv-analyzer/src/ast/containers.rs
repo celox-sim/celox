@@ -285,12 +285,12 @@ pub(super) fn fixed_storage(
         )));
     }
     let mut element = ty.clone();
-    element.unpacked_ranges.clear();
+    element.unpacked_ranges_mut().clear();
     // The element has the element type of the array (7.4).
     if let Some(semantic_types::TyData::Array { element: id, .. }) =
         ty.binding.get(table).map(|id| table.data(id))
     {
-        element.binding.set(table, *id);
+        element.bind(table, *id);
     }
     // A container does not give its elements the initial values of their
     // members (see `unpacked_structs::record`).
@@ -427,7 +427,9 @@ pub(super) fn of(container: ContainerType) -> Type {
         ConstExpr::Literal("0".into()),
     ));
     ty.container = Some(Arc::new(container));
-    // A container's type is the one it was bound to, if it was.
+    // A container's type is the one it was bound to, if it was, and so is
+    // its element type, as it has no unpacked dimensions.
+    ty.element = binding.clone();
     ty.binding = binding;
     ty
 }
@@ -1245,7 +1247,7 @@ fn check_fixed_compatible(
         .map_err(|_| unsupported(format!("{context} from a value of unknown type")))?;
     let literal = |value: i128| ConstExpr::Literal(value.to_string());
     let mut ty = target.element.clone();
-    ty.unpacked_ranges = vec![UnpackedRange::new(literal(left), literal(right))];
+    *ty.unpacked_ranges_mut() = vec![UnpackedRange::new(literal(left), literal(right))];
     let target = semantic_types::of_type(&mut session.types, &tree.functions, &ty, &dims.const_env)
         .ok_or_else(|| unsupported("type of a fixed-size array class property"))?;
     assignments::check_types(tree, session, dims, source, target, &|| context.into())
@@ -2840,7 +2842,7 @@ pub(super) fn element_member(
                 .try_fold(id, |id, name| session.types.member(id, name))
         })
     {
-        member_type.binding.set(&session.types, id);
+        member_type.bind(&session.types, id);
     }
     let leaves_in_order = aggregate.leaves();
     let parts = leaves

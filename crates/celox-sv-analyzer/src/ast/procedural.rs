@@ -477,7 +477,7 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
             unpacked_struct: r#type.unpacked_struct.clone(),
             declared: type_names::Declared::new(r#type),
         },
-        &r#type.binding,
+        r#type,
     )
 }
 
