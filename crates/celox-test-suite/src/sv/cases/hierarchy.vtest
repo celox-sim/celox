@@ -1951,3 +1951,26 @@ module Top(output bit ok);
 endmodule
 "#)
   (top Top) (run_until 2) (assert_eq ok 1))
+
+; The initializer of a variable output port initializes the variable before
+; any procedure runs, as a variable declaration assignment does (IEEE
+; 1800-2023 23.2.2.2, 10.5); so does the one of the variable declaration
+; of a non-ANSI output port (23.2.2.1).
+(case variable_output_ports_take_initializers
+  (source "variable_output_ports_take_initializers.sv" #"
+module Ansi(output reg [7:0] x = 8'd3, y = 8'd4, output logic seen);
+  initial seen = x == 8'd3 && y == 8'd4;
+endmodule
+module NonAnsi(n, m);
+  output [7:0] n, m;
+  reg [7:0] n = 8'd5, m;
+  initial m = n + 8'd1;
+endmodule
+module Top(output logic [7:0] x, y, n, m, output logic seen);
+  Ansi ansi(.x(x), .y(y), .seen(seen));
+  NonAnsi non_ansi(.n(n), .m(m));
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq x 3) (assert_eq y 4) (assert_eq seen 1)
+  (assert_eq n 5) (assert_eq m 6))
