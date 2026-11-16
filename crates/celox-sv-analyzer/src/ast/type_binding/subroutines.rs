@@ -88,6 +88,7 @@ pub(in crate::ast) fn port_formals<'a>(
         }
         if !declared_port_range_matches(
             port.declared_type,
+            Some(port.data_type),
             &ty,
             tree,
             session,

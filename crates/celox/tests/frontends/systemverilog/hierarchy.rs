@@ -537,6 +537,27 @@ fn rejects_malformed_non_ansi_port_declarations() {
             "its net or variable declaration differ",
         ),
         (
+            "module Top(x); output [7:0] x; reg x; endmodule",
+            "its net or variable declaration of `x` differ",
+        ),
+        (
+            "module Top(x); output [3:0] x; real x; endmodule",
+            "its net or variable declaration of `x` differ",
+        ),
+        (
+            "typedef struct packed { logic [31:0] a; logic [7:0] b; } T; \
+             module Top(x); output [47:0] x; T x; endmodule",
+            "its net or variable declaration of `x` differ",
+        ),
+        (
+            "module Top; input [1:0] x; wire [3:0] x; endmodule",
+            "port declaration in the body of a design element without a list of ports",
+        ),
+        (
+            "module Top(input a); input b; endmodule",
+            "port declaration in the body of a design element without a list of ports",
+        ),
+        (
             "module Top(q); output reg q; reg q; endmodule",
             "port `q` with a net or variable type is declared again",
         ),

@@ -1577,7 +1577,7 @@ fn continuous_assignment_targets_declare_implicit_nets_in_their_scope() {
 
 #[test]
 fn ordinary_net_declarations_retain_qualifiers_types_dimensions_and_values() {
-    let code = "module M;wire signed[7:0] a[2:1],b=3+2;trireg(small)scalared[3:0]c;tri(strong0,weak1)vectored logic[4:0]#(1:2:3,4,5)d;wire T[3:0]#1 e;input wire p;C child();if(1)begin:g uwire bit q;end endmodule interface I;tri t;endinterface";
+    let code = "module M;wire signed[7:0] a[2:1],b=3+2;trireg(small)scalared[3:0]c;tri(strong0,weak1)vectored logic[4:0]#(1:2:3,4,5)d;wire T[3:0]#1 e;C child();if(1)begin:g uwire bit q;end endmodule interface I;tri t;endinterface";
     let native = Declarations::parse(code, Path::new("nets.sv")).unwrap();
     assert_eq!(native.net_declarations.len(), 6);
     let a = &native.net_declarations[0];
@@ -3264,6 +3264,22 @@ fn non_ansi_subroutine_port_redeclarations_keep_their_rules() {
     // declaration stays a second declaration of the name.
     let syntax = parse("module M; task t; input int l; int l; endtask endmodule");
     assert_eq!(syntax.subroutines[0].items.len(), 1);
+}
+
+#[test]
+fn port_declarations_need_a_list_of_ports() {
+    for code in [
+        "module M; input x; endmodule",
+        "module M(input a); output b; endmodule",
+        "interface I(); inout c; endinterface",
+    ] {
+        assert!(
+            Declarations::parse(code, Path::new("bad.sv")).is_err(),
+            "{code}"
+        );
+    }
+    // A subroutine of such a design element keeps its non-ANSI formals.
+    parse("module M; task t; input x; endtask endmodule");
 }
 
 #[test]

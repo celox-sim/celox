@@ -27,6 +27,25 @@ type PortObject = (Option<String>, bool, TypeId, Option<TypeId>, Option<ExprId>)
 impl Parser<'_> {
     /// Fold the body port declarations of a non-ANSI `unit` into its header.
     pub(super) fn adopt_non_ansi_ports(&mut self, unit: &mut Unit) -> Result<()> {
+        // Only a header with a list of ports leaves port declarations to
+        // the body (IEEE 1800-2023 A.1.2: an ANSI header, or one without
+        // ports, takes non-port items only).
+        if unit.port_style == PortStyle::Ansi
+            && let Some(tokens) = unit.items.iter().find_map(|&item| {
+                let BodyItem { kind, tokens } = &self.body_items[item.0];
+                matches!(
+                    kind,
+                    BodyItemKind::Unconverted { category, .. }
+                        if matches!(category.as_str(), "input" | "output" | "inout" | "ref")
+                )
+                .then_some(*tokens)
+            })
+        {
+            return Err(self.error_at(
+                tokens,
+                "port declaration in the body of a design element without a list of ports",
+            ));
+        }
         if unit.port_style != PortStyle::NonAnsi
             || !unit
                 .ports
@@ -384,7 +403,9 @@ impl Parser<'_> {
     /// `port_type` and a net or variable declaration of type `object_type`,
     /// and `port_type` when both give a range in other words: the ranges
     /// must be identical (IEEE 1800-2023 23.2.2.1), so their bounds are
-    /// compared once parameters have values.
+    /// compared once parameters have values. It is also `port_type` when the
+    /// object's type is a keyword or name without a range, whose width the
+    /// port declaration's range must give.
     pub(super) fn merge_port_type(
         &mut self,
         port_type: TypeId,
@@ -395,8 +416,14 @@ impl Parser<'_> {
         let mut changed = false;
         let mut declared = None;
         if object.packed_dimensions.is_empty() {
-            changed |= !port.packed_dimensions.is_empty();
-            object.packed_dimensions = port.packed_dimensions.clone();
+            if matches!(object.kind, DataTypeKind::Implicit) {
+                changed |= !port.packed_dimensions.is_empty();
+                object.packed_dimensions = port.packed_dimensions.clone();
+            } else if !port.packed_dimensions.is_empty() {
+                // A type keyword or name without a range: the port
+                // declaration's range must give the type's width.
+                declared = Some(port_type);
+            }
         } else {
             let text = |dimensions: &[Dimension]| {
                 dimensions
