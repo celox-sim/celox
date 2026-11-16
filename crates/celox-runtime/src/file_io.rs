@@ -234,8 +234,11 @@ impl FileIo {
     }
 
     fn close_inner(&mut self, descriptor: u32) -> io::Result<()> {
+        // An MCD selects one channel per set bit (IEEE 1800-2023 21.3.1), so
+        // MCD 0, which a failed `$fopen` returns, selects none: closing it
+        // closes nothing.
         if descriptor == 0 {
-            return Err(invalid_descriptor());
+            return Ok(());
         }
         if descriptor & FD_FLAG != 0 {
             let key = descriptor & !FD_FLAG;
@@ -285,8 +288,9 @@ impl FileIo {
     }
 
     fn write_inner(&mut self, descriptor: u32, bytes: &[u8]) -> io::Result<bool> {
+        // MCD 0 selects no channel (21.3.1): the output goes nowhere.
         if descriptor == 0 {
-            return Err(invalid_descriptor());
+            return Ok(false);
         }
         if descriptor & FD_FLAG != 0 {
             return match descriptor & !FD_FLAG {
@@ -483,8 +487,9 @@ impl FileIo {
 
     fn flush_inner(&mut self, descriptor: Option<u32>) -> io::Result<()> {
         if let Some(descriptor) = descriptor {
+            // MCD 0 selects no channel (21.3.1): there is nothing to flush.
             if descriptor == 0 {
-                return Err(invalid_descriptor());
+                return Ok(());
             }
             if descriptor & FD_FLAG != 0 {
                 return match descriptor & !FD_FLAG {
