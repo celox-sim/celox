@@ -944,3 +944,103 @@ fn initial_memory_image_reads_readmem_x_and_z_as_zero_in_two_state() {
         }
     }
 }
+
+#[test]
+fn hdl_sources_partition_by_extension() {
+    let sources = make_sources(&[
+        ("module A; endmodule", "src/a.sv"),
+        ("module B () {}", "src/b.veryl"),
+        ("module C; endmodule", "src/c.SVH"),
+        ("module D () {}", "src/d"),
+    ]);
+    let (veryl, sv) = partition_hdl_sources(&sources);
+    let paths = |pairs: &[(String, std::path::PathBuf)]| {
+        pairs
+            .iter()
+            .map(|(_, p)| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(paths(&veryl), ["src/b.veryl", "src/d"]);
+    assert_eq!(paths(&sv), ["src/a.sv", "src/c.SVH"]);
+}
+
+#[test]
+fn gen_ts_from_sv_source_reports_module_ports() {
+    let json = gen_ts_from_source(
+        vec![NapiSourceFile {
+            content: "module Adder(input logic [15:0] a, input logic [15:0] b, output logic [16:0] sum); always_comb sum = a + b; endmodule".to_string(),
+            path: "src/Adder.sv".to_string(),
+        }],
+        None,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let module = &value["modules"][0];
+    assert_eq!(module["moduleName"], "Adder");
+    assert_eq!(module["sourceFile"], "src/Adder.sv");
+    assert_eq!(module["ports"]["a"]["direction"], "input");
+    assert_eq!(module["ports"]["a"]["width"], 16);
+    assert_eq!(module["ports"]["sum"]["direction"], "output");
+    assert_eq!(module["ports"]["sum"]["width"], 17);
+}
+
+#[test]
+fn simulator_handle_compiles_systemverilog_sources() {
+    let handle = NativeSimulatorHandle::new(
+        vec![NapiSourceFile {
+            content: "module Adder(input logic [15:0] a, input logic [15:0] b, output logic [16:0] sum); always_comb sum = a + b; endmodule".to_string(),
+            path: "src/Adder.sv".to_string(),
+        }],
+        "Adder".into(),
+        None,
+    )
+    .unwrap();
+    let layout: serde_json::Value = serde_json::from_str(&handle.layout_json).unwrap();
+    assert_eq!(layout["a"]["width"], 16);
+    assert_eq!(layout["sum"]["width"], 17);
+    assert_eq!(layout["sum"]["direction"], "output");
+}
+
+#[test]
+fn gen_ts_from_sv_sources_shares_packages_across_files() {
+    let json = gen_ts_from_source(
+        vec![
+            NapiSourceFile {
+                content:
+                    "package p; parameter int W = 12; typedef logic [W-1:0] word_t; endpackage"
+                        .to_string(),
+                path: "src/p.sv".to_string(),
+            },
+            NapiSourceFile {
+                content:
+                    "module Top(input p::word_t a, output p::word_t y); assign y = a; endmodule"
+                        .to_string(),
+                path: "src/Top.sv".to_string(),
+            },
+        ],
+        None,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let module = &value["modules"][0];
+    assert_eq!(module["moduleName"], "Top");
+    assert_eq!(module["ports"]["a"]["width"], 12);
+    assert_eq!(module["ports"]["y"]["width"], 12);
+}
+
+#[test]
+fn simulation_handle_compiles_systemverilog_sources() {
+    let handle = NativeSimulationHandle::new(
+        vec![NapiSourceFile {
+            content: "module Counter(input logic clk, input logic rst_n, input logic en, output logic [7:0] count); always_ff @(posedge clk or negedge rst_n) begin if (!rst_n) count <= 8'd0; else if (en) count <= count + 8'd1; end endmodule".to_string(),
+            path: "src/Counter.sv".to_string(),
+        }],
+        "Counter".into(),
+        None,
+    )
+    .unwrap();
+    let layout: serde_json::Value = serde_json::from_str(&handle.layout_json).unwrap();
+    assert_eq!(layout["count"]["width"], 8);
+    let events: serde_json::Value = serde_json::from_str(&handle.events_json).unwrap();
+    assert!(events.get("clk").is_some(), "events: {events}");
+}
