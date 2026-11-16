@@ -467,6 +467,62 @@ fn primitive_processes(
     Ok(processes)
 }
 
+/// The continuous connections of explicitly named ports to their
+/// expressions (IEEE 1800-2023 23.2.2.2): an input port drives its
+/// expression, and the expression of an output port drives the port.
+pub(super) fn port_connections(
+    ports: &[Port],
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<Vec<CombProcess>> {
+    let native = tree.declarations();
+    let mut processes = Vec::new();
+    for port in ports {
+        let Some(expression) = port.expression() else {
+            continue;
+        };
+        let value = Expr::Ident(port.name().to_string());
+        let stmt = match port.direction() {
+            PortDirection::Input => match &native.expression(expression).kind {
+                celox_sv_syntax::ExprKind::Concatenation(parts) => Stmt::AssignConcat {
+                    parts: parts
+                        .iter()
+                        .map(|&part| {
+                            expression_binding::net_lvalue(part, native, tree, session, dimensions)
+                        })
+                        .collect::<Converted<_>>()?,
+                    rhs: value,
+                    nonblocking: false,
+                },
+                _ => Stmt::Assign {
+                    lhs: expression_binding::net_lvalue(
+                        expression, native, tree, session, dimensions,
+                    )?,
+                    rhs: value,
+                    nonblocking: false,
+                },
+            },
+            PortDirection::Output => Stmt::Assign {
+                lhs: LValue::Ident(port.name().to_string()),
+                rhs: expression_binding::value(expression, native, tree, session, dimensions)?,
+                nonblocking: false,
+            },
+            _ => {
+                return Err(unsupported(
+                    "explicitly named port that is not an input or an output",
+                ));
+            }
+        };
+        processes.push(CombProcess::procedural(
+            CombProcessKind::ContinuousAssign,
+            None,
+            vec![stmt],
+        ));
+    }
+    Ok(processes)
+}
+
 /// Native continuous assignment membership and values drive lowering.
 fn continuous_assignments(
     native: &celox_sv_syntax::AssignSyntax,

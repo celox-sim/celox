@@ -1427,7 +1427,9 @@ impl Parser<'_> {
                 PortKind::Explicit { name, expression }
             } else if matches!(self.peek(), "," | ")") {
                 PortKind::NonAnsi(None)
-            } else if !fresh && matches!(self.peek(), "{" | "(") {
+            } else if !fresh && (matches!(self.peek(), "{" | "(") || !ansi && self.nth(1) == "[") {
+                // A port expression of a non-ANSI header: a concatenation,
+                // or a bit- or part-select (23.2.2.1).
                 PortKind::NonAnsi(Some(self.expression(0)?))
             } else {
                 PortKind::Named(self.name()?)
