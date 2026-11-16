@@ -141,6 +141,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
         }
         return CombProcess {
             delay: process.delay,
+            delay_initial: process.delay_initial,
             net_delay: process.net_delay,
             drive_strength: process.drive_strength,
             creation_order: process.creation_order,
@@ -168,6 +169,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
             .collect(),
     );
     result.delay = process.delay;
+    result.delay_initial = process.delay_initial;
     result.net_delay = process.net_delay;
     result.drive_strength = process.drive_strength;
     result.creation_order = process.creation_order;

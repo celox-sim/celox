@@ -453,6 +453,13 @@ pub(super) fn signals_from_body_item(
     use celox_sv_syntax::{BodyItemKind, DataDeclaration};
     let native = tree.declarations();
     let owner = native.body_item(id);
+    // The state and previous inputs of the instances of a sequential UDP.
+    if let BodyItemKind::LogicGate(gate) = &owner.kind
+        && let Some(primitive) = primitives::sequential(native, &gate.kind)
+    {
+        primitives::signals(gate, primitive, selected_name, signals);
+        return Ok(());
+    }
     let payload = match owner.kind {
         BodyItemKind::Data(id) => match native.data_declaration(id) {
             DataDeclaration::Variables(value) | DataDeclaration::Constructed(value) => {

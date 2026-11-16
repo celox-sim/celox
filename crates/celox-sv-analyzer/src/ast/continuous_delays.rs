@@ -114,6 +114,27 @@ pub(super) fn lower(
         // survives checkpoints; automatic locals would give each child a copy.
         signals.push(Signal::new(driven.clone(), storage.clone()));
         signals.push(Signal::new(sample.clone(), storage));
+        // A value the target has before the first delay ends, such as the
+        // initial value of a sequential UDP (29.3.3), starts both.
+        if let Some(value) = process.delay_initial.take() {
+            initial.push(InitialProcess {
+                creation_order: process.creation_order,
+                site: None,
+                condition: process.condition.clone(),
+                body: [&driven, &sample]
+                    .into_iter()
+                    .map(|name| Stmt::Assign {
+                        lhs: LValue::Ident(name.clone()),
+                        rhs: value.clone(),
+                        nonblocking: false,
+                    })
+                    .collect(),
+                kind: celox_design::ProcessKind::Initializer,
+                validation_body: Vec::new(),
+                synthetic: true,
+                repeats: false,
+            });
+        }
         // Freeze the value after assignment conversion: widening uses the
         // RHS signedness before adopting the destination's signedness.
         let value = coerce_procedural_assignment_rhs(tree, rhs.clone(), lhs, dimensions);

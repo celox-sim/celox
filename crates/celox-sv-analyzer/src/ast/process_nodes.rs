@@ -38,6 +38,7 @@ impl CombProcess {
             .collect();
         Self {
             delay: None,
+            delay_initial: None,
             net_delay: false,
             drive_strength: false,
             creation_order: 0,
@@ -58,6 +59,7 @@ impl CombProcess {
     ) -> Self {
         Self {
             delay: None,
+            delay_initial: None,
             net_delay: false,
             drive_strength: false,
             creation_order: 0,

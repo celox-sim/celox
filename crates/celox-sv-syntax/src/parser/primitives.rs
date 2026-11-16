@@ -240,6 +240,7 @@ impl Parser<'_> {
         let valid_output =
             |symbol: &str| matches!(symbol, "0" | "1" | "x") || sequential && symbol == "-";
         if input.len() != inputs
+            || input.iter().any(|symbol| symbol == "-")
             || edges > usize::from(sequential)
             || output.len() != 1
             || !valid_output(&output[0])
@@ -332,6 +333,8 @@ mod tests {
             "primitive p(o, i); output o; input i; table r : 1; endtable endprimitive",
             // `-` is the next state of a sequential entry only.
             "primitive p(o, i); output o; input i; table 0 : -; endtable endprimitive",
+            // `-` in an input field.
+            "primitive p(o, i); output reg o; input i; table - : ? : 1; endtable endprimitive",
             // Two edges in one sequential entry.
             "primitive p(o, i, j); output reg o; input i, j; table r f : ? : 1; endtable \
              endprimitive",
