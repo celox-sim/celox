@@ -143,6 +143,8 @@ pub(super) fn lower_comb_processes(
             symbolic_star(index, process) && !pm.callees_read_beyond_wildcard(process);
         if (process.kind() == sv::ir::CombProcessKind::AlwaysStar && !symbolic_star)
             || pm.reads_simulation_state(process.body())
+            // A memory file is read when the task executes.
+            || pm.loads_memory_file(process.body())
             // The symbolic form would expand every call.
             || pm.calls_out_of_line(process.body())
             || (process.kind() != sv::ir::CombProcessKind::ContinuousAssign

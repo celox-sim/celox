@@ -44,7 +44,6 @@ pub struct SimulatorBuilder<'a, Target = Simulator> {
     live_signals: Vec<(Vec<(String, usize)>, Vec<String>)>,
     injected_components: crate::InjectedComponents,
     frontend_artifact: Option<celox_frontend_sdk::FrontendArtifact>,
-    file_dependencies: celox_frontend_veryl::FileDependencyCollector,
     native_file_calls: bool,
     /// Whether the build keeps the value change points of
     /// [`Self::value_change_signals`]: not one that starts interpreted,
@@ -55,15 +54,6 @@ pub struct SimulatorBuilder<'a, Target = Simulator> {
 
 /// Configuration methods shared by all builder variants.
 impl<'a, Target> SimulatorBuilder<'a, Target> {
-    /// Track external Veryl file lookups in this compilation-owned collector.
-    pub fn file_dependency_collector(
-        mut self,
-        collector: celox_frontend_veryl::FileDependencyCollector,
-    ) -> Self {
-        self.file_dependencies = collector;
-        self
-    }
-
     /// Returns the source files passed to this builder.
     pub fn sources(&self) -> &[(&'a str, &'a Path)] {
         &self.sources

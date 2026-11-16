@@ -923,8 +923,8 @@ fn initial_memory_image_reads_readmem_x_and_z_as_zero_in_two_state() {
             .design
             .initial_state
             .iter()
-            .find(|initial| matches!(initial.data, celox_design::InitialStateData::Writes(_)))
-            .expect("$readmemh initializes mem");
+            .find(|initial| matches!(initial.data, celox_design::InitialStateData::MemoryFile(_)))
+            .expect("$readmemh loads mem as the image is built");
         let offset = layout.offsets[&initial.address];
         let element_byte = |element: usize| {
             let (byte, intra) = layout.map_static_bit_offset(&initial.address, element * 8);

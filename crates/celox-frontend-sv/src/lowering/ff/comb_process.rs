@@ -75,11 +75,14 @@ impl Ff<'_, '_> {
             }
         }
         let mut targets = merged;
+        // A `$readmemh` assigns the words it may load, although the file
+        // read when it executes gives only some of them.
+        let assigned = without_loaded_words(&targets, &self.writes.memory_loads);
         if kind == sv::ir::CombProcessKind::AlwaysComb
             && super::super::comb_retention::retains_state(
                 &body_unit,
-                &targets,
-                &targets
+                &assigned,
+                &assigned
                     .iter()
                     .map(|target| (target.id, self.m.var(target.id).width))
                     .collect(),
@@ -394,4 +397,31 @@ impl Ff<'_, '_> {
         }
         Ok(paths)
     }
+}
+
+/// `targets` without the bits of `loads`.
+fn without_loaded_words(
+    targets: &[VarAtomBase<SourceVarId>],
+    loads: &[(SourceVarId, BitAccess)],
+) -> Vec<VarAtomBase<SourceVarId>> {
+    let mut remaining = targets.to_vec();
+    for &(id, loaded) in loads {
+        remaining = remaining
+            .into_iter()
+            .flat_map(|target| {
+                if target.id != id || !target.access.overlaps(&loaded) {
+                    return vec![target];
+                }
+                let mut parts = Vec::new();
+                if target.access.lsb < loaded.lsb {
+                    parts.push(VarAtomBase::new(id, target.access.lsb, loaded.lsb - 1));
+                }
+                if target.access.msb > loaded.msb {
+                    parts.push(VarAtomBase::new(id, loaded.msb + 1, target.access.msb));
+                }
+                parts
+            })
+            .collect();
+    }
+    remaining
 }

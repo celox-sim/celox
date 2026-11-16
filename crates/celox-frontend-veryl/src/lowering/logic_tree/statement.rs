@@ -128,9 +128,13 @@ pub(super) fn eval_system_function_call_side_effects(
     Ok((store, boundaries))
 }
 
-/// `$readmemh` in a combinational block drives the locations named by the
-/// file with its contents (IEEE 1800-2023 21.4). The file is read at compile
-/// time; locations the file does not name keep their values.
+/// `$readmemh` in a combinational block. A block that reads no signal runs
+/// once, at time zero (IEEE 1800-2023 9.2.2.2), so its load reads the file
+/// when a simulator instance starts (21.4): the words it may load hold that
+/// state instead of being driven, and the values the block wrote to them
+/// before are written before the load. [`super::comb`] rejects a load in a
+/// block that reads signals, which would read the file again whenever they
+/// change.
 pub(super) fn apply_readmem_writes(
     module: &Module,
     store: &mut SymbolicStore<VarId>,
@@ -146,38 +150,74 @@ pub(super) fn apply_readmem_writes(
             Some(&call.comptime.token),
         ));
     };
-    let image = crate::module::readmem_image(
-        module,
-        filename,
-        destinations,
-        &arena.file_dependencies,
-        16,
-        |dst| {
-            dst.index
-                .0
-                .iter()
-                .map(|index| crate::bitaccess::eval_constexpr(index)?.to_usize())
-                .collect()
-        },
-    )?;
-    let destination = &destinations[0];
-    for run in image.runs {
-        let node = arena.alloc(SLTNode::Constant(
-            BigUint::from_bytes_le(&run.value_bytes),
-            BigUint::from_bytes_le(&run.mask_bytes),
-            run.bit_width,
-            false,
-        ))?;
-        update_assignment_range(
-            module,
-            store,
-            destination,
-            BitAccess::new(run.bit_offset, run.bit_offset + run.bit_width - 1),
-            (node, HashSet::default()),
-            false,
-            arena,
-        )?;
+    let (var_id, load) = crate::module::readmem_load(module, filename, destinations, 16, |dst| {
+        dst.index
+            .0
+            .iter()
+            .map(|index| crate::bitaccess::eval_constexpr(index)?.to_usize())
+            .collect()
+    })?;
+    let Some((lsb, msb)) = load.written_bits() else {
+        return Ok(());
+    };
+    let access = BitAccess::new(lsb, msb);
+    let variable = &module.variables[&var_id];
+    let width = resolve_total_width(module, variable)?;
+    let range_store = store
+        .entry(var_id)
+        .or_insert_with(|| RangeStore::new(None, width));
+    // The values written before, which the words the file does not give keep.
+    let mut before = Vec::new();
+    let mut bit = access.lsb;
+    for (value, relative) in range_store.get_parts(access).map_err(|error| {
+        range_store_error("$readmemh destination", error, Some(&call.comptime.token))
+    })? {
+        let part_width = relative.msb - relative.lsb + 1;
+        let part_lsb = bit;
+        bit += part_width;
+        let Some((node, _)) = value else { continue };
+        let constant = match arena.get(node) {
+            SLTNode::Constant(value, mask, _, _) => {
+                let keep = (BigUint::from(1u8) << part_width) - 1u8;
+                Some((
+                    (value >> relative.lsb) & &keep,
+                    (mask >> relative.lsb) & keep,
+                ))
+            }
+            _ => None,
+        };
+        let Some((value, mask)) = constant else {
+            return Err(ParserError::illegal_context(
+                "$readmemh destination",
+                "words written before the load in an always_comb must be constants",
+                Some(&call.comptime.token),
+            ));
+        };
+        before.push(celox_design::InitialStateWriteRun {
+            bit_offset: part_lsb,
+            bit_width: part_width,
+            value_bytes: celox_frontend_core::memory_file::biguint_to_fixed_le_bytes(
+                &value, part_width,
+            ),
+            mask_bytes: celox_frontend_core::memory_file::biguint_to_fixed_le_bytes(
+                &mask, part_width,
+            ),
+        });
     }
+    range_store.update(access, None).map_err(|error| {
+        range_store_error("$readmemh destination", error, Some(&call.comptime.token))
+    })?;
+    if !before.is_empty() {
+        arena.memory_loads.push(celox_design::InitialStateValue {
+            address: var_id,
+            data: celox_design::InitialStateData::Writes(before),
+        });
+    }
+    arena.memory_loads.push(celox_design::InitialStateValue {
+        address: var_id,
+        data: celox_design::InitialStateData::MemoryFile(load),
+    });
+    arena.memory_load_call = Some(call.comptime.token);
     Ok(())
 }
 

@@ -1960,6 +1960,7 @@ pub fn lower_frontend_artifact(
         comb_observers: Vec::new(),
         runtime_errors: HashMap::default(),
         runtime_event_sites: Vec::new(),
+        memory_file_bases: Vec::new(),
         extern_functions: Vec::new(),
         folded_initial_memory_values: Vec::new(),
         declaration_initial_memory_values: initial_memory_values.clone(),
