@@ -166,6 +166,14 @@ impl BodyBuilder<'_, '_, '_> {
         let result = self
             .native_body_machine(ids)
             .and_then(|stmts| reject_escaped_places(&stmts).map(|()| stmts));
+        // The imports a task or function body declares bind until the body
+        // ends (IEEE 1800-2023 A.2.8).
+        while let Some((at, _)) = self.outer_contexts.last()
+            && *at >= depth
+        {
+            let (_, outer) = self.outer_contexts.pop().expect("an outer context");
+            self.tree = outer;
+        }
         // Restore lexical bindings on every diagnostic path, just as the old
         // recursive block/for wrappers did; no native failure is retried.
         while self.names.scopes.len() > depth {

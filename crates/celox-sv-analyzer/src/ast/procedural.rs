@@ -295,6 +295,9 @@ struct ForHeader {
 enum BodyContext<'t> {
     /// The context of the scope the body belongs to.
     Scope(&'t AnalysisContext<'t>),
+    /// The context of a block that imports packages: an enclosing one with
+    /// the block's imports (IEEE 1800-2023 26.3).
+    Block(std::rc::Rc<AnalysisContext<'t>>),
 }
 
 impl<'t> std::ops::Deref for BodyContext<'t> {
@@ -303,6 +306,7 @@ impl<'t> std::ops::Deref for BodyContext<'t> {
     fn deref(&self) -> &Self::Target {
         match self {
             Self::Scope(tree) => tree,
+            Self::Block(tree) => tree,
         }
     }
 }
@@ -311,6 +315,9 @@ impl<'t> std::ops::Deref for BodyContext<'t> {
 pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// The context the body is analyzed in.
     tree: BodyContext<'t>,
+    /// The contexts that the imports of the blocks being lowered replaced,
+    /// each with the depth of the block's scope, innermost last.
+    outer_contexts: Vec<(usize, BodyContext<'t>)>,
     pub(super) session: &'s mut Session,
     dims: PackedDimensions,
     names: Names,
@@ -703,6 +710,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             randsequence_expanded: 0,
             randsequence_exits: HashMap::default(),
             tree: BodyContext::Scope(tree),
+            outer_contexts: Vec::new(),
             session,
             dims,
             names: Names {
@@ -754,6 +762,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let dims = self.dims.clone();
         let type_aliases = self.type_aliases.clone();
         let scopes = self.names.scopes.clone();
+        let tree = self.tree.clone();
+        let outer_contexts = self.outer_contexts.clone();
         while !self.names.scopes.is_empty() {
             self.pop_scope();
         }
@@ -761,10 +771,109 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         self.dims = dims;
         self.type_aliases = type_aliases;
         self.names.scopes = scopes;
+        self.tree = tree;
+        self.outer_contexts = outer_contexts;
         result
     }
 
+    /// Analyze the rest of the current block with the bindings of the
+    /// import at source offset `offset` (see `ScopeSymbols::block_imports`):
+    /// the block's context is the enclosing one with them, until the block
+    /// ends. A block that imports nothing keeps the enclosing context.
+    fn import_into_block(&mut self, offset: usize) {
+        let imported = scope::imported(&self.tree);
+        let Some(bound) = imported
+            .block_imports
+            .get(&offset)
+            .filter(|bound| !bound.is_empty())
+        else {
+            return;
+        };
+        let mut layered = (*imported).clone();
+        for (name, target) in bound {
+            layered.alias(name, target);
+            // A call of the name calls the package's subroutine or DPI
+            // import, as a call of a name the scope imports does (see
+            // `ScopeElaboration::rename_imported_calls`).
+            if layered
+                .subroutines
+                .iter()
+                .any(|subroutine| subroutine.name == *target)
+                || layered
+                    .dpi_imports
+                    .iter()
+                    .any(|import| import.name() == target.as_str())
+            {
+                layered.block_calls.insert(name.clone(), target.clone());
+            }
+            // The name denotes the package's constant in the block: a
+            // parameter or an enumeration member, whose values `alias`
+            // copied under the name.
+            let constants: Vec<(String, i128)> = layered
+                .const_env
+                .iter()
+                .filter(|(key, _)| {
+                    *key == name
+                        || scope::split_marker(key).is_some_and(|(_, marked)| marked == name)
+                })
+                .map(|(key, value)| (key.clone(), *value))
+                .collect();
+            if !constants.is_empty() || layered.parameter_values.contains_key(name) {
+                let entry = self.take_binding(name, None, 0);
+                for (key, value) in constants {
+                    self.dims.const_env.insert(key, value);
+                }
+                if let Some(value) = layered.parameter_values.get(name) {
+                    // A reference to it is its value, as one to a local
+                    // parameter is: the scope's constants do not have it.
+                    if let Expr::Literal(text) = value {
+                        self.names
+                            .local_constants
+                            .insert(name.clone(), text.clone());
+                    }
+                    self.dims
+                        .parameter_values
+                        .insert(name.clone(), value.clone());
+                }
+                if let Some(binding) = layered.constant_types.get(name) {
+                    Arc::make_mut(&mut self.dims.constant_types)
+                        .insert(name.clone(), binding.clone());
+                }
+                self.names
+                    .scopes
+                    .last_mut()
+                    .expect("a body always has a scope")
+                    .entries
+                    .push(entry);
+            }
+            // The name denotes the package's type in the block.
+            if let Some(ty) = self.type_aliases.get(target).cloned() {
+                let shadowed = self.type_aliases.insert(name.clone(), ty.clone());
+                self.dims.type_aliases.insert(name.clone(), ty);
+                self.names
+                    .scopes
+                    .last_mut()
+                    .expect("a body always has a scope")
+                    .shadowed_types
+                    .push((name.clone(), shadowed));
+            }
+        }
+        let context = self.tree.importing(Arc::new(layered));
+        let outer = std::mem::replace(
+            &mut self.tree,
+            BodyContext::Block(std::rc::Rc::new(context)),
+        );
+        self.outer_contexts.push((self.names.scopes.len(), outer));
+    }
+
     fn pop_scope(&mut self) {
+        // The block's imports bind until the block ends.
+        while let Some((depth, _)) = self.outer_contexts.last()
+            && *depth >= self.names.scopes.len()
+        {
+            let (_, outer) = self.outer_contexts.pop().expect("an outer context");
+            self.tree = outer;
+        }
         let Some(scope) = self.names.scopes.pop() else {
             return;
         };

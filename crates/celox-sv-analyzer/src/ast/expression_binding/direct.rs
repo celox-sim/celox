@@ -44,6 +44,23 @@ pub(in crate::ast) fn call_name(
     native: &Declarations,
 ) -> Option<String> {
     match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Name(name) => {
+            let name = instances::normalize_identifier(&name.spelling);
+            // An import of a block around the call may bind the name to a
+            // package subroutine (IEEE 1800-2023 26.3).
+            Some(match tree.imported.block_calls.get(&name) {
+                Some(target) => target.clone(),
+                None => name,
+            })
+        }
+        _ => scoped_name(tree, id, native),
+    }
+}
+
+/// The name `id` spells, with the scopes that qualify it: those name
+/// packages and classes, which no import of a block rebinds.
+fn scoped_name(tree: &AnalysisContext<'_>, id: ExprId, native: &Declarations) -> Option<String> {
+    match &native.expression(ungroup(id, native)).kind {
         ExprKind::Name(name) => Some(instances::normalize_identifier(&name.spelling)),
         ExprKind::Member {
             expression,
@@ -51,7 +68,7 @@ pub(in crate::ast) fn call_name(
             name,
         } if separator == "::" => Some(scope::qualified_name(
             tree,
-            &call_name(tree, *expression, native)?,
+            &scoped_name(tree, *expression, native)?,
             &instances::normalize_identifier(&name.spelling),
         )),
         _ => None,
