@@ -22,6 +22,7 @@ mod nets;
 mod non_ansi;
 mod numbers;
 mod packages;
+mod primitives;
 mod procedures;
 mod properties;
 #[cfg(test)]
@@ -97,6 +98,8 @@ pub struct Declarations {
     /// The productions of the `randsequence` statements whose structure
     /// parsed (see [`Randsequence`]).
     pub randsequences: Vec<Randsequence>,
+    /// The user-defined primitives the source declares.
+    pub primitives: Vec<Primitive>,
 }
 
 impl Declarations {
@@ -160,7 +163,10 @@ impl Declarations {
             class_scopes: Vec::new(),
             lets: Vec::new(),
             default_nettype: Some("wire".to_string()),
+            primitive_names: Vec::new(),
+            primitives: Vec::new(),
         };
+        parser.primitive_names = parser.primitive_names();
         let units = parser.units()?;
         let source_items = parser.source_items;
         let expressions = parser.expressions;
@@ -190,6 +196,7 @@ impl Declarations {
         let subroutines = parser.subroutines;
         let classes = parser.classes;
         let randsequences = parser.randsequences;
+        let primitives = parser.primitives;
         Ok(Self {
             source_items,
             expressions,
@@ -219,6 +226,7 @@ impl Declarations {
             subroutines,
             classes,
             randsequences,
+            primitives,
             sources,
             tokens,
             units,
@@ -442,6 +450,9 @@ struct Parser<'a> {
     /// `default_nettype none`.
     default_nettype: Option<String>,
     lets: Vec<LetDeclaration>,
+    /// The names of the user-defined primitives the source declares.
+    primitive_names: Vec<String>,
+    primitives: Vec<Primitive>,
 }
 
 impl Parser<'_> {

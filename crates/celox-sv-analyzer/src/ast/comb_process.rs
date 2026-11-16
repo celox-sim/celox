@@ -199,6 +199,14 @@ fn logic_gate_processes(
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Vec<CombProcess>> {
+    if let Some(primitive) = tree
+        .declarations()
+        .primitives
+        .iter()
+        .find(|primitive| primitive.name.value() == gate.kind)
+    {
+        return primitive_processes(primitive, gate, tree, session, dimensions);
+    }
     if gate.strength.is_some()
         || gate.delay.is_some()
         || gate
@@ -338,6 +346,131 @@ fn net_declaration_assignments(
         assignments.push(Assignment::new(lhs, rhs));
     }
     Ok(assignments)
+}
+
+/// The continuous assignments of the outputs of the instances `gate` of
+/// combinational user-defined primitive `primitive` (IEEE 1800-2023 29.3):
+/// the output of the first table entry whose input symbols match the
+/// inputs, or x when none does. An input matches `0` or `1` when it has
+/// that value, `b` when it has either, `x` when it has neither (z counts as
+/// x, 29.3.5), and `?` always.
+fn primitive_processes(
+    primitive: &celox_sv_syntax::Primitive,
+    gate: &celox_sv_syntax::LogicGate,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<Vec<CombProcess>> {
+    let name = primitive.name.value();
+    if primitive.sequential {
+        return Err(unsupported("sequential user-defined primitive"));
+    }
+    if gate.strength.is_some()
+        || gate
+            .instances
+            .iter()
+            .any(|instance| !instance.dimensions.is_empty())
+    {
+        return Err(unsupported(
+            "user-defined primitive instance with a drive strength or an array of instances",
+        ));
+    }
+    let delay = gate
+        .delay
+        .as_ref()
+        .map(|delay| continuous_delays::ticks(delay, tree, session, dimensions))
+        .transpose()?;
+    let native = tree.declarations();
+    let mut processes = Vec::new();
+    for instance in &gate.instances {
+        if instance.terminals.len() != primitive.ports.len() {
+            return Err(AnalyzerError::Parse(format!(
+                "instance of user-defined primitive `{name}` with {} terminals for its {} ports",
+                instance.terminals.len(),
+                primitive.ports.len()
+            )));
+        }
+        let mut output = instance.terminals[0];
+        while let celox_sv_syntax::ExprKind::Concatenation(parts) = &native.expression(output).kind
+        {
+            if parts.len() != 1 {
+                return Err(unsupported("non-scalar user-defined primitive terminal"));
+            }
+            output = parts[0];
+        }
+        let lhs = expression_binding::net_lvalue(output, native, tree, session, dimensions)?;
+        if !lvalue_expr_type(&tree.functions, &lhs, dimensions).is_some_and(|ty| ty.width == 1) {
+            return Err(unsupported("non-scalar user-defined primitive terminal"));
+        }
+        let mut inputs = Vec::new();
+        for &input in &instance.terminals[1..] {
+            let input = expression_binding::value(input, native, tree, session, dimensions)?;
+            if expr_static_width(tree, &input, dimensions) != Some(1) {
+                return Err(unsupported("non-scalar user-defined primitive terminal"));
+            }
+            inputs.push(input);
+        }
+        let is = |value: &Expr, bit: &str| Expr::Binary {
+            left: Box::new(value.clone()),
+            op: BinaryOp::EqCase,
+            right: Box::new(Expr::Literal(bit.into())),
+        };
+        let either = |value: &Expr| Expr::Binary {
+            left: Box::new(is(value, "1'b0")),
+            op: BinaryOp::LogicOr,
+            right: Box::new(is(value, "1'b1")),
+        };
+        let mut rhs = Expr::Literal("1'bx".into());
+        for row in primitive.rows.iter().rev() {
+            let condition = row
+                .inputs
+                .iter()
+                .zip(&inputs)
+                .filter_map(|(symbol, value)| match symbol.as_str() {
+                    "0" => Some(is(value, "1'b0")),
+                    "1" => Some(is(value, "1'b1")),
+                    "b" => Some(either(value)),
+                    "x" => Some(Expr::Unary {
+                        op: UnaryOp::LogicNot,
+                        expr: Box::new(either(value)),
+                    }),
+                    _ => None,
+                })
+                .reduce(|left, right| Expr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::LogicAnd,
+                    right: Box::new(right),
+                });
+            let value = Expr::Literal(
+                match row.output.as_str() {
+                    "0" => "1'b0",
+                    "1" => "1'b1",
+                    _ => "1'bx",
+                }
+                .into(),
+            );
+            rhs = match condition {
+                Some(condition) => Expr::Mux {
+                    condition: Box::new(condition),
+                    then_expr: Box::new(value),
+                    else_expr: Box::new(rhs),
+                },
+                None => value,
+            };
+        }
+        let mut process = CombProcess::procedural(
+            CombProcessKind::ContinuousAssign,
+            None,
+            vec![Stmt::Assign {
+                lhs,
+                rhs,
+                nonblocking: false,
+            }],
+        );
+        process.delay = delay;
+        processes.push(process);
+    }
+    Ok(processes)
 }
 
 /// Native continuous assignment membership and values drive lowering.
