@@ -316,3 +316,47 @@ fn rejects_members_that_are_no_constants() {
     );
     assert!(unknown.contains("nothing.n"), "{unknown}");
 }
+
+/// A later parameter of the same port list is sized by a member of an
+/// earlier one (6.20.2): `logic [Info.size*8-1:0]`, from the default value
+/// of the parameter and from overrides by a parameter and by a pattern.
+#[test]
+fn members_size_later_parameters() {
+    let source = r#"
+    `timescale 1ns/1ns
+    package Parts;
+      typedef struct packed { logic [10:0] offset; logic [10:0] size; } part_t;
+      parameter part_t Default = '{offset: 11'd0, size: 11'd2};
+    endpackage
+    module Buffer import Parts::*; #(
+      parameter part_t Info = Default,
+      parameter logic [Info.size*8-1:0] Init = '0
+    ) (output logic [Info.size*8-1:0] data_o);
+      assign data_o = Init;
+      initial #1 $display("%m size=%0d bits=%0d init=%0d data=%h", Info.size, $bits(data_o),
+                          $bits(Init), data_o);
+    endmodule
+    module Top import Parts::*; ;
+      localparam logic [63:0] Inv = 64'h0123_4567_89ab_cdef;
+      localparam part_t Wide = '{offset: 11'd2, size: 11'd4};
+      logic [15:0] a;
+      logic [31:0] b, c;
+      Buffer u_default(.data_o(a));
+      Buffer #(.Info(Wide), .Init(Inv[Wide.offset*8 +: Wide.size*8])) u_wide(.data_o(b));
+      Buffer #(.Info('{offset: 11'd0, size: 11'd4}), .Init(32'hcafe_f00d)) u_pattern(.data_o(c));
+    endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut lines = display(source, four_state);
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                "Top.u_default size=2 bits=16 init=16 data=0000",
+                "Top.u_pattern size=4 bits=32 init=32 data=cafef00d",
+                "Top.u_wide size=4 bits=32 init=32 data=456789ab",
+            ],
+            "four-state {four_state}"
+        );
+    }
+}
