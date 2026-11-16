@@ -100,6 +100,16 @@ impl BodyBuilder<'_, '_, '_> {
             celox_sv_syntax::LocalDeclaration::Unconverted(_) => {
                 return Err(unsupported("let declaration inside a procedural block"));
             }
+            celox_sv_syntax::LocalDeclaration::PackageBinding(id) => {
+                let offset = self
+                    .syntax()
+                    .declarations()
+                    .package_binding(*id)
+                    .tokens
+                    .start;
+                self.import_into_block(offset);
+                return Ok(Vec::new());
+            }
             _ => return Err(unsupported("local declaration")),
         };
         let signals = type_binding::local_signals(
