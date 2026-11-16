@@ -15,6 +15,16 @@ pub(super) fn connections(
     if native.connections.is_empty() {
         return Ok(Vec::new());
     }
+    // The hierarchy below a module is elaborated from its declarations
+    // before the hierarchical names of the module are resolved against it
+    // (IEEE 1800-2023 23.6): an actual with such a name is left out there,
+    // and bound when the module is analyzed with the objects the names
+    // denote.
+    let declarations_only = imported.declarations_only;
+    let resolved = move |connection: Converted<PortConnection>| match connection {
+        Err(AnalyzerError::HierarchicalReference { .. }) if declarations_only => Ok(None),
+        connection => connection.map(Some),
+    };
     let ordered = native
         .connections
         .iter()
@@ -51,13 +61,13 @@ pub(super) fn connections(
                 continue;
             }
             if let Some(id) = value {
-                lowered.push(expression_connection(
+                lowered.extend(resolved(expression_connection(
                     formal.clone(),
                     id,
                     tree,
                     session,
                     dimensions,
-                )?);
+                ))?);
             }
         }
     } else {
@@ -76,9 +86,9 @@ pub(super) fn connections(
                         continue;
                     }
                     if let ConnectionValue::Expression(id) = value {
-                        lowered.push(expression_connection(
+                        lowered.extend(resolved(expression_connection(
                             formal, *id, tree, session, dimensions,
-                        )?);
+                        ))?);
                         continue;
                     }
                     let actual_expr = match value {
