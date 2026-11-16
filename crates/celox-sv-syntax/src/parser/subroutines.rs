@@ -408,6 +408,31 @@ impl Parser<'_> {
         } else {
             body_tokens = self.range(body_start);
         }
+        // A task or a void function returns no value (IEEE 1800-2023 13.3,
+        // 13.4.1); a randsequence production has returns of its own.
+        let void = task || return_type.is_some_and(
+            |id| matches!(&self.types[id.0].kind, DataTypeKind::Builtin(name) if name == "void"),
+        );
+        if void {
+            let mut pending = items.clone();
+            while let Some(id) = pending.pop() {
+                let statement = &self.statements[id.0];
+                match &statement.kind {
+                    StatementKind::Return(Some(_)) => {
+                        return Err(self.error_at(
+                            statement.tokens,
+                            format!(
+                                "return of a value from {} `{}`",
+                                if task { "task" } else { "void function" },
+                                name.value()
+                            ),
+                        ));
+                    }
+                    StatementKind::Unconverted { category, .. } if category == "randsequence" => {}
+                    kind => pending.extend(kind.children()),
+                }
+            }
+        }
         let id = SubroutineId(self.subroutines.len());
         let authored_statements = self.body_membership(&items);
         self.subroutines.push(Subroutine {

@@ -311,6 +311,21 @@ impl Builder {
                 parser.expect("(")?;
                 let declared = parser.eat("genvar");
                 let variable = parser.name()?;
+                // In a loop generate block its index is a localparam, so a
+                // nested loop cannot use the same genvar (IEEE 1800-2023
+                // 27.4).
+                if !declared
+                    && self.frames.iter().any(|frame| {
+                        matches!(frame, Frame::Loop { variable: outer, .. }
+                            if outer.value() == variable.value())
+                    })
+                {
+                    parser.at -= 1;
+                    return Err(parser.error(format!(
+                        "loop generate nested in a loop generate of the same genvar `{}`",
+                        variable.value()
+                    )));
+                }
                 parser.expect("=")?;
                 let initial = parser.expression(0)?;
                 parser.expect(";")?;
@@ -413,5 +428,251 @@ impl Builder {
             }
         }
         Ok(true)
+    }
+}
+
+impl Parser<'_> {
+    /// Reject typedefs of the scope of `unit` that name each other in a
+    /// cycle, so that none of them resolves to a data type (IEEE 1800-2023
+    /// 6.18).
+    pub(super) fn reject_circular_typedefs(&self, unit: &Unit) -> Result<()> {
+        let mut aliases = Vec::<(&str, Option<&str>, TokenRange)>::new();
+        let mut pending = unit.items.clone();
+        while let Some(id) = pending.pop() {
+            match &self.body_items[id.0].kind {
+                BodyItemKind::Region(items) => pending.extend(items),
+                BodyItemKind::TypeAlias(id) => {
+                    let alias = &self.type_aliases[id.0];
+                    let target = match alias.target {
+                        TypeAliasTarget::DataType(id) => match &self.types[id.0].kind {
+                            DataTypeKind::Named(path) if path.len() == 1 => {
+                                Some(path[0].name.value())
+                            }
+                            _ => None,
+                        },
+                        _ => continue,
+                    };
+                    aliases.push((alias.name.value(), target, alias.tokens));
+                }
+                _ => {}
+            }
+        }
+        for &(start, _, tokens) in &aliases {
+            let mut name = start;
+            for _ in 0..aliases.len() {
+                let Some(target) = aliases
+                    .iter()
+                    .find(|(alias, ..)| *alias == name)
+                    .and_then(|(_, target, _)| *target)
+                else {
+                    break;
+                };
+                if target == start {
+                    return Err(self.error_at(
+                        tokens,
+                        format!("typedef `{start}` names itself through a cycle of typedefs"),
+                    ));
+                }
+                name = target;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject a loop generate whose index is a variable or net of the unit
+    /// that no genvar declaration of the unit names: the loop index shall be
+    /// declared as a genvar (IEEE 1800-2023 27.4).
+    pub(super) fn reject_variable_loop_indices(&self, unit: &Unit) -> Result<()> {
+        let mut pending = unit.items.clone();
+        let mut loops = Vec::new();
+        let mut genvars = fxhash::FxHashSet::default();
+        while let Some(id) = pending.pop() {
+            let item = &self.body_items[id.0];
+            match &item.kind {
+                BodyItemKind::Region(items) | BodyItemKind::Block { items, .. } => {
+                    pending.extend(items)
+                }
+                BodyItemKind::Conditional {
+                    then_body,
+                    otherwise,
+                    ..
+                } => pending.extend(std::iter::once(*then_body).chain(*otherwise)),
+                BodyItemKind::Case { arms, .. } => pending.extend(arms.iter().map(|arm| arm.body)),
+                BodyItemKind::Loop {
+                    declared,
+                    variable,
+                    body,
+                    ..
+                } => {
+                    if !declared {
+                        loops.push((variable, item.tokens));
+                    }
+                    pending.push(*body);
+                }
+                BodyItemKind::Unconverted { category, .. } if category == "genvar" => genvars
+                    .extend(
+                        self.tokens[item.tokens.start..item.tokens.end]
+                            .iter()
+                            .filter(|token| token.text != "genvar")
+                            .filter_map(Token::identifier),
+                    ),
+                _ => {}
+            }
+        }
+        for (variable, tokens) in loops {
+            let name = variable.value();
+            if genvars.contains(name) {
+                continue;
+            }
+            let variable_declared = unit.items.iter().any(|id| {
+                let declarators = match &self.body_items[id.0].kind {
+                    BodyItemKind::Net(id) => &self.net_declarations[id.0].variables,
+                    BodyItemKind::Data(id) => match &self.data_declarations[id.0] {
+                        DataDeclaration::Variables(declaration)
+                        | DataDeclaration::Constructed(declaration) => &declaration.variables,
+                        DataDeclaration::Unconverted(_) => return false,
+                    },
+                    _ => return false,
+                };
+                declarators
+                    .iter()
+                    .any(|declarator| declarator.name.value() == name)
+            });
+            if variable_declared {
+                return Err(self.error_at(
+                    tokens,
+                    format!("loop generate index `{name}` is a variable, not a genvar"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject a generate block whose name another declaration of the
+    /// module scope also has: a variable, net or instance, a named block of
+    /// a procedure, or a generate block of another generate construct (IEEE
+    /// 1800-2023 23.9, 27.4, 27.5). The blocks of one conditional generate
+    /// construct may share a name (27.5).
+    pub(super) fn reject_duplicate_block_names(&self, unit: &Unit) -> Result<()> {
+        if unit.kind == UnitKind::Package {
+            return Ok(());
+        }
+        // Each other declaration of the scope, and the generate blocks of
+        // each generate construct, with where they are.
+        let mut declared = Vec::<(&str, TokenRange)>::new();
+        let mut blocks = Vec::<Vec<(&str, TokenRange)>>::new();
+        let mut pending = unit.items.clone();
+        pending.reverse();
+        while let Some(id) = pending.pop() {
+            let item = &self.body_items[id.0];
+            match &item.kind {
+                BodyItemKind::Region(items) => pending.extend(items.iter().rev()),
+                BodyItemKind::Net(id) => declared.extend(
+                    self.net_declarations[id.0]
+                        .variables
+                        .iter()
+                        .map(|variable| (variable.name.value(), item.tokens)),
+                ),
+                BodyItemKind::Data(id) => {
+                    if let DataDeclaration::Variables(declaration)
+                    | DataDeclaration::Constructed(declaration) = &self.data_declarations[id.0]
+                    {
+                        declared.extend(
+                            declaration
+                                .variables
+                                .iter()
+                                .map(|variable| (variable.name.value(), item.tokens)),
+                        );
+                    }
+                }
+                BodyItemKind::Instance(id) => declared.extend(
+                    self.instantiations[id.0]
+                        .instances
+                        .iter()
+                        .map(|instance| (instance.name.value(), item.tokens)),
+                ),
+                BodyItemKind::Procedure(id) => {
+                    let statement = &self.statements[self.procedures[id.0].body.0];
+                    let label = match &statement.kind {
+                        StatementKind::Block { label, .. }
+                        | StatementKind::Parallel { label, .. } => {
+                            label.as_ref().or(statement.label.as_ref())
+                        }
+                        _ => None,
+                    };
+                    declared.extend(label.map(|label| (label.value(), item.tokens)));
+                }
+                BodyItemKind::Loop { body, .. } => {
+                    blocks.push(self.generate_block_name(*body).into_iter().collect());
+                }
+                BodyItemKind::Conditional { .. } | BodyItemKind::Case { .. } => {
+                    let mut names = Vec::new();
+                    let mut alternatives = vec![id];
+                    while let Some(id) = alternatives.pop() {
+                        match &self.body_items[id.0].kind {
+                            // An `else if` continues the construct (27.5).
+                            BodyItemKind::Conditional {
+                                then_body,
+                                otherwise,
+                                ..
+                            } => {
+                                names.extend(self.generate_block_name(*then_body));
+                                if let Some(otherwise) = otherwise {
+                                    match &self.body_items[otherwise.0].kind {
+                                        BodyItemKind::Conditional { .. } => {
+                                            alternatives.push(*otherwise)
+                                        }
+                                        _ => names.extend(self.generate_block_name(*otherwise)),
+                                    }
+                                }
+                            }
+                            BodyItemKind::Case { arms, .. } => names.extend(
+                                arms.iter()
+                                    .filter_map(|arm| self.generate_block_name(arm.body)),
+                            ),
+                            _ => {}
+                        }
+                    }
+                    names.sort_unstable_by_key(|(name, _)| *name);
+                    names.dedup_by_key(|(name, _)| *name);
+                    blocks.push(names);
+                }
+                _ => {}
+            }
+        }
+        let mut seen = fxhash::FxHashSet::default();
+        for (name, _) in &declared {
+            seen.insert(*name);
+        }
+        let mut generate = fxhash::FxHashSet::default();
+        for (name, tokens) in blocks.into_iter().flatten() {
+            if seen.contains(name) || !generate.insert(name) {
+                return Err(self.error_at(
+                    tokens,
+                    format!(
+                        "generate block `{name}` has the name of another declaration of `{}`",
+                        unit.name.value()
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The name of the generate block `id` of a generate construct, if it is
+    /// a named block.
+    fn generate_block_name(&self, id: BodyItemId) -> Option<(&str, TokenRange)> {
+        let item = &self.body_items[id.0];
+        match &item.kind {
+            BodyItemKind::Block {
+                leading_label,
+                label,
+                ..
+            } => label
+                .as_ref()
+                .or(leading_label.as_ref())
+                .map(|label| (label.value(), item.tokens)),
+            _ => None,
+        }
     }
 }

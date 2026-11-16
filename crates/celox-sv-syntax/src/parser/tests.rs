@@ -4499,3 +4499,5 @@ fn let_declarations_are_recorded_and_calls_stay_calls() {
             if matches!(&tree.expression(*expression).kind, ExprKind::Name(name) if name.value() == "f")
     )));
 }
+
+mod declaration_names;
