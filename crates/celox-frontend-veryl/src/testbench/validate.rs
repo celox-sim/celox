@@ -131,7 +131,9 @@ pub(super) fn validate_testbench_expression(
             _ => None,
         };
         if let Some((info, index, select)) = access
-            && (index.indices.len() > info.array_dims.len() || !select.0.is_empty() || select.1.is_some())
+            && (index.indices.len() > info.array_dims.len()
+                || !select.0.is_empty()
+                || select.1.is_some())
         {
             return Err(ParserError::illegal_context(
                 "string character selection",
@@ -143,7 +145,12 @@ pub(super) fn validate_testbench_expression(
     match expression {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::HierVariable(reference) => {
-                for expression in reference.index.indices.iter().chain(reference.select.0.iter()) {
+                for expression in reference
+                    .index
+                    .indices
+                    .iter()
+                    .chain(reference.select.0.iter())
+                {
                     validate_testbench_expression(expression, lookup, source, active_functions)?;
                 }
                 if let Some((_, expression)) = &reference.select.1 {
@@ -193,7 +200,10 @@ pub(super) fn validate_testbench_expression(
                     ))
                 }
             }
-            Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => Ok(()),
         },
         Expression::Unary(_, inner, _) => {
             if inner.comptime().r#type.is_string() {

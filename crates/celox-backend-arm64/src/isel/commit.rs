@@ -180,7 +180,9 @@ pub(super) fn lower_commit(
                         );
                     }
                 }
-                SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
+                SIROffset::Dynamic(_)
+                | SIROffset::Element { .. }
+                | SIROffset::ElementRun { .. } => {
                     let offset_vreg = memory_offset_vreg(ctx, block, src_addr, offset);
                     let src_mask_base = ctx.mask_byte_offset(src_addr, 0);
                     let dst_mask_base = ctx.mask_byte_offset(dst_addr, 0);

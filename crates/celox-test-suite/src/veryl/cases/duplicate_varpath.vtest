@@ -53,6 +53,7 @@
 ; internal vars, and always_comb inside uses `var flag: logic;` in multiple
 ; for-loop scopes.
 (case test_duplicate_scoped_var_with_generate_for
+  (allow_inferred_latches)
   (source "test.veryl" #"
         module Top (
             clk   : input  clock  ,

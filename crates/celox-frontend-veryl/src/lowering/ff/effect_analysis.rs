@@ -58,7 +58,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Unsigned(input) => input_needs_snapshot(input),
                     SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                 },
-                Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => false,
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 self.expression_needs_assignment_snapshot_inner(lhs, visiting)
@@ -279,7 +282,10 @@ impl<'a> FfParser<'a> {
                         }
                         _ => true,
                     },
-                    Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                    Factor::Value(_)
+                    | Factor::ResetValue(..)
+                    | Factor::Anonymous(_)
+                    | Factor::Unknown(_) => false,
                 }
             }
             Expression::Binary(lhs, _, rhs, _) => {

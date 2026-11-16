@@ -157,7 +157,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Finish => {}
                 },
                 Factor::HierVariable(_) => return None,
-                Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 self.collect_function_input_usage(lhs, usage, active_calls)?;
@@ -327,7 +330,10 @@ impl<'a> FfParser<'a> {
                         | SystemFunctionKind::Finish => {}
                     },
                     Factor::HierVariable(_) => {}
-                    Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+                    Factor::Value(_)
+                    | Factor::ResetValue(..)
+                    | Factor::Anonymous(_)
+                    | Factor::Unknown(_) => {}
                 },
                 Expression::Binary(lhs, _, rhs, _) => {
                     collect(lhs);

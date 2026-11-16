@@ -237,7 +237,8 @@ pub(super) fn collect_target_reads(
     // The native selected-target path reads the complete root signal before
     // merging the new slice.  Model that read as a DSE root; a whole-root
     // assignment does not need this extra liveness edge.
-    if !target.index.indices.is_empty() || !target.select.0.is_empty() || target.select.1.is_some() {
+    if !target.index.indices.is_empty() || !target.select.0.is_empty() || target.select.1.is_some()
+    {
         reads.push(TestbenchRead::Root(target.id));
     }
 }
@@ -288,7 +289,10 @@ pub(super) fn collect_expression_reads(
                 }
                 collect_select_reads(&reference.select, funcs, active_functions, reads);
             }
-            Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => {}
         },
         Expression::Unary(_, inner, _) => {
             collect_expression_reads(inner, funcs, active_functions, reads);

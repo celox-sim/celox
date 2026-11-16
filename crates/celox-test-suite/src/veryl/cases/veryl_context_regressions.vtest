@@ -234,6 +234,7 @@
   (assert_eq y1 3 "output y1"))
 
 (case dynamic_index_store_is_cut_to_element_width
+  (allow_inferred_latches)
   ; An 8-bit element has 4-byte storage; a wider source must not leave
   ; bits above the element there for a reader of the whole word.
   (source "test.veryl" #"

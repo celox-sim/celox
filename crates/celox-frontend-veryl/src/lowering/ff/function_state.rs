@@ -480,7 +480,8 @@ impl<'a> FfParser<'a> {
                     if Self::is_function_state_base(comptime) {
                         return expr.clone();
                     }
-                    let is_whole = index.indices.is_empty() && select.0.is_empty() && select.1.is_none();
+                    let is_whole =
+                        index.indices.is_empty() && select.0.is_empty() && select.1.is_none();
                     if let Some(bound) = defs.get(var_id)
                         && expanding.insert(*var_id)
                     {

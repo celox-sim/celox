@@ -184,7 +184,10 @@ impl<'a> FfParser<'a> {
                     }
                     Expression::Term(Box::new(Factor::HierVariable(Box::new(reference))))
                 }
-                Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) | Factor::Unknown(_) => expr.clone(),
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => expr.clone(),
             },
             Expression::Binary(lhs, op, rhs, comptime) => {
                 let lhs =

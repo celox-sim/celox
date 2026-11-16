@@ -564,7 +564,9 @@ pub(super) fn static_written_range(offset: &SIROffset, width: usize) -> Option<(
         | SIROffset::PackedElements {
             bit_offset: bit, ..
         } => *bit,
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => return None,
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
+            return None;
+        }
     };
     Some((lsb, lsb + width.max(1) - 1))
 }

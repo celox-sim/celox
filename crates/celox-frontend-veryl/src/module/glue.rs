@@ -104,7 +104,10 @@ pub(super) fn collect_parent_output_address_sources(
                     | SystemFunctionKind::Finish => Ok(()),
                 }
             }
-            Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => Ok(()),
         },
         Expression::Unary(_, inner, _) => {
             collect_parent_output_address_sources(module, store, inner, arena, out)

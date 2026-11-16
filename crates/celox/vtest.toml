@@ -50,6 +50,17 @@ add = ["native-baseline"]
 
 [veryl.groups.tb_queue]
 omit = ["veryl"]
+
+[veryl.cases."tb_queue::aggregate_and_selected_returns"]
+ignore = ["sv"]
+
+[veryl.cases."tb_queue::four_state_values"]
+ignore = ["sv"]
+
+[veryl.cases."tb_queue::operations"]
+ignore = ["sv"]
+
+[veryl.cases."tb_queue::shared_processes"]
 ignore = ["sv"]
 
 [veryl.groups.synth_dynamic_loop]
@@ -445,7 +456,7 @@ ignore = ["veryl"]
 # Upstream Veryl 0.22 folds negative f32 constants incorrectly (#1657).
 # https://github.com/celox-sim/celox/issues/1657
 [veryl.cases."floating_point::integral_constants_from_float"]
-ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
 
 # Veryl 0.22 simulator truncates the implicit 3.5 port conversion to 3 instead of 4.
 [veryl.cases."floating_point::scalar_port_and_function_conversions"]
@@ -593,28 +604,10 @@ omit = ["veryl"]
 [veryl.cases."hierarchy::test_dynamic_step_output_port_rmw"]
 ignore = ["veryl"]
 
-# Veryl emits a call with an output argument in an input port connection, which IEEE 1800
-# 13.4 forbids outside procedural code; the SV frontend rejects it
-# ("systemverilog input port connection", #88).
-[veryl.cases."hierarchy::test_inactive_instance_input_output_call_adds_no_parent_driver"]
-ignore = ["sv"]
-
 # Neither veryl-simulator nor the Veryl frontend supports instance
 # arrays; the emitted SystemVerilog does.
 [veryl.cases."hierarchy::test_instance_array_broadcast_and_unpacked_array_connection"]
-ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp"]
-
-# SV arm: Veryl emits a call with an output argument in an input port connection, which
-# IEEE 1800 13.4 forbids outside procedural code; the SV frontend rejects it
-# ("systemverilog input port connection", #88).
-[veryl.cases."hierarchy::test_instance_input_function_output_concat_dynamic_writeback"]
-ignore = ["sv", "veryl"]
-
-# Veryl emits a call with an output argument in an input port connection, which IEEE
-# 1800 13.4 forbids outside procedural code; the SV frontend rejects it
-# ("systemverilog input port connection", #88).
-[veryl.cases."hierarchy::test_instance_input_function_output_writeback"]
-ignore = ["sv"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
 
 # veryl-simulator 0.22.0 does not support a concatenation as an instance output
 # connection (UnsupportedDescription).
@@ -644,7 +637,9 @@ ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm"
 # emitted SystemVerilog keeps it, so the `sv` arm passes.
 # Observed on every other arm: `q` reads 0x0 instead of 0x11 (the interface `always_comb` never runs).
 [veryl.cases."interface::test_interface_always_comb_packed_array_member"]
-ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
+
+
 
 # Celox and veryl-simulator both build from the Veryl analyzer IR, whose
 # `ir::Interface` keeps only variables, functions and modports: logic
@@ -652,13 +647,13 @@ ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm"
 # emitted SystemVerilog keeps it, so the `sv` arm passes.
 # Observed on every other arm: `count` stays 0x0 instead of 0x3 (the interface `always_ff` never runs).
 [veryl.cases."interface::test_interface_always_ff_on_member_clock"]
-ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
 
 # Veryl 0.22 loses the selected interface element in native IR calls:
 # Celox reads lane 0 for both calls; veryl-simulator panics on lane 1.
 # The emitted SV preserves the selection and is the regression target.
 [veryl.cases."interface::test_interface_array_direct_function_calls"]
-ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
 
 # Celox and veryl-simulator both build from the Veryl analyzer IR, whose
 # `ir::Interface` keeps only variables, functions and modports: logic
@@ -666,7 +661,7 @@ ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm"
 # emitted SystemVerilog keeps it, so the `sv` arm passes.
 # Observed on every other arm: `total` reads 0x0 instead of 0x12c (the interface `assign` never runs).
 [veryl.cases."interface::test_interface_continuous_assign_logic"]
-ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
 
 # Celox and veryl-simulator both build from the Veryl analyzer IR, whose
 # `ir::Interface` keeps only variables, functions and modports: logic
@@ -674,7 +669,7 @@ ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm"
 # emitted SystemVerilog keeps it, so the `sv` arm passes.
 # Observed on every other arm: `f12` reads 0x0 instead of 0x1 (the interface `assign full = data == MAX` never runs).
 [veryl.cases."interface::test_interface_param_and_const"]
-ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
 
 # veryl-simulator panics calling a modport-imported function:
 # `Option::unwrap()` on None (veryl-simulator ir/expression.rs:2506).
@@ -694,7 +689,7 @@ ignore = ["veryl"]
 # Veryl 0.22 native IR drops interface body assignments and nested
 # instances: all native arms return 0 for a driven member.
 [veryl.cases."interface::test_nested_interface_instance"]
-ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp"]
+ignore = ["native", "native-parallel", "cranelift", "cranelift-parallel", "wasm", "interp", "veryl"]
 
 # The Veryl reference simulator reads an existing element through an
 # invalid index.

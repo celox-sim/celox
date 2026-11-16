@@ -59,7 +59,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Unsigned(input) => input_references(input),
                     SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                 },
-                Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => false,
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 Self::expression_references_any(lhs, candidates)
@@ -101,7 +104,10 @@ impl<'a> FfParser<'a> {
                 match factor.as_ref() {
                     Factor::FunctionCall(_) => true,
                     Factor::Variable(_, index, select, _) => {
-                        index.indices.iter().any(Self::expression_contains_function_call)
+                        index
+                            .indices
+                            .iter()
+                            .any(Self::expression_contains_function_call)
                             || select.0.iter().any(Self::expression_contains_function_call)
                             || select.1.as_ref().is_some_and(|(_, expr)| {
                                 Self::expression_contains_function_call(expr)
@@ -136,7 +142,10 @@ impl<'a> FfParser<'a> {
                         | SystemFunctionKind::Unsigned(input) => input_contains(input),
                         SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                     },
-                    Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                    Factor::Value(_)
+                    | Factor::ResetValue(..)
+                    | Factor::Anonymous(_)
+                    | Factor::Unknown(_) => false,
                 }
             }
             Expression::Binary(lhs, _, rhs, _) => {
@@ -250,7 +259,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Unsigned(input) => collect_input(input, variables),
                     SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => {}
                 },
-                Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 self.collect_expression_read_variables(lhs, variables, arrays_only);
@@ -358,7 +370,10 @@ impl<'a> FfParser<'a> {
                         }
                         SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                     },
-                    Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                    Factor::Value(_)
+                    | Factor::ResetValue(..)
+                    | Factor::Anonymous(_)
+                    | Factor::Unknown(_) => false,
                 }
             }
             Expression::Binary(lhs, _, rhs, _) => {
