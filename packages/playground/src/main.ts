@@ -18,6 +18,7 @@ import {
 	type PlaygroundDumpSink,
 } from "./playground-simulator.js";
 import { SV_EXAMPLES } from "./sv-examples.js";
+import { TB_EXAMPLES } from "./tb-examples.js";
 import { transpileTestbench } from "./testbench-transpile.js";
 import {
 	buildVirtualModuleDts,
@@ -835,7 +836,7 @@ document.getElementById("app")!.innerHTML = `
 </style>
 <header>
   <h1>Celox Playground</h1>
-  <select id="examples"><option value="">-- Example --</option><option value="adder">Adder</option><option value="counter">Counter (Simulator)</option><option value="counter_sim">Counter (Simulation)</option><option value="counter_vcd">Counter (Waveform)</option><option value="four_state">4-State</option><option value="sv_adder">SV: Adder</option><option value="sv_counter">SV: Counter (Simulation)</option><option value="sv_counter_vcd">SV: Counter (Waveform)</option><option value="sv_alu">SV: ALU</option></select>
+  <select id="examples"><option value="">-- Example --</option><option value="adder">Adder</option><option value="counter">Counter (Simulator)</option><option value="counter_sim">Counter (Simulation)</option><option value="counter_vcd">Counter (Waveform)</option><option value="four_state">4-State</option><option value="sv_adder">SV: Adder</option><option value="sv_counter">SV: Counter (Simulation)</option><option value="sv_counter_vcd">SV: Counter (Waveform)</option><option value="sv_alu">SV: ALU</option><option value="sv_tb_veryl">TB: SV testbench + Veryl Counter</option></select>
   <select id="run-target"></select>
   <input id="run-args" type="text" placeholder="vitest args (e.g. --grep &quot;add&quot;)" style="width: 180px; font-size: 0.8rem;" />
   <button id="run" disabled>Run</button>
@@ -1279,6 +1280,24 @@ function promptNewFile() {
 		}
 	});
 }
+
+// ── TimedTestbench type declaration for Monaco ──────────
+
+monacoTypeScript.typescriptDefaults.addExtraLib(
+	`
+interface TimedTestbenchResult {
+  passed: boolean;
+  finished: boolean;
+  time: number;
+  signals: Record<string, string>;
+  error: string | null;
+}
+declare const TimedTestbench: {
+  run(top: string): Promise<TimedTestbenchResult>;
+};
+`,
+	"file:///timed-testbench.d.ts",
+);
 
 // ── vitest type declarations for Monaco ─────────────────
 
@@ -1810,6 +1829,15 @@ async function run() {
 			_it.skip = (_name: string, _fn: () => void | Promise<void>) => {};
 			_describe.skip = (_name: string, _fn: () => void) => {};
 
+			// Runs an HDL testbench (timed processes) on the compiler worker.
+			const TimedTestbench = {
+				async run(top: string) {
+					return JSON.parse(
+						await celoxCompiler.runTimedTestbench(sources, top),
+					);
+				},
+			};
+
 			const argNames = [
 				"describe",
 				"it",
@@ -1823,6 +1851,7 @@ async function run() {
 				"X",
 				"Z",
 				"console",
+				"TimedTestbench",
 				...moduleNames,
 			];
 			const argValues = [
@@ -1838,6 +1867,7 @@ async function run() {
 				X,
 				Z,
 				playgroundConsole,
+				TimedTestbench,
 				...moduleNames.map((n: string) => moduleBindings[n]),
 			];
 			new Function(...argNames, jsCode)(...argValues);
@@ -1932,6 +1962,20 @@ async function run() {
 // ── Events ──────────────────────────────────────────────
 
 function loadExample(name: string) {
+	const tbExample = TB_EXAMPLES[name];
+	if (tbExample) {
+		removeAllFiles();
+		createFile("Veryl.toml", DEFAULT_VERYL_TOML);
+		createFile("celox.toml", DEFAULT_CELOX_TOML);
+		for (const file of tbExample.files) {
+			createFile(file.path, file.content);
+		}
+		createFile(`test/${name}.test.ts`, tbExample.testbench);
+		activateFile(`test/${name}.test.ts`);
+		onHdlChange();
+		return;
+	}
+
 	const svExample = SV_EXAMPLES[name];
 	if (svExample) {
 		removeAllFiles();

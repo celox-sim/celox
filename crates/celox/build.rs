@@ -15,7 +15,7 @@ fn main() {
         "aarch64" => !feature("X86_64_CODEGEN"),
         _ => false,
     };
-    if native {
+    if native && feature("HOST_RUNTIME") {
         println!("cargo::rustc-cfg=hotspot_jit");
     }
     if feature("CLI") {

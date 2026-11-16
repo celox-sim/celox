@@ -67,3 +67,4 @@ export const NativeSimulatorHandle = __napiModule.exports.NativeSimulatorHandle
 export const clearJitCache = __napiModule.exports.clearJitCache
 export const genTs = __napiModule.exports.genTs
 export const genTsFromSource = __napiModule.exports.genTsFromSource
+export const runTimedTestbench = __napiModule.exports.runTimedTestbench

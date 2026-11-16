@@ -22,7 +22,7 @@ fn hotspot_block_frames_preserve_values_across_native_and_interpreted_branches()
     };
     let mut mixed = build();
     let mut reference = build();
-    let options = SimulatorOptions {
+    let options = crate::SimulatorOptions {
         four_state: true,
         ..Default::default()
     };
@@ -124,7 +124,7 @@ endmodule
     for (native_eval, native_apply) in [(true, false), (false, true), (true, true)] {
         let mut reference = build();
         let mut mixed = build();
-        let options = SimulatorOptions {
+        let options = crate::SimulatorOptions {
             four_state: true,
             emit_triggers: true,
             ..Default::default()

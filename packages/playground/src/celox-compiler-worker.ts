@@ -24,6 +24,12 @@ try {
 				return;
 			}
 
+			if (request.type === "runTimedTestbench") {
+				const value = celox.runTimedTestbench(request.sources, request.top);
+				workerScope.postMessage({ type: "result", id: request.id, value });
+				return;
+			}
+
 			const handle = new celox.NativeSimulatorHandle(
 				request.sources,
 				request.top,

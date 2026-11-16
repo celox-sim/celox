@@ -2,6 +2,12 @@ import type { CeloxSourceFile } from "./celox-compiler-protocol.js";
 
 export function genTsFromSource(sources: CeloxSourceFile[]): string;
 
+export function runTimedTestbench(
+	sources: CeloxSourceFile[],
+	top: string,
+	maxSteps?: number,
+): string;
+
 export class NativeSimulatorHandle {
 	constructor(
 		sources: CeloxSourceFile[],

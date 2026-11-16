@@ -1798,14 +1798,6 @@ pub(crate) mod verify {
 pub use celox_slt::{GlueAddrBase, GlueBlockBase};
 
 pub use celox_frontend_core::TraceSimModule as SimModule;
-#[cfg(all(
-    feature = "host-runtime",
-    any(
-        target_arch = "x86_64",
-        feature = "arm64-codegen",
-        target_arch = "aarch64"
-    )
-))]
 pub(crate) use celox_runtime::SignalArrayLayout;
 pub use celox_runtime::SignalRef;
 
