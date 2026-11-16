@@ -1083,10 +1083,6 @@ pub(super) fn parameters_from_native_with_environment(
         parameter.packed_ranges = parameter_ranges.clone();
         parameter.members = parameter_members.clone();
         parameter.signed_element_depth = parameter_signed_element_depth;
-        parameter.enum_domain = declared_alias
-            .as_ref()
-            .filter(|_| !alias_has_use_site_dimensions)
-            .and_then(|alias| alias.enum_domain().cloned());
         validate_parameter_materialization_width(
             parameter
                 .resolved_type(&environment.types)

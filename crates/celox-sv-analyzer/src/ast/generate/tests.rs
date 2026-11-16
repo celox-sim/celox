@@ -429,7 +429,6 @@ fn scopes_all_function_return_metadata_and_keeps_hidden_outer_binding() {
         string: false,
         chandle: false,
         pattern_type: None,
-        enum_domain: None,
         container: None,
     };
     let inner = FunctionReturnMetadata {
@@ -443,7 +442,6 @@ fn scopes_all_function_return_metadata_and_keeps_hidden_outer_binding() {
         string: false,
         chandle: false,
         pattern_type: None,
-        enum_domain: None,
         container: None,
     };
     let dimensions = PackedDimensions {

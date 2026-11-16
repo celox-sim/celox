@@ -153,7 +153,7 @@ pub(in crate::ast) fn pattern(
     // known.
     if matches!(expression, ExprKind::Call { expression, .. }
         if direct::function_name(tree, session, *expression, native, dimensions)
-            .is_some_and(|name| returns_enum(&name, dimensions)))
+            .is_some_and(|name| returns_enum(&name, dimensions, &session.types)))
     {
         return Err(unsupported("%p of an enum value"));
     }
@@ -853,16 +853,24 @@ fn rereadable(value: &Expr) -> bool {
     !effects
 }
 
-/// Whether function `name` returns an enumerated value.
-fn returns_enum(name: &str, dimensions: &PackedDimensions) -> bool {
+/// Whether function `name` returns a value of an enumerated type whose
+/// members are resolved, as its semantic type in `table` tells.
+fn returns_enum(
+    name: &str,
+    dimensions: &PackedDimensions,
+    table: &semantic_types::TyTable,
+) -> bool {
+    let enumerated = |id: Option<semantic_types::TyId>| {
+        id.is_some_and(|id| table.enumeration(id) == Some(false) && table.enum_domain(id).is_some())
+    };
     dimensions
         .functions
         .get(name)
-        .is_some_and(|function| function.return_enum_domain.is_some())
+        .is_some_and(|function| enumerated(function.return_semantic_type))
         || dimensions
             .function_return_types
             .get(name)
-            .is_some_and(|metadata| metadata.enum_domain.is_some())
+            .is_some_and(|metadata| enumerated(metadata.semantic_type))
 }
 
 /// The shape of the variable that native selection `id` selects from, and

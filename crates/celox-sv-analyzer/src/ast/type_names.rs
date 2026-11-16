@@ -36,9 +36,6 @@ struct SpellingParts {
     aggregate: Option<&'static str>,
     /// The name of the typedef of an enumeration, struct or union.
     name: Option<TypedefName>,
-    /// The source position that declares an enumeration, which tells an
-    /// anonymous one apart (IEEE 1800-2023 6.22.1 c).
-    anonymous: Option<Arc<str>>,
     /// The elaborated scope that declares the enumeration, struct or union
     /// type: an analysis of a module, interface or program, which each
     /// instance with other parameter values has (6.22). `None` for a
@@ -94,24 +91,6 @@ impl Spelling {
         let mut parts = self.0.as_deref().cloned().unwrap_or_default();
         parts.scope = Some(scope);
         self.0 = Some(Arc::new(parts));
-    }
-
-    /// Record that the enumeration is declared at source position
-    /// `declaration`, in elaborated scope `scope` if a module, interface or
-    /// program.
-    pub(super) fn anonymous_enum(&mut self, declaration: Arc<str>, scope: Option<Arc<str>>) {
-        let mut parts = self.0.as_deref().cloned().unwrap_or_default();
-        parts.anonymous = Some(declaration);
-        if scope.is_some() {
-            parts.scope = scope;
-        }
-        self.0 = Some(Arc::new(parts));
-    }
-
-    /// The source position that declares an enumeration (see
-    /// [`Self::anonymous_enum`]).
-    pub(super) fn anonymous(&self) -> Option<&str> {
-        self.parts()?.anonymous.as_deref()
     }
 
     /// The identity of the typedef that names the type.

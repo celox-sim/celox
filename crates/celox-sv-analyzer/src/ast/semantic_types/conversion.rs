@@ -3,8 +3,8 @@
 use super::*;
 use crate::ast::{
     ConstEnv, ConstExpr, ContainerKind, ContainerType, Type, TypeKind, VariableDimensions,
-    const_functions, enums::EnumDomain, eval_ast_const_expr, packed_structs::PackedMember,
-    type_names, unpacked_structs::UnpackedStruct,
+    const_functions, eval_ast_const_expr, packed_structs::PackedMember, type_names,
+    unpacked_structs::UnpackedStruct,
 };
 
 /// The semantic type of `ty`, whose ranges name constants of `env`; `None`
@@ -132,14 +132,10 @@ fn convert(
         container: ty.container.as_deref(),
         unpacked_struct: ty.unpacked_struct.as_ref(),
         kind: ty.kind,
-        enumeration: ty.is_enum || ty.packed_enum,
-        packed_enum: ty.packed_enum,
-        enum_domain: ty.enum_domain.as_ref(),
         members: &ty.members,
         declaration: ty.declaration_name(),
         typename: ty.spelling.name_of(),
         aggregate: ty.spelling.aggregate_of(),
-        anonymous: ty.spelling.anonymous(),
         scope: ty.declaration_scope(),
         signed: ty.is_signed,
         signed_element_depth: ty.signed_element_depth,
@@ -189,16 +185,10 @@ pub(in crate::ast) fn of_shape(
         container: shape.container.as_deref(),
         unpacked_struct: shape.unpacked_struct.as_ref(),
         kind,
-        enumeration: shape.enum_domain.is_some()
-            || shape.packed_enum
-            || declared.is_some_and(|ty| ty.is_enum),
-        packed_enum: shape.packed_enum,
-        enum_domain: shape.enum_domain.as_ref(),
         members: &shape.members,
         declaration: declared.and_then(Type::declaration_name),
         typename: declared.and_then(|ty| ty.spelling.name_of()),
         aggregate: declared.and_then(|ty| ty.spelling.aggregate_of()),
-        anonymous: declared.and_then(|ty| ty.spelling.anonymous()),
         scope: declared.and_then(Type::declaration_scope),
         signed: shape.signed,
         signed_element_depth: shape.signed_element_depth,
@@ -223,16 +213,11 @@ struct Parts<'a> {
     /// the type keeps it: the fields below then only cross-check it.
     bound_element: Option<TyId>,
     /// The declaration of the enumerated type the type is or has elements
-    /// of, where the type keeps it: the fields below then only cross-check
-    /// it.
+    /// of.
     bound_enumeration: Option<&'a super::EnumDeclaration>,
     container: Option<&'a ContainerType>,
     unpacked_struct: Option<&'a Arc<UnpackedStruct>>,
     kind: TypeKind,
-    /// An enumeration or a packed array of one.
-    enumeration: bool,
-    packed_enum: bool,
-    enum_domain: Option<&'a Arc<EnumDomain>>,
     members: &'a [PackedMember],
     /// The typedef that names an enumeration, structure or union type.
     declaration: Option<&'a str>,
@@ -241,8 +226,6 @@ struct Parts<'a> {
     /// `struct` or `union` of a structure or union type other than a soft
     /// or tagged union.
     aggregate: Option<&'static str>,
-    /// The source position of an enumeration no typedef names.
-    anonymous: Option<&'a str>,
     /// The elaborated scope that declares the enumeration, structure or
     /// union type, if not a package or compilation unit.
     scope: Option<&'a str>,
@@ -370,75 +353,10 @@ impl Parts<'_> {
             // `reg` is `logic` (6.11.2), as is an implicit type.
             TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => true,
         };
-        // An anonymous enumeration matches only itself (6.22.1 c): its
-        // declaration tells it apart from another of the same members.
-        let anonymous = match (self.anonymous, self.enum_domain) {
-            (Some(declaration), domain) => Some(Decl::AnonymousEnum {
-                decl: Some(table.declare(declaration, self.scope)),
-                domain: domain.cloned(),
-            }),
-            (None, Some(domain)) => Some(Decl::AnonymousEnum {
-                decl: None,
-                domain: Some(domain.clone()),
-            }),
-            (None, None) => None,
-        };
-        let named = self
-            .declaration
-            .filter(|_| self.enumeration)
-            .map(|declaration| table.declare(declaration, self.scope));
-        if let Some(decl) = named {
-            table.record_spelling(decl, self.typename, None);
-            if let Some(domain) = self.enum_domain {
-                table.record_enum_domain(decl, domain);
-            }
-        }
+        // An enumerated type, or a packed array of one, is told apart by
+        // its declaration (6.19, 6.22.1 c), which the type keeps.
         let element = if let Some(enumeration) = self.bound_enumeration {
-            let element = enumeration.element(table, self.packed.len());
-            #[cfg(debug_assertions)]
-            if let Some(decl) = named.map(Decl::Named).or(anonymous) {
-                // Fields that record the members alone, such as those of
-                // the shape of a parameter, tell no declaration: the kept
-                // type has them.
-                let members_only = match (&decl, &element) {
-                    (
-                        Decl::AnonymousEnum {
-                            decl: None,
-                            domain: Some(domain),
-                        },
-                        PackedElement::Enum { array: false, .. },
-                    ) => enumeration
-                        .domain
-                        .as_ref()
-                        .is_some_and(|kept| kept.members == domain.members),
-                    _ => false,
-                };
-                if !members_only {
-                    assert_eq!(
-                        element,
-                        PackedElement::Enum {
-                            decl,
-                            array: self.packed_enum,
-                        },
-                        "the enumeration a type keeps is not that of its fields"
-                    );
-                }
-            } else {
-                panic!("the fields of a type that keeps an enumeration tell none");
-            }
-            element
-        } else if self.enumeration
-            && let Some(decl) = named.map(Decl::Named).or(anonymous)
-        {
-            PackedElement::Enum {
-                decl,
-                array: self.packed_enum,
-            }
-        } else if self.enumeration {
-            // An enumeration that records neither its declaration nor its
-            // members, such as one made for a select, is told apart by its
-            // bits only.
-            PackedElement::Bits
+            enumeration.element(table, self.packed.len())
         } else if let Some(member) = self.members.first() {
             let owner = member.owner().clone();
             let members = self

@@ -201,64 +201,36 @@ impl Enumeration {
 
     /// The enumeration of a type that has no semantic type yet but keeps
     /// the enumerated type `declaration` declares, with `packed` packed
-    /// dimensions, and whose conversion input fields tell `fields`.
+    /// dimensions.
     pub(super) fn kept(
         declaration: &super::semantic_types::EnumDeclaration,
         packed: usize,
-        fields: Self,
     ) -> Self {
         let array = packed > declaration.dims;
-        let facts = Self {
+        Self {
             enumeration: true,
             packed: array,
             domain: declaration.domain.clone().filter(|_| !array),
-        };
-        debug_assert_eq!(facts, fields, "the enumeration a type keeps");
-        facts
+        }
     }
 
     /// The enumeration of a type, or of the elements of a fixed-size
-    /// unpacked array of it, whose semantic type in `table` is `id`, and
-    /// whose conversion input fields tell `fields`.
+    /// unpacked array of it, whose semantic type in `table` is `id`: none
+    /// for a type with none.
     pub(super) fn of(
         id: Option<super::semantic_types::TyId>,
         table: &super::semantic_types::TyTable,
-        fields: Self,
     ) -> Self {
-        let Some(id) = id else {
-            debug_assert_eq!(
-                fields,
-                Self::default(),
-                "an enumeration type is told by its semantic type"
-            );
+        let Some(id) = id.map(|id| table.fixed_element(id)) else {
             return Self::default();
         };
-        let id = table.fixed_element(id);
         match table.enumeration(id) {
-            Some(array) => {
-                let facts = Self {
-                    enumeration: true,
-                    packed: array,
-                    domain: table.enum_domain(id).filter(|_| !array).cloned(),
-                };
-                debug_assert_eq!(facts, fields, "the semantic type of an enumeration type");
-                facts
-            }
-            // An anonymous enumeration whose members are not resolved, or a
-            // packed array of one, converts to bits: nothing identifies it
-            // until anonymous enumerations are told by their declarations.
-            None if fields.enumeration && table.is_integral(id) => {
-                debug_assert!(fields.domain.is_none());
-                fields
-            }
-            None => {
-                debug_assert_eq!(
-                    fields,
-                    Self::default(),
-                    "the semantic type of a type that is no enumeration"
-                );
-                Self::default()
-            }
+            Some(array) => Self {
+                enumeration: true,
+                packed: array,
+                domain: table.enum_domain(id).filter(|_| !array).cloned(),
+            },
+            None => Self::default(),
         }
     }
 }

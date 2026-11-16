@@ -152,8 +152,6 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                     randomizable: port.r#type().container.is_none()
                         && !port.r#type().holds_chandle()
                         && port.randomizable,
-                    enum_domain: port.r#type().enum_domain.clone(),
-                    packed_enum: port.r#type().packed_enum,
                     real: matches!(port.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
                     string: matches!(port.r#type().kind(), TypeKind::String),
                     packed: signal_packed_dimension_widths(port.r#type().packed_ranges()),
@@ -204,8 +202,6 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                         && !signal.r#type().holds_chandle()
                         && !signal.is_net()
                         && !signal.is_const,
-                    enum_domain: signal.r#type().enum_domain.clone(),
-                    packed_enum: signal.r#type().packed_enum,
                     real: matches!(signal.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
                     string: matches!(signal.r#type().kind(), TypeKind::String),
                     packed: signal_packed_dimension_widths(signal.r#type().packed_ranges()),
@@ -483,9 +479,6 @@ fn extend_variable_dimensions_from_markers(
         let packed_ranges = ranges.split_off(unpacked);
         let ty = Type::from(TypeShape {
             container: None,
-            is_enum: false,
-            enum_domain: None,
-            packed_enum: false,
             kind: TypeKind::Logic,
             is_signed: variable_type_is_signed(const_env, name),
             packed_ranges,
@@ -505,8 +498,6 @@ fn extend_variable_dimensions_from_markers(
             shape.declared = existing.declared.clone();
             shape.container = existing.container.clone();
             shape.randomizable = existing.randomizable;
-            shape.enum_domain = existing.enum_domain.clone();
-            shape.packed_enum = existing.packed_enum;
             shape.members = existing.members.clone();
             shape.is_2state = existing.is_2state;
             shape.signed_element_depth = existing.signed_element_depth;
@@ -697,9 +688,7 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
     parameters
         .iter()
         .filter(|parameter| {
-            !parameter.packed_ranges.is_empty()
-                || parameter.enum_domain.is_some()
-                || enumeration(parameter).declaration().is_some()
+            !parameter.packed_ranges.is_empty() || enumeration(parameter).declaration().is_some()
         })
         .map(|parameter| {
             (
@@ -709,8 +698,6 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                     container: None,
                     chandle: false,
                     randomizable: true,
-                    enum_domain: parameter.enum_domain.clone(),
-                    packed_enum: false,
                     real: false,
                     string: false,
                     packed: function_packed_dimension_widths(&parameter.packed_ranges),

@@ -405,19 +405,16 @@ impl ContainerType {
         &self,
         table: &semantic_types::TyTable,
     ) -> enums::Enumeration {
-        enums::Enumeration::of(
-            self.element_id(table),
-            table,
-            self.element.enumeration_fields(),
-        )
+        enums::Enumeration::of(self.element_id(table), table)
     }
 
     /// The enumeration of the index of an associative array (7.8.4), from
     /// its semantic type; none without an index.
     pub(super) fn key_enumeration(&self, table: &semantic_types::TyTable) -> enums::Enumeration {
-        self.key.as_ref().map_or_else(Default::default, |key| {
-            enums::Enumeration::of(self.key_id(table), table, key.enumeration_fields())
-        })
+        if self.key.is_none() {
+            return enums::Enumeration::default();
+        }
+        enums::Enumeration::of(self.key_id(table), table)
     }
 
     /// The class of the element or index type of the container whose
