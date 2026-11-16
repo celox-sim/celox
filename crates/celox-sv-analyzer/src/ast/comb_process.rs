@@ -193,6 +193,11 @@ fn comb_processes_from_item(
 /// Scalar n-input and n-output truth tables (IEEE 1800-2023 28.4, 28.5): a
 /// one-input gate, and `buf` and `not`, must also turn Z into X, which the
 /// identity operand does.
+///
+/// An array of `n` instances (28.3.5) is one bitwise operation on `n` bits: a
+/// one-bit terminal connects to every instance and an `n`-bit one gives each
+/// instance one bit of it, the instance of the right-hand index its LSB
+/// (28.3.6).
 fn logic_gate_processes(
     gate: &celox_sv_syntax::LogicGate,
     tree: &AnalysisContext<'_>,
@@ -207,13 +212,7 @@ fn logic_gate_processes(
     {
         return primitive_processes(primitive, gate, tree, session, dimensions);
     }
-    if gate.strength.is_some()
-        || gate.delay.is_some()
-        || gate
-            .instances
-            .iter()
-            .any(|instance| !instance.dimensions.is_empty())
-    {
+    if gate.strength.is_some() || gate.delay.is_some() {
         return Err(unsupported("gate primitive instantiation"));
     }
     let (op, identity, invert) = match gate.kind.as_str() {
@@ -229,19 +228,44 @@ fn logic_gate_processes(
     let n_output = matches!(gate.kind.as_str(), "buf" | "not");
     let mut processes = Vec::new();
     for instance in &gate.instances {
+        let count = gate_instance_count(instance, tree, session, dimensions)?;
+        let replicate = |expr: Expr| {
+            if count == 1 {
+                expr
+            } else {
+                Expr::RepeatConcat {
+                    count: ConstExpr::Literal(count.to_string()),
+                    parts: vec![expr],
+                }
+            }
+        };
+        let mismatch = |width: Option<usize>| match width {
+            // Too many or too few bits for the instances are an error.
+            Some(width) if count > 1 => Err(AnalyzerError::Parse(format!(
+                "{} gate instance array: a {width}-bit terminal, where {count} instances need 1 or {count} bits (IEEE 1800-2023 28.3.6)",
+                gate.kind
+            ))),
+            _ => Err(unsupported("non-scalar gate terminal")),
+        };
         let outputs = if n_output {
             instance.terminals.len() - 1
         } else {
             1
         };
         let (outputs, inputs) = instance.terminals.split_at(outputs);
-        let mut rhs = Expr::Literal(identity.into());
+        let mut rhs = replicate(Expr::Literal(identity.into()));
         for &input in inputs {
             let input =
                 expression_binding::value(input, tree.declarations(), tree, session, dimensions)?;
-            if expr_static_width(tree, &input, dimensions) != Some(1) {
-                return Err(unsupported("non-scalar gate terminal"));
-            }
+            let input = match expr_static_width(tree, &input, dimensions) {
+                Some(1) => replicate(input),
+                Some(width) if width == count => Expr::Resize {
+                    expr: Box::new(input),
+                    width,
+                    signed: false,
+                },
+                width => return mismatch(width),
+            };
             rhs = Expr::Binary {
                 left: Box::new(rhs),
                 op,
@@ -255,48 +279,120 @@ fn logic_gate_processes(
             };
         }
         for &output in outputs {
-            // A scalar net lvalue can be wrapped in arbitrarily nested
-            // singleton concatenations. Multi-part outputs remain outside the
-            // scalar subset.
-            let mut output = output;
-            while let celox_sv_syntax::ExprKind::Concatenation(parts) =
-                &tree.declarations().expression(output).kind
-            {
-                if parts.len() != 1 {
-                    return Err(unsupported("non-scalar gate terminal"));
+            // An output is a net lvalue or a concatenation of them, nested
+            // to any depth.
+            let mut pending = vec![output];
+            let mut parts = Vec::new();
+            while let Some(id) = pending.pop() {
+                if let celox_sv_syntax::ExprKind::Concatenation(items) =
+                    &tree.declarations().expression(id).kind
+                {
+                    pending.extend(items.iter().rev().copied());
+                } else {
+                    parts.push(expression_binding::net_lvalue(
+                        id,
+                        tree.declarations(),
+                        tree,
+                        session,
+                        dimensions,
+                    )?);
                 }
-                output = parts[0];
             }
-            let lhs = expression_binding::net_lvalue(
-                output,
-                tree.declarations(),
-                tree,
-                session,
-                dimensions,
-            )?;
-            if !lvalue_expr_type(&tree.functions, &lhs, dimensions).is_some_and(|ty| ty.width == 1)
-            {
-                return Err(unsupported("non-scalar gate terminal"));
-            }
-            let rhs = if matches!(
-                lhs,
-                LValue::Select {
-                    is_2state: true,
-                    ..
+            let width = parts.iter().try_fold(0, |total, part| {
+                Some(total + lvalue_expr_type(&tree.functions, part, dimensions)?.width)
+            });
+            if width == Some(count) {
+                processes.push(gate_output_process(tree, parts, rhs.clone(), dimensions));
+            } else if width == Some(1) {
+                // Every instance drives the one-bit output.
+                for bit in 0..count {
+                    let rhs = if count == 1 {
+                        rhs.clone()
+                    } else {
+                        Expr::Select {
+                            expr: Box::new(rhs.clone()),
+                            msb: ConstExpr::Literal(bit.to_string()),
+                            lsb: ConstExpr::Literal(bit.to_string()),
+                            signed: false,
+                        }
+                    };
+                    processes.push(gate_output_process(tree, parts.clone(), rhs, dimensions));
                 }
-            ) {
-                coerce_procedural_assignment_rhs(tree, rhs.clone(), &lhs, dimensions)
             } else {
-                rhs.clone()
-            };
-            processes.push(CombProcess::new(
-                CombProcessKind::ContinuousAssign,
-                None,
-                vec![Assignment::new(lhs, rhs)],
-            ));
+                return mismatch(width);
+            }
         }
     }
     Ok(processes)
+}
+
+/// The number of instances that a gate instance declares (IEEE 1800-2023
+/// 28.3.5): `abs(lhi - rhi) + 1` for a range, one without.
+fn gate_instance_count(
+    instance: &celox_sv_syntax::LogicGateInstance,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<usize> {
+    match instance.dimensions.as_slice() {
+        [] => Ok(1),
+        [dimension] => {
+            let range =
+                constant_binding::bind_unpacked_dimension(dimension, tree, session, dimensions)?;
+            let bound = |expr| eval_ast_const_expr(&tree.functions, expr, &dimensions.const_env);
+            bound(range.left())
+                .zip(bound(range.right()))
+                .map(|(left, right)| left.abs_diff(right))
+                .filter(|&span| span < 4096)
+                .map(|span| span as usize + 1)
+                .ok_or_else(|| {
+                    unsupported(
+                        "gate primitive instantiation with nonconstant instance array bounds",
+                    )
+                })
+        }
+        _ => Err(unsupported(
+            "gate primitive instantiation with a multidimensional instance array",
+        )),
+    }
+}
+
+/// The continuous assignment of a gate output: one net lvalue, or the parts
+/// of a concatenation.
+fn gate_output_process(
+    tree: &AnalysisContext<'_>,
+    mut parts: Vec<LValue>,
+    rhs: Expr,
+    dimensions: &PackedDimensions,
+) -> CombProcess {
+    if parts.len() == 1 {
+        let lhs = parts.pop().unwrap();
+        let rhs = if matches!(
+            lhs,
+            LValue::Select {
+                is_2state: true,
+                ..
+            }
+        ) {
+            coerce_procedural_assignment_rhs(tree, rhs, &lhs, dimensions)
+        } else {
+            rhs
+        };
+        return CombProcess::new(
+            CombProcessKind::ContinuousAssign,
+            None,
+            vec![Assignment::new(lhs, rhs)],
+        );
+    }
+    CombProcess::procedural(
+        CombProcessKind::ContinuousAssign,
+        None,
+        vec![Stmt::AssignConcat {
+            parts,
+            rhs,
+            nonblocking: false,
+        }],
+    )
 }
 
 fn always_dimensions(
