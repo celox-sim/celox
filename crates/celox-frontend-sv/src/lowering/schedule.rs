@@ -715,6 +715,22 @@ fn schedule_sources_collecting(
         {
             return Err(unsupported_sv_inout(port.path.join(".")).into());
         }
+        // The host writes an input of the top module directly, past the
+        // controls of a procedural force of it (IEEE 1800-2023 10.6.2).
+        if let Some(port) = root.port_order.iter().find(|&&id| {
+            root.variables[&id].kind == VariableKind::Input
+                && root.variables.values().any(|variable| {
+                    variable
+                        .force_control
+                        .is_some_and(|slot| slot.procedural && slot.target == id)
+                })
+        }) {
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "force or release of `{}`, an input port of the top module, which the host drives",
+                root.variables[port].path.join(".")
+            ))
+            .into());
+        }
         validate_sv_module_graph(
             &root_key,
             &module_ids,

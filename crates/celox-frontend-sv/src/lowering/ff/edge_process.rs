@@ -357,23 +357,13 @@ impl Ff<'_, '_> {
             .copied()
             .partition(|target| self.writes.working.contains(&target.id));
         let mut apply = SIRBuilder::new();
-        emit_sparse_memory_commits(
-            &mut apply,
-            &published,
-            &self.writes.sparse_memories,
-            self.m.variables,
-        );
+        emit_sparse_memory_commits(&mut apply, &published, &self.writes.sparse_memories, self.m);
         emit_nba_merges(&mut apply, &staged, self.m);
         emit_delayed_publications(&mut apply, &staged, self.m);
         let mut active = SIRBuilder::new();
-        emit_ff_commits(&mut active, &active_targets);
+        emit_ff_commits(&mut active, &active_targets, self.m);
         let mut nba = SIRBuilder::new();
-        emit_sparse_memory_commits(
-            &mut nba,
-            &nba_targets,
-            &self.writes.sparse_memories,
-            self.m.variables,
-        );
+        emit_sparse_memory_commits(&mut nba, &nba_targets, &self.writes.sparse_memories, self.m);
         emit_nba_merges(&mut nba, &staged, self.m);
         emit_delayed_publications(&mut nba, &staged, self.m);
         Ok(FfProcessUnits {
@@ -413,7 +403,7 @@ pub(super) fn emit_sparse_memory_commits(
     builder: &mut SIRBuilder<Addr>,
     targets: &[VarAtomBase<SourceVarId>],
     sparse: &HashSet<SourceVarId>,
-    variables: &HashMap<SourceVarId, SvVariable>,
+    pm: &ProcModule<'_>,
 ) {
     let mut committed = HashSet::default();
     for target in targets {
@@ -432,11 +422,11 @@ pub(super) fn emit_sparse_memory_commits(
                 },
                 stable(target.id),
                 SIROffset::Static(0),
-                variables[&target.id].width,
+                pm.var(target.id).width,
                 Vec::new(),
             ));
         } else {
-            emit_ff_commits(builder, std::slice::from_ref(target));
+            emit_ff_commits(builder, std::slice::from_ref(target), pm);
         }
     }
 }
