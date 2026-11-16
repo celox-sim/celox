@@ -1,6 +1,42 @@
 use super::*;
 
 impl Ff<'_, '_> {
+    /// Count the changes of the whole static variable `id` for a monitor,
+    /// once, and pass its value to the host request that registers it.
+    fn watch_monitor_variable(
+        &mut self,
+        task: sv::ir::SystemTask,
+        file: bool,
+        id: SourceVarId,
+        watched: &mut Vec<SourceVarId>,
+        registration: &mut Vec<celox_design::HostRequestValue<SourceVarId>>,
+    ) -> Result<(), sv::AnalyzerError> {
+        let variable = self.m.var(id);
+        if (file && variable.value_kind == celox_design::ValueKind::StrRef)
+            || !variable.array_dims.is_empty()
+            || !matches!(
+                variable.value_kind,
+                celox_design::ValueKind::Bits | celox_design::ValueKind::StrRef
+            )
+        {
+            return Err(unsupported(format!(
+                "`{task}` requires whole static scalar variables (file monitors currently require numeric variables)"
+            )));
+        }
+        if !watched.contains(&id) {
+            watched.push(id);
+            registration.push(celox_design::HostRequestValue {
+                value_kind: variable.value_kind,
+                id,
+                width: variable.width,
+                signed: variable.signed,
+                is_string: false,
+                float_precision: variable.float,
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn strobe(
         &mut self,
         task: sv::ir::SystemTask,
@@ -87,39 +123,70 @@ impl Ff<'_, '_> {
             // Thus a transient write still triggers output when its final
             // value returns to the preceding slot's value.
             let mut watched = Vec::new();
-            for arg in args.iter().skip(usize::from(file)) {
+            for arg in args.iter_mut().skip(usize::from(file)) {
                 let SystemTaskArg::Expr(expr) = arg else {
                     continue;
                 };
+                // A time query, also as a `%t` argument scaled to the time
+                // unit or the operand of a pure call, changes in every slot
+                // without triggering the monitor (IEEE 1800-2023 21.2.3).
+                // Whether an argument that mixes one with other values
+                // changed apart from time has no exact answer here, so it
+                // stays unsupported.
+                if reads_time_query(expr) {
+                    let mut names = HashSet::default();
+                    expr_idents(expr, &mut names);
+                    if !names.is_empty() {
+                        return Err(unsupported(format!(
+                            "`{task}` argument that mixes a time query with other values"
+                        )));
+                    }
+                    continue;
+                }
+                // Any other expression is watched through a continuous
+                // assignment of it to a hidden variable, which the monitor
+                // then displays: it reports when the value of the
+                // expression changes, not each write of an operand
+                // (IEEE 1800-2023 21.2.3).
+                if !matches!(
+                    expr,
+                    Expr::Ident(_)
+                        | Expr::Literal(_)
+                        | Expr::Call {
+                            callee: Callee::System(
+                                sv::ir::SystemFunction::Time
+                                    | sv::ir::SystemFunction::Stime
+                                    | sv::ir::SystemFunction::Realtime,
+                            ),
+                            ..
+                        }
+                ) && !self.m.expr_is_string(expr)
+                {
+                    let mut samples = Vec::new();
+                    let event = self.event_expression(expr, &mut samples)?;
+                    // Operands copied for the wait of a suspending process
+                    // would not follow later writes.
+                    let [(name, value)] = samples.as_slice() else {
+                        return Err(unsupported(format!(
+                            "`{task}` expression reading a process-local variable"
+                        )));
+                    };
+                    self.assign(&sv::ir::LValue::Ident(name.clone()), value)?;
+                    *expr = Expr::Ident(self.m.var(event).path.join("."));
+                }
                 match expr {
                     Expr::Ident(name) => {
                         let id = self
                             .m
                             .id(name)
                             .ok_or_else(|| unsupported(format!("`{task}` argument")))?;
-                        let variable = self.m.var(id);
-                        if (file && variable.value_kind == celox_design::ValueKind::StrRef)
-                            || !variable.array_dims.is_empty()
-                            || !matches!(
-                                variable.value_kind,
-                                celox_design::ValueKind::Bits | celox_design::ValueKind::StrRef
-                            )
-                        {
-                            return Err(unsupported(format!(
-                                "`{task}` requires whole static scalar variables (file monitors currently require numeric variables)"
-                            )));
-                        }
-                        if !watched.contains(&id) {
-                            watched.push(id);
-                            registration.push(celox_design::HostRequestValue {
-                                value_kind: variable.value_kind,
-                                id,
-                                width: variable.width,
-                                signed: variable.signed,
-                                is_string: false,
-                                float_precision: variable.float,
-                            });
-                        }
+                        self.watch_monitor_variable(
+                            task,
+                            file,
+                            id,
+                            &mut watched,
+                            &mut registration,
+                        )?;
                     }
                     Expr::Literal(_) => {}
                     Expr::Call {
@@ -166,4 +233,20 @@ impl Ff<'_, '_> {
         )?;
         Ok(true)
     }
+}
+
+/// Whether `expr` calls `$time`, `$stime` or `$realtime`.
+fn reads_time_query(expr: &sv::ir::Expr) -> bool {
+    let mut calls = Vec::new();
+    collect_calls(expr, &mut calls);
+    calls.iter().any(|(callee, _)| {
+        matches!(
+            callee,
+            sv::ir::Callee::System(
+                sv::ir::SystemFunction::Time
+                    | sv::ir::SystemFunction::Stime
+                    | sv::ir::SystemFunction::Realtime
+            )
+        )
+    })
 }
