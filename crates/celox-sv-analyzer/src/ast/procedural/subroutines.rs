@@ -4,7 +4,11 @@ use super::*;
 /// Run `epilogue` at each `return` in `body`. A returned value is first
 /// stored in the result variable `result`, so the epilogue sees the effects
 /// of evaluating it.
-pub(super) fn before_returns(body: &mut Vec<Stmt>, epilogue: &[Stmt], result: Option<&str>) {
+pub(in crate::ast) fn before_returns(
+    body: &mut Vec<Stmt>,
+    epilogue: &[Stmt],
+    result: Option<&str>,
+) {
     let mut pending = vec![body];
     while let Some(stmts) = pending.pop() {
         let mut index = 0;
@@ -1322,10 +1326,11 @@ pub(in crate::ast) fn lower_subroutine(
         // (IEEE 1800-2023 13.3.2). Those of a package or `$unit` task are
         // variables of that scope, shared by every module calling it; a
         // module allocates its own once.
-        let shared_scope = !matches!(
-            tree.root_unit(),
-            Ok(unit) if unit.kind != celox_sv_syntax::UnitKind::Package
-        );
+        let shared_scope = builder.session.shares_static_formals
+            || !matches!(
+                tree.root_unit(),
+                Ok(unit) if unit.kind != celox_sv_syntax::UnitKind::Package
+            );
         if suspends && shared_scope {
             for param in &subroutine.params {
                 if matches!(

@@ -30,7 +30,7 @@ pub(super) mod randomization;
 mod randsequence;
 pub(super) mod references;
 pub(crate) mod static_references;
-mod subroutines;
+pub(in crate::ast) mod subroutines;
 pub(super) mod timed_tasks;
 mod timing;
 use crate::procedural::{
