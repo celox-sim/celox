@@ -3165,6 +3165,68 @@ fn non_ansi_port_declarations_fold_into_the_header() {
 }
 
 #[test]
+fn non_ansi_subroutine_ports_take_variable_declarations() {
+    let syntax = parse(
+        "module M;\n task t;\n output x;\n input signed [3:0] y;\n int x;\n \
+         reg [3:0] z, y;\n x = y;\n endtask\nendmodule\n",
+    );
+    let task = &syntax.subroutines[0];
+    let ports: Vec<_> = task
+        .port_declarations
+        .iter()
+        .flat_map(|declaration| &declaration.ports)
+        .map(|port| {
+            let r#type = syntax.data_type(port.data_type);
+            (
+                r#type.kind.clone(),
+                r#type.signed,
+                r#type.packed_dimensions.len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ports,
+        [
+            (DataTypeKind::Builtin("int".into()), None, 0),
+            (DataTypeKind::Builtin("reg".into()), Some(true), 1),
+        ]
+    );
+    // `int x;` is gone from the body; `reg z` stays as the only declarator.
+    assert_eq!(task.items.len(), 2);
+    let StatementKind::Declaration(LocalDeclaration::Variables(declaration)) =
+        &syntax.statement(task.items[0]).kind
+    else {
+        panic!()
+    };
+    assert_eq!(declaration.variables.len(), 1);
+    assert_eq!(declaration.variables[0].name.value(), "z");
+}
+
+#[test]
+fn non_ansi_subroutine_port_redeclarations_keep_their_rules() {
+    for body in [
+        // A range on the variable declaration only (23.2.2.1).
+        "input l; reg [4:0] l;",
+        // A range on the port declaration only.
+        "input [7:0] l; integer l;",
+        "input [7:0] l; reg l;",
+        // An initializer or unpacked dimensions on the variable declaration.
+        "input l; int l = 1;",
+        "input l; int l [2];",
+    ] {
+        let code = format!("module M; task t; {body} endtask endmodule");
+        assert!(
+            Declarations::parse(&code, Path::new("bad.sv")).is_err(),
+            "{body}"
+        );
+    }
+    // A port declaration with a data type is complete; the variable
+    // declaration stays a second declaration of the name.
+    let syntax = parse("module M; task t; input int l; int l; endtask endmodule");
+    assert_eq!(syntax.subroutines[0].items.len(), 1);
+}
+
+#[test]
 fn array_method_with_expressions_parse_in_values_and_statements() {
     parse(
         "module M; int a[3], q[$]; initial begin

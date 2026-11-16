@@ -359,7 +359,7 @@ impl Parser<'_> {
     /// and `port_type` when both give a range in other words: the ranges
     /// must be identical (IEEE 1800-2023 23.2.2.1), so their bounds are
     /// compared once parameters have values.
-    fn merge_port_type(
+    pub(super) fn merge_port_type(
         &mut self,
         port_type: TypeId,
         object_type: TypeId,
