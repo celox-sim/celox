@@ -6890,3 +6890,37 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
   (expect_output "0\n"))
+
+; `function A::new()` and `function B::new()` define the classes'
+; constructors (IEEE 1800-2023 8.24): neither package declares a `new` that
+; the wildcard imports of `c` could both provide (26.3).
+(case out_of_block_methods_declare_no_package_items
+  (source "class.sv" #"
+package a;
+    class A; extern function new(); endclass
+    function A::new(); endfunction
+endpackage
+package b;
+    class B; extern function new(); endclass
+    function B::new(); endfunction
+endpackage
+package c;
+    import a::*;
+    import b::*;
+    class C;
+        int k;
+        function new(); k = 4; endfunction
+    endclass
+    function int f();
+        C x = new;
+        return x.k;
+    endfunction
+endpackage
+module Top(output int y, output bit done);
+    initial begin
+        y = c::f();
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq y 4) (assert_eq done 1))

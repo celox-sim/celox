@@ -402,7 +402,11 @@ pub(super) fn item_names(id: celox_sv_syntax::BodyItemId, tree: &SyntaxTree) -> 
                 types.push(id);
             }
         }
-        BodyItemKind::Subroutine(id) => add(&native.subroutine(*id).name),
+        // An out-of-block method definition, `function C::f`, belongs to its
+        // class (IEEE 1800-2023 8.24): the scope declares no `f`.
+        BodyItemKind::Subroutine(id) if native.subroutine(*id).scope.is_empty() => {
+            add(&native.subroutine(*id).name)
+        }
         // An export names a subroutine the scope already declares.
         BodyItemKind::Dpi(id) if native.dpi_declaration(*id).import => {
             add(&native.dpi_declaration(*id).name)
