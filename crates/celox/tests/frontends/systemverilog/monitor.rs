@@ -19,10 +19,33 @@ sv_backends! {
     }
 }
 
+sv_backends! {
+    fn monitor_scaled_time_arguments_do_not_trigger(sim) {
+        @setup { let source=r#"module Top;
+            timeunit 1ns; timeprecision 1ps;
+            bit [3:0] a;
+            initial begin
+                $monitor("%t %b", $time, a[1]);
+                #1 a = 4'b0001;
+                #1 a = 4'b0010;
+                #1;
+            end
+        endmodule"#; }
+        @build celox::Simulation::from_sv_sources(vec![(source,Path::new("monitor_time.sv"))],"Top");
+        sim.run_until(3000).unwrap();
+        let lines: Vec<_> = sim.drain_runtime_events().into_iter().map(|event| match event {
+            celox::RuntimeEvent::Display { message } => String::from_utf8(message).unwrap(),
+            other => panic!("{other:?}"),
+        }).collect();
+        // Only the change of `a[1]` at 2 ns reports; the time alone does not.
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].ends_with(" 0") && lines[1].ends_with(" 1"), "{lines:?}");
+    }
+}
+
 #[test]
-fn monitor_rejects_expression_arguments() {
+fn monitor_rejects_effects_and_file_strings() {
     for body in [
-        "int value; initial $monitor(value+1);",
         "int value; initial $monitor(value++);",
         "string value; initial $fmonitor(1,value);",
     ] {

@@ -87,10 +87,60 @@ impl Ff<'_, '_> {
             // Thus a transient write still triggers output when its final
             // value returns to the preceding slot's value.
             let mut watched = Vec::new();
-            for arg in args.iter().skip(usize::from(file)) {
+            for arg in args.iter_mut().skip(usize::from(file)) {
                 let SystemTaskArg::Expr(expr) = arg else {
                     continue;
                 };
+                // A time query, also as a `%t` argument scaled to the time
+                // unit, changes in every slot without triggering the
+                // monitor (IEEE 1800-2023 21.2.3).
+                let mut calls = Vec::new();
+                collect_calls(expr, &mut calls);
+                if !matches!(expr, Expr::Call { .. })
+                    && calls.iter().any(|(callee, _)| {
+                        matches!(
+                            callee,
+                            Callee::System(
+                                sv::ir::SystemFunction::Time
+                                    | sv::ir::SystemFunction::Stime
+                                    | sv::ir::SystemFunction::Realtime
+                            )
+                        )
+                    })
+                {
+                    continue;
+                }
+                // Any other expression is watched through a continuous
+                // assignment of it to a hidden variable, which the monitor
+                // then displays: it reports when the value of the
+                // expression changes, not each write of an operand
+                // (IEEE 1800-2023 21.2.3).
+                if !matches!(
+                    expr,
+                    Expr::Ident(_)
+                        | Expr::Literal(_)
+                        | Expr::Call {
+                            callee: Callee::System(
+                                sv::ir::SystemFunction::Time
+                                    | sv::ir::SystemFunction::Stime
+                                    | sv::ir::SystemFunction::Realtime,
+                            ),
+                            ..
+                        }
+                ) && !self.m.expr_is_string(expr)
+                {
+                    let mut samples = Vec::new();
+                    let event = self.event_expression(expr, &mut samples)?;
+                    // Operands copied for the wait of a suspending process
+                    // would not follow later writes.
+                    let [(name, value)] = samples.as_slice() else {
+                        return Err(unsupported(format!(
+                            "`{task}` expression reading a process-local variable"
+                        )));
+                    };
+                    self.assign(&sv::ir::LValue::Ident(name.clone()), value)?;
+                    *expr = Expr::Ident(self.m.var(event).path.join("."));
+                }
                 match expr {
                     Expr::Ident(name) => {
                         let id = self
