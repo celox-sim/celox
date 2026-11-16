@@ -1932,7 +1932,7 @@ impl Expr {
 
     /// `self` as a select position: a value whose operands are such
     /// values, or `None`.
-    fn to_const(&self) -> Option<ConstExpr> {
+    pub fn to_const(&self) -> Option<ConstExpr> {
         let go = |expr: &Expr| expr.to_const().map(Box::new);
         Some(match self {
             Expr::Ident(name) => ConstExpr::Ident(name.clone()),

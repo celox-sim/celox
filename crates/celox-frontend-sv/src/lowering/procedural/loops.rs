@@ -172,3 +172,229 @@ pub(in crate::lowering) fn stmt_may_jump(stmt: &sv::ir::Stmt, in_loop: bool) -> 
         _ => false,
     }
 }
+
+/// The values that the variables of the `for` loops around a statement
+/// take, innermost last (see [`LoopBounds::walk`]).
+pub(in crate::lowering) type LoopValues = Vec<(String, Vec<i128>)>;
+
+/// What the bounds of `for` loops are evaluated with, to find the values
+/// their variables take.
+pub(in crate::lowering) struct LoopBounds<'a> {
+    pub constants: &'a HashMap<String, i128>,
+    pub parameter_types: &'a HashMap<String, (usize, bool)>,
+    /// The width and signedness of an integral variable that a loop
+    /// declares.
+    pub variable_type: &'a dyn Fn(&str) -> Option<(usize, bool)>,
+}
+
+impl LoopBounds<'_> {
+    /// Visit each statement of `stmts`, outermost first, as `Stmt::walk`
+    /// does, with the values the variables of the `for` loops around it take
+    /// (see [`Self::values`]) appended to `loops`.
+    pub(in crate::lowering) fn walk<'s>(
+        &self,
+        stmts: &'s [sv::ir::Stmt],
+        loops: &mut LoopValues,
+        f: &mut dyn FnMut(&'s sv::ir::Stmt, &LoopValues),
+    ) {
+        for stmt in stmts {
+            self.walk_stmt(stmt, loops, f);
+        }
+    }
+
+    fn walk_stmt<'s>(
+        &self,
+        stmt: &'s sv::ir::Stmt,
+        loops: &mut LoopValues,
+        f: &mut dyn FnMut(&'s sv::ir::Stmt, &LoopValues),
+    ) {
+        f(stmt, loops);
+        match stmt {
+            sv::ir::Stmt::DelayedNonblocking {
+                control,
+                assignment,
+            } => {
+                self.walk_stmt(control, loops, f);
+                self.walk_stmt(assignment, loops, f);
+            }
+            sv::ir::Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                self.walk(then_body, loops, f);
+                self.walk(else_body, loops, f);
+            }
+            sv::ir::Stmt::Case { items, default, .. } => {
+                for item in items {
+                    self.walk(&item.body, loops, f);
+                }
+                if let Some(default) = default {
+                    self.walk(default, loops, f);
+                }
+            }
+            sv::ir::Stmt::Loop {
+                kind,
+                init,
+                condition,
+                step,
+                body,
+            } => {
+                self.walk(init, loops, f);
+                self.walk(step, loops, f);
+                let values = matches!(kind, sv::ir::LoopKind::For)
+                    .then(|| self.values(init, condition.as_ref(), step, body))
+                    .flatten();
+                let bound = values.is_some();
+                loops.extend(values);
+                self.walk(body, loops, f);
+                if bound {
+                    loops.pop();
+                }
+            }
+            sv::ir::Stmt::Fork { branches, .. } => {
+                for branch in branches {
+                    self.walk(branch, loops, f);
+                }
+            }
+            sv::ir::Stmt::Block { body, .. } => self.walk(body, loops, f),
+            _ => {}
+        }
+    }
+
+    /// The values the variable of a counted `for` loop takes in the
+    /// iterations of its body, when the loop declares the variable, its
+    /// body does not write it, and its bounds are constant: the loop runs
+    /// them in order whatever other processes do (IEEE 1800-2023 12.7.1).
+    /// The values wrap as the variable's type does.
+    fn values(
+        &self,
+        init: &[sv::ir::Stmt],
+        condition: Option<&sv::ir::Expr>,
+        step: &[sv::ir::Stmt],
+        body: &[sv::ir::Stmt],
+    ) -> Option<(String, Vec<i128>)> {
+        let [sv::ir::Stmt::Local { .. }] = init else {
+            return None;
+        };
+        let canonical = canonical_for_loop(init, condition, step)?;
+        let mut written = HashSet::default();
+        written_names(body, &mut written);
+        if written.contains(&canonical.var) {
+            return None;
+        }
+        let (width, signed) = (self.variable_type)(&canonical.var)?;
+        if width == 0 || width > 64 {
+            return None;
+        }
+        let [sv::ir::Stmt::Assign { rhs: next, .. }] = step else {
+            return None;
+        };
+        let condition = condition?;
+        let modulus = 1i128 << width;
+        let wrap = |value: i128| {
+            let bits = value.rem_euclid(modulus);
+            if signed && bits >= modulus / 2 {
+                bits - modulus
+            } else {
+                bits
+            }
+        };
+        let constant = |expr: &sv::ir::Expr| {
+            sv::typecheck::eval_const_expr_with_types(
+                &expr.to_const()?,
+                self.constants,
+                self.parameter_types,
+            )
+        };
+        // The expression with the variable a literal of its type.
+        let at = |expr: &sv::ir::Expr, value: i128| {
+            let bits = u128::try_from(value.rem_euclid(modulus)).ok()?;
+            let literal = typed_literal(&BigUint::from(bits), width, signed);
+            constant(&expr.substitute(&canonical.var, &sv::ir::Expr::Literal(literal))?)
+        };
+        let mut value = wrap(constant(&canonical.start)?);
+        let mut values = Vec::new();
+        while at(condition, value)? != 0 {
+            if values.len() == MAX_UNROLLED_ITERATIONS {
+                return None;
+            }
+            values.push(value);
+            value = wrap(at(next, value)?);
+        }
+        Some((canonical.var, values))
+    }
+}
+
+/// The bounds `msb` and `lsb` of a select at each combination of the values
+/// the loop variables of `loops` it reads take, when they are constant
+/// then; `None` if it reads none of them, or no iteration runs.
+pub(in crate::lowering) fn unrolled_select_bounds(
+    msb: &sv::ir::ConstExpr,
+    lsb: &sv::ir::ConstExpr,
+    loops: &LoopValues,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<Vec<(i128, i128)>> {
+    /// `constants` with the loop variables at the values of one iteration.
+    struct Iteration<'a> {
+        constants: &'a HashMap<String, i128>,
+        values: &'a [(&'a str, i128)],
+    }
+    impl sv::typecheck::Constants for Iteration<'_> {
+        fn constant(&self, name: &str) -> Option<&i128> {
+            self.values
+                .iter()
+                .find(|(variable, _)| *variable == name)
+                .map(|(_, value)| value)
+                .or_else(|| self.constants.get(name))
+        }
+    }
+    // The innermost loop of each variable the bounds read.
+    let mut read: Vec<(&str, &[i128])> = Vec::new();
+    for (name, values) in loops.iter().rev() {
+        if (msb.reads(name) || lsb.reads(name))
+            && !read.iter().any(|(seen, _)| *seen == name.as_str())
+        {
+            read.push((name.as_str(), values.as_slice()));
+        }
+    }
+    let total = read
+        .iter()
+        .try_fold(1usize, |total, (_, values)| total.checked_mul(values.len()))?;
+    if read.is_empty() || total == 0 || total > MAX_UNROLLED_ITERATIONS {
+        return None;
+    }
+    let mut bounds = Vec::with_capacity(total);
+    let mut indices = vec![0; read.len()];
+    let mut values = Vec::with_capacity(read.len());
+    loop {
+        values.clear();
+        values.extend(
+            read.iter()
+                .zip(&indices)
+                .map(|((name, values), &index)| (*name, values[index])),
+        );
+        let iteration = Iteration {
+            constants,
+            values: &values,
+        };
+        bounds.push((
+            sv::typecheck::eval_const_expr_with_types(msb, &iteration, parameter_types)?,
+            sv::typecheck::eval_const_expr_with_types(lsb, &iteration, parameter_types)?,
+        ));
+        // The next combination, the innermost loop first.
+        let mut digit = 0;
+        loop {
+            let Some(index) = indices.get_mut(digit) else {
+                return Some(bounds);
+            };
+            *index += 1;
+            if *index < read[digit].1.len() {
+                break;
+            }
+            *index = 0;
+            digit += 1;
+        }
+    }
+}

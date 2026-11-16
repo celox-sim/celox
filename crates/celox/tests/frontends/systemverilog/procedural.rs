@@ -338,6 +338,88 @@ fn always_comb_blocks_may_not_share_a_variable() {
     assert!(error.contains("shared.sv:11"), "{error}");
 }
 
+/// Processes that write bits of a variable through selects indexed by the
+/// variables of `for` loops, next to other drivers of its other bits. A
+/// process drives the bits it may write, those a select takes in the loop's
+/// iterations (IEEE 1800-2023 6.5, 12.7.1). Verilator 5.054 prints the same.
+const LOOP_SELECT_DRIVERS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic clk = 0;
+  logic [7:0] a = 8'ha5, b = 8'h0f;
+  logic [7:0] v, w, q;
+  logic [15:0] n;
+  always_comb for (int i = 0; i < 4; i++) v[i] = a[i];
+  assign v[7:4] = ~a[7:4];
+  always_comb for (int i = 0; i < 4; i++) w[2 * i] = a[i];
+  always_comb for (int i = 0; i < 4; i++) w[2 * i + 1] = b[i];
+  always_comb for (int i = 1; i >= 0; i--) for (int j = 0; j < 4; j++) n[i * 4 + j] = a[j + 4 - i * 4];
+  assign n[15:8] = 8'hc3;
+  always_ff @(posedge clk) q[7:4] <= ~a[7:4];
+  always_ff @(posedge clk) for (int i = 0; i < 4; i++) q[i] <= a[i];
+  initial begin
+    #1 $display("%h %h %h", v, w, n);
+    clk = 1;
+    #1 $display("%h", q);
+    a = 8'h3c;
+    clk = 0;
+    #1 clk = 1;
+    #1 $display("%h %h %h %h", v, w, n, q);
+  end
+endmodule
+"#;
+
+#[test]
+fn loop_selects_drive_the_bits_of_their_iterations() {
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(LOOP_SELECT_DRIVERS, Path::new("loop_drivers.sv"))],
+            "top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        assert_eq!(
+            display_lines(&mut sim),
+            ["55 bb c35a", "55", "cc fa c3c3 cc"],
+            "four-state {four_state}"
+        );
+    }
+}
+
+#[test]
+fn loop_selects_overlapping_other_drivers_are_rejected() {
+    for (process, other) in [
+        (
+            "always_comb for (int i = 0; i < 5; i++) v[i] = a[i];",
+            "assign v[7:4] = ~a[7:4];",
+        ),
+        (
+            "always_ff @(posedge clk) for (int i = 0; i < 4; i++) v[2 * i] <= a[i];",
+            "always_ff @(posedge clk) for (int i = 0; i < 4; i++) v[i + 4] <= a[i];",
+        ),
+    ] {
+        let source = format!(
+            "module top(input logic clk, input logic [7:0] a, output logic [7:0] v);
+               {process}
+               {other}
+             endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("overlap.sv"))],
+            "top",
+        )
+        .build()
+        .map(|_| ())
+        .expect_err("overlapping drivers are rejected")
+        .to_string();
+        assert!(
+            error.contains("multiple variable drivers for `v`"),
+            "{process}: {error}"
+        );
+    }
+}
+
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn plan_builds_report_kernels_and_warnings_without_code() {

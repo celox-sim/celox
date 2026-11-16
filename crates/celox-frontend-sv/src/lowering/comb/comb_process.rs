@@ -14,8 +14,46 @@ impl Comb<'_, '_> {
         // otherwise it would hold its previous value (a latch).
         let mut visited = HashSet::default();
         let mut writes = Vec::new();
-        static_writes(self.m, body, &mut visited, &mut writes, false);
-        for (id, access) in writes {
+        let mut unrolled = HashSet::default();
+        static_writes(
+            self.m,
+            body,
+            &mut visited,
+            &mut writes,
+            &mut unrolled,
+            false,
+        );
+        // The drivers of a variable count the bits a select in loops writes
+        // in their iterations (see `ProcModule::unrolled_select_writes`).
+        // A loop folded rather than unrolled writes the whole variable or
+        // element at each run-time position instead; the process then runs
+        // as a guarded unit, which writes only the positions the select
+        // takes.
+        for &id in &unrolled {
+            let mut counted: Vec<_> = writes
+                .iter()
+                .filter(|(written, _)| *written == id)
+                .map(|(_, access)| (access.lsb, access.msb))
+                .collect();
+            counted.sort_unstable();
+            let beyond = store.get(&id).is_some_and(|range| {
+                range.ranges.iter().any(|(&lsb, (value, width, _))| {
+                    // Whether the counted bits cover `lsb` up to its top.
+                    let msb = lsb + width - 1;
+                    let mut next = lsb;
+                    for &(low, high) in &counted {
+                        if low <= next && next <= high {
+                            next = high + 1;
+                        }
+                    }
+                    value.is_some() && next <= msb
+                })
+            });
+            if beyond {
+                return Err(unsupported(RUNTIME_LOOP_CONDITION));
+            }
+        }
+        for &(id, access) in &writes {
             let defined = store.get(&id).is_some_and(|range| {
                 range
                     .get_parts_ref(access)
@@ -174,18 +212,23 @@ pub(in crate::lowering) fn subtract_written_sensitivity(
 }
 
 /// The module variables (and constant bit ranges) a statement list may
-/// write, following subroutine calls.
+/// write, following subroutine calls. The variables of `unrolled` are
+/// those of selects in loops whose bits are counted in each iteration (see
+/// `ProcModule::unrolled_select_writes`).
 pub(in crate::lowering) fn static_writes(
     m: &ProcModule<'_>,
     stmts: &[sv::ir::Stmt],
     visited: &mut HashSet<String>,
     writes: &mut Vec<(SourceVarId, BitAccess)>,
+    unrolled: &mut HashSet<SourceVarId>,
     functions_only: bool,
 ) {
     let mut calls = Vec::new();
     let record = |this: &ProcModule<'_>,
                   lvalue: &sv::ir::LValue,
-                  writes: &mut Vec<(SourceVarId, BitAccess)>| {
+                  loops: &LoopValues,
+                  writes: &mut Vec<(SourceVarId, BitAccess)>,
+                  unrolled: &mut HashSet<SourceVarId>| {
         let Some(id) = this.id(lvalue.name()) else {
             return;
         };
@@ -193,81 +236,69 @@ pub(in crate::lowering) fn static_writes(
             return;
         }
         let variable = this.var(id);
-        let access = match lvalue {
-            sv::ir::LValue::Ident(_) => full(variable.width),
-            sv::ir::LValue::Select { msb, lsb, .. } => {
-                let bounds = sv::typecheck::eval_const_expr_with_types(
-                    msb,
-                    this.constants,
-                    this.parameter_types,
-                )
+        let sv::ir::LValue::Select { msb, lsb, .. } = lvalue else {
+            writes.push((id, full(variable.width)));
+            return;
+        };
+        // A select at positions only the variables of the loops around it
+        // make run-time values writes the bits it selects in their
+        // iterations, as the unrolled loops write them.
+        if let Some(accesses) = this.unrolled_select_writes(lvalue, loops) {
+            writes.extend(accesses.into_iter().map(|access| (id, access)));
+            unrolled.insert(id);
+            return;
+        }
+        let bounds =
+            sv::typecheck::eval_const_expr_with_types(msb, this.constants, this.parameter_types)
                 .zip(sv::typecheck::eval_const_expr_with_types(
                     lsb,
                     this.constants,
                     this.parameter_types,
                 ))
                 .and_then(|(msb, lsb)| constant_select_write(variable, msb, lsb));
-                match bounds {
-                    Some((Some(access), _)) => access,
-                    // A constant select entirely outside the vector
-                    // writes nothing.
-                    Some((None, _)) => return,
-                    // A run-time select may write any bit; the written
-                    // value keeps the others, so it defines the whole
-                    // vector, or the one element its constant part names.
-                    None => {
-                        let element = dynamic_array_element_lvalue(
-                            lvalue,
-                            this.variables,
-                            this.name_to_id,
-                            this.constants,
-                            this.parameter_types,
-                        );
-                        element
-                            .is_none()
-                            .then(|| {
-                                dynamic_packed_write(
-                                    lvalue,
-                                    this.variables,
-                                    this.name_to_id,
-                                    this.constants,
-                                    this.parameter_types,
-                                )
-                            })
-                            .flatten()
-                            .and_then(|write| write.window)
-                            .unwrap_or(full(variable.width))
-                    }
-                }
-            }
+        let access = match bounds {
+            Some((Some(access), _)) => access,
+            // A constant select entirely outside the vector writes
+            // nothing.
+            Some((None, _)) => return,
+            // A run-time select may write any bit; the written value keeps
+            // the others, so it defines the whole vector, or the one
+            // element its constant part names.
+            None => this
+                .dynamic_select_access(lvalue)
+                .unwrap_or(full(variable.width)),
         };
         writes.push((id, access));
     };
-    for stmt in stmts {
-        stmt.walk(&mut |stmt| {
-            match stmt {
-                sv::ir::Stmt::Assign { lhs, .. } => record(m, lhs, writes),
-                sv::ir::Stmt::AssignConcat { parts, .. } => {
-                    for part in parts {
-                        record(m, part, writes);
-                    }
+    let variable_type = |name: &str| m.integral_variable_type(name);
+    let bounds = LoopBounds {
+        constants: m.constants,
+        parameter_types: m.parameter_types,
+        variable_type: &variable_type,
+    };
+    bounds.walk(stmts, &mut LoopValues::new(), &mut |stmt, loops| {
+        match stmt {
+            sv::ir::Stmt::Assign { lhs, .. } => record(m, lhs, loops, writes, unrolled),
+            sv::ir::Stmt::AssignConcat { parts, .. } => {
+                for part in parts {
+                    record(m, part, loops, writes, unrolled);
                 }
-                sv::ir::Stmt::Call { name, args, .. } => calls.push((name.clone(), args.clone())),
-                _ => {}
             }
-            if functions_only {
-                let mut expressions = Vec::new();
-                stmt_calls(stmt, &mut expressions);
-                calls.extend(expressions.into_iter().filter_map(|(callee, args)| {
-                    if let sv::ir::Callee::Subroutine(name) = callee {
-                        Some((name, args))
-                    } else {
-                        None
-                    }
-                }));
-            }
-        });
-    }
+            sv::ir::Stmt::Call { name, args, .. } => calls.push((name.clone(), args.clone())),
+            _ => {}
+        }
+        if functions_only {
+            let mut expressions = Vec::new();
+            stmt_calls(stmt, &mut expressions);
+            calls.extend(expressions.into_iter().filter_map(|(callee, args)| {
+                if let sv::ir::Callee::Subroutine(name) = callee {
+                    Some((name, args))
+                } else {
+                    None
+                }
+            }));
+        }
+    });
     let mut index = 0;
     let mut seen_defaults = super::super::procedural::SeenDefaults::default();
     while index < calls.len() {
@@ -294,16 +325,30 @@ pub(in crate::lowering) fn static_writes(
                 && let Some(lvalues) = arg.as_ref().and_then(lvalue_from_expr)
             {
                 for lvalue in &lvalues {
-                    record(m, lvalue, writes);
+                    record(m, lvalue, &LoopValues::new(), writes, unrolled);
                 }
             }
         }
         if visited.insert(name) && (!functions_only || !subroutine.is_task) {
-            static_writes(m, &subroutine.body, visited, writes, functions_only);
+            static_writes(
+                m,
+                &subroutine.body,
+                visited,
+                writes,
+                unrolled,
+                functions_only,
+            );
             if functions_only {
                 // Sensitivity is syntactic: folded branches still exclude
                 // their written expressions, including writes in callees.
-                static_writes(m, &subroutine.sensitivity_body, visited, writes, true);
+                static_writes(
+                    m,
+                    &subroutine.sensitivity_body,
+                    visited,
+                    writes,
+                    unrolled,
+                    true,
+                );
             }
         }
     }
