@@ -352,7 +352,10 @@ pub use simulator::{
     compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_diagnostic_policy,
     compile_to_sir_with_latch_policy,
 };
-pub use simulator::{compile_mixed_to_sir, compile_sv_to_sir};
+pub use simulator::{
+    compile_mixed_to_sir, compile_mixed_to_sir_with_diagnostic_policy, compile_sv_to_sir,
+    compile_sv_to_sir_with_diagnostic_policy,
+};
 
 #[cfg(test)]
 mod flatting_tests;

@@ -61,7 +61,7 @@ const MIXED_TOP: &str = "module Top(en: input logic, d: input logic<8>, q: outpu
 const MIXED_DUT: &str = "module Latch(input logic en, input logic [7:0] d, output logic [7:0] q); always_comb if(en) q=d; endmodule";
 
 #[test]
-fn mixed_hierarchy_inference_remains_opt_in() {
+fn mixed_hierarchy_inference_warns_by_default_and_errors_in_strict_mode() {
     let builder = || {
         Simulator::from_mixed_sources(
             vec![(MIXED_TOP, Path::new("top.veryl"))],
@@ -69,7 +69,13 @@ fn mixed_hierarchy_inference_remains_opt_in() {
             "Top",
         )
     };
-    let error = builder().build_interpreter().unwrap_err().to_string();
+    let sim = builder().build_interpreter().unwrap();
+    assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
+    let error = builder()
+        .strict(true)
+        .build_interpreter()
+        .unwrap_err()
+        .to_string();
     assert!(
         error.contains("latch inference inside always_comb"),
         "{error}"
@@ -449,8 +455,8 @@ fn task_call_sensitivity_in_both_state_modes_at_o0_and_o2() {
 // A continuous assignment whose bits each read other bits of its own net,
 // as a Gray-code decoder does (OpenPiton's async_fifo:
 // `assign b_wptr = {1'b0, b_wptr[ASIZE-1:1]} ^ g_wptr;`), settles bit by
-// bit (IEEE 1800-2023 10.3.2). A bit that reads itself, and an always_comb
-// that reads what it writes, still hold a previous value and are rejected.
+// bit (IEEE 1800-2023 10.3.2). A bit that reads itself is a loop, and an
+// always_comb that reads what it writes holds a previous value (a latch).
 #[test]
 fn continuous_assignments_read_other_bits_of_their_net() {
     let source = r#"
@@ -487,18 +493,28 @@ fn continuous_assignments_read_other_bits_of_their_net() {
         // Gray 11010 is binary 10011, Gray 00111 is binary 00101.
         assert_eq!(displayed, ["10011", "00101"], "four_state={four_state}");
     }
-    for rejected in [
-        "module Top; logic [3:0] g; wire [3:0] b; assign b = b ^ g; endmodule",
-        "module Top; logic [3:0] g, b; always_comb b = {1'b0, b[3:1]} ^ g; endmodule",
-    ] {
-        let error =
-            celox::Simulation::from_sv_sources(vec![(rejected, Path::new("loop.sv"))], "Top")
-                .build_cranelift()
-                .err()
-                .unwrap_or_else(|| panic!("`{rejected}` is accepted"))
-                .to_string();
-        assert!(error.contains("latch inference"), "{error}");
-    }
+    // A continuous self-assignment is a combinational loop in both modes.
+    let rejected = "module Top; logic [3:0] g; wire [3:0] b; assign b = b ^ g; endmodule";
+    let error = celox::Simulation::from_sv_sources(vec![(rejected, Path::new("loop.sv"))], "Top")
+        .build_cranelift()
+        .err()
+        .unwrap_or_else(|| panic!("`{rejected}` is accepted"))
+        .to_string();
+    assert!(error.contains("latch inference"), "{error}");
+    // The always_comb self-read holds its previous value: a latch, which
+    // warns by default and is rejected in strict mode.
+    let latch = "module Top; logic [3:0] g, b; always_comb b = {1'b0, b[3:1]} ^ g; endmodule";
+    let sim = celox::Simulation::from_sv_sources(vec![(latch, Path::new("loop.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
+    let error = celox::Simulation::from_sv_sources(vec![(latch, Path::new("loop.sv"))], "Top")
+        .strict(true)
+        .build_cranelift()
+        .err()
+        .unwrap_or_else(|| panic!("`{latch}` is accepted in strict mode"))
+        .to_string();
+    assert!(error.contains("latch inference"), "{error}");
 }
 
 // Each output of an `always_comb` that keeps some bits on some paths, as

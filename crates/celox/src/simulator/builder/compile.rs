@@ -46,8 +46,9 @@ pub fn compile_to_sir(
 
 /// Compile Veryl with an explicit inferred-latch policy.
 ///
-/// The default compilation APIs reject inferred latches. Pass `true` here to
-/// allow them, or use `SimulatorBuilder::allow_inferred_latches` on host targets.
+/// The default compilation APIs compile inferred latches with a warning.
+/// Pass `true` here to allow them silently, or use
+/// `SimulatorBuilder::allow_inferred_latches` on host targets.
 pub fn compile_to_sir_with_latch_policy(
     sources: &[(&str, &Path)],
     top: &str,
@@ -431,6 +432,47 @@ pub fn compile_sv_to_sir(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    compile_sv_to_sir_with_diagnostic_policy(
+        sources,
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        param_overrides,
+        optimize_options,
+        &crate::DiagnosticPolicy::default(),
+    )
+}
+
+/// Compile SystemVerilog sources with an explicit per-code diagnostic policy.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_sv_to_sir_with_diagnostic_policy(
+    sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostic_policy: &crate::DiagnosticPolicy,
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let result = compile_sv_to_sir_with_layout_mode(
         sources,
         top,
@@ -445,7 +487,7 @@ pub fn compile_sv_to_sir(
         param_overrides,
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
-        &crate::DiagnosticPolicy::default(),
+        diagnostic_policy,
         None,
         false,
         crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
@@ -454,9 +496,9 @@ pub fn compile_sv_to_sir(
         &[],
         &[],
     );
-    let policy = crate::DiagnosticPolicy::default();
-    let (program, mut warnings) = result.map_err(|error| error.apply_diagnostic_policy(&policy))?;
-    policy.apply(&mut warnings)?;
+    let (program, mut warnings) =
+        result.map_err(|error| error.apply_diagnostic_policy(diagnostic_policy))?;
+    diagnostic_policy.apply(&mut warnings)?;
     Ok((program, warnings))
 }
 
@@ -576,6 +618,49 @@ pub fn compile_mixed_to_sir(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    compile_mixed_to_sir_with_diagnostic_policy(
+        sources,
+        sv_sources,
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        param_overrides,
+        optimize_options,
+        &crate::DiagnosticPolicy::default(),
+    )
+}
+
+/// Compile a mixed hierarchy with an explicit per-code diagnostic policy.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_mixed_to_sir_with_diagnostic_policy(
+    sources: &[(&str, &Path)],
+    sv_sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostic_policy: &crate::DiagnosticPolicy,
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let result = compile_mixed_to_sir_with_layout_mode(
         sources,
         sv_sources,
@@ -591,7 +676,7 @@ pub fn compile_mixed_to_sir(
         param_overrides,
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
-        &crate::DiagnosticPolicy::default(),
+        diagnostic_policy,
         None,
         false,
         &[],
@@ -600,9 +685,9 @@ pub fn compile_mixed_to_sir(
         false,
         false,
     );
-    let policy = crate::DiagnosticPolicy::default();
-    let (program, mut warnings) = result.map_err(|error| error.apply_diagnostic_policy(&policy))?;
-    policy.apply(&mut warnings)?;
+    let (program, mut warnings) =
+        result.map_err(|error| error.apply_diagnostic_policy(diagnostic_policy))?;
+    diagnostic_policy.apply(&mut warnings)?;
     Ok((program, warnings))
 }
 

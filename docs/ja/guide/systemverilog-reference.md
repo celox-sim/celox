@@ -457,11 +457,10 @@ sequence 内のインスタンス、
 
 受理しますが標準どおりではありません。移植性が必要なコードはこれらに依存しないでください。
 
-- **推論ラッチは既定でエラーです。** `always_comb` の不完全な代入
-  （一部の経路でしか書かない static ローカルを含む）は、
+- **推論ラッチは既定で警告です。** `always_comb` の不完全な代入
+  （一部の経路でしか書かない static ローカルを含む）は、警告付きでラッチとしてシミュレーションし、strict mode（`strict = true` / `--strict`）または
   [`[diagnostics]` テーブル](./celox-toml.md#diagnostics)で
-  `inferred_latch = "warn"` または `"allow"` を設定するか、相当する
-  Rust / JavaScript オプションを使わない限り拒否します。明示的な
+  `inferred_latch = "error"` を設定すると拒否します。明示的な
   `always_latch` と通常の `always @*` には不要です。
 - **固定サイズ unpacked 配列への packed 値と充填。** IEEE 1800-2023 7.6 は
   固定サイズ unpacked 配列に、互換な型の unpacked 配列だけを代入できるとします。
@@ -489,8 +488,8 @@ sequence 内のインスタンス、
   空縮約がゼロを返します。そのようなツールとの互換用です。
 - **時間尺度のない設計要素に既定値を使う（オプトイン）。** IEEE 1800-2023
   3.14.2.3 は、時間単位と精度（宣言・継承・`` `timescale `` によるもの）を
-  持つ設計要素と持たない設計要素が混在する設計をエラーとします。Celox も既定では
-  これを拒否し、持たない設計要素の名前を示します。
+  持つ設計要素と持たない設計要素が混在する設計をエラーとします。Celox は既定では
+  警告して持たない設計要素の名前を示し、strict mode では拒否します。
   [`[diagnostics]` テーブル](./celox-toml.md#diagnostics)で
   `mixed_timescale = "warn"` または `"allow"` を指定すると（JavaScript
   パッケージもこのテーブルを読みます。コマンドラインの `--diagnostic

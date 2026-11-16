@@ -148,6 +148,51 @@ fn aggregate_input_defaults_can_be_enabled_with_diagnostic_policy() {
 }
 
 #[test]
+fn cli_strict_flag_and_project_strict_setting_promote_latch_warnings() {
+    let project = tempfile::tempdir().unwrap();
+    let config = project.path().join("celox.toml");
+    fs::write(
+        project.path().join("top.sv"),
+        "module Top; logic en; logic [7:0] d, q; always_comb if (en) q = d; initial begin en=1; d=7; #1; $finish; end endmodule",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_celox"))
+            .current_dir(project.path())
+            .arg("run")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    fs::write(&config, "sources = ['top.sv']\ntop = 'Top'\n").unwrap();
+    let warned = run(&[]);
+    assert!(
+        warned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&warned.stderr)
+    );
+    assert!(String::from_utf8_lossy(&warned.stderr).contains("inferred_latch"));
+    let strict = run(&["--strict"]);
+    assert!(!strict.status.success());
+    assert!(String::from_utf8_lossy(&strict.stderr).contains("inferred_latch"));
+    // An explicit per-code level wins over --strict.
+    let relaxed = run(&["--strict", "--diagnostic", "inferred_latch=warn"]);
+    assert!(
+        relaxed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&relaxed.stderr)
+    );
+    fs::write(
+        &config,
+        "sources = ['top.sv']\ntop = 'Top'\nstrict = true\n",
+    )
+    .unwrap();
+    let project_strict = run(&[]);
+    assert!(!project_strict.status.success());
+    assert!(String::from_utf8_lossy(&project_strict.stderr).contains("inferred_latch"));
+}
+
+#[test]
 fn inferred_latch_uses_common_diagnostics_for_run_and_build() {
     let project = tempfile::tempdir().unwrap();
     let config = project.path().join("celox.toml");

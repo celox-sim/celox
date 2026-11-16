@@ -136,7 +136,7 @@ impl NativeSimulatorHandle {
                     .clone()
                     .with_inferred_latches(opts.allow_inferred_latches),
             ),
-            (true, false) => celox::compile_sv_to_sir(
+            (true, false) => celox::compile_sv_to_sir_with_diagnostic_policy(
                 &sv_refs,
                 &top,
                 &false_loops,
@@ -149,8 +149,12 @@ impl NativeSimulatorHandle {
                 opts.reset_type,
                 &opts.parameters,
                 &opts.optimize_options,
+                &opts
+                    .diagnostic_policy
+                    .clone()
+                    .with_inferred_latches(opts.allow_inferred_latches),
             ),
-            (false, false) => celox::compile_mixed_to_sir(
+            (false, false) => celox::compile_mixed_to_sir_with_diagnostic_policy(
                 &source_refs,
                 &sv_refs,
                 &top,
@@ -164,6 +168,10 @@ impl NativeSimulatorHandle {
                 opts.reset_type,
                 &opts.parameters,
                 &opts.optimize_options,
+                &opts
+                    .diagnostic_policy
+                    .clone()
+                    .with_inferred_latches(opts.allow_inferred_latches),
             ),
         }
         .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -213,7 +221,7 @@ impl NativeSimulatorHandle {
     ) -> Result<Self> {
         let mut opts = parse_options_common(&options)?;
         let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
-        opts.diagnostic_policy = celox_cfg.diagnostics.clone();
+        opts.diagnostic_policy = celox_cfg.diagnostic_policy(opts.diagnostic_policy.strict);
         append_extra_source(&mut sources, &opts.extra_source);
 
         let source_refs: Vec<(&str, &std::path::Path)> = sources

@@ -69,6 +69,10 @@ pub struct NapiOptions {
     /// Permit inferred latches when inferred_latch has no explicit diagnostic level.
     /// Explicit project diagnostics take precedence. Default: false.
     pub allow_inferred_latches: Option<bool>,
+    /// Promote recoverable diagnostics (inferred latches and other
+    /// compatibility fallbacks) from warnings to errors.
+    /// Explicit per-code project diagnostics take precedence. Default: false.
+    pub strict: Option<bool>,
     pub vcd: Option<String>,
     /// Path of the FST waveform file to record; mutually exclusive with `vcd`.
     pub fst: Option<String>,
@@ -403,7 +407,8 @@ pub(super) fn parse_options_common(options: &Option<NapiOptions>) -> Result<Pars
                 celox::OptimizeOptions::all()
             };
             Ok(ParsedOptionsCommon {
-                diagnostic_policy: Default::default(),
+                diagnostic_policy: celox::DiagnosticPolicy::default()
+                    .strict(o.strict.unwrap_or(false)),
                 four_state: o.four_state.unwrap_or(false),
                 plusargs: o.plusargs.clone().unwrap_or_default(),
                 allow_inferred_latches: o.allow_inferred_latches.unwrap_or(false),

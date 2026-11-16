@@ -63,21 +63,30 @@ fn complete_binary_case_has_no_latch_diagnostic() {
 #[test]
 fn missing_case_still_infers_latch() {
     let source = source(true);
+    let sim = Simulator::builder(&source, "Top").build_native().unwrap();
+    assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
     let error = Simulator::builder(&source, "Top")
+        .strict(true)
         .build_native()
         .map(|_| ())
-        .expect_err("missing selector 15 must be rejected");
+        .expect_err("missing selector 15 must be rejected in strict mode");
     assert!(error.to_string().contains("inferred_latch"), "{error}");
 }
 
 #[test]
 fn four_state_selector_keeps_unmatched_retention() {
     let source = source(false);
-    let error = Simulator::builder(&source, "Top")
+    let sim = Simulator::builder(&source, "Top")
         .four_state(true)
         .build_native()
+        .unwrap();
+    assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
+    let error = Simulator::builder(&source, "Top")
+        .four_state(true)
+        .strict(true)
+        .build_native()
         .map(|_| ())
-        .expect_err("binary labels do not cover X/Z");
+        .expect_err("binary labels do not cover X/Z in strict mode");
     assert!(error.to_string().contains("inferred_latch"), "{error}");
 }
 
@@ -88,7 +97,13 @@ fn complete_labels_do_not_hide_missing_assignments_or_other_selectors() {
         source(false).replace("4'd15:", "5'd31:"),
         source(false).replace("4'd15:", "d[3:0]:"),
     ] {
+        // The non-constant label source fails in the analyzer instead;
+        // the other two compile with one latch warning by default.
+        if let Ok(sim) = Simulator::builder(&source, "Top").build_native() {
+            assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
+        }
         let error = Simulator::builder(&source, "Top")
+            .strict(true)
             .build_native()
             .map(|_| ())
             .expect_err("incomplete coverage must not be proved combinational");

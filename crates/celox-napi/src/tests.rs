@@ -151,6 +151,7 @@ fn native_handle_dumps_consume_activity_until_memory_is_exposed() {
             four_state: None,
             plusargs: None,
             allow_inferred_latches: None,
+            strict: None,
             opt_level: None,
             pass_overrides: None,
             optimize: None,
@@ -215,6 +216,7 @@ fn fst_option_records_a_parseable_waveform_and_conflicts_with_vcd() {
             four_state: None,
             plusargs: None,
             allow_inferred_latches: None,
+            strict: None,
             opt_level: None,
             pass_overrides: None,
             optimize: None,
@@ -620,6 +622,18 @@ fn inferred_latch_policy_differs() {
     assert_ne!(
         build_cache_key(&src, "Top", &strict, None),
         build_cache_key(&src, "Top", &permissive, None),
+    );
+}
+
+#[test]
+fn strict_policy_differs() {
+    let src = make_sources(&[("module Top {}", "a.veryl")]);
+    let default = default_opts();
+    let mut strict = default_opts();
+    strict.common.diagnostic_policy.strict = true;
+    assert_ne!(
+        build_cache_key(&src, "Top", &default, None),
+        build_cache_key(&src, "Top", &strict, None),
     );
 }
 

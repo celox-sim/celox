@@ -44,6 +44,10 @@ pub(super) fn append_extra_source(
 pub(super) struct CeloxConfig {
     #[serde(default)]
     pub(super) diagnostics: celox::DiagnosticPolicy,
+    /// Root `strict = true` in celox.toml: promote recoverable diagnostics
+    /// to errors. A per-call `strict` option also enables it.
+    #[serde(default)]
+    pub(super) strict: Option<bool>,
     /// Glob patterns (relative to project root) for `.veryl` files to exclude
     /// from compilation and type generation.
     #[serde(default)]
@@ -52,6 +56,16 @@ pub(super) struct CeloxConfig {
     pub(super) test: CeloxTestConfig,
     #[serde(default)]
     pub(super) simulation: CeloxSimulationConfig,
+}
+
+impl CeloxConfig {
+    /// The project diagnostic policy, with strict mode from the project
+    /// setting or the per-call `strict` option.
+    pub(super) fn diagnostic_policy(&self, strict_option: bool) -> celox::DiagnosticPolicy {
+        self.diagnostics
+            .clone()
+            .strict(self.strict.unwrap_or(false) || strict_option)
+    }
 }
 
 #[derive(serde::Deserialize, Default)]
