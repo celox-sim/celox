@@ -52,7 +52,12 @@ fn lower_methods(
             item.map(|item| item.name(&name)).unwrap_or(name)
         }
     };
+    // An inline randomization that another scope requested names its
+    // class, which this scope may reach only through that scope's package,
+    // as an interface instance that imports it does for the module that
+    // binds it.
     let handle = classes::handle_type(tree, session, &class.name)
+        .or_else(|| inline.map(|_| classes::handle(&mut session.types, &class.name)))
         .ok_or_else(|| unsupported("class randomization receiver"))?;
     let convert_type =
         |session: &mut Session, ty| crate::ast::ir_type(session, &tree.functions, ty, env);
