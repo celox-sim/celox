@@ -2793,10 +2793,10 @@ generated/uvm-examples/uvm_tb_build_ss_tb.sv	2state	fail
 generated/uvm-examples/uvm_tb_build_ss_tb.sv	4state	fail
 generated/uvm-examples/uvm_test_init.sv	2state	pass
 generated/uvm-examples/uvm_test_init.sv	4state	pass
-generated/uvm-examples/uvm_use_models_bidir_get_put.sv	2state	fail
-generated/uvm-examples/uvm_use_models_bidir_get_put.sv	4state	fail
-generated/uvm-examples/uvm_use_models_bidir_item_done.sv	2state	fail
-generated/uvm-examples/uvm_use_models_bidir_item_done.sv	4state	fail
+generated/uvm-examples/uvm_use_models_bidir_get_put.sv	2state	pass
+generated/uvm-examples/uvm_use_models_bidir_get_put.sv	4state	pass
+generated/uvm-examples/uvm_use_models_bidir_item_done.sv	2state	pass
+generated/uvm-examples/uvm_use_models_bidir_item_done.sv	4state	pass
 generated/uvm-examples/uvm_use_models_pipelined_get_put.sv	2state	fail
 generated/uvm-examples/uvm_use_models_pipelined_get_put.sv	4state	fail
 generated/uvm-examples/uvm_use_models_pipelined_item_done.sv	2state	pass
