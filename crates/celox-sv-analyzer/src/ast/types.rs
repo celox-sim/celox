@@ -823,7 +823,9 @@ pub(super) fn illegal_enum_base(base: &Type) -> Option<&'static str> {
         TypeKind::Object | TypeKind::Process | TypeKind::Event => {
             return Some("its base type is a handle type");
         }
-        TypeKind::Implicit => return None,
+        // A typedef of an implicit type, such as `signed [3:0]`, is a
+        // vector of `logic`.
+        TypeKind::Implicit => {}
     }
     if base.is_enum {
         return Some("its base type is an enumeration");

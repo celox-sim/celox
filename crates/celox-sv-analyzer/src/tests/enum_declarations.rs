@@ -30,6 +30,10 @@ fn rejects_enumeration_bases_that_are_no_integer_types() {
             "typedef struct packed { int x; } T; enum T {A} e;",
             "a packed structure",
         ),
+        (
+            "typedef signed [1:0][1:0] T; enum T {A} e;",
+            "more than one packed dimension",
+        ),
     ] {
         let error = enumeration(declarations).unwrap_err();
         assert!(
@@ -47,6 +51,7 @@ fn accepts_enumeration_bases_that_name_integer_types() {
         "typedef bit [3:0] T; enum T {A, B} e;",
         "typedef logic T; enum T [3:0] {A, B} e;",
         "typedef logic [7:0] B; typedef B T; enum T {A, C} e;",
+        "typedef signed [3:0] T; enum T {A, C} e;",
         "enum integer {A, B} e;",
         "enum logic [3:0] {A, B} e;",
     ] {
@@ -77,6 +82,11 @@ fn rejects_enumeration_values_that_are_not_unique_or_increment_the_maximum() {
             "increments the maximum value",
         ),
         ("enum byte {a = 127, b} e;", "increments the maximum value"),
+        // A value only a constant function call gives.
+        (
+            "function automatic int one(); return 1; endfunction enum {A = one(), B = 1} e;",
+            "have the same value",
+        ),
         // Bases of 128 bits and more keep every bit of the values.
         (
             "enum bit [127:0] {a = 128'hffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff, b} e;",

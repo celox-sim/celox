@@ -1130,18 +1130,13 @@ pub(in crate::ast) fn validate_enum_initializers(
             values.unknown();
             continue;
         }
-        match literal.as_ref() {
-            // An X/Z value is not compared with the known ones.
-            Some(literal) if !previous_unknown => values.assign(&name, literal)?,
-            _ => values.unknown(),
-        }
         if previous_unknown {
             // Preserve masks when a later enumerator refers to this member.
             // Numeric constant environments cannot represent X/Z values.
             unknown_literals.insert(
                 name.clone(),
                 Expr::Literal(resize_integral_literal_for_cast(
-                    literal.unwrap(),
+                    literal.clone().unwrap(),
                     shape.width,
                     shape.signed,
                 )),
@@ -1154,6 +1149,23 @@ pub(in crate::ast) fn validate_enum_initializers(
             .map(|value| {
                 parameters::coerce_const_parameter_value(value, shape.width, shape.signed)
             });
+        match (literal.as_ref(), next) {
+            // An X/Z value is not compared with the known ones.
+            _ if previous_unknown => values.unknown(),
+            (Some(literal), _) => values.assign(&name, literal)?,
+            // A value only the numeric evaluation resolves, such as that
+            // of a constant function call.
+            (None, Some(value)) => values.assign(
+                &name,
+                &typecheck::IntegralLiteral {
+                    width: 128,
+                    signed: true,
+                    value: num_bigint::BigUint::from(value as u128),
+                    mask: num_bigint::BigUint::default(),
+                },
+            )?,
+            (None, None) => values.unknown(),
+        }
         if let Some(value) = next {
             env.insert(name.clone(), value);
             dimensions::insert_parameter_type_markers(&mut env, &name, shape);
@@ -1168,7 +1180,7 @@ pub(in crate::ast) fn validate_enum_initializers(
 struct EnumValues {
     width: usize,
     signed: bool,
-    members: Vec<(String, num_bigint::BigUint)>,
+    members: HashMap<num_bigint::BigUint, String>,
     /// The value of the last member, if it is known and has no X/Z bits;
     /// before the first member, the value an implicit first member takes.
     last: Option<num_bigint::BigUint>,
@@ -1180,7 +1192,7 @@ impl EnumValues {
         Self {
             width,
             signed,
-            members: Vec::new(),
+            members: HashMap::default(),
             last: Some(num_bigint::BigUint::default()),
             first: true,
         }
@@ -1238,7 +1250,7 @@ impl EnumValues {
     }
 
     fn insert(&mut self, name: &str, value: num_bigint::BigUint) -> Converted<()> {
-        if let Some((other, _)) = self.members.iter().find(|(_, other)| *other == value) {
+        if let Some(other) = self.members.get(&value) {
             let shown = if self.signed && value.bit((self.width - 1) as u64) {
                 format!(
                     "-{}",
@@ -1251,7 +1263,7 @@ impl EnumValues {
                 "members `{other}` and `{name}` have the same value {shown}"
             ));
         }
-        self.members.push((name.to_owned(), value.clone()));
+        self.members.insert(value.clone(), name.to_owned());
         self.last = Some(value);
         Ok(())
     }
