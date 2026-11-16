@@ -2803,8 +2803,8 @@ generated/uvm-examples/uvm_use_models_pipelined_item_done.sv	2state	pass
 generated/uvm-examples/uvm_use_models_pipelined_item_done.sv	4state	pass
 generated/uvm-examples/uvm_use_models_unidirectional.sv	2state	pass
 generated/uvm-examples/uvm_use_models_unidirectional.sv	4state	pass
-generated/uvm-examples/uvm_vif_config_db.sv	2state	fail
-generated/uvm-examples/uvm_vif_config_db.sv	4state	fail
+generated/uvm-examples/uvm_vif_config_db.sv	2state	pass
+generated/uvm-examples/uvm_vif_config_db.sv	4state	pass
 generated/uvm-examples/uvm_virt_seq_find_all.sv	2state	pass
 generated/uvm-examples/uvm_virt_seq_find_all.sv	4state	pass
 generated/uvm-examples/uvm_wait_for_signal.sv	2state	pass
