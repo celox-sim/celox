@@ -1061,8 +1061,13 @@ endmodule"#;
                     panic!("four_state={four_state}, level={level:?}, fused={fused}: {error}")
                 });
                 assert!(simulation.is_finished());
-                let q = simulation.signal("q");
-                assert_eq!(simulation.get(q), num_bigint::BigUint::from(1u8));
+                // The design checks `q` itself. Combinational logic writes
+                // it, so O2's dead-store policy does not let the host read
+                // it.
+                if level == crate::OptLevel::O0 {
+                    let q = simulation.signal("q");
+                    assert_eq!(simulation.get(q), num_bigint::BigUint::from(1u8));
+                }
                 let stats = simulation.scheduler_stats();
                 assert!(stats.compiled_slots > 0, "{stats:?}");
                 assert!(stats.checked_steps > 0, "{stats:?}");

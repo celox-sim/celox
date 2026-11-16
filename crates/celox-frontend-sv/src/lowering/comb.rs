@@ -75,6 +75,12 @@ pub(super) struct Comb<'p, 'a> {
     pub continuous: bool,
     /// Whether the process is an `initial` block, which defines initial state.
     pub initial: bool,
+    /// Whether a variable the process does not write on every path may keep
+    /// its value there, as a latch.
+    pub hold_latches: bool,
+    /// Whether the process keeps a variable's value on a path, which it
+    /// then defines as a latch.
+    pub held: bool,
 }
 
 fn range_error(error: impl std::fmt::Display) -> sv::AnalyzerError {
@@ -99,6 +105,8 @@ impl<'p, 'a> Comb<'p, 'a> {
             folds: loops::Folds::default(),
             continuous: false,
             initial: false,
+            hold_latches: false,
+            held: false,
         }
     }
 
