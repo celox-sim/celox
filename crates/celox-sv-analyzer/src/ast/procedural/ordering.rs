@@ -3,11 +3,152 @@
 //! The expression gives each element the key it is ordered by. The keys are
 //! computed once, into a hidden queue beside the container, and a stable
 //! insertion sort then moves the elements and their keys together, in place.
+//!
+//! The ordering methods of a fixed-size array variable, which no container
+//! holds, order a container of its elements and copy them back.
 use super::*;
 use celox_sv_syntax::ExprKind;
 use system_functions::{ContainerKind, ContainerLayout, ContainerOp, HandleProperty, StringOp};
 
 impl BodyBuilder<'_, '_, '_> {
+    /// The statements of `a.reverse()`, `a.sort()`, `a.rsort()` or
+    /// `a.shuffle()` when statement expression `id` is one, of a fixed-size
+    /// unpacked array variable of one dimension, which no container holds
+    /// (IEEE 1800-2023 7.12.2): its elements are copied into a container,
+    /// from its left index to its right one (7.4), ordered there as a
+    /// container's are, and copied back.
+    pub(super) fn fixed_ordering_statement(
+        &mut self,
+        id: celox_sv_syntax::ExprId,
+    ) -> Converted<Option<Vec<Stmt>>> {
+        let native = self.tree.declarations();
+        let id = expression_binding::ungroup(id, native);
+        let (member, arguments) = match &native.expression(id).kind {
+            ExprKind::Call {
+                expression,
+                arguments,
+            } => (*expression, arguments.as_slice()),
+            _ => (id, &[][..]),
+        };
+        let ExprKind::Member {
+            expression: base,
+            separator,
+            name,
+        } = &native.expression(member).kind
+        else {
+            return Ok(None);
+        };
+        let op = match name.spelling.as_str() {
+            "reverse" => ContainerOp::Reverse,
+            "sort" => ContainerOp::Sort,
+            "rsort" => ContainerOp::Rsort,
+            "shuffle" => ContainerOp::Shuffle,
+            _ => return Ok(None),
+        };
+        let ExprKind::Name(array) = &native
+            .expression(expression_binding::ungroup(*base, native))
+            .kind
+        else {
+            return Ok(None);
+        };
+        let array = instances::normalize_identifier(&array.spelling);
+        let Some(shape) = self.dims.get(&array) else {
+            return Ok(None);
+        };
+        if separator != "." || shape.container.is_some() || shape.unpacked.len() != 1 {
+            return Ok(None);
+        }
+        let Some(declared) = type_names::declared_type(shape).cloned() else {
+            return Ok(None);
+        };
+        // The methods take no arguments; `a.sort()` lists one empty one.
+        if !matches!(
+            arguments,
+            [] | [celox_sv_syntax::Argument {
+                name: None,
+                value: None,
+                ..
+            }]
+        ) {
+            return Err(unsupported("ordering method arguments"));
+        }
+        // The array is written as an assignment writes it.
+        self.native_lvalue(*base, false)?;
+        let target =
+            containers::fixed_storage(&declared, &self.session.types, self.tree, &self.dims)?;
+        let layout = target.layout;
+        if matches!(op, ContainerOp::Sort | ContainerOp::Rsort) {
+            // Chandles have no relational operators (6.14, 7.12.2).
+            if target.element.is_chandle() {
+                return Err(AnalyzerError::IllegalChandleUse {
+                    detail: "sorting chandles".into(),
+                });
+            }
+            if layout.handle == Some(HandleProperty::Object) {
+                return Err(unsupported(
+                    "sorting class handles requires a with expression",
+                ));
+            }
+        }
+        let mut elements = containers::fixed_array_literal(
+            *base,
+            self.tree,
+            &self.session.types,
+            &self.dims,
+            &target,
+        )?;
+        self.rename_expr(&mut elements);
+        // A container is held by its handle (see `containers::with_dimensions`).
+        let mut held = Type::new(TypeKind::Object);
+        held.packed_ranges.push(PackedRange::new(
+            ConstExpr::Literal("31".into()),
+            ConstExpr::Literal("0".into()),
+        ));
+        held.container = Some(target.clone());
+        let ordered = self.declare("$celox_ordered", held);
+        let ident = || Expr::Ident(ordered.clone());
+        let mut stmts = vec![
+            Stmt::Local {
+                name: ordered.clone(),
+                init: None,
+            },
+            Stmt::Assign {
+                lhs: LValue::Ident(ordered.clone()),
+                rhs: elements,
+                nonblocking: false,
+            },
+            Stmt::Eval(containers::call(op, layout, vec![ident()])),
+        ];
+        let (left, right) = target.fixed.expect("the range of a fixed-size array");
+        let indices: Vec<i128> = if left <= right {
+            (left..=right).collect()
+        } else {
+            (right..=left).rev().collect()
+        };
+        // The container holds the elements in that order, the one at
+        // position `k` the array's `k`-th from its left index.
+        for (position, index) in indices.into_iter().enumerate() {
+            let get = containers::call(
+                ContainerOp::Get,
+                layout,
+                vec![ident(), Expr::Literal(position.to_string())],
+            );
+            let mut lhs = selects::lvalue_from_indices(
+                self.tree,
+                array.clone(),
+                vec![ConstExpr::Literal(index.to_string())],
+                &self.dims,
+            )?;
+            self.rename_lvalue(&mut lhs);
+            stmts.push(Stmt::Assign {
+                lhs,
+                rhs: containers::element_read(&target, &self.session.types, get),
+                nonblocking: false,
+            });
+        }
+        Ok(Some(stmts))
+    }
+
     /// The statements of `a.sort with (key)` or `a.rsort with (key)` when
     /// statement expression `id` is one.
     pub(super) fn ordering_with_statement(
