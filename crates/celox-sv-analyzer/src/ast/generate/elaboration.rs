@@ -470,7 +470,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         self.remaining = self
             .remaining
             .checked_sub(1)
-            .ok_or_else(|| unsupported("loop-generate unroll limit exceeded"))?;
+            .ok_or_else(|| { eprintln!("PROBE unroll scope={:?} var={name} value={value}", parent.path); unsupported("loop-generate unroll limit exceeded") })?;
         let iteration = Rc::new(iteration);
         jobs.push(Job::Update {
             id,
