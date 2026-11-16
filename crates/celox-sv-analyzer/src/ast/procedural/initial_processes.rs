@@ -225,6 +225,57 @@ pub(in crate::ast) fn initial_processes_from_scope(
             }
             continue;
         }
+        // The process of each instance of a sequential UDP (see
+        // `primitives`).
+        if let celox_sv_syntax::BodyItemKind::LogicGate(gate) =
+            &tree.declarations().body_item(item.id).kind
+            && let Some(primitive) = primitives::sequential(tree.declarations(), &gate.kind)
+        {
+            let (item_dimensions, literals) = views.get(item);
+            for instance in &gate.instances {
+                let mut inputs = Vec::new();
+                for &input in instance.terminals.iter().skip(1) {
+                    inputs.push(expression_binding::value(
+                        input,
+                        tree.declarations(),
+                        tree,
+                        session,
+                        item_dimensions,
+                    )?);
+                }
+                let initial = match primitive.initial {
+                    Some(value) => expression_binding::value(
+                        value,
+                        tree.declarations(),
+                        tree,
+                        session,
+                        item_dimensions,
+                    )?,
+                    None => Expr::Literal("1'bx".into()),
+                };
+                let mut body = primitives::process(primitive, gate, instance, inputs, initial);
+                for stmt in &mut body {
+                    substitute_stmt_constants(tree, session, stmt, &item.env, literals);
+                    qualify_stmt(item, stmt);
+                    substitute_stmt_constants(tree, session, stmt, const_env, parameter_literals);
+                }
+                processes.push(InitialProcess {
+                    creation_order,
+                    site: process_site(
+                        "user-defined primitive",
+                        tree.declarations().body_item(item.id).tokens,
+                        tree,
+                    ),
+                    condition: None,
+                    body,
+                    kind: celox_design::ProcessKind::Regular,
+                    validation_body: Vec::new(),
+                    synthetic: false,
+                    repeats: true,
+                });
+            }
+            continue;
+        }
         let Some(procedure) = item.procedure(tree.declarations())? else {
             continue;
         };

@@ -228,3 +228,118 @@ endmodule
   (top Top) (run_until 4) (assert_eq y 0)
   (set a 1) (run_until 6) (assert_eq y 0)
   (run_until 8) (assert_eq y 1))
+
+; A sequential user-defined primitive keeps a state, which starts with its
+; initial value (29.5) and which each change of an input updates with the
+; next state of the first level-sensitive entry that matches, else of the
+; first edge-sensitive entry of that change; `-` keeps the state (IEEE
+; 1800-2023 29.6, 29.7).
+(case sequential_primitive_tables
+  (source "udp_sequential.sv" #"
+primitive dff (q, d, clk);
+  output q;
+  reg q;
+  input d, clk;
+  initial q = 1'b0;
+  table
+  // d  clk  : q : q+
+     0 (01)  : ? : 0;
+     1 (01)  : ? : 1;
+     ? (?0)  : ? : -;
+    (??) ?   : ? : -;
+  endtable
+endprimitive
+primitive latch (output reg q, input d, en);
+  table
+     ? 0 : ? : -;
+     0 1 : ? : 0;
+     1 1 : ? : 1;
+  endtable
+endprimitive
+module Top(output bit ok);
+  reg d = 0, clk = 0, en = 0;
+  wire q, l;
+  dff ff(q, d, clk);
+  latch (l, d, en);
+  initial begin
+    ok = 1;
+    #1 if (q !== 1'b0) ok = 0;
+    d = 1;
+    #1 if (q !== 1'b0) ok = 0;
+    clk = 1;
+    #1 if (q !== 1'b1) ok = 0;
+    d = 0;
+    #1 if (q !== 1'b1) ok = 0;
+    clk = 0;
+    #1 if (q !== 1'b1) ok = 0;
+    en = 1;
+    #1 if (l !== 1'b0) ok = 0;
+    d = 1;
+    #1 if (l !== 1'b1) ok = 0;
+    en = 0;
+    #1 d = 0;
+    #1 if (l !== 1'b1 || q !== 1'b1) ok = 0;
+  end
+endmodule
+"#)
+  (top Top) (run_until 20) (assert_eq ok 1))
+
+; A change of an input that no entry matches makes the state x (29.7);
+; the state keeps the initial value until an input changes (29.5).
+(case sequential_primitive_unspecified_edges
+  (four_state)
+  (source "udp_unspecified.sv" #"
+primitive rise (q, d, clk);
+  output reg q = 1'b1;
+  input d, clk;
+  table
+     0 (01) : ? : 0;
+     1 (01) : ? : 1;
+     ? (?0) : ? : -;
+  endtable
+endprimitive
+module Top(output bit ok);
+  reg d, clk;
+  wire q, late;
+  rise r(q, d, clk);
+  // The initial value reaches the output when simulation begins, before
+  // the delay of the instance (29.3.3).
+  rise #4 delayed(late, d, clk);
+  initial begin
+    ok = 1;
+    #1 if (q !== 1'b1 || late !== 1'b1) ok = 0;
+    d = 0;
+    #1 if (q !== 1'bx) ok = 0;
+    clk = 0;
+    #1 if (q !== 1'bx) ok = 0;
+    clk = 1;
+    #1 if (q !== 1'b0) ok = 0;
+  end
+endmodule
+"#)
+  (top Top) (run_until 10) (assert_eq ok 1))
+
+; A UDP takes a z input as x (29.3.5): a change between x and z is no
+; change of the input.
+(case sequential_primitive_inputs_take_z_as_x
+  (four_state)
+  (source "udp_z.sv" #"
+primitive changed (output reg q = 1'b0, input a);
+  table
+    (??) : ? : 1;
+  endtable
+endprimitive
+module Top(output bit ok);
+  reg a;
+  wire q;
+  changed c(q, a);
+  initial begin
+    ok = 1;
+    a = 1'bz;
+    #1 if (q !== 1'b0) ok = 0;
+    a = 1'b1;
+    #1 if (q !== 1'b1) ok = 0;
+  end
+endmodule
+"#)
+  (top Top) (run_until 5) (assert_eq ok 1))
