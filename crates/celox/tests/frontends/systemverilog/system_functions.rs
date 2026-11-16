@@ -3799,3 +3799,49 @@ fn readmem_reports_each_call_of_an_unrolled_loop() {
         "{reports:?}"
     );
 }
+
+/// An address that a signed 64-bit integer cannot hold names no word: the
+/// load reports it and loads nothing, rather than taking its low bits.
+#[test]
+fn readmem_reports_an_address_beyond_64_bits() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("words.hex");
+    std::fs::write(&file, "12 34").unwrap();
+    let source = format!(
+        r#"`timescale 1ns/1ns
+        module top;
+            logic [7:0] mem [0:1];
+            logic [64:0] start;
+            initial begin
+                mem[0] = 8'h55; mem[1] = 8'h66;
+                start = 65'h1_0000_0000_0000_0001;
+                #1 $readmemh("{}", mem, start);
+                $display("%h %h", mem[0], mem[1]);
+                $finish;
+            end
+        endmodule"#,
+        file.display()
+    );
+    let mut sim = celox::Simulation::from_sv_sources(vec![(&source, Path::new("wide.sv"))], "top")
+        .build()
+        .unwrap();
+    sim.run_until(10).unwrap();
+    let mut lines = Vec::new();
+    let mut errors = Vec::new();
+    for event in sim.drain_runtime_events() {
+        match event {
+            celox::RuntimeEvent::Display { message } => {
+                lines.push(String::from_utf8_lossy(&message).into_owned())
+            }
+            celox::RuntimeEvent::Report(report) if report.severity == celox::Severity::Error => {
+                errors.push(String::from_utf8_lossy(&report.message).into_owned())
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(lines, ["55 66"]);
+    assert!(
+        matches!(&errors[..], [error] if error.contains("address is outside the destination range")),
+        "{errors:?}"
+    );
+}

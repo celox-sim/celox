@@ -248,9 +248,10 @@ const _: () = assert!(
         && MEMORY_FILE_MESSAGE <= 0xff
 );
 
-/// `range(start, finish, unknown)`: the addresses the next
-/// [`MEMORY_FILE_LOAD`] loads from and toward, as signed integers, and
-/// whether either has an unknown bit (IEEE 1800-2023 21.4).
+/// `range(start, finish, flags)`: the addresses the next
+/// [`MEMORY_FILE_LOAD`] loads from and toward, as signed integers; `flags`
+/// has bit 0 when either has an unknown bit and bit 1 when either is beyond
+/// a signed 64-bit integer (IEEE 1800-2023 21.4).
 pub const MEMORY_FILE_RANGE: u64 = 160;
 /// `load(descriptor, file)`: read memory file string `file` as string
 /// `descriptor` describes, through the reader of the heap (see
@@ -263,7 +264,8 @@ pub const MEMORY_FILE_POSITION: u64 = 162;
 /// its value plane, or of its unknown plane when the parameter is 1.
 pub const MEMORY_FILE_WORD: u64 = 163;
 /// `message()`: the warning of the last load, or its error when the
-/// parameter is 1, as a string; the empty string when it has none.
+/// parameter is 1, as a string; the empty string when it has none. Taking
+/// the error ends the load, whose words are dropped.
 pub const MEMORY_FILE_MESSAGE: u64 = 164;
 
 impl Heap {

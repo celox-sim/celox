@@ -17,6 +17,12 @@ pub trait MemoryFileReader: Send {
         file: &[u8],
         range: Option<MemoryFileRange>,
     ) -> MemoryFileWords;
+
+    /// The reader as its own type, for the simulator that installed it.
+    fn as_any(&self) -> &dyn std::any::Any;
+
+    /// The reader as its own type, for the simulator that installed it.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
 /// The addresses a memory file load is given at run time.
@@ -26,6 +32,9 @@ pub struct MemoryFileRange {
     pub finish: i64,
     /// Whether either address has an unknown bit, which loads nothing.
     pub unknown: bool,
+    /// Whether either address is beyond a signed 64-bit integer, which no
+    /// array is addressed by.
+    pub unrepresentable: bool,
 }
 
 /// The words a memory file load gives, and its messages.
@@ -88,6 +97,16 @@ impl Heap {
         self.memory_files.reader.take()
     }
 
+    /// The reader [`Self::set_memory_file_reader`] installed.
+    pub fn memory_file_reader(&self) -> Option<&dyn MemoryFileReader> {
+        self.memory_files.reader.as_deref()
+    }
+
+    /// The reader [`Self::set_memory_file_reader`] installed.
+    pub fn memory_file_reader_mut(&mut self) -> Option<&mut (dyn MemoryFileReader + 'static)> {
+        self.memory_files.reader.as_deref_mut()
+    }
+
     pub(crate) fn memory_file_call(
         &mut self,
         op: u64,
@@ -102,7 +121,8 @@ impl Heap {
                 files.range = Some(MemoryFileRange {
                     start: a as i64,
                     finish: b as i64,
-                    unknown: c != 0,
+                    unknown: c & 1 != 0,
+                    unrepresentable: c & 2 != 0,
                 });
                 0
             }
@@ -141,7 +161,9 @@ impl Heap {
                 let message = if parameter & 1 == 0 {
                     files.loaded.warning.take()
                 } else {
-                    files.loaded.error.take()
+                    // The error is the last thing compiled code takes of a
+                    // load; its words are stored by now.
+                    std::mem::take(&mut files.loaded).error
                 };
                 match message {
                     Some(message) => self.intern(&message).into(),

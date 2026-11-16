@@ -263,3 +263,47 @@ fn writemem_uses_injected_io() {
     sim.run_until(1).unwrap();
     assert_eq!(sim.get(sim.signal("value")), u32::from(b'4').into());
 }
+
+/// The memory files the code loads go through the simulation's own file
+/// system, so a `$readmemh` reads what a `$writememh` of the same
+/// simulation wrote there, also in a file system of the embedding host
+/// that keeps its files to itself (IEEE 1800-2023 21.4, 21.5).
+#[test]
+fn readmem_reads_what_writemem_wrote_through_the_simulations_file_system() {
+    let source = r#"`timescale 1ns/1ns
+        module Top;
+            logic [7:0] a [0:1];
+            logic [7:0] b [0:1];
+            logic [7:0] start;
+            initial begin
+                a[0] = 8'h12; a[1] = 8'h34;
+                $writememh("round.hex", a);
+                $readmemh("round.hex", b);
+                $display("%h %h", b[0], b[1]);
+                a[1] = 8'h56;
+                #1 $writememh("round.hex", a);
+                start = 8'h01;
+                $readmemh("round.hex", b, start);
+                $display("%h %h", b[0], b[1]);
+                $finish;
+            end
+        endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("round.sv"))], "Top")
+        .file_system(|| Box::<file_system::TestIo>::default())
+        .build()
+        .unwrap();
+    sim.run_until(10).unwrap();
+    let lines: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => {
+                Some(String::from_utf8_lossy(&message).into_owned())
+            }
+            _ => None,
+        })
+        .collect();
+    // The file has two words for the one address of the second load, which
+    // takes its first.
+    assert_eq!(lines, ["12 34", "12 12"]);
+}

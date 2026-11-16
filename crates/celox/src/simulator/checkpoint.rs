@@ -225,14 +225,13 @@ impl<B: SimBackend> Simulator<B> {
     /// The file-I/O effect handler. Its state is deliberately outside core
     /// checkpoints; an embedding system may snapshot it separately.
     pub fn file_io(&self) -> &celox_runtime::file_io::FileIo {
-        &self.file_io
+        self.files()
     }
 
-    /// Replace the file-I/O effect handler at a host execution boundary. The
-    /// memory files the code loads keep being read from the file system the
-    /// simulator was built with.
+    /// Replace the file-I/O effect handler at a host execution boundary,
+    /// through which the memory files the code loads are read too.
     pub fn replace_file_io(&mut self, file_io: celox_runtime::file_io::FileIo) {
-        self.file_io = file_io;
+        *self.files_mut() = file_io;
     }
 
     pub(crate) fn check_host_restore_support(&self) -> Result<(), CheckpointError> {

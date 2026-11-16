@@ -459,7 +459,10 @@ impl MemoryFileLoad {
         if width == 0 || first > last {
             return None;
         }
-        Some((first * width, (last + 1) * width - 1))
+        // A range beyond the bits of any array writes none.
+        let lsb = first.checked_mul(width)?;
+        let msb = last.checked_add(1)?.checked_mul(width)?.checked_sub(1)?;
+        Some((lsb, msb))
     }
 
     /// The task, for messages.

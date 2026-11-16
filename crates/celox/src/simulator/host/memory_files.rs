@@ -47,7 +47,7 @@ impl<B: SimBackend> Simulator<B> {
 
     /// Run `load`, reading its file through the simulation's file system.
     pub(super) fn run_memory_file(&mut self, load: &MemoryFileLoad) -> MemoryLoad {
-        let file_io = &mut self.file_io;
+        let file_io = self.files_mut();
         load_memory_file(load, |path| file_io.read_to_string(path))
     }
 
@@ -108,28 +108,51 @@ impl<B: SimBackend> Simulator<B> {
 }
 
 impl<B: SimBackend> Simulator<B> {
-    /// Simulate with the file systems `files` makes: one for the design's
-    /// file I/O, and one through which its code reads memory files.
+    /// Simulate with the file system `files` makes, through which the
+    /// design's file I/O and the memory files its code loads both go.
     pub(crate) fn use_file_system(
         &mut self,
         files: &celox_runtime::file_io_backend::FileSystemFactory,
     ) {
-        let reader = crate::HostMemoryFileReader::with_file_system(
+        self.install_file_io(celox_runtime::file_io::FileIo::new(files.create()));
+    }
+
+    /// Simulate with file I/O `file_io`. The heap the code calls owns it with
+    /// its memory-file reader, so a load reads what the design's file writes
+    /// wrote, through the same descriptors and file system.
+    pub(super) fn install_file_io(&mut self, file_io: celox_runtime::file_io::FileIo) {
+        let reader = crate::HostMemoryFileReader::with_file_io(
             self.program.design.memory_file_bases(),
-            files.create(),
+            file_io,
         );
         self.backend
             .heap_mut()
             .set_memory_file_reader(reader.into_heap_reader());
-        self.file_io = celox_runtime::file_io::FileIo::new(files.create());
     }
 
-    /// Read memory files of the code from the host file system, as the
-    /// design's default file I/O does.
-    pub(super) fn use_host_memory_files(&mut self) {
-        let reader = crate::HostMemoryFileReader::new(self.program.design.memory_file_bases());
+    /// The simulator's own memory-file reader in its heap.
+    fn host_reader(heap: &celox_heap::Heap) -> &crate::HostMemoryFileReader {
+        heap.memory_file_reader()
+            .and_then(|reader| reader.as_any().downcast_ref())
+            .expect("a simulator's heap holds its file I/O")
+    }
+
+    /// The design's file I/O.
+    pub(crate) fn files(&self) -> &celox_runtime::file_io::FileIo {
+        Self::host_reader(self.backend.heap()).file_io()
+    }
+
+    /// The design's file I/O.
+    pub(crate) fn files_mut(&mut self) -> &mut celox_runtime::file_io::FileIo {
         self.backend
             .heap_mut()
-            .set_memory_file_reader(reader.into_heap_reader());
+            .memory_file_reader_mut()
+            .and_then(|reader| {
+                reader
+                    .as_any_mut()
+                    .downcast_mut::<crate::HostMemoryFileReader>()
+            })
+            .expect("a simulator's heap holds its file I/O")
+            .file_io_mut()
     }
 }

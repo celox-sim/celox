@@ -99,16 +99,19 @@ impl Ff<'_, '_> {
         Ok(())
     }
 
-    /// Address `expr` as a signed 64-bit integer, with 1 in a 64-bit
-    /// register when it has an unknown bit.
+    /// Address `expr` as a signed 64-bit integer, with its flags in a 64-bit
+    /// register: 1 when it has an unknown bit, 2 when a signed 64-bit integer
+    /// cannot hold it, which no array is addressed by.
     fn address_operand(
         &mut self,
         expr: &sv::ir::Expr,
     ) -> Result<(RegisterId, RegisterId), sv::AnalyzerError> {
         let signed = self.expr_signed(expr);
         let expr = self.hoist(expr)?;
-        let value = self.eval(&expr, Some((64, signed)))?;
-        let unknown = self.b.alloc_bit(64, false);
+        let natural = self.eval(&expr, None)?;
+        let wide = self.b.register(&natural).width().max(64);
+        let value = self.eval(&expr, Some((wide, signed)))?;
+        let unknown = self.b.alloc_bit(1, false);
         if let RegisterType::Logic { width } = self.b.register(&value).clone() {
             // The planes of whole 64-bit words.
             let (value, width) = if width.is_multiple_of(64) {
@@ -128,22 +131,64 @@ impl Ff<'_, '_> {
                 .emit(SIRInstruction::Slice(mask, planes, width, width));
             let zero = self.b.alloc_bit(width, false);
             self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
-            let any = self.b.alloc_bit(1, false);
             self.b
-                .emit(SIRInstruction::Binary(any, mask, BinaryOp::Ne, zero));
-            self.b
-                .emit(SIRInstruction::Unary(unknown, UnaryOp::Ident, any));
+                .emit(SIRInstruction::Binary(unknown, mask, BinaryOp::Ne, zero));
         } else {
             self.b
                 .emit(SIRInstruction::Imm(unknown, SIRValue::new(0u64)));
         }
-        let known = self.b.alloc_bit(64, signed);
+        let known = self.b.alloc_bit(wide, signed);
         self.b
             .emit(SIRInstruction::Unary(known, UnaryOp::ToTwoState, value));
-        let operand = self.b.alloc_bit(64, false);
+        // The bits above the 63 of a signed 64-bit integer must repeat its
+        // sign: all zero for an unsigned address.
+        let unrepresentable = self.b.alloc_bit(1, false);
+        if wide > 64 || !signed {
+            let high = self.b.alloc_bit(wide - 63, false);
+            self.b
+                .emit(SIRInstruction::Slice(high, known, 63, wide - 63));
+            let zero = self.b.alloc_bit(wide - 63, false);
+            self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
+            let nonzero = self.b.alloc_bit(1, false);
+            self.b
+                .emit(SIRInstruction::Binary(nonzero, high, BinaryOp::Ne, zero));
+            if signed {
+                let ones = self.b.alloc_bit(wide - 63, false);
+                self.b.emit(SIRInstruction::Imm(
+                    ones,
+                    SIRValue::new((BigUint::from(1u8) << (wide - 63)) - 1u8),
+                ));
+                let not_ones = self.b.alloc_bit(1, false);
+                self.b
+                    .emit(SIRInstruction::Binary(not_ones, high, BinaryOp::Ne, ones));
+                self.b.emit(SIRInstruction::Binary(
+                    unrepresentable,
+                    nonzero,
+                    BinaryOp::And,
+                    not_ones,
+                ));
+            } else {
+                self.b.emit(SIRInstruction::Unary(
+                    unrepresentable,
+                    UnaryOp::Ident,
+                    nonzero,
+                ));
+            }
+        } else {
+            self.b
+                .emit(SIRInstruction::Imm(unrepresentable, SIRValue::new(0u64)));
+        }
+        let low = self.b.alloc_bit(64, false);
+        self.b.emit(SIRInstruction::Slice(low, known, 0, 64));
+        let flags = self.b.alloc_bit(2, false);
+        self.b.emit(SIRInstruction::Concat(
+            flags,
+            vec![unrepresentable, unknown],
+        ));
+        let flags64 = self.b.alloc_bit(64, false);
         self.b
-            .emit(SIRInstruction::Unary(operand, UnaryOp::Ident, known));
-        Ok((operand, unknown))
+            .emit(SIRInstruction::Unary(flags64, UnaryOp::Ident, flags));
+        Ok((low, flags64))
     }
 
     /// Report string `message`, a 64-bit handle, at `severity` unless it is

@@ -74,8 +74,9 @@ pub fn frozen_bytes<A>(b: &mut SIRBuilder<A>, bytes: &[u8]) -> RegisterId {
 
 /// Run `load` when the code executes, reading the file string `file` (its
 /// handle, or `load.file` when `None`), from address `range.0` toward
-/// `range.1` when given as signed 64-bit registers; a nonzero `range.2`
-/// says an address has an unknown bit, which loads nothing. `cx` is the lowering
+/// `range.1` when given as signed 64-bit registers; `range.2` holds the
+/// flags of `MEMORY_FILE_RANGE` (an address with an unknown bit, or beyond a
+/// signed 64-bit integer), either of which loads nothing. `cx` is the lowering
 /// that `builder` gives the builder of, and `store(cx, position, word)`
 /// stores each word the file gives at its position in the storage order of
 /// the array; a word keeps its unknown bits when `four_state` is set and has

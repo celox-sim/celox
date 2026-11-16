@@ -86,7 +86,7 @@ impl<B: SimBackend> Simulator<B> {
         let descriptor = descriptor.to_u32_digits().first().copied().unwrap_or(0);
         let mut line = Vec::new();
         let success = loop {
-            match self.file_io.read_byte(descriptor) {
+            match self.files_mut().read_byte(descriptor) {
                 Ok(Some(byte)) => {
                     line.push(byte);
                     if byte == b'\n' {
@@ -133,7 +133,7 @@ impl<B: SimBackend> Simulator<B> {
                 }));
             }
             let descriptor = descriptor.to_u32_digits().first().copied().unwrap_or(0);
-            let (code, message) = self.file_io.error(descriptor);
+            let (code, message) = self.files_mut().error(descriptor);
             let bytes: Vec<_> = message.bytes().filter(|byte| *byte != 0).collect();
             let result = if site.results[1].value_kind == celox_design::ValueKind::StrRef {
                 BigUint::from(self.backend.heap_mut().intern(&bytes))
@@ -199,12 +199,12 @@ impl<B: SimBackend> Simulator<B> {
                 } else {
                     None
                 };
-                let descriptor = self.file_io.open(path, mode.as_deref());
+                let descriptor = self.files_mut().open(path, mode.as_deref());
                 self.backend.set(site.results[0].id, descriptor);
             }
             1 => {
                 let descriptor = number(0)?;
-                self.file_io
+                self.files_mut()
                     .close(descriptor)
                     .map_err(|err| error(format!("$fclose: {err}")))?;
                 self.cancel_file_strobes(descriptor);
@@ -234,7 +234,8 @@ impl<B: SimBackend> Simulator<B> {
                 };
                 let (args, message) =
                     formatted_file_write(site, &values, &format, timestamp, self.backend.heap());
-                let (stdout, write_result) = self.file_io.write_with_stdout(number(0)?, &message);
+                let (stdout, write_result) =
+                    self.files_mut().write_with_stdout(number(0)?, &message);
                 if stdout {
                     let mut format = format;
                     format.kind = if site.operation == 3 {
@@ -252,7 +253,7 @@ impl<B: SimBackend> Simulator<B> {
                 } else {
                     Some(number(0)?)
                 };
-                self.file_io
+                self.files_mut()
                     .flush(descriptor)
                     .map_err(|err| error(format!("$fflush: {err}")))?;
             }
@@ -260,7 +261,7 @@ impl<B: SimBackend> Simulator<B> {
                 let descriptor = number(usize::from(site.operation == 11))?;
                 let code: i32 = match site.operation {
                     7 => self
-                        .file_io
+                        .files_mut()
                         .tell(descriptor)
                         .ok()
                         .and_then(|position| i32::try_from(position).ok())
@@ -269,7 +270,7 @@ impl<B: SimBackend> Simulator<B> {
                         let offset = number(1)? as i32;
                         let operation = number(2)? as i32;
                         if self
-                            .file_io
+                            .files_mut()
                             .seek(descriptor, i64::from(offset), operation)
                             .is_ok()
                         {
@@ -279,14 +280,14 @@ impl<B: SimBackend> Simulator<B> {
                         }
                     }
                     9 => {
-                        if self.file_io.rewind(descriptor).is_ok() {
+                        if self.files_mut().rewind(descriptor).is_ok() {
                             0
                         } else {
                             -1
                         }
                     }
                     10 => self
-                        .file_io
+                        .files_mut()
                         .read_byte(descriptor)
                         .ok()
                         .flatten()
@@ -295,7 +296,7 @@ impl<B: SimBackend> Simulator<B> {
                         let character = number(0)?;
                         if character != u32::MAX
                             && self
-                                .file_io
+                                .files_mut()
                                 .unread_byte(descriptor, character as u8)
                                 .is_ok()
                         {
@@ -304,7 +305,7 @@ impl<B: SimBackend> Simulator<B> {
                             -1
                         }
                     }
-                    12 => i32::from(self.file_io.eof(descriptor).unwrap_or(false)),
+                    12 => i32::from(self.files_mut().eof(descriptor).unwrap_or(false)),
                     _ => unreachable!(),
                 };
                 self.backend.set(site.results[0].id, code);
@@ -366,7 +367,7 @@ impl<B: SimBackend> Simulator<B> {
                         )
                     })
                     .collect();
-                self.file_io
+                self.files_mut()
                     .write_memory_with_backend(
                         path,
                         site.operation == 5,
