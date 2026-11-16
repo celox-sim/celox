@@ -275,6 +275,22 @@ pub(super) fn net_signals(
     let Some(base) = bind(declaration.data_type, tree, session, &context)? else {
         return Err(unsupported("unsupported net data type"));
     };
+    // A net has a four-state integral type or an unpacked aggregate of
+    // such (6.7.1): no string, handle or chandle.
+    let illegal = match base.kind {
+        TypeKind::String => Some("type `string`"),
+        TypeKind::Object | TypeKind::Process | TypeKind::Event => Some("a handle type"),
+        TypeKind::Chandle => Some("type `chandle`"),
+        _ => None,
+    };
+    if let Some(data_type) = illegal
+        && let Some(variable) = declaration.variables.first()
+    {
+        return Err(AnalyzerError::IllegalNetDataType {
+            name: normalize_identifier(&variable.name.spelling),
+            data_type,
+        });
+    }
     let mut signals = Vec::new();
     for variable in &declaration.variables {
         let name = normalize_identifier(&variable.name.spelling);

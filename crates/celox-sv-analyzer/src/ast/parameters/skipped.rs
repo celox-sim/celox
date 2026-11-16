@@ -14,6 +14,27 @@ fn integer(
         .ok_or_else(|| unsupported("parameter shape expression that is not a known constant"))
 }
 
+/// Whether native expression `root` has a concatenation or replication with
+/// a real operand.
+fn real_concatenation(root: ExprId, tree: &AnalysisContext<'_>) -> bool {
+    let native = tree.declarations();
+    let tokens = native.expression(root).tokens;
+    tree.spans()
+        .expressions
+        .within(&[tokens])
+        .into_iter()
+        .any(|id| match &native.expression(id).kind {
+            ExprKind::Concatenation(operands)
+            | ExprKind::Replication {
+                expressions: operands,
+                ..
+            } => operands
+                .iter()
+                .any(|operand| super::super::validation::real_operand(*operand, native, tree)),
+            _ => false,
+        })
+}
+
 fn bound(
     root: ExprId,
     unknown: bool,
@@ -1168,6 +1189,23 @@ pub(in crate::ast) fn validate_scope(
             // casts of its items included.
             let context = dimensions::query_context_for_operand(root, scope, session, dimensions)?;
             selects::selected_parameter_initializer(root, scope, session, &context, None)?;
+        }
+        // The value of a parameter without unpacked dimensions is no
+        // unpacked array concatenation; a concatenation takes integral
+        // operands (11.3, Table 11-1).
+        if *is_prefix
+            && let ParameterKind::Value {
+                default: Some(root),
+                dimensions: unpacked,
+                ..
+            } = &parameter.kind
+            && unpacked.is_empty()
+            && real_concatenation(*root, tree)
+        {
+            return Err(AnalyzerError::IllegalOperand {
+                operator: "{}".into(),
+                operand: "real",
+            });
         }
     }
     Ok(())

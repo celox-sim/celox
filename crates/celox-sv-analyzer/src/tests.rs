@@ -315,6 +315,8 @@ fn preserves_enum_base_types_during_constant_substitution() {
     assert_eq!(&**expr, &ir::Expr::Literal("2'd0".to_string()));
 }
 
+mod illegal_operands;
+
 #[test]
 fn accepts_casez_nested_under_comb_conditionals() {
     analyze_source(
