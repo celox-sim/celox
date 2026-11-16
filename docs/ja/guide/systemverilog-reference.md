@@ -455,6 +455,10 @@ sequence 内のインスタンス、
   `inferred_latch = "warn"` または `"allow"` を設定するか、相当する
   Rust / JavaScript オプションを使わない限り拒否します。明示的な
   `always_latch` と通常の `always @*` には不要です。
+- **固定サイズ unpacked 配列への packed 値と充填。** IEEE 1800-2023 7.6 は
+  固定サイズ unpacked 配列に、互換な型の unpacked 配列だけを代入できるとします。
+  Celox は配列全体とちょうど同じ幅の packed 値もビットごとに代入し、`'0` のような unbased unsized リテラルでは全要素を埋めます。
+  それ以外の幅の値、real や string の変数は拒否します。
 - **`static` キーワードの欠落を1つのケースで許容します。** IEEE 1800-2023 6.21 は、
   初期化値を持つ static 変数の宣言に明示的な `static` を要求します。Celox は
   定数初期化子ではどの手続きでも、実行時初期化子では `initial` のような
