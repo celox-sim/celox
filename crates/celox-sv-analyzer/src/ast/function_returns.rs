@@ -60,7 +60,7 @@ impl FunctionReturnMetadata {
             string: ty.is_some_and(|ty| ty.kind() == TypeKind::String),
             enum_domain: ty
                 .filter(|ty| ty.unpacked_ranges.is_empty())
-                .and_then(|ty| ty.enum_domain.clone()),
+                .and_then(|ty| ty.enum_domain().cloned()),
             container: ty.and_then(|ty| ty.container.clone()),
             chandle: ty.is_some_and(|ty| ty.is_chandle() && ty.unpacked_ranges.is_empty()),
             pattern_type: ty

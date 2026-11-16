@@ -163,7 +163,7 @@ pub(in crate::ast) fn member_default(
 ) -> Converted<Option<Expr>> {
     // A member's type is read while its structure is bound, before the
     // member has a semantic type of its own.
-    if ty.is_enum
+    if ty.enumeration().is_some()
         || ty.is_unpacked_struct_in(&session.types)
         || ty.class_in(&session.types).is_some()
         || ty.is_chandle()
@@ -269,8 +269,7 @@ pub(in crate::ast) fn native_type(
                 if ty.unpacked_struct().is_some()
                     || !ty.members.is_empty()
                     || ty.is_chandle()
-                    || ty.is_enum
-                    || ty.packed_enum
+                    || ty.enumeration().is_some()
                     || !matches!(
                         ty.kind,
                         TypeKind::Bit

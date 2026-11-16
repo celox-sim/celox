@@ -48,7 +48,9 @@ impl Type {
         scope: Option<Arc<str>>,
         name: impl FnOnce() -> (String, type_names::TypedefName),
     ) {
-        if (self.is_enum || !self.members.is_empty() || self.unpacked_struct.is_some())
+        if (self.enumeration().is_some()
+            || !self.members.is_empty()
+            || self.unpacked_struct.is_some())
             && self.spelling.declaration().is_none()
         {
             let (name, typename) = name();
@@ -287,7 +289,7 @@ impl Type {
 
     /// Whether the type is an enumeration or a packed array of them.
     pub(crate) fn has_enumeration(&self) -> bool {
-        self.is_enum || self.packed_enum
+        self.enumeration().is_some()
     }
 
     /// The type with the enumeration of `other`, its named values and its
@@ -298,6 +300,8 @@ impl Type {
         self.enum_domain = other.enum_domain.clone();
         self.packed_enum = other.packed_enum;
         self.spelling = other.spelling.clone();
+        // The type keeps the enumerated type `other` keeps too.
+        self.keep_enumeration(other.enumeration.binding());
         self
     }
 
