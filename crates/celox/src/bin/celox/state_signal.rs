@@ -15,14 +15,16 @@ mod unix {
         reason = "cross-thread: the SIGUSR1 handler sets it asynchronously and the CLI main thread polls it between time steps"
     )]
     static REQUESTED: AtomicBool = AtomicBool::new(false);
-    #[expect(
-        clippy::disallowed_types,
-        reason = "single-threaded: a process-wide guard against installing the SIGUSR1 handler twice, touched only by the CLI main thread"
-    )]
-    static INSTALLED: AtomicBool = AtomicBool::new(false);
 
     extern "C" fn request_state(_signal: libc::c_int) {
         REQUESTED.store(true, Ordering::Relaxed);
+    }
+
+    fn cannot_install() -> String {
+        format!(
+            "cannot install SIGUSR1 state capture: {}",
+            std::io::Error::last_os_error()
+        )
     }
 
     pub(super) struct Registration {
@@ -31,7 +33,20 @@ mod unix {
 
     impl Registration {
         pub(super) fn install() -> Result<Self, String> {
-            if INSTALLED.swap(true, Ordering::Relaxed) {
+            let handler = request_state as *const () as libc::sighandler_t;
+            // Safety: a zeroed sigaction is a valid output buffer, and a null
+            // action only queries the installed one.
+            let current = unsafe {
+                let mut current: libc::sigaction = std::mem::zeroed();
+                if libc::sigaction(libc::SIGUSR1, std::ptr::null(), &mut current) != 0 {
+                    return Err(cannot_install());
+                }
+                current
+            };
+            // An installed registration keeps its handler and its pending
+            // request, so a second one is refused before anything changes. The
+            // CLI installs it once, from its main thread.
+            if current.sa_sigaction == handler {
                 return Err("SIGUSR1 state capture is already installed".into());
             }
             REQUESTED.store(false, Ordering::Relaxed);
@@ -41,15 +56,11 @@ mod unix {
             unsafe {
                 let mut action: libc::sigaction = std::mem::zeroed();
                 let mut previous: libc::sigaction = std::mem::zeroed();
-                action.sa_sigaction = request_state as *const () as libc::sighandler_t;
+                action.sa_sigaction = handler;
                 action.sa_flags = libc::SA_RESTART;
                 libc::sigemptyset(&mut action.sa_mask);
                 if libc::sigaction(libc::SIGUSR1, &action, &mut previous) != 0 {
-                    INSTALLED.store(false, Ordering::Relaxed);
-                    return Err(format!(
-                        "cannot install SIGUSR1 state capture: {}",
-                        std::io::Error::last_os_error()
-                    ));
+                    return Err(cannot_install());
                 }
                 Ok(Self { previous })
             }
@@ -71,7 +82,6 @@ mod unix {
             unsafe {
                 libc::sigaction(libc::SIGUSR1, &self.previous, std::ptr::null_mut());
             }
-            INSTALLED.store(false, Ordering::Relaxed);
         }
     }
 }
