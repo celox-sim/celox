@@ -1877,3 +1877,57 @@ fn sv_children_wait_on_class_properties_under_a_veryl_top() {
         assert_eq!(sim.get(t), BigUint::from(2u8), "four-state {four_state}");
     }
 }
+
+/// A package handle to an object of a class of `Setter`, whose override
+/// `Reader` calls through the package's dispatcher; `Setter`'s override of
+/// `get` reads `extra` from `Setter`'s instance.
+fn module_class_override_sources(extra: &str) -> String {
+    format!(
+        "`timescale 1ns/1ns
+        package agent;
+            class base; virtual function int get(); return -1; endfunction endclass
+            base h;
+        endpackage
+        module Setter;
+            import agent::*;
+            int k = 5;
+            class c extends base; function int get(); return {extra}; endfunction endclass
+            initial begin c x = new; h = x; end
+        endmodule
+        module Reader(output int t);
+            initial begin #1 t = agent::h.get(); end
+        endmodule"
+    )
+}
+
+#[test]
+fn mixed_hierarchies_call_overrides_of_module_classes() {
+    let veryl = "module Top(t: output logic<32>) { inst s: $sv::Setter; inst r: $sv::Reader(t); }";
+    let sv = module_class_override_sources("5");
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sources(vec![(veryl, Path::new("top.veryl"))], "Top")
+            .with_sv_sources(vec![(&sv, Path::new("agent.sv"))])
+            .four_state(four_state)
+            .build()
+            .unwrap();
+        sim.run_until(2).unwrap();
+        let t = sim.signal("t");
+        assert_eq!(sim.get(t), BigUint::from(5u8), "four-state {four_state}");
+    }
+}
+
+#[test]
+fn mixed_hierarchies_reject_overrides_that_select_module_instances() {
+    // The override reads `k` of the instance its object was made in, which a
+    // mixed-language hierarchy does not number.
+    let veryl = "module Top(t: output logic<32>) { inst s: $sv::Setter; inst r: $sv::Reader(t); }";
+    let sv = module_class_override_sources("k");
+    let Err(error) = celox::Simulation::from_sources(vec![(veryl, Path::new("top.veryl"))], "Top")
+        .with_sv_sources(vec![(&sv, Path::new("agent.sv"))])
+        .build()
+    else {
+        panic!("the override is rejected");
+    };
+    let error = error.to_string();
+    assert!(error.contains("in a mixed-language hierarchy"), "{error}");
+}

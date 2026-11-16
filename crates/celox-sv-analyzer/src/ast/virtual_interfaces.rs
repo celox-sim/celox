@@ -70,7 +70,7 @@ impl VirtualInterface {
 /// The interfaces that virtual interface types of a design name, from the
 /// interface signatures. Analysis does not know their instances, which the
 /// frontend numbers in the elaborated hierarchy and repeats each access for
-/// (see [`crate::ir::Module::expand_virtual_interface_instances`]).
+/// (see [`crate::ir::Module::expand_instances`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VirtualInterfaces {
     pub interfaces: HashMap<String, VirtualInterfaceDeclaration>,
@@ -233,7 +233,7 @@ impl VirtualInterfaces {
 
 /// `r#type` of a member of a non-parameterized interface, whose bounds are
 /// constants, possibly the interface's `constants`.
-fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> Option<Type> {
+pub(crate) fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> Option<Type> {
     // A handle of a class object, such as the proxy through which a bus
     // functional model calls back the class that drives it (8.4).
     if r#type.kind() == crate::ir::TypeKind::Object
@@ -272,6 +272,43 @@ fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> Option<Type>
     )
 }
 
+/// The definition whose instances a placeholder selects among: an interface,
+/// or a specialization of a module whose classes' overrides read its items
+/// (see `crate::ir::ModuleClasses::key`). A placeholder holds it whole, as a
+/// typed key of a fixed width, never the definition's name, which may hold
+/// any character a placeholder separates its parts with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DefinitionId(u64);
+
+impl DefinitionId {
+    /// The key of the definition named `name`.
+    pub fn of(name: &str) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = fxhash::FxHasher64::default();
+        name.hash(&mut hasher);
+        Self(hasher.finish())
+    }
+
+    /// The key that `text` spells, all of it.
+    fn parse(text: &str) -> Option<Self> {
+        (text.len() == 16 && text.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| u64::from_str_radix(text, 16).ok().map(Self))
+            .flatten()
+    }
+
+    /// The key at the start of `text` and what follows its separator.
+    fn split(text: &str) -> Option<(Self, &str)> {
+        let key = Self::parse(text.get(..16)?)?;
+        Some((key, text.get(16..)?.strip_prefix('$')?))
+    }
+}
+
+impl std::fmt::Display for DefinitionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
 /// A signal of a module that the frontend binds for virtual interfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VirtualInterfaceSignal {
@@ -283,18 +320,27 @@ pub enum VirtualInterfaceSignal {
     /// Member `member` of interface `interface`, which a select through a
     /// virtual interface is bound against before it is applied to the member
     /// of each instance; it denotes no instance's member.
-    Template { interface: String, member: String },
+    Template {
+        definition: DefinitionId,
+        member: String,
+    },
     /// Member `member` of the instance of interface `interface` that an
     /// access selects: analysis builds each access once with it, for the
     /// frontend to repeat for every instance of the elaborated design (see
-    /// [`crate::ir::Module::expand_virtual_interface_instances`]).
-    Placeholder { interface: String, member: String },
+    /// [`crate::ir::Module::expand_instances`]).
+    Placeholder {
+        definition: DefinitionId,
+        member: String,
+    },
     /// The id of that instance, which the access compares its handle with.
-    Instance { interface: String },
+    Instance { definition: DefinitionId },
     /// Static variable `name` of a subroutine of the instance of interface
     /// `interface` that a call through a virtual interface selects, which
     /// the frontend repeats for every instance, as a member.
-    StaticPlaceholder { interface: String, name: String },
+    StaticPlaceholder {
+        definition: DefinitionId,
+        name: String,
+    },
     /// Static variable `name` of a subroutine of interface instance `id`,
     /// called through a virtual interface (13.3.2, 25.9): one per instance,
     /// held by the scope that makes the call.
@@ -304,12 +350,12 @@ pub enum VirtualInterfaceSignal {
 impl VirtualInterfaceSignal {
     /// The kind of a signal named `name`, if the frontend binds it.
     pub fn of(name: &str) -> Option<Self> {
-        if let Some((interface, name)) = name
+        if let Some((definition, name)) = name
             .strip_prefix(STATIC_PLACEHOLDER_PREFIX)
-            .and_then(|rest| rest.split_once('$'))
+            .and_then(DefinitionId::split)
         {
             return Some(Self::StaticPlaceholder {
-                interface: interface.to_owned(),
+                definition,
                 name: name.to_owned(),
             });
         }
@@ -322,31 +368,32 @@ impl VirtualInterfaceSignal {
                 name: name.to_owned(),
             });
         }
-        if let Some((interface, member)) = name
+        if let Some((definition, member)) = name
             .strip_prefix(PLACEHOLDER_PREFIX)
-            .and_then(|rest| rest.split_once('$'))
+            .and_then(DefinitionId::split)
         {
             return Some(Self::Placeholder {
-                interface: interface.to_owned(),
+                definition,
                 member: member.to_owned(),
             });
         }
-        if let Some(interface) = name.strip_prefix(INSTANCE_PREFIX) {
-            return Some(Self::Instance {
-                interface: interface.to_owned(),
-            });
+        if let Some(definition) = name
+            .strip_prefix(INSTANCE_PREFIX)
+            .and_then(DefinitionId::parse)
+        {
+            return Some(Self::Instance { definition });
         }
         if let Some(handle) = name.strip_prefix(IDENTITY_PREFIX) {
             return Some(Self::Identity {
                 handle: handle.to_owned(),
             });
         }
-        if let Some((interface, member)) = name
+        if let Some((definition, member)) = name
             .strip_prefix(TEMPLATE_PREFIX)
-            .and_then(|rest| rest.split_once('$'))
+            .and_then(DefinitionId::split)
         {
             return Some(Self::Template {
-                interface: interface.to_owned(),
+                definition,
                 member: member.to_owned(),
             });
         }
@@ -361,15 +408,15 @@ impl VirtualInterfaceSignal {
         match self {
             Self::Member { id, member } => format!("{MEMBER_PREFIX}{id}${member}"),
             Self::Identity { handle } => format!("{IDENTITY_PREFIX}{handle}"),
-            Self::Template { interface, member } => {
-                format!("{TEMPLATE_PREFIX}{interface}${member}")
+            Self::Template { definition, member } => {
+                format!("{TEMPLATE_PREFIX}{definition}${member}")
             }
-            Self::Placeholder { interface, member } => {
-                format!("{PLACEHOLDER_PREFIX}{interface}${member}")
+            Self::Placeholder { definition, member } => {
+                format!("{PLACEHOLDER_PREFIX}{definition}${member}")
             }
-            Self::Instance { interface } => format!("{INSTANCE_PREFIX}{interface}"),
-            Self::StaticPlaceholder { interface, name } => {
-                format!("{STATIC_PLACEHOLDER_PREFIX}{interface}${name}")
+            Self::Instance { definition } => format!("{INSTANCE_PREFIX}{definition}"),
+            Self::StaticPlaceholder { definition, name } => {
+                format!("{STATIC_PLACEHOLDER_PREFIX}{definition}${name}")
             }
             Self::Static { id, name } => format!("{STATIC_PREFIX}{id}${name}"),
         }
@@ -469,11 +516,11 @@ pub(super) fn member<'a>(
         )));
     }
     let instance = VirtualInterfaceSignal::Instance {
-        interface: ty.interface.clone(),
+        definition: DefinitionId::of(&ty.interface),
     }
     .name();
     let signal = VirtualInterfaceSignal::Placeholder {
-        interface: ty.interface.clone(),
+        definition: DefinitionId::of(&ty.interface),
         member: member.to_owned(),
     }
     .name();
@@ -512,7 +559,7 @@ pub(super) fn check_write(
 /// interface instances that virtual interfaces may denote: the templates
 /// selects are bound against, and per interface the placeholders of the
 /// selected instance's members and id, which the frontend replaces with the
-/// signals of each instance (see [`crate::ir::Module::expand_virtual_interface_instances`]).
+/// signals of each instance (see [`crate::ir::Module::expand_instances`]).
 pub(super) fn member_signals(
     declarations: &VirtualInterfaces,
     table: &mut semantic_types::TyTable,
@@ -535,7 +582,7 @@ pub(super) fn member_signals(
     }
     for (interface, declaration) in interfaces {
         let instance = VirtualInterfaceSignal::Instance {
-            interface: interface.clone(),
+            definition: DefinitionId::of(interface),
         }
         .name();
         signals.push(Signal {
@@ -557,7 +604,7 @@ pub(super) fn member_signals(
         });
         signals.extend(declaration.members.iter().map(|member| {
             let name = VirtualInterfaceSignal::Placeholder {
-                interface: interface.clone(),
+                definition: DefinitionId::of(interface),
                 member: member.name.clone(),
             }
             .name();
@@ -583,7 +630,7 @@ pub(super) fn member_signals(
 /// interface `interface` is bound against (see [`selected_read`]).
 pub(super) fn template(interface: &str, member: &str) -> String {
     VirtualInterfaceSignal::Template {
-        interface: interface.to_owned(),
+        definition: DefinitionId::of(interface),
         member: member.to_owned(),
     }
     .name()
@@ -1835,11 +1882,11 @@ pub(super) fn map_children(expr: Expr, map: &mut dyn FnMut(Expr) -> Expr) -> Exp
 
 /// The interface of placeholder signal `name`, if it is one: a member or the
 /// id of the instance an access selects (see [`member`]).
-pub(crate) fn placeholder_interface(name: &str) -> Option<String> {
+pub(crate) fn placeholder_interface(name: &str) -> Option<DefinitionId> {
     match VirtualInterfaceSignal::of(name)? {
-        VirtualInterfaceSignal::Placeholder { interface, .. }
-        | VirtualInterfaceSignal::StaticPlaceholder { interface, .. }
-        | VirtualInterfaceSignal::Instance { interface } => Some(interface),
+        VirtualInterfaceSignal::Placeholder { definition, .. }
+        | VirtualInterfaceSignal::StaticPlaceholder { definition, .. }
+        | VirtualInterfaceSignal::Instance { definition } => Some(definition),
         _ => None,
     }
 }

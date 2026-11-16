@@ -28,13 +28,13 @@ pub(super) fn lower_package_states(
     warnings: &mut Vec<crate::warning::PendingWarning>,
     force_out_of_line: bool,
     recursion_report: Option<&Path>,
-    virtual_ids: &HashMap<String, Vec<u32>>,
+    instances: &sv::ir::InstanceExpansion<'_>,
 ) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
     let mut states = packages.specialized_state_modules(design);
     // Their initializers may reach interface instances through virtual
     // interfaces, as modules do.
     for state in &mut states {
-        state.expand_virtual_interface_instances(virtual_ids);
+        state.expand_instances(instances);
     }
     // The change counts of the watched class properties (see
     // `ff::property_changes`), shared by every module and package, whose

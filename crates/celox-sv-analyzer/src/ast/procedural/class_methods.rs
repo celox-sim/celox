@@ -131,6 +131,26 @@ impl BodyBuilder<'_, '_, '_> {
             nonblocking: false,
         }];
         body.extend(class.program_registration(&self.session.types));
+        // An object of a class of a module records the module instance it
+        // is created in, before a base constructor may call an override.
+        if let Some(property) = class
+            .properties
+            .iter()
+            .find(|property| property.hidden && property.owner == class.name)
+        {
+            body.push(Stmt::Eval(classes::object_call(
+                system_functions::ObjectOp::Store(property.field),
+                vec![
+                    Expr::Ident(this.to_owned()),
+                    Expr::Ident(
+                        virtual_interfaces::VirtualInterfaceSignal::Identity {
+                            handle: module_overrides::MODULE_HANDLE.to_owned(),
+                        }
+                        .name(),
+                    ),
+                ],
+            )));
+        }
         if let Some(base) = &class.base {
             let base = classes::class(
                 &self.tree,
