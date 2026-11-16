@@ -1106,6 +1106,30 @@ pub(super) fn indexed_expression_value(
     expr_to_const(session, folded)
 }
 
+/// The constant operand of an assignment-like context, such as a cast, with
+/// only its self-determined operands folded: the context sizes the others
+/// (IEEE 1800-2023 6.24.1, 11.6.1).
+pub(super) fn indexed_context_operand(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    expression: Expr,
+    dimensions: &PackedDimensions,
+) -> Option<ConstExpr> {
+    let expression = substitute_indexed_parameter_values(tree, session, expression, dimensions);
+    let const_env = &dimensions.const_env;
+    constant_folding::constant_with_folded_selections_with_lookup(
+        tree,
+        session,
+        &expression,
+        const_env,
+        &|name| parameter_type_from_const_env(const_env, name).map(|ty| (ty.width, ty.signed)),
+    )
+    .or_else(|| {
+        let folded = fold_const_integral_expr_preserving_mask(tree, session, expression, const_env);
+        expr_to_const(session, folded)
+    })
+}
+
 fn substitute_indexed_parameter_values(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
