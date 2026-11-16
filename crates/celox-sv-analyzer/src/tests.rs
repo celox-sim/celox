@@ -8216,6 +8216,27 @@ fn unresolved_class_alias_type_arguments_still_fail() {
 }
 
 #[test]
+fn unresolved_class_alias_value_arguments_still_fail() {
+    // A value waits for the package's constants, but a variable or a
+    // constant of another scope is still no constant of the package.
+    for value in ["v", "MISSING"] {
+        let source = format!(
+            "package p; int v = 3; class C #(int W = 1); endclass \
+             typedef C#({value}) c_t; endpackage \
+             module Top; localparam int MISSING = 29; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("unresolved-class-value-argument.sv"))
+            .expect_err("a package value argument must be a constant of the package");
+        assert!(
+            error
+                .to_string()
+                .contains("class parameter value that is not constant"),
+            "{value}: {error}"
+        );
+    }
+}
+
+#[test]
 fn named_aggregate_type_arguments_keep_their_declarations() {
     let source = "package p;
         typedef enum {A0, A1} first_e;

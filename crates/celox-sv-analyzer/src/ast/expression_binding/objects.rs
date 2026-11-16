@@ -441,13 +441,37 @@ pub(in crate::ast) fn class_parameter(
         "::" => named_class(tree, session, *expression, native, dimensions)?,
         _ => None,
     };
-    Ok(class.and_then(|class| {
-        classes::specializations::parameter(
-            session,
-            &class,
-            &instances::normalize_identifier(&name.spelling),
-        )
-    }))
+    let Some(class) = class else {
+        return Ok(None);
+    };
+    let member = instances::normalize_identifier(&name.spelling);
+    if let Some(value) = classes::specializations::parameter(session, &class, &member) {
+        return Ok(Some(value));
+    }
+    // `C::p` of a class without parameter ports that nothing has made yet,
+    // as when a typedef of its package names one of its constants before
+    // any declaration uses the class: `p` is a constant of the class itself
+    // (8.25), which its only specialization holds.
+    let declares = |tree: &AnalysisContext<'_>, session: &mut Session| {
+        classes::declaration(tree, session, &class).is_some_and(|declaration| {
+            declaration
+                .parameter_ports
+                .iter()
+                .chain(&declaration.parameters)
+                .flat_map(|id| &tree.declarations().parameter_declaration(*id).parameters)
+                .any(|parameter| {
+                    instances::normalize_identifier(&parameter.name.spelling) == member
+                })
+        })
+    };
+    if separator == "::"
+        && !classes::is_parameterized(tree, session, &class)
+        && declares(tree, session)
+    {
+        let made = classes::specializations::specialize(tree, session, &class, &[], dimensions)?;
+        return Ok(classes::specializations::parameter(session, &made, &member));
+    }
+    Ok(None)
 }
 
 /// The variable of the static property that native expression `id` names:

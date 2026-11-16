@@ -841,7 +841,7 @@ fn prepare(
             "class `{generic}` declared in a loop generate block"
         )));
     }
-    let Some(arguments) = bind_arguments(
+    let arguments = match bind_arguments(
         tree,
         session,
         generic,
@@ -849,11 +849,19 @@ fn prepare(
         native,
         arguments,
         context,
-    )?
-    else {
-        return Ok(Preparation::Deferred(unsupported(
-            "class type parameter value",
-        )));
+    ) {
+        Ok(Some(arguments)) => arguments,
+        Ok(None) => {
+            return Ok(Preparation::Deferred(unsupported(
+                "class type parameter value",
+            )));
+        }
+        // A value that names a constant of the enclosing scope, such as a
+        // parameter of the package that declares the typedef, waits for
+        // those constants as a type argument does (see
+        // [`specialize_if_ready`]); a use reports the error.
+        Err(error) if error.is_unsupported() => return Ok(Preparation::Deferred(error)),
+        Err(error) => return Err(error),
     };
     prepare_bound(tree, session, generic, arguments, context)
 }

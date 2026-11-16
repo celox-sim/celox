@@ -2291,6 +2291,41 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "5\n"))
 
+(case package_typedefs_specialize_classes_with_package_constants
+  (source "class.sv" #"
+package p;
+    localparam int K = 12;
+    class Widths;
+        localparam A = 16;
+        localparam int B = 5;
+    endclass
+    localparam int L = Widths::A + 1;
+    class C #(int W = 8, int D = 1);
+        bit [W-1:0] x;
+        function int width(); return $bits(x); endfunction
+        function int depth(); return D; endfunction
+    endclass
+    typedef C #(K) by_parameter_t;
+    typedef C #(p::K, K + 1) by_qualified_t;
+    typedef C #(Widths::A, Widths::B) by_class_constant_t;
+    typedef C #(L) by_derived_t;
+endpackage
+module Top(output bit done);
+    import p::*;
+    initial begin
+        by_parameter_t a = new;
+        by_qualified_t b = new;
+        by_class_constant_t c = new;
+        by_derived_t d = new;
+        $display("%0d %0d %0d %0d %0d %0d", a.width(), b.width(), b.depth(),
+                 c.width(), c.depth(), d.width());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "12 12 13 16 5 17\n"))
+
 (case constrained_randomize_scalar
   (source "constraints.sv" #"
 module Top(output bit done);
