@@ -249,6 +249,7 @@ impl CallSites for Item {
             imports: _,
             shadowed: _,
             scope: _,
+            blocks: _,
         } = self;
         for value in literals.values() {
             value.call_sites(visit);

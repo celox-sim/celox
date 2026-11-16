@@ -82,7 +82,12 @@ constructs without a dedicated issue point to the frontend roadmap,
   from a scope that `f` is visible in by its simple name: a method of the
   class or a base, or a subroutine of the design element; not through an
   instance, package or named block, and not when the variable is of
-  unpacked structure type.
+  unpacked structure type. A name that the body of an interface instance
+  does not declare is searched for from the scope that instantiates the
+  instance (23.8); it is rejected where the body is reached through an
+  interface port, in the tasks and functions of an interface that a virtual
+  interface names, and in an interface instance that another interface's
+  body declares.
 - Packages: package nets
   ([#1146](https://github.com/celox-sim/celox/issues/1146)); a package
   variable cannot be a clock or reset.

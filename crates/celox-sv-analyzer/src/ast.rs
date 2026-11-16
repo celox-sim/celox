@@ -262,6 +262,16 @@ pub struct HierarchicalSignal {
     pub is_net: bool,
     /// The names denote the module's own signal `name`, which they alias.
     pub local: bool,
+    /// The interface instance of the module whose body writes the names
+    /// (IEEE 1800-2023 23.8), as [`crate::InterfaceBodyScope::handle`]
+    /// names it: they are names of that body, not of the module. `name` is
+    /// then the body's placeholder for the object
+    /// ([`virtual_interfaces::VirtualInterfaceSignal::Upward`]), never a
+    /// name the body's own members could have.
+    pub interface_instance: Option<String>,
+    /// The module's own signal that the names of an interface body alias,
+    /// when `local`.
+    pub aliased: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -64,6 +64,8 @@ fn unknown_member(
         }
         return AnalyzerError::HierarchicalReference {
             path: path.join("."),
+            components: path.to_vec(),
+            interface: None,
         };
     }
     unsupported(format!("structure member `{}`", path.join(".")))
