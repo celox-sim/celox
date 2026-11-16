@@ -289,9 +289,28 @@ struct ForHeader {
     steps: Vec<Stmt>,
 }
 
+/// The context a body is analyzed in, which a [`BodyBuilder`] holds and
+/// passes on: copying it copies no context.
+#[derive(Clone)]
+enum BodyContext<'t> {
+    /// The context of the scope the body belongs to.
+    Scope(&'t AnalysisContext<'t>),
+}
+
+impl<'t> std::ops::Deref for BodyContext<'t> {
+    type Target = AnalysisContext<'t>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Scope(tree) => tree,
+        }
+    }
+}
+
 /// Converts the statements of one procedural body.
 pub(super) struct BodyBuilder<'s, 't, 'a> {
-    tree: &'t AnalysisContext<'t>,
+    /// The context the body is analyzed in.
+    tree: BodyContext<'t>,
     pub(super) session: &'s mut Session,
     dims: PackedDimensions,
     names: Names,
@@ -651,6 +670,12 @@ impl Drop for BodyBuilder<'_, '_, '_> {
 }
 
 impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
+    /// The syntax tree of the body's scope, for as long as the scope's
+    /// context lives, whichever context the builder holds.
+    fn syntax(&self) -> &'t SyntaxTree {
+        self.tree.syntax_tree
+    }
+
     pub(super) fn new(
         tree: &'t AnalysisContext<'t>,
         session: &'s mut Session,
@@ -679,7 +704,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             randsequence_depth: 0,
             randsequence_expanded: 0,
             randsequence_exits: HashMap::default(),
-            tree,
+            tree: BodyContext::Scope(tree),
             session,
             dims,
             names: Names {
@@ -1046,7 +1071,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     fn enter_class_scope(&mut self, class: &classes::Class) {
         self.dims.class_scope = Some(class.name.clone());
         let constants =
-            classes::specializations::constant_types(self.tree, self.session, &class.name);
+            classes::specializations::constant_types(&self.tree, self.session, &class.name);
         Arc::make_mut(&mut self.dims.constant_types).extend(constants);
         // The name of a property of unpacked structure type, whose members
         // are properties named by their member paths, is hidden too.
@@ -1121,8 +1146,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     fn native_value(&mut self, id: celox_sv_syntax::ExprId) -> Result<Expr, AnalyzerError> {
         let mut value = expression_binding::value(
             id,
-            self.tree.declarations(),
-            self.tree,
+            self.syntax().declarations(),
+            &self.tree,
             self.session,
             &self.dims,
         )?;
@@ -1136,8 +1161,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     fn native_chandle_value(&mut self, id: celox_sv_syntax::ExprId) -> Result<Expr, AnalyzerError> {
         let mut value = expression_binding::bind_chandle_value(
             id,
-            self.tree.declarations(),
-            self.tree,
+            self.syntax().declarations(),
+            &self.tree,
             self.session,
             &self.dims,
             None,
@@ -1154,8 +1179,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     ) -> Result<(LValue, LValue), AnalyzerError> {
         let lowered = expression_binding::variable_lvalue(
             id,
-            self.tree.declarations(),
-            self.tree,
+            self.syntax().declarations(),
+            &self.tree,
             self.session,
             &self.dims,
             chandle,
