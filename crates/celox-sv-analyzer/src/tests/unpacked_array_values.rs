@@ -13,6 +13,8 @@ fn rejects_continuous_assignments_of_scalars_to_unpacked_arrays() {
         "wire [1:0] x[1:0]; assign x = 1'b1 + 1'b1;",
         "wire [1:0] x[1:0]; assign x = int'(1'b1);",
         "wire [1:0] x[1:0]; real r; assign x = r;",
+        "function automatic [7:0] f(); return 1; endfunction wire [7:0] w[2]; assign w = f();",
+        "int a[2]; initial a = null;",
         "wire [1:0] x[1:0]; reg [1:0] y; assign x = y;",
         "wire a[1:0]; wire x; assign a = x;",
         "wire a[1:0]; wire x[1:0]; assign a = x[0];",
@@ -43,6 +45,9 @@ fn accepts_unpacked_array_values_of_unpacked_arrays() {
         "wire [7:0] values[2][3]; wire [23:0] row; assign values[0] = row;",
         "wire [1:0] x[1:0]; assign x = 4'(1);",
         "logic [7:0] values[4]; always_comb values = '0;",
+        "typedef logic [7:0] A [2]; function automatic A f(); return '{1, 2}; endfunction \
+         wire [7:0] w[2]; assign w = f();",
+        "function automatic [15:0] f(); return 1; endfunction wire [7:0] w[2]; assign w = f();",
         // A string literal fills an unpacked array of bytes (5.9).
         "byte b[3:0] = \"hi2\";",
     ] {

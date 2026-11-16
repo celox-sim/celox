@@ -379,7 +379,8 @@ fn check_assignment(
             }
             semantic_types::TyData::Real
             | semantic_types::TyData::Shortreal
-            | semantic_types::TyData::String => true,
+            | semantic_types::TyData::String
+            | semantic_types::TyData::Null => true,
             _ => false,
         };
         if rejected {
@@ -418,8 +419,9 @@ fn fixed_array_bits(table: &semantic_types::TyTable, mut id: semantic_types::TyI
 /// literal, which an unpacked array of bytes takes (5.9), an unbased
 /// unsized literal, which Celox fills an unpacked array with, an
 /// assignment pattern, a concatenation or a stream, which an unpacked
-/// array may take as its elements (IEEE 1800-2023 10.9, 10.10, 11.4.14),
-/// nor a call.
+/// array may take as its elements (IEEE 1800-2023 10.9, 10.10, 11.4.14).
+/// A call of a user function is one; one that returns an unpacked array has
+/// that type.
 fn is_scalar_operand(id: celox_sv_syntax::ExprId, native: &celox_sv_syntax::Declarations) -> bool {
     use celox_sv_syntax::ExprKind;
     match &native
@@ -427,6 +429,12 @@ fn is_scalar_operand(id: celox_sv_syntax::ExprId, native: &celox_sv_syntax::Decl
         .kind
     {
         ExprKind::Literal(text) => !text.starts_with(['"', '\'']),
+        // A system function, such as `$cast`, has the type of its own
+        // definition.
+        ExprKind::Call { expression, .. } => !matches!(
+            &native.expression(*expression).kind,
+            ExprKind::Name(name) if name.spelling.starts_with('$')
+        ),
         kind => matches!(
             kind,
             ExprKind::Name(_)
