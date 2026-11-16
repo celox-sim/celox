@@ -79,6 +79,16 @@ impl Builder {
         kind: BodyItemKind,
     ) -> Result<()> {
         let start = self.pending.take().unwrap_or(start);
+        // A generate block holds generate items, which a specparam
+        // declaration is not (IEEE 1800-2023 27.3, Syntax 27-1).
+        if matches!(&kind, BodyItemKind::Unconverted { category, .. } if category == "specparam")
+            && !self.element_scope()
+        {
+            return Err(parser.error_at(
+                parser.range(start),
+                "specparam declaration in a generate block",
+            ));
+        }
         let id = Self::node(parser, start, kind)?;
         self.feed(parser, id)
     }
@@ -364,6 +374,14 @@ impl Builder {
                 });
             }
             "generate" => {
+                // Generate regions do not nest (IEEE 1800-2023 27.3).
+                if self
+                    .frames
+                    .iter()
+                    .any(|frame| matches!(frame, Frame::Region { .. }))
+                {
+                    return Err(parser.error("generate region nested in a generate region"));
+                }
                 parser.at += 1;
                 scopes.push("endgenerate");
                 self.frames.push(Frame::Region {
