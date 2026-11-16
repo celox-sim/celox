@@ -413,9 +413,16 @@ endmodule
 ; Table 11-1 rejects the case equality operators themselves on reals.
 (case case_statements_compare_real_values
   (source "real_case_statements.sv" #"
-module Top(output int selected, output int integral, output int fallback);
+module Top(output int selected, output int integral, output int fallback,
+           output int comb_selected);
   parameter real P = 1.5;
   real r;
+  always_comb
+    case (r)
+      1, 1.5: comb_selected = 1;
+      2: comb_selected = 2;
+      default: comb_selected = 3;
+    endcase
   initial begin
     r = P;
     case (r)
@@ -437,4 +444,5 @@ module Top(output int selected, output int integral, output int fallback);
 endmodule
 "#)
   (top Top) (run_until 0)
-  (assert_eq selected 2) (assert_eq integral 2) (assert_eq fallback 4))
+  (assert_eq selected 2) (assert_eq integral 2) (assert_eq fallback 4)
+  (assert_eq comb_selected 2))
