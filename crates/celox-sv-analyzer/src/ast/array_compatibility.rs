@@ -368,8 +368,48 @@ fn check_assignment(
             ..
         }
     );
+    if fixed && !array && is_scalar_operand(id, native) {
+        // A value that is no unpacked array, such as an integral or real
+        // variable, an element of an array or an operation on them, is not
+        // assignment compatible with a fixed-size unpacked array (7.6).
+        if matches!(
+            table.data(actual),
+            semantic_types::TyData::Packed(_)
+                | semantic_types::TyData::Real
+                | semantic_types::TyData::Shortreal
+                | semantic_types::TyData::String
+        ) {
+            return Err(AnalyzerError::NotUnpackedArray {
+                context: context(),
+                target: table.spell(target),
+            });
+        }
+    }
     if !(array && fixed) {
         return Ok(());
     }
     assignments::check_types(tree, session, dims, actual, target, context)
+}
+
+/// Whether native expression `id` is a number, a name, a select or an
+/// operator, whose value has the type of its operands: not a string
+/// literal, which an unpacked array of bytes takes (5.9), an assignment
+/// pattern, a concatenation or a stream, which an unpacked array may take
+/// as its elements (IEEE 1800-2023 10.9, 10.10, 11.4.14), nor a call.
+fn is_scalar_operand(id: celox_sv_syntax::ExprId, native: &celox_sv_syntax::Declarations) -> bool {
+    use celox_sv_syntax::ExprKind;
+    match &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    {
+        ExprKind::Literal(text) => !text.starts_with('"'),
+        kind => matches!(
+            kind,
+            ExprKind::Name(_)
+                | ExprKind::Select { .. }
+                | ExprKind::Member { .. }
+                | ExprKind::Unary { .. }
+                | ExprKind::Binary { .. }
+        ),
+    }
 }

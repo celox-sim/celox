@@ -651,6 +651,8 @@ fn substitutes_loop_indices_when_tracking_comb_writes() {
     .expect("a concrete nonoverlapping loop write should preserve the guard proof");
 }
 
+mod unpacked_array_values;
+
 #[test]
 fn analyzes_comb_processes_with_generate_local_constants() {
     analyze_source(
