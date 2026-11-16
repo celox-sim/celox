@@ -16,7 +16,6 @@ pub use celox_state_layout::{
     LayoutInput, LayoutRequirements, LayoutSource, MemoryLayoutMode, StateObjectLayout,
     UnpackedArrayLayout, get_byte_size,
 };
-#[cfg(feature = "host-runtime")]
 pub use celox_state_layout::{
     RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
     RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,

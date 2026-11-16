@@ -14,6 +14,7 @@ mod simulation_handle;
 mod simulator_handle;
 #[cfg(not(target_arch = "wasm32"))]
 mod test_runner;
+mod timed_testbench;
 #[cfg(target_arch = "wasm32")]
 mod wasm_handle;
 #[cfg(not(target_arch = "wasm32"))]
@@ -32,6 +33,7 @@ pub use simulation_handle::*;
 pub use simulator_handle::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub use test_runner::*;
+pub use timed_testbench::*;
 #[cfg(target_arch = "wasm32")]
 pub use wasm_handle::*;
 

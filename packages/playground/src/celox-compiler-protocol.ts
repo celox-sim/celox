@@ -35,6 +35,12 @@ export type CeloxCompilerRequest =
 			sources: CeloxSourceFile[];
 			top: string;
 			fourState: boolean;
+	  }
+	| {
+			id: number;
+			type: "runTimedTestbench";
+			sources: CeloxSourceFile[];
+			top: string;
 	  };
 
 export type CeloxCompilerResponse =

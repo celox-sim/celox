@@ -174,6 +174,7 @@ mod parallel_option_tests;
     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
     all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
+#[cfg_attr(not(feature = "host-runtime"), allow(dead_code))]
 fn plan_report(program: &crate::ir::LaidOutProgram, warnings: &[CompilationWarning]) -> String {
     use std::fmt::Write;
     let schema = &program.runtime.runtime_schema;

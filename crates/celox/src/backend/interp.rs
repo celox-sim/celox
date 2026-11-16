@@ -17,8 +17,6 @@
 //! when the backend is constructed with `emit_triggers`, like the compiled
 //! codegen flag.
 
-#![cfg(feature = "host-runtime")]
-
 #[cfg(hotspot_jit)]
 use super::hotspot::{EntryKey, HotspotRuntime, HotspotStats, RegionSource};
 
@@ -52,7 +50,7 @@ use crate::interpreter::{
 };
 use crate::ir::{FRAME_REGION, SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION};
 use crate::{
-    HashMap, SimulatorError, SimulatorOptions,
+    HashMap, SimulatorError,
     ir::{AbsoluteAddr, LaidOutProgram, RegionedAbsoluteAddr, SignalArrayLayout, SignalRef},
 };
 
@@ -1636,12 +1634,42 @@ pub struct InterpBackend {
 }
 
 impl InterpBackend {
+    #[cfg(feature = "host-runtime")]
     pub fn new(
         laid_out: &LaidOutProgram,
-        options: &SimulatorOptions,
+        options: &crate::SimulatorOptions,
+    ) -> Result<Self, SimulatorError> {
+        Self::build(
+            laid_out,
+            options.four_state,
+            options.emit_triggers,
+            &options.dpi,
+        )
+    }
+
+    /// Build an interpreter backend with only the modes a host without a
+    /// full [`SimulatorOptions`] can name (for example a WebAssembly host
+    /// driving a timed testbench). All other options take their defaults.
+    pub fn new_with_modes(
+        laid_out: &LaidOutProgram,
+        four_state: bool,
+        emit_triggers: bool,
+    ) -> Result<Self, SimulatorError> {
+        Self::build(
+            laid_out,
+            four_state,
+            emit_triggers,
+            &crate::DpiSymbols::default(),
+        )
+    }
+
+    fn build(
+        laid_out: &LaidOutProgram,
+        four_state: bool,
+        emit_triggers: bool,
+        dpi: &crate::DpiSymbols,
     ) -> Result<Self, SimulatorError> {
         let layout = laid_out.layout().clone();
-        let four_state = options.four_state;
 
         // Share one id space across the three schedule groups, mirroring the
         // compiled backend so scheduler ordering and trigger ids agree.
@@ -1809,13 +1837,11 @@ impl InterpBackend {
             fused_comb_apply_units,
             comb_trigger_addrs,
             trigger_snapshots: Vec::new(),
-            emit_triggers: options.emit_triggers,
+            emit_triggers,
             calls: Calls::new(&laid_out.sir.functions),
             #[cfg(hotspot_jit)]
             hotspots: None,
-            extern_functions: options
-                .dpi
-                .resolve(&laid_out.runtime().runtime_schema.extern_functions)?,
+            extern_functions: dpi.resolve(&laid_out.runtime().runtime_schema.extern_functions)?,
         };
         backend.install_event_buffers();
         Ok(backend)
@@ -1824,7 +1850,7 @@ impl InterpBackend {
     #[cfg(hotspot_jit)]
     pub(crate) fn enable_hotspots(
         &mut self,
-        options: &SimulatorOptions,
+        options: &crate::SimulatorOptions,
     ) -> Result<(), SimulatorError> {
         let words = self.memory.len_words() + super::hotspot::SCRATCH_BYTES / 8;
         self.memory.reserve_total(words);
@@ -2668,5 +2694,5 @@ impl SimBackend for InterpBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host-runtime"))]
 mod tests;

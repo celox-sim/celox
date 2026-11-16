@@ -2,11 +2,11 @@
 pub(crate) mod compile_cancel;
 #[cfg(all(feature = "host-runtime", hotspot_jit))]
 pub(crate) mod hotspot;
-#[cfg(feature = "host-runtime")]
+#[cfg_attr(not(feature = "host-runtime"), allow(dead_code))]
 pub(crate) mod interp;
 #[cfg(feature = "host-runtime")]
 pub(crate) mod lanes;
-#[cfg(feature = "host-runtime")]
+#[cfg_attr(not(feature = "host-runtime"), allow(dead_code))]
 pub(crate) mod memory_image;
 pub(crate) mod memory_layout;
 #[cfg(all(
@@ -26,7 +26,6 @@ pub use celox_backend_wasm as wasm_codegen;
 pub use celox_runtime::backend as traits;
 #[cfg(feature = "wasm-runtime")]
 pub mod wasm_runtime;
-#[cfg(feature = "host-runtime")]
 pub(crate) use celox_runtime::RuntimeEventBuffer;
 pub use celox_runtime::SimulatorErrorCode;
 pub use memory_layout::{LayoutRequirements, MemoryLayout, MemoryLayoutMode, get_byte_size};
@@ -62,9 +61,11 @@ mod host {
 #[cfg(feature = "host-runtime")]
 pub use host::*;
 
+#[cfg(not(feature = "host-runtime"))]
+pub use self::interp::InterpBackend;
+
 /// Trigger instructions use the semantic event order. Every execution engine
 /// must assign those same IDs rather than enumerating hash-map keys.
-#[cfg(feature = "host-runtime")]
 fn event_ids(
     program: &crate::ir::LaidOutProgram,
 ) -> (

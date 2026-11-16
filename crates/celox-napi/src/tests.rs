@@ -1044,3 +1044,51 @@ fn simulation_handle_compiles_systemverilog_sources() {
     let events: serde_json::Value = serde_json::from_str(&handle.events_json).unwrap();
     assert!(events.get("clk").is_some(), "events: {events}");
 }
+
+#[test]
+fn timed_testbench_runs_sv_testbench_against_veryl_counter() {
+    let veryl = "module Counter (clk: input clock, rst: input reset, en: input logic, count: output logic<8>) { always_ff { if_reset { count = 0; } else if en { count += 1; } } }";
+    let tb = r#"module Tb;
+    timeunit 1ns;
+    timeprecision 1ns;
+    logic clk; logic rst; logic en; logic [7:0] count;
+    int errors; bit done;
+    prj_Counter dut (.clk(clk), .rst(rst), .en(en), .count(count));
+    always #5 clk = ~clk;
+    initial begin
+        clk = 0; rst = 0; en = 0; errors = 0; done = 0;
+        #12 rst = 1; en = 1;
+        repeat (5) @(posedge clk);
+        #1;
+        if (count !== 8'd5) errors = errors + 1;
+        en = 0;
+        repeat (2) @(posedge clk);
+        #1;
+        if (count !== 8'd5) errors = errors + 1;
+        done = 1;
+        $finish;
+    end
+endmodule"#;
+    let json = run_timed_testbench(
+        vec![
+            NapiSourceFile {
+                content: veryl.to_string(),
+                path: "src/Counter.veryl".to_string(),
+            },
+            NapiSourceFile {
+                content: tb.to_string(),
+                path: "src/Tb.sv".to_string(),
+            },
+        ],
+        "Tb".to_string(),
+        None,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["error"], serde_json::Value::Null, "{value}");
+    assert_eq!(value["finished"], true, "{value}");
+    assert_eq!(value["passed"], true, "{value}");
+    assert_eq!(value["signals"]["errors"], "0", "{value}");
+    assert_eq!(value["signals"]["done"], "1", "{value}");
+    assert_eq!(value["signals"]["count"], "5", "{value}");
+}

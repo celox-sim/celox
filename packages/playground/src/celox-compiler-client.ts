@@ -75,6 +75,13 @@ export class CeloxCompilerClient {
 		});
 	}
 
+	async runTimedTestbench(
+		sources: CeloxSourceFile[],
+		top: string,
+	): Promise<string> {
+		return this.request<string>({ type: "runTimedTestbench", sources, top });
+	}
+
 	async compile(
 		sources: CeloxSourceFile[],
 		top: string,

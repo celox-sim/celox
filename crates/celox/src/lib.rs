@@ -342,6 +342,8 @@ mod host_api {
 pub use host_api::*;
 
 // Re-exports needed for wasm32 builds
+#[cfg(not(feature = "host-runtime"))]
+pub use backend::InterpBackend;
 pub use backend::wasm_codegen;
 
 // Public compilation API (available on all targets)
