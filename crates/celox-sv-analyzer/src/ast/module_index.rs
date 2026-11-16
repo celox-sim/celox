@@ -85,7 +85,7 @@ impl ModuleIndex {
                     .ports
                     .iter()
                     .filter_map(|port| match &port.kind {
-                        PortKind::Named(name) => Some(name.spelling.clone()),
+                        PortKind::Named(name) => Some(normalize_identifier(&name.spelling)),
                         _ => None,
                     })
                     .collect();
@@ -100,7 +100,7 @@ impl ModuleIndex {
                                 celox_sv_syntax::ParameterKind::Value { .. }
                             )
                     })
-                    .map(|parameter| parameter.name.spelling.clone())
+                    .map(|parameter| normalize_identifier(&parameter.name.spelling))
                     .collect();
                 index.interfaces.insert(
                     normalize_identifier(&unit.name.spelling),
