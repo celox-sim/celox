@@ -14,6 +14,9 @@ pub(super) struct Binding {
     pub id: PackageBindingId,
     /// Original source range for the interface dependency reader.
     pub original: Option<(usize, usize)>,
+    /// For an import a procedural block or a subroutine body declares (IEEE
+    /// 1800-2023 A.2.8), where that block or body ends: it binds there only.
+    pub procedural_end: Option<usize>,
 }
 impl Binding {
     pub(super) fn names(&self, tree: &SyntaxTree) -> Vec<(String, Option<String>)> {
@@ -44,9 +47,14 @@ fn header(unit: &Unit, native: &Declarations) -> Vec<PackageBindingId> {
         })
         .collect()
 }
-fn body_ids(ids: &[BodyItemId], tree: &Declarations) -> Converted<Vec<PackageBindingId>> {
+/// The package bindings of the body items `ids`, each with the end of the
+/// procedural block or subroutine body that declares it, if one does.
+fn body_ids(
+    ids: &[BodyItemId],
+    tree: &Declarations,
+) -> Converted<Vec<(PackageBindingId, Option<usize>)>> {
     let mut pending = ids.iter().rev().copied().collect::<Vec<_>>();
-    let mut statements = Vec::new();
+    let mut statements: Vec<(celox_sv_syntax::StatementId, usize)> = Vec::new();
     let mut result = Vec::new();
     let mut seen = HashSet::default();
     while let Some(id) = pending.pop() {
@@ -54,16 +62,30 @@ fn body_ids(ids: &[BodyItemId], tree: &Declarations) -> Converted<Vec<PackageBin
             return Err(mismatch());
         }
         match &tree.body_item(id).kind {
-            BodyItemKind::PackageBinding(id) => result.push(*id),
+            BodyItemKind::PackageBinding(id) => result.push((*id, None)),
             BodyItemKind::Subroutine(id) => {
-                statements.extend(&tree.subroutine(*id).authored_statements)
+                let subroutine = tree.subroutine(*id);
+                let end = subroutine.tokens.end;
+                statements.extend(
+                    subroutine
+                        .authored_statements
+                        .iter()
+                        .map(|statement| (*statement, end)),
+                )
             }
             BodyItemKind::Procedure(id) => {
-                statements.extend(&tree.procedure(*id).authored_statements)
+                let procedure = tree.procedure(*id);
+                let end = procedure.tokens.end;
+                statements.extend(
+                    procedure
+                        .authored_statements
+                        .iter()
+                        .map(|statement| (*statement, end)),
+                )
             }
             BodyItemKind::Unit(id) => {
                 let unit = tree.unit(*id);
-                result.extend(header(unit, tree));
+                result.extend(header(unit, tree).into_iter().map(|id| (id, None)));
                 pending.extend(unit.items.iter().rev().copied());
             }
             BodyItemKind::Region(items)
@@ -87,23 +109,31 @@ fn body_ids(ids: &[BodyItemId], tree: &Declarations) -> Converted<Vec<PackageBin
         }
     }
     let mut seen = HashSet::default();
-    while let Some(id) = statements.pop() {
+    while let Some((id, end)) = statements.pop() {
         if !seen.insert(id) {
             continue;
         }
         let statement = tree.statement(id);
         if let StatementKind::Declaration(LocalDeclaration::PackageBinding(id)) = statement.kind {
-            result.push(id);
+            result.push((id, Some(end)));
         }
-        statements.extend(statement.kind.children());
+        // A block declares the imports among its items.
+        let end = match statement.kind {
+            StatementKind::Block { .. } | StatementKind::Parallel { .. } => statement.tokens.end,
+            _ => end,
+        };
+        statements.extend(statement.kind.children().map(|child| (child, end)));
     }
     Ok(result)
 }
-fn bindings(ids: Vec<PackageBindingId>, tree: &SyntaxTree) -> Converted<Vec<Binding>> {
+fn bindings(
+    ids: Vec<(PackageBindingId, Option<usize>)>,
+    tree: &SyntaxTree,
+) -> Converted<Vec<Binding>> {
     let native = tree.declarations();
     let mut seen = HashSet::default();
     ids.into_iter()
-        .map(|id| {
+        .map(|(id, procedural_end)| {
             if !seen.insert(id) {
                 return Err(mismatch());
             }
@@ -118,7 +148,11 @@ fn bindings(ids: Vec<PackageBindingId>, tree: &SyntaxTree) -> Converted<Vec<Bind
                         Some((start, end)) => (start.min(span.start), end.max(span.end)),
                     })
                 });
-            Ok(Binding { id, original })
+            Ok(Binding {
+                id,
+                original,
+                procedural_end,
+            })
         })
         .collect()
 }
@@ -126,8 +160,11 @@ pub(super) fn item(id: BodyItemId, tree: &SyntaxTree) -> Converted<Vec<Binding>>
     bindings(body_ids(&[id], tree.declarations())?, tree)
 }
 pub(super) fn scope(tree: &SyntaxTree) -> Converted<Vec<Binding>> {
-    let mut ids = if let Ok(unit) = tree.root_unit() {
+    let mut ids: Vec<(PackageBindingId, Option<usize>)> = if let Ok(unit) = tree.root_unit() {
         header(unit, tree.declarations())
+            .into_iter()
+            .map(|id| (id, None))
+            .collect()
     } else {
         Vec::new()
     };
@@ -140,7 +177,7 @@ pub(super) fn compilation(tree: &SyntaxTree) -> Converted<Vec<Binding>> {
         .body_membership()?
         .into_iter()
         .filter_map(|id| match tree.declarations().body_item(id).kind {
-            BodyItemKind::PackageBinding(id) => Some(id),
+            BodyItemKind::PackageBinding(id) => Some((id, None)),
             _ => None,
         })
         .collect();
