@@ -11,7 +11,12 @@ use veryl_analyzer::ir::VarId;
 pub(crate) struct SLTNodeArena<A: Hash + Eq + Clone> {
     nodes: celox_slt::SLTNodeArena<A>,
     pub(super) loop_ranges: HashMap<VarId, BigUint>,
-    pub(crate) file_dependencies: crate::file_dependencies::FileDependencyCollector,
+    /// The memory files the `always_comb` blocks lowered so far load, with
+    /// the values they wrote to the loaded words before: initial state of
+    /// their module (see `apply_readmem_writes`).
+    pub(crate) memory_loads: Vec<celox_design::InitialStateValue<VarId>>,
+    /// The call of the last of `memory_loads`, for diagnostics.
+    pub(crate) memory_load_call: Option<veryl_parser::token_range::TokenRange>,
 }
 impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
     pub(crate) fn alloc(
@@ -27,7 +32,8 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
         Self {
             nodes: Default::default(),
             loop_ranges: source.loop_ranges.clone(),
-            file_dependencies: source.file_dependencies.clone(),
+            memory_loads: Vec::new(),
+            memory_load_call: None,
         }
     }
     pub(crate) fn into_inner(self) -> celox_slt::SLTNodeArena<A> {
@@ -39,7 +45,8 @@ impl<A: Hash + Eq + Clone> Default for SLTNodeArena<A> {
         Self {
             nodes: Default::default(),
             loop_ranges: Default::default(),
-            file_dependencies: Default::default(),
+            memory_loads: Vec::new(),
+            memory_load_call: None,
         }
     }
 }
@@ -48,7 +55,8 @@ impl<A: Hash + Eq + Clone> Clone for SLTNodeArena<A> {
         Self {
             nodes: self.nodes.clone(),
             loop_ranges: self.loop_ranges.clone(),
-            file_dependencies: self.file_dependencies.clone(),
+            memory_loads: self.memory_loads.clone(),
+            memory_load_call: self.memory_load_call,
         }
     }
 }

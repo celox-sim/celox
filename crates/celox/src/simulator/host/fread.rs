@@ -65,7 +65,7 @@ impl<B: SimBackend> Simulator<B> {
         'words: for index in start..start + count {
             let base = index.abs_diff(left) as usize * width;
             for byte_index in 0..width.div_ceil(8) {
-                let byte = match self.file_io.read_byte(fd) {
+                let byte = match self.files_mut().read_byte(fd) {
                     Ok(Some(byte)) => byte,
                     Ok(None) => break 'words,
                     Err(_) => {

@@ -665,13 +665,17 @@ pub(super) fn exec_one_detailed<B: SimBackend>(
         | GenericTestbenchStatement::Break => {
             unreachable!("statement is compiled into the process kernel")
         }
-        GenericTestbenchStatement::WriteMemory { signal, writes } => {
+        GenericTestbenchStatement::WriteMemory { signal, load } => {
             if let Err(e) = settle_testbench(sim) {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
+            // The file is read now (IEEE 1800-2023 21.4); an error terminates
+            // the load, keeping the words loaded before it.
+            let outcome = sim.run_testbench_memory_file(load);
             write_testbench_signal(sim, *signal, |sim| {
-                sim.apply_testbench_memory_writes(*signal, writes)
+                sim.apply_testbench_memory_writes(*signal, &outcome.runs)
             });
+            sim.report_testbench_memory_file(&outcome, load);
             ExecResult::Continue
         }
         GenericTestbenchStatement::RandomSeed { handle, value } => {

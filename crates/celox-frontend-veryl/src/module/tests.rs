@@ -10,7 +10,7 @@ use veryl_parser::Parser;
 use super::SLTNodeArena;
 use super::{
     collect_glue_sources, collect_parent_output_address_sources,
-    resolve_readmem_path_with_fallback, uses_named_external_port_associations,
+    uses_named_external_port_associations,
 };
 use crate::{GlueAddr, HashMap};
 use celox_design::{BinaryOp, BitAccess, VarAtomBase};
@@ -203,46 +203,6 @@ module Top (
     )
     .unwrap();
     assert!(sources.contains_key(&data_id));
-}
-
-#[test]
-fn readmem_path_falls_back_to_project_root() {
-    let tmp = tempfile::tempdir().unwrap();
-    let source_dir = tmp.path().join("tb");
-    let data_dir = tmp.path().join("test/hex");
-    std::fs::create_dir_all(&source_dir).unwrap();
-    std::fs::create_dir_all(&data_dir).unwrap();
-    std::fs::write(data_dir.join("boot.hex"), "00\n").unwrap();
-
-    let resolved = resolve_readmem_path_with_fallback(
-        "test/hex/boot.hex",
-        Some(&source_dir.join("testbench.veryl")),
-        Some(tmp.path()),
-        &Default::default(),
-    );
-
-    assert_eq!(resolved, data_dir.join("boot.hex"));
-}
-
-#[test]
-fn readmem_path_prefers_source_relative_file() {
-    let tmp = tempfile::tempdir().unwrap();
-    let source_dir = tmp.path().join("tb");
-    let source_data_dir = source_dir.join("test/hex");
-    let root_data_dir = tmp.path().join("test/hex");
-    std::fs::create_dir_all(&source_data_dir).unwrap();
-    std::fs::create_dir_all(&root_data_dir).unwrap();
-    std::fs::write(source_data_dir.join("boot.hex"), "11\n").unwrap();
-    std::fs::write(root_data_dir.join("boot.hex"), "00\n").unwrap();
-
-    let resolved = resolve_readmem_path_with_fallback(
-        "test/hex/boot.hex",
-        Some(&source_dir.join("testbench.veryl")),
-        Some(tmp.path()),
-        &Default::default(),
-    );
-
-    assert_eq!(resolved, source_data_dir.join("boot.hex"));
 }
 
 #[test]

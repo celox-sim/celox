@@ -319,50 +319,7 @@ impl Ff<'_, '_> {
             return self.file_task(task, args);
         }
         if let sv::ir::SystemTask::Readmem(format) = task {
-            // A file whose name is known only when the task executes is
-            // read then, by the host.
-            if !constant_file_name(args.first()) {
-                self.readmem_request(format, args)?;
-                return Ok(true);
-            }
-            let mut addresses = [None, None];
-            for (slot, arg) in addresses.iter_mut().zip(args.iter().skip(2)) {
-                let sv::ir::SystemTaskArg::Expr(expr) = arg else {
-                    continue;
-                };
-                let signed = self.expr_signed(expr);
-                let (value, width) = self
-                    .eval_const(expr)?
-                    .ok_or_else(|| unsupported(format!("`{task}` address that is not constant")))?;
-                let value = num_bigint::BigInt::from(value);
-                let value = if signed && width > 0 && value.bit(width as u64 - 1) {
-                    value - (num_bigint::BigInt::from(1u8) << width)
-                } else {
-                    value
-                };
-                *slot = Some(
-                    value
-                        .to_i128()
-                        .ok_or_else(|| unsupported(format!("`{task}` address")))?,
-                );
-            }
-            let (id, words) = self
-                .m
-                .readmem(format, args, addresses[0], addresses[1], site)?;
-            for word in words {
-                let width = word.access.msb - word.access.lsb + 1;
-                let reg = if word.mask.is_zero() {
-                    self.b.alloc_bit(width, false)
-                } else {
-                    self.b.alloc_logic(width)
-                };
-                self.b.emit(SIRInstruction::Imm(
-                    reg,
-                    SIRValue::new_four_state(word.value, word.mask),
-                ));
-                let offset = sv_memory_offset(self.m.var(id), word.access.lsb, width);
-                self.store(id, offset, width, reg);
-            }
+            self.readmem(format, args, site)?;
             return Ok(true);
         }
         // IEEE 1800-2023 24.7: `$exit` in a thread of a program's `initial`

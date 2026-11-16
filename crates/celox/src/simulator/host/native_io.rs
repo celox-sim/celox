@@ -382,7 +382,6 @@ pub(super) struct Scope<'a> {
     pub metadata: &'a Metadata,
     pub state: *const u8,
     pub state_size: usize,
-    pub files: &'a mut celox_runtime::file_io::FileIo,
     #[expect(
         clippy::disallowed_types,
         reason = "cross-thread: the simulator's pending runtime events, which a RuntimeEventDrain handle on another thread also locks"
@@ -922,6 +921,30 @@ impl Scope<'_> {
     /// The heap of the active native backend. It installs its heap after
     /// code adoption, so the current pointer is read rather than retaining
     /// the earlier tier's.
+    /// The design's file I/O, which the heap holds with its memory-file
+    /// reader (see `Simulator::files`).
+    fn files(&mut self) -> Result<&mut celox_runtime::file_io::FileIo, RuntimeErrorCode> {
+        // SAFETY: the backend keeps the heap it installs in this state
+        // image alive while the image runs, and no heap call of the code is
+        // active while it calls the host.
+        let heap = unsafe {
+            self.state
+                .add(celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET)
+                .cast::<*mut celox_heap::Heap>()
+                .read_unaligned()
+                .as_mut()
+        }
+        .ok_or_else(|| Self::fault("native state has no active heap"))?;
+        heap.memory_file_reader_mut()
+            .and_then(|reader| {
+                reader
+                    .as_any_mut()
+                    .downcast_mut::<crate::HostMemoryFileReader>()
+            })
+            .map(crate::HostMemoryFileReader::file_io_mut)
+            .ok_or_else(|| Self::fault("native state has no file I/O"))
+    }
+
     fn heap(&self) -> Result<&celox_heap::Heap, RuntimeErrorCode> {
         // SAFETY: the backend keeps the heap it installs in this state
         // image alive while the image runs.
@@ -1019,7 +1042,7 @@ impl Scope<'_> {
             timestamp,
             self.heap()?,
         );
-        let (stdout, result) = self.files.write_with_stdout(descriptor, &message);
+        let (stdout, result) = self.files()?.write_with_stdout(descriptor, &message);
         if stdout {
             let mut format = site.format.clone();
             format.kind = if site.request.operation == 3 {
@@ -1222,7 +1245,6 @@ mod tests {
             ],
         };
         let mut state = [0u8; 16];
-        let mut files = celox_runtime::file_io::FileIo::default();
         let pending = Arc::default();
         let read_seq = AtomicU64::new(0);
         let mut queue = std::collections::VecDeque::new();
@@ -1232,7 +1254,6 @@ mod tests {
             metadata: &metadata,
             state: state.as_mut_ptr().cast_const(),
             state_size: state.len(),
-            files: &mut files,
             pending: &pending,
             read_seq: &read_seq,
             error: None,
