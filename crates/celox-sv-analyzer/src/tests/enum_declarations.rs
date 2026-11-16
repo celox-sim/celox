@@ -87,6 +87,11 @@ fn rejects_enumeration_values_that_are_not_unique_or_increment_the_maximum() {
             "enum bit [255:0] {A = 256'h8000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000, B = A} e;",
             "have the same value",
         ),
+        // A wide value an implicit member takes, through its name.
+        (
+            "enum bit [255:0] {A = 256'h1_0000_0000_0000_0000_0000_0000_0000_0000, B, C = B} e;",
+            "have the same value",
+        ),
         // A value only a constant function call gives.
         (
             "function automatic int one(); return 1; endfunction enum {A = one(), B = 1} e;",

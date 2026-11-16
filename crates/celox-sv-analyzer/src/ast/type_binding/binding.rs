@@ -1058,6 +1058,25 @@ pub(in crate::ast) fn validate_enum_initializers(
                 continue;
             }
             values.increment(&name)?;
+            // Keep a value too wide for the numeric environment for the
+            // members that name it.
+            if next.is_none()
+                && let Some(value) = values.last.clone()
+            {
+                unknown_literals.insert(
+                    name.clone(),
+                    Expr::Literal(resize_integral_literal_for_cast(
+                        typecheck::IntegralLiteral {
+                            width: shape.width,
+                            signed: shape.signed,
+                            value,
+                            mask: num_bigint::BigUint::default(),
+                        },
+                        shape.width,
+                        shape.signed,
+                    )),
+                );
+            }
             if let Some(value) = next {
                 env.insert(name.clone(), value);
                 dimensions::insert_parameter_type_markers(&mut env, &name, shape);
