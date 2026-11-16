@@ -911,7 +911,10 @@ impl<'a> Elaborator<'a, '_> {
             .into_iter()
             .map(|(name, ty)| (name, (ty.width, ty.signed)))
             .collect();
-        self.expression(root, scope)?
+        let probe_expr = self.expression(root, scope)?;
+        let probe_text = { let t = self.tree.declarations().expression(root).tokens; format!("{t:?}") };
+        let probe_dbg = format!("{probe_expr:?}");
+        let result = probe_expr
             .and_then(|expr| {
                 let expr = expr.into();
                 // Preserve four-state truth first (IEEE 1800-2023 12.4).
@@ -930,8 +933,11 @@ impl<'a> Elaborator<'a, '_> {
                         )
                         .map(|value| value != 0)
                     })
-            })
-            .ok_or_else(|| AnalyzerError::Unsupported(detail.to_string()))
+            });
+        if result.is_none() {
+            eprintln!("PROBE gen-cond scope={:?} tokens={probe_text} expr={}", scope.path, &probe_dbg[..probe_dbg.len().min(3000)]);
+        }
+        result.ok_or_else(|| AnalyzerError::Unsupported(detail.to_string()))
     }
 
     fn push(&mut self, id: celox_sv_syntax::BodyItemId, scope: &Scope) {

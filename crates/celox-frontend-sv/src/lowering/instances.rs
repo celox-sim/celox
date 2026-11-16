@@ -73,6 +73,7 @@ pub(super) fn lower_instances(
             let condition =
                 sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
                     .ok_or_else(|| {
+                        eprintln!("PROBE fe-inst cond={condition:?}");
                         sv::AnalyzerError::Unsupported(
                             "unknown conditional-generate condition".to_string(),
                         )

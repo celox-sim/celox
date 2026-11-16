@@ -206,6 +206,7 @@ pub(super) fn lower_initial_processes(
             let condition =
                 sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
                     .ok_or_else(|| {
+                        eprintln!("PROBE fe-init cond={condition:?}");
                         procedural::unsupported("unknown conditional-generate condition")
                     })?;
             if condition == 0 {
