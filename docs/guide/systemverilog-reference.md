@@ -375,8 +375,9 @@ blocks in programs. Two region deviations are listed under
   included, the latter naming the member. A guard of state values, as of `if` or `->`, is
   evaluated before solving, so a constraint it leaves out reads no member of
   a null handle (18.5.13).
-- Inline `with` constraints: aggregate caller-scope inputs, typed
-  parameter inputs, a `local::` name of a property of the caller's
+- Inline `with` constraints: aggregate caller-scope inputs other than an
+  element at a position a caller-scope name or a literal gives (as
+  `buffer[i]`, read as the call starts), typed parameter inputs, a `local::` name of a property of the caller's
   class, and a member of a caller-scope variable (18.7) other than the one
   that holds the object being randomized, as `h` of
   `h.randomize() with { h.x > 0; }`, which names that object, also in

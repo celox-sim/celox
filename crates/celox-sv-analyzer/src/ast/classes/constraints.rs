@@ -1010,9 +1010,11 @@ pub(in crate::ast) struct CallerInput {
 
 /// The key of the caller's value that constraint expression `id` names, as
 /// a randomize call supplies it (see [`CallerInput`]): a name, `local::`
-/// one (18.7), or with `this_is_caller`, as in a scope randomize call
-/// inside a method, `this.` or `super.` one, a member of the caller's
-/// object. One resolution for the call's collection and the binding.
+/// one (18.7), with `this_is_caller`, as in a scope randomize call inside a
+/// method, `this.` or `super.` one, a member of the caller's object, or an
+/// element `a[i]` of an array at a position a name or a literal gives,
+/// which the call supplies when both resolve in the caller's scope. One
+/// resolution for the call's collection and the binding.
 pub(in crate::ast) fn caller_key(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
@@ -1042,8 +1044,69 @@ pub(in crate::ast) fn caller_key(
                 _ => None,
             }
         }
+        ExprKind::Select {
+            expression,
+            dimension,
+        } => {
+            let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind else {
+                return None;
+            };
+            let ExprKind::Name(array) = &native
+                .expression(expression_binding::ungroup(*expression, native))
+                .kind
+            else {
+                return None;
+            };
+            let index = match &native
+                .expression(expression_binding::ungroup(index, native))
+                .kind
+            {
+                ExprKind::Name(name) if name.spelling != "$" => {
+                    instances::normalize_identifier(&name.spelling)
+                }
+                ExprKind::Literal(text) => text.clone(),
+                _ => return None,
+            };
+            Some(format!(
+                "{}[{index}]",
+                instances::normalize_identifier(&array.spelling)
+            ))
+        }
         _ => None,
     }
+}
+
+/// The names of the array and the position of element `a[i]` that
+/// constraint expression `id` selects (see [`caller_key`]), the position's
+/// only when a name gives it.
+pub(in crate::ast) fn element_names(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+) -> Option<(String, Option<String>)> {
+    let ExprKind::Select {
+        expression,
+        dimension,
+    } = &native.expression(id).kind
+    else {
+        return None;
+    };
+    let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind else {
+        return None;
+    };
+    let ExprKind::Name(array) = &native
+        .expression(expression_binding::ungroup(*expression, native))
+        .kind
+    else {
+        return None;
+    };
+    let index = match &native
+        .expression(expression_binding::ungroup(index, native))
+        .kind
+    {
+        ExprKind::Name(name) => Some(instances::normalize_identifier(&name.spelling)),
+        _ => None,
+    };
+    Some((instances::normalize_identifier(&array.spelling), index))
 }
 
 /// The first input index that stands for the value of call `k` of a
@@ -2341,6 +2404,27 @@ pub(in crate::ast) fn bind_inputs(
                     }),
                     width,
                     signed,
+                }
+            }
+            // An element of an array of the caller at a position the
+            // caller gives, a value the call supplies (18.7): not one at the
+            // position of a constraint loop's variable.
+            ExprKind::Select { .. }
+                if caller_key(id, native, true).is_some_and(|key| inputs.contains_key(&key))
+                    && element_names(id, native).is_some_and(|(_, index)| {
+                        !index.is_some_and(|index| {
+                            loops.iter().any(|looped| looped.variable == index)
+                        })
+                    }) =>
+            {
+                let input = inputs[&caller_key(id, native, true).unwrap()];
+                Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Input {
+                        index: input.index,
+                        width: input.width,
+                    }),
+                    width: input.width,
+                    signed: input.signed,
                 }
             }
             // A select of a property at constant positions: its bits, an

@@ -6100,6 +6100,49 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq checks 1023))
 
+; An element of an array of the caller, as `buffer[i]` or `vals[2]`, at a
+; position a name of the caller or a literal gives, is a value the call
+; supplies, read as the call starts (IEEE 1800-2023 18.7): an element of a
+; property of the class of the method that makes the call, 4-state too, or
+; of a variable of the caller's scope. A name the object's class declares,
+; as `lim`, still names the object's array.
+(case inline_constraint_caller_elements
+  (source "inline_caller_elements.sv" #"
+class Item;
+    rand logic [31:0] data;
+    rand int delay;
+    int lim[2] = '{5, 6};
+endclass
+class Seq;
+    Item req;
+    logic [31:0] buffer[];
+    int lim[2] = '{100, 200};
+    function int fill();
+        int n = 0;
+        req = new;
+        buffer = new[4];
+        foreach (buffer[i]) buffer[i] = 32'hA0 + i;
+        for (int i = 0; i < 4; i++)
+            n += req.randomize() with { data == buffer[i]; delay < lim[1]; delay > 0; }
+                && req.data == buffer[i] && req.delay < 6;
+        return n;
+    endfunction
+endclass
+module Top(output int checks);
+    initial begin
+        Seq s = new;
+        Item it = new;
+        int vals[3] = '{7, 8, 9};
+        int k = 1;
+        checks = 0;
+        checks += (s.fill() == 4) * 1;
+        checks += (it.randomize() with { delay == vals[k]; data == vals[2]; }
+            && it.delay == 8 && it.data == 9) * 2;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 3))
+
 ; A select of a member a handle path names, `h.m[0]`, `this.h.m[3:0]`,
 ; `super.h.m[1:0]` or the receiver's `item.h.m[6]`, and of a member of a loop
 ; element, takes its bits in every constraint position: a constraint, a

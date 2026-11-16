@@ -2108,7 +2108,8 @@ fn scope_randomize_with(
 /// than those `owned` names, added to `inputs` from index `first_input` on
 /// with their types and values (IEEE 1800-2023 18.7): a variable of the
 /// caller's scope, a member of the class of the caller's method, also
-/// through `this.` or `super.` with `this_is_caller` (see
+/// through `this.` or `super.` with `this_is_caller`, or an element of an
+/// array of either at a position the caller gives (see
 /// [`classes::constraints::caller_key`]), but not a constant, which the
 /// constraint binds as its value.
 #[allow(clippy::too_many_arguments)]
@@ -2172,6 +2173,29 @@ fn caller_inputs(
                 return Err(unsupported(
                     "a member of a variable of the caller in inline constraints",
                 ));
+            }
+            // An element of an array of the caller at a position the caller
+            // gives (see `caller_key`): the call supplies its value.
+            ExprKind::Select { .. }
+                if classes::constraints::caller_key(id, native, this_is_caller).is_some()
+                    && classes::constraints::element_names(id, native).is_some_and(
+                        |(array, index)| {
+                            let caller = |name: &String| {
+                                !loops.contains(name)
+                                    && !owned(name)
+                                    && receiver != Some(name.as_str())
+                            };
+                            caller(&array) && index.as_ref().is_none_or(caller)
+                        },
+                    ) =>
+            {
+                let (array, _) =
+                    classes::constraints::element_names(id, native).expect("an element select");
+                Some((
+                    classes::constraints::caller_key(id, native, this_is_caller)
+                        .expect("an element key"),
+                    array,
+                ))
             }
             ExprKind::Group(id) | ExprKind::Unary { expression: id, .. } => {
                 pending.push((*id, loops));
@@ -2285,7 +2309,10 @@ fn caller_inputs(
             continue;
         }
         let through_this = key.starts_with("this.") || key.starts_with("super.");
-        let Some(variable) = dimensions.get(&name).filter(|_| !through_this) else {
+        // An element is read as the caller reads it, whose type gives the
+        // input's.
+        let element = matches!(native.expression(id).kind, ExprKind::Select { .. });
+        let Some(variable) = dimensions.get(&name).filter(|_| !through_this && !element) else {
             // A member of the class of the caller's method, read as the
             // method reads it; a constant binds as its value.
             let member = match scope_class(dimensions) {
@@ -2295,7 +2322,7 @@ fn caller_inputs(
                         .is_some()
                 }
                 _ => false,
-            };
+            } || (element && dimensions.get(&name).is_some());
             if !through_this && !member {
                 if dimensions.const_env.contains_key(&name) {
                     continue;
