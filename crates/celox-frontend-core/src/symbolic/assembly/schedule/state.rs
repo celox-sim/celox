@@ -317,6 +317,7 @@ pub(super) fn stage_nba_sites(
     let eval_apply_ffs = &units.eval_apply_ffs;
     let eval_only_ffs = &units.eval_only_ffs;
     let apply_ffs = &units.apply_ffs;
+    let functions = &units.functions;
     let processes = &mut units.processes;
     let timing = &mut units.timing;
 
@@ -381,7 +382,8 @@ pub(super) fn stage_nba_sites(
                 .chain(eval_comb_apply_ffs.values().flatten())
                 .chain(eval_only_ffs.values().flatten())
                 .chain(apply_ffs.values().flatten())
-                .chain(processes.iter().map(|process| &process.kernel)),
+                .chain(processes.iter().map(|process| &process.kernel))
+                .chain(functions.iter().map(|function| &function.unit)),
             &top_ports,
             &observed,
         );
