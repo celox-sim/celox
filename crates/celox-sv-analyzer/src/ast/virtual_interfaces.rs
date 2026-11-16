@@ -578,6 +578,7 @@ pub(super) fn member_signals(
             is_const: false,
             package_variable: None,
             hierarchical: None,
+            force_control: None,
         }));
     }
     for (interface, declaration) in interfaces {
@@ -587,6 +588,7 @@ pub(super) fn member_signals(
         .name();
         signals.push(Signal {
             hierarchical: Some(instance.clone()),
+            force_control: None,
             name: instance,
             r#type: value_type(
                 table,
@@ -612,6 +614,7 @@ pub(super) fn member_signals(
             // name does: that instance's object, not one of this module.
             Signal {
                 hierarchical: Some(name.clone()),
+                force_control: None,
                 name,
                 r#type: member.r#type.clone(),
                 is_net: member.is_net,
@@ -1146,6 +1149,7 @@ pub(super) fn identity_signal(
         is_const: false,
         package_variable: None,
         hierarchical: None,
+        force_control: None,
     })
 }
 

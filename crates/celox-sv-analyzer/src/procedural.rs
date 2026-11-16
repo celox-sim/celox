@@ -71,6 +71,25 @@ pub enum StmtBase<E, L> {
     Deassign {
         lhs: L,
     },
+    /// `force lhs = rhs;` in a procedure (IEEE 1800-2023 10.6.2). The
+    /// analyzer lowers it to writes of the target's force controls and a
+    /// [`StmtBase::ForceStore`] (`ast::procedural_forces`), so it does not
+    /// reach the IR.
+    Force {
+        lhs: L,
+        rhs: E,
+    },
+    /// `release lhs;` (10.6.2), lowered with [`StmtBase::Force`].
+    Release {
+        lhs: L,
+    },
+    /// The store of a forced value into the target of a `force`: the
+    /// target takes the value at once (10.6.2), and the store is no
+    /// procedural assignment or driver of the target.
+    ForceStore {
+        lhs: L,
+        rhs: E,
+    },
     /// A nonblocking assignment scheduled by an intra-assignment delay.
     /// The control describes the delay; it does not suspend the caller.
     DelayedNonblocking {
@@ -349,6 +368,15 @@ impl<E, L> StmtBase<E, L> {
                 rhs: fe(rhs),
             },
             StmtBase::Deassign { lhs } => StmtBase::Deassign { lhs: fl(lhs) },
+            StmtBase::Force { lhs, rhs } => StmtBase::Force {
+                lhs: fl(lhs),
+                rhs: fe(rhs),
+            },
+            StmtBase::Release { lhs } => StmtBase::Release { lhs: fl(lhs) },
+            StmtBase::ForceStore { lhs, rhs } => StmtBase::ForceStore {
+                lhs: fl(lhs),
+                rhs: fe(rhs),
+            },
             StmtBase::If {
                 condition,
                 then_body,
@@ -509,11 +537,14 @@ impl<E, L> StmtBase<E, L> {
                 control.visit(fe, fl, fcall);
                 assignment.visit(fe, fl, fcall);
             }
-            StmtBase::Assign { lhs, rhs, .. } | StmtBase::ProceduralAssign { lhs, rhs } => {
+            StmtBase::Assign { lhs, rhs, .. }
+            | StmtBase::ProceduralAssign { lhs, rhs }
+            | StmtBase::Force { lhs, rhs }
+            | StmtBase::ForceStore { lhs, rhs } => {
                 fl(lhs);
                 fe(rhs);
             }
-            StmtBase::Deassign { lhs } => fl(lhs),
+            StmtBase::Deassign { lhs } | StmtBase::Release { lhs } => fl(lhs),
             StmtBase::AssignConcat { parts, rhs, .. } => {
                 parts.iter().for_each(&mut *fl);
                 fe(rhs);
@@ -643,11 +674,14 @@ impl<E, L> StmtBase<E, L> {
                 control.visit_mut(fe, fl, fname);
                 assignment.visit_mut(fe, fl, fname);
             }
-            StmtBase::Assign { lhs, rhs, .. } | StmtBase::ProceduralAssign { lhs, rhs } => {
+            StmtBase::Assign { lhs, rhs, .. }
+            | StmtBase::ProceduralAssign { lhs, rhs }
+            | StmtBase::Force { lhs, rhs }
+            | StmtBase::ForceStore { lhs, rhs } => {
                 fl(lhs);
                 fe(rhs);
             }
-            StmtBase::Deassign { lhs } => fl(lhs),
+            StmtBase::Deassign { lhs } | StmtBase::Release { lhs } => fl(lhs),
             StmtBase::AssignConcat { parts, rhs, .. } => {
                 parts.iter_mut().for_each(&mut *fl);
                 fe(rhs);
