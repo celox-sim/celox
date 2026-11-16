@@ -1,6 +1,42 @@
 use super::*;
 
 impl Ff<'_, '_> {
+    /// Count the changes of the whole static variable `id` for a monitor,
+    /// once, and pass its value to the host request that registers it.
+    fn watch_monitor_variable(
+        &mut self,
+        task: sv::ir::SystemTask,
+        file: bool,
+        id: SourceVarId,
+        watched: &mut Vec<SourceVarId>,
+        registration: &mut Vec<celox_design::HostRequestValue<SourceVarId>>,
+    ) -> Result<(), sv::AnalyzerError> {
+        let variable = self.m.var(id);
+        if (file && variable.value_kind == celox_design::ValueKind::StrRef)
+            || !variable.array_dims.is_empty()
+            || !matches!(
+                variable.value_kind,
+                celox_design::ValueKind::Bits | celox_design::ValueKind::StrRef
+            )
+        {
+            return Err(unsupported(format!(
+                "`{task}` requires whole static scalar variables (file monitors currently require numeric variables)"
+            )));
+        }
+        if !watched.contains(&id) {
+            watched.push(id);
+            registration.push(celox_design::HostRequestValue {
+                value_kind: variable.value_kind,
+                id,
+                width: variable.width,
+                signed: variable.signed,
+                is_string: false,
+                float_precision: variable.float,
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn strobe(
         &mut self,
         task: sv::ir::SystemTask,
@@ -108,6 +144,22 @@ impl Ff<'_, '_> {
                         )
                     })
                 {
+                    // The other operands of an argument that mixes one in,
+                    // such as `$time + value`, still trigger it.
+                    let mut names = HashSet::default();
+                    expr_idents(expr, &mut names);
+                    let mut operands: Vec<_> =
+                        names.iter().filter_map(|name| self.m.id(name)).collect();
+                    operands.sort_unstable();
+                    for id in operands {
+                        self.watch_monitor_variable(
+                            task,
+                            file,
+                            id,
+                            &mut watched,
+                            &mut registration,
+                        )?;
+                    }
                     continue;
                 }
                 // Any other expression is watched through a continuous
@@ -147,29 +199,13 @@ impl Ff<'_, '_> {
                             .m
                             .id(name)
                             .ok_or_else(|| unsupported(format!("`{task}` argument")))?;
-                        let variable = self.m.var(id);
-                        if (file && variable.value_kind == celox_design::ValueKind::StrRef)
-                            || !variable.array_dims.is_empty()
-                            || !matches!(
-                                variable.value_kind,
-                                celox_design::ValueKind::Bits | celox_design::ValueKind::StrRef
-                            )
-                        {
-                            return Err(unsupported(format!(
-                                "`{task}` requires whole static scalar variables (file monitors currently require numeric variables)"
-                            )));
-                        }
-                        if !watched.contains(&id) {
-                            watched.push(id);
-                            registration.push(celox_design::HostRequestValue {
-                                value_kind: variable.value_kind,
-                                id,
-                                width: variable.width,
-                                signed: variable.signed,
-                                is_string: false,
-                                float_precision: variable.float,
-                            });
-                        }
+                        self.watch_monitor_variable(
+                            task,
+                            file,
+                            id,
+                            &mut watched,
+                            &mut registration,
+                        )?;
                     }
                     Expr::Literal(_) => {}
                     Expr::Call {
