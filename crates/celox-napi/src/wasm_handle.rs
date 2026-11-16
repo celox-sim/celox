@@ -88,39 +88,80 @@ impl NativeSimulatorHandle {
             .collect();
         append_extra_source(&mut src_pairs, &opts.extra_source);
 
-        let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+        let (veryl_pairs, sv_pairs) = partition_hdl_sources(&src_pairs);
+        let source_refs: Vec<(&str, &std::path::Path)> = veryl_pairs
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
+        let sv_refs: Vec<(&str, &std::path::Path)> = sv_pairs
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
 
         let trace_opts = celox::TraceOptions::default();
-        let (program, warnings) = celox::compile_to_sir_with_diagnostic_policy(
-            &source_refs,
-            &top,
-            &opts
-                .false_loops
-                .iter()
-                .map(|(f, t)| (f.clone(), t.clone()))
-                .collect::<Vec<_>>(),
-            &opts
-                .true_loops
-                .iter()
-                .map(|(f, t, m)| (f.clone(), t.clone(), *m))
-                .collect::<Vec<_>>(),
-            opts.four_state,
-            &trace_opts,
-            None,
-            None,
-            opts.clock_type,
-            opts.reset_type,
-            &opts.parameters,
-            &opts.optimize_options,
-            &opts
-                .diagnostic_policy
-                .clone()
-                .with_inferred_latches(opts.allow_inferred_latches),
-            &Default::default(),
-        )
+        let false_loops = opts
+            .false_loops
+            .iter()
+            .map(|(f, t)| (f.clone(), t.clone()))
+            .collect::<Vec<_>>();
+        let true_loops = opts
+            .true_loops
+            .iter()
+            .map(|(f, t, m)| (f.clone(), t.clone(), *m))
+            .collect::<Vec<_>>();
+        // Dispatch on the source languages: pure Veryl keeps the existing
+        // diagnostic-policy pipeline, pure SystemVerilog uses the SV
+        // frontend, and a mix uses the mixed-language pipeline.
+        let (program, warnings) = match (source_refs.is_empty(), sv_refs.is_empty()) {
+            (false, true) | (true, true) => celox::compile_to_sir_with_diagnostic_policy(
+                &source_refs,
+                &top,
+                &false_loops,
+                &true_loops,
+                opts.four_state,
+                &trace_opts,
+                None,
+                None,
+                opts.clock_type,
+                opts.reset_type,
+                &opts.parameters,
+                &opts.optimize_options,
+                &opts
+                    .diagnostic_policy
+                    .clone()
+                    .with_inferred_latches(opts.allow_inferred_latches),
+                &Default::default(),
+            ),
+            (true, false) => celox::compile_sv_to_sir(
+                &sv_refs,
+                &top,
+                &false_loops,
+                &true_loops,
+                opts.four_state,
+                &trace_opts,
+                None,
+                None,
+                opts.clock_type,
+                opts.reset_type,
+                &opts.parameters,
+                &opts.optimize_options,
+            ),
+            (false, false) => celox::compile_mixed_to_sir(
+                &source_refs,
+                &sv_refs,
+                &top,
+                &false_loops,
+                &true_loops,
+                opts.four_state,
+                &trace_opts,
+                None,
+                None,
+                opts.clock_type,
+                opts.reset_type,
+                &opts.parameters,
+                &opts.optimize_options,
+            ),
+        }
         .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
         let laid_out = program

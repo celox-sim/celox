@@ -266,6 +266,21 @@ impl NativeSimulatorHandle {
         })
     }
 
+    /// The simulator builder for sources partitioned by language.
+    pub(super) fn builder_for_sources<'a>(
+        veryl: Vec<(&'a str, &'a std::path::Path)>,
+        sv: Vec<(&'a str, &'a std::path::Path)>,
+        top: &'a str,
+    ) -> celox::SimulatorBuilder<'a, celox::Simulator> {
+        match (veryl.is_empty(), sv.is_empty()) {
+            (false, true) | (true, true) => celox::Simulator::from_sources(veryl, top),
+            (true, false) => celox::SimulatorBuilder::<celox::Simulator>::from_sv_sources(sv, top),
+            (false, false) => {
+                celox::SimulatorBuilder::<celox::Simulator>::from_mixed_sources(veryl, sv, top)
+            }
+        }
+    }
+
     /// Create a new simulator from Veryl source code.
     #[napi(constructor)]
     pub fn new(
@@ -289,11 +304,16 @@ impl NativeSimulatorHandle {
             }
         }
 
-        let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+        let (veryl_pairs, sv_pairs) = partition_hdl_sources(&src_pairs);
+        let source_refs: Vec<(&str, &std::path::Path)> = veryl_pairs
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts);
+        let sv_refs: Vec<(&str, &std::path::Path)> = sv_pairs
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
+        let builder = apply_options(Self::builder_for_sources(source_refs, sv_refs, &top), &opts);
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -322,11 +342,16 @@ impl NativeSimulatorHandle {
             .collect();
         append_extra_source(&mut src_pairs, &opts.extra_source);
 
-        let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+        let (veryl_pairs, sv_pairs) = partition_hdl_sources(&src_pairs);
+        let source_refs: Vec<(&str, &std::path::Path)> = veryl_pairs
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts);
+        let sv_refs: Vec<(&str, &std::path::Path)> = sv_pairs
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
+        let builder = apply_options(Self::builder_for_sources(source_refs, sv_refs, &top), &opts);
         let sim = builder
             .build_tiered()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
