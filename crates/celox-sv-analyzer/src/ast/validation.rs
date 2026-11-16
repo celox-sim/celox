@@ -441,6 +441,79 @@ fn contains(outer: celox_sv_syntax::TokenRange, inner: celox_sv_syntax::TokenRan
     outer.start <= inner.start && inner.end <= outer.end
 }
 
+/// Whether native expression `id` is a replication whose multiplier is the
+/// constant zero.
+fn zero_replication(
+    id: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> bool {
+    let celox_sv_syntax::ExprKind::Replication { count, .. } = native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    else {
+        return false;
+    };
+    constant_binding::bind(count, tree, session, dimensions)
+        .ok()
+        .flatten()
+        .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env))
+        == Some(0)
+}
+
+/// Whether native expression `id` is a real operand: a real literal, or a
+/// parameter of the design element declared `real`, `shortreal` or
+/// `realtime` (IEEE 1800-2023 5.7.2, 6.12).
+pub(super) fn real_operand(
+    id: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+) -> bool {
+    use celox_sv_syntax::{DataTypeKind, ExprKind, ParameterKind};
+    match &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    {
+        // A real literal has a decimal point or an exponent, unlike a based
+        // or a time literal.
+        ExprKind::Literal(text) => {
+            text.starts_with(|c: char| c.is_ascii_digit())
+                && text
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, '_' | '.' | 'e' | 'E' | '+' | '-'))
+                && text.contains(['.', 'e', 'E'])
+        }
+        ExprKind::Name(name) => {
+            let name = instances::normalize_identifier(&name.spelling);
+            tree.root_unit().is_ok_and(|unit| {
+                unit.parameters
+                    .iter()
+                    .flatten()
+                    .chain(&unit.body_parameters)
+                    .any(|parameter| {
+                        instances::normalize_identifier(&parameter.name.spelling) == name
+                            && matches!(
+                                &parameter.kind,
+                                ParameterKind::Value { data_type, dimensions, .. }
+                                    if dimensions.is_empty()
+                                        && matches!(
+                                            &native.data_type(*data_type).kind,
+                                            DataTypeKind::Builtin(builtin)
+                                                if matches!(
+                                                    builtin.as_str(),
+                                                    "real" | "shortreal" | "realtime"
+                                                )
+                                        )
+                            )
+                    })
+            })
+        }
+        _ => false,
+    }
+}
+
 /// Whole-file facts the scope validation selects from, built once per file
 /// so each scope costs what its own token ranges contain.
 #[derive(Debug)]
@@ -971,6 +1044,29 @@ fn validate_scope(
                     // only the width requires constant validation here.
                     check_indexed_width(width, syntax_tree, session, indexed_dimensions)?;
                 }
+            }
+            // A replication of zero copies has no size; it appears only in a
+            // concatenation with an operand of positive size (11.4.12.1).
+            ExprKind::Concatenation(operands) | ExprKind::Replication { expressions: operands, .. }
+                if !operands.is_empty()
+                    && operands.iter().all(|operand| {
+                        zero_replication(*operand, native, syntax_tree, session, indexed_dimensions)
+                    }) =>
+            {
+                return Err(AnalyzerError::InvalidReplication(
+                    "a replication of zero copies is the only operand of a concatenation".into(),
+                ));
+            }
+            ExprKind::Binary { left, operator, right }
+                if matches!(operator.as_str(), "==?" | "!=?")
+                    && [*left, *right]
+                        .into_iter()
+                        .any(|operand| real_operand(operand, native, syntax_tree)) =>
+            {
+                return Err(AnalyzerError::IllegalOperand {
+                    operator: operator.clone(),
+                    operand: "real",
+                });
             }
             _ => {}
         }

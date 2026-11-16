@@ -330,6 +330,28 @@ pub enum AnalyzerError {
     /// between types of different sizes.
     #[error("cast: {0} (IEEE 1800-2023 6.24)")]
     InvalidCast(String),
+    /// A replication that IEEE 1800-2023 11.4.12.1 forbids, such as one of
+    /// zero copies alone in a concatenation.
+    #[error("replication: {0} (IEEE 1800-2023 11.4.12.1)")]
+    InvalidReplication(String),
+    /// An operand of a type that the operator does not take, such as a real
+    /// operand of a wildcard equality or a concatenation, which take
+    /// integral ones (IEEE 1800-2023 11.3, Table 11-1).
+    #[error("operator `{operator}` takes no {operand} operand (IEEE 1800-2023 11.3)")]
+    IllegalOperand {
+        operator: String,
+        operand: &'static str,
+    },
+    /// A net declared with a data type that is not integral or an unpacked
+    /// aggregate of such, such as a `string` or a class (IEEE 1800-2023
+    /// 6.7.1).
+    #[error(
+        "net `{name}` of {data_type}: a net shall have an integral type (IEEE 1800-2023 6.7.1)"
+    )]
+    IllegalNetDataType {
+        name: String,
+        data_type: &'static str,
+    },
     /// A `defparam` assignment that IEEE 1800-2023 23.10.1 or 6.20.3
     /// forbids, such as one out of the generate block it is in.
     #[error("defparam: {0}")]
