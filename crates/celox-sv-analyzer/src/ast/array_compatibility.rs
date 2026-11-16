@@ -36,10 +36,6 @@ fn element_identity(shape: &VariableDimensions, table: &semantic_types::TyTable)
     {
         return Some(table.spell(id));
     }
-    debug_assert!(
-        shape.virtual_interface.is_none(),
-        "an array of virtual interfaces is told by its semantic type"
-    );
     if let Some(aggregate) = shape.unpacked_struct_in(table) {
         return Some(format!("struct {}", aggregate.identity()));
     }
@@ -158,11 +154,7 @@ pub(super) fn selected_unpacked_shape(
         .filter(|rest| !rest.is_empty())?;
     // A subarray has the element type of the whole array; `$typename`
     // compares the declared dimensions before it uses the declared type.
-    Some(VariableDimensions::new(VariableShape {
-        container: None,
-        unpacked: unpacked.to_vec(),
-        ..shape.clone_shape()
-    }))
+    Some(shape.subarray(unpacked.to_vec()))
 }
 
 /// The variable an expression selects from, as the dotted path of its

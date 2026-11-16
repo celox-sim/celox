@@ -2,6 +2,32 @@
 
 use crate::{ast, symbol::ModuleId, typecheck};
 
+mod overrides;
+pub use crate::ast::module_overrides::MODULE_HANDLE;
+pub use overrides::{ExportedOverride, ModuleClasses, OverrideArm, merge_overrides};
+
+/// What expanding the instances of an elaborated design repeats analyzed
+/// accesses for (see [`Module::expand_instances`]).
+pub struct InstanceExpansion<'a> {
+    /// The ids of the instances of each interface, and of each module
+    /// specialization whose classes' overrides read its items, in id order.
+    ids: &'a crate::HashMap<crate::ast::virtual_interfaces::DefinitionId, Vec<u32>>,
+    /// The overrides of the module classes of the design.
+    overrides: &'a [ExportedOverride],
+}
+
+impl<'a> InstanceExpansion<'a> {
+    /// The expansion for the instances `ids` of a design whose module
+    /// classes export `overrides` (see [`merge_overrides`]): every module
+    /// expanded with it calls those overrides through its dispatchers.
+    pub fn new(
+        ids: &'a crate::HashMap<crate::ast::virtual_interfaces::DefinitionId, Vec<u32>>,
+        overrides: &'a [ExportedOverride],
+    ) -> Self {
+        Self { ids, overrides }
+    }
+}
+
 pub use crate::ast::warnings::AnalyzerWarning;
 
 /// The variable that the checks of the tags a written place's selection
@@ -58,10 +84,10 @@ impl Ir {
     }
 
     /// The modules, to lower them from their own bodies.
-    /// See [`Module::expand_virtual_interface_instances`], for each module.
-    pub fn expand_virtual_interface_instances(&mut self, ids: &crate::HashMap<String, Vec<u32>>) {
+    /// See [`Module::expand_instances`], for each module.
+    pub fn expand_instances(&mut self, expansion: &InstanceExpansion<'_>) {
         for module in &mut self.modules {
-            module.expand_virtual_interface_instances(ids);
+            module.expand_instances(expansion);
         }
     }
 
@@ -95,6 +121,8 @@ pub struct Module {
     imported_parameters: Vec<Parameter>,
     interface_scope_names: Vec<String>,
     interface_handles: Vec<InterfaceHandle>,
+    /// The overrides of the module's classes that other scopes call.
+    exported_overrides: Vec<ExportedOverride>,
     program: bool,
 }
 
@@ -327,6 +355,7 @@ impl Module {
             program: false,
             interface_scope_names: Vec::new(),
             interface_handles: Vec::new(),
+            exported_overrides: Vec::new(),
         }
     }
 
@@ -590,6 +619,31 @@ pub struct Signal {
     net_resolution: crate::ast::NetResolution,
     package_variable: Option<(String, String)>,
     hierarchical: Option<String>,
+    force_control: Option<ForceControl>,
+}
+
+/// What a hidden variable holds for the procedural force of a variable or
+/// net of its module (IEEE 1800-2023 10.6.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForceRole {
+    /// Whether the target is forced. Every write of the target stores the
+    /// forced value while it is set.
+    Enable,
+    /// The forced value.
+    Value,
+}
+
+/// The force control a hidden variable is (see [`ForceRole`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForceControl {
+    /// The name of the forced variable or net in the module.
+    pub target: String,
+    pub role: ForceRole,
+    /// Whether a force stores its value into the target: a variable that
+    /// procedures write, or an input port. A target that continuous
+    /// assignments or port connections drive takes the value through them,
+    /// and a net with no driver takes it from a driver the frontend adds.
+    pub stored: bool,
 }
 
 impl Signal {
@@ -602,7 +656,19 @@ impl Signal {
             net_resolution: crate::ast::NetResolution::Wire,
             package_variable: None,
             hierarchical: None,
+            force_control: None,
         }
+    }
+
+    pub(crate) fn with_force_control(mut self, control: Option<&ForceControl>) -> Self {
+        self.force_control = control.cloned();
+        self
+    }
+
+    /// The force control the signal is, for a hidden variable that the
+    /// lowering of `force` declares.
+    pub fn force_control(&self) -> Option<&ForceControl> {
+        self.force_control.as_ref()
     }
 
     pub(crate) fn with_hierarchical(mut self, hierarchical: Option<&str>) -> Self {
@@ -686,26 +752,31 @@ impl Port {
         self
     }
 
-    /// Bind an aggregate pattern as independently typed values for the leaf ports.
+    /// Bind an aggregate pattern as independently typed values for the leaf
+    /// ports, in the types of `design`: the design whose analysis published
+    /// the port, which bound its type there.
     pub fn bind_structure_pattern(
         &self,
         pattern: &crate::ast::BoundPattern,
+        design: &mut crate::Design,
     ) -> Result<Vec<Expr>, crate::AnalyzerError> {
         let target = self.pattern_target.as_ref().ok_or_else(|| {
             crate::AnalyzerError::Unsupported("unpacked structure port pattern type".into())
         })?;
-        pattern.bind_structure_port(target)
+        pattern.bind_structure_port(target, design)
     }
 
-    /// Bind caller-owned pattern values in this specialized port's type.
+    /// Bind caller-owned pattern values in this specialized port's type, in
+    /// the types of `design` (see [`Self::bind_structure_pattern`]).
     pub fn bind_pattern(
         &self,
         pattern: &crate::ast::BoundPattern,
+        design: &mut crate::Design,
     ) -> Result<Expr, crate::AnalyzerError> {
         let target = self.pattern_target.as_ref().ok_or_else(|| {
             crate::AnalyzerError::Unsupported("assignment pattern port type".into())
         })?;
-        pattern.bind_port(target)
+        pattern.bind_port(target, design)
     }
 
     pub fn name(&self) -> &str {
@@ -1392,6 +1463,17 @@ impl Assignment {
     }
 }
 
+/// The bits `lsb..=msb` of a variable that a run-time select stays within:
+/// those of the packed structure member the select is written on. The
+/// select's positions count from bit 0 of the variable, as those of a
+/// constant select of the member do; what it selects outside the window
+/// reads X and is not written (IEEE 1800-2023 11.5.1), as outside a vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SelectWindow {
+    pub lsb: u32,
+    pub msb: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LValue {
     Ident(String),
@@ -1399,8 +1481,11 @@ pub enum LValue {
         name: String,
         msb: ConstExpr,
         lsb: ConstExpr,
-        array_slice_width: Option<ConstExpr>,
+        array_slice_width: Option<Box<ConstExpr>>,
         array_slice_reversed: bool,
+        /// The bits of the variable a run-time select stays within: those of
+        /// the structure member it is written on (see [`SelectWindow`]).
+        window: Option<SelectWindow>,
     },
 }
 
@@ -2354,13 +2439,15 @@ impl From<ast::LValue> for LValue {
                 lsb,
                 array_slice_width,
                 array_slice_reversed,
+                window,
                 ..
             } => LValue::Select {
                 name,
                 msb: msb.into(),
                 lsb: lsb.into(),
-                array_slice_width: array_slice_width.map(Into::into),
+                array_slice_width: array_slice_width.map(|width| Box::new(width.into())),
                 array_slice_reversed,
+                window,
             },
         }
     }
@@ -2990,11 +3077,13 @@ fn map_operands(expr: Expr, f: &mut impl FnMut(Expr) -> Expr) -> Expr {
 
 /// The placeholders of the virtual interface accesses of a module, which
 /// the frontend replaces with the signals of each interface instance of the
-/// elaborated design (see [`Module::expand_virtual_interface_instances`]).
+/// elaborated design (see [`Module::expand_instances`]).
 mod virtual_instances {
     use super::*;
     use crate::HashMap;
-    use crate::ast::virtual_interfaces::{VirtualInterfaceSignal, placeholder_interface};
+    use crate::ast::virtual_interfaces::{
+        DefinitionId, VirtualInterfaceSignal, placeholder_interface,
+    };
 
     /// Bit width of a virtual interface value (an instance id).
     const WIDTH: usize = 32;
@@ -3004,10 +3093,10 @@ mod virtual_instances {
     }
 
     /// The interface whose instance id placeholder `expr` is.
-    fn instance(expr: &Expr) -> Option<String> {
+    fn instance(expr: &Expr) -> Option<DefinitionId> {
         match expr {
             Expr::Ident(name) => match VirtualInterfaceSignal::of(name)? {
-                VirtualInterfaceSignal::Instance { interface } => Some(interface),
+                VirtualInterfaceSignal::Instance { definition } => Some(definition),
                 _ => None,
             },
             _ => None,
@@ -3015,7 +3104,7 @@ mod virtual_instances {
     }
 
     /// The interface whose placeholders `expr` reads, if any.
-    fn mentioned(expr: &Expr) -> Option<String> {
+    fn mentioned(expr: &Expr) -> Option<DefinitionId> {
         let mut found = None;
         let _ = map_operands(expr.clone(), &mut |child| {
             if found.is_none() {
@@ -3031,14 +3120,14 @@ mod virtual_instances {
 
     /// `name` with the member placeholder of interface `interface` replaced
     /// by the signal of the member of its instance `id`.
-    fn member_name(name: &str, interface: &str, id: u32) -> Option<String> {
+    fn member_name(name: &str, interface: DefinitionId, id: u32) -> Option<String> {
         match VirtualInterfaceSignal::of(name)? {
             VirtualInterfaceSignal::Placeholder {
-                interface: of,
+                definition: of,
                 member,
             } if of == interface => Some(VirtualInterfaceSignal::Member { id, member }.name()),
             VirtualInterfaceSignal::StaticPlaceholder {
-                interface: of,
+                definition: of,
                 name,
             } if of == interface => Some(VirtualInterfaceSignal::Static { id, name }.name()),
             _ => None,
@@ -3048,12 +3137,12 @@ mod virtual_instances {
     /// The interface of the static variable placeholder `stmt` assigns, as
     /// an initializer of a static variable of an interface subroutine
     /// called through a virtual interface does.
-    pub(super) fn assigned_static(stmt: &Stmt) -> Option<String> {
+    pub(super) fn assigned_static(stmt: &Stmt) -> Option<DefinitionId> {
         let Stmt::Assign { lhs, .. } = stmt else {
             return None;
         };
         match VirtualInterfaceSignal::of(lhs.name())? {
-            VirtualInterfaceSignal::StaticPlaceholder { interface, .. } => Some(interface),
+            VirtualInterfaceSignal::StaticPlaceholder { definition, .. } => Some(definition),
             _ => None,
         }
     }
@@ -3061,10 +3150,10 @@ mod virtual_instances {
     /// `stmt` for instance `id` of interface `interface`.
     pub(super) fn for_each_instance(
         stmt: &Stmt,
-        interface: &str,
-        ids: &HashMap<String, Vec<u32>>,
+        interface: DefinitionId,
+        ids: &HashMap<DefinitionId, Vec<u32>>,
     ) -> Vec<Stmt> {
-        ids.get(interface)
+        ids.get(&interface)
             .into_iter()
             .flatten()
             .map(|&id| stmt_for_instance(stmt.clone(), interface, id))
@@ -3073,9 +3162,12 @@ mod virtual_instances {
 
     /// The names of static variable placeholder `name` for each instance of
     /// its interface in `ids`, or `name` itself.
-    pub(super) fn static_names(name: &str, ids: &HashMap<String, Vec<u32>>) -> Vec<String> {
+    pub(super) fn static_names(name: &str, ids: &HashMap<DefinitionId, Vec<u32>>) -> Vec<String> {
         match VirtualInterfaceSignal::of(name) {
-            Some(VirtualInterfaceSignal::StaticPlaceholder { interface, name }) => ids
+            Some(VirtualInterfaceSignal::StaticPlaceholder {
+                definition: interface,
+                name,
+            }) => ids
                 .get(&interface)
                 .into_iter()
                 .flatten()
@@ -3092,7 +3184,7 @@ mod virtual_instances {
     }
 
     /// `expr` for instance `id` of interface `interface`.
-    pub(super) fn for_instance(expr: Expr, interface: &str, id: u32) -> Expr {
+    pub(super) fn for_instance(expr: Expr, interface: DefinitionId, id: u32) -> Expr {
         match expr {
             Expr::Ident(name) => {
                 if instance(&Expr::Ident(name.clone())).is_some_and(|of| of == interface) {
@@ -3104,14 +3196,14 @@ mod virtual_instances {
         }
     }
 
-    fn lvalue_for_instance(lvalue: &mut LValue, interface: &str, id: u32) {
+    fn lvalue_for_instance(lvalue: &mut LValue, interface: DefinitionId, id: u32) {
         let (LValue::Ident(name) | LValue::Select { name, .. }) = lvalue;
         if let Some(renamed) = member_name(name, interface, id) {
             *name = renamed;
         }
     }
 
-    fn stmt_for_instance(mut stmt: Stmt, interface: &str, id: u32) -> Stmt {
+    fn stmt_for_instance(mut stmt: Stmt, interface: DefinitionId, id: u32) -> Stmt {
         stmt.visit_mut(
             &mut |expr| {
                 *expr = for_instance(
@@ -3129,7 +3221,7 @@ mod virtual_instances {
     /// `expr` with each selection arm that compares a handle with the id
     /// placeholder of an interface repeated for each of its instances in
     /// `ids`, in id order.
-    pub(super) fn expand_expr(expr: Expr, ids: &HashMap<String, Vec<u32>>) -> Expr {
+    pub(super) fn expand_expr(expr: Expr, ids: &HashMap<DefinitionId, Vec<u32>>) -> Expr {
         let expr = map_operands(expr, &mut |child| expand_expr(child, ids));
         let Expr::Mux {
             condition,
@@ -3157,15 +3249,15 @@ mod virtual_instances {
         let mut value = *else_expr;
         for &id in ids.get(&interface).into_iter().flatten().rev() {
             value = Expr::Mux {
-                condition: Box::new(for_instance((*condition).clone(), &interface, id)),
-                then_expr: Box::new(for_instance((*then_expr).clone(), &interface, id)),
+                condition: Box::new(for_instance((*condition).clone(), interface, id)),
+                then_expr: Box::new(for_instance((*then_expr).clone(), interface, id)),
                 else_expr: Box::new(value),
             };
         }
         value
     }
 
-    pub(super) fn expand_stmts(stmts: &mut [Stmt], ids: &HashMap<String, Vec<u32>>) {
+    pub(super) fn expand_stmts(stmts: &mut [Stmt], ids: &HashMap<DefinitionId, Vec<u32>>) {
         for stmt in stmts {
             expand_stmt(stmt, ids);
         }
@@ -3175,7 +3267,7 @@ mod virtual_instances {
     /// each case item labelled with an id placeholder repeated for each
     /// instance, and each event item that watches a placeholder repeated for
     /// each instance.
-    fn expand_stmt(stmt: &mut Stmt, ids: &HashMap<String, Vec<u32>>) {
+    fn expand_stmt(stmt: &mut Stmt, ids: &HashMap<DefinitionId, Vec<u32>>) {
         stmt.visit_mut(
             &mut |expr| {
                 *expr = expand_expr(std::mem::replace(expr, Expr::Literal(String::new())), ids);
@@ -3207,7 +3299,7 @@ mod virtual_instances {
                                 .body
                                 .iter()
                                 .cloned()
-                                .map(|stmt| stmt_for_instance(stmt, &interface, id))
+                                .map(|stmt| stmt_for_instance(stmt, interface, id))
                                 .collect(),
                         });
                     }
@@ -3230,11 +3322,11 @@ mod virtual_instances {
                     for &id in ids.get(&interface).into_iter().flatten() {
                         expanded.push(crate::procedural::EventItemBase {
                             edge: event.edge,
-                            expr: for_instance(event.expr.clone(), &interface, id),
+                            expr: for_instance(event.expr.clone(), interface, id),
                             iff: event
                                 .iff
                                 .clone()
-                                .map(|iff| for_instance(iff, &interface, id)),
+                                .map(|iff| for_instance(iff, interface, id)),
                         });
                     }
                 }
@@ -3248,7 +3340,7 @@ mod virtual_instances {
     /// interfaces whose member placeholders `signals` declares.
     pub(super) fn instance_signals(
         signals: &[Signal],
-        ids: &HashMap<String, Vec<u32>>,
+        ids: &HashMap<DefinitionId, Vec<u32>>,
     ) -> Vec<Signal> {
         let mut found = Vec::new();
         for signal in signals {
@@ -3267,8 +3359,10 @@ mod virtual_instances {
                 );
                 continue;
             }
-            let Some(VirtualInterfaceSignal::Placeholder { interface, member }) =
-                VirtualInterfaceSignal::of(&signal.name)
+            let Some(VirtualInterfaceSignal::Placeholder {
+                definition: interface,
+                member,
+            }) = VirtualInterfaceSignal::of(&signal.name)
             else {
                 continue;
             };
@@ -3297,8 +3391,16 @@ impl Module {
     /// access once, independently of the elaborated hierarchy; this repeats
     /// it for each instance, and declares the signals of the instances'
     /// members in place of the placeholders.
-    pub fn expand_virtual_interface_instances(&mut self, ids: &crate::HashMap<String, Vec<u32>>) {
+    ///
+    /// The overrides of the module classes of the design (see
+    /// [`ExportedOverride`]) join the module's dispatchers first: those
+    /// that read the items of their module instance select it as a call
+    /// through a virtual interface selects an interface instance, and are
+    /// repeated for each instance alike.
+    pub fn expand_instances(&mut self, expansion: &InstanceExpansion<'_>) {
         use virtual_instances::{expand_expr, expand_stmts};
+        self.inject_overrides(expansion.overrides);
+        let ids = expansion.ids;
         let expand = |expr: &mut Expr| {
             *expr = expand_expr(std::mem::replace(expr, Expr::Literal(String::new())), ids);
         };
@@ -3323,7 +3425,7 @@ impl Module {
             process.body = std::mem::take(&mut process.body)
                 .into_iter()
                 .flat_map(|stmt| match virtual_instances::assigned_static(&stmt) {
-                    Some(interface) => virtual_instances::for_each_instance(&stmt, &interface, ids),
+                    Some(interface) => virtual_instances::for_each_instance(&stmt, interface, ids),
                     None => vec![stmt],
                 })
                 .collect();

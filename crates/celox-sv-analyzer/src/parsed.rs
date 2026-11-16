@@ -313,6 +313,7 @@ impl ParsedSource {
                 );
             }
             packages.build_virtual_interface_calls()?;
+            packages.build_design_subroutines();
             packages.check_unreferenced_interfaces(&trees)?;
             Ok(packages)
         })();

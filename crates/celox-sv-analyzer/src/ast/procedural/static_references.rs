@@ -96,8 +96,8 @@ impl BodyBuilder<'_, '_, '_> {
     /// In a class scope, a method `f` hides a subroutine of the design
     /// element that a binding outside it found.
     pub(super) fn bind_static_references(&mut self) -> Converted<()> {
-        let tree = self.tree;
-        for candidate in file_candidates(tree) {
+        let tree = self.tree.clone();
+        for candidate in file_candidates(&tree) {
             let (subroutine, variable) = (&candidate.subroutine, &candidate.variable);
             // A variable `f` of the scope is no subroutine.
             if self.dims.get(subroutine).is_some() {
@@ -146,12 +146,12 @@ impl BodyBuilder<'_, '_, '_> {
     fn static_owner(&mut self, name: &str) -> Converted<Option<String>> {
         if let Some(scope) = self.dims.class_scope.clone() {
             let class =
-                expression_binding::object_class(self.tree, self.session, &self.dims, &scope)?;
+                expression_binding::object_class(&self.tree, self.session, &self.dims, &scope)?;
             let Some(method) = class.method(name) else {
                 return Ok(None);
             };
             let visible = expression_binding::check_member_access(
-                self.tree,
+                &self.tree,
                 self.session,
                 &self.dims,
                 &method.owner,

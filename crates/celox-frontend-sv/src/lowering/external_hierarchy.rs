@@ -416,10 +416,7 @@ fn prepare_external_hierarchy_collecting(
             false,
             warnings,
             LevelLists::Processes,
-            HierarchicalNames {
-                discovery: true,
-                ..HierarchicalNames::default()
-            },
+            HierarchicalNames::discovery(),
             None,
         )?;
         ff::watched_properties(&lowered.source, &mut properties);
@@ -443,6 +440,37 @@ fn prepare_external_hierarchy_collecting(
     if let Some(module) = analyzed.values().next() {
         package_watched_properties(&module.packages, &design, &mut properties);
         time_format |= packages_call_time_format(&module.packages, &design);
+    }
+    // The overrides of module classes, of every specialization, join the
+    // dispatchers of every module and package (see `schedule_sources`).
+    let mut analyses = HashMap::default();
+    for (key, &module_id) in &module_ids {
+        if foreign_specializations.contains_key(key) || foreign_modules.contains_key(&key.name) {
+            continue;
+        }
+        let base = analyzed
+            .get(&key.name)
+            .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
+        analyses.insert(
+            module_id,
+            analyze_specialization(base, &mut design, key, &[], warnings)?,
+        );
+    }
+    let overrides = schedule::exported_overrides(analyses.values())?;
+    // This hierarchy numbers no module instances: an override that selects
+    // the instance whose items it reads, or among the definitions of its
+    // class, would select none.
+    if let Some(export) = overrides.iter().find(|export| export.wrapper.is_some()) {
+        return Err(sv::AnalyzerError::Unsupported(format!(
+            "override `{}` of a module class that selects among module instances, in a mixed-language hierarchy",
+            export.template.name
+        ))
+        .into());
+    }
+    let no_instances = HashMap::default();
+    let expansion = sv::ir::InstanceExpansion::new(&no_instances, &overrides);
+    for ir in analyses.values_mut() {
+        ir.expand_instances(&expansion);
     }
     let mut lowered_modules = module_ids
         .iter()
@@ -469,9 +497,9 @@ fn prepare_external_hierarchy_collecting(
                     HierarchicalNames {
                         properties: &properties,
                         time_format,
-                        ..HierarchicalNames::default()
+                        ..HierarchicalNames::lowering(&expansion)
                     },
-                    None,
+                    analyses.remove(&module_id),
                 )?,
             ))
         })
@@ -506,6 +534,7 @@ fn prepare_external_hierarchy_collecting(
             &HashSet::default(),
             warnings,
             None,
+            &mut design,
         )?;
         modules.insert(
             module_id,
@@ -549,7 +578,7 @@ fn prepare_external_hierarchy_collecting(
         warnings,
         force_out_of_line,
         None,
-        &HashMap::default(),
+        &expansion,
     )?;
     // How often the design instantiates these modules is not known here;
     // assembly checks the drivers of package variables across instances.

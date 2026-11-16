@@ -176,7 +176,7 @@ enum Step<'p> {
 impl BodyBuilder<'_, '_, '_> {
     /// The statements of `randsequence` statement `id`.
     pub(super) fn randsequence(&mut self, id: StatementId) -> Converted<Vec<Stmt>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let randsequence = native
             .randsequence(id)
             .ok_or_else(|| unsupported("randsequence form"))?;
@@ -197,7 +197,7 @@ impl BodyBuilder<'_, '_, '_> {
                 .map(|production| instances::normalize_identifier(&production.name.spelling))
                 .ok_or_else(|| unsupported("randsequence without productions"))?,
         };
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let reached = check(native, &productions, &main)?;
         let mut signatures = HashMap::default();
         for name in reached {
@@ -213,7 +213,7 @@ impl BodyBuilder<'_, '_, '_> {
     /// The signature of production `production` named `name`, its types
     /// those of the scope of the statement.
     fn signature(&mut self, name: &str, production: &RsProduction) -> Converted<Signature> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         // A variable holds each formal and the value, as a whole.
         let plain = |ty: &Type, table: &semantic_types::TyTable| {
             ty.unpacked_ranges.is_empty()
@@ -226,7 +226,7 @@ impl BodyBuilder<'_, '_, '_> {
             let declared = type_binding::port_formals(
                 ports,
                 "randsequence production",
-                self.tree,
+                &self.tree,
                 self.session,
                 &self.dims,
             )?;
@@ -253,7 +253,7 @@ impl BodyBuilder<'_, '_, '_> {
         let result = match production.return_type {
             Some(id) if is_void(native, id) => None,
             Some(id) => {
-                let ty = type_binding::binding::bind(id, self.tree, self.session, &self.dims)?
+                let ty = type_binding::binding::bind(id, &self.tree, self.session, &self.dims)?
                     .ok_or_else(|| {
                         unsupported(format!("randsequence production `{name}` value type"))
                     })?;
@@ -302,12 +302,12 @@ impl BodyBuilder<'_, '_, '_> {
     /// The statements assigning native expression `id` to local `unique` of
     /// type `ty`, as the initializer of a declaration of it would be.
     fn assigned(&mut self, id: ExprId, unique: &str, ty: &Type) -> Converted<Vec<Stmt>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let mut output = self.effects(&[id])?;
         expression_binding::check_chandle_assignment(
             ty.is_chandle(),
             id,
-            self.tree,
+            &self.tree,
             native,
             &self.dims,
             self.session,
@@ -316,7 +316,7 @@ impl BodyBuilder<'_, '_, '_> {
         let mut scoped = self.dims.clone();
         scoped.insert(unique.to_owned(), dimensions_from_type(ty));
         let mut value =
-            expression_binding::expression(id, native, &target, self.tree, self.session, &scoped)?;
+            expression_binding::expression(id, native, &target, &self.tree, self.session, &scoped)?;
         self.rename_expr(&mut value);
         output.push(Stmt::Assign {
             lhs: target,
@@ -334,7 +334,7 @@ impl BodyBuilder<'_, '_, '_> {
         signatures: &HashMap<String, Signature>,
         main: &str,
     ) -> Converted<Vec<Stmt>> {
-        let start = self.tree.declarations().statement(id).tokens.start;
+        let start = self.syntax().declarations().statement(id).tokens.start;
         // A `break` or `return` is lowered first as a `disable` of a marker
         // like no block's, by the statement, the expansion so far and their
         // order, and then as the setting of its flag.
@@ -354,7 +354,7 @@ impl BodyBuilder<'_, '_, '_> {
         // The units of the rule frame last finished, for a `rand join`.
         let mut finished_units: Option<Vec<Vec<Stmt>>> = None;
         loop {
-            let native = self.tree.declarations();
+            let native = self.syntax().declarations();
             // The `else` production an `if` expands after its `then` one.
             let mut frames_step = None;
             let step = match frames.last_mut() {
@@ -768,7 +768,7 @@ impl BodyBuilder<'_, '_, '_> {
                             _ => None,
                         })
                         .expect("an item is in a rule");
-                    let name = item_call(self.tree.declarations(), item)?.0;
+                    let name = item_call(self.syntax().declarations(), item)?.0;
                     frames.push(self.enter(productions, signatures, &name, Some(item), &caller)?);
                 }
                 Step::Finish(output) => {
@@ -1096,7 +1096,7 @@ impl BodyBuilder<'_, '_, '_> {
         self.count_expansion()?;
         let production = productions[name];
         let arguments = match item {
-            Some(item) => item_call(self.tree.declarations(), item)?.1,
+            Some(item) => item_call(self.syntax().declarations(), item)?.1,
             None => &[],
         };
         let (mut prelude, locals) = self.passed(name, &signatures[name], arguments, caller)?;
@@ -1209,7 +1209,7 @@ impl BodyBuilder<'_, '_, '_> {
         prelude: Vec<Stmt>,
         epilogue: Vec<Stmt>,
     ) -> Converted<Frame<'p>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let mut locals = production.clone();
         // The items of each production with a value, in order.
         let mut uses: Vec<(String, Vec<ExprId>)> = Vec::new();
@@ -1242,7 +1242,7 @@ impl BodyBuilder<'_, '_, '_> {
             let (source, unique) = self.hidden(array.clone());
             for (index, item) in items.into_iter().enumerate() {
                 let mut target = selects::lvalue_from_indices(
-                    self.tree,
+                    &self.tree,
                     source.clone(),
                     vec![literal(index + 1)],
                     &self.dims,

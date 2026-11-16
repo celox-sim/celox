@@ -11,6 +11,10 @@ pub(super) struct VariableDimensions {
     /// The semantic type the declaration was bound to where it is declared
     /// (see [`Self::bind_type`]).
     binding: Option<semantic_types::RetainedType>,
+    /// The semantic type of an element of the shape's unpacked dimensions
+    /// (IEEE 1800-2023 7.4), which an element selected from the shape keeps
+    /// (see [`Type::unpacked_ranges_mut`]).
+    element: Option<semantic_types::RetainedType>,
 }
 
 impl VariableDimensions {
@@ -18,14 +22,17 @@ impl VariableDimensions {
         Self {
             shape,
             binding: None,
+            element: None,
         }
     }
 
-    /// `shape`, of a type bound to `binding`: its semantic type.
-    pub(super) fn bound_to(shape: VariableShape, binding: &semantic_types::Binding) -> Self {
+    /// `shape`, of type `ty`: bound to its semantic type and that of its
+    /// elements, as `ty` is.
+    pub(super) fn bound_to(shape: VariableShape, ty: &Type) -> Self {
         Self {
             shape,
-            binding: binding.retained(),
+            binding: ty.binding.retained(),
+            element: ty.element.retained(),
         }
     }
 
@@ -42,8 +49,26 @@ impl VariableDimensions {
         });
         if let Some(id) = self.bound_element(table) {
             element.bind_to(table, id);
+        } else {
+            // The elements of the elements are those of the shape.
+            element.element = self.element.clone();
         }
         element
+    }
+
+    /// The shape of a subarray of this unpacked array with the slowest
+    /// varying dimensions `unpacked` (7.4.6), which has its element type.
+    pub(super) fn subarray(&self, unpacked: Vec<UnpackedDimension>) -> VariableDimensions {
+        let mut subarray = VariableDimensions::new(VariableShape {
+            container: None,
+            unpacked,
+            ..self.clone_shape()
+        });
+        // A container's elements are not those of the subarray.
+        if self.shape.container.is_none() {
+            subarray.element = self.element.clone();
+        }
+        subarray
     }
 
     /// The semantic type of an element of the unpacked array this shape is
@@ -91,9 +116,23 @@ impl VariableDimensions {
         }
     }
 
-    /// Bind the shape to type `id` of `table`, which it was made to have.
+    /// Bind the shape to type `id` of `table`, which it was made to have,
+    /// and its elements to the type of an element of its unpacked
+    /// dimensions.
     pub(super) fn bind_to(&mut self, table: &semantic_types::TyTable, id: semantic_types::TyId) {
         self.binding = Some(table.retain(id));
+        self.element = table
+            .unpacked_element(id, self.shape.unpacked.len())
+            .map(|element| table.retain(element));
+    }
+
+    /// The semantic type of an element of the shape's unpacked dimensions,
+    /// if it keeps one.
+    pub(super) fn element_type(
+        &self,
+        table: &semantic_types::TyTable,
+    ) -> Option<semantic_types::TyId> {
+        self.element.as_ref()?.in_table(table)
     }
 
     pub(super) fn clone_shape(&self) -> VariableShape {
@@ -123,7 +162,10 @@ impl VariableDimensions {
             return Some(id);
         }
         let id = semantic_types::of_shape(table, functions, self, env);
-        self.binding = id.map(|id| table.retain(id));
+        match id {
+            Some(id) => self.bind_to(table, id),
+            None => self.binding = None,
+        }
         id
     }
 
@@ -229,7 +271,14 @@ impl VariableDimensions {
         // A shape whose bounds are all literals has the same type in every
         // context: a parameter of a structure type is typed once, not at
         // each access of one of its members.
-        if !self.shape.is_closed() {
+        // Nor does the shape tell a virtual interface from the number that
+        // holds it: its element type does.
+        if !self.shape.is_closed()
+            || self
+                .element
+                .as_ref()
+                .is_some_and(|e| e.identity().is_some())
+        {
             return semantic_types::of_shape(table, functions, self, env);
         }
         let key = self.shape.closed_hash();
@@ -284,7 +333,13 @@ impl PartialEq for VariableDimensions {
     fn eq(&self, other: &Self) -> bool {
         // Enriching a shape is not a lexical edit. Signature publishers use
         // same_declaration when a newly resolved binding must be published.
+        // A virtual interface is told by its element type (see `Type`).
         self.shape == other.shape
+            && self.element.as_ref().and_then(|element| element.identity())
+                == other
+                    .element
+                    .as_ref()
+                    .and_then(|element| element.identity())
     }
 }
 impl Eq for VariableDimensions {}
@@ -297,6 +352,7 @@ impl Deref for VariableDimensions {
 impl DerefMut for VariableDimensions {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.binding = None;
+        self.element = None;
         &mut self.shape
     }
 }
@@ -317,9 +373,6 @@ pub(super) struct VariableShape {
     pub(super) string: bool,
     /// The class of an object handle variable.
     pub(super) class: Option<String>,
-    /// The interface of a virtual interface variable, which only the
-    /// conversion to its semantic type reads (see `TypeShape`).
-    pub(super) virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
     pub(super) packed: Vec<PackedDimension>,
     pub(super) unpacked: Vec<UnpackedDimension>,
     pub(super) signed: bool,
@@ -347,7 +400,6 @@ impl VariableShape {
             && type_names::Declared::of_shape(self).is_none_or(|ty| !ty.is_enum)
             && self.container.is_none()
             && self.class.is_none()
-            && self.virtual_interface.is_none()
             && self.unpacked_struct.is_none()
             // The width of a dimension is computed from its bounds.
             && self

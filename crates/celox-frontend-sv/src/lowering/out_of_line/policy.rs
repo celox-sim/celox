@@ -157,11 +157,12 @@ impl ProcModule<'_> {
     /// stored variable, whatever process stores it, the occurrences of
     /// flip-flop events included. Its other instrumentation is for process
     /// and flip-flop units only: the triggers that combinational and
-    /// flip-flop units' stores into events get, the staging of nonblocking
-    /// assignments, the counting of what flip-flops write, and the
-    /// captures of combinational observers in combinational processes. So a
-    /// function unit stores into none of the `excluded` storage: the writes
-    /// of flip-flops, the targets of nonblocking assignments and `foreign`;
+    /// flip-flop units' stores into events get, the counting of what
+    /// flip-flops write, and the captures of combinational observers in
+    /// combinational processes. A function unit's store into the target of
+    /// a nonblocking assignment makes the site queue its value, as a
+    /// process's store does. So a function unit stores into none of the
+    /// `excluded` storage: the writes of flip-flops and `foreign`;
     /// and a combinational process calls no function unit that stores into
     /// `observed` storage, module state included. Assembly rejects a
     /// function unit that a combinational or flip-flop unit calls and that
@@ -182,9 +183,8 @@ impl ProcModule<'_> {
         };
         let mut observers: Vec<sv::ir::Stmt> = Vec::new();
         // What a function unit must not store into: what flip-flops write,
-        // and below the targets of nonblocking assignments and the names of
-        // other modules. Events are assembly's to judge, which sees the
-        // units that call each function.
+        // and below the names of other modules. Events are assembly's to
+        // judge, which sees the units that call each function.
         let mut hard_names: Vec<String> = Vec::new();
         for process in module.ff_processes() {
             let mut written = HashSet::default();
@@ -262,10 +262,9 @@ impl ProcModule<'_> {
             .collect();
         let mut excluded: HashSet<SourceVarId> = HashSet::default();
         excluded.extend(
-            targets
+            foreign
                 .iter()
-                .copied()
-                .chain(foreign.iter().map(String::as_str))
+                .map(String::as_str)
                 .chain(hard_names.iter().map(String::as_str))
                 .filter_map(|name| self.id(name)),
         );

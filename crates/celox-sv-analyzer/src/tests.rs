@@ -3149,7 +3149,7 @@ fn flattens_unpacked_array_range_selections() {
     assert_eq!(eval_test_const_expr(msb), Some(15));
     assert_eq!(eval_test_const_expr(lsb), Some(0));
     assert_eq!(
-        array_slice_width.as_ref().map(eval_test_const_expr),
+        array_slice_width.as_deref().map(eval_test_const_expr),
         Some(Some(8))
     );
     assert!(*array_slice_reversed);
@@ -7232,9 +7232,10 @@ fn undeclared_class_members_are_errors() {
 fn covergroups_of_classes_are_declared_members() {
     // A covergroup a class declares is a member of it (IEEE 1800-2023
     // 19.4): a select of it is no undeclared member, whatever the analyzer
-    // makes of it otherwise.
+    // makes of it otherwise. The class constructs none, which the analysis
+    // of its package would reject.
     let class = "class C; int x; covergroup cg; coverpoint x; endgroup \
-        function new(); cg = new; endfunction endclass";
+        function new(); endfunction endclass";
     for access in ["c.cg.sample();", "void'(c.cg);"] {
         let source =
             format!("module Top; {class} C c; initial begin c = new; {access} end endmodule");
@@ -8216,6 +8217,27 @@ fn unresolved_class_alias_type_arguments_still_fail() {
 }
 
 #[test]
+fn unresolved_class_alias_value_arguments_still_fail() {
+    // A value waits for the package's constants, but a variable or a
+    // constant of another scope is still no constant of the package.
+    for value in ["v", "MISSING"] {
+        let source = format!(
+            "package p; int v = 3; class C #(int W = 1); endclass \
+             typedef C#({value}) c_t; endpackage \
+             module Top; localparam int MISSING = 29; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("unresolved-class-value-argument.sv"))
+            .expect_err("a package value argument must be a constant of the package");
+        assert!(
+            error
+                .to_string()
+                .contains("class parameter value that is not constant"),
+            "{value}: {error}"
+        );
+    }
+}
+
+#[test]
 fn named_aggregate_type_arguments_keep_their_declarations() {
     let source = "package p;
         typedef enum {A0, A1} first_e;
@@ -8871,4 +8893,28 @@ fn static_formals_of_package_functions_that_fork_are_rejected() {
             result.unwrap_or_else(|error| panic!("{subroutine}: {error}"));
         }
     }
+}
+
+#[test]
+fn block_imports_bind_the_calls_of_folded_branches() {
+    // The branch a constant condition never takes stays in the process's
+    // sensitivity body (IEEE 1800-2023 9.2.2.2.1), where the block's import
+    // binds its call as in the statements the process runs.
+    let code = "package q; int v; function int g(); return v; endfunction endpackage\n\
+                module Top #(parameter bit EN = 0) (output int y);\n\
+                always_comb begin import q::*; if (EN) y = g(); else y = 7; end\n\
+                endmodule";
+    let ir = analyze_source(code, Path::new("folded.sv")).unwrap();
+    let module = ir
+        .modules()
+        .iter()
+        .find(|module| module.name() == "Top")
+        .unwrap();
+    let sensitivity = module
+        .comb_processes()
+        .iter()
+        .map(|process| format!("{:?}", process.sensitivity_body()))
+        .collect::<String>();
+    assert!(sensitivity.contains("\"q::g\""), "{sensitivity}");
+    assert!(!sensitivity.contains("\"g\""), "{sensitivity}");
 }

@@ -767,3 +767,104 @@ endmodule
     sim.run_until(1).unwrap();
     assert_eq!(displays(&mut sim), ["drove 4"]);
 }
+
+/// A static task of an interface whose output formal may keep its value, as
+/// a `$cast` that can fail leaves it (IEEE 1800-2023 8.16), called through a
+/// virtual interface, as UVM's bus functional models' `drive` tasks are: the
+/// formal is a static variable of the instance (13.3.2), which the call
+/// gives back.
+#[test]
+fn output_formals_of_static_interface_tasks_are_given_back_through_a_virtual_interface() {
+    let source = r#"`timescale 1ns/1ns
+package bus_pkg;
+  class base_obj; endclass
+  class item extends base_obj;
+    rand int delay; rand int addr; int read_data; bit error;
+    function base_obj clone(); item c = new; c.delay = delay; c.addr = addr; return c; endfunction
+  endclass
+  class seq;
+    virtual bfm b;
+    task body(); item req = new; item rsp; void'(req.randomize() with {delay inside {[1:2]}; addr inside {[4:7]};}); b.drive(req, rsp); $display("rsp %0d %0d", rsp.read_data, rsp.addr >= 4 && rsp.addr <= 7); endtask
+  endclass
+endpackage
+module top; logic clk = 0; logic ready = 1; logic [31:0] read_data = 33; bfm i(clk, ready, read_data); initial forever #5 clk = ~clk;
+  initial begin bus_pkg::seq s = new; s.b = i; s.body(); $finish; end
+endmodule
+interface bfm(input logic clk, input logic ready, input logic [31:0] read_data);
+  import bus_pkg::*;
+  logic valid;
+  task drive(item req, output item rsp);
+    repeat (req.delay) begin
+      @(posedge clk);
+    end
+    valid <= 1;
+    while (ready != 1) begin
+      @(posedge clk);
+    end
+    $cast(rsp, req.clone());
+    rsp.read_data = read_data;
+    valid <= 0;
+  endtask
+endinterface
+"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("formals.sv"))], "top")
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+    sim.run_until(40).unwrap();
+    assert_eq!(displays(&mut sim), ["rsp 33 1"]);
+}
+
+/// The formals of a static task of an interface are static variables of each
+/// instance (IEEE 1800-2023 13.3.2), which overlapping calls through virtual
+/// interfaces share: the second call's `v` is the first's when it resumes.
+/// Those of an automatic task belong to each call, and another instance has
+/// formals of its own.
+#[test]
+fn static_formals_of_interface_tasks_are_shared_by_overlapping_calls() {
+    let source = r#"`timescale 1ns/1ns
+interface bfm(input logic clk);
+  task t(input int v, output int o); @(posedge clk); o = v; endtask
+endinterface
+package agent;
+  class user;
+    virtual bfm b; int a, c;
+    task run();
+      fork
+        begin #1 b.t(1, a); end
+        begin #2 b.t(2, c); end
+      join
+      $display("a %0d c %0d at %0t", a, c, $time);
+    endtask
+  endclass
+endpackage
+module top; logic clk = 0; bfm i(clk); initial forever #5 clk = ~clk;
+  initial begin agent::user u = new; u.b = i; u.run(); $finish; end
+endmodule
+"#;
+    let automatic = source.replace("  task t(input int v", "  task automatic t(input int v");
+    let instances = source
+        .replace("bfm i(clk);", "bfm i(clk); bfm j(clk);")
+        .replace("virtual bfm b;", "virtual bfm b, d;")
+        .replace("u.b = i;", "u.b = i; u.d = j;")
+        .replace("begin #2 b.t(2, c); end", "begin #2 d.t(2, c); end");
+    for (shape, source, expected) in [
+        ("static", source, "a 2 c 2 at 5"),
+        ("automatic", automatic.as_str(), "a 1 c 2 at 5"),
+        ("two instances", instances.as_str(), "a 1 c 2 at 5"),
+    ] {
+        for four_state in [false, true] {
+            let mut sim =
+                celox::Simulation::from_sv_sources(vec![(source, Path::new("shared.sv"))], "top")
+                    .four_state(four_state)
+                    .build()
+                    .unwrap_or_else(|error| panic!("{shape}: {error}"));
+            sim.run_until(10).unwrap();
+            assert_eq!(
+                displays(&mut sim),
+                [expected],
+                "{shape} four_state={four_state}"
+            );
+        }
+    }
+}

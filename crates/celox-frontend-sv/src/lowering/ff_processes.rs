@@ -893,11 +893,51 @@ pub(super) fn emit_ff_seeds(
     }
 }
 
+/// Publish the next state of `targets`. A target a procedural force
+/// controls takes the forced value while it is forced, also when the force
+/// came after the process ran (IEEE 1800-2023 10.6.2).
 pub(super) fn emit_ff_commits(
     builder: &mut SIRBuilder<RegionedVarAddr>,
     targets: &[VarAtomBase<SourceVarId>],
+    pm: &procedural::ProcModule<'_>,
 ) {
     for target in targets {
+        if let Some((enabled, forced)) = pm.force_controls(target.id)
+            && pm.procedurally_forced.contains(&target.id)
+        {
+            let offset = SIROffset::Static(target.access.lsb);
+            let width = target.access.msb - target.access.lsb + 1;
+            let register = |builder: &mut SIRBuilder<RegionedVarAddr>| {
+                if pm.var(target.id).is_4state {
+                    builder.alloc_logic(width)
+                } else {
+                    builder.alloc_bit(width, false)
+                }
+            };
+            let next = register(builder);
+            builder.emit(SIRInstruction::Load(
+                next,
+                RegionedVarAddrBase {
+                    region: WORKING_REGION,
+                    var_id: target.id,
+                },
+                offset.clone(),
+                width,
+            ));
+            let selected = force_select(builder, (enabled, forced), offset.clone(), next);
+            builder.emit(SIRInstruction::Store(
+                RegionedVarAddrBase {
+                    region: STABLE_REGION,
+                    var_id: target.id,
+                },
+                offset,
+                width,
+                selected,
+                Vec::new(),
+                Vec::new(),
+            ));
+            continue;
+        }
         builder.emit(SIRInstruction::Commit(
             RegionedVarAddrBase {
                 region: WORKING_REGION,
@@ -912,6 +952,41 @@ pub(super) fn emit_ff_commits(
             Vec::new(),
         ));
     }
+}
+
+/// `value`, the bits at `offset` of a variable, or the forced value of the
+/// variable while the force `controls` (enable, value) is on.
+pub(super) fn force_select(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    controls: (SourceVarId, SourceVarId),
+    offset: SIROffset,
+    value: celox_sir::RegisterId,
+) -> celox_sir::RegisterId {
+    let (enabled, forced) = controls;
+    let width = builder.register(&value).width();
+    let condition = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Load(
+        condition,
+        RegionedVarAddrBase {
+            region: STABLE_REGION,
+            var_id: enabled,
+        },
+        SIROffset::Static(0),
+        1,
+    ));
+    let replacement = builder.alloc_reg(builder.register(&value).clone());
+    builder.emit(SIRInstruction::Load(
+        replacement,
+        RegionedVarAddrBase {
+            region: STABLE_REGION,
+            var_id: forced,
+        },
+        offset,
+        width,
+    ));
+    let selected = builder.alloc_reg(builder.register(&value).clone());
+    builder.emit(SIRInstruction::Mux(selected, condition, replacement, value));
+    selected
 }
 
 /// The clock that the sampled value functions of an edge-triggered process

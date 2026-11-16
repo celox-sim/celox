@@ -42,6 +42,7 @@ mod mailboxes;
 mod net_delays;
 mod net_drives;
 mod procedural_assigns;
+mod procedural_forces;
 mod processes;
 mod semaphores;
 pub use bound_patterns::BoundPattern;
@@ -83,6 +84,7 @@ pub(crate) use parameters::unbounded_parameter_marker;
 mod array_reductions;
 mod containers;
 mod locators;
+pub(crate) mod module_overrides;
 mod patterns;
 mod procedural;
 mod scope;
@@ -291,6 +293,9 @@ pub struct Module {
     interface_scope_names: Vec<String>,
     /// The interface instances and ports a virtual interface may denote.
     interface_handles: Vec<crate::ir::InterfaceHandle>,
+    /// The classes of a module, whose overrides other scopes may call (see
+    /// `module_overrides`).
+    module_classes: Option<crate::ir::ModuleClasses>,
     /// The symbols of a package, for the scopes that use it.
     symbols: Option<scope::ScopeSymbols>,
 }
@@ -385,6 +390,8 @@ pub struct Signal {
     /// The hierarchical name of the signal of another instance the signal
     /// denotes (IEEE 1800-2023 23.6).
     hierarchical: Option<String>,
+    /// The force control the signal is (see `procedural_forces`).
+    force_control: Option<crate::ir::ForceControl>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,6 +441,10 @@ pub enum PortDirection {
 pub struct Type {
     shape: Arc<TypeShape>,
     binding: semantic_types::Binding,
+    /// The semantic type of an element of the type's unpacked dimensions
+    /// (IEEE 1800-2023 7.4), which a change of those dimensions keeps
+    /// (see [`Type::unpacked_ranges_mut`]) and any other change forgets.
+    element: semantic_types::Binding,
 }
 
 /// What a [`Type`] is made of.
@@ -457,12 +468,6 @@ pub struct TypeShape {
     signed_element_depth: Option<usize>,
     /// The class of an object handle type.
     class: Option<Arc<str>>,
-    /// The interface of a virtual interface type (IEEE 1800-2023 25.9), or of
-    /// the elements of an array of them. Only the conversion to a semantic
-    /// type reads it: readers ask the type's `TyId`. It holds the element's
-    /// identity where a change of dimensions forgets the type's binding,
-    /// until the shape keeps its element's semantic type itself.
-    virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
     /// The members of an unpacked structure type (IEEE 1800-2023 7.2).
     unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
     /// The typedef that names an enumeration, struct or union type, and how
@@ -470,9 +475,12 @@ pub struct TypeShape {
     spelling: type_names::Spelling,
 }
 
+/// Two types are equal if their shapes and the identities of their elements
+/// are: a virtual interface type has the shape of the number that holds its
+/// value, and its element type tells its interface (IEEE 1800-2023 25.9).
 impl PartialEq for Type {
     fn eq(&self, other: &Self) -> bool {
-        self.shape == other.shape
+        self.shape == other.shape && self.element.identity() == other.element.identity()
     }
 }
 
@@ -481,6 +489,7 @@ impl Eq for Type {}
 impl std::hash::Hash for Type {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.shape.hash(state);
+        self.element.identity().hash(state);
     }
 }
 
@@ -496,6 +505,7 @@ impl std::ops::DerefMut for Type {
     /// A change of the shape may change its semantic type.
     fn deref_mut(&mut self) -> &mut TypeShape {
         self.binding.forget();
+        self.element.forget();
         Arc::make_mut(&mut self.shape)
     }
 }
@@ -507,6 +517,28 @@ impl Type {
     pub(in crate::ast) fn shape_keeping_binding(&mut self) -> &mut TypeShape {
         Arc::make_mut(&mut self.shape)
     }
+
+    /// The unpacked dimensions of the type, for a change that keeps the
+    /// type of its elements: the type forgets its binding but not that of
+    /// its elements, which the conversion of the changed type takes.
+    pub(in crate::ast) fn unpacked_ranges_mut(&mut self) -> &mut Vec<UnpackedRange> {
+        self.binding.forget();
+        &mut Arc::make_mut(&mut self.shape).unpacked_ranges
+    }
+
+    /// Bind the type to semantic type `id` of `table`, and its elements to
+    /// the type of an element of its unpacked dimensions.
+    pub(in crate::ast) fn bind(
+        &mut self,
+        table: &semantic_types::TyTable,
+        id: semantic_types::TyId,
+    ) {
+        self.binding.set(table, id);
+        match table.unpacked_element(id, self.unpacked_ranges.len()) {
+            Some(element) => self.element.set(table, element),
+            None => self.element.forget(),
+        }
+    }
 }
 
 impl From<TypeShape> for Type {
@@ -514,6 +546,7 @@ impl From<TypeShape> for Type {
         Self {
             shape: Arc::new(shape),
             binding: semantic_types::Binding::default(),
+            element: semantic_types::Binding::default(),
         }
     }
 }
@@ -635,6 +668,10 @@ pub enum LValue {
         signed: bool,
         array_slice_width: Option<ConstExpr>,
         array_slice_reversed: bool,
+        /// The bits of the variable a run-time select stays within: those of
+        /// the structure member it is written on (see
+        /// [`crate::ir::SelectWindow`]).
+        window: Option<crate::ir::SelectWindow>,
         /// Whether this selection names a two-state packed struct member.
         is_2state: bool,
     },

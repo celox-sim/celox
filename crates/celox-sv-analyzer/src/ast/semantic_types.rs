@@ -324,6 +324,12 @@ impl Binding {
         self.0 = Some(table.retain(id));
     }
 
+    /// What tells the type apart where its shape does not (see
+    /// [`RetainedType::identity`]).
+    pub(super) fn identity(&self) -> Option<Arc<TyData>> {
+        self.0.as_ref()?.identity()
+    }
+
     /// The retained semantic type, for a holder of the same type, such as
     /// the shape of a variable declared with it.
     pub(super) fn retained(&self) -> Option<RetainedType> {
@@ -339,6 +345,16 @@ pub(super) struct RetainedType {
     node: Weak<TyData>,
 }
 impl RetainedType {
+    /// What tells the type apart from another of the same shape, where its
+    /// shape does not: the interned data of a virtual interface type (IEEE
+    /// 1800-2023 25.9), which is the same in every table that shares the
+    /// prefix the design's interfaces were declared in.
+    pub(super) fn identity(&self) -> Option<Arc<TyData>> {
+        self.node
+            .upgrade()
+            .filter(|data| matches!(**data, TyData::VirtualInterface { .. }))
+    }
+
     pub(super) fn same_node(&self, other: &Self) -> bool {
         self.id == other.id && Weak::ptr_eq(&self.node, &other.node)
     }
@@ -585,6 +601,36 @@ impl TyTable {
             TyData::Class(Decl::Class(decl)) => Some(&self.decl(*decl).name),
             _ => None,
         }
+    }
+
+    /// Type `id` without the integer type keyword that declared it, which
+    /// only `$typename` tells apart (20.6.1, 6.22.1 e).
+    pub fn without_keyword(&mut self, id: TyId) -> TyId {
+        match self.data(id) {
+            TyData::Packed(packed) if packed.keyword.is_some() => {
+                let packed = Packed {
+                    keyword: None,
+                    ..packed.clone()
+                };
+                self.intern(TyData::Packed(packed))
+            }
+            _ => id,
+        }
+    }
+
+    /// The element of `id` through `dimensions` fixed-size unpacked
+    /// dimensions (7.4.2), if it has as many.
+    pub fn unpacked_element(&self, mut id: TyId, dimensions: usize) -> Option<TyId> {
+        for _ in 0..dimensions {
+            match self.data(id) {
+                TyData::Array {
+                    kind: ArrayKind::Fixed(_),
+                    element,
+                } => id = *element,
+                _ => return None,
+            }
+        }
+        Some(id)
     }
 
     /// The element of `id` if it is a fixed-size unpacked array, through

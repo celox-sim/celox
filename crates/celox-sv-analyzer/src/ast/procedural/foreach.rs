@@ -22,9 +22,9 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         header: &ForeachHeader,
     ) -> Result<Vec<ForeachLoop>, AnalyzerError> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let container =
-            containers::native_type(header.array, native, self.tree, self.session, &self.dims)?;
+            containers::native_type(header.array, native, &self.tree, self.session, &self.dims)?;
         let mut array = header.array;
         let mut unit_member = None;
         let array = loop {
@@ -114,7 +114,7 @@ impl BodyBuilder<'_, '_, '_> {
         // A string is a dynamic array of bytes indexed from 0 to N-1, where
         // N is its length (IEEE 1800-2023 12.7.3).
         if expression_binding::native_string(
-            self.tree,
+            &self.tree,
             self.session,
             header.array,
             native,

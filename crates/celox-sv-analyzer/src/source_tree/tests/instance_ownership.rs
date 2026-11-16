@@ -429,21 +429,36 @@ mod parameter_tests {
         );
     }
     #[test]
+    fn native_override_set_membership_tests_are_constants() {
+        // A set membership test of constants is a constant (IEEE 1800-2023
+        // 11.4.13), which overrides a parameter.
+        let tree = super::parse_source(
+            "module C#(parameter N=0)();endmodule module M;C#(.N(1 inside {1,2}))c();endmodule",
+            Path::new("native-inside-override.sv"),
+        )
+        .unwrap();
+        let source = Source::from_syntax(&tree).unwrap();
+        let module = source
+            .modules()
+            .iter()
+            .find(|module| module.name() == "M")
+            .unwrap();
+        let value = module.instances()[0].parameter_overrides()[0]
+            .value()
+            .unwrap();
+        assert_eq!(number(value), 1);
+    }
+    #[test]
     fn native_override_special_forms_preserve_existing_diagnostics() {
-        for (value, diagnostic) in [
-            ("1:2:3", "mintypmax expression"),
-            ("1 inside {1,2}", "parameter override expression"),
-        ] {
-            let code = format!(
-                "module C#(parameter N=0)();endmodule module M;C#(.N({value}))c();endmodule"
-            );
-            let tree =
-                super::parse_source(&code, Path::new("native-unsupported-override.sv")).unwrap();
-            assert!(
-                matches!(Source::from_syntax(&tree),Err(AnalyzerError::Unsupported(message)) if message==diagnostic),
-                "{value}"
-            );
-        }
+        let tree = super::parse_source(
+            "module C#(parameter N=0)();endmodule module M;C#(.N(1:2:3))c();endmodule",
+            Path::new("native-unsupported-override.sv"),
+        )
+        .unwrap();
+        assert!(
+            matches!(Source::from_syntax(&tree),Err(AnalyzerError::Unsupported(message)) if message=="mintypmax expression"),
+            "1:2:3"
+        );
         let tree = super::parse_source(
             "module C#(parameter N=0)();endmodule module M;C#(.N($))c();endmodule",
             Path::new("native-unbounded-override.sv"),

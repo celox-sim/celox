@@ -1,14 +1,16 @@
 use super::*;
 
-/// A `wait` through a handle that a class property, an automatic variable
-/// or an argument holds would have to follow changes of the handle while
-/// its condition is evaluated (IEEE 1800-2023 9.4.3), which is not
-/// implemented; it is rejected rather than sampled.
+/// A `wait` through a handle that an automatic variable or an argument
+/// holds, directly or as a class property of an object one holds, would
+/// have to follow changes of the handle while its condition is evaluated
+/// (IEEE 1800-2023 9.4.3), which nothing watches; it is rejected rather
+/// than sampled.
 #[test]
 fn level_waits_through_non_static_handles_are_unsupported() {
     let waits = [
-        "class C; virtual bus_if vif; task run(virtual bus_if b); vif = b; wait (vif.clk); endtask endclass",
+        "class C; task run(virtual bus_if b); wait (b.clk); endtask endclass",
         "class C; task run(virtual bus_if b); virtual bus_if v; v = b; wait (v.clk); endtask endclass",
+        "class C; virtual bus_if vif; task run(virtual bus_if b); C o = new; o.vif = b; wait (o.vif.clk); endtask endclass",
     ];
     for wait in waits {
         let source = format!(
@@ -1070,4 +1072,36 @@ fn typename_writes_virtual_interface_types_as_declared() {
             },
         ]
     );
+}
+
+/// An enumeration member of an interface, assigned through a generic
+/// interface port, is the instance's variable: its receiver is no value,
+/// in a design whose classes hold virtual interfaces too (25.3).
+#[test]
+fn enum_members_assigned_through_generic_interface_ports() {
+    let source = "`timescale 1ns/1ns
+        package t; typedef enum logic [1:0] {IDLE, BUSY, DONE} st_e; endpackage
+        interface bfm(input logic clk); endinterface
+        interface mif; import t::*; logic clk; st_e st; endinterface
+        module slave(interface bus); import t::*; always @(negedge bus.clk) bus.st <= DONE; endmodule
+        package p; class h; virtual bfm v; endclass endpackage
+        module top(output logic [1:0] st);
+            mif m(); bfm b(.clk(m.clk)); slave s(.bus(m)); p::h x;
+            assign st = m.st;
+            initial begin x = new; x.v = b; m.clk = 1; #1 m.clk = 0; end
+        endmodule";
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        let st = sim.signal("st");
+        sim.run_until(2).unwrap();
+        assert_eq!(
+            sim.get(st),
+            num_bigint::BigUint::from(2u8),
+            "four-state {four_state}"
+        );
+    }
 }

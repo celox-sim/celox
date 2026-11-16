@@ -157,7 +157,7 @@ impl BodyBuilder<'_, '_, '_> {
             if !members.contains(&id) || !seen.insert(id) {
                 return Err(disagreement());
             }
-            let kind = &self.tree.declarations().statement(id).kind;
+            let kind = &self.syntax().declarations().statement(id).kind;
             if !matches!(kind, StatementKind::Unconverted { .. }) {
                 pending.extend(kind.children());
             }
@@ -166,6 +166,14 @@ impl BodyBuilder<'_, '_, '_> {
         let result = self
             .native_body_machine(ids)
             .and_then(|stmts| reject_escaped_places(&stmts).map(|()| stmts));
+        // The imports a task or function body declares bind until the body
+        // ends (IEEE 1800-2023 A.2.8).
+        while let Some((at, _)) = self.outer_contexts.last()
+            && *at >= depth
+        {
+            let (_, outer) = self.outer_contexts.pop().expect("an outer context");
+            self.tree = outer;
+        }
         // Restore lexical bindings on every diagnostic path, just as the old
         // recursive block/for wrappers did; no native failure is retried.
         while self.names.scopes.len() > depth {
@@ -177,7 +185,7 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         ids: &[StatementId],
     ) -> Result<Vec<Stmt>, AnalyzerError> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let mut jobs = Vec::new();
         jobs.extend(ids.iter().rev().map(|id| Job::Enter(*id)));
         // Authored block sequences append directly. Only semantic control
@@ -548,10 +556,10 @@ impl BodyBuilder<'_, '_, '_> {
                         self.allow_timing("wait statement")?;
                         // `wait(e.triggered)` (IEEE 1800-2023 15.5.3).
                         if let Some(event) = events::triggered(
-                            self.tree,
+                            &self.tree,
                             self.session,
                             *condition,
-                            self.tree.declarations(),
+                            self.syntax().declarations(),
                             &self.dims,
                         )? {
                             let event = self.native_value(event)?;
@@ -661,7 +669,11 @@ impl BodyBuilder<'_, '_, '_> {
                                 }
                                 if let Some(sequence) = sequence
                                     && multiclock::clocked(
-                                        &self.tree.declarations().sequence(*sequence).consequent,
+                                        &self
+                                            .syntax()
+                                            .declarations()
+                                            .sequence(*sequence)
+                                            .consequent,
                                     )
                                 {
                                     // A multiclocked sequence (16.13): its
@@ -671,7 +683,8 @@ impl BodyBuilder<'_, '_, '_> {
                                             "disable iff of a multiclocked sequence",
                                         ));
                                     }
-                                    let body = self.tree.declarations().sequence(*sequence).clone();
+                                    let body =
+                                        self.syntax().declarations().sequence(*sequence).clone();
                                     let multiclock = self.multiclock_monitor(
                                         clock.expect("a leading clock"),
                                         &body,
@@ -693,7 +706,7 @@ impl BodyBuilder<'_, '_, '_> {
                                         })
                                         .transpose()?;
                                     if let Some(disable) = &disable {
-                                        assertions::concurrent_operand(disable)?;
+                                        self.concurrent_operand(disable)?;
                                         assertions::concurrent_disable(disable)?;
                                         // An attempt of one tick is disabled at that tick;
                                         // a longer one whenever the condition is true
@@ -707,12 +720,12 @@ impl BodyBuilder<'_, '_, '_> {
                                     (Expr::Literal("1'b1".into()), &None, Some(disable))
                                 } else {
                                     let mut operand = self.native_value(*condition)?;
-                                    assertions::concurrent_operand(&operand)?;
+                                    self.concurrent_operand(&operand)?;
                                     // `p iff q` holds when both are true or
                                     // both false; X/Z is false (16.12.8).
                                     if let Some(equivalent) = equivalent {
                                         let equivalent = self.native_value(*equivalent)?;
-                                        assertions::concurrent_operand(&equivalent)?;
+                                        self.concurrent_operand(&equivalent)?;
                                         operand = Expr::Binary {
                                             left: Box::new(procedural_truth_condition(operand)),
                                             op: BinaryOp::Eq,
@@ -721,7 +734,7 @@ impl BodyBuilder<'_, '_, '_> {
                                     }
                                     if let Some(antecedent) = antecedent {
                                         let antecedent = self.native_value(*antecedent)?;
-                                        assertions::concurrent_operand(&antecedent)?;
+                                        self.concurrent_operand(&antecedent)?;
                                         // A Boolean sequence matches only when true.
                                         // X/Z antecedents have no match (16.12.7).
                                         let matched = procedural_truth_condition(antecedent);
@@ -745,7 +758,7 @@ impl BodyBuilder<'_, '_, '_> {
                                         })
                                         .transpose()?;
                                     if let Some(disable) = &disable {
-                                        assertions::concurrent_operand(disable)?;
+                                        self.concurrent_operand(disable)?;
                                         assertions::concurrent_disable(disable)?;
                                     }
                                     (condition, &None, Some(disable))
@@ -795,7 +808,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 },
                                 outcome: celox_design::AssertionOutcome::Fail,
                             },
-                            span: super::source_span(statement.tokens, self.tree),
+                            span: super::source_span(statement.tokens, &self.tree),
                             failure: *failure,
                             prelude,
                             start: output.len(),
@@ -829,7 +842,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 .filter(|shape| !shape.unpacked.is_empty())
                             {
                                 array_compatibility::check_native_unpacked_assignment(
-                                    self.tree,
+                                    &self.tree,
                                     self.session,
                                     *id,
                                     target,
@@ -846,14 +859,14 @@ impl BodyBuilder<'_, '_, '_> {
                                 .and_then(|shape| {
                                     expression_binding::objects::shape_class(
                                         shape,
-                                        self.tree,
+                                        &self.tree,
                                         self.session,
                                         &self.dims,
                                     )
                                 })
                             {
                                 expression_binding::check_handle_assignment(
-                                    self.tree,
+                                    &self.tree,
                                     self.session,
                                     *id,
                                     native,
@@ -869,7 +882,7 @@ impl BodyBuilder<'_, '_, '_> {
                                     expression_binding::check_chandle_assignment(
                                         chandle,
                                         id,
-                                        self.tree,
+                                        &self.tree,
                                         native,
                                         &self.dims,
                                         self.session,
@@ -883,7 +896,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 let mut value = bind(
                                     id,
                                     native,
-                                    self.tree,
+                                    &self.tree,
                                     self.session,
                                     &self.dims,
                                     self.return_shape.as_ref(),
@@ -1368,7 +1381,7 @@ impl BodyBuilder<'_, '_, '_> {
         value: celox_sv_syntax::ExprId,
         labels: &[celox_sv_syntax::ExprId],
     ) -> Converted<(Vec<Stmt>, CaseKind, Expr, bool)> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         // A case statement compares with `===` (IEEE 1800-2023 12.5).
         let operator = match (mode, keyword) {
             (Some("inside"), _) => "inside",
@@ -1380,7 +1393,7 @@ impl BodyBuilder<'_, '_, '_> {
         // chandle also when only a default arm compares nothing with it.
         let mut chandles = operator == "==="
             && expression_binding::native_chandle(
-                self.tree,
+                &self.tree,
                 value,
                 native,
                 &self.dims,
@@ -1391,7 +1404,7 @@ impl BodyBuilder<'_, '_, '_> {
                 operator,
                 value,
                 *label,
-                self.tree,
+                &self.tree,
                 native,
                 &self.dims,
                 self.session,
@@ -1549,11 +1562,11 @@ impl BodyBuilder<'_, '_, '_> {
         headroom: usize,
         what: &str,
     ) -> Converted<(Vec<Stmt>, Vec<String>, usize)> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let mut width = minimum;
         for weight in weight_ids.iter().flatten() {
             let ty =
-                expression_types::type_of(self.tree, self.session, *weight, native, &self.dims)?;
+                expression_types::type_of(&self.tree, self.session, *weight, native, &self.dims)?;
             let semantic_types::TyData::Packed(packed) = self.session.types.data(ty).clone() else {
                 return Err(unsupported(format!("non-integral {what} weight")));
             };
@@ -1717,14 +1730,14 @@ impl BodyBuilder<'_, '_, '_> {
         value: celox_sv_syntax::ExprId,
         arms: &[celox_sv_syntax::CaseArm],
     ) -> Converted<Option<StatementId>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         for arm in arms {
             for case_match in &arm.matches {
                 let celox_sv_syntax::CaseMatch::Expression(label) = case_match else {
                     return Err(unsupported("range item of a case on a type"));
                 };
                 if expression_binding::type_references::matching(
-                    self.tree,
+                    &self.tree,
                     self.session,
                     value,
                     *label,
@@ -1749,7 +1762,7 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         id: celox_sv_syntax::SequenceId,
     ) -> Converted<assertions::SequenceMonitor> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let sequence = native.sequence(id).clone();
         // Local variables bind as locals of the monitor; their reads become
         // the values their assignments sampled.
@@ -1758,7 +1771,7 @@ impl BodyBuilder<'_, '_, '_> {
         let mut local_types = HashMap::default();
         let mut registers = Vec::new();
         for local in &sequence.locals {
-            let ty = type_binding::bind(local.data_type, self.tree, self.session, &self.dims)?
+            let ty = type_binding::bind(local.data_type, &self.tree, self.session, &self.dims)?
                 .filter(|ty| {
                     // An integral variable, which a register can keep.
                     semantic_types::of_type(
@@ -1821,7 +1834,7 @@ impl BodyBuilder<'_, '_, '_> {
                     before: order,
                 };
                 let condition = self.native_value(step.expression)?;
-                assertions::concurrent_operand(&condition)?;
+                self.concurrent_operand(&condition)?;
                 let condition = self.sequence_value(&condition, point, &locals, &mut registers)?;
                 let mut calls = Vec::new();
                 for item in &step.items {
@@ -1831,7 +1844,7 @@ impl BodyBuilder<'_, '_, '_> {
                             operator,
                             value,
                         } => {
-                            let native = self.tree.declarations();
+                            let native = self.syntax().declarations();
                             let celox_sv_syntax::ExprKind::Name(name) = &native
                                 .expression(expression_binding::ungroup(*target, native))
                                 .kind
@@ -1846,7 +1859,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 Some(value) => expression_binding::value(
                                     *value,
                                     native,
-                                    self.tree,
+                                    &self.tree,
                                     self.session,
                                     &self.dims,
                                 )?,
@@ -1857,7 +1870,7 @@ impl BodyBuilder<'_, '_, '_> {
                             let value = match operator.as_str() {
                                 "=" => rhs,
                                 "++" | "--" => statements::assignment_op_expr(
-                                    self.tree,
+                                    &self.tree,
                                     self.session,
                                     &lvalue,
                                     if operator == "++" { "+=" } else { "-=" },
@@ -1865,7 +1878,7 @@ impl BodyBuilder<'_, '_, '_> {
                                     &self.dims,
                                 )?,
                                 _ => statements::assignment_op_expr(
-                                    self.tree,
+                                    &self.tree,
                                     self.session,
                                     &lvalue,
                                     operator,
@@ -1876,10 +1889,10 @@ impl BodyBuilder<'_, '_, '_> {
                             // The value converts to the local's type as an
                             // assignment's does (10.7).
                             let mut value = coerce_procedural_assignment_rhs(
-                                self.tree, value, &lvalue, &self.dims,
+                                &self.tree, value, &lvalue, &self.dims,
                             );
                             self.rename_expr(&mut value);
-                            assertions::concurrent_operand(&value)?;
+                            self.concurrent_operand(&value)?;
                             let mut target = Expr::Ident(source);
                             self.rename_expr(&mut target);
                             let Expr::Ident(unique) = target else {
@@ -2117,10 +2130,9 @@ impl BodyBuilder<'_, '_, '_> {
             let by_value = argument == Argument::Value;
             let value = self.sequence_value(expr, here, locals, registers)?;
             *expr = if by_value {
-                // A value read over sampled values, as an operand is: a user
-                // function would read module variables that sampling does
-                // not reach (16.6).
-                assertions::concurrent_operand(&value)?;
+                // A value read over sampled values, as an operand is, with
+                // the same restrictions on the functions it calls (16.6).
+                self.concurrent_operand(&value)?;
                 assertions::sampled(value)
             } else {
                 value
@@ -2276,7 +2288,7 @@ impl BodyBuilder<'_, '_, '_> {
         let mut steps = Vec::new();
         let mut step = |this: &mut Self, offset: u32, id, antecedent| -> Converted<()> {
             let value = this.native_value(id)?;
-            assertions::concurrent_operand(&value)?;
+            this.concurrent_operand(&value)?;
             steps.push((
                 offset,
                 procedural_truth_condition(assertions::sampled(value)),
@@ -2294,9 +2306,9 @@ impl BodyBuilder<'_, '_, '_> {
                     // (16.12.8).
                     Some(equivalent) => {
                         let left = self.native_value(property.condition)?;
-                        assertions::concurrent_operand(&left)?;
+                        self.concurrent_operand(&left)?;
                         let right = self.native_value(equivalent)?;
-                        assertions::concurrent_operand(&right)?;
+                        self.concurrent_operand(&right)?;
                         steps.push((
                             0,
                             Expr::Binary {
@@ -2315,7 +2327,7 @@ impl BodyBuilder<'_, '_, '_> {
                 }
             }
             Some(id) => {
-                let sequence = self.tree.declarations().sequence(id).clone();
+                let sequence = self.syntax().declarations().sequence(id).clone();
                 if !sequence.locals.is_empty() {
                     return Err(unsupported(
                         "local variable of a sequence in an expect statement",
@@ -2363,7 +2375,7 @@ impl BodyBuilder<'_, '_, '_> {
         &self,
         id: celox_sv_syntax::ExprId,
     ) -> Option<celox_sv_syntax::PropertySpec> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let id = expression_binding::ungroup(id, native);
         let celox_sv_syntax::ExprKind::Name(name) = &native.expression(id).kind else {
             return None;
@@ -2481,6 +2493,7 @@ mod tests {
             subroutine_statics: HashMap::default(),
             static_initializers: Vec::new(),
             constant_evaluation: false,
+            assertion_callees: Vec::new(),
         };
         let mut builder = BodyBuilder::new(
             &tree,

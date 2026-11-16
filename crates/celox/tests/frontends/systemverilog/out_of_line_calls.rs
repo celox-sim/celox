@@ -5840,3 +5840,215 @@ endmodule
         }
     }
 }
+
+#[test]
+fn recursion_reaching_a_specialization_for_another_packages_class_goes_out_of_line() {
+    // `b` imports no package, but its recursive call of `core::get` reaches,
+    // through `wrapper::make`, `registry#(user::C)::make`, which constructs
+    // a `user::C`: UVM's factory reaches `uvm_object_registry#(T)` of a
+    // user's `T` this way. The recursion goes out of line only with the
+    // constructor of `user::C` in `b`.
+    let source = r#"`timescale 1ns/1ns
+package base;
+  virtual class wrapper;
+    pure virtual function int make();
+  endclass
+  class registry #(type T = int) extends wrapper;
+    virtual function int make();
+      T t = new;
+      return 1;
+    endfunction
+  endclass
+  wrapper w;
+  int depth;
+  int made;
+  class core;
+    static core inst;
+    static function core get();
+      if (inst == null) init();
+      return inst;
+    endfunction
+  endclass
+  function automatic void init();
+    core c;
+    depth++;
+    c = new;
+    core::inst = c;
+    void'(core::get());
+    if (w != null) made += w.make();
+  endfunction
+endpackage
+package user;
+  class C;
+    int v;
+  endclass
+  base::registry #(C) r = new;
+  function void register();
+    base::w = r;
+  endfunction
+endpackage
+module a;
+  import user::*;
+  initial register();
+endmodule
+module b;
+  int depth;
+  int made;
+  bit found;
+  initial #1 begin
+    base::core c;
+    c = base::core::get();
+    depth = base::depth;
+    made = base::made;
+    found = c != null;
+  end
+endmodule
+"#;
+    let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("factory.sv"))], "")
+        .tops(["a", "b"])
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    sim.run_until(2).unwrap();
+    for (name, value) in [("b.depth", 1u32), ("b.made", 1), ("b.found", 1)] {
+        let signal = sim.signal(name);
+        assert_eq!(sim.get(signal), value.into(), "{name}");
+    }
+}
+
+/// The design of [`recursion_reaching_a_specialization_for_another_packages_class_goes_out_of_line`]
+/// with `user::C` of `class` and the `user` items of `items`.
+fn foreign_constructor_design(items: &str, class: &str) -> String {
+    r#"`timescale 1ns/1ns
+package base;
+  virtual class wrapper;
+    pure virtual function int make();
+  endclass
+  class registry #(type T = int) extends wrapper;
+    virtual function int make();
+      T t = new;
+      return t.ok();
+    endfunction
+  endclass
+  wrapper w;
+  int made;
+  class core;
+    static core inst;
+    static function core get();
+      if (inst == null) init();
+      return inst;
+    endfunction
+  endclass
+  function automatic void init();
+    core c;
+    c = new;
+    core::inst = c;
+    void'(core::get());
+    if (w != null) made += w.make();
+  endfunction
+endpackage
+package user;
+ITEMS
+CLASS
+  base::registry #(C) r = new;
+  function void register();
+    base::w = r;
+  endfunction
+endpackage
+module a;
+  import user::*;
+  int created;
+  initial begin
+    register();
+    #2 created = user::created;
+  end
+endmodule
+module b;
+  int made;
+  initial #1 begin
+    base::core c;
+    c = base::core::get();
+    made = base::made;
+  end
+endmodule
+"#
+    .replace("ITEMS", items)
+    .replace("CLASS", class)
+}
+
+/// Run `source` with tops `a` and `b` and give `names`.
+fn run_tops(source: &str, names: &[&str]) -> Vec<u32> {
+    let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("factory.sv"))], "")
+        .tops(["a", "b"])
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    sim.run_until(3).unwrap();
+    names
+        .iter()
+        .map(|name| {
+            let signal = sim.signal(name);
+            u32::try_from(sim.get(signal)).unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn reached_foreign_constructors_update_their_packages_variables() {
+    // `b` imports no package, but its recursion reaches `user::C::new`,
+    // which counts the objects in a variable of `user`: `b` binds it as a
+    // scope that imports `user` does, so `a` sees the count.
+    let source = foreign_constructor_design(
+        "  int created;",
+        "  class C;\n    function new();\n      created++;\n    endfunction\n    function int ok();\n      return 1;\n    endfunction\n  endclass",
+    );
+    assert_eq!(run_tops(&source, &["a.created", "b.made"]), [1, 1]);
+}
+
+#[test]
+fn reached_foreign_constructors_call_their_packages_dpi_imports() {
+    // `b` imports no package, but its recursion reaches `user::C::new`,
+    // which calls a DPI import of `user` (one that Celox provides).
+    let source = foreign_constructor_design(
+        "  int created;\n  import \"DPI-C\" function string uvm_dpi_get_tool_name_c();",
+        "  class C;\n    string tool;\n    function new();\n      tool = uvm_dpi_get_tool_name_c();\n    endfunction\n    function int ok();\n      return tool == \"Celox\";\n    endfunction\n  endclass",
+    );
+    assert_eq!(run_tops(&source, &["b.made"]), [1]);
+}
+
+#[test]
+fn function_units_store_into_targets_of_nonblocking_assignments() {
+    // IEEE 1800-2023 10.4.2: the recursive `f` goes out of line and stores
+    // into `a`, which nonblocking assignments also update; each update
+    // still lands after the blocking store of its time slot.
+    let source = r#"`timescale 1ns/1ns
+module Top(output logic [7:0] first, output logic [7:0] second,
+           output logic [7:0] third, output logic [7:0] fourth);
+  logic [7:0] a = 0;
+  function automatic int f(int d, int v);
+    if (d > 0) return f(d - 1, v);
+    a = v;
+    return 0;
+  endfunction
+  initial begin
+    #1 a <= 1; void'(f(2, 7)); first = a;
+    #1 second = a;
+    void'(f(2, 9)); a <= 3; third = a;
+    #1 fourth = a;
+  end
+endmodule
+"#;
+    for four_state in [false, true] {
+        let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("nba.sv"))], "Top")
+            .four_state(four_state)
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+        sim.run_until(4).unwrap();
+        for (name, value) in [("first", 7u8), ("second", 1), ("third", 9), ("fourth", 3)] {
+            let signal = sim.signal(name);
+            assert_eq!(
+                sim.get(signal),
+                value.into(),
+                "{name} four_state={four_state}"
+            );
+        }
+    }
+}

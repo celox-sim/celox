@@ -124,16 +124,36 @@ impl BodyBuilder<'_, '_, '_> {
         result: &str,
         arguments: &[celox_sv_syntax::Argument],
     ) -> Converted<Vec<Stmt>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let mut body = vec![Stmt::Assign {
             lhs: LValue::Ident(result.to_owned()),
             rhs: Expr::Ident(this.to_owned()),
             nonblocking: false,
         }];
         body.extend(class.program_registration(&self.session.types));
+        // An object of a class of a module records the module instance it
+        // is created in, before a base constructor may call an override.
+        if let Some(property) = class
+            .properties
+            .iter()
+            .find(|property| property.hidden && property.owner == class.name)
+        {
+            body.push(Stmt::Eval(classes::object_call(
+                system_functions::ObjectOp::Store(property.field),
+                vec![
+                    Expr::Ident(this.to_owned()),
+                    Expr::Ident(
+                        virtual_interfaces::VirtualInterfaceSignal::Identity {
+                            handle: module_overrides::MODULE_HANDLE.to_owned(),
+                        }
+                        .name(),
+                    ),
+                ],
+            )));
+        }
         if let Some(base) = &class.base {
             let base = classes::class(
-                self.tree,
+                &self.tree,
                 self.session,
                 base,
                 &self.dims.const_env,
@@ -141,7 +161,7 @@ impl BodyBuilder<'_, '_, '_> {
             )?;
             if let Some(method) = base.method("new") {
                 expression_binding::check_member_access(
-                    self.tree,
+                    &self.tree,
                     self.session,
                     &self.dims,
                     &method.owner,
@@ -163,7 +183,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 index + 1,
                                 value,
                                 native,
-                                self.tree,
+                                &self.tree,
                                 &self.dims,
                                 self.session,
                             )?;
@@ -190,7 +210,7 @@ impl BodyBuilder<'_, '_, '_> {
                 let mut value = match property.initializer {
                     Some(initializer) => containers::fixed_assignment(
                         initializer,
-                        self.tree,
+                        &self.tree,
                         self.session,
                         &self.dims,
                         storage,
@@ -218,7 +238,7 @@ impl BodyBuilder<'_, '_, '_> {
             if let Some(container) = property.r#type.container.as_deref() {
                 let mut value = containers::assignment(
                     initializer,
-                    self.tree,
+                    &self.tree,
                     self.session,
                     &self.dims,
                     container,
@@ -232,7 +252,7 @@ impl BodyBuilder<'_, '_, '_> {
             }
             let mut value = match property.r#type.class_in(&self.session.types) {
                 Some(class) => expression_binding::object_constructor(
-                    self.tree,
+                    &self.tree,
                     self.session,
                     initializer,
                     native,
@@ -244,7 +264,7 @@ impl BodyBuilder<'_, '_, '_> {
             expression_binding::check_chandle_assignment(
                 property.r#type.is_chandle() && property.r#type.unpacked_ranges.is_empty(),
                 initializer,
-                self.tree,
+                &self.tree,
                 native,
                 &self.dims,
                 self.session,
@@ -254,7 +274,7 @@ impl BodyBuilder<'_, '_, '_> {
                 None => expression_binding::bind_value(
                     initializer,
                     native,
-                    self.tree,
+                    &self.tree,
                     self.session,
                     &self.dims,
                     Some(&dimensions_from_type(&property.r#type)),

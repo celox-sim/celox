@@ -37,7 +37,9 @@ constructs without a dedicated issue point to the frontend roadmap,
 ### Design structure
 
 - `bind`, `checker`, `config`, `covergroup`, clocking blocks and clocking
-  drives, user-defined primitives (UDP), and `specify` blocks.
+  drives, user-defined primitives (UDP), and `specify` blocks. A class may
+  declare a covergroup that nothing constructs; constructing one or calling
+  its methods is rejected.
 - `defparam` assignments other than to a parameter of a module instance of
   the module that has the statement, which may be in a generate block:
   names through a child instance, names that start at `$root`, elements of
@@ -55,8 +57,9 @@ constructs without a dedicated issue point to the frontend roadmap,
   module to a `wire`, `tri`, `wand`, `triand`, `wor` or `trior` net, which
   are resolved (6.6.1 to 6.6.3). Still rejected are drivers below an
   instance (so a tri-state bus across modules), assignments with a drive
-  strength, `tri0`, `tri1` and supply nets with several drivers, and, in
-  two-state simulation, drivers with an X or Z literal, whose high
+  strength, `tri0`, `tri1` and supply nets with several drivers, drivers
+  that call a function with a loop whose condition depends on values, and,
+  in two-state simulation, drivers with an X or Z literal, whose high
   impedance a two-state value cannot hold. `inout` ports of the top module
   are rejected. An `inout` below the top is supported only with one
   continuous driver on either side, such as `assign io = oe ? d : 'z;`.
@@ -122,8 +125,10 @@ constructs without a dedicated issue point to the frontend roadmap,
   reserves `$` for generated names.
 - Variable declaration initializers of members of an interface array.
 - Virtual interfaces <a id="virtual-interfaces"></a>: a `wait` statement
-  through a virtual interface held by an automatic variable, an argument,
-  or a class property; virtual interfaces of parameterized interfaces;
+  through a virtual interface held by an automatic variable or an argument,
+  or by a class property of an object one holds (a property of `this` or of
+  an object a static variable holds is watched); virtual interfaces of
+  parameterized interfaces;
   clocking blocks and nested interface instances reached through a virtual
   interface; writes to nets through a virtual interface; `$bits` of a call
   of an interface function through a virtual interface in a package or
@@ -199,8 +204,21 @@ blocks in programs. Two region deviations are listed under
 
 ### Processes, timing, and control flow {#timing-controls}
 
-- Procedural `force` / `release` statements, and the `disable` statement,
-  except `disable fork`.
+- The `disable` statement, except `disable fork`.
+- Procedural `force` / `release` (IEEE 1800-2023 10.6.2) outside `initial`
+  and `always` procedures: in a subroutine, a `final` procedure, or an
+  `always_comb`, `always_latch` or `always_ff` procedure. An `always`
+  procedure with one runs as a process. The target is a whole packed
+  integral variable or net of the module: a bit-select, part-select,
+  member, concatenation or name of another instance, a `real`, `string`,
+  handle or unpacked target (singular ones the standard allows), and a
+  variable that an `always_comb`, `always_latch` or `always @*` procedure
+  assigns, or that a nonblocking assignment with an intra-assignment delay
+  writes, are rejected. So are an expression with side effects or with a
+  call of a subroutine or a system function, and one that reads a variable
+  of a procedural block. A target that the host also forces
+  (`Simulator::force`) is rejected, as is an input port of the top module,
+  which the host writes.
 - Procedural continuous assignments (`assign` / `deassign`, IEEE 1800-2023
   10.6.1) outside `initial` and `always` procedures: in a subroutine, a
   `final` procedure, or an `always_comb`, `always_latch` or `always_ff`
@@ -292,6 +310,12 @@ blocks in programs. Two region deviations are listed under
   class passes its own such parameters on by name).
 - Module-local classes as type arguments to package-class specializations,
   and anonymous enumeration, struct, or union types as type arguments.
+- In an override, by a class of a module, of a virtual method of a class
+  declared outside the module (which other scopes call through handles of
+  that class): reading a module variable or port of a type other than an
+  integral type without unpacked dimensions or a class handle, static
+  variables, and calls of the module's own subroutines that read its
+  variables.
 - Properties that are `real`; fixed-size array properties that are
   `static` or `randc`, have more than one unpacked dimension or a
   negative bound or one outside `int`, are assigned or compared with an
@@ -402,7 +426,9 @@ blocks in programs. Two region deviations are listed under
   unsupported (a default-only literal is supported, 7.8.6).
 - Container methods: locator methods returning indices for integral keys
   wider than 64 bits; sorting elements wider than 64 bits without a `with`
-  expression; ordering fixed arrays; comparing containers of elements
+  expression; ordering a fixed-size array variable of more than one
+  dimension, of unpacked structures or of elements wider than 64 bits, or
+  with a `with` expression; comparing containers of elements
   wider than 64 bits with `==`, reducing them, or printing them with `%p`;
   type queries (`$bits`, …) on string- or class-valued queue pop results;
   queries of element dimensions and associative bounds; locator methods in
@@ -502,6 +528,9 @@ concurrent assertions is unsupported:
 - Untimed blocking actions, report/severity tasks, and subroutine calls
   that do not suspend, perform a nonblocking assignment, start or control a
   process, or trigger an event.
+- Calls of functions without side effects (16.6) in operands, `disable iff`
+  conditions and match-item values. A function gets the sampled values of
+  its arguments, and its body reads current values (16.5.1).
 
 Unsupported in particular: procedural concurrent assertions,
 implicit/default clocking, named properties and sequences with formal
@@ -510,9 +539,13 @@ repetition, the sequence operator `within`, `intersect` of sequences that
 never match at one tick, instances of named sequences clocked differently
 or with local variables inside a
 multi-cycle sequence, `iff`
-with an operand over cycles or a named operand, user
-function calls in predicates and match-item values, and timed or
-nonblocking action statements.
+with an operand over cycles or a named operand, calls of functions that
+are not pure (an output, inout, ref or const ref formal of the called
+function; writes to non-local variables, kept static state,
+side-effecting system calls, or string or class method calls, directly
+or through the functions it calls), DPI import calls, function calls in
+the operand of `$past`/`$rose`/`$fell`/`$stable`/`$changed`, and timed
+or nonblocking action statements.
 
 ### System tasks, functions, and I/O
 

@@ -497,10 +497,15 @@ pub(super) fn check_tagged_port_connections(
 
 /// Connect unpacked structures through their independently typed leaf ports.
 /// Aggregate declarations remain in source metadata for nominal type checking.
+/// An assignment pattern connected to a structure port is bound in the types
+/// of `design`, which the child's analysis published its ports with; without
+/// a design, as for the drivers of the parent's signals, which an input port
+/// pattern makes none of, its leaf connections are left out.
 pub(super) fn expand_structure_connections<'a>(
     connections: &'a [LoweredSvPortConnection],
     parent: &sv::ir::Module,
     child: &sv::ir::Module,
+    mut design: Option<&mut sv::Design>,
 ) -> Result<std::borrow::Cow<'a, [LoweredSvPortConnection]>, ParserError> {
     if !child
         .ports()
@@ -537,8 +542,11 @@ pub(super) fn expand_structure_connections<'a>(
                     "an output structure port requires a variable".into(),
                 ));
             }
+            let Some(design) = design.as_deref_mut() else {
+                continue;
+            };
             let parts = port
-                .bind_structure_pattern(pattern)
+                .bind_structure_pattern(pattern, design)
                 .map_err(|error| invalid(error.to_string()))?;
             for ((member, _), value) in port.r#type().structure_leaves().iter().zip(parts) {
                 expanded.push(LoweredSvPortConnection {
@@ -601,6 +609,7 @@ pub(super) fn expand_structure_connections<'a>(
 pub(super) fn bind_port_patterns(
     connections: &mut [LoweredSvPortConnection],
     child: &LoweredSvModule,
+    design: &mut sv::Design,
 ) -> Result<(), ParserError> {
     for connection in connections {
         let Some(pattern) = connection.bound_pattern.take() else {
@@ -625,7 +634,7 @@ pub(super) fn bind_port_patterns(
                 None,
             ));
         }
-        connection.actual_expr = Some(port.bind_pattern(&pattern).map_err(|error| {
+        connection.actual_expr = Some(port.bind_pattern(&pattern, design).map_err(|error| {
             ParserError::illegal_context(
                 "systemverilog port assignment pattern",
                 error.to_string(),

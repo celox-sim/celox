@@ -79,6 +79,7 @@ impl Ff<'_, '_> {
                 lsb,
                 array_slice_width,
                 array_slice_reversed,
+                window,
             } => keep_element_window(
                 lvalue,
                 sv::ir::LValue::Select {
@@ -87,6 +88,7 @@ impl Ff<'_, '_> {
                     lsb: substitute_overlay_const(lsb, &self.scope.overlay),
                     array_slice_width: array_slice_width.clone(),
                     array_slice_reversed: *array_slice_reversed,
+                    window: *window,
                 },
                 self.m.variables,
                 self.m.name_to_id,
@@ -126,7 +128,7 @@ impl Ff<'_, '_> {
             Some(rewritten) => std::borrow::Cow::Owned(rewritten),
             None => expr,
         };
-        let expr = if self.m.forceable.is_empty() {
+        let expr = if !self.m.forces_reads() {
             expr
         } else {
             std::borrow::Cow::Owned(force_reads(&expr, self.m))

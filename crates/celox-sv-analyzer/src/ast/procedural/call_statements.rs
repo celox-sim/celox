@@ -9,15 +9,15 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         root: celox_sv_syntax::ExprId,
     ) -> Result<Option<Stmt>, AnalyzerError> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         if let Some(mut call) =
-            processes::value(self.tree, self.session, root, native, &self.dims, true)?
+            processes::value(&self.tree, self.session, root, native, &self.dims, true)?
         {
             self.rename_expr(&mut call);
             return Ok(Some(Stmt::Eval(call)));
         }
         if let Some(mut call) =
-            semaphores::value(self.tree, self.session, root, native, &self.dims, true)?
+            semaphores::value(&self.tree, self.session, root, native, &self.dims, true)?
         {
             self.rename_expr(&mut call);
             let stmt = Stmt::Eval(call);
@@ -27,7 +27,7 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(Some(stmt));
         }
         if let Some(mut call) =
-            mailboxes::value(self.tree, self.session, root, native, &self.dims, true)?
+            mailboxes::value(&self.tree, self.session, root, native, &self.dims, true)?
         {
             self.rename_expr(&mut call);
             let stmt = Stmt::Eval(call);
@@ -39,7 +39,7 @@ impl BodyBuilder<'_, '_, '_> {
         // The rand_mode of a static rand property is one bit every object
         // shares (IEEE 1800-2023 18.8).
         if let Some((off, Some(argument))) = expression_binding::object_static_rand_mode(
-            self.tree,
+            &self.tree,
             self.session,
             root,
             native,
@@ -59,7 +59,7 @@ impl BodyBuilder<'_, '_, '_> {
             }));
         }
         if let Some(mut call) = expression_binding::object_constraint_mode_call(
-            self.tree,
+            &self.tree,
             self.session,
             root,
             native,
@@ -67,7 +67,7 @@ impl BodyBuilder<'_, '_, '_> {
             true,
         )?
         .or(expression_binding::object_rand_mode_call(
-            self.tree,
+            &self.tree,
             self.session,
             root,
             native,
@@ -91,7 +91,7 @@ impl BodyBuilder<'_, '_, '_> {
         let call = match native.expression(root).kind {
             celox_sv_syntax::ExprKind::Call { .. } => {
                 if expression_binding::object_call_method(
-                    self.tree,
+                    &self.tree,
                     self.session,
                     root,
                     native,
@@ -106,7 +106,7 @@ impl BodyBuilder<'_, '_, '_> {
                 expression_binding::bind_chandle_value(
                     root,
                     native,
-                    self.tree,
+                    &self.tree,
                     self.session,
                     &self.dims,
                     None,
@@ -114,7 +114,7 @@ impl BodyBuilder<'_, '_, '_> {
             }
             _ => {
                 let Some((name, formals, receiver)) = expression_binding::object_method(
-                    self.tree,
+                    &self.tree,
                     self.session,
                     root,
                     native,
@@ -128,7 +128,7 @@ impl BodyBuilder<'_, '_, '_> {
                         vec![Some(expression_binding::value(
                             receiver,
                             native,
-                            self.tree,
+                            &self.tree,
                             self.session,
                             &self.dims,
                         )?)]
@@ -182,9 +182,9 @@ impl BodyBuilder<'_, '_, '_> {
         args: Vec<Expr>,
         nonblocking: bool,
     ) -> Result<Stmt, AnalyzerError> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         if let Some((property, receiver)) = expression_binding::object_property(
-            self.tree,
+            &self.tree,
             self.session,
             string,
             native,
@@ -195,7 +195,7 @@ impl BodyBuilder<'_, '_, '_> {
                 return Err(unsupported("nonblocking assignment to a class property"));
             }
             let handle = expression_binding::object_receiver(
-                self.tree,
+                &self.tree,
                 self.session,
                 receiver,
                 native,
@@ -217,7 +217,7 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(Stmt::Eval(store));
         }
         if expression_binding::fixed_string_array_element(
-            self.tree,
+            &self.tree,
             self.session,
             string,
             native,
@@ -249,8 +249,8 @@ impl BodyBuilder<'_, '_, '_> {
             let mut body = Vec::new();
             for index in indices.into_iter().rev() {
                 let mut value =
-                    expression_binding::value(index, native, self.tree, self.session, &self.dims)?;
-                let ty = dimensions::bound_bits_type(self.tree, &value, &self.dims)
+                    expression_binding::value(index, native, &self.tree, self.session, &self.dims)?;
+                let ty = dimensions::bound_bits_type(&self.tree, &value, &self.dims)
                     .ok_or_else(|| unsupported("string array index type"))?;
                 let (source, unique) = self.hidden(vector_type(ty.width, ty.signed));
                 self.rename_expr(&mut value);
@@ -268,7 +268,7 @@ impl BodyBuilder<'_, '_, '_> {
                 expression_binding::string_call(
                     StringOp::FromHandle,
                     vec![expr_from_lvalue(
-                        self.tree,
+                        &self.tree,
                         &self.session.types,
                         &written,
                         &self.dims,
@@ -307,18 +307,21 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         root: celox_sv_syntax::ExprId,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         if let Some((mut value, _)) =
-            array_reductions::bind(root, native, self.tree, self.session, &self.dims)?
+            array_reductions::bind(root, native, &self.tree, self.session, &self.dims)?
         {
             self.rename_expr(&mut value);
             return Ok(vec![Stmt::Eval(value)]);
         }
         if let Some(mut value) =
-            containers::value(root, native, self.tree, self.session, &self.dims, true)?
+            containers::value(root, native, &self.tree, self.session, &self.dims, true)?
         {
             self.rename_expr(&mut value);
             return Ok(vec![Stmt::Eval(value)]);
+        }
+        if let Some(stmts) = self.fixed_ordering_statement(root)? {
+            return Ok(stmts);
         }
         if let celox_sv_syntax::ExprKind::Call {
             expression,
@@ -327,7 +330,7 @@ impl BodyBuilder<'_, '_, '_> {
             .expression(expression_binding::ungroup(root, native))
             .kind
             && let Some((op, string)) = expression_binding::string_method(
-                self.tree,
+                &self.tree,
                 self.session,
                 *expression,
                 native,
@@ -344,7 +347,7 @@ impl BodyBuilder<'_, '_, '_> {
             let args = args
                 .into_iter()
                 .map(|arg| {
-                    expression_binding::value(arg, native, self.tree, self.session, &self.dims)
+                    expression_binding::value(arg, native, &self.tree, self.session, &self.dims)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             // A method that returns a value has no effect as a statement.
@@ -355,15 +358,23 @@ impl BodyBuilder<'_, '_, '_> {
             };
         }
         let discarded = matches!(
-            self.tree.declarations().expression(root).kind,
+            self.syntax().declarations().expression(root).kind,
             celox_sv_syntax::ExprKind::Cast { .. }
         );
         {
-            let query_root =
-                expression_binding::call_statement_root(root, discarded, self.tree.declarations())?;
+            let query_root = expression_binding::call_statement_root(
+                root,
+                discarded,
+                self.syntax().declarations(),
+            )?;
             if discarded
-                && let Some((mut value, _)) =
-                    array_reductions::bind(query_root, native, self.tree, self.session, &self.dims)?
+                && let Some((mut value, _)) = array_reductions::bind(
+                    query_root,
+                    native,
+                    &self.tree,
+                    self.session,
+                    &self.dims,
+                )?
             {
                 self.rename_expr(&mut value);
                 return Ok(vec![Stmt::Eval(value)]);
@@ -372,7 +383,7 @@ impl BodyBuilder<'_, '_, '_> {
                 && let Some(mut value) = containers::value(
                     query_root,
                     native,
-                    self.tree,
+                    &self.tree,
                     self.session,
                     &self.dims,
                     true,
@@ -393,12 +404,12 @@ impl BodyBuilder<'_, '_, '_> {
                 return Ok(vec![call]);
             }
             if let celox_sv_syntax::ExprKind::Call { expression, .. } =
-                self.tree.declarations().expression(query_root).kind
+                self.syntax().declarations().expression(query_root).kind
                 && matches!(
                     expression_binding::native_name(
-                        self.tree,
+                        &self.tree,
                         expression,
-                        self.tree.declarations(),
+                        self.syntax().declarations(),
                     )
                     .as_deref(),
                     Some("randomize" | "std::randomize")
@@ -408,8 +419,8 @@ impl BodyBuilder<'_, '_, '_> {
                 self.rename_expr(&mut call);
                 return Ok(vec![Stmt::Eval(call)]);
             }
-            if timescales::is_query(query_root, self.tree.declarations()) {
-                let value = timescales::query(query_root, self.tree)?;
+            if timescales::is_query(query_root, self.syntax().declarations()) {
+                let value = timescales::query(query_root, &self.tree)?;
                 return Ok(vec![Stmt::Eval(Expr::Literal(
                     parameters::format_typed_parameter_literal(i128::from(value), 32, true),
                 ))]);
@@ -422,8 +433,8 @@ impl BodyBuilder<'_, '_, '_> {
             if let Some(mut call) = expression_binding::call_statement(
                 root,
                 discarded,
-                self.tree.declarations(),
-                self.tree,
+                self.syntax().declarations(),
+                &self.tree,
                 self.session,
                 &self.dims,
                 signatures,
@@ -445,8 +456,8 @@ impl BodyBuilder<'_, '_, '_> {
             }
         }
         let root =
-            expression_binding::call_statement_root(root, discarded, self.tree.declarations())?;
-        let declarations = self.tree.declarations();
+            expression_binding::call_statement_root(root, discarded, self.syntax().declarations())?;
+        let declarations = self.syntax().declarations();
         let (callee, arguments) = match &declarations.expression(root).kind {
             celox_sv_syntax::ExprKind::Call {
                 expression,
@@ -456,9 +467,20 @@ impl BodyBuilder<'_, '_, '_> {
             _ => return Err(unsupported("system task or function name")),
         };
         let celox_sv_syntax::ExprKind::Name(name) = &declarations.expression(callee).kind else {
+            if let celox_sv_syntax::ExprKind::Member { expression, .. } =
+                &declarations.expression(callee).kind
+            {
+                expression_binding::objects::reject_covergroup(
+                    &self.tree,
+                    self.session,
+                    *expression,
+                    declarations,
+                    &self.dims,
+                )?;
+            }
             // `h.m();` of a class that declares no `m` (8.5).
             expression_binding::check_member_declared(
-                self.tree,
+                &self.tree,
                 self.session,
                 callee,
                 declarations,
@@ -489,7 +511,7 @@ impl BodyBuilder<'_, '_, '_> {
                 &source.name,
             )
             && expression_binding::enum_domain(
-                self.tree,
+                &self.tree,
                 self.session,
                 destination,
                 declarations,
@@ -507,7 +529,7 @@ impl BodyBuilder<'_, '_, '_> {
                 then_body: Vec::new(),
                 else_body: vec![Stmt::SystemTask {
                     task: SystemTask::Severity(system_functions::Severity::Error),
-                    site: source_span(declarations.expression(root).tokens, self.tree),
+                    site: source_span(declarations.expression(root).tokens, &self.tree),
                     assertion: None,
                     args: vec![SystemTaskArg::Str(
                         "$cast of a value that is no member of the enumerated type".into(),
@@ -532,7 +554,7 @@ impl BodyBuilder<'_, '_, '_> {
                 then_body: Vec::new(),
                 else_body: vec![Stmt::SystemTask {
                     task: SystemTask::Severity(system_functions::Severity::Error),
-                    site: source_span(declarations.expression(root).tokens, self.tree),
+                    site: source_span(declarations.expression(root).tokens, &self.tree),
                     assertion: None,
                     args: vec![SystemTaskArg::Str(
                         "$cast of a value that is not cast compatible with its destination".into(),
@@ -549,7 +571,7 @@ impl BodyBuilder<'_, '_, '_> {
                 &source.name,
             )
             && let Some(cast) = expression_binding::object_cast_to(
-                self.tree,
+                &self.tree,
                 self.session,
                 destination,
                 source,
@@ -565,7 +587,7 @@ impl BodyBuilder<'_, '_, '_> {
             }
             let error = Stmt::SystemTask {
                 task: SystemTask::Severity(system_functions::Severity::Error),
-                site: source_span(declarations.expression(root).tokens, self.tree),
+                site: source_span(declarations.expression(root).tokens, &self.tree),
                 assertion: None,
                 args: vec![SystemTaskArg::Str(
                     "$cast of a class handle to an incompatible class".into(),
@@ -600,17 +622,17 @@ impl BodyBuilder<'_, '_, '_> {
                 values.push(expression_binding::bind_value(
                     id,
                     declarations,
-                    self.tree,
+                    &self.tree,
                     self.session,
                     &self.dims,
                     None,
                 )?);
             }
             let value = expression_binding::format_call(
-                timescales::time_divisor(root, self.tree)?,
+                timescales::time_divisor(root, &self.tree)?,
                 &ids,
                 values,
-                self.tree,
+                &self.tree,
                 self.session,
                 declarations,
                 &self.dims,
@@ -659,7 +681,7 @@ impl BodyBuilder<'_, '_, '_> {
                 let value = expression_binding::bind_value(
                     id,
                     declarations,
-                    self.tree,
+                    &self.tree,
                     self.session,
                     &self.dims,
                     None,
@@ -686,7 +708,7 @@ impl BodyBuilder<'_, '_, '_> {
                     &text,
                     &ids,
                     &mut values,
-                    self.tree,
+                    &self.tree,
                     self.session,
                     declarations,
                     &self.dims,
@@ -695,7 +717,7 @@ impl BodyBuilder<'_, '_, '_> {
             let format = expression_binding::bytes_literal(&text);
             let value = expression_binding::string_call(
                 StringOp::Format {
-                    ticks_per_unit: timescales::time_divisor(root, self.tree)?,
+                    ticks_per_unit: timescales::time_divisor(root, &self.tree)?,
                 },
                 std::iter::once(format).chain(values).collect(),
             );
@@ -705,7 +727,7 @@ impl BodyBuilder<'_, '_, '_> {
             let mut value = expression_binding::bind_value(
                 root,
                 declarations,
-                self.tree,
+                &self.tree,
                 self.session,
                 &self.dims,
                 None,
@@ -727,7 +749,7 @@ impl BodyBuilder<'_, '_, '_> {
                 let mut value = expression_binding::bind_value(
                     root,
                     declarations,
-                    self.tree,
+                    &self.tree,
                     self.session,
                     &self.dims,
                     None,
@@ -738,11 +760,11 @@ impl BodyBuilder<'_, '_, '_> {
             system_functions::SystemCall::Task(SystemTask::Printtimescale) => {
                 return Ok(vec![Stmt::SystemTask {
                     task: SystemTask::Display(system_functions::Radix::Decimal),
-                    site: source_span(declarations.expression(root).tokens, self.tree),
+                    site: source_span(declarations.expression(root).tokens, &self.tree),
                     assertion: None,
                     args: vec![SystemTaskArg::Str(timescales::print_message(
                         root,
-                        self.tree,
+                        &self.tree,
                         system_functions::CallSite::Statement(self.body),
                     )?)],
                 }]);
@@ -791,7 +813,7 @@ impl BodyBuilder<'_, '_, '_> {
                     let mut value = expression_binding::bind_value(
                         id,
                         declarations,
-                        self.tree,
+                        &self.tree,
                         self.session,
                         &self.dims,
                         None,
@@ -806,7 +828,7 @@ impl BodyBuilder<'_, '_, '_> {
         if matches!(task, SystemTask::Readmem(_) | SystemTask::Writemem(_))
             && let Some(memory) = arguments.get(1).and_then(|arg| arg.value)
         {
-            expression_binding::check_chandle_memory(memory, self.tree, &self.dims, self.session)?;
+            expression_binding::check_chandle_memory(memory, &self.tree, &self.dims, self.session)?;
         }
         if matches!(
             task,
@@ -835,7 +857,7 @@ impl BodyBuilder<'_, '_, '_> {
                 if matches!(task, SystemTask::Vcd(system_functions::VcdTask::Vars)) && index > 0 {
                     let text = dump_selection_name(
                         id,
-                        self.tree,
+                        &self.tree,
                         self.session,
                         &self.dims,
                         &|value| self.names.rename_const(value),
@@ -864,7 +886,7 @@ impl BodyBuilder<'_, '_, '_> {
                 let value = expression_binding::bind_value(
                     id,
                     declarations,
-                    self.tree,
+                    &self.tree,
                     self.session,
                     &self.dims,
                     None,
@@ -885,7 +907,7 @@ impl BodyBuilder<'_, '_, '_> {
         }
         // A string literal that %t converts is bound as a value: the binder
         // handles every literal form, triple quotes and escapes included.
-        let divisor = timescales::time_divisor(root, self.tree)?;
+        let divisor = timescales::time_divisor(root, &self.tree)?;
         let mut bind = |index: usize| -> Result<Option<Expr>, AnalyzerError> {
             let Some(id) = ids.get(index).copied().flatten() else {
                 return Ok(None);
@@ -893,7 +915,7 @@ impl BodyBuilder<'_, '_, '_> {
             let mut value = expression_binding::bind_value(
                 id,
                 declarations,
-                self.tree,
+                &self.tree,
                 self.session,
                 &self.dims,
                 None,
@@ -914,7 +936,7 @@ impl BodyBuilder<'_, '_, '_> {
                 let Some(id) = arguments.get(index).and_then(|arg| arg.value) else {
                     continue;
                 };
-                let value = constant_binding::bind(id, self.tree, self.session, &self.dims)
+                let value = constant_binding::bind(id, &self.tree, self.session, &self.dims)
                     .ok()
                     .flatten()
                     .and_then(|value| {
@@ -935,14 +957,14 @@ impl BodyBuilder<'_, '_, '_> {
                     });
                 }
             }
-            args = timeformat_arguments(args, timescales::tick_exponent(root, self.tree)?)?;
+            args = timeformat_arguments(args, timescales::tick_exponent(root, &self.tree)?)?;
         }
         // Keep Veryl's assertion calls as calls: their message arguments
         // execute even on success, unlike an SV assertion's fail action.
         Ok(vec![Stmt::SystemTask {
             task,
             args,
-            site: source_span(declarations.expression(root).tokens, self.tree),
+            site: source_span(declarations.expression(root).tokens, &self.tree),
             assertion: None,
         }])
     }

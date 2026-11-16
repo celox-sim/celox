@@ -113,6 +113,8 @@ mod packed_structs;
 mod procedural;
 #[path = "frontends/systemverilog/procedural_assigns.rs"]
 mod procedural_assigns;
+#[path = "frontends/systemverilog/procedural_forces.rs"]
+mod procedural_forces;
 #[path = "frontends/systemverilog/realtime.rs"]
 mod realtime;
 #[path = "frontends/systemverilog/review_regressions.rs"]
@@ -225,6 +227,12 @@ mod tagged_unions;
 
 #[path = "frontends/systemverilog/references.rs"]
 mod references;
+
+#[path = "frontends/systemverilog/module_class_overrides.rs"]
+mod module_class_overrides;
+
+#[path = "frontends/systemverilog/block_imports.rs"]
+mod block_imports;
 
 #[path = "frontends/systemverilog/top_level_modules.rs"]
 mod top_level_modules;

@@ -15,6 +15,10 @@ use super::*;
 pub(super) struct ScopeSymbols {
     /// User package qualifiers precede implicit std declarations (26.7).
     pub package_scopes: HashSet<String>,
+    /// The subroutines of every package of the design, which a scope copies
+    /// when its calls reach them though it imports no package that has them
+    /// (see [`packages::DesignSubroutines`]).
+    pub design_subroutines: packages::SharedDesignSubroutines,
     /// Declaration inspection omits executable bodies; it is not simulation validation.
     pub declarations_only: bool,
     /// Constant values of parameters and enum members, with their type
@@ -68,6 +72,16 @@ pub(super) struct ScopeSymbols {
     /// The names the imports of a generate block bind there to another
     /// declaration than outside it, by the native body identity of the block.
     pub generate_imports: HashMap<celox_sv_syntax::BodyItemId, HashMap<String, String>>,
+    /// What the imports a procedural block or a subroutine body declares
+    /// bind, by the source offset of its first import: the names the block
+    /// references, with the declarations its imports give them, looked up
+    /// as in generate blocks (IEEE 1800-2023 26.3). The block's statements
+    /// after the import are analyzed with them.
+    pub block_imports: HashMap<usize, HashMap<String, String>>,
+    /// The names the imports of the procedural blocks being analyzed bind
+    /// to package subroutines and DPI imports: a call of one calls that
+    /// declaration, as a call naming it with its package does.
+    pub block_calls: HashMap<String, String>,
     /// The classes the scope declares, laid out, by their qualified names
     /// (IEEE 1800-2023 26.3): a scope that uses them may be analyzed from
     /// another source, without their declarations.
@@ -449,6 +463,7 @@ impl ScopeSymbols {
             // do not carry a compilation unit.
             unit: None,
             package_scopes: self.package_scopes.clone(),
+            design_subroutines: self.design_subroutines.clone(),
             // Classes have their qualified names already.
             classes: self.classes.clone(),
             class_member_types: self.class_member_types.clone(),
@@ -650,6 +665,8 @@ impl ScopeSymbols {
                 .collect(),
             aliases: HashMap::default(),
             generate_imports: HashMap::default(),
+            block_imports: HashMap::default(),
+            block_calls: HashMap::default(),
         }
     }
 }
@@ -956,6 +973,7 @@ impl Renamer<'_> {
                 signed,
                 array_slice_width,
                 array_slice_reversed,
+                window,
                 is_2state,
             } => LValue::Select {
                 name: self.name(&name),
@@ -964,6 +982,7 @@ impl Renamer<'_> {
                 signed,
                 array_slice_width: array_slice_width.map(|width| self.const_expr(width)),
                 array_slice_reversed,
+                window,
                 is_2state,
             },
         }

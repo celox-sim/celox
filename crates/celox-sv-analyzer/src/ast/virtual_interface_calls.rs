@@ -11,7 +11,7 @@
 //! the handle labelled with the instance placeholder (`$vifinstance$I`).
 //! Expanding a module's virtual interface placeholders repeats that item
 //! for each instance of the interface, with the members of that instance
-//! ([`crate::ir::Module::expand_virtual_interface_instances`]), as it does
+//! ([`crate::ir::Module::expand_instances`]), as it does
 //! for any other access through a virtual interface.
 //!
 //! One subroutine serves every instance. Its formals belong to each call,
@@ -22,7 +22,7 @@
 //! called through an interface port is held by the calling module.
 
 use super::*;
-use virtual_interfaces::{VirtualInterface, VirtualInterfaceSignal};
+use virtual_interfaces::{DefinitionId, VirtualInterface, VirtualInterfaceSignal};
 
 /// The subroutines that call the tasks and functions of interfaces through
 /// virtual interfaces, which every scope that may make such a call imports.
@@ -104,6 +104,7 @@ fn interface_subroutines(
     let context = AnalysisContext::unspecialized(scoped);
     let mut design = packages.design();
     let session = &mut Session::with_packages(packages, &mut design);
+    session.shares_static_formals = true;
     let module = interface_ast::analyze(
         &context.child(scoped, &overrides),
         session,
@@ -126,7 +127,7 @@ fn interface_subroutines(
         names.insert(
             member.name.clone(),
             VirtualInterfaceSignal::Placeholder {
-                interface: interface.to_string(),
+                definition: DefinitionId::of(interface),
                 member: member.name.clone(),
             }
             .name(),
@@ -141,13 +142,15 @@ fn interface_subroutines(
             virtual_interfaces::subroutine_name(interface, name),
         );
     }
-    // The static variables of the subroutines belong to each instance.
+    // The static variables of the subroutines belong to each instance (13.3.2),
+    // the formals of a static task kept with them (see
+    // `Session::shares_static_formals`).
     for subroutine in &symbols.subroutines {
         for name in &subroutine.persistent_locals {
             names.insert(
                 name.clone(),
                 VirtualInterfaceSignal::StaticPlaceholder {
-                    interface: interface.to_string(),
+                    definition: DefinitionId::of(interface),
                     name: name.clone(),
                 }
                 .name(),
@@ -197,10 +200,13 @@ fn interface_subroutines(
         .keys()
         .map(|name| virtual_interfaces::subroutine_name(interface, name))
         .collect();
-    let ty = virtual_interfaces::value_type(VirtualInterface {
-        interface: interface.to_string(),
-        modport: None,
-    });
+    let ty = virtual_interfaces::value_type(
+        &mut session.types,
+        VirtualInterface {
+            interface: interface.to_string(),
+            modport: None,
+        },
+    );
     let handle_shape = procedural::dimensions_from_type(&ty);
     let ty = type_nodes::ir_type(session, &context.functions, ty, &ConstEnv::default());
     for subroutine in &bound.subroutines {
@@ -226,8 +232,9 @@ fn interface_subroutines(
         // Each subroutine names its handle apart from the others', which
         // the handle of a call of another one reads.
         let handle = format!("{}$$handle", subroutine.name);
-        let dispatching = dispatching(subroutine, interface, &handle, &ty, &own);
+        let (dispatching, temporaries) = dispatching(subroutine, interface, &handle, &ty, &own);
         built.subroutines.push(Arc::new(dispatching));
+        built.locals.extend(temporaries.into_iter().map(Arc::new));
         built.locals.push(Arc::new(LocalVariable {
             name: handle.clone(),
             source_name: handle,
@@ -255,9 +262,64 @@ fn dispatching(
     handle: &str,
     ty: &crate::ir::Type,
     own: &HashSet<String>,
-) -> Subroutine {
+) -> (Subroutine, Vec<LocalVariable>) {
     let mut subroutine = subroutine.clone();
     let value = Expr::Ident(handle.to_string());
+    // A static task's formals are static variables of each instance
+    // (13.3.2), which every call shares. The call binds its arguments
+    // before it knows the instance, to formals of its own, which the
+    // instance's formals take on entry and give back on every exit.
+    let is_static = |name: &str| {
+        matches!(
+            VirtualInterfaceSignal::of(name),
+            Some(VirtualInterfaceSignal::StaticPlaceholder { .. })
+        )
+    };
+    let mut temporaries = Vec::new();
+    let mut entry = Vec::new();
+    let mut exit = Vec::new();
+    for (index, param) in subroutine.params.iter_mut().enumerate() {
+        if !is_static(&param.name) {
+            continue;
+        }
+        let temporary = format!("{handle}$formal{index}");
+        let shared = std::mem::replace(&mut param.name, temporary.clone());
+        use crate::procedural::ParamDirection;
+        if matches!(
+            param.direction,
+            ParamDirection::Input | ParamDirection::Inout
+        ) {
+            entry.push(Stmt::Assign {
+                lhs: LValue::Ident(shared.clone()),
+                rhs: Expr::Ident(temporary.clone()),
+                nonblocking: false,
+            });
+        }
+        if matches!(
+            param.direction,
+            ParamDirection::Output | ParamDirection::Inout
+        ) {
+            exit.push(Stmt::Assign {
+                lhs: LValue::Ident(temporary.clone()),
+                rhs: Expr::Ident(shared),
+                nonblocking: false,
+            });
+        }
+        temporaries.push(LocalVariable {
+            name: temporary.clone(),
+            source_name: temporary,
+            r#type: param.r#type.clone(),
+            owned: true,
+        });
+    }
+    if !entry.is_empty() || !exit.is_empty() {
+        let result = subroutine.return_var.clone();
+        let mut body = std::mem::take(&mut subroutine.body);
+        procedural::subroutines::before_returns(&mut body, &exit, result.as_deref());
+        subroutine.body = entry;
+        subroutine.body.extend(body);
+        subroutine.body.extend(exit);
+    }
     // A call of another subroutine of the interface runs it for the same
     // instance, also one in a default.
     for stmt in &mut subroutine.body {
@@ -282,7 +344,7 @@ fn dispatching(
     subroutine.automatic = true;
     subroutine.automatic_locals = automatic_locals;
     let instance = VirtualInterfaceSignal::Instance {
-        interface: interface.to_string(),
+        definition: DefinitionId::of(interface),
     }
     .name();
     // A default is evaluated where the subroutine is declared (13.5.3): one
@@ -328,7 +390,7 @@ fn dispatching(
             &value, 1, false,
         ))]),
     }];
-    subroutine
+    (subroutine, temporaries)
 }
 
 /// The order of the actuals of a call, by formal position, once the handle

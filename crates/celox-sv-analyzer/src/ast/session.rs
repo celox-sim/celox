@@ -6,6 +6,11 @@ use super::*;
 /// their inputs and what it reports. Analysis passes it down as `&mut`.
 #[derive(Default)]
 pub(crate) struct Session {
+    /// The formals of a static task that suspends are static variables of
+    /// the scope, shared by overlapping calls (IEEE 1800-2023 13.3.2), as an
+    /// interface's are where its tasks are called through virtual
+    /// interfaces: each instance has them once (see `virtual_interface_calls`).
+    pub(super) shares_static_formals: bool,
     /// Packages analyzed for their declarations alone, no executable body
     /// (see `Packages::analyze_needed`).
     pub(super) declarations_only: bool,

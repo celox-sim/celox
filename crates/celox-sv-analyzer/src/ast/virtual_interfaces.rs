@@ -70,7 +70,7 @@ impl VirtualInterface {
 /// The interfaces that virtual interface types of a design name, from the
 /// interface signatures. Analysis does not know their instances, which the
 /// frontend numbers in the elaborated hierarchy and repeats each access for
-/// (see [`crate::ir::Module::expand_virtual_interface_instances`]).
+/// (see [`crate::ir::Module::expand_instances`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VirtualInterfaces {
     pub interfaces: HashMap<String, VirtualInterfaceDeclaration>,
@@ -233,7 +233,7 @@ impl VirtualInterfaces {
 
 /// `r#type` of a member of a non-parameterized interface, whose bounds are
 /// constants, possibly the interface's `constants`.
-fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> Option<Type> {
+pub(crate) fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> Option<Type> {
     // A handle of a class object, such as the proxy through which a bus
     // functional model calls back the class that drives it (8.4).
     if r#type.kind() == crate::ir::TypeKind::Object
@@ -272,6 +272,43 @@ fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> Option<Type>
     )
 }
 
+/// The definition whose instances a placeholder selects among: an interface,
+/// or a specialization of a module whose classes' overrides read its items
+/// (see `crate::ir::ModuleClasses::key`). A placeholder holds it whole, as a
+/// typed key of a fixed width, never the definition's name, which may hold
+/// any character a placeholder separates its parts with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DefinitionId(u64);
+
+impl DefinitionId {
+    /// The key of the definition named `name`.
+    pub fn of(name: &str) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = fxhash::FxHasher64::default();
+        name.hash(&mut hasher);
+        Self(hasher.finish())
+    }
+
+    /// The key that `text` spells, all of it.
+    fn parse(text: &str) -> Option<Self> {
+        (text.len() == 16 && text.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| u64::from_str_radix(text, 16).ok().map(Self))
+            .flatten()
+    }
+
+    /// The key at the start of `text` and what follows its separator.
+    fn split(text: &str) -> Option<(Self, &str)> {
+        let key = Self::parse(text.get(..16)?)?;
+        Some((key, text.get(16..)?.strip_prefix('$')?))
+    }
+}
+
+impl std::fmt::Display for DefinitionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
 /// A signal of a module that the frontend binds for virtual interfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VirtualInterfaceSignal {
@@ -283,18 +320,27 @@ pub enum VirtualInterfaceSignal {
     /// Member `member` of interface `interface`, which a select through a
     /// virtual interface is bound against before it is applied to the member
     /// of each instance; it denotes no instance's member.
-    Template { interface: String, member: String },
+    Template {
+        definition: DefinitionId,
+        member: String,
+    },
     /// Member `member` of the instance of interface `interface` that an
     /// access selects: analysis builds each access once with it, for the
     /// frontend to repeat for every instance of the elaborated design (see
-    /// [`crate::ir::Module::expand_virtual_interface_instances`]).
-    Placeholder { interface: String, member: String },
+    /// [`crate::ir::Module::expand_instances`]).
+    Placeholder {
+        definition: DefinitionId,
+        member: String,
+    },
     /// The id of that instance, which the access compares its handle with.
-    Instance { interface: String },
+    Instance { definition: DefinitionId },
     /// Static variable `name` of a subroutine of the instance of interface
     /// `interface` that a call through a virtual interface selects, which
     /// the frontend repeats for every instance, as a member.
-    StaticPlaceholder { interface: String, name: String },
+    StaticPlaceholder {
+        definition: DefinitionId,
+        name: String,
+    },
     /// Static variable `name` of a subroutine of interface instance `id`,
     /// called through a virtual interface (13.3.2, 25.9): one per instance,
     /// held by the scope that makes the call.
@@ -304,12 +350,12 @@ pub enum VirtualInterfaceSignal {
 impl VirtualInterfaceSignal {
     /// The kind of a signal named `name`, if the frontend binds it.
     pub fn of(name: &str) -> Option<Self> {
-        if let Some((interface, name)) = name
+        if let Some((definition, name)) = name
             .strip_prefix(STATIC_PLACEHOLDER_PREFIX)
-            .and_then(|rest| rest.split_once('$'))
+            .and_then(DefinitionId::split)
         {
             return Some(Self::StaticPlaceholder {
-                interface: interface.to_owned(),
+                definition,
                 name: name.to_owned(),
             });
         }
@@ -322,31 +368,32 @@ impl VirtualInterfaceSignal {
                 name: name.to_owned(),
             });
         }
-        if let Some((interface, member)) = name
+        if let Some((definition, member)) = name
             .strip_prefix(PLACEHOLDER_PREFIX)
-            .and_then(|rest| rest.split_once('$'))
+            .and_then(DefinitionId::split)
         {
             return Some(Self::Placeholder {
-                interface: interface.to_owned(),
+                definition,
                 member: member.to_owned(),
             });
         }
-        if let Some(interface) = name.strip_prefix(INSTANCE_PREFIX) {
-            return Some(Self::Instance {
-                interface: interface.to_owned(),
-            });
+        if let Some(definition) = name
+            .strip_prefix(INSTANCE_PREFIX)
+            .and_then(DefinitionId::parse)
+        {
+            return Some(Self::Instance { definition });
         }
         if let Some(handle) = name.strip_prefix(IDENTITY_PREFIX) {
             return Some(Self::Identity {
                 handle: handle.to_owned(),
             });
         }
-        if let Some((interface, member)) = name
+        if let Some((definition, member)) = name
             .strip_prefix(TEMPLATE_PREFIX)
-            .and_then(|rest| rest.split_once('$'))
+            .and_then(DefinitionId::split)
         {
             return Some(Self::Template {
-                interface: interface.to_owned(),
+                definition,
                 member: member.to_owned(),
             });
         }
@@ -361,29 +408,33 @@ impl VirtualInterfaceSignal {
         match self {
             Self::Member { id, member } => format!("{MEMBER_PREFIX}{id}${member}"),
             Self::Identity { handle } => format!("{IDENTITY_PREFIX}{handle}"),
-            Self::Template { interface, member } => {
-                format!("{TEMPLATE_PREFIX}{interface}${member}")
+            Self::Template { definition, member } => {
+                format!("{TEMPLATE_PREFIX}{definition}${member}")
             }
-            Self::Placeholder { interface, member } => {
-                format!("{PLACEHOLDER_PREFIX}{interface}${member}")
+            Self::Placeholder { definition, member } => {
+                format!("{PLACEHOLDER_PREFIX}{definition}${member}")
             }
-            Self::Instance { interface } => format!("{INSTANCE_PREFIX}{interface}"),
-            Self::StaticPlaceholder { interface, name } => {
-                format!("{STATIC_PLACEHOLDER_PREFIX}{interface}${name}")
+            Self::Instance { definition } => format!("{INSTANCE_PREFIX}{definition}"),
+            Self::StaticPlaceholder { definition, name } => {
+                format!("{STATIC_PLACEHOLDER_PREFIX}{definition}${name}")
             }
             Self::Static { id, name } => format!("{STATIC_PREFIX}{id}${name}"),
         }
     }
 }
 
-/// The type of a virtual interface value: an unsigned two-state number.
-pub(super) fn value_type(interface: VirtualInterface) -> Type {
+/// The type of a virtual interface value: an unsigned two-state number,
+/// bound to its semantic type in `table`, which tells its interface and
+/// modport (IEEE 1800-2023 25.9) and which an array of it keeps as the type
+/// of its elements.
+pub(super) fn value_type(table: &mut semantic_types::TyTable, interface: VirtualInterface) -> Type {
+    let id = interface.type_id(table);
     let mut ty = Type::new(TypeKind::Bit);
     ty.packed_ranges.push(PackedRange::new(
         ConstExpr::Literal((WIDTH - 1).to_string()),
         ConstExpr::Literal("0".into()),
     ));
-    ty.virtual_interface = Some(Arc::new(interface));
+    ty.bind(table, id);
     ty
 }
 
@@ -394,7 +445,7 @@ pub(super) fn declarations(state: &Session) -> Option<&VirtualInterfaces> {
 
 /// The type `virtual name[.modport]`, checked against the interface.
 pub(super) fn bind_type(
-    state: &Session,
+    state: &mut Session,
     name: &celox_sv_syntax::Name,
     arguments: Option<&[celox_sv_syntax::Argument]>,
     modport: Option<&celox_sv_syntax::Name>,
@@ -404,7 +455,10 @@ pub(super) fn bind_type(
     // The packages are analyzed once to find the interfaces before the
     // declarations exist; the analysis that uses the types checks them.
     let Some(declarations) = declarations(state) else {
-        return Ok(value_type(VirtualInterface { interface, modport }));
+        return Ok(value_type(
+            &mut state.types,
+            VirtualInterface { interface, modport },
+        ));
     };
     // The declarations hold every interface that a virtual interface type
     // of any source names (see `VirtualInterfaces::declarations_of`), so one
@@ -427,7 +481,10 @@ pub(super) fn bind_type(
             "modport `{modport}` of interface `{interface}`"
         )));
     }
-    Ok(value_type(VirtualInterface { interface, modport }))
+    Ok(value_type(
+        &mut state.types,
+        VirtualInterface { interface, modport },
+    ))
 }
 
 /// The member `member` that a virtual interface of type `ty` reaches, with
@@ -459,11 +516,11 @@ pub(super) fn member<'a>(
         )));
     }
     let instance = VirtualInterfaceSignal::Instance {
-        interface: ty.interface.clone(),
+        definition: DefinitionId::of(&ty.interface),
     }
     .name();
     let signal = VirtualInterfaceSignal::Placeholder {
-        interface: ty.interface.clone(),
+        definition: DefinitionId::of(&ty.interface),
         member: member.to_owned(),
     }
     .name();
@@ -502,8 +559,11 @@ pub(super) fn check_write(
 /// interface instances that virtual interfaces may denote: the templates
 /// selects are bound against, and per interface the placeholders of the
 /// selected instance's members and id, which the frontend replaces with the
-/// signals of each instance (see [`crate::ir::Module::expand_virtual_interface_instances`]).
-pub(super) fn member_signals(declarations: &VirtualInterfaces) -> Vec<Signal> {
+/// signals of each instance (see [`crate::ir::Module::expand_instances`]).
+pub(super) fn member_signals(
+    declarations: &VirtualInterfaces,
+    table: &mut semantic_types::TyTable,
+) -> Vec<Signal> {
     let mut interfaces = declarations.interfaces.iter().collect::<Vec<_>>();
     interfaces.sort_by(|left, right| left.0.cmp(right.0));
     let mut signals = Vec::new();
@@ -518,20 +578,25 @@ pub(super) fn member_signals(declarations: &VirtualInterfaces) -> Vec<Signal> {
             is_const: false,
             package_variable: None,
             hierarchical: None,
+            force_control: None,
         }));
     }
     for (interface, declaration) in interfaces {
         let instance = VirtualInterfaceSignal::Instance {
-            interface: interface.clone(),
+            definition: DefinitionId::of(interface),
         }
         .name();
         signals.push(Signal {
             hierarchical: Some(instance.clone()),
+            force_control: None,
             name: instance,
-            r#type: value_type(VirtualInterface {
-                interface: interface.clone(),
-                modport: None,
-            }),
+            r#type: value_type(
+                table,
+                VirtualInterface {
+                    interface: interface.clone(),
+                    modport: None,
+                },
+            ),
             is_net: false,
             unresolved_net: false,
             net_resolution: NetResolution::Wire,
@@ -541,7 +606,7 @@ pub(super) fn member_signals(declarations: &VirtualInterfaces) -> Vec<Signal> {
         });
         signals.extend(declaration.members.iter().map(|member| {
             let name = VirtualInterfaceSignal::Placeholder {
-                interface: interface.clone(),
+                definition: DefinitionId::of(interface),
                 member: member.name.clone(),
             }
             .name();
@@ -549,6 +614,7 @@ pub(super) fn member_signals(declarations: &VirtualInterfaces) -> Vec<Signal> {
             // name does: that instance's object, not one of this module.
             Signal {
                 hierarchical: Some(name.clone()),
+                force_control: None,
                 name,
                 r#type: member.r#type.clone(),
                 is_net: member.is_net,
@@ -567,7 +633,7 @@ pub(super) fn member_signals(declarations: &VirtualInterfaces) -> Vec<Signal> {
 /// interface `interface` is bound against (see [`selected_read`]).
 pub(super) fn template(interface: &str, member: &str) -> String {
     VirtualInterfaceSignal::Template {
-        interface: interface.to_owned(),
+        definition: DefinitionId::of(interface),
         member: member.to_owned(),
     }
     .name()
@@ -740,24 +806,23 @@ pub(super) fn holds_virtual_interface(
 }
 
 /// [`holds_virtual_interface`] with the constants of `env`. A shape whose
-/// type cannot be formed in `env` is told by its metadata, which every
-/// shape keeps until declarations bind their types.
+/// type cannot be formed in `env` is told by the type of its elements, which
+/// the shape keeps.
 fn shape_holds_virtual_interface(
     shape: &VariableDimensions,
     table: &mut semantic_types::TyTable,
     functions: &const_functions::ConstantFunctions,
     env: &ConstEnv,
 ) -> bool {
-    let metadata = shape.virtual_interface.is_some() && shape.container.is_none();
-    let Some(ty) = shape.type_id(table, functions, env) else {
-        return metadata;
-    };
-    let found = of_type(table, ty).is_some() || element_of_array(table, ty).is_some();
-    debug_assert_eq!(
-        found, metadata,
-        "the type and the virtual interface metadata of a shape disagree"
-    );
-    found
+    match shape.type_id(table, functions, env) {
+        Some(ty) => of_type(table, ty).is_some() || element_of_array(table, ty).is_some(),
+        None => {
+            shape.container.is_none()
+                && shape
+                    .element_type(table)
+                    .is_some_and(|element| of_type(table, element).is_some())
+        }
+    }
 }
 
 /// The virtual interface type of the elements of `ty`, if it is a fixed-size
@@ -1059,17 +1124,24 @@ pub(super) fn dispatch(
 /// The signal that holds the id of the interface instance that interface
 /// instance or port `handle` of interface `interface` denotes, if a virtual
 /// interface may denote it.
-pub(super) fn identity_signal(state: &Session, handle: &str, interface: &str) -> Option<Signal> {
+pub(super) fn identity_signal(
+    state: &mut Session,
+    handle: &str,
+    interface: &str,
+) -> Option<Signal> {
     declarations(state)?.interfaces.get(interface)?;
     Some(Signal {
         name: VirtualInterfaceSignal::Identity {
             handle: handle.to_owned(),
         }
         .name(),
-        r#type: value_type(VirtualInterface {
-            interface: interface.to_owned(),
-            modport: None,
-        }),
+        r#type: value_type(
+            &mut state.types,
+            VirtualInterface {
+                interface: interface.to_owned(),
+                modport: None,
+            },
+        ),
         is_net: false,
         unresolved_net: false,
         net_resolution: NetResolution::Wire,
@@ -1077,6 +1149,7 @@ pub(super) fn identity_signal(state: &Session, handle: &str, interface: &str) ->
         is_const: false,
         package_variable: None,
         hierarchical: None,
+        force_control: None,
     })
 }
 
@@ -1084,7 +1157,7 @@ pub(super) fn identity_signal(state: &Session, handle: &str, interface: &str) ->
 /// interface declares no members: the frontend finds the instance a port
 /// denotes by the connections of its members.
 pub(super) fn port_identity_signal(
-    state: &Session,
+    state: &mut Session,
     handle: &str,
     interface: &str,
 ) -> Option<Signal> {
@@ -1813,11 +1886,11 @@ pub(super) fn map_children(expr: Expr, map: &mut dyn FnMut(Expr) -> Expr) -> Exp
 
 /// The interface of placeholder signal `name`, if it is one: a member or the
 /// id of the instance an access selects (see [`member`]).
-pub(crate) fn placeholder_interface(name: &str) -> Option<String> {
+pub(crate) fn placeholder_interface(name: &str) -> Option<DefinitionId> {
     match VirtualInterfaceSignal::of(name)? {
-        VirtualInterfaceSignal::Placeholder { interface, .. }
-        | VirtualInterfaceSignal::StaticPlaceholder { interface, .. }
-        | VirtualInterfaceSignal::Instance { interface } => Some(interface),
+        VirtualInterfaceSignal::Placeholder { definition, .. }
+        | VirtualInterfaceSignal::StaticPlaceholder { definition, .. }
+        | VirtualInterfaceSignal::Instance { definition } => Some(definition),
         _ => None,
     }
 }
@@ -1844,17 +1917,19 @@ mod holds_virtual_interface_tests {
     }
 
     #[test]
-    fn shapes_whose_type_is_not_formed_keep_their_virtual_interface_metadata() {
+    fn shapes_whose_type_is_not_formed_keep_their_virtual_interface_element_type() {
         // `virtual I handles[N]` where the scope has no `N`.
-        let mut ty = Type::new(TypeKind::Bit);
-        ty.virtual_interface = Some(Arc::new(VirtualInterface {
-            interface: "I".into(),
-            modport: None,
-        }));
-        ty.unpacked_ranges.push(symbolic_range());
+        let mut table = semantic_types::TyTable::default();
+        let mut ty = value_type(
+            &mut table,
+            VirtualInterface {
+                interface: "I".into(),
+                modport: None,
+            },
+        );
+        ty.unpacked_ranges_mut().push(symbolic_range());
         let shape = procedural::dimensions_from_type(&ty);
         let functions = const_functions::ConstantFunctions::default();
-        let mut table = semantic_types::TyTable::default();
         assert!(
             shape
                 .type_id(&mut table, &functions, &ConstEnv::default())
@@ -1870,5 +1945,75 @@ mod holds_virtual_interface_tests {
         assert!(shape_holds_virtual_interface(
             &shape, &mut table, &functions, &env
         ));
+    }
+
+    /// An array keeps the semantic type of its virtual interface elements
+    /// (IEEE 1800-2023 25.9, 7.4) when its unpacked dimensions change, and
+    /// its shapes and selected elements keep it too; another change of the
+    /// type forgets it.
+    #[test]
+    fn arrays_keep_the_semantic_type_of_their_virtual_interface_elements() {
+        let mut table = semantic_types::TyTable::default();
+        let functions = const_functions::ConstantFunctions::default();
+        let env = ConstEnv::default();
+        let interface = VirtualInterface {
+            interface: "bus_if".into(),
+            modport: Some("mp".into()),
+        };
+        let element = interface.type_id(&mut table);
+        let mut ty = value_type(&mut table, interface);
+        let literal = |value: &str| ConstExpr::Literal(value.into());
+        ty.unpacked_ranges_mut()
+            .push(UnpackedRange::new(literal("0"), literal("3")));
+        assert!(ty.binding.get(&table).is_none());
+        assert_eq!(ty.element.get(&table), Some(element));
+        let id = semantic_types::of_type(&mut table, &functions, &ty, &env).unwrap();
+        assert_eq!(table.unpacked_element(id, 1), Some(element));
+        // The shape of a variable of the array, and an element selected
+        // from it before the shape is bound.
+        let shape = procedural::dimensions_from_type(&ty);
+        assert_eq!(shape.element_type(&table), Some(element));
+        assert_eq!(
+            shape.unpacked_element(&table).element_type(&table),
+            Some(element)
+        );
+        // Any other change of the type may change its elements.
+        ty.is_signed = true;
+        assert!(ty.element.get(&table).is_none());
+    }
+
+    /// A virtual interface type has the shape of the number that holds its
+    /// value; its element type tells it apart from that number and from
+    /// other interfaces and modports (IEEE 1800-2023 25.9).
+    #[test]
+    fn virtual_interface_types_are_equal_by_their_interface_and_modport() {
+        let mut table = semantic_types::TyTable::default();
+        let mut vif = |interface: &str, modport: Option<&str>| {
+            value_type(
+                &mut table,
+                VirtualInterface {
+                    interface: interface.into(),
+                    modport: modport.map(Into::into),
+                },
+            )
+        };
+        let (bus, again, mp, other) = (
+            vif("bus_if", None),
+            vif("bus_if", None),
+            vif("bus_if", Some("mp")),
+            vif("other_if", None),
+        );
+        let mut number = Type::new(TypeKind::Bit);
+        number.packed_ranges.push(PackedRange::new(
+            ConstExpr::Literal((WIDTH - 1).to_string()),
+            ConstExpr::Literal("0".into()),
+        ));
+        assert_eq!(bus, again);
+        assert_ne!(bus, mp);
+        assert_ne!(bus, other);
+        assert_ne!(bus, number);
+        let shape = |ty: &Type| procedural::dimensions_from_type(ty);
+        assert_eq!(shape(&bus), shape(&again));
+        assert_ne!(shape(&bus), shape(&number));
     }
 }

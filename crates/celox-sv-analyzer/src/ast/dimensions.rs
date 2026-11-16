@@ -155,7 +155,6 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                     real: matches!(port.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
                     string: matches!(port.r#type().kind(), TypeKind::String),
                     class: port.r#type().class().map(str::to_owned),
-                    virtual_interface: port.r#type().virtual_interface.clone(),
                     packed: signal_packed_dimension_widths(port.r#type().packed_ranges()),
                     unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
                     signed: port.r#type().is_signed(),
@@ -175,7 +174,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                     unpacked_struct: port.r#type().unpacked_struct.clone(),
                 },
                 // The shape has the type the port was declared with.
-                &port.r#type().binding,
+                port.r#type(),
             ),
         );
     }
@@ -209,7 +208,6 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                     real: matches!(signal.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
                     string: matches!(signal.r#type().kind(), TypeKind::String),
                     class: signal.r#type().class().map(str::to_owned),
-                    virtual_interface: signal.r#type().virtual_interface.clone(),
                     packed: signal_packed_dimension_widths(signal.r#type().packed_ranges()),
                     unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
                     signed: signal.r#type().is_signed(),
@@ -229,7 +227,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                     unpacked_struct: signal.r#type().unpacked_struct.clone(),
                 },
                 // The shape has the type the signal was declared with.
-                &signal.r#type().binding,
+                signal.r#type(),
             ),
         );
     }
@@ -434,7 +432,6 @@ fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, con
             members: Vec::new(),
             signed_element_depth: None,
             class: None,
-            virtual_interface: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
         });
@@ -640,7 +637,6 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                     real: false,
                     string: false,
                     class: None,
-                    virtual_interface: None,
                     packed: function_packed_dimension_widths(&parameter.packed_ranges),
                     unpacked: Vec::new(),
                     signed: parameter.declared_signed.unwrap_or(false),

@@ -4,7 +4,7 @@ use super::*;
 use crate::ast::{
     ConstEnv, ConstExpr, ContainerKind, ContainerType, Type, TypeKind, VariableDimensions,
     const_functions, enums::EnumDomain, eval_ast_const_expr, packed_structs::PackedMember,
-    type_names, unpacked_structs::UnpackedStruct, virtual_interfaces::VirtualInterface,
+    type_names, unpacked_structs::UnpackedStruct,
 };
 
 /// The semantic type of `ty`, whose ranges name constants of `env`; `None`
@@ -78,7 +78,7 @@ pub(in crate::ast) fn bind_declared(
     if ty.binding.get(table).is_none()
         && let Some(id) = convert(table, functions, ty, env)
     {
-        ty.binding.set(table, id);
+        ty.bind(table, id);
     }
 }
 
@@ -127,9 +127,9 @@ fn convert(
     env: &ConstEnv,
 ) -> Option<TyId> {
     let parts = Parts {
+        bound_element: ty.element.get(table),
         container: ty.container.as_deref(),
         class: ty.class.as_deref(),
-        virtual_interface: ty.virtual_interface.as_deref(),
         unpacked_struct: ty.unpacked_struct.as_ref(),
         kind: ty.kind,
         enumeration: ty.is_enum || ty.packed_enum,
@@ -180,9 +180,12 @@ pub(in crate::ast) fn of_shape(
         TypeKind::Logic
     };
     let parts = Parts {
+        // A shape tells no keyword (see above).
+        bound_element: shape
+            .element_type(table)
+            .map(|element| table.without_keyword(element)),
         container: shape.container.as_deref(),
         class: shape.class.as_deref(),
-        virtual_interface: shape.virtual_interface.as_deref(),
         unpacked_struct: shape.unpacked_struct.as_ref(),
         kind,
         enumeration: shape.enum_domain.is_some()
@@ -215,9 +218,11 @@ pub(in crate::ast) fn of_shape(
 
 /// What a type is made of, from a [`Type`] or a [`VariableDimensions`].
 struct Parts<'a> {
+    /// The semantic type of an element of the unpacked dimensions, where
+    /// the type keeps it: the fields below then only cross-check it.
+    bound_element: Option<TyId>,
     container: Option<&'a ContainerType>,
     class: Option<&'a str>,
-    virtual_interface: Option<&'a VirtualInterface>,
     unpacked_struct: Option<&'a Arc<UnpackedStruct>>,
     kind: TypeKind,
     /// An enumeration or a packed array of one.
@@ -260,18 +265,47 @@ impl Parts<'_> {
                 right: eval_ast_const_expr(functions, right, env)?,
             })
         };
-        let element = self.element(table, functions, env, &range)?;
-        let mut id = table.intern(element);
-        if let Some(aggregate) = self.unpacked_struct
-            && table.is_unpacked_struct(id)
-        {
-            table.record_struct(id, aggregate);
-        }
+        let mut id = match self.bound_element {
+            Some(element) => {
+                // The fields tell no virtual interface: only its kept type
+                // does (25.9).
+                #[cfg(debug_assertions)]
+                if !matches!(table.data(element), TyData::VirtualInterface { .. })
+                    && let Some(fields) = self.element_of_fields(table, functions, env, &range)
+                {
+                    assert_eq!(
+                        fields, element,
+                        "the element type a type keeps converts to another type"
+                    );
+                }
+                element
+            }
+            None => self.element_of_fields(table, functions, env, &range)?,
+        };
         for (left, right) in unpacked.rev() {
             id = table.intern(TyData::Array {
                 kind: ArrayKind::Fixed(range(left, right)?),
                 element: id,
             });
+        }
+        Some(id)
+    }
+
+    /// The type of an element of the fixed-size unpacked dimensions, as
+    /// the fields tell.
+    fn element_of_fields(
+        &self,
+        table: &mut TyTable,
+        functions: &const_functions::ConstantFunctions,
+        env: &ConstEnv,
+        range: &dyn Fn(&ConstExpr, &ConstExpr) -> Option<Range>,
+    ) -> Option<TyId> {
+        let element = self.element(table, functions, env, range)?;
+        let id = table.intern(element);
+        if let Some(aggregate) = self.unpacked_struct
+            && table.is_unpacked_struct(id)
+        {
+            table.record_struct(id, aggregate);
         }
         Some(id)
     }
@@ -303,12 +337,6 @@ impl Parts<'_> {
         // Events and processes are handles of built-in classes.
         if let Some(class) = self.class {
             return Some(TyData::Class(table.class(class)));
-        }
-        if let Some(interface) = self.virtual_interface {
-            return Some(TyData::VirtualInterface {
-                interface: table.interface(&interface.interface),
-                modport: interface.modport.as_deref().map(Into::into),
-            });
         }
         if let Some(aggregate) = self.unpacked_struct {
             let members = aggregate

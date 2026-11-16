@@ -439,37 +439,6 @@ fn schedule_sources_collecting(
     // Analysis builds each virtual interface access once, with placeholders
     // for the instance it selects; repeat each for the instances now known.
     checkpoint!("discovery");
-    let virtual_instances = virtual_interfaces.as_ref().map(|declarations| {
-        (
-            virtual_interfaces::Instances::elaborate(
-                root_id,
-                &module_ids,
-                &elaborated,
-                declarations,
-            ),
-            declarations.clone(),
-        )
-    });
-    let virtual_ids = virtual_instances
-        .as_ref()
-        .map(|(instances, _)| instances.ids())
-        .unwrap_or_default();
-    if virtual_instances.is_some() {
-        let names: HashMap<ModuleId, &str> = module_ids
-            .iter()
-            .map(|(key, &id)| (id, key.name.as_str()))
-            .collect();
-        for (module_id, ir) in &mut discovery_analyses {
-            ir.expand_virtual_interface_instances(&virtual_ids);
-            if let Some(source) = ir
-                .modules()
-                .iter()
-                .find(|module| Some(module.name()) == names.get(module_id).copied())
-            {
-                virtual_sources.insert(*module_id, source.clone());
-            }
-        }
-    }
     let keys: HashMap<ModuleId, &LoweredSvModuleKey> =
         module_ids.iter().map(|(key, &id)| (id, key)).collect();
     let hierarchy = hierarchy::Hierarchy::new(
@@ -518,11 +487,6 @@ fn schedule_sources_collecting(
                 },
             }
         };
-        let mut ir = ir;
-        ir.expand_virtual_interface_instances(&virtual_ids);
-        if let Some(module) = ir.modules().iter().find(|module| module.name() == key.name) {
-            hierarchy::collect_foreign_writes(module, &resolved, &mut foreign_writes);
-        }
         for reference in &resolved {
             for (target_module, target) in &reference.targets {
                 foreign_references
@@ -534,14 +498,100 @@ fn schedule_sources_collecting(
         references.insert(module_id, resolved);
         analyses.insert(module_id, ir);
     }
-    // The elaboration only served to resolve the hierarchical names.
+    // The elaboration served to resolve the hierarchical names, and below
+    // to number the instances.
     drop(hierarchy);
+
+    // The ids of interface instances depend on the elaborated hierarchy.
+    // Analysis builds each virtual interface access once, with placeholders
+    // for the instance it selects; repeat each for the instances now known.
+    // The overrides of module classes, of every analysis, join the
+    // dispatchers of every module; they are repeated for the instances of
+    // their modules, as virtual interface accesses are.
+    let overrides = exported_overrides(discovery_analyses.values().chain(analyses.values()))?;
+    // A module that hierarchical names reach declared its instances by its
+    // declarations alone, before the analysis that exports its overrides.
+    for (&module_id, ir) in &analyses {
+        let Some(module) = ir
+            .modules()
+            .iter()
+            .find(|module| module.name() == keys[&module_id].name)
+        else {
+            continue;
+        };
+        if let Some(elaborated) = elaborated.get_mut(&module_id) {
+            for handle in module.interface_handles() {
+                if handle.handle == sv::ir::MODULE_HANDLE
+                    && !elaborated
+                        .interface_handles
+                        .iter()
+                        .any(|known| known.handle == handle.handle)
+                {
+                    elaborated.interface_handles.push(handle.clone());
+                }
+            }
+        }
+    }
+    let mut modules: HashMap<String, Vec<sv::ast::virtual_interfaces::VirtualInterfaceMember>> =
+        HashMap::default();
+    for export in &overrides {
+        for module in export.modules() {
+            modules.entry(module.to_owned()).or_default();
+        }
+        for (module, member) in &export.members {
+            let known = modules.entry(module.clone()).or_default();
+            if !known.iter().any(|known| known.name == member.name) {
+                known.push(member.clone());
+            }
+        }
+    }
+    let definitions = virtual_interfaces::Definitions {
+        interfaces: virtual_interfaces.as_deref(),
+        modules,
+    };
+    let virtual_instances = (definitions.interfaces.is_some() || !definitions.modules.is_empty())
+        .then(|| {
+            virtual_interfaces::Instances::elaborate(
+                root_id,
+                &module_ids,
+                &elaborated,
+                &definitions,
+            )
+        });
     drop(elaborated);
+    let virtual_ids = virtual_instances
+        .as_ref()
+        .map(|instances| instances.ids())
+        .unwrap_or_default();
+    let expansion = sv::ir::InstanceExpansion::new(&virtual_ids, &overrides);
+    if virtual_instances.is_some() || !overrides.is_empty() {
+        let names: HashMap<ModuleId, &str> = module_ids
+            .iter()
+            .map(|(key, &id)| (id, key.name.as_str()))
+            .collect();
+        for (module_id, ir) in &mut discovery_analyses {
+            ir.expand_instances(&expansion);
+            if let Some(source) = ir
+                .modules()
+                .iter()
+                .find(|module| Some(module.name()) == names.get(module_id).copied())
+            {
+                virtual_sources.insert(*module_id, source.clone());
+            }
+        }
+    }
+    for (module_id, ir) in &mut analyses {
+        ir.expand_instances(&expansion);
+        let key = keys[module_id];
+        if let Some(module) = ir.modules().iter().find(|module| module.name() == key.name) {
+            hierarchy::collect_foreign_writes(module, &references[module_id], &mut foreign_writes);
+        }
+    }
     // Signals that denote members of interface instances for virtual
     // interfaces, which other modules then write and watch.
     let mut virtual_references: HashMap<ModuleId, Vec<hierarchy::HierarchicalReference>> =
         HashMap::default();
-    if let Some((instances, declarations)) = &virtual_instances {
+    if let Some(instances) = &virtual_instances {
         for (&module_id, ir) in
             virtual_sources
                 .iter()
@@ -555,7 +605,7 @@ fn schedule_sources_collecting(
                     ))
                 }))
         {
-            let references = instances.references(ir, declarations);
+            let references = instances.references(ir, &definitions);
             if references.is_empty() {
                 continue;
             }
@@ -635,8 +685,7 @@ fn schedule_sources_collecting(
                     force_out_of_line: analysis_options.force_out_of_line_calls,
                     properties: &properties,
                     time_format,
-                    virtual_ids: Some(&virtual_ids),
-                    discovery: false,
+                    instances: Instances::Known(&expansion),
                     shared: SharedAlways {
                         temporaries: analysis_options.shared_always_temporaries,
                         foreign_references: foreign_references
@@ -665,6 +714,22 @@ fn schedule_sources_collecting(
             .find(|port| port.kind == VariableKind::Inout)
         {
             return Err(unsupported_sv_inout(port.path.join(".")).into());
+        }
+        // The host writes an input of the top module directly, past the
+        // controls of a procedural force of it (IEEE 1800-2023 10.6.2).
+        if let Some(port) = root.port_order.iter().find(|&&id| {
+            root.variables[&id].kind == VariableKind::Input
+                && root.variables.values().any(|variable| {
+                    variable
+                        .force_control
+                        .is_some_and(|slot| slot.procedural && slot.target == id)
+                })
+        }) {
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "force or release of `{}`, an input port of the top module, which the host drives",
+                root.variables[port].path.join(".")
+            ))
+            .into());
         }
         validate_sv_module_graph(
             &root_key,
@@ -708,7 +773,7 @@ fn schedule_sources_collecting(
                     &lowered_modules,
                 )?);
             }
-            if let Some((instances, _)) = &virtual_instances {
+            if let Some(instances) = &virtual_instances {
                 instance_values.extend(instances.values(module_id, lowered));
             }
             let mut calls = lowered.calls.clone();
@@ -724,6 +789,7 @@ fn schedule_sources_collecting(
                 hierarchical_targets.get(&module_id).unwrap_or(&no_targets),
                 warnings,
                 calls.as_mut(),
+                &mut design,
             );
             if let (Some(graph), Some(path)) =
                 (&calls, analysis_options.recursion_report.as_deref())
@@ -757,7 +823,7 @@ fn schedule_sources_collecting(
             warnings,
             analysis_options.force_out_of_line_calls,
             analysis_options.recursion_report.as_deref(),
-            &virtual_ids,
+            &expansion,
         )?;
         validate_package_variable_drivers([&root_key], &module_ids, &lowered_modules)?;
         let mut packages = Vec::new();
@@ -858,4 +924,21 @@ fn demote_level_lists(
         }
     }
     changed
+}
+
+/// The overrides that the module classes of `analyses` export (see
+/// `sv::ir::ExportedOverride`), those of one override merged.
+pub(super) fn exported_overrides<'a>(
+    analyses: impl Iterator<Item = &'a sv::ir::Ir> + Clone,
+) -> Result<Vec<sv::ir::ExportedOverride>, sv::AnalyzerError> {
+    let modules = analyses.flat_map(|ir| ir.modules());
+    let taken: HashSet<String> = modules
+        .clone()
+        .flat_map(|module| module.subroutines())
+        .map(|subroutine| subroutine.name.clone())
+        .collect();
+    sv::ir::merge_overrides(
+        modules.flat_map(|module| module.exported_overrides().iter().cloned()),
+        &taken,
+    )
 }

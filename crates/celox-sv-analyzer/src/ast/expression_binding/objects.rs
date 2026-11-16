@@ -184,6 +184,71 @@ pub(in crate::ast) fn check_member_declared(
     })
 }
 
+/// Rejects native expression `id` if it names a covergroup that a class
+/// declares (IEEE 1800-2023 19.4), `cg` in a method of the class or
+/// `h.cg`: the analysis does not make covergroup instances, so constructing
+/// one or calling its methods is unsupported rather than read as something
+/// else. A covergroup that nothing constructs has no instance, which is why
+/// its declaration alone is accepted.
+pub(in crate::ast) fn reject_covergroup(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    let (class_name, member) = match &native.expression(ungroup(id, native)).kind {
+        // A name a scope of the method declares hides the class's.
+        ExprKind::Name(name) => {
+            let member = instances::normalize_identifier(&name.spelling);
+            if dimensions.get(&member).is_some() {
+                return Ok(());
+            }
+            let Some(class) = scope_class(dimensions) else {
+                return Ok(());
+            };
+            (class, member)
+        }
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "." => {
+            let Some(class) = native_class(tree, session, *expression, native, dimensions) else {
+                return Ok(());
+            };
+            (class, instances::normalize_identifier(&name.spelling))
+        }
+        _ => return Ok(()),
+    };
+    let mut pending = vec![class_name];
+    let mut seen = HashSet::default();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current.clone()) || classes::builtin(&current) {
+            continue;
+        }
+        let Ok(class) = class(tree, session, dimensions, &current) else {
+            return Ok(());
+        };
+        // A property or method of the name hides a covergroup of a base.
+        if declares(session, &class, &member) != Some(false) {
+            return Ok(());
+        }
+        if declares_covergroup(tree, session, &current, &member) == Some(true) {
+            // The class as the source names it, not its specialization.
+            let spelled = classes::declaration(tree, session, &current).map_or_else(
+                || classes::specializations::generic(session, &current),
+                |declaration| instances::normalize_identifier(&declaration.name.spelling),
+            );
+            return Err(unsupported(format!(
+                "covergroup `{member}` of class `{spelled}` (IEEE 1800-2023 19.4)"
+            )));
+        }
+        pending.extend(class.base.iter().cloned());
+    }
+    Ok(())
+}
+
 /// Whether class `name` declares a covergroup `member`, or `None` when its
 /// declaration is not at hand.
 fn declares_covergroup(
@@ -441,13 +506,37 @@ pub(in crate::ast) fn class_parameter(
         "::" => named_class(tree, session, *expression, native, dimensions)?,
         _ => None,
     };
-    Ok(class.and_then(|class| {
-        classes::specializations::parameter(
-            session,
-            &class,
-            &instances::normalize_identifier(&name.spelling),
-        )
-    }))
+    let Some(class) = class else {
+        return Ok(None);
+    };
+    let member = instances::normalize_identifier(&name.spelling);
+    if let Some(value) = classes::specializations::parameter(session, &class, &member) {
+        return Ok(Some(value));
+    }
+    // `C::p` of a class without parameter ports that nothing has made yet,
+    // as when a typedef of its package names one of its constants before
+    // any declaration uses the class: `p` is a constant of the class itself
+    // (8.25), which its only specialization holds.
+    let declares = |tree: &AnalysisContext<'_>, session: &mut Session| {
+        classes::declaration(tree, session, &class).is_some_and(|declaration| {
+            declaration
+                .parameter_ports
+                .iter()
+                .chain(&declaration.parameters)
+                .flat_map(|id| &tree.declarations().parameter_declaration(*id).parameters)
+                .any(|parameter| {
+                    instances::normalize_identifier(&parameter.name.spelling) == member
+                })
+        })
+    };
+    if separator == "::"
+        && !classes::is_parameterized(tree, session, &class)
+        && declares(tree, session)
+    {
+        let made = classes::specializations::specialize(tree, session, &class, &[], dimensions)?;
+        return Ok(classes::specializations::parameter(session, &made, &member));
+    }
+    Ok(None)
 }
 
 /// The variable of the static property that native expression `id` names:

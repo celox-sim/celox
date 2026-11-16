@@ -6,7 +6,7 @@ impl BodyBuilder<'_, '_, '_> {
     /// rest of the scope (IEEE 1800-2023 6.18). A forward typedef declares
     /// nothing a body uses.
     pub(super) fn local_type_alias(&mut self, id: celox_sv_syntax::TypeAliasId) -> Converted<()> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let alias = native.type_alias(id);
         let celox_sv_syntax::TypeAliasTarget::DataType(target) = alias.target else {
             return Ok(());
@@ -17,7 +17,7 @@ impl BodyBuilder<'_, '_, '_> {
         let mut members = EnumMemberConstants::default();
         let aliases: SharedAliases = self.type_aliases.clone().into();
         let ty = types::bind_local_alias(
-            self.tree,
+            &self.tree,
             self.session,
             alias,
             &self.dims.const_env,
@@ -38,7 +38,7 @@ impl BodyBuilder<'_, '_, '_> {
             .entries
             .push(hidden);
         let binding = parameters::enum_constant_type(
-            self.tree,
+            &self.tree,
             self.session,
             target,
             &ty,
@@ -100,11 +100,21 @@ impl BodyBuilder<'_, '_, '_> {
             celox_sv_syntax::LocalDeclaration::Unconverted(_) => {
                 return Err(unsupported("let declaration inside a procedural block"));
             }
+            celox_sv_syntax::LocalDeclaration::PackageBinding(id) => {
+                let offset = self
+                    .syntax()
+                    .declarations()
+                    .package_binding(*id)
+                    .tokens
+                    .start;
+                self.import_into_block(offset);
+                return Ok(Vec::new());
+            }
             _ => return Err(unsupported("local declaration")),
         };
         let signals = type_binding::local_signals(
             native,
-            self.tree,
+            &self.tree,
             self.session,
             &self.dims.const_env,
             &self.type_aliases,
@@ -113,15 +123,12 @@ impl BodyBuilder<'_, '_, '_> {
             Some(&self.dims),
         )?;
         let mut stmts = Vec::new();
+        let declarations = self.syntax().declarations();
         for (mut signal, assignment) in
             signals
                 .into_iter()
                 .zip(native.variables.iter().filter(|variable| {
-                    type_binding::ordinary_variable(
-                        variable,
-                        native.data_type,
-                        self.tree.declarations(),
-                    )
+                    type_binding::ordinary_variable(variable, native.data_type, declarations)
                 }))
         {
             if signal.r#type.is_unpacked_struct_in(&self.session.types)
@@ -170,16 +177,16 @@ impl BodyBuilder<'_, '_, '_> {
                     expression_binding::check_chandle_assignment(
                         signal.r#type().is_chandle() && signal.r#type().unpacked_ranges.is_empty(),
                         root,
-                        self.tree,
-                        self.tree.declarations(),
+                        &self.tree,
+                        self.syntax().declarations(),
                         &self.dims,
                         self.session,
                     )?;
                     let mut init = expression_binding::expression(
                         root,
-                        self.tree.declarations(),
+                        self.syntax().declarations(),
                         &target,
-                        self.tree,
+                        &self.tree,
                         self.session,
                         &scoped,
                     )?;
@@ -255,12 +262,12 @@ impl BodyBuilder<'_, '_, '_> {
         }
         if let Some(root) = root {
             let structure =
-                unpacked_structs::type_id(signal.r#type(), self.tree, self.session, &self.dims)?;
+                unpacked_structs::type_id(signal.r#type(), &self.tree, self.session, &self.dims)?;
             unpacked_structs::check_value(
                 structure,
                 root,
-                self.tree.declarations(),
-                self.tree,
+                self.syntax().declarations(),
+                &self.tree,
                 self.session,
                 &self.dims,
             )?;
@@ -393,7 +400,7 @@ impl BodyBuilder<'_, '_, '_> {
             .collect::<Vec<_>>();
         parameters::parameters_from_native(
             &authored,
-            self.tree,
+            &self.tree,
             self.session,
             &mut parameters,
             true,
@@ -407,7 +414,7 @@ impl BodyBuilder<'_, '_, '_> {
             let entry = self.take_binding(name, None, parameter.packed_ranges.len());
             types.remove(name);
             if !parameters::bind_parameter(
-                self.tree,
+                &self.tree,
                 self.session,
                 &mut self.dims.const_env,
                 &mut types,

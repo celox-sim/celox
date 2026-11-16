@@ -4,7 +4,8 @@ use super::*;
 
 /// The switches of the switched nonblocking sites that may stage their
 /// value: the site's target has no other writer (no store or commit of any
-/// unit, no other nonblocking site, not a top-level port the host drives)
+/// unit, function units included, no other nonblocking site, not a
+/// top-level port the host drives)
 /// and is not in `observed`.
 pub(super) fn staged_nba_sites<'u>(
     timing: &TimingMetadata,
