@@ -2767,8 +2767,8 @@ generated/uvm-examples/uvm_interrupts_prioritized.sv	2state	fail
 generated/uvm-examples/uvm_interrupts_prioritized.sv	4state	fail
 generated/uvm-examples/uvm_interrupts_simple.sv	2state	fail
 generated/uvm-examples/uvm_interrupts_simple.sv	4state	fail
-generated/uvm-examples/uvm_many_to_one.sv	2state	fail
-generated/uvm-examples/uvm_many_to_one.sv	4state	fail
+generated/uvm-examples/uvm_many_to_one.sv	2state	pass
+generated/uvm-examples/uvm_many_to_one.sv	4state	pass
 generated/uvm-examples/uvm_messaging_example.sv	2state	pass
 generated/uvm-examples/uvm_messaging_example.sv	4state	pass
 generated/uvm-examples/uvm_overriding.sv	2state	pass
