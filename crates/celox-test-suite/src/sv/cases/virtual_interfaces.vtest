@@ -1102,3 +1102,46 @@ endmodule
 "#)
   (top Top) (run_until 0)
   (assert_eq size 2) (assert_eq first 3) (assert_eq through 2))
+
+
+; A task called through a virtual interface reads and writes the members of
+; the instance the handle denotes, also in the bounds of a select, as
+; `sel[idx]` and `flags[idx]` do (IEEE 1800-2023 25.9): each instance waits
+; for its own bit.
+(case subroutine_select_bounds_read_instance_members
+  (source "vif.sv" #"
+interface bfm(input logic clk, input logic [3:0] sel);
+    int idx = 0;
+    logic [3:0] flags = 0;
+    function void set_idx(int i); idx = i; endfunction
+    task wait_sel();
+        while (sel[idx] != 1'b1) @(posedge clk);
+        flags[idx] = 1'b1;
+    endtask
+endinterface
+package p;
+    class agent;
+        virtual bfm v;
+        int seen;
+        task run(); v.wait_sel(); seen = $time; endtask
+    endclass
+endpackage
+module Top;
+    logic clk = 0;
+    logic [3:0] sel = 0;
+    always #1 clk = ~clk;
+    bfm b0(clk, sel);
+    bfm b1(clk, sel);
+    p::agent a0, a1;
+    initial begin
+        a0 = new; a1 = new; a0.v = b0; a1.v = b1;
+        a0.v.set_idx(2); a1.v.set_idx(1);
+        fork a0.run(); a1.run(); join_none
+        #4 sel[1] = 1;
+        #6 sel[2] = 1;
+        #4 $display("seen %0d %0d flags %b %b", a0.seen, a1.seen, b0.flags, b1.flags);
+    end
+endmodule
+"#)
+  (top Top) (run_until 20)
+  (expect_output "seen 11 5 flags 0100 0010\n"))
