@@ -172,8 +172,14 @@ blocks in programs. Two region deviations are listed under
   A virtual interface type, which 20.6.1 has no rule for, is written as
   it is declared: `virtual bus_if` or `virtual bus_if.mp`.
 - Parameters of unpacked array type hold their value from the start of the
-  simulation and cannot be used where an elaboration-time constant is
-  required. A member of a packed-structure parameter is such a constant
+  simulation. An element of a one-dimensional array parameter is an
+  elaboration-time constant when the elements are packed integral values
+  of at most 127 bits without X or Z bits and the array has at most 4096
+  of them, and so is a select of such an element's packed dimensions
+  unless the element type is a packed array of a signed named type; the
+  whole array, and an element of any other array parameter, cannot be used
+  where such a constant is required. A member of a packed-structure
+  parameter is such a constant
   unless it is wider than 127 bits or has X or Z bits: then it cannot size
   a declaration, select a generate construct or override a parameter.
 
