@@ -1,6 +1,8 @@
 use super::*;
 use crate::ast::ConstEnv;
 
+mod enum_declarations;
+
 fn eval_test_const_expr(expr: &ir::ConstExpr) -> Option<i128> {
     match expr {
         ir::ConstExpr::Literal(value) => value.parse().ok(),
@@ -7700,7 +7702,9 @@ fn preserves_legal_enum_declaration_initializers() {
         "enum bit [1:0] { a=(2'bxx & 2'b00), b } value;",
         "enum logic [1:0] { a=2'bxx, b=2'b01, c } value;",
         "enum logic [1:0] { a=2'bxx, b=a & 2'b00, c } value;",
-        "localparam P=4'h2; enum logic [2:0] { A=P, B=4'h1+1 } value;",
+        // An operation on sized literals is no sized literal constant; the
+        // values stay unique (6.19).
+        "localparam P=4'h2; enum logic [2:0] { A=P, B=4'h1+2 } value;",
         "enum logic [2:0] { A=3'(4'h2) } value;",
         "enum logic [2:0] { A=3'h2 } value [2];",
         "typedef enum int { W=3 } E; typedef logic [W'(2):0] B; enum B { A=3'b101 } value;",

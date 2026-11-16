@@ -534,6 +534,9 @@ fn bind_in_mode(
                 let Some(mut ty) = values.pop() else {
                     return Err(unsupported("enum base type"));
                 };
+                if let Some(detail) = types::illegal_enum_base(&ty) {
+                    return types::invalid_enumeration(detail.into());
+                }
                 if matches!(mode, BindingMode::Use) {
                     validate_enum_initializers(id, native, tree, session, context, &ty)?;
                 }
@@ -1038,6 +1041,10 @@ pub(in crate::ast) fn validate_enum_initializers(
     let mut unknown_literals = HashMap::default();
     let mut previous_unknown = false;
     let mut next = Some(0i128);
+    // The values of the members before, as the bits of their base type,
+    // which shall be unique (6.19), and those of the last one, unless it is
+    // not known yet or has X/Z bits.
+    let mut values = EnumValues::new(shape.width, shape.signed);
     for item in items {
         let name = normalize_identifier(&item.name.spelling);
         let Some(value) = item.value else {
@@ -1048,7 +1055,28 @@ pub(in crate::ast) fn validate_enum_initializers(
             }
             if !item.dimensions.is_empty() {
                 next = None;
+                values.unknown();
                 continue;
+            }
+            values.increment(&name)?;
+            // Keep a value too wide for the numeric environment for the
+            // members that name it.
+            if next.is_none()
+                && let Some(value) = values.last.clone()
+            {
+                unknown_literals.insert(
+                    name.clone(),
+                    Expr::Literal(resize_integral_literal_for_cast(
+                        typecheck::IntegralLiteral {
+                            width: shape.width,
+                            signed: shape.signed,
+                            value,
+                            mask: num_bigint::BigUint::default(),
+                        },
+                        shape.width,
+                        shape.signed,
+                    )),
+                );
             }
             if let Some(value) = next {
                 env.insert(name.clone(), value);
@@ -1119,6 +1147,7 @@ pub(in crate::ast) fn validate_enum_initializers(
         }
         if !item.dimensions.is_empty() {
             next = None;
+            values.unknown();
             continue;
         }
         if previous_unknown {
@@ -1127,7 +1156,7 @@ pub(in crate::ast) fn validate_enum_initializers(
             unknown_literals.insert(
                 name.clone(),
                 Expr::Literal(resize_integral_literal_for_cast(
-                    literal.unwrap(),
+                    literal.clone().unwrap(),
                     shape.width,
                     shape.signed,
                 )),
@@ -1140,6 +1169,38 @@ pub(in crate::ast) fn validate_enum_initializers(
             .map(|value| {
                 parameters::coerce_const_parameter_value(value, shape.width, shape.signed)
             });
+        match (literal.as_ref(), next) {
+            // An X/Z value is not compared with the known ones.
+            _ if previous_unknown => values.unknown(),
+            (Some(literal), _) => values.assign(&name, literal)?,
+            // A value only the numeric evaluation resolves, such as that
+            // of a constant function call.
+            (None, Some(value)) => values.assign(
+                &name,
+                &typecheck::IntegralLiteral {
+                    width: 128,
+                    signed: true,
+                    value: num_bigint::BigUint::from(value as u128),
+                    mask: num_bigint::BigUint::default(),
+                },
+            )?,
+            (None, None) => values.unknown(),
+        }
+        // The numeric environment cannot hold a value wider than 128 bits
+        // either; keep its literal for the members that name it.
+        if next.is_none()
+            && !previous_unknown
+            && let Some(literal) = literal.clone()
+        {
+            unknown_literals.insert(
+                name.clone(),
+                Expr::Literal(resize_integral_literal_for_cast(
+                    literal,
+                    shape.width,
+                    shape.signed,
+                )),
+            );
+        }
         if let Some(value) = next {
             env.insert(name.clone(), value);
             dimensions::insert_parameter_type_markers(&mut env, &name, shape);
@@ -1147,6 +1208,100 @@ pub(in crate::ast) fn validate_enum_initializers(
         }
     }
     Ok(())
+}
+
+/// The values of the members of an enumeration, as the bits of its base
+/// type of `width` bits, which are unique (IEEE 1800-2023 6.19).
+struct EnumValues {
+    width: usize,
+    signed: bool,
+    members: HashMap<num_bigint::BigUint, String>,
+    /// The value of the last member, if it is known and has no X/Z bits;
+    /// before the first member, the value an implicit first member takes.
+    last: Option<num_bigint::BigUint>,
+    first: bool,
+}
+
+impl EnumValues {
+    fn new(width: usize, signed: bool) -> Self {
+        Self {
+            width,
+            signed,
+            members: HashMap::default(),
+            last: Some(num_bigint::BigUint::default()),
+            first: true,
+        }
+    }
+
+    fn keep(&self) -> num_bigint::BigUint {
+        (num_bigint::BigUint::from(1u8) << self.width) - 1u8
+    }
+
+    /// A member whose value is not known here, or has X/Z bits.
+    fn unknown(&mut self) {
+        self.first = false;
+        self.last = None;
+    }
+
+    /// Member `name` without a value, which increments the last one; it
+    /// shall not increment the maximum representable value (6.19).
+    fn increment(&mut self, name: &str) -> Converted<()> {
+        let first = std::mem::replace(&mut self.first, false);
+        let Some(last) = self.last.take() else {
+            return Ok(());
+        };
+        let value = if first {
+            last
+        } else {
+            let maximum = if self.signed {
+                (num_bigint::BigUint::from(1u8) << (self.width - 1)) - 1u8
+            } else {
+                self.keep()
+            };
+            if last == maximum {
+                return types::invalid_enumeration(format!(
+                    "member `{name}` increments the maximum value of the base type"
+                ));
+            }
+            (last + 1u8) & self.keep()
+        };
+        self.insert(name, value)
+    }
+
+    /// Member `name` of the value `literal` gives, cast to the base type.
+    fn assign(&mut self, name: &str, literal: &typecheck::IntegralLiteral) -> Converted<()> {
+        self.first = false;
+        let mut value = literal.value.clone();
+        if literal.signed
+            && literal.width > 0
+            && literal.width < self.width
+            && value.bit((literal.width - 1) as u64)
+        {
+            value |= ((num_bigint::BigUint::from(1u8) << (self.width - literal.width)) - 1u8)
+                << literal.width;
+        }
+        value &= self.keep();
+        self.insert(name, value)
+    }
+
+    fn insert(&mut self, name: &str, value: num_bigint::BigUint) -> Converted<()> {
+        if let Some(other) = self.members.get(&value) {
+            let shown = if self.signed && value.bit((self.width - 1) as u64) {
+                format!(
+                    "-{}",
+                    (num_bigint::BigUint::from(1u8) << self.width) - &value
+                )
+            } else {
+                value.to_string()
+            };
+            return types::invalid_enumeration(format!(
+                "members `{other}` and `{name}` have the same value {shown}"
+            ));
+        }
+        self.members.insert(value.clone(), name.to_owned());
+        self.last = Some(value);
+        Ok(())
+    }
 }
 
 /// Domain metadata is best-effort during signature discovery. Only a caller
