@@ -999,7 +999,7 @@ pub(super) fn fixed_assignment(
 /// The container `target` holds of the elements of ordinary fixed-size
 /// array `id`, a variable named by itself, from its left index to its right
 /// one (IEEE 1800-2023 7.6), for an assignment or a comparison.
-fn fixed_array_literal(
+pub(super) fn fixed_array_literal(
     id: ExprId,
     tree: &AnalysisContext<'_>,
     table: &semantic_types::TyTable,
