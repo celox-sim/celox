@@ -64,6 +64,24 @@ impl Preprocessed {
         }
     }
 
+    /// Keep the line breaks of `token`, which the output leaves out, so that
+    /// the lines after it keep their numbers in the text view.
+    fn push_line_breaks(&mut self, token: &Token) {
+        if token.kind == TokenKind::Newline {
+            self.tokens.push(token.clone());
+            return;
+        }
+        for _ in token.text.matches('\n') {
+            self.tokens.push(Token {
+                kind: TokenKind::Newline,
+                text: "\n".to_owned(),
+                origin: token.origin,
+                contributors: vec![token.origin],
+                disabled_macros: Vec::new(),
+            });
+        }
+    }
+
     fn merge(&mut self, other: Self) {
         self.tokens.extend(other.tokens);
         self.observations.extend(other.observations);
@@ -277,6 +295,8 @@ impl Preprocessor {
                     } else {
                         output.push(token);
                     }
+                } else {
+                    output.push_line_breaks(&token);
                 }
                 continue;
             }
@@ -329,6 +349,9 @@ impl Preprocessor {
                 }
                 "define" => {
                     let (line, original) = definition_line(&mut tokens);
+                    for token in &original {
+                        output.push_line_breaks(token);
+                    }
                     if active {
                         self.define_source(&line, origin)?;
                         output.observations.extend([token, name_token]);
