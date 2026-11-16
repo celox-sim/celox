@@ -7232,9 +7232,10 @@ fn undeclared_class_members_are_errors() {
 fn covergroups_of_classes_are_declared_members() {
     // A covergroup a class declares is a member of it (IEEE 1800-2023
     // 19.4): a select of it is no undeclared member, whatever the analyzer
-    // makes of it otherwise.
+    // makes of it otherwise. The class constructs none, which the analysis
+    // of its package would reject.
     let class = "class C; int x; covergroup cg; coverpoint x; endgroup \
-        function new(); cg = new; endfunction endclass";
+        function new(); endfunction endclass";
     for access in ["c.cg.sample();", "void'(c.cg);"] {
         let source =
             format!("module Top; {class} C c; initial begin c = new; {access} end endmodule");
