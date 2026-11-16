@@ -533,6 +533,9 @@ fn bind_in_mode(
                 let Some(mut ty) = values.pop() else {
                     return Err(unsupported("enum base type"));
                 };
+                if let Some(detail) = types::illegal_enum_base(&ty) {
+                    return types::invalid_enumeration(detail.into());
+                }
                 if matches!(mode, BindingMode::Use) {
                     validate_enum_initializers(id, native, tree, session, context, &ty)?;
                 }
@@ -1037,6 +1040,9 @@ pub(in crate::ast) fn validate_enum_initializers(
     let mut unknown_literals = HashMap::default();
     let mut previous_unknown = false;
     let mut next = Some(0i128);
+    // The values of the members before, as their base type holds them,
+    // which shall be unique (6.19).
+    let mut values = Vec::<(String, i128)>::new();
     for item in items {
         let name = normalize_identifier(&item.name.spelling);
         let Some(value) = item.value else {
@@ -1050,6 +1056,16 @@ pub(in crate::ast) fn validate_enum_initializers(
                 continue;
             }
             if let Some(value) = next {
+                // It shall be an error to automatically increment the
+                // maximum representable value of the enum (6.19).
+                if parameters::coerce_const_parameter_value(value, shape.width, shape.signed)
+                    != value
+                {
+                    return types::invalid_enumeration(format!(
+                        "member `{name}` increments the maximum value of the base type"
+                    ));
+                }
+                unique_enum_value(&mut values, &name, value)?;
                 env.insert(name.clone(), value);
                 dimensions::insert_parameter_type_markers(&mut env, &name, shape);
                 next = value.checked_add(1);
@@ -1140,11 +1156,27 @@ pub(in crate::ast) fn validate_enum_initializers(
                 parameters::coerce_const_parameter_value(value, shape.width, shape.signed)
             });
         if let Some(value) = next {
+            // An X/Z value is not compared with the known ones.
+            if !previous_unknown {
+                unique_enum_value(&mut values, &name, value)?;
+            }
             env.insert(name.clone(), value);
             dimensions::insert_parameter_type_markers(&mut env, &name, shape);
             next = value.checked_add(1);
         }
     }
+    Ok(())
+}
+
+/// Record that member `name` has `value`, which no member before it of
+/// `values` may have (IEEE 1800-2023 6.19).
+fn unique_enum_value(values: &mut Vec<(String, i128)>, name: &str, value: i128) -> Converted<()> {
+    if let Some((other, _)) = values.iter().find(|(_, other)| *other == value) {
+        return types::invalid_enumeration(format!(
+            "members `{other}` and `{name}` have the same value {value}"
+        ));
+    }
+    values.push((name.to_owned(), value));
     Ok(())
 }
 
