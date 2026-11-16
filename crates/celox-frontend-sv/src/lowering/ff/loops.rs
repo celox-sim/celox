@@ -157,6 +157,31 @@ impl Ff<'_, '_> {
         self.store(id, offset, width, register);
     }
 
+    /// The iteration count of `repeat (count)` for a real `count`: rounded
+    /// to the nearest integer with ties away from zero, as a real assigned
+    /// to an integral variable is (IEEE 1800-2023 6.12.1), and zero when
+    /// negative (12.7.2). A NaN count converts to zero.
+    fn real_repeat_count(
+        &mut self,
+        count: &sv::ir::Expr,
+        precision: celox_sir::FloatPrecision,
+    ) -> Result<RegisterId, sv::AnalyzerError> {
+        let mut arena = SLTNodeArena::new();
+        let node = self.expr_slt(count, None, &mut arena)?;
+        let node = floating::convert(&mut arena, node, Some(precision), None, 64, true, true)
+            .ok_or_else(|| unsupported("repeat count"))?;
+        let value = self.lower_slt(&arena, node)?;
+        let zero = self.b.alloc_bit(64, true);
+        self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let negative = self.b.alloc_bit(1, false);
+        self.b
+            .emit(SIRInstruction::Binary(negative, value, BinaryOp::LtS, zero));
+        let count = self.b.alloc_bit(64, false);
+        self.b
+            .emit(SIRInstruction::Mux(count, negative, zero, value));
+        Ok(count)
+    }
+
     pub(super) fn runtime_loop(
         &mut self,
         kind: &sv::ir::LoopKind<sv::ir::Expr>,
@@ -173,7 +198,11 @@ impl Ff<'_, '_> {
             sv::ir::LoopKind::Repeat(count) => {
                 let signed = self.expr_signed(count);
                 let (id, name) = self.m.temp("repeat", 64, false, false);
-                let value = if self.kernel.is_some() {
+                let value = if let Some(precision) = self.m.expr_float_precision(count) {
+                    // A real count is rounded to an integer (IEEE 1800-2023
+                    // 6.12.1), and a negative one runs the body zero times.
+                    self.real_repeat_count(count, precision)?
+                } else if self.kernel.is_some() {
                     // A count with an unknown bit, or a negative one, runs
                     // the body zero times (IEEE 1800-2023 12.7.2).
                     let count = if signed {
