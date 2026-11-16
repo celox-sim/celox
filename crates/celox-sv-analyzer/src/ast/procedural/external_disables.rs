@@ -18,11 +18,9 @@ use super::*;
 /// The named blocks of a scope that a `disable` reaches from outside them.
 #[derive(Default)]
 pub(in crate::ast) struct ExternalDisables {
-    /// How many `disable` statements of the scope name each simple name,
-    /// counted once.
-    names: Option<HashMap<String, usize>>,
-    /// How many of them each named block holds itself, by block.
-    inside: HashMap<u64, usize>,
+    /// The simple names that a `disable` of the scope names from outside
+    /// every block of that name, found once.
+    outside: Option<HashSet<String>>,
     /// The blocks that run as a branch, by name.
     pub(in crate::ast) blocks: HashSet<String>,
     /// The names of more than one such block, which no `disable` from
@@ -51,64 +49,68 @@ pub(in crate::ast) fn signals(label: &str, types: &mut semantic_types::TyTable) 
 }
 
 impl BodyBuilder<'_, '_, '_> {
-    /// The simple names that the `disable` statements in `tokens` name.
-    fn disabled_names(&self, tokens: celox_sv_syntax::TokenRange) -> HashMap<String, usize> {
-        let words: Vec<_> = self
-            .tree
-            .declarations()
-            .tokens
-            .get(tokens.start..tokens.end)
-            .into_iter()
-            .flatten()
-            .filter(|token| !token.is_trivia())
-            .map(|token| token.text.as_str())
-            .collect();
-        let mut names = HashMap::default();
-        for window in words.windows(3) {
-            if window[0] == "disable" && !matches!(window[2], "." | "::") {
-                *names
-                    .entry(instances::normalize_identifier(window[1]))
-                    .or_default() += 1;
-            }
-        }
-        names
-    }
-
-    /// Record how many `disable` statements of named block `label`, at
-    /// `tokens`, name it from within.
-    pub(super) fn enter_named_block(
-        &mut self,
-        label: &str,
-        id: u64,
-        tokens: celox_sv_syntax::TokenRange,
-    ) {
-        let inside = self.disabled_names(tokens).remove(label).unwrap_or(0);
-        self.state.disables.inside.insert(id, inside);
-    }
-
-    /// Whether a `disable` of the scope names block `label`, numbered `id`,
-    /// from outside it.
-    fn disabled_from_outside(&mut self, label: &str, id: u64) -> bool {
-        if self.state.disables.names.is_none() {
+    /// Whether a `disable` of the scope names block `label` from outside
+    /// every block of that name: one inside such a block names that block
+    /// or one within it (9.6.2, 23.8).
+    fn disabled_from_outside(&mut self, label: &str) -> bool {
+        if self.state.disables.outside.is_none() {
             let native = self.tree.declarations();
-            let tokens = match self.syntax().scope_handle().unit(native) {
+            let scope = match self.syntax().scope_handle().unit(native) {
                 Some(unit) => unit.tokens,
                 None => celox_sv_syntax::TokenRange {
                     start: 0,
                     end: native.tokens.len(),
                 },
             };
-            self.state.disables.names = Some(self.disabled_names(tokens));
+            let within = |tokens: celox_sv_syntax::TokenRange| {
+                scope.start <= tokens.start && tokens.end <= scope.end
+            };
+            let mut blocks: HashMap<String, Vec<celox_sv_syntax::TokenRange>> = HashMap::default();
+            let mut disables = Vec::new();
+            for statement in native.statements.iter().filter(|s| within(s.tokens)) {
+                match &statement.kind {
+                    celox_sv_syntax::StatementKind::Block {
+                        label: Some(label), ..
+                    } => blocks
+                        .entry(instances::normalize_identifier(&label.spelling))
+                        .or_default()
+                        .push(statement.tokens),
+                    celox_sv_syntax::StatementKind::Disable(tokens) => {
+                        let mut words = native
+                            .tokens
+                            .get(tokens.start..tokens.end)
+                            .into_iter()
+                            .flatten()
+                            .filter(|token| !token.is_trivia())
+                            .map(|token| token.text.as_str())
+                            .skip_while(|word| *word == "disable");
+                        if let Some(name) = words.next()
+                            && !matches!(words.next(), Some("." | "::"))
+                        {
+                            disables.push((instances::normalize_identifier(name), tokens.start));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let outside = disables
+                .into_iter()
+                .filter(|(name, at)| {
+                    !blocks.get(name).is_some_and(|ranges| {
+                        ranges
+                            .iter()
+                            .any(|range| range.start <= *at && *at < range.end)
+                    })
+                })
+                .map(|(name, _)| name)
+                .collect();
+            self.state.disables.outside = Some(outside);
         }
-        let all = self
-            .state
+        self.state
             .disables
-            .names
+            .outside
             .as_ref()
-            .and_then(|names| names.get(label))
-            .copied()
-            .unwrap_or(0);
-        all > self.state.disables.inside.get(&id).copied().unwrap_or(0)
+            .is_some_and(|names| names.contains(label))
     }
 
     /// The statements of named block `label`, `body`, as the branch that a
@@ -116,29 +118,29 @@ impl BodyBuilder<'_, '_, '_> {
     /// outside the block names it; otherwise `body` itself. A block whose statements leave it
     /// otherwise, or in a context without processes, stays as it is, and a
     /// `disable` from outside it remains unsupported.
-    pub(super) fn external_disable_block(
-        &mut self,
-        label: String,
-        id: u64,
-        body: Vec<Stmt>,
-    ) -> Vec<Stmt> {
+    pub(super) fn external_disable_block(&mut self, label: String, body: Vec<Stmt>) -> Vec<Stmt> {
         // Only a hierarchical name reaches a block of a subroutine from
         // outside it (23.6), and those stay unsupported.
         if self.owner.is_some()
-            || !self.disabled_from_outside(&label, id)
+            || !self.disabled_from_outside(&label)
             || self
                 .allow_timing("disable of a named block from outside it")
                 .is_err()
         {
             return body;
         }
-        let mut leaves = false;
+        // The branch is a process of its own: a statement that leaves the
+        // block other than through its own loops, or that asks for the
+        // current process, would see the difference.
+        let mut asks_for_process = false;
         for stmt in &body {
             stmt.walk(&mut |stmt| {
-                leaves |= matches!(stmt, Stmt::Return(_) | Stmt::Break | Stmt::Continue)
-            });
+                if let Stmt::Eval(expr) | Stmt::Assign { rhs: expr, .. } = stmt {
+                    asks_for_process |= calls_self_handle(expr);
+                }
+            })
         }
-        if leaves {
+        if leaves_block(&body, false) || asks_for_process {
             return body;
         }
         if !self.state.disables.blocks.insert(label.clone()) {
@@ -167,10 +169,20 @@ impl BodyBuilder<'_, '_, '_> {
     }
 
     /// `disable label` of a block outside the statement.
-    pub(super) fn external_disable(&mut self, label: String) -> Vec<Stmt> {
+    pub(super) fn external_disable(&mut self, label: String) -> Result<Vec<Stmt>, AnalyzerError> {
+        // Only a process can end another one (9.6.2); a combinational
+        // procedure or a function has none to run the kill.
+        if !matches!(
+            self.body,
+            system_functions::Body::Initial | system_functions::Body::Process
+        ) {
+            return Err(unsupported(
+                "disable of a named block from outside it in a function or a combinational procedure",
+            ));
+        }
         let (process, armed) = variables(&label);
         self.state.disables.targets.push(label);
-        vec![Stmt::If {
+        Ok(vec![Stmt::If {
             condition: Expr::Ident(armed.clone()),
             then_body: vec![
                 Stmt::Eval(events::call(
@@ -184,6 +196,113 @@ impl BodyBuilder<'_, '_, '_> {
                 },
             ],
             else_body: Vec::new(),
-        }]
+        }])
+    }
+}
+
+/// Whether `stmts` leave the block they are in other than through a loop
+/// among them: a `return`, or a `break` or `continue` outside such a loop.
+fn leaves_block(stmts: &[Stmt], in_loop: bool) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        Stmt::Return(_) => true,
+        Stmt::Break | Stmt::Continue => !in_loop,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => leaves_block(then_body, in_loop) || leaves_block(else_body, in_loop),
+        Stmt::Case { items, default, .. } => {
+            items.iter().any(|item| leaves_block(&item.body, in_loop))
+                || default
+                    .as_deref()
+                    .is_some_and(|body| leaves_block(body, in_loop))
+        }
+        Stmt::Loop {
+            init, step, body, ..
+        } => leaves_block(init, in_loop) || leaves_block(step, in_loop) || leaves_block(body, true),
+        Stmt::Block { body, .. } => leaves_block(body, in_loop),
+        Stmt::Fork { branches, .. } => branches.iter().any(|branch| leaves_block(branch, false)),
+        _ => false,
+    })
+}
+
+/// Whether `expr` asks for the process that evaluates it (`process::self()`).
+fn calls_self_handle(expr: &Expr) -> bool {
+    let mut found = false;
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        match expr {
+            Expr::Call { callee, args, .. } => {
+                found |= matches!(
+                    callee,
+                    Callee::System(SystemFunction::Process(celox_design::ProcessOp::SelfHandle))
+                );
+                pending.extend(args.iter().flatten());
+            }
+            Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+                pending.push(expr)
+            }
+            Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => pending.extend(parts),
+            Expr::Binary { left, right, .. } => pending.extend([&**left, &**right]),
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => pending.extend([&**condition, &**then_expr, &**else_expr]),
+            Expr::Inside { expr, .. } => pending.push(expr),
+            Expr::Ident(_) | Expr::Literal(_) => {}
+        }
+    }
+    found
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    fn analyze(source: &str) -> Result<crate::ir::Ir, crate::AnalyzerError> {
+        crate::analyze_source(source, Path::new("external_disable.sv"))
+    }
+
+    #[test]
+    fn a_disable_inside_a_block_of_the_same_name_keeps_others_flat() {
+        // The `disable worker` names the first block only; the second runs
+        // in its process, as before.
+        let ir = analyze(
+            "module Top; initial begin : a begin : worker #1; disable worker; end end \
+             initial begin : b begin : worker #1; end end endmodule",
+        )
+        .unwrap();
+        let module = &ir.modules()[0];
+        assert!(
+            !module
+                .signals()
+                .iter()
+                .any(|signal| signal.name().starts_with("disable%")),
+            "no block runs as a branch"
+        );
+    }
+
+    #[test]
+    fn combinational_procedures_cannot_disable_blocks_of_other_processes() {
+        let error = analyze(
+            "module Top(input bit a); initial begin : work #5; end \
+             always_comb if (a) disable work; endmodule",
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("combinational procedure"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn blocks_that_ask_for_their_process_stay_unsupported_targets() {
+        let error = analyze(
+            "module Top; process p; initial begin : work p = process::self(); #5; end \
+             initial #1 disable work; endmodule",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("disable statement"), "{error}");
     }
 }

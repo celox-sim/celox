@@ -444,7 +444,7 @@ impl BodyBuilder<'_, '_, '_> {
                         } else {
                             // A block outside the statement, which the
                             // scope checks it has (see `external_disables`).
-                            Ok(self.external_disable(name))
+                            self.external_disable(name)
                         }
                     }
                     _ => Err(unsupported("disable statement")),

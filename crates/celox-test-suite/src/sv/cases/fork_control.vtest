@@ -782,7 +782,11 @@ endprogram"#)
 module Top(output int count, output int resumed, output int hits);
   initial begin
     begin : work
-      forever #2 count++;
+      forever begin
+        #2 count++;
+        // A loop of the block's own may end early.
+        for (int k = 0; k < 4; k++) if (k == 1) break;
+      end
     end
     resumed = count + 100;
   end
