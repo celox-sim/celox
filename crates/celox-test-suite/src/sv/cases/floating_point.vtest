@@ -407,3 +407,33 @@ endmodule
   (modify (set bits 0))
   (assert_eq narrow 0)
   (assert_eq wide 0))
+
+; IEEE 1800-2023 6.12, 7.4: an element of an unpacked array of reals is a
+; real in every expression, at a constant or a run-time index.
+(case unpacked_real_array_elements_are_reals
+  (source "real_array_elements.sv" #"
+module Top(input int i, output int rounded, output int indexed, output bit greater,
+           output int short_sum, output logic [63:0] comb_bits);
+  real values[3];
+  shortreal halves[2];
+  initial begin
+    values[0] = 2.5;
+    values[1] = -1.25;
+    values[2] = 7.0;
+    halves[0] = 0.5;
+    halves[1] = 1.5;
+  end
+  always_comb begin
+    rounded = values[0];
+    indexed = values[i] * 4.0;
+    greater = values[2] > values[0];
+    short_sum = halves[0] + halves[1];
+    comb_bits = $realtobits(values[1] + 1.0);
+  end
+endmodule
+"#)
+  (top Top)
+  (run_until 0) (set i 1) (eval)
+  (assert_eq rounded 3) (assert_eq indexed 0xfffffffb) (assert_eq greater 1)
+  (assert_eq short_sum 2) (assert_eq comb_bits 0xbfd0000000000000)
+  (set i 2) (eval) (assert_eq indexed 28))
