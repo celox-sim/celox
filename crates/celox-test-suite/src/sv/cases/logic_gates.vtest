@@ -135,6 +135,56 @@ endmodule
     (modify (set a va))
     (assert_eq b0 vb) (assert_eq b1 vb) (assert_eq n0 vn) (assert_eq n1 vn)))
 
+; IEEE 1800-2023 28.3.5, 28.3.6: an array of gate instances connects a
+; terminal as wide as the array bit by bit, the right-hand index to the LSB,
+; and a one-bit terminal to every instance. Outputs may be concatenations,
+; and the instances of one-bit outputs all drive the net.
+(case instance_arrays
+  (four_state)
+  (source "arrays.sv" #"
+module Top(input logic [3:0] a,b, input logic e,
+           output wire [3:0] y,n, output wire [1:0] q0,q1, output wire w,w2);
+  and ga[3:0](y,a,b);
+  nor gn[0:3](n,a,e);
+  not gq[1:0](q0,{q1[1],q1[0]},a[1:0]);
+  buf gw[2:2](w,e), gw2[1:0](w2,e);
+endmodule
+"#)
+  (top Top)
+  (for (av am bv ev yv ym nv nm qv qm)
+    (list
+      (12 0 10 0 8 0 3 0 3 0)
+      (5 0 3 1 1 0 0 0 2 0)
+      (10 9 15 0 11 9 13 9 1 1)
+    )
+    (modify (set a (fourstate av am)) (set b (fourstate bv 0)) (set e (fourstate ev 0)))
+    (assert_eq y (fourstate yv ym)) (assert_eq n (fourstate nv nm))
+    (assert_eq q0 (fourstate qv qm)) (assert_eq q1 (fourstate qv qm))
+    (assert_eq w (fourstate ev 0)) (assert_eq w2 (fourstate ev 0))))
+
+(case two_state_instance_arrays
+  (source "arrays.sv" #"
+module Top(input logic [3:0] a,b, input logic e, output wire [3:0] y,n, output wire [1:0] q);
+  xor gx[4:1](y,a,b);
+  nand gn[3:0](n,a,e);
+  buf gq[1:0](q,a[3:2]);
+endmodule
+"#)
+  (top Top)
+  (for (va vb ve vy vn vq) (list (12 10 1 6 3 3) (5 3 0 6 15 1))
+    (modify (set a va) (set b vb) (set e ve))
+    (assert_eq y vy) (assert_eq n vn) (assert_eq q vq)))
+
+; Too many or too few bits for the instances are an error (28.3.6).
+(case instance_array_terminal_width_mismatch
+  (source "mismatch.sv" #"
+module Top(input logic [2:0] a, input logic b, output wire [3:0] y);
+  and g[3:0](y,a,b);
+endmodule
+"#)
+  (top Top)
+  (expect reject))
+
 (case scalar_expressions_in_generate_loops
   (source "selected.sv" #"
 module Top(input logic [1:0] a,b, output wire [1:0] y, output wire inverted);
