@@ -605,7 +605,7 @@ fn schedule_sources_collecting(
                     ))
                 }))
         {
-            let references = instances.references(ir, &definitions);
+            let references = instances.references(ir, &definitions, &mut design);
             if references.is_empty() {
                 continue;
             }

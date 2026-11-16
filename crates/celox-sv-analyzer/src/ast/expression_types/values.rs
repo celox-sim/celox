@@ -438,7 +438,7 @@ fn casting_type(
         if let celox_sv_syntax::DataTypeKind::Builtin(name) = &data.kind
             && data.packed_dimensions.is_empty()
         {
-            type_binding::builtin_type(name, data.signed)?
+            type_binding::builtin_type_in(&mut session.types, name, data.signed)?
         } else {
             let constants = constants.get_or_insert_with(|| constant_session(session));
             type_binding::binding::bind_in(id, native, tree, constants, dims).ok()??

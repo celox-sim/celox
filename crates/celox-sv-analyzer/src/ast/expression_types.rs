@@ -711,7 +711,7 @@ fn member_of(
         .members
         .iter()
         .find(|candidate| candidate.name == member)?
-        .r#type
-        .clone();
+        .clone()
+        .type_in(&mut session.types);
     semantic_types::of_type(&mut session.types, &tree.functions, &ty, &dims.const_env)
 }
