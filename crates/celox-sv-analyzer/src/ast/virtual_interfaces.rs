@@ -771,6 +771,14 @@ pub(super) fn check_target(target: &LValue) -> Converted<()> {
     }
 }
 
+/// `expr` with each occurrence of expression `from` replaced by `to`.
+pub(super) fn replace(expr: Expr, from: &Expr, to: &Expr) -> Expr {
+    if expr == *from {
+        return to.clone();
+    }
+    map_children(expr, &mut |child| replace(child, from, to))
+}
+
 /// `expr` with identifier `from` renamed to `to`.
 pub(super) fn rename(expr: Expr, from: &str, to: &str) -> Expr {
     match expr {
