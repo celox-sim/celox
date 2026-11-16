@@ -333,6 +333,32 @@ endmodule
   (assert_eq negative_zero_bits 0x80000000)
   (assert_eq negative_value 0xfffffffd) (assert_eq positive_value 3))
 
+(case ranged_and_signed_parameters_take_their_declared_type
+  (source "ranged_real_parameters.sv" #"
+    module Ranged #(parameter [7:0] V=3.0)(output logic [7:0] value, output int width);
+      assign value=V;
+      assign width=$bits(V);
+    endmodule
+    module Top(output logic [7:0] byte_value, overridden, output int byte_width,
+        output logic [2:0] signed_value, output int signed_width, output logic negative_matches,
+        output int signing_width, output logic signing_negative);
+      localparam signed [2:0] S=-1.0;
+      localparam signed N=4'd15;
+      Ranged plain(.value(byte_value), .width(byte_width));
+      Ranged #(.V(2.5)) wide(.value(overridden), .width());
+      assign signed_value=S;
+      assign signed_width=$bits(S);
+      assign negative_matches=S === -1;
+      assign signing_width=$bits(N);
+      assign signing_negative=N === -1;
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq byte_value 3) (assert_eq byte_width 8) (assert_eq overridden 3)
+  (assert_eq signed_value 7) (assert_eq signed_width 3) (assert_eq negative_matches 1)
+  (assert_eq signing_width 4) (assert_eq signing_negative 1))
+
 (case real_parameter_overrides_from_math_and_generate_scopes
   (source "generated_real_parameter_overrides.sv" #"
     package Values;
