@@ -280,36 +280,38 @@ fn publish(
         let assignments = bodies.assignments.into_iter().map(Into::into).collect();
         let comb_processes = bodies.comb_processes.into_iter().map(Into::into).collect();
         let ff_processes = bodies.ff_processes.into_iter().map(Into::into).collect();
-        modules.push(
-            ir::Module::new(
-                id,
-                module.name().to_string(),
-                parameters,
-                ports,
-                signals,
-                instances,
-                assignments,
-                comb_processes,
-                ff_processes,
-                bodies
-                    .initial_processes
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-                module.locals().to_vec(),
-                bodies
-                    .subroutines
-                    .into_iter()
-                    .map(|subroutine| subroutine.map(&mut Into::into, &mut Into::into, &mut |t| t))
-                    .collect(),
-            )
-            .with_interface_scope_names(module.interface_scope_names().to_vec())
-            .with_interface_handles(module.interface_handles().to_vec())
-            .with_dpi_imports(module.dpi_imports().to_vec())
-            .with_program(module.is_program())
-            .with_imported_parameters(imported_parameters)
-            .with_declaration_subroutines(module.declaration_subroutines().to_vec()),
-        );
+        let mut lowered = ir::Module::new(
+            id,
+            module.name().to_string(),
+            parameters,
+            ports,
+            signals,
+            instances,
+            assignments,
+            comb_processes,
+            ff_processes,
+            bodies
+                .initial_processes
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            module.locals().to_vec(),
+            bodies
+                .subroutines
+                .into_iter()
+                .map(|subroutine| subroutine.map(&mut Into::into, &mut Into::into, &mut |t| t))
+                .collect(),
+        )
+        .with_interface_scope_names(module.interface_scope_names().to_vec())
+        .with_interface_handles(module.interface_handles().to_vec())
+        .with_dpi_imports(module.dpi_imports().to_vec())
+        .with_program(module.is_program())
+        .with_imported_parameters(imported_parameters)
+        .with_declaration_subroutines(module.declaration_subroutines().to_vec());
+        if let Some(classes) = module.module_classes() {
+            lowered.export_overrides(classes)?;
+        }
+        modules.push(lowered);
     }
 
     Ok(ir::Ir::new(modules))

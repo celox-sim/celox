@@ -181,9 +181,14 @@ pub(super) fn specialize_module(
                         hierarchical.signals,
                         warnings,
                     )?;
-                    ir.expand_virtual_interface_instances(
-                        hierarchical.virtual_ids.unwrap_or(&HashMap::default()),
-                    );
+                    match hierarchical.instances {
+                        Instances::Known(expansion) => ir.expand_instances(expansion),
+                        // Discovery is not simulated: no instance is known,
+                        // nor an override the design exports.
+                        Instances::Discovery => ir.expand_instances(
+                            &sv::ir::InstanceExpansion::new(&HashMap::default(), &[]),
+                        ),
+                    }
                     ir
                 }
             };
@@ -198,7 +203,7 @@ pub(super) fn specialize_module(
     };
     // Each module may store or wait on a watched property.
     let own;
-    let properties = if hierarchical.discovery {
+    let properties = if matches!(hierarchical.instances, Instances::Discovery) {
         let mut keys = hierarchical.properties.clone();
         ff::watched_properties(&specialized, &mut keys);
         own = keys;
@@ -218,7 +223,8 @@ pub(super) fn specialize_module(
     // Every module shares the format of `%t` of a design that calls
     // `$timeformat`; discovery sees whether this module does.
     let specialized = if hierarchical.time_format
-        || (hierarchical.discovery && ff::calls_time_format(&specialized))
+        || (matches!(hierarchical.instances, Instances::Discovery)
+            && ff::calls_time_format(&specialized))
     {
         std::borrow::Cow::Owned(specialized.into_owned().with_shared_variables(
             ff::TIME_FORMAT,

@@ -41,6 +41,10 @@ pub(super) struct Property {
     /// the array, which every type check and query sees, and an assignment
     /// or a copy of the object copies the elements.
     pub storage: Option<Arc<ContainerType>>,
+    /// A property the analysis adds, which no source names: the id of the
+    /// module instance an object of a class of a module was created in
+    /// (see `module_overrides`).
+    pub hidden: bool,
 }
 
 /// Where a randomize call solves a static rand property (see
@@ -85,7 +89,9 @@ pub(super) fn member(
         properties
             .iter()
             .rposition(|property| {
-                property.name == name && owner.is_none_or(|owner| property.owner == owner)
+                !property.hidden
+                    && property.name == name
+                    && owner.is_none_or(|owner| property.owner == owner)
             })
             .map(Member::Instance)
     };
@@ -700,7 +706,7 @@ impl Class {
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, property)| property.name == name)?;
+            .find(|(_, property)| !property.hidden && property.name == name)?;
         (!self.hidden(name, index + 1, index)).then_some(property)
     }
 
@@ -1430,6 +1436,18 @@ pub(super) fn shared_class(
 }
 
 /// [`shared_class`] of a class not laid out yet.
+/// Whether class `name` is declared in the scope of `tree`.
+pub(super) fn declared_in_scope(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    name: &str,
+) -> bool {
+    declaration(tree, session, name).is_some_and(|declaration| {
+        enclosing_unit(tree.declarations(), declaration.tokens).map(|unit| unit.tokens)
+            == tree.root_unit().ok().map(|unit| unit.tokens)
+    })
+}
+
 fn lay_out_shared_class(
     tree: &AnalysisContext<'_>,
     name: &str,
@@ -1573,6 +1591,29 @@ fn lay_out_shared_class(
         .chain(base.iter().flat_map(|base| base.lineage.iter().cloned()))
         .collect::<Vec<_>>();
     let mut size = base.as_ref().map_or(0, |base| base.size);
+    if module_overrides::needs_instance(tree, session, base.as_deref()) {
+        let ty = module_overrides::instance_type();
+        let mut field = field(&tree.functions, &ty, env, size)?;
+        size = field.offset + field.storage();
+        field.key = crate::system_functions::ChangeKey::Property(property_key(
+            name,
+            module_overrides::INSTANCE_PROPERTY,
+        ));
+        properties.push(Property {
+            name: module_overrides::INSTANCE_PROPERTY.to_owned(),
+            owner: name.to_owned(),
+            constant: false,
+            local: true,
+            protected: false,
+            r#type: ty,
+            field,
+            rand: false,
+            randc: false,
+            initializer: None,
+            storage: None,
+            hidden: true,
+        });
+    }
     for property in &declaration.properties {
         if property.declaration.constant && (property.qualifiers.rand || property.qualifiers.randc)
         {
@@ -1689,6 +1730,7 @@ fn lay_out_shared_class(
                         randc: false,
                         initializer: None,
                         storage: None,
+                        hidden: false,
                     });
                 }
                 continue;
@@ -1762,6 +1804,7 @@ fn lay_out_shared_class(
                 randc: property.qualifiers.randc,
                 initializer: variable.value,
                 storage,
+                hidden: false,
             });
         }
     }

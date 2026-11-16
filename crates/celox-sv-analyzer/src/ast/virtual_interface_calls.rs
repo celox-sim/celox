@@ -11,7 +11,7 @@
 //! the handle labelled with the instance placeholder (`$vifinstance$I`).
 //! Expanding a module's virtual interface placeholders repeats that item
 //! for each instance of the interface, with the members of that instance
-//! ([`crate::ir::Module::expand_virtual_interface_instances`]), as it does
+//! ([`crate::ir::Module::expand_instances`]), as it does
 //! for any other access through a virtual interface.
 //!
 //! One subroutine serves every instance. Its formals belong to each call,
@@ -22,7 +22,7 @@
 //! called through an interface port is held by the calling module.
 
 use super::*;
-use virtual_interfaces::{VirtualInterface, VirtualInterfaceSignal};
+use virtual_interfaces::{DefinitionId, VirtualInterface, VirtualInterfaceSignal};
 
 /// The subroutines that call the tasks and functions of interfaces through
 /// virtual interfaces, which every scope that may make such a call imports.
@@ -127,7 +127,7 @@ fn interface_subroutines(
         names.insert(
             member.name.clone(),
             VirtualInterfaceSignal::Placeholder {
-                interface: interface.to_string(),
+                definition: DefinitionId::of(interface),
                 member: member.name.clone(),
             }
             .name(),
@@ -150,7 +150,7 @@ fn interface_subroutines(
             names.insert(
                 name.clone(),
                 VirtualInterfaceSignal::StaticPlaceholder {
-                    interface: interface.to_string(),
+                    definition: DefinitionId::of(interface),
                     name: name.clone(),
                 }
                 .name(),
@@ -344,7 +344,7 @@ fn dispatching(
     subroutine.automatic = true;
     subroutine.automatic_locals = automatic_locals;
     let instance = VirtualInterfaceSignal::Instance {
-        interface: interface.to_string(),
+        definition: DefinitionId::of(interface),
     }
     .name();
     // A default is evaluated where the subroutine is declared (13.5.3): one

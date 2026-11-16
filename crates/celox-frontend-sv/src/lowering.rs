@@ -408,19 +408,37 @@ struct HierarchicalNames<'a> {
     /// Whether the design calls `$timeformat`, whose format every module
     /// shares (see `ff::TIME_FORMAT`).
     time_format: bool,
-    /// The ids of the instances of each interface of the elaborated design,
-    /// which the module's virtual interface accesses are repeated for (see
-    /// `sv::ir::Module::expand_virtual_interface_instances`); none before
-    /// the instances are known.
-    virtual_ids: Option<&'a HashMap<String, Vec<u32>>>,
-    /// A lowering that only discovers the hierarchy, before `properties`
-    /// is known: the module counts the stores of the properties its own
-    /// waits read, and the result is not simulated.
-    discovery: bool,
+    /// The instances of the design, or a lowering that only discovers the
+    /// hierarchy (see [`Instances`]).
+    instances: Instances<'a>,
 }
 
-impl Default for HierarchicalNames<'_> {
-    fn default() -> Self {
+/// What a lowering knows of the instances of the design.
+#[derive(Clone, Copy)]
+enum Instances<'a> {
+    /// It only discovers the hierarchy, before the properties it watches
+    /// are known: the module counts the stores of the properties its own
+    /// waits read, and the result is not simulated.
+    Discovery,
+    /// The instances of the elaborated design, which the module's virtual
+    /// interface accesses and the overrides that the module classes of the
+    /// design export are repeated for (see `sv::ir::Module::expand_instances`).
+    Known(&'a sv::ir::InstanceExpansion<'a>),
+}
+
+impl<'a> HierarchicalNames<'a> {
+    /// A lowering that only discovers the hierarchy.
+    fn discovery() -> Self {
+        Self::with_instances(Instances::Discovery)
+    }
+
+    /// A lowering of the design whose instances and exported overrides
+    /// `expansion` holds, without hierarchical names.
+    fn lowering(expansion: &'a sv::ir::InstanceExpansion<'a>) -> Self {
+        Self::with_instances(Instances::Known(expansion))
+    }
+
+    fn with_instances(instances: Instances<'a>) -> Self {
         static EMPTY: std::sync::LazyLock<HashMap<String, hierarchy::ForeignWrites>> =
             std::sync::LazyLock::new(HashMap::default);
         static NO_PROPERTIES: BTreeSet<u32> = BTreeSet::new();
@@ -433,8 +451,7 @@ impl Default for HierarchicalNames<'_> {
             force_out_of_line: false,
             properties: &NO_PROPERTIES,
             time_format: false,
-            virtual_ids: None,
-            discovery: false,
+            instances,
         }
     }
 }

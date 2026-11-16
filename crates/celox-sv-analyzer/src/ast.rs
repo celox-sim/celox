@@ -83,6 +83,7 @@ pub(crate) use parameters::unbounded_parameter_marker;
 mod array_reductions;
 mod containers;
 mod locators;
+pub(crate) mod module_overrides;
 mod patterns;
 mod procedural;
 mod scope;
@@ -291,6 +292,9 @@ pub struct Module {
     interface_scope_names: Vec<String>,
     /// The interface instances and ports a virtual interface may denote.
     interface_handles: Vec<crate::ir::InterfaceHandle>,
+    /// The classes of a module, whose overrides other scopes may call (see
+    /// `module_overrides`).
+    module_classes: Option<crate::ir::ModuleClasses>,
     /// The symbols of a package, for the scopes that use it.
     symbols: Option<scope::ScopeSymbols>,
 }
