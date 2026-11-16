@@ -492,11 +492,6 @@ impl BodyBuilder<'_, '_, '_> {
                         });
                         if let Some(label) = named {
                             let block_id = self.block_id(native.statement(id).tokens.start);
-                            self.enter_named_block(
-                                &instances::normalize_identifier(&label.spelling),
-                                block_id,
-                                native.statement(id).tokens,
-                            );
                             self.named_blocks.push((
                                 instances::normalize_identifier(&label.spelling),
                                 block_id,
@@ -1182,7 +1177,7 @@ impl BodyBuilder<'_, '_, '_> {
                         body = vec![Stmt::Block { id, body }];
                     }
                     // A `disable` elsewhere may end it too (9.6.2).
-                    output.extend(self.external_disable_block(label, id, body));
+                    output.extend(self.external_disable_block(label, body));
                 }
                 Job::ImplicitEvent { start, sensitivity } => {
                     let wait = timing::implicit_event(
