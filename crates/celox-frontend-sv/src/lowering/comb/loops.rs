@@ -89,13 +89,43 @@ impl Comb<'_, '_> {
         let mut remaining_repeat = match kind {
             sv::ir::LoopKind::Repeat(count) => {
                 let (node, _) = self.eval(&mut store, frames, count, None)?;
-                let (value, _) = slt_const(self.arena, &mut self.consts, node)
+                let (value, width) = slt_const(self.arena, &mut self.consts, node)
                     .ok_or_else(|| unsupported("repeat count that depends on run-time values"))?;
-                Some(
-                    value
+                let precision = self
+                    .m
+                    .expr_float_precision(count)
+                    .or_else(|| floating::precision(count, self.m.variables, self.m.name_to_id));
+                let iterations = match precision {
+                    // A real count is rounded to the nearest integer, ties
+                    // away from zero (IEEE 1800-2023 6.12.1), not read as its
+                    // bit pattern.
+                    Some(precision) => {
+                        let bits = value.to_u64().ok_or_else(|| unsupported("repeat count"))?;
+                        let real = match precision {
+                            celox_sir::FloatPrecision::F32 => {
+                                f64::from(f32::from_bits(bits as u32))
+                            }
+                            celox_sir::FloatPrecision::F64 => f64::from_bits(bits),
+                        };
+                        let rounded = real.round();
+                        // A negative count runs the body zero times (12.7.2);
+                        // so do NaN and infinities, which convert to zero as
+                        // in procedural code.
+                        if !rounded.is_finite() || rounded <= 0.0 {
+                            0
+                        } else {
+                            num_traits::cast::<f64, usize>(rounded)
+                                .ok_or_else(|| unsupported("repeat count"))?
+                        }
+                    }
+                    None if self.expr_signed(count) && width > 0 && value.bit(width as u64 - 1) => {
+                        0
+                    }
+                    None => value
                         .to_usize()
                         .ok_or_else(|| unsupported("repeat count"))?,
-                )
+                };
+                Some(iterations)
             }
             _ => None,
         };
