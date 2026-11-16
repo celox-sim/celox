@@ -521,7 +521,9 @@ impl BodyBuilder<'_, '_, '_> {
                                 else_body: Vec::new(),
                             }])
                         } else {
-                            Err(unsupported("disable statement"))
+                            // A block outside the statement, which the
+                            // scope checks it has (see `external_disables`).
+                            Ok(self.external_disable(name))
                         }
                     }
                     _ => Err(unsupported("disable statement")),
