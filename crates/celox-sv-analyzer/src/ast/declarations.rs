@@ -48,7 +48,7 @@ pub(super) fn ports_from_scope(
             None => return Err(unsupported("unsupported port data type")),
         };
         if !type_binding::declared_port_range_matches(
-            native,
+            native.declared_type,
             &base,
             syntax_tree,
             session,

@@ -92,14 +92,14 @@ pub(super) fn port_type(
 /// net or variable declaration repeats in other words, has the bounds of the
 /// port's type (IEEE 1800-2023 23.2.2.1).
 pub(super) fn declared_port_range_matches(
-    port: &celox_sv_syntax::Port,
+    declared_type: Option<celox_sv_syntax::TypeId>,
     ty: &Type,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
     aliases: &TypeAliases,
 ) -> Converted<bool> {
-    let Some(id) = port.declared_type else {
+    let Some(id) = declared_type else {
         return Ok(true);
     };
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
