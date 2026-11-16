@@ -69,6 +69,7 @@ impl ScopeElaboration<'_> {
             ff_processes: self.ff_processes.clone(),
             aliases: self.imported.aliases.clone(),
             interface_members: self.imported.interface_members.clone(),
+            outward_names: self.imported.outward_names.clone(),
             local_aliases: self.imported.local_aliases.clone(),
             interface_types: self.imported.interface_types.clone(),
             interface_modports: self.imported.interface_modports.clone(),

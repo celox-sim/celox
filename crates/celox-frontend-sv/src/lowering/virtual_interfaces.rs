@@ -216,6 +216,8 @@ impl Instances {
                         r#type: declared.declared_type(design),
                         is_net: declared.is_net,
                         local: false,
+                        interface_instance: None,
+                        aliased: None,
                     },
                     instance.path.clone(),
                     vec![(instance.module, target.clone())],

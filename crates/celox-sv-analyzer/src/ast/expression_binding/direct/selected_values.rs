@@ -123,6 +123,8 @@ pub(in crate::ast::expression_binding) fn path(
                         {
                             AnalyzerError::HierarchicalReference {
                                 path: name.join("."),
+                                components: name,
+                                interface: None,
                             }
                         }
                         Err(error @ AnalyzerError::HierarchicalReference { .. }) => error,

@@ -211,6 +211,34 @@ impl Source {
                     // A hierarchical name reads and writes the local signal
                     // bound to the other instance's object.
                     for signal in bindings.hierarchical {
+                        // A name of the body of an interface instance binds
+                        // there; the module holds the signal of an object
+                        // of another instance it denotes.
+                        if let Some(handle) = &signal.interface_instance {
+                            imported
+                                .outward_names
+                                .entry(handle.clone())
+                                .or_default()
+                                .push(signal.clone());
+                            if !signal.local {
+                                imported.state_signals.push(Signal {
+                                    is_const: false,
+                                    name: signal.name.clone(),
+                                    r#type: signal.r#type.clone(),
+                                    is_net: signal.is_net,
+                                    unresolved_net: false,
+                                    net_resolution: NetResolution::Wire,
+                                    net_drive: NetDrive::None,
+                                    package_variable: None,
+                                    hierarchical: Some(format!(
+                                        "{handle}.{}",
+                                        signal.paths.first().map_or("", String::as_str)
+                                    )),
+                                    force_control: None,
+                                });
+                            }
+                            continue;
+                        }
                         for path in &signal.paths {
                             imported
                                 .interface_members

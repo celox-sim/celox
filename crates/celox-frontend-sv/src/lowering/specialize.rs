@@ -291,11 +291,18 @@ pub(super) fn specialize_module(
 }
 
 /// The hierarchical name at which the analysis of a module failed, which
-/// needs the specialized hierarchy below it.
-pub(super) fn hierarchical_reference_path(error: &sv::AnalyzerError) -> Option<&str> {
+/// needs the specialized hierarchy below it: its components, and the
+/// interface instance of the module whose body has it, if one does.
+pub(super) fn unresolved_name(
+    error: &sv::AnalyzerError,
+) -> Option<(&[String], Option<&sv::InterfaceBodyScope>)> {
     match error {
-        sv::AnalyzerError::HierarchicalReference { path } => Some(path),
-        sv::AnalyzerError::WithWarnings { error, .. } => hierarchical_reference_path(error),
+        sv::AnalyzerError::HierarchicalReference {
+            components,
+            interface,
+            ..
+        } => Some((components, interface.as_deref())),
+        sv::AnalyzerError::WithWarnings { error, .. } => unresolved_name(error),
         _ => None,
     }
 }

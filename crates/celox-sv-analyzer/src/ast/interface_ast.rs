@@ -19,9 +19,32 @@ pub(super) fn analyze(
     types: &[(String, Type)],
     interfaces: &ModuleInterfaces,
     declarations_only: bool,
+    outward: &[HierarchicalSignal],
 ) -> Converted<Module> {
     let mut imported = imports::imported_symbols(tree, packages, packages.unit(path))?;
     imported.declarations_only = declarations_only;
+    // The hierarchical names of the body that the scope instantiating it
+    // resolved (IEEE 1800-2023 23.8) read and write the signals of that
+    // scope they denote, which it declares.
+    for signal in outward {
+        for path in &signal.paths {
+            imported
+                .interface_members
+                .insert(path.clone(), signal.name.clone());
+        }
+        imported.state_signals.push(Signal {
+            is_const: false,
+            name: signal.name.clone(),
+            r#type: signal.r#type.clone(),
+            is_net: signal.is_net,
+            unresolved_net: false,
+            net_resolution: NetResolution::Wire,
+            net_drive: NetDrive::None,
+            package_variable: None,
+            hierarchical: signal.paths.first().cloned(),
+            force_control: None,
+        });
+    }
     imported.type_parameter_bindings = type_parameters::bind(tree, types)?;
     let name = tree.root_name()?;
     let instance = (
