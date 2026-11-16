@@ -20,6 +20,12 @@ impl Ff<'_, '_> {
                 .m
                 .id(&canonical.var)
                 .is_some_and(|id| self.m.is_hidden(id) || runs_without_others(body))
+            // A real loop variable takes real values, which the integral
+            // unrolling would store as its bits (6.12).
+            && self
+                .m
+                .id(&canonical.var)
+                .is_some_and(|id| self.m.var(id).float.is_none())
             && let Some((values, last)) = self.unrolled_values(&canonical, condition, step, body)?
         {
             return self.unroll(&canonical, &values, last, body);
@@ -266,9 +272,13 @@ impl Ff<'_, '_> {
         // step leaves its variable unchanged would never end; it stops the
         // simulation with an error instead.
         self.b.switch_to_block(latch);
+        // An integral loop variable only: a real step may make progress the
+        // bits do not show (`-0.0` after `0.0`), and none of its values
+        // repeats while it counts.
         let progress = match kind {
             sv::ir::LoopKind::For => canonical_for_loop(init, condition, step)
-                .and_then(|canonical| Some((canonical.var.clone(), self.m.id(&canonical.var)?))),
+                .and_then(|canonical| Some((canonical.var.clone(), self.m.id(&canonical.var)?)))
+                .filter(|&(_, id)| self.m.var(id).float.is_none()),
             _ => None,
         };
         let previous = match &progress {
