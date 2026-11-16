@@ -192,6 +192,11 @@ pub enum AnalyzerError {
     /// Packages that import or refer to each other.
     #[error("package `{name}` depends on itself")]
     PackageCycle { name: String },
+    /// A parameter whose value depends on itself, directly or through other
+    /// parameters, which no constant value satisfies (IEEE 1800-2023
+    /// 6.20.2).
+    #[error("parameter `{name}` depends on its own value")]
+    CircularParameter { name: String },
     #[error("unknown top-level parameter override `{name}`")]
     UnknownParameterOverride { name: String },
     #[error("localparam override `{name}`")]
@@ -199,6 +204,11 @@ pub enum AnalyzerError {
     /// A name that nothing in the design declares (IEEE 1800-2023 6.18).
     #[error("`{name}` is not declared: {context}")]
     UndeclaredIdentifier { name: String, context: String },
+    /// A variable or net read where a constant expression is required,
+    /// such as a bound of a part-select (IEEE 1800-2023 11.5.1) or the
+    /// value of a parameter (6.20.2).
+    #[error("{construct} reads `{name}`, which is not a constant")]
+    NonConstantExpression { construct: String, name: String },
     /// A `$name` call that is not a system task or function Celox knows.
     #[error("unknown system task or function `{name}`")]
     UnknownSystemTf { name: String },

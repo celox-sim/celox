@@ -1136,7 +1136,48 @@ pub(in crate::ast) fn validate_scope(
         .filter(|(_, _, prefix)| *prefix)
         .map(|(parameter, _, _)| parameter)
         .collect::<Vec<_>>();
+    reject_circular_parameters(&prefix, native, tree.spans())?;
+    let variables = super::super::validation::element_variables(tree);
     for (parameter, scope, is_prefix) in &values {
+        // A parameter of the design element takes a constant value, which
+        // reads no variable or net (IEEE 1800-2023 6.20.2, 11.2.1).
+        if *is_prefix
+            && let ParameterKind::Value {
+                default: Some(root),
+                ..
+            } = parameter.kind
+            && let Some(name) = super::super::validation::variable_read(
+                root,
+                native,
+                tree.spans(),
+                dimensions,
+                &variables,
+            )
+        {
+            return Err(AnalyzerError::NonConstantExpression {
+                construct: format!(
+                    "the value of parameter `{}`",
+                    instances::normalize_identifier(&parameter.name.spelling)
+                ),
+                name,
+            });
+        }
+        if *is_prefix
+            && let ParameterKind::Value {
+                default: Some(root),
+                ..
+            } = parameter.kind
+            && let Some((construct, name)) =
+                default_argument_read(root, tree, dimensions, &variables)
+        {
+            return Err(AnalyzerError::NonConstantExpression {
+                construct: format!(
+                    "{construct}, which the value of parameter `{}` calls,",
+                    instances::normalize_identifier(&parameter.name.spelling)
+                ),
+                name,
+            });
+        }
         let scoped_context = tree.child(scope, &tree.parameter_overrides);
         let scope = &scoped_context;
         let ParameterKind::Value {
@@ -1171,6 +1212,149 @@ pub(in crate::ast) fn validate_scope(
             // casts of its items included.
             let context = dimensions::query_context_for_operand(root, scope, session, dimensions)?;
             selects::selected_parameter_initializer(root, scope, session, &context, None)?;
+        }
+    }
+    Ok(())
+}
+
+/// A variable or net that the default of an argument reads, of a call in
+/// native expression `root` of a function of the design element that omits
+/// that argument: the call is no constant function call, whose defaults are
+/// constant expressions (IEEE 1800-2023 13.4.3).
+fn default_argument_read(
+    root: ExprId,
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    variables: &HashMap<String, bool>,
+) -> Option<(String, String)> {
+    let native = tree.declarations();
+    let unit = tree.root_unit().ok()?;
+    let tokens = native.expression(root).tokens;
+    for id in tree.spans().expressions.within(&[tokens]) {
+        let ExprKind::Call {
+            expression,
+            arguments,
+        } = &native.expression(id).kind
+        else {
+            continue;
+        };
+        let Some(name) = expression_binding::callable_name(tree, *expression, native) else {
+            continue;
+        };
+        let Some(function) = unit
+            .subroutines
+            .iter()
+            .map(|id| native.subroutine(*id))
+            .find(|subroutine| {
+                subroutine.kind == celox_sv_syntax::SubroutineKind::Function
+                    && subroutine.scope.is_empty()
+                    && instances::normalize_identifier(&subroutine.name.spelling) == name
+            })
+        else {
+            continue;
+        };
+        for (position, port) in function.ports.iter().flatten().enumerate() {
+            let (Some(default), Some(formal)) = (port.default, port.name.as_ref()) else {
+                continue;
+            };
+            let formal = instances::normalize_identifier(&formal.spelling);
+            let given = arguments.iter().enumerate().any(|(index, argument)| {
+                argument.value.is_some()
+                    && match &argument.name {
+                        Some(named) => instances::normalize_identifier(&named.spelling) == formal,
+                        None => index == position,
+                    }
+            });
+            if given {
+                continue;
+            }
+            if let Some(read) = super::super::validation::variable_read(
+                default,
+                native,
+                tree.spans(),
+                dimensions,
+                variables,
+            ) {
+                return Some((
+                    format!("the default of argument `{formal}` of function `{name}`"),
+                    read,
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Reject a parameter of the design element whose value depends on itself,
+/// directly or through other parameters of the element: no constant value
+/// satisfies it (IEEE 1800-2023 6.20.2).
+fn reject_circular_parameters(
+    parameters: &[&celox_sv_syntax::Parameter],
+    native: &celox_sv_syntax::Declarations,
+    spans: &crate::source_tree::Spans,
+) -> Converted<()> {
+    use celox_sv_syntax::ParameterKind;
+    let names = parameters
+        .iter()
+        .map(|parameter| instances::normalize_identifier(&parameter.name.spelling))
+        .collect::<Vec<_>>();
+    // The parameters each value reads.
+    let reads = parameters
+        .iter()
+        .map(|parameter| {
+            let ParameterKind::Value {
+                default: Some(root),
+                ..
+            } = parameter.kind
+            else {
+                return Vec::new();
+            };
+            let tokens = native.expression(root).tokens;
+            let mut read = spans
+                .expressions
+                .within(&[tokens])
+                .into_iter()
+                .filter_map(|id| match &native.expression(id).kind {
+                    ExprKind::Name(name) => {
+                        let name = instances::normalize_identifier(&name.spelling);
+                        names.iter().position(|other| *other == name)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            read.sort_unstable();
+            read.dedup();
+            read
+        })
+        .collect::<Vec<_>>();
+    // Depth-first search for a cycle: 1 while on the path, 2 when done.
+    let mut state = vec![0u8; parameters.len()];
+    for start in 0..parameters.len() {
+        if state[start] != 0 {
+            continue;
+        }
+        let mut path = vec![(start, 0usize)];
+        state[start] = 1;
+        while let Some((node, next)) = path.last_mut() {
+            let node = *node;
+            let Some(&target) = reads[node].get(*next) else {
+                state[node] = 2;
+                path.pop();
+                continue;
+            };
+            *next += 1;
+            match state[target] {
+                0 => {
+                    state[target] = 1;
+                    path.push((target, 0));
+                }
+                1 => {
+                    return Err(AnalyzerError::CircularParameter {
+                        name: names[target].clone(),
+                    });
+                }
+                _ => {}
+            }
         }
     }
     Ok(())

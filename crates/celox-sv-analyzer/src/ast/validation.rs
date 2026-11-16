@@ -953,6 +953,7 @@ fn validate_scope(
             }
         }
     }
+    let mut variables = None;
     for id in spans.expressions.within(&ranges) {
         let expression = native.expression(id);
         if !selected(expression.tokens) {
@@ -963,7 +964,38 @@ fn validate_scope(
                 matches!(control.kind, celox_sv_syntax::TimingControlKind::Delay { value, .. } if contains(native.expression(value).tokens, expression.tokens))) => {
                 return Err(unsupported("mintypmax expression"));
             }
-            ExprKind::Select { dimension, .. } => {
+            ExprKind::Select {
+                expression: selected,
+                dimension,
+            } => {
+                // The bounds of a part-select of a vector shall be constant
+                // (11.5.1); only an indexed part-select has a variable
+                // position. A slice of a queue may have variable bounds
+                // (7.10.1).
+                if let DimensionKind::Range { left, right } = dimension.kind
+                    && !facts.parameter_defaults.contains(dimension.tokens)
+                    && let ExprKind::Name(selected) =
+                        &native.expression(expression_binding::ungroup(*selected, native)).kind
+                    && variables
+                        .get_or_insert_with(|| element_variables(syntax_tree))
+                        .get(&instances::normalize_identifier(&selected.spelling))
+                        == Some(&false)
+                {
+                    for bound in [left, right] {
+                        if let Some(name) = variable_read(
+                            bound,
+                            native,
+                            spans,
+                            indexed_dimensions,
+                            variables.get_or_insert_with(|| element_variables(syntax_tree)),
+                        ) {
+                            return Err(AnalyzerError::NonConstantExpression {
+                                construct: "a bound of a part-select".into(),
+                                name,
+                            });
+                        }
+                    }
+                }
                 if let DimensionKind::Indexed { width, .. } = dimension.kind {
                     if facts.parameter_defaults.contains(dimension.tokens) { continue; }
                     // IEEE 1800-2023 11.5.1 permits a variable base. Its
@@ -1231,6 +1263,111 @@ fn reject_constant_calls(
         }
     }
     Ok(())
+}
+
+/// A variable or net of the scope that native expression `id` reads by its
+/// simple name, which makes it no constant expression (IEEE 1800-2023
+/// 11.2.1). A name a parameter, a genvar or a constant of the scope also
+/// has is not one, nor is a name in a call, such as of `$bits`, which may
+/// query a variable, in a member select, or the key of an assignment
+/// pattern item, which names a member.
+pub(super) fn variable_read(
+    id: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
+    spans: &crate::source_tree::Spans,
+    dimensions: &PackedDimensions,
+    variables: &HashMap<String, bool>,
+) -> Option<String> {
+    use celox_sv_syntax::ExprKind;
+    let tokens = native.expression(id).tokens;
+    let expressions = spans.expressions.within(&[tokens]);
+    let mut opaque = Vec::new();
+    for id in &expressions {
+        let expression = native.expression(*id);
+        match &expression.kind {
+            ExprKind::Call { .. } | ExprKind::Member { .. } => opaque.push(expression.tokens),
+            // The key of an assignment pattern item names a member or a type.
+            ExprKind::Pattern { items, .. } => opaque.extend(
+                items
+                    .iter()
+                    .filter_map(|item| item.key)
+                    .map(|key| native.expression(key).tokens),
+            ),
+            _ => {}
+        }
+    }
+    expressions.into_iter().find_map(|id| {
+        let expression = native.expression(id);
+        let ExprKind::Name(name) = &expression.kind else {
+            return None;
+        };
+        if opaque
+            .iter()
+            .any(|outer| contains(*outer, expression.tokens))
+        {
+            return None;
+        }
+        let name = instances::normalize_identifier(&name.spelling);
+        (variables.contains_key(&name)
+            && !dimensions.const_env.contains_key(&name)
+            && !dimensions.parameter_values.contains_key(&name))
+        .then_some(name)
+    })
+}
+
+/// The ports and the variables and nets that the design element of `tree`
+/// declares in its own scope, by their normalized names, with whether they
+/// may be unpacked arrays: they have unpacked dimensions, or a type name,
+/// which may name an unpacked array type.
+pub(super) fn element_variables(tree: &AnalysisContext<'_>) -> HashMap<String, bool> {
+    use celox_sv_syntax::{BodyItemKind, DataDeclaration, DataTypeKind, PortKind};
+    let mut names = HashMap::default();
+    let Ok(unit) = tree.root_unit() else {
+        return names;
+    };
+    let native = tree.declarations();
+    let named = |id: celox_sv_syntax::TypeId| {
+        !matches!(
+            native.data_type(id).kind,
+            DataTypeKind::Builtin(_) | DataTypeKind::Implicit
+        )
+    };
+    for port in &unit.ports {
+        if let PortKind::Named(name) | PortKind::Explicit { name, .. } = &port.kind {
+            names.insert(
+                instances::normalize_identifier(&name.spelling),
+                !port.dimensions.is_empty() || port.data_type.is_none_or(named),
+            );
+        }
+    }
+    let mut pending = unit.items.clone();
+    while let Some(id) = pending.pop() {
+        let (data_type, declarators) = match &native.body_item(id).kind {
+            BodyItemKind::Region(items) => {
+                pending.extend(items);
+                continue;
+            }
+            BodyItemKind::Net(id) => {
+                let declaration = native.net_declaration(*id);
+                (declaration.data_type, &declaration.variables)
+            }
+            BodyItemKind::Data(id) => match native.data_declaration(*id) {
+                DataDeclaration::Variables(declaration)
+                | DataDeclaration::Constructed(declaration) => {
+                    (declaration.data_type, &declaration.variables)
+                }
+                DataDeclaration::Unconverted(_) => continue,
+            },
+            _ => continue,
+        };
+        names.extend(declarators.iter().map(|declarator| {
+            (
+                instances::normalize_identifier(&declarator.name.spelling),
+                !declarator.dimensions.is_empty() || named(data_type),
+            )
+        }));
+    }
+    names
 }
 
 /// Reject an indexed part-select width that is not a positive constant.

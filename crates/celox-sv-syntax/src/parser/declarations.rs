@@ -1278,6 +1278,22 @@ impl Parser<'_> {
     pub(super) fn parameter_declaration(&mut self) -> Result<ParameterDeclarationId> {
         let start = self.at;
         let parameters = self.parameters(";")?;
+        // Only a parameter port list may omit a default value (IEEE
+        // 1800-2023 6.20.1, Syntax 6-6).
+        if let Some(parameter) = parameters.iter().find(|parameter| {
+            matches!(
+                parameter.kind,
+                ParameterKind::Value { default: None, .. } | ParameterKind::Type { default: None }
+            )
+        }) {
+            return Err(self.error_at(
+                parameter.tokens,
+                format!(
+                    "parameter `{}` declared without a value outside a parameter port list",
+                    parameter.name.value()
+                ),
+            ));
+        }
         let id = ParameterDeclarationId(self.parameter_declarations.len());
         self.parameter_declarations.push(ParameterDeclaration {
             parameters,

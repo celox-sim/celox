@@ -8918,3 +8918,5 @@ fn block_imports_bind_the_calls_of_folded_branches() {
     assert!(sensitivity.contains("\"q::g\""), "{sensitivity}");
     assert!(!sensitivity.contains("\"g\""), "{sensitivity}");
 }
+
+mod constant_expressions;
