@@ -210,6 +210,7 @@ fn validate_procedure(
             StatementKind::Assignment {
                 nonblocking: true, ..
             } if kind == AlwaysKind::Comb && procedure.kind == ProcedureKind::AlwaysComb => {
+                eprintln!("PROBE validation stmt={:?}", statement.tokens);
                 return Err(unsupported("nonblocking assignment inside always_comb"));
             }
             StatementKind::Timing { control, .. }

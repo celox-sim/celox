@@ -198,6 +198,7 @@ pub(in crate::ast) fn classify<'a>(
                 continue;
             }
             if process.kind == CombProcessKind::AlwaysStar && assigns_nonblocking(&process.body) {
+                eprintln!("PROBE timed_tasks always@* body={:?}", process.body);
                 return Err(unsupported("nonblocking assignment inside always_comb"));
             }
             retained.push(process);

@@ -109,6 +109,7 @@ impl Comb<'_, '_> {
                 nonblocking,
             } => {
                 if *nonblocking && !self.allow_nonblocking {
+                    eprintln!("PROBE comb nba lhs={lhs:?} rhs={rhs:?}");
                     return Err(unsupported("nonblocking assignment inside always_comb"));
                 }
                 self.assign(&mut store, frames, lhs, rhs)?;
@@ -120,6 +121,7 @@ impl Comb<'_, '_> {
                 nonblocking,
             } => {
                 if *nonblocking && !self.allow_nonblocking {
+                    eprintln!("PROBE comb nba concat parts={parts:?}");
                     return Err(unsupported("nonblocking assignment inside always_comb"));
                 }
                 self.assign_concat(&mut store, frames, parts, rhs)?;

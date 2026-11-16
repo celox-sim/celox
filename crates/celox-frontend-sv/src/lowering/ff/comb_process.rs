@@ -41,6 +41,7 @@ impl Ff<'_, '_> {
                 )
             });
             if nonblocking {
+                eprintln!("PROBE ff comb_process site={site:?} stmt={stmt:?}");
                 return Err(unsupported("nonblocking assignment inside always_comb"));
             }
         }
