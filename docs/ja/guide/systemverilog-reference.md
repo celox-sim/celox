@@ -67,6 +67,9 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
   サブルーチンの static 変数を `f.v` (23.6) で参照できるのは、`f` が単純名で
   見えるスコープ（そのクラスや基底クラスのメソッド、設計要素のサブルーチン）からだけです。
   インスタンス・package・名前付きブロック経由の参照と、unpacked 構造体型の変数は対象外です。
+  interface インスタンスの本体が宣言しない名前は、そのインスタンスを生成するスコープから
+  探索します（23.8）。interface ポート経由で到達する本体、virtual interface が指す interface のタスクと関数、
+  および別の interface の本体が宣言する interface インスタンスでは拒否します。
 - package: package ネット（[#1146](https://github.com/celox-sim/celox/issues/1146)）。
   package 変数はクロックやリセットにできません。
 - コンパイル単位: `$unit` 変数を宣言できるソースファイルは1つだけです。

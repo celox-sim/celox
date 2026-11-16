@@ -614,3 +614,203 @@
   (for (a b) (list (0 0) (0 1) (1 0) (1 1))
     (modify (set a a) (set b b))
     (assert_eq q (^ a b))))
+
+(case interface_bodies_name_objects_from_the_scope_that_instantiates_them
+  ; A name the body of an interface instance does not declare is searched
+  ; for from the scope that instantiates the instance, the generate block
+  ; that holds it first, then upward (IEEE 1800-2023 23.8): each instance
+  ; of `Mirror` reads the `CONTROL` of its own parent.
+  (source "interface_upward_names.sv" #"
+    interface Bus; logic [7:0] data; endinterface
+    interface Mirror;
+      wire [7:0] near, far, rooted, absolute, plain;
+      assign near = CONTROL.data;
+      assign far = TOPBUS.data;
+      assign rooted = Top.TOPBUS.data;
+      assign absolute = $root.Top.k;
+      assign plain = Top.k;
+    endinterface
+    module Left(input logic [7:0] d, output wire [7:0] y, far);
+      Bus CONTROL();
+      assign CONTROL.data = d;
+      Mirror m();
+      assign y = m.near;
+      assign far = m.far;
+    endmodule
+    module Right(input logic [7:0] d, output wire [7:0] y);
+      Bus CONTROL();
+      assign CONTROL.data = ~d;
+      Mirror m();
+      assign y = m.near;
+    endmodule
+    module Top(input logic [7:0] a, b,
+               output wire [7:0] left, right, far, rooted, absolute, plain, g0, g1, arr1);
+      Bus TOPBUS();
+      assign TOPBUS.data = a ^ b;
+      wire [7:0] k;
+      assign k = a + b;
+      Bus CONTROL();
+      assign CONTROL.data = b;
+      Left l(a, left, far);
+      Right r(b, right);
+      for (genvar i = 0; i < 2; i++) begin : g
+        Bus CONTROL();
+        assign CONTROL.data = a + i;
+        Mirror m();
+      end
+      Mirror arr[2]();
+      Mirror top_m();
+      assign g0 = g[0].m.near;
+      assign g1 = g[1].m.near;
+      assign arr1 = arr[1].near;
+      assign rooted = top_m.rooted;
+      assign absolute = l.m.absolute;
+      assign plain = top_m.plain;
+    endmodule
+  "#)
+  (top Top)
+  (for (a b) (list (0 0) (0x12 0x34) (0xff 0x01))
+    (modify (set a a) (set b b))
+    (assert_eq left a)
+    (assert_eq right (trunc 8 (^ b 0xff)))
+    (assert_eq far (^ a b))
+    (assert_eq g0 a)
+    (assert_eq g1 (trunc 8 (+ a 1)))
+    (assert_eq arr1 b)
+    (assert_eq rooted (^ a b))
+    (assert_eq absolute (trunc 8 (+ a b)))
+    (assert_eq plain (trunc 8 (+ a b)))))
+
+(case interface_bodies_in_escaped_generate_blocks_search_their_own_blocks
+  ; The generate block `\a.b ` that holds an interface instance is one
+  ; scope, its `.` part of the escaped name (IEEE 1800-2023 5.6.1): the
+  ; body's `CONTROL.data` is not searched for in a scope `\a`, which would
+  ; find the instance `\a.CONTROL `, but in the module (23.8).
+  (source "interface_upward_escaped.sv" #"
+    interface Bus; logic [7:0] data; endinterface
+    interface M(output wire [7:0] seen);
+      assign seen = CONTROL.data;
+    endinterface
+    module Top(input logic [7:0] a, output wire [7:0] y);
+      Bus CONTROL();
+      assign CONTROL.data = a;
+      Bus \a.CONTROL ();
+      assign \a.CONTROL .data = ~a;
+      if (1) begin : \a.b
+        M m(y);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0x5a))
+  (assert_eq y 0x5a)
+  (modify (set a 0x0f))
+  (assert_eq y 0x0f))
+
+(case interface_members_and_upward_names_of_one_spelling_are_apart
+  ; An interface that declares `data` and reads its parent's `data` as
+  ; `Top.data` reads two objects (IEEE 1800-2023 23.8): its own member,
+  ; and the module's signal.
+  (source "interface_member_and_upward_name.sv" #"
+    interface Echo(output wire [7:0] own_out, output wire [7:0] parent_out);
+      logic [7:0] data;
+      assign data = 8'h3c;
+      assign own_out = data;
+      assign parent_out = Top.data;
+    endinterface
+    module Top(input logic [7:0] a, output wire [7:0] own, parent);
+      wire [7:0] data;
+      assign data = a;
+      Echo e(own, parent);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0x5a))
+  (assert_eq own 0x3c)
+  (assert_eq parent 0x5a)
+  (modify (set a 0x81))
+  (assert_eq own 0x3c)
+  (assert_eq parent 0x81))
+
+(case spellings_of_one_object_are_one_writer
+  ; `Top.sig` and `$root.Top.sig` name the same variable from `Top` and
+  ; from the body of an interface instance of it (IEEE 1800-2023 23.3.1,
+  ; 23.8): one `always_ff` process that writes it through both is its only
+  ; writer (9.2.2.4).
+  (source "one_object_two_spellings.sv" #"
+    interface W(input logic clk, input logic rst);
+      always_ff @(posedge clk)
+        if (rst) Top.sig <= 0;
+        else $root.Top.sig <= Top.sig + 1;
+    endinterface
+    module Top(input logic clk, input logic rst, output logic [7:0] sig, output logic [7:0] own);
+      W w(clk, rst);
+      always_ff @(posedge clk)
+        if (rst) Top.own <= 0;
+        else $root.Top.own <= Top.own + 2;
+    endmodule
+  "#)
+  (top Top)
+  (modify (set rst 1))
+  (tick clk)
+  (modify (set rst 0))
+  (tick clk)
+  (tick clk)
+  (tick clk)
+  (assert_eq sig 3)
+  (assert_eq own 6))
+
+(case interface_tasks_and_processes_wait_on_and_write_upward_names
+  ; The processes and tasks of an interface body wait on and write the
+  ; objects its outward names denote, from each parent (23.8).
+  (source "interface_upward_processes.sv" #"
+    interface Ctl; logic clk; logic [7:0] data; endinterface
+    interface Counter;
+      int n = 0;
+      int far = 0;
+      always @(posedge CONTROL.clk) n++;
+      always @(posedge TOPCTL.clk) far++;
+      task put(input logic [7:0] v);
+        @(posedge CONTROL.clk);
+        CONTROL.data = v;
+      endtask
+    endinterface
+    module Mid(output int seen, output int far);
+      Ctl CONTROL();
+      Counter c();
+      initial begin
+        CONTROL.clk = 0;
+        repeat (3) begin #1 CONTROL.clk = 1; #1 CONTROL.clk = 0; end
+      end
+      assign seen = c.n;
+      assign far = c.far;
+    endmodule
+    module Other(output int seen, output logic [7:0] data);
+      Ctl CONTROL();
+      Counter c();
+      initial begin
+        CONTROL.clk = 0;
+        fork
+          repeat (5) begin #1 CONTROL.clk = 1; #1 CONTROL.clk = 0; end
+          c.put(8'h5a);
+        join
+      end
+      assign seen = c.n;
+      assign data = CONTROL.data;
+    endmodule
+    module Top;
+      Ctl TOPCTL();
+      int a, b, f;
+      logic [7:0] d;
+      Mid m(a, f);
+      Other o(b, d);
+      initial begin
+        TOPCTL.clk = 0;
+        repeat (2) begin #1 TOPCTL.clk = 1; #1 TOPCTL.clk = 0; end
+      end
+      initial begin #30 $display("%0d %0d %0d %h", a, b, f, d); $finish; end
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "3 5 2 5a\n"))

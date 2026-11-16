@@ -220,6 +220,12 @@ impl ModuleBinding<'_> {
                     &dimensions,
                     Some(&interface),
                 )?;
+                let outward = self
+                    .imported
+                    .outward_names
+                    .get(&handle)
+                    .cloned()
+                    .unwrap_or_default();
                 let mut module = {
                     let tree = &AnalysisContext {
                         interface_instance: Some(timescales::interface_instance(
@@ -237,8 +243,29 @@ impl ModuleBinding<'_> {
                         &types,
                         self.interfaces.extra,
                         self.imported.declarations_only,
+                        &outward,
                     )
+                    .map_err(|error| {
+                        let blocks = generated_item
+                            .as_ref()
+                            .map_or(&[][..], |item| item.blocks());
+                        instance_body_reference(error, &handle, blocks, &interface_name)
+                    })
                 }?;
+                // The signals the body's outward names denote are this
+                // scope's, which declares them: the body holds them as their
+                // placeholders, which no member of the body is named.
+                let outer = |signal: &Signal| {
+                    matches!(
+                        virtual_interfaces::VirtualInterfaceSignal::of(&signal.name),
+                        Some(virtual_interfaces::VirtualInterfaceSignal::Upward { .. })
+                    ) && outward.iter().any(|name| name.name == signal.name)
+                };
+                module.signals.retain(|signal| !outer(signal));
+                if let Some(symbols) = module.symbols.as_mut() {
+                    symbols.state_signals.retain(|signal| !outer(signal));
+                    symbols.signals.retain(|signal| !outer(signal));
+                }
                 let port_syntax = SyntaxTree::empty();
                 let port_tree = module.constant_context(&port_syntax);
                 let port_symbols = module.symbols.as_ref().unwrap();
@@ -381,7 +408,10 @@ impl ModuleBinding<'_> {
                     self.port_assignments.push(assignment);
                 }
                 let symbols = module.symbols.as_ref().unwrap();
-                let names = binding_names(&module, symbols, &handle, &mut self.imported);
+                let mut names = binding_names(&module, symbols, &handle, &mut self.imported);
+                // The placeholders of the scope's objects stay, or name the
+                // scope's own signal they alias.
+                names.retain(|name, _| !outward.iter().any(|signal| signal.name == *name));
                 if let Some(item) = &generated_item {
                     let scope = self
                         .imported
@@ -397,6 +427,11 @@ impl ModuleBinding<'_> {
                             .insert(format!("{local_handle}.{member}"), bound.clone());
                     }
                 }
+                names.extend(
+                    outward
+                        .iter()
+                        .filter_map(|signal| Some((signal.name.clone(), signal.aliased.clone()?))),
+                );
                 let bound = instance_symbols(symbols, &names);
                 self.imported
                     .initial_processes
@@ -405,5 +440,45 @@ impl ModuleBinding<'_> {
             }
         }
         Ok(())
+    }
+}
+
+/// A hierarchical name that the body of interface instance `handle` does
+/// not declare is searched for from the scope that instantiates it, and
+/// upward from there (IEEE 1800-2023 23.8): the error says which instance,
+/// so that its parent resolves the name. A name of the body of an instance
+/// nested in another interface's body is not resolved.
+fn instance_body_reference(
+    error: AnalyzerError,
+    handle: &str,
+    blocks: &[String],
+    interface: &str,
+) -> AnalyzerError {
+    match error {
+        AnalyzerError::HierarchicalReference {
+            path,
+            components,
+            interface: None,
+        } => AnalyzerError::HierarchicalReference {
+            path,
+            components,
+            interface: Some(Box::new(crate::InterfaceBodyScope {
+                handle: handle.to_string(),
+                blocks: blocks.to_vec(),
+                interface: interface.to_string(),
+            })),
+        },
+        AnalyzerError::HierarchicalReference {
+            path,
+            interface: Some(_),
+            ..
+        } => unsupported(format!(
+            "hierarchical name `{path}` in the body of an interface instance nested in interface instance `{handle}`"
+        )),
+        AnalyzerError::WithWarnings { error, warnings } => AnalyzerError::WithWarnings {
+            error: Box::new(instance_body_reference(*error, handle, blocks, interface)),
+            warnings,
+        },
+        error => error,
     }
 }

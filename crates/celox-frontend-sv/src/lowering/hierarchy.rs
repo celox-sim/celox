@@ -438,6 +438,27 @@ impl<'a> Hierarchy<'a> {
         path.push(segment);
         Some(path)
     }
+
+    /// The path from the top instance of the instance that a name written
+    /// in `module` reaches from `start` along `path`; `None` if `module` has
+    /// several instances and the name starts at an ancestor.
+    fn absolute(
+        &self,
+        module: ModuleId,
+        start: HierarchicalStart,
+        path: &[(String, usize)],
+    ) -> Option<Vec<(String, usize)>> {
+        let mut absolute = match start {
+            HierarchicalStart::Root => Vec::new(),
+            HierarchicalStart::Ancestor(levels) => {
+                let mut absolute = self.instance_path(module)?;
+                absolute.truncate(absolute.len().checked_sub(levels)?);
+                absolute
+            }
+        };
+        absolute.extend(path.iter().cloned());
+        Some(absolute)
+    }
 }
 
 /// Resolve the hierarchical names of specialization `module` that its
@@ -456,6 +477,46 @@ pub(super) fn resolve(hierarchy: &Hierarchy<'_>, module: ModuleId) -> Vec<Hierar
     references
 }
 
+/// What name `components`, which starts at `$root`, denotes (IEEE 1800-2023
+/// 23.3.1), from whichever scope it is written in. The root of several
+/// top-level modules stands for `$root`, and its instances are the tops.
+fn root_name(
+    hierarchy: &Hierarchy<'_>,
+    components: &[String],
+) -> Result<Option<(HierarchicalStart, Found)>, sv::AnalyzerError> {
+    let start = if hierarchy.hidden_root {
+        1
+    } else if components.get(1) == Some(&hierarchy.root.0.name) {
+        2
+    } else {
+        return Ok(None);
+    };
+    Ok(hierarchy
+        .walk(hierarchy.root.1, components, start)?
+        .map(|found| (HierarchicalStart::Root, found)))
+}
+
+/// `start` and `found` of a name written in `module`, which a name from the
+/// top that reaches the only instance of `module` starts at the module
+/// instead: it names the module's own signal, as `Top.sig` does in `Top`
+/// for `$root.Top.sig`, and is one signal with it, which each process
+/// writes once.
+fn relative(
+    hierarchy: &Hierarchy<'_>,
+    module: ModuleId,
+    start: HierarchicalStart,
+    mut found: Found,
+) -> (HierarchicalStart, Found) {
+    if start == HierarchicalStart::Root
+        && found.modules == [module]
+        && hierarchy.instance_path(module).as_ref() == Some(&found.path)
+    {
+        found.path.clear();
+        return (HierarchicalStart::Ancestor(0), found);
+    }
+    (start, found)
+}
+
 /// Add the reference of the hierarchical name `components` of `module` to
 /// `references`. Whether the name denotes a signal not referenced yet.
 pub(super) fn resolve_name(
@@ -466,19 +527,7 @@ pub(super) fn resolve_name(
 ) -> Result<bool, sv::AnalyzerError> {
     let elaborated = &hierarchy.elaborated[&module];
     let resolved = if components[0] == "$root" {
-        // `$root.top. ...` (IEEE 1800-2023 23.3.1). The root of several
-        // top-level modules stands for `$root`, and its instances are the
-        // tops.
-        let start = if hierarchy.hidden_root {
-            1
-        } else if components.get(1) == Some(&hierarchy.root.0.name) {
-            2
-        } else {
-            return Ok(false);
-        };
-        hierarchy
-            .walk(hierarchy.root.1, components, start)?
-            .map(|found| (HierarchicalStart::Root, found))
+        root_name(hierarchy, components)?
     } else if starts_at_instance(elaborated, components)
         || components[0] == hierarchy.authored_name(module)
     {
@@ -500,7 +549,9 @@ pub(super) fn resolve_name(
                 (start, found)
             })
     };
-    let Some((start, found)) = resolved else {
+    let Some((start, found)) =
+        resolved.map(|(start, found)| relative(hierarchy, module, start, found))
+    else {
         return Ok(false);
     };
     let written = components[..found.length].join(".");
@@ -520,6 +571,8 @@ pub(super) fn resolve_name(
                 r#type: found.r#type,
                 is_net: found.is_net,
                 local: true,
+                interface_instance: None,
+                aliased: None,
             },
             start,
             path: Vec::new(),
@@ -534,6 +587,149 @@ pub(super) fn resolve_name(
             r#type: found.r#type,
             is_net: found.is_net,
             local: false,
+            interface_instance: None,
+            aliased: None,
+        },
+        start,
+        path: found.path,
+        targets: found
+            .modules
+            .into_iter()
+            .map(|module| (module, found.target.clone()))
+            .collect(),
+    });
+    Ok(true)
+}
+
+/// Add the reference of hierarchical name `components` of the body of
+/// interface instance `scope` of `module` to `references` (IEEE 1800-2023
+/// 23.8): the body does not declare it, so it is searched for in the scope
+/// that instantiates the instance, the generate blocks that hold it
+/// innermost first and then the module, and upward from the module as a
+/// name of the module is; a name that starts at `$root` as from any scope
+/// (23.3.1). Whether the name denotes a signal not referenced yet.
+pub(super) fn resolve_interface_name(
+    hierarchy: &Hierarchy<'_>,
+    module: ModuleId,
+    scope: &sv::InterfaceBodyScope,
+    components: &[String],
+    references: &mut Vec<HierarchicalReference>,
+) -> Result<bool, sv::AnalyzerError> {
+    // The generate blocks that hold the instance, outermost first: `g[1].u`
+    // is instance `u` of block `g[1]`.
+    let blocks = &scope.blocks;
+    let resolved = if components[0] == "$root" {
+        // A name that starts at `$root` denotes the same object from every
+        // scope.
+        root_name(hierarchy, components)?
+    } else {
+        let mut resolved = None;
+        for depth in (0..=blocks.len()).rev() {
+            let mut name = blocks[..depth].to_vec();
+            name.extend(components.iter().cloned());
+            if let Some(found) = hierarchy.downward(module, &name)? {
+                // The components of the blocks precede those of the name.
+                resolved = Some((
+                    HierarchicalStart::Ancestor(0),
+                    Found {
+                        length: found.length.saturating_sub(depth),
+                        ..found
+                    },
+                ));
+                break;
+            }
+        }
+        match resolved {
+            Some(resolved) => Some(resolved),
+            None => hierarchy
+                .upward(module, components, &mut HashMap::default())?
+                .map(|found| {
+                    let start = if found.rooted {
+                        HierarchicalStart::Root
+                    } else {
+                        HierarchicalStart::Ancestor(found.levels)
+                    };
+                    (start, found)
+                }),
+        }
+    };
+    let Some((start, found)) =
+        resolved.map(|(start, found)| relative(hierarchy, module, start, found))
+    else {
+        return Ok(false);
+    };
+    // The components that name the signal; the rest select in it.
+    let named = &components[..found.length.min(components.len())];
+    let written = named.join(".");
+    let body = |reference: &&mut HierarchicalReference| {
+        reference.signal.interface_instance.as_deref() == Some(scope.handle.as_str())
+    };
+    if references
+        .iter_mut()
+        .filter(body)
+        .any(|reference| reference.signal.paths.contains(&written))
+    {
+        return Ok(false);
+    }
+    let own = found.levels == 0 && found.path.is_empty() && start == HierarchicalStart::Ancestor(0);
+    // Another spelling of an object a name of the body already denotes,
+    // such as `Top.sig` and `$root.Top.sig`, is another name of the same
+    // signal: one object, written by each process once.
+    let object = hierarchy.absolute(module, start, &found.path);
+    if let Some(reference) = references.iter_mut().filter(body).find(|reference| {
+        if own {
+            reference.signal.aliased.as_ref() == Some(&found.target)
+        } else {
+            !reference.signal.local
+                && reference
+                    .targets
+                    .iter()
+                    .map(|(module, target)| (*module, target))
+                    .eq(found.modules.iter().map(|module| (*module, &found.target)))
+                && match (
+                    hierarchy.absolute(module, reference.start, &reference.path),
+                    &object,
+                ) {
+                    (Some(known), Some(object)) => known == *object,
+                    // Names from an ancestor of a module with several
+                    // instances are the same object only if spelled alike.
+                    _ => reference.start == start && reference.path == found.path,
+                }
+        }
+    }) {
+        reference.signal.paths.push(written);
+        return Ok(true);
+    }
+    // The body names every object of the scope by its placeholder, apart
+    // from its own members.
+    let name = sv::ast::virtual_interfaces::upward_signal(&scope.interface, &scope.handle, named);
+    // The module's own signal, which the body reads as the module does.
+    if own {
+        references.push(HierarchicalReference {
+            signal: sv::ast::HierarchicalSignal {
+                paths: vec![written],
+                name,
+                r#type: found.r#type,
+                is_net: found.is_net,
+                local: true,
+                interface_instance: Some(scope.handle.clone()),
+                aliased: Some(found.target),
+            },
+            start,
+            path: Vec::new(),
+            targets: Vec::new(),
+        });
+        return Ok(true);
+    }
+    references.push(HierarchicalReference {
+        signal: sv::ast::HierarchicalSignal {
+            paths: vec![written],
+            name,
+            r#type: found.r#type,
+            is_net: found.is_net,
+            local: false,
+            interface_instance: Some(scope.handle.clone()),
+            aliased: None,
         },
         start,
         path: found.path,

@@ -74,6 +74,10 @@ pub(super) struct Item {
     imports: SharedMap<String>,
     shadowed: Arc<HashSet<String>>,
     scope: String,
+    /// The generate blocks of `scope`, outermost first, each as a
+    /// hierarchical name spells it (`g[1]`): an escaped name may contain
+    /// `.` (IEEE 1800-2023 5.6.1), so `scope` cannot be split into them.
+    blocks: Arc<[String]>,
 }
 
 /// The names the imports of the enclosing generate blocks bind to another
@@ -227,6 +231,11 @@ impl Item {
 
     pub fn scope_name(&self) -> &str {
         &self.scope
+    }
+
+    /// The generate blocks that hold the item, outermost first.
+    pub fn blocks(&self) -> &[String] {
+        &self.blocks
     }
 
     /// `tree` analyzing the item, which sees the interface bindings of the
@@ -554,6 +563,8 @@ impl Item {
 struct Scope {
     imported: Arc<scope::ScopeSymbols>,
     path: String,
+    /// The blocks of `path`, outermost first.
+    blocks: Vec<String>,
     in_loop: bool,
     env: SharedEnv,
     literals: SharedMap<Expr>,
@@ -947,6 +958,7 @@ impl<'a> Elaborator<'a, '_> {
             imports: scope.imports.clone(),
             shadowed: scope.shadowed.clone(),
             scope: scope.path.clone(),
+            blocks: scope.blocks.clone().into(),
         });
     }
 
@@ -1725,6 +1737,7 @@ fn module_constant_functions(
             imports: SharedMap::default(),
             shadowed: Arc::default(),
             scope: String::new(),
+            blocks: Arc::default(),
         });
     }
     let mut functions = functions::native_functions(

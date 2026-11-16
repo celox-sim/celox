@@ -501,3 +501,41 @@ fn static_variable_references_resolve_where_they_are_written() {
         assert!(error.to_string().contains("f.v"), "{body}: {error}");
     }
 }
+
+/// A name the body of an interface does not declare denotes an object
+/// relative to where the instance is (IEEE 1800-2023 23.8). A module that
+/// receives the instance through an interface port, or an interface whose
+/// body instantiates it, is not that scope; the name is rejected there.
+#[test]
+fn outward_names_of_interfaces_through_ports_virtual_interfaces_and_nested_instances_are_unsupported()
+ {
+    let interfaces = "interface Ctl; logic clk; endinterface
+        interface Counter; int n = 0; always @(posedge CONTROL.clk) n++; endinterface";
+    for (design, expected) in [
+        (
+            "module User(Counter p); endmodule
+             module Top; Ctl CONTROL(); Counter c(); User u(c); endmodule",
+            "hierarchical name `CONTROL.clk` in the body of an interface that interface port `p` connects",
+        ),
+        (
+            "interface Outer; Counter inner(); endinterface
+             module Top; Ctl CONTROL(); Outer o(); endmodule",
+            "hierarchical name `CONTROL.clk` in the body of an interface instance nested in interface instance `o`",
+        ),
+        (
+            "interface Driver; task tick(); @(posedge CONTROL.clk); endtask endinterface
+             module Top; Ctl CONTROL(); Driver d(); virtual Driver v; endmodule",
+            "hierarchical name `CONTROL.clk` in a task or function of interface `Driver`, which a virtual interface names",
+        ),
+    ] {
+        let source = format!("{interfaces}\n{design}");
+        let error =
+            match Simulator::from_sv_sources(vec![(source.as_str(), Path::new("up.sv"))], "Top")
+                .build_interpreter()
+            {
+                Ok(_) => panic!("{design}: an outward name of this body is unsupported"),
+                Err(error) => error.to_string(),
+            };
+        assert!(error.contains(expected), "{design}: {error}");
+    }
+}

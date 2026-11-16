@@ -381,6 +381,7 @@ impl Packages {
                     &[],
                     &ModuleInterfaces::default(),
                     false,
+                    &[],
                 ) {
                     found.push((name, error));
                 }
