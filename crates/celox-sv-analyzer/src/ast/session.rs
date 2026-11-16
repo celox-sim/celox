@@ -96,6 +96,11 @@ pub(crate) struct Session {
     /// Whether the assertions of the design check its assertion control
     /// state (see [`assertion_control`]).
     pub(super) controls_assertions: bool,
+    /// While the parameters of a module are collected once its enumeration
+    /// members are constants, their types: an item of the pattern of an
+    /// array parameter may name one (see
+    /// [`array_parameters::constant_elements`]).
+    pub(super) enum_constant_types: Option<Arc<HashMap<String, semantic_types::ConstantType>>>,
 }
 
 impl Session {
