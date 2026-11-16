@@ -234,6 +234,7 @@ fn publish(
                 .with_net_resolution(signal.net_resolution())
                 .with_package_variable(signal.package_variable())
                 .with_hierarchical(signal.hierarchical())
+                .with_force_control(signal.force_role())
             })
             .collect();
         let instances = module

@@ -120,5 +120,6 @@ pub(super) fn identity_signal() -> Signal {
         is_const: false,
         package_variable: None,
         hierarchical: None,
+        force_control: None,
     }
 }

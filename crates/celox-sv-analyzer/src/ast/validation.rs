@@ -91,9 +91,9 @@ fn level_sensitive(
 }
 
 /// Timing controls, including delayed assignments, require process kernels.
-/// With `procedural_assigns`, so does a procedural continuous assignment,
-/// which starts or ends a driver that outlives the statement (IEEE 1800-2023
-/// 10.6.1). Typed leaf restrictions remain in their semantic binders.
+/// With `procedural_assigns`, so does a procedural continuous assignment or
+/// a force, which starts or ends a driver that outlives the statement (IEEE
+/// 1800-2023 10.6.1, 10.6.2). Typed leaf restrictions remain in their semantic binders.
 fn has_timing_control(
     root: celox_sv_syntax::StatementId,
     native: &celox_sv_syntax::Declarations,
@@ -146,7 +146,10 @@ fn has_timing_control(
         ) || procedural_assigns
             && matches!(
                 statement.kind,
-                StatementKind::ProceduralAssign(_) | StatementKind::ProceduralDeassign(_)
+                StatementKind::ProceduralAssign(_)
+                    | StatementKind::ProceduralDeassign(_)
+                    | StatementKind::ProceduralForce(_)
+                    | StatementKind::ProceduralRelease(_)
             )
         {
             return true;
