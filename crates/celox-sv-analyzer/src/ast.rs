@@ -78,6 +78,7 @@ pub mod packages;
 mod packed_structs;
 mod parameters;
 mod port_owners;
+mod primitives;
 mod timing;
 mod type_binding;
 pub(crate) use parameters::unbounded_parameter_marker;
@@ -733,6 +734,10 @@ pub enum ObjectPlace {
 pub struct CombProcess {
     /// Elaborated ticks, consumed by continuous_delays before IR publication.
     delay: Option<u64>,
+    /// The value a delayed assignment drives before its first delay ends:
+    /// the initial value of a sequential UDP's output (IEEE 1800-2023
+    /// 29.3.3); x if `None`.
+    delay_initial: Option<Expr>,
     /// A declaration's independent net delay, consumed before IR publication.
     net_delay: bool,
     /// Whether the continuous assignment or gate states a drive strength
