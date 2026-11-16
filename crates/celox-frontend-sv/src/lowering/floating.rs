@@ -110,6 +110,11 @@ fn binary(op: sv::ir::BinaryOp) -> Option<(FB, bool)> {
         B::Pow => (FB::Pow, false),
         B::Eq => (FB::Eq, true),
         B::Ne => (FB::Ne, true),
+        // The comparisons of a `case` statement on a real value: a real has
+        // no unknown bits, so they compare the values (IEEE 1800-2023 12.5,
+        // 11.4.5). Table 11-1 keeps the operators themselves off reals.
+        B::EqCase => (FB::Eq, true),
+        B::NeCase => (FB::Ne, true),
         B::Lt => (FB::Lt, true),
         B::Le => (FB::Le, true),
         B::Gt => (FB::Gt, true),
