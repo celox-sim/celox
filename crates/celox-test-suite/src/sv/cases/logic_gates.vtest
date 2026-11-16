@@ -160,3 +160,71 @@ endmodule
   (top Top)
   (for (v m expected) (list (0 0 0) (1 0 2) (1 1 0) (0 1 0))
     (modify (set a (fourstate v m))) (assert_eq y (fourstate expected 0))))
+
+; A combinational user-defined primitive drives its output with the output
+; of the first table entry its inputs match, and x when none does; `?`
+; matches any input, `b` a 0 or a 1, and `x` an input that is neither (z
+; included) (IEEE 1800-2023 29.3, 29.3.5). Its instances are named or not
+; (29.8).
+(case combinational_primitive_tables
+  (four_state)
+  (source "udp.sv" #"
+primitive mux2 (y, s, a, b);
+  output y;
+  input s, a, b;
+  table
+  // s a b : y
+     0 1 ? : 1;
+     0 0 ? : 0;
+     1 ? 1 : 1;
+     1 ? 0 : 0;
+     x 0 0 : 0;
+     x 1 1 : 1;
+  endtable
+endprimitive
+primitive inv (output o, input i);
+  table
+    0 : 1;
+    1 : 0;
+  endtable
+endprimitive : inv
+module Top(input logic s, a, b, output wire y, n);
+  mux2 m(y, s, a, b);
+  inv (n, a);
+endmodule
+"#)
+  (top Top)
+  (for (sv sm av am bv bm yv ym nv nm)
+    (list
+      (0 0 1 0 0 0 1 0 0 0)
+      (0 0 0 0 1 0 0 0 1 0)
+      (1 0 0 0 1 0 1 0 1 0)
+      (1 0 1 0 0 0 0 0 0 0)
+      (0 1 1 0 1 0 1 0 0 0)
+      (0 1 0 0 1 0 1 1 1 0)
+      (0 0 0 1 1 0 1 1 1 1)
+      (1 0 1 0 0 1 1 1 0 0)
+      (1 0 1 0 1 1 1 1 0 0)
+    )
+    (modify (set s (fourstate sv sm)) (set a (fourstate av am)) (set b (fourstate bv bm)))
+    (assert_eq y (fourstate yv ym)) (assert_eq n (fourstate nv nm))))
+
+; An instance of a user-defined primitive may have a delay (29.8), which
+; delays its output as a continuous assignment delay does.
+(case delayed_primitive_instances
+  (source "udp_delay.sv" #"
+primitive buffer (out, in);
+  output out;
+  input in;
+  table
+    0 : 0;
+    1 : 1;
+  endtable
+endprimitive
+module Top(input bit a, output wire y);
+  buffer #3 b(y, a);
+endmodule
+"#)
+  (top Top) (run_until 4) (assert_eq y 0)
+  (set a 1) (run_until 6) (assert_eq y 0)
+  (run_until 8) (assert_eq y 1))

@@ -244,6 +244,12 @@ impl Parser<'_> {
             }
             let root = scopes.is_empty() && delimiters.is_empty();
             let start = pending.as_ref().map_or(self.at, |value| value.0);
+            if root && self.peek() == "primitive" {
+                let primitive = self.primitive()?;
+                self.primitives.push(primitive);
+                pending = None;
+                continue;
+            }
             if self.unit_start() {
                 let id = SourceUnitId(units.len());
                 units.push(self.unit()?);
@@ -269,7 +275,7 @@ impl Parser<'_> {
                 Some(BodyItemKind::Parameter(self.parameter_declaration()?))
             } else if root
                 && pending.as_ref().is_some_and(|value| value.1 == self.at)
-                && self.logic_gate_start()
+                && (self.logic_gate_start() || self.primitive_instance_start())
             {
                 Some(BodyItemKind::LogicGate(Box::new(self.logic_gate()?)))
             } else if delimiters.is_empty() && self.peek() == "assign" {
@@ -804,7 +810,10 @@ impl Parser<'_> {
                 frames.push(frame);
                 continue;
             }
-            if frame.delimiters.is_empty() && frame.item_start && self.logic_gate_start() {
+            if frame.delimiters.is_empty()
+                && frame.item_start
+                && (self.logic_gate_start() || self.primitive_instance_start())
+            {
                 let start = self.at;
                 let gate = self.logic_gate()?;
                 frame.record(self, start, BodyItemKind::LogicGate(Box::new(gate)))?;
