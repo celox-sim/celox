@@ -563,8 +563,13 @@ pub(crate) fn eval_const_assignment_in_env(
     }
 }
 
-/// Evaluate and resize a constant expression in a case selector's comparison
-/// context without discarding X/Z masks.
+/// Evaluate a constant expression assigned to a value of `width` and
+/// `signed` without discarding X/Z masks.
+///
+/// The width is the context of the context-determined operands, which are
+/// extended before they are evaluated (IEEE 1800-2023 11.6.1, 11.8.2); the
+/// value keeps its own signedness until it is converted (11.8.1). A size
+/// cast evaluates its operand the same way (6.24.1).
 pub fn context_size_const_integral_literal(
     expr: &ConstExpr,
     constants: &impl Constants,
@@ -572,14 +577,15 @@ pub fn context_size_const_integral_literal(
     width: usize,
     signed: bool,
 ) -> Option<IntegralLiteral> {
-    if let Some(fill) = unbased_fill_from_const_expr(expr) {
-        let mut literal = integral_fill_literal(fill, width)?;
-        literal.signed = signed;
-        return Some(literal);
-    }
-    let literal = eval_const_integral_literal_with_types(expr, constants, types)?;
-    let extension = signed_extension(&literal, literal.signed);
-    Some(resize_integral_literal(literal, width, signed, extension))
+    eval_const_integral_literal_with_types(
+        &ConstExpr::Resize {
+            expr: Box::new(expr.clone()),
+            width,
+            signed,
+        },
+        constants,
+        types,
+    )
 }
 
 /// Evaluate an integral expression in the common context of a case-generate.
@@ -1688,6 +1694,22 @@ pub(crate) fn integral_literal_as_i128(literal: &IntegralLiteral, signed: bool) 
     }
     // Extend the sign as a bit pattern: 2^127 is not a positive i128.
     Some((value | (u128::MAX << literal.width)) as i128)
+}
+
+/// The value of a literal wider than 128 bits in the i128 slot of the
+/// constant environment, which holds it sign-extended from bit 127 (as
+/// typed substitution restores it); `None` for any other value.
+pub(crate) fn wide_integral_literal_as_i128(literal: &IntegralLiteral) -> Option<i128> {
+    if literal.mask != BigUint::default() {
+        return None;
+    }
+    let high = &literal.value >> 127usize;
+    let all_ones = (BigUint::from(1u8) << literal.width.checked_sub(127)?) - BigUint::from(1u8);
+    if high != BigUint::default() && high != all_ones {
+        return None;
+    }
+    let low = &literal.value & BigUint::from(u128::MAX);
+    Some(u128::try_from(low).ok()? as i128)
 }
 
 fn eval_integral_unary(op: UnaryOp, mut literal: IntegralLiteral) -> IntegralLiteral {

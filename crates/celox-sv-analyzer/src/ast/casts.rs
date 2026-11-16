@@ -202,18 +202,30 @@ pub(super) fn cast_constant_target(
     }
     let parameter_types = parameter_types_from_const_env(const_env);
     let operand_type = infer_const_expr_type(&operand, &parameter_types)?;
+    let context_width = match target {
+        RuntimeCastTarget::Integral { target, .. } | RuntimeCastTarget::Zero(target) => {
+            target.width
+        }
+        RuntimeCastTarget::Signing(_)
+        | RuntimeCastTarget::Real { .. }
+        | RuntimeCastTarget::String => 0,
+    };
     let literal = if let ConstExpr::Literal(literal) = &operand {
         typecheck::parse_integral_literal(literal)?
     } else {
         let ir_operand: crate::ir::ConstExpr = operand.clone().into();
-        let ir_parameter_types = parameter_types
-            .iter()
-            .map(|(name, r#type)| (name.clone(), (r#type.width, r#type.signed)))
-            .collect();
-        typecheck::eval_const_integral_literal_with_types(
+        // A cast to a wider type evaluates its operand as an assignment to a
+        // variable of that type (IEEE 1800-2023 6.24.1): the target width is
+        // the context of its context-determined operands (11.6.1).
+        typecheck::eval_const_assignment_in_env(
             &ir_operand,
             const_env,
-            &ir_parameter_types,
+            &|name| {
+                parameter_types
+                    .get(name)
+                    .map(|r#type| (r#type.width, r#type.signed))
+            },
+            context_width,
         )
         .or_else(|| {
             let operand_value = eval_ast_const_expr(&tree.functions, &operand, const_env)?;

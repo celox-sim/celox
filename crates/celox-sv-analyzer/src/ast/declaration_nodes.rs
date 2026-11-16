@@ -46,15 +46,9 @@ impl Parameter {
         if self.floating.is_some() {
             return None;
         }
-        let mut value =
-            substitute_typed_parameter_literals(self.value()?.clone(), constants, parameter_types);
-        if self.declared_is_2state {
-            value = ConstExpr::Unary {
-                op: UnaryOp::ToTwoState,
-                expr: Box::new(value),
-            };
-        }
-        let value: crate::ir::ConstExpr = value.into();
+        let value: crate::ir::ConstExpr =
+            substitute_typed_parameter_literals(self.value()?.clone(), constants, parameter_types)
+                .into();
         let environment = const_functions::Environment {
             constants,
             functions,
@@ -67,7 +61,47 @@ impl Parameter {
             // real parameters retain their floating type.
             typecheck::round_real_to_i128(typecheck::eval_real_const_expr(&value, &environment)?)
         } else {
-            typecheck::eval_const_expr_in_env(&value, &environment)?
+            // A typed parameter is assigned its value (6.20.2): the declared
+            // width is the context of the context-determined operands, which
+            // are extended before they are evaluated (11.6.1, 11.8.2). The
+            // value keeps its own signedness until it is converted (11.8.1).
+            let two_state = |value| {
+                if self.declared_is_2state {
+                    crate::ir::ConstExpr::Unary {
+                        op: crate::ir::UnaryOp::ToTwoState,
+                        expr: Box::new(value),
+                    }
+                } else {
+                    value
+                }
+            };
+            let signed = self.declared_signed.unwrap_or(false);
+            let assigned = |value, width| {
+                two_state(crate::ir::ConstExpr::Resize {
+                    expr: Box::new(value),
+                    width,
+                    signed,
+                })
+            };
+            match self.declared_width {
+                None => typecheck::eval_const_expr_in_env(&two_state(value), &environment)?,
+                Some(width) if width <= 128 => {
+                    typecheck::eval_const_expr_in_env(&assigned(value, width), &environment)?
+                }
+                Some(width) => {
+                    if let Some(literal) = typecheck::eval_const_integral_literal_in_env(
+                        &assigned(value.clone(), width),
+                        &environment,
+                        &|_| None,
+                    ) {
+                        // A wider value is numeric only as a sign-extended
+                        // i128; the literal resolution keeps any other.
+                        typecheck::wide_integral_literal_as_i128(&literal)?
+                    } else {
+                        typecheck::eval_const_expr_in_env(&two_state(value), &environment)?
+                    }
+                }
+            }
         };
         // A signing without a range applies to the range of the final value
         // (IEEE 1800-2023 6.20.2).
