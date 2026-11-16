@@ -390,7 +390,21 @@ pub(super) fn alias_base_type(
     binding::bind_alias_in(id, native, tree, session, &context, defer_class_defaults)
 }
 
-/// Builtin integral identity/width without syntax or aggregate layout.
+/// [`builtin_type`], or the type of named events (IEEE 1800-2023 15.5), a
+/// handle whose semantic type names its built-in class in `table`.
+pub(super) fn builtin_type_in(
+    table: &mut semantic_types::TyTable,
+    name: &str,
+    signing: Option<bool>,
+) -> Option<Type> {
+    if name == "event" {
+        return Some(super::classes::handle(table, super::events::CLASS));
+    }
+    builtin_type(name, signing)
+}
+
+/// Builtin integral identity/width without syntax or aggregate layout. The
+/// type of named events is a class handle, which [`builtin_type_in`] binds.
 pub(super) fn builtin_type(name: &str, signing: Option<bool>) -> Option<Type> {
     let (kind, width, signed) = match name {
         "real" | "realtime" => (TypeKind::Real, Some(64), true),
@@ -407,8 +421,6 @@ pub(super) fn builtin_type(name: &str, signing: Option<bool>) -> Option<Type> {
         "integer" => (TypeKind::Logic, Some(32), true),
         "time" => (TypeKind::Logic, Some(64), false),
         "chandle" => (TypeKind::Chandle, Some(64), false),
-        // A named event is a handle (IEEE 1800-2023 15.5).
-        "event" => return Some(super::classes::handle_shape(super::events::CLASS)),
         _ => return None,
     };
     let mut ty = Type::new(kind);

@@ -188,11 +188,12 @@ impl Instances {
     }
 
     /// The references of the signals of `module` that denote a member of an
-    /// instance.
+    /// instance, with the types the analyses of `design` read.
     pub(super) fn references(
         &self,
         module: &sv::ir::Module,
         definitions: &Definitions<'_>,
+        design: &mut sv::Design,
     ) -> Vec<HierarchicalReference> {
         module
             .signals()
@@ -212,7 +213,7 @@ impl Instances {
                     sv::ast::HierarchicalSignal {
                         paths: Vec::new(),
                         name: signal.name().to_string(),
-                        r#type: declared.r#type.clone(),
+                        r#type: declared.declared_type(design),
                         is_net: declared.is_net,
                         local: false,
                     },

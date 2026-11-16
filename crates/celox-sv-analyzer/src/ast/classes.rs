@@ -1354,9 +1354,8 @@ pub(super) fn handle(table: &mut semantic_types::TyTable, name: &str) -> Type {
     ty
 }
 
-/// [`handle`] without its semantic type, for the built-in types of
-/// [`super::type_binding::builtin_type`], which their readers bind.
-pub(super) fn handle_shape(name: &str) -> Type {
+/// The shape of the handle type of class `name`, which [`handle`] binds.
+fn handle_shape(name: &str) -> Type {
     let mut ty = Type::new(
         // A semaphore is a heap object, which collection reclaims.
         if name == super::processes::CLASS {
