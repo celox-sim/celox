@@ -1371,10 +1371,36 @@ pub fn declare_counter_slots(
     variables: &mut SymbolicVariables,
     candidates: impl IntoIterator<Item = crate::SourceVarId>,
 ) -> Vec<celox_design::CounterSlots<crate::SourceVarId>> {
-    let mut candidates: Vec<_> = candidates
+    let candidates: Vec<_> = candidates
         .into_iter()
         .filter(|id| watchable(variables, id))
         .collect();
+    declare_slots(variables, candidates)
+}
+
+/// [`declare_counter_slots`] for hidden variables the host watches itself,
+/// such as the buffer of an expression argument of `$monitor`: they are
+/// state of the module even though no name reaches them. Unpacked arrays
+/// are still skipped.
+pub fn declare_hidden_counter_slots(
+    variables: &mut SymbolicVariables,
+    candidates: impl IntoIterator<Item = crate::SourceVarId>,
+) -> Vec<celox_design::CounterSlots<crate::SourceVarId>> {
+    let candidates: Vec<_> = candidates
+        .into_iter()
+        .filter(|id| {
+            variables
+                .get(id)
+                .is_some_and(|var| var.metadata.array_dims.is_empty())
+        })
+        .collect();
+    declare_slots(variables, candidates)
+}
+
+fn declare_slots(
+    variables: &mut SymbolicVariables,
+    mut candidates: Vec<crate::SourceVarId>,
+) -> Vec<celox_design::CounterSlots<crate::SourceVarId>> {
     candidates.sort_unstable();
     candidates.dedup();
     candidates

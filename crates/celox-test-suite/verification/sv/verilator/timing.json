@@ -1879,6 +1879,17 @@
           "LIMITATIONS.md#systemverilog-suite"
         ]
       }
+    },
+    {
+      "category": "Sequential",
+      "detail": "timing::monitor_reports_changes_of_expression_arguments at 4087:3: expect_output: expected [49, 32, 48, 32, 48, 10, 49, 32, 49, 32, 48, 10, 51, 32, 49, 32, 48, 10], got [49, 32, 48, 32, 48, 10, 49, 32, 48, 32, 48, 10, 49, 32, 49, 32, 48, 10, 51, 32, 49, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "timing::monitor_reports_changes_of_expression_arguments",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }
