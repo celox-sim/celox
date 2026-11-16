@@ -1980,7 +1980,7 @@ impl Expr {
 
     /// `self` as a select position: a value whose operands are such
     /// values, or `None`.
-    fn to_const(&self) -> Option<ConstExpr> {
+    pub fn to_const(&self) -> Option<ConstExpr> {
         let go = |expr: &Expr| expr.to_const().map(Box::new);
         Some(match self {
             Expr::Ident(name) => ConstExpr::Ident(name.clone()),
@@ -2205,7 +2205,7 @@ impl ConstExpr {
     }
 
     /// `self` with each identifier `name` replaced by `value`.
-    fn substitute(&self, name: &str, value: &ConstExpr) -> ConstExpr {
+    pub fn substitute(&self, name: &str, value: &ConstExpr) -> ConstExpr {
         let go = |expr: &ConstExpr| Box::new(expr.substitute(name, value));
         match self {
             ConstExpr::Ident(ident) if ident == name => value.clone(),

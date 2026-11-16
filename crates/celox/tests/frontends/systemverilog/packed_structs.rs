@@ -827,6 +827,82 @@ endmodule"#;
     }
 }
 
+/// The display lines a simulation of `source` prints by time 10.
+fn display_lines(source: &str, four_state: bool) -> Vec<String> {
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("members.sv"))], "top")
+            .four_state(four_state)
+            .build()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    sim.drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => {
+                Some(String::from_utf8_lossy(&message).into_owned())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A process that writes members of the elements of packed array members
+/// in a `for` loop, at the loop's variable, as OpenTitan's usbdev writes
+/// `hw2reg.out_stall[i].d`, drives the bits those members take in the
+/// loop's iterations, and other processes or continuous assignments may
+/// drive the other members (IEEE 1800-2023 6.5, 12.7.1). Verilator 5.054
+/// prints the same lines.
+#[test]
+fn loops_drive_members_of_packed_array_member_elements() {
+    let source = r#"`timescale 1ns/1ns
+package regs;
+  typedef struct packed { logic d; logic de; } bit_t;
+  typedef struct packed { bit_t [3:0] in_stall; bit_t [3:0] out_stall; logic [3:0] status; } hw2reg_t;
+endpackage
+module top;
+  import regs::*;
+  logic clk = 0;
+  hw2reg_t comb, ff;
+  logic [3:0] hit = 4'b0101;
+  assign comb.status = 4'h9;
+  always_comb begin
+    for (int i = 0; i < 4; i++) begin
+      comb.out_stall[i].d = 1'b1;
+      comb.out_stall[i].de = hit[i];
+      comb.in_stall[i].d = 1'b0;
+      comb.in_stall[i].de = ~hit[i];
+    end
+  end
+  always_ff @(posedge clk) ff.status <= 4'h6;
+  always_ff @(posedge clk) begin
+    for (int i = 0; i < 4; i++) begin
+      ff.out_stall[i].d <= hit[i];
+      ff.out_stall[i].de <= 1'b1;
+      ff.in_stall[i].d <= ~hit[i];
+      ff.in_stall[i].de <= 1'b0;
+    end
+  end
+  initial begin
+    #1 clk = 1;
+    #1 $display("%b %b", comb, ff);
+    hit = 4'b0011;
+    clk = 0;
+    #1 clk = 1;
+    #1 $display("%b %b", comb, ff);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            display_lines(source, four_state),
+            [
+                "01000100101110111001 10001000011101110110",
+                "01010000101011111001 10100000010111110110"
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
+
 // A run-time bit-select or indexed part-select of a member of a packed
 // structure selects within the member (IEEE 1800-2023 7.2.1, 11.5.1): the
 // bits it selects outside the member's range read X and are not written, and

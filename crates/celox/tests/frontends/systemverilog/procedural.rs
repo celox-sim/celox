@@ -330,6 +330,162 @@ fn always_comb_blocks_may_not_share_a_variable() {
     assert!(error.contains("shared.sv:11"), "{error}");
 }
 
+/// Processes that write bits of a variable through selects indexed by the
+/// variables of `for` loops, next to other drivers of its other bits. A
+/// process drives the bits it may write, those a select takes in the loop's
+/// iterations (IEEE 1800-2023 6.5, 12.7.1). Verilator 5.054 prints the same.
+const LOOP_SELECT_DRIVERS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic clk = 0;
+  logic [7:0] a = 8'ha5, b = 8'h0f;
+  logic [7:0] v, w, q;
+  logic [15:0] n;
+  always_comb for (int i = 0; i < 4; i++) v[i] = a[i];
+  assign v[7:4] = ~a[7:4];
+  always_comb for (int i = 0; i < 4; i++) w[2 * i] = a[i];
+  always_comb for (int i = 0; i < 4; i++) w[2 * i + 1] = b[i];
+  always_comb for (int i = 1; i >= 0; i--) for (int j = 0; j < 4; j++) n[i * 4 + j] = a[j + 4 - i * 4];
+  assign n[15:8] = 8'hc3;
+  always_ff @(posedge clk) q[7:4] <= ~a[7:4];
+  always_ff @(posedge clk) for (int i = 0; i < 4; i++) q[i] <= a[i];
+  initial begin
+    #1 $display("%h %h %h", v, w, n);
+    clk = 1;
+    #1 $display("%h", q);
+    a = 8'h3c;
+    clk = 0;
+    #1 clk = 1;
+    #1 $display("%h %h %h %h", v, w, n, q);
+  end
+endmodule
+"#;
+
+#[test]
+fn loop_selects_drive_the_bits_of_their_iterations() {
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(LOOP_SELECT_DRIVERS, Path::new("loop_drivers.sv"))],
+            "top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        assert_eq!(
+            display_lines(&mut sim),
+            ["55 bb c35a", "55", "cc fa c3c3 cc"],
+            "four-state {four_state}"
+        );
+    }
+}
+
+#[test]
+fn loop_selects_overlapping_other_drivers_are_rejected() {
+    for (process, other) in [
+        (
+            "always_comb for (int i = 0; i < 5; i++) v[i] = a[i];",
+            "assign v[7:4] = ~a[7:4];",
+        ),
+        (
+            "always_ff @(posedge clk) for (int i = 0; i < 4; i++) v[2 * i] <= a[i];",
+            "always_ff @(posedge clk) for (int i = 0; i < 4; i++) v[i + 4] <= a[i];",
+        ),
+    ] {
+        let source = format!(
+            "module top(input logic clk, input logic [7:0] a, output logic [7:0] v);
+               {process}
+               {other}
+             endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("overlap.sv"))],
+            "top",
+        )
+        .build()
+        .map(|_| ())
+        .expect_err("overlapping drivers are rejected")
+        .to_string();
+        assert!(
+            error.contains("multiple variable drivers for `v`"),
+            "{process}: {error}"
+        );
+    }
+}
+
+/// The display lines a simulation of `source`, of top module `tb`, prints
+/// by time 10.
+fn loop_display_lines(source: &str, four_state: bool) -> Vec<String> {
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("loops.sv"))], "tb")
+        .four_state(four_state)
+        .build()
+        .unwrap();
+    sim.run_until(10).unwrap();
+    display_lines(&mut sim)
+}
+
+/// A call that writes the variable of a loop through an output argument,
+/// of a system function or of a user function, makes it take other values
+/// than the loop's step gives it: a select at it may write any bit, all of
+/// which an edge process commits. Verilator 5.054 prints the same line.
+#[test]
+fn loop_variables_written_by_calls_select_any_bit() {
+    let source = r#"`timescale 1ns/1ns
+module tb;
+  logic clk = 0;
+  logic [7:0] q = '0, r = '0;
+  int tmp, tmp2;
+  function automatic int setf(output int x);
+    x = 3;
+    return 0;
+  endfunction
+  always_ff @(posedge clk)
+    for (int i = 0; i < 1; i++) begin
+      tmp = $sscanf("2", "%d", i);
+      q[i] <= 1'b1;
+    end
+  always_ff @(posedge clk)
+    for (int i = 0; i < 1; i++) begin
+      tmp2 = setf(i);
+      r[i] <= 1'b1;
+    end
+  initial begin #1 clk = 1; #1 $display("%h %h", q, r); end
+endmodule
+"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            loop_display_lines(source, four_state),
+            ["04 08"],
+            "four-state {four_state}"
+        );
+    }
+}
+
+/// The bounds of a select at the variable of a loop take the variable at
+/// its type's width: `i + 32'hffff_ffff` wraps to `i - 1` (IEEE 1800-2023
+/// 11.6.1), so the loop writes bits 0 to 2, which the edge process commits.
+/// Verilator 5.054 prints the same line.
+#[test]
+fn loop_select_bounds_wrap_at_the_width_of_their_operands() {
+    let source = r#"`timescale 1ns/1ns
+module tb;
+  logic clk = 0;
+  logic [7:0] a = 8'hff, q, v;
+  always_ff @(posedge clk) q[7:3] <= 5'h15;
+  always_ff @(posedge clk) for (int i = 0; i < 4; i++) q[i + 32'hffff_ffff] <= a[i];
+  always_comb for (int i = 0; i < 4; i++) v[i + 32'hffff_ffff] = a[i];
+  assign v[7:3] = 5'h0a;
+  initial begin #1 clk = 1; #1 $display("%h %h", q, v); end
+endmodule
+"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            loop_display_lines(source, four_state),
+            ["af 57"],
+            "four-state {four_state}"
+        );
+    }
+}
+
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn plan_builds_report_kernels_and_warnings_without_code() {
