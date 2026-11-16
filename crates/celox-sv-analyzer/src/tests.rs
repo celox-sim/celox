@@ -6195,6 +6195,24 @@ fn native_indexed_ranges_preserve_declared_direction_for_dynamic_bases() {
 }
 
 #[test]
+fn escaped_format_conversions_consume_empty_arguments() {
+    // `\045d` is a `%d` (IEEE 1800-2023 5.9.1): the empty argument after it
+    // is the value it converts, not one written as a space.
+    let source = r#"module Top(input int value);
+        initial $display("v=\045d",, value);
+    endmodule"#;
+    let ir = analyze_source(source, Path::new("escaped_format.sv")).unwrap();
+    let body = ir.modules()[0].initial_processes()[0].body();
+    let crate::ir::Stmt::SystemTask { args, .. } = &body[0] else {
+        panic!("expected display");
+    };
+    assert!(
+        matches!(args[1], crate::ir::SystemTaskArg::Empty),
+        "{args:?}"
+    );
+}
+
+#[test]
 fn native_system_task_arguments_preserve_strings_omissions_and_query_operands() {
     let source = r#"module Top(input int value);
         initial begin

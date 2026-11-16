@@ -427,8 +427,13 @@ pub(super) fn swrite_radix(name: &str) -> Option<system_functions::Radix> {
 /// (IEEE 1800-2023 21.2.1.2): flags, a width and a precision may precede
 /// each.
 pub(super) fn format_conversions(text: &str) -> Vec<char> {
+    // The formats are in the text after its escape sequences: `\045d` is a
+    // `%d` (IEEE 1800-2023 5.9.1, 21.2.1).
+    let decoded = typecheck::unescape_string_literal(text)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_else(|| text.to_string());
     let mut conversions = Vec::new();
-    let mut chars = text.chars().peekable();
+    let mut chars = decoded.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch != '%' {
             continue;
