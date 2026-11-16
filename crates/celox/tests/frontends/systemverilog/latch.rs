@@ -445,3 +445,58 @@ fn task_call_sensitivity_in_both_state_modes_at_o0_and_o2() {
         }
     }
 }
+
+// A continuous assignment whose bits each read other bits of its own net,
+// as a Gray-code decoder does (OpenPiton's async_fifo:
+// `assign b_wptr = {1'b0, b_wptr[ASIZE-1:1]} ^ g_wptr;`), settles bit by
+// bit (IEEE 1800-2023 10.3.2). A bit that reads itself, and an always_comb
+// that reads what it writes, still hold a previous value and are rejected.
+#[test]
+fn continuous_assignments_read_other_bits_of_their_net() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+            parameter ASIZE = 5;
+            reg [ASIZE-1:0] g_wptr = 5'b11010;
+            wire [ASIZE-1:0] b_wptr;
+            assign b_wptr[ASIZE-1:0] = ({1'b0, b_wptr[ASIZE-1:1]} ^ g_wptr[ASIZE-1:0]);
+            initial begin
+                #1 $display("%b", b_wptr);
+                g_wptr = 5'b00111;
+                #1 $display("%b", b_wptr);
+            end
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("gray.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        sim.run_until(5).unwrap();
+        let displayed: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8(message).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        // Gray 11010 is binary 10011, Gray 00111 is binary 00101.
+        assert_eq!(displayed, ["10011", "00101"], "four_state={four_state}");
+    }
+    for rejected in [
+        "module Top; logic [3:0] g; wire [3:0] b; assign b = b ^ g; endmodule",
+        "module Top; logic [3:0] g, b; always_comb b = {1'b0, b[3:1]} ^ g; endmodule",
+    ] {
+        let error =
+            celox::Simulation::from_sv_sources(vec![(rejected, Path::new("loop.sv"))], "Top")
+                .build_cranelift()
+                .err()
+                .unwrap_or_else(|| panic!("`{rejected}` is accepted"))
+                .to_string();
+        assert!(error.contains("latch inference"), "{error}");
+    }
+}
