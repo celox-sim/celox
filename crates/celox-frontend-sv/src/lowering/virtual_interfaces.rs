@@ -1,4 +1,6 @@
-//! Virtual interfaces (IEEE 1800-2023 25.9) across the elaborated design.
+//! Virtual interfaces (IEEE 1800-2023 25.9) across the elaborated design,
+//! and the module instances that the exported overrides of module classes
+//! select among (see `sv::ir::ExportedOverride`).
 //!
 //! The analyzer represents a virtual interface value as the id of an
 //! interface instance and a member access through it as a selection among
@@ -28,9 +30,40 @@ struct Instance {
     members: Vec<(String, String)>,
 }
 
-/// The interface instances of the elaborated design, numbered from 1 in
-/// hierarchy order, and what the interface instances and ports of each
-/// module instance denote.
+/// The definitions whose instances are numbered: the interfaces virtual
+/// interfaces name, and the module specializations whose classes' exported
+/// overrides read their items, each with its members.
+pub(super) struct Definitions<'a> {
+    pub(super) interfaces: Option<&'a sv::VirtualInterfaces>,
+    pub(super) modules: HashMap<String, Vec<sv::ast::virtual_interfaces::VirtualInterfaceMember>>,
+}
+
+impl Definitions<'_> {
+    fn contains(&self, definition: &str) -> bool {
+        self.interfaces
+            .is_some_and(|interfaces| interfaces.interfaces.contains_key(definition))
+            || self.modules.contains_key(definition)
+    }
+
+    fn member(
+        &self,
+        definition: &str,
+        member: &str,
+    ) -> Option<&sv::ast::virtual_interfaces::VirtualInterfaceMember> {
+        let members = match self
+            .interfaces
+            .and_then(|interfaces| interfaces.interfaces.get(definition))
+        {
+            Some(declaration) => &declaration.members,
+            None => self.modules.get(definition)?,
+        };
+        members.iter().find(|declared| declared.name == member)
+    }
+}
+
+/// The interface instances of the elaborated design, and the instances of
+/// the modules of [`Definitions`], numbered from 1 in hierarchy order, and
+/// what the interface instances and ports of each module instance denote.
 pub(super) struct Instances {
     instances: Vec<Instance>,
     /// The instances of each specialization.
@@ -40,13 +73,12 @@ pub(super) struct Instances {
 }
 
 impl Instances {
-    /// Number the interface instances below `root`, whose interfaces
-    /// `declarations` lists.
+    /// Number the instances below `root` of the `definitions`.
     pub(super) fn elaborate(
         root: ModuleId,
         module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
         elaborated: &HashMap<ModuleId, ElaboratedModule>,
-        declarations: &sv::VirtualInterfaces,
+        definitions: &Definitions<'_>,
     ) -> Self {
         let mut found = Self {
             instances: Vec::new(),
@@ -64,7 +96,7 @@ impl Instances {
             };
             found.paths.entry(module_id).or_default().push(path.clone());
             for handle in &module.interface_handles {
-                if !declarations.interfaces.contains_key(&handle.interface) {
+                if !definitions.contains(&handle.interface) {
                     continue;
                 }
                 let id = if handle.port {
@@ -142,22 +174,25 @@ impl Instances {
     /// The ids of the instances of each interface, in id order, which the
     /// analyzed modules' virtual interface accesses are expanded for (see
     /// `sv::ir::Module::expand_virtual_interface_instances`).
-    pub(super) fn ids(&self) -> HashMap<String, Vec<u32>> {
-        let mut ids: HashMap<String, Vec<u32>> = HashMap::default();
+    pub(super) fn ids(&self) -> HashMap<sv::ast::virtual_interfaces::DefinitionId, Vec<u32>> {
+        let mut ids: HashMap<sv::ast::virtual_interfaces::DefinitionId, Vec<u32>> =
+            HashMap::default();
         for (index, instance) in self.instances.iter().enumerate() {
-            ids.entry(instance.interface.clone())
-                .or_default()
-                .push(index as u32 + 1);
+            ids.entry(sv::ast::virtual_interfaces::DefinitionId::of(
+                &instance.interface,
+            ))
+            .or_default()
+            .push(index as u32 + 1);
         }
         ids
     }
 
     /// The references of the signals of `module` that denote a member of an
-    /// interface instance.
+    /// instance.
     pub(super) fn references(
         &self,
         module: &sv::ir::Module,
-        declarations: &sv::VirtualInterfaces,
+        definitions: &Definitions<'_>,
     ) -> Vec<HierarchicalReference> {
         module
             .signals()
@@ -172,10 +207,7 @@ impl Instances {
                     .instances
                     .get(usize::try_from(id).ok()?.checked_sub(1)?)?;
                 let (_, target) = instance.members.iter().find(|(name, _)| *name == member)?;
-                let declared = declarations.interfaces[&instance.interface]
-                    .members
-                    .iter()
-                    .find(|declared| declared.name == member)?;
+                let declared = definitions.member(&instance.interface, &member)?;
                 Some(HierarchicalReference::rooted(
                     sv::ast::HierarchicalSignal {
                         paths: Vec::new(),

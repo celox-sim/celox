@@ -386,15 +386,30 @@ impl ScopeElaboration<'_> {
         interface_scope_names.sort_unstable();
         interface_scope_names.dedup();
         let interface_handles = virtual_interfaces::handles(session, self.imported, &self.ports);
+        let module_classes = module_overrides::module_classes(
+            syntax_tree,
+            session,
+            &self.const_env,
+            &self.name,
+            &self.parameters,
+        );
+        let mut signals = self.signals;
+        if module_classes
+            .as_ref()
+            .is_some_and(|classes| !classes.instance_fields.is_empty())
+        {
+            signals.push(module_overrides::identity_signal());
+        }
 
         Module {
             name: self.name,
             program: self.program,
             interface_scope_names,
             interface_handles,
+            module_classes,
             parameters: self.parameters,
             ports: self.ports,
-            signals: self.signals,
+            signals,
             instances: self.instances,
             assignments,
             comb_processes: self.comb_processes,

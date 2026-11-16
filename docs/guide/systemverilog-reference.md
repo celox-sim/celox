@@ -292,6 +292,12 @@ blocks in programs. Two region deviations are listed under
   class passes its own such parameters on by name).
 - Module-local classes as type arguments to package-class specializations,
   and anonymous enumeration, struct, or union types as type arguments.
+- In an override, by a class of a module, of a virtual method of a class
+  declared outside the module (which other scopes call through handles of
+  that class): reading a module variable or port of a type other than an
+  integral type without unpacked dimensions or a class handle, static
+  variables, and calls of the module's own subroutines that read its
+  variables.
 - Properties that are `real`; fixed-size array properties that are
   `static` or `randc`, have more than one unpacked dimension or a
   negative bound or one outside `int`, are assigned or compared with an
