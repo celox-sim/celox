@@ -2,6 +2,32 @@
 
 use super::*;
 
+/// Whether `path` names a SystemVerilog source (`.sv` / `.svh`).
+pub(super) fn is_sv_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("sv") || ext.eq_ignore_ascii_case("svh"))
+}
+
+/// Split sources into Veryl and SystemVerilog sources by file extension.
+///
+/// Sources without an `.sv`/`.svh` extension are treated as Veryl, matching
+/// the historical behavior for extensionless in-memory sources.
+pub(super) fn partition_hdl_sources<T: Clone>(
+    sources: &[(T, std::path::PathBuf)],
+) -> (Vec<(T, std::path::PathBuf)>, Vec<(T, std::path::PathBuf)>) {
+    let mut veryl = Vec::new();
+    let mut sv = Vec::new();
+    for source in sources {
+        if is_sv_path(&source.1) {
+            sv.push(source.clone());
+        } else {
+            veryl.push(source.clone());
+        }
+    }
+    (veryl, sv)
+}
+
 /// Append extra source as a separate file entry if provided.
 pub(super) fn append_extra_source(
     sources: &mut Vec<(String, std::path::PathBuf)>,
