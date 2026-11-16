@@ -95,11 +95,24 @@ impl NativeSimulationHandle {
             .map(|s| (s.content, std::path::PathBuf::from(s.path)))
             .collect();
         append_extra_source(&mut src_pairs, &opts.extra_source);
-        let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+        let (veryl_pairs, sv_pairs) = partition_hdl_sources(&src_pairs);
+        let source_refs: Vec<(&str, &std::path::Path)> = veryl_pairs
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let builder = apply_options(celox::Simulation::from_sources(source_refs, &top), &opts);
+        let sv_refs: Vec<(&str, &std::path::Path)> = sv_pairs
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
+        // Dispatch on the source languages, as in the simulator handle.
+        let base = match (source_refs.is_empty(), sv_refs.is_empty()) {
+            (false, true) | (true, true) => celox::Simulation::from_sources(source_refs, &top),
+            (true, false) => celox::Simulation::from_sv_sources(sv_refs, &top),
+            (false, false) => {
+                celox::Simulation::from_sources(source_refs, &top).with_sv_sources(sv_refs)
+            }
+        };
+        let builder = apply_options(base, &opts);
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
