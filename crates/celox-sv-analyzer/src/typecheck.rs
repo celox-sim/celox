@@ -2028,8 +2028,12 @@ fn parse_small_literal(value: &str) -> Option<IntegralLiteral> {
             return None;
         }
         let value = value.parse::<u128>().ok()?;
+        if value.leading_zeros() == 0 {
+            // A sign bit would make it 129 bits wide.
+            return None;
+        }
         return Some(IntegralLiteral {
-            width: (128 - value.leading_zeros() as usize).max(32),
+            width: unsized_signed_width(128 - value.leading_zeros() as usize),
             signed: true,
             value: BigUint::from(value),
             mask: BigUint::default(),
@@ -2060,7 +2064,15 @@ fn parse_small_literal(value: &str) -> Option<IntegralLiteral> {
     }
     let value = u128::from_str_radix(digits, radix).ok()?;
     let natural_width = if bits_per_digit == 0 {
-        (128 - value.leading_zeros() as usize).max(32)
+        let bits = 128 - value.leading_zeros() as usize;
+        if signed && width.is_none() {
+            if bits == 128 {
+                return None;
+            }
+            unsized_signed_width(bits)
+        } else {
+            bits
+        }
     } else {
         digits.len().checked_mul(bits_per_digit)?
     };
@@ -2278,9 +2290,18 @@ fn parse_unbased_unsized_literal(value: &str) -> Option<IntegralLiteral> {
     })
 }
 
+/// The width of an unsized signed number whose magnitude has `bits` bits:
+/// 32, or a sign bit above a magnitude that needs more than 32 bits
+/// (IEEE 1800-2023, 5.7.1: 4294967296 is represented by at least 34 bits).
+/// A magnitude of exactly 32 bits keeps the 32-bit integer width, as other
+/// tools read 2147483648.
+fn unsized_signed_width(bits: usize) -> usize {
+    if bits <= 32 { 32 } else { bits + 1 }
+}
+
 fn parse_decimal_literal(value: &str) -> Option<IntegralLiteral> {
     let value = value.parse::<BigUint>().ok()?;
-    let width = value.bits().max(32) as usize;
+    let width = unsized_signed_width(value.bits() as usize);
     Some(IntegralLiteral {
         width,
         signed: true,
@@ -2321,7 +2342,12 @@ fn parse_based_literal(size: &str, based: &str) -> Option<IntegralLiteral> {
         parse_power_of_two_based_digits(digit_text, bits_per_digit)?
     };
     let natural_width = if bits_per_digit == 0 {
-        parsed.value.bits().max(32) as usize
+        let bits = parsed.value.bits() as usize;
+        if signed && width.is_none() {
+            unsized_signed_width(bits)
+        } else {
+            bits
+        }
     } else {
         digit_text.chars().count().checked_mul(bits_per_digit)?
     };
@@ -3124,6 +3150,22 @@ mod literal_tests {
                     truth.map(i128::from)
                 );
             }
+        }
+    }
+
+    #[test]
+    fn gives_unsized_signed_literals_over_32_bits_a_sign_bit() {
+        for (text, width) in [
+            ("2147483647", 32),
+            ("4294967295", 32),
+            ("4294967296", 34),
+            ("10000000000", 35),
+            ("'sd4294967296", 34),
+            ("'d4294967296", 33),
+            ("340282366920938463463374607431768211455", 129),
+        ] {
+            let lit = parse_integral_literal(text).unwrap();
+            assert_eq!(lit.width, width, "{text}");
         }
     }
 
