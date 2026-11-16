@@ -56,6 +56,52 @@ impl Comb<'_, '_> {
         Ok(pieces)
     }
 
+    /// Whether `node`, the value of bits `window` of variable `id`, reads
+    /// those bits only where it keeps them: an arm of a multiplexer that
+    /// is the read of the very bits it defines.
+    fn holds_only(&self, node: NodeId, id: SourceVarId, window: BitAccess) -> bool {
+        match self.arena.get(node) {
+            SLTNode::Input {
+                variable,
+                index,
+                access,
+                ..
+            } if *variable == id && index.is_empty() && *access == window => true,
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                !self.reads(*cond, id, window)
+                    && self.holds_only(*then_expr, id, window)
+                    && self.holds_only(*else_expr, id, window)
+            }
+            // A part of a wider value of the variable's bits.
+            SLTNode::Slice { expr, access } if access.lsb <= window.lsb => {
+                let lsb = window.lsb - access.lsb;
+                let inner = BitAccess::new(lsb, lsb + self.width(*expr) - 1);
+                self.holds_only(*expr, id, inner)
+            }
+            SLTNode::Concat(parts) => {
+                let mut lsb = window.lsb;
+                parts.iter().rev().all(|&(part, width)| {
+                    let part_window = BitAccess::new(lsb, lsb + width - 1);
+                    lsb += width;
+                    self.holds_only(part, id, part_window)
+                })
+            }
+            _ => !self.reads(node, id, window),
+        }
+    }
+
+    /// Whether `node` may read bits `window` of variable `id`.
+    fn reads(&self, node: NodeId, id: SourceVarId, window: BitAccess) -> bool {
+        self.node_sources(node).is_none_or(|sources| {
+            sources
+                .iter()
+                .any(|source| source.id == id && source.access.overlaps(&window))
+        })
+    }
     /// Execute one combinational process and return the logic it defines.
     pub fn lower_process(
         &mut self,
@@ -74,6 +120,12 @@ impl Comb<'_, '_> {
                     .is_ok_and(|parts| parts.iter().all(|(value, _)| value.is_some()))
             });
             if !defined {
+                // Bits that no path the process takes writes, such as
+                // those of a branch a parameter excludes, keep their value.
+                if self.hold_latches {
+                    self.held = true;
+                    continue;
+                }
                 return Err(unsupported(format!(
                     "latch inference inside always_comb for `{}` (bits {}:{})",
                     self.m.var(id).path.join("."),
@@ -116,9 +168,20 @@ impl Comb<'_, '_> {
                 let target = BitAccess::new(lsb, msb);
                 // A value that reads other bits of its own net defines each
                 // bit apart, from the current values of those bits.
-                let split = sources
+                let self_read = sources
                     .iter()
                     .any(|source| source.id == id && source.access.overlaps(&target));
+                // A value that keeps the bits on some paths, and reads them
+                // nowhere else, is a latch (IEEE 1800-2023 9.2.2.2,
+                // 9.2.2.3): it reads the bits' previous value, and is the
+                // same however often it is evaluated.
+                let held = self_read && !self.continuous && self.hold_latches && {
+                    let relative = BitAccess::new(lsb - origin, msb - origin);
+                    let sliced = self.slice(value, relative)?;
+                    self.holds_only(sliced, id, target)
+                };
+                self.held |= held;
+                let split = self_read && !held;
                 let pieces = if split {
                     self.own_bit_pieces(id, value, &sources, target, origin)?
                 } else {
@@ -129,7 +192,11 @@ impl Comb<'_, '_> {
                     let previous_sources = sources
                         .iter()
                         .copied()
-                        .filter(|source| source.id != id || !source.access.overlaps(&target))
+                        // A source the process writes is read before the write,
+                        // the bits a latch keeps included.
+                        .filter(|source| {
+                            held || source.id != id || !source.access.overlaps(&target)
+                        })
                         .filter(|source| !split || source.id != id)
                         .filter(|source| {
                             written_atoms.iter().any(|written| {
