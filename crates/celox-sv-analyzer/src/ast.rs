@@ -905,6 +905,10 @@ pub struct CombProcess {
     /// The drive strength the continuous assignment or gate states (IEEE
     /// 1800-2023 10.3.4, 28.11).
     drive_strength: Option<crate::ir::DriveStrength>,
+    /// Whether the process is a three-state gate (`bufif0`, `bufif1`,
+    /// `notif0` or `notif1`, IEEE 1800-2023 28.6), whose net keeps the
+    /// single-driver rule.
+    three_state_gate: bool,
     creation_order: usize,
     site: Option<crate::procedural::SourceSpan>,
     /// Where the procedure is written, for an `always @*` that becomes a

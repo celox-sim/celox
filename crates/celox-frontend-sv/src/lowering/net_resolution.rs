@@ -28,7 +28,10 @@ impl ResolvedNets {
     /// single-driver rule (and its "multiple net drivers" error) when a
     /// driver is not a plain continuous assignment or assigns a bit twice
     /// by itself, or when one of several drivers of a `wand`, `wor`,
-    /// `triand` or `trior` states a drive strength (10.3.4, 28.12.4). So does, in a two-state
+    /// `triand` or `trior` states a drive strength (10.3.4, 28.12.4), or
+    /// when a driver is a three-state gate, whose L and H outputs resolve
+    /// by strength (28.12.2) in a way that is not modelled for such a
+    /// gate. So does, in a two-state
     /// build, a net with an X or Z literal in a driver: the values of such
     /// a build cannot carry the high impedance that yields to another
     /// driver.
@@ -82,7 +85,10 @@ impl ResolvedNets {
                 .any(|driver| !participants.contains(&driver.0))
                 || participants.iter().any(|&process| {
                     let process = &processes[process];
-                    (several && process.has_drive_strength() && resolution != NetResolution::Wire)
+                    process.is_three_state_gate()
+                        || (several
+                            && process.has_drive_strength()
+                            && resolution != NetResolution::Wire)
                         || (!four_state
                             && process.body().iter().any(|statement| match statement {
                                 sv::ir::Stmt::Assign { rhs, .. }
