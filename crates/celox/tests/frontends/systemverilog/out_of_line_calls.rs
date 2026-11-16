@@ -6013,3 +6013,42 @@ fn reached_foreign_constructors_call_their_packages_dpi_imports() {
     );
     assert_eq!(run_tops(&source, &["b.made"]), [1]);
 }
+
+#[test]
+fn function_units_store_into_targets_of_nonblocking_assignments() {
+    // IEEE 1800-2023 10.4.2: the recursive `f` goes out of line and stores
+    // into `a`, which nonblocking assignments also update; each update
+    // still lands after the blocking store of its time slot.
+    let source = r#"`timescale 1ns/1ns
+module Top(output logic [7:0] first, output logic [7:0] second,
+           output logic [7:0] third, output logic [7:0] fourth);
+  logic [7:0] a = 0;
+  function automatic int f(int d, int v);
+    if (d > 0) return f(d - 1, v);
+    a = v;
+    return 0;
+  endfunction
+  initial begin
+    #1 a <= 1; void'(f(2, 7)); first = a;
+    #1 second = a;
+    void'(f(2, 9)); a <= 3; third = a;
+    #1 fourth = a;
+  end
+endmodule
+"#;
+    for four_state in [false, true] {
+        let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("nba.sv"))], "Top")
+            .four_state(four_state)
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+        sim.run_until(4).unwrap();
+        for (name, value) in [("first", 7u8), ("second", 1), ("third", 9), ("fourth", 3)] {
+            let signal = sim.signal(name);
+            assert_eq!(
+                sim.get(signal),
+                value.into(),
+                "{name} four_state={four_state}"
+            );
+        }
+    }
+}

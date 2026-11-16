@@ -272,8 +272,10 @@ impl SimModule {
     /// clock and reset ports of other instances alias.
     /// The part of [`Self::instrumented_storage`] whose stores assembly
     /// instruments in the units of processes and flip-flops only, which no
-    /// function unit may store into: what flip-flops' pending counts and
-    /// nonblocking assignments stage. Assembly instruments a function
+    /// function unit may store into: what flip-flops' pending counts
+    /// stage. A function unit's store into the target of a nonblocking
+    /// assignment makes the site queue its value, as a process kernel's
+    /// store does (`staged_nba_sites`). Assembly instruments a function
     /// unit's stores for the counters of waits and event controls as a
     /// process kernel's, the occurrences of flip-flop events included, and
     /// a combinational process calls none that stores into what
@@ -284,7 +286,6 @@ impl SimModule {
         self.pending_slots
             .iter()
             .map(|slots| slots.signal)
-            .chain(self.nba_sites.iter().map(|site| site.target))
             .collect()
     }
 
