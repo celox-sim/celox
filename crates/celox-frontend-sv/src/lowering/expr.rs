@@ -42,6 +42,30 @@ pub(super) fn lower_expr_with_context(
             arena,
         );
     }
+    lower_bits_with_context(
+        expr,
+        variables,
+        name_to_id,
+        constants,
+        parameter_types,
+        arena,
+        context_width,
+        context_signed,
+    )
+}
+
+/// [`lower_expr_with_context`] of the bits of `expr`, also where they hold
+/// a real value: an element of an array of reals reads its payload.
+pub(super) fn lower_bits_with_context(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+    arena: &mut SLTNodeArena<SourceVarId>,
+    context_width: Option<usize>,
+    context_signed: Option<bool>,
+) -> Option<(celox_slt::NodeId, HashSet<VarAtomBase<SourceVarId>>)> {
     match expr {
         sv::ir::Expr::Ident(name) => {
             let Some(id) = name_to_id.get(name).copied() else {
