@@ -122,8 +122,10 @@ constructs without a dedicated issue point to the frontend roadmap,
   reserves `$` for generated names.
 - Variable declaration initializers of members of an interface array.
 - Virtual interfaces <a id="virtual-interfaces"></a>: a `wait` statement
-  through a virtual interface held by an automatic variable, an argument,
-  or a class property; virtual interfaces of parameterized interfaces;
+  through a virtual interface held by an automatic variable or an argument,
+  or by a class property of an object one holds (a property of `this` or of
+  an object a static variable holds is watched); virtual interfaces of
+  parameterized interfaces;
   clocking blocks and nested interface instances reached through a virtual
   interface; writes to nets through a virtual interface; `$bits` of a call
   of an interface function through a virtual interface in a package or

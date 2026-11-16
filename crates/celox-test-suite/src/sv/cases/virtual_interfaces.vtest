@@ -704,6 +704,88 @@ endmodule
   (top Top) (run_until 20)
   (expect_output "module 5\nother 10\n"))
 
+(case waits_on_member_levels_through_class_properties
+  ; A handle that a class property holds, of the method's object or of an
+  ; object a module variable holds, is watched as the property is: a store
+  ; of the property re-evaluates the condition, so the wait follows the
+  ; member of the instance the handle denotes (IEEE 1800-2023 9.4.2, 9.4.3).
+  ; A store of the property of another object only evaluates it again.
+  (source "virtual_interfaces.sv" #"
+interface sif;
+    logic reset;
+endinterface
+class Driver;
+    virtual sif port;
+    task await_release(output time at);
+        wait (port.reset == 0);
+        at = $time;
+    endtask
+endclass
+module Top(output bit done);
+    sif a();
+    sif b();
+    Driver d, other;
+    time member, handle, outside;
+    initial begin
+        d = new;
+        other = new;
+        d.port = a;
+        a.reset = 1;
+        b.reset = 0;
+        fork
+            d.await_release(member);
+            #3 a.reset = 0;
+        join
+        a.reset = 1;
+        fork
+            d.await_release(handle);
+            #4 d.port = b;
+        join
+        d.port = a;
+        fork
+            begin wait (d.port.reset == 0); outside = $time; end
+            begin #2 other.port = a; #3 a.reset = 0; end
+        join
+        $display("%0d %0d %0d", member, handle, outside);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 100) (assert_eq done 1)
+  (expect_output "3 7 12\n"))
+
+(case waits_on_unknown_member_levels_through_class_properties
+  ; An unknown member does not satisfy the condition (12.4).
+  (source "virtual_interfaces.sv" #"
+interface sif;
+    logic reset;
+endinterface
+class Driver;
+    virtual sif port;
+    task await_release(output time at);
+        wait (port.reset == 0);
+        at = $time;
+    endtask
+endclass
+module Top(output bit done);
+    sif a();
+    Driver d;
+    time at;
+    initial begin
+        d = new;
+        d.port = a;
+        fork
+            d.await_release(at);
+            begin #2 a.reset = 1'bz; #2 a.reset = 0; end
+        join
+        $display("%0d", at);
+        done = 1;
+    end
+endmodule
+"#)
+  (four_state) (top Top) (run_until 100) (assert_eq done 1)
+  (expect_output "4\n"))
+
 (case waits_with_guards_signed_members_and_automatic_tasks
   ; The process evaluates a wait condition, so a read through a null
   ; handle that the condition guards against is not an error; a signed

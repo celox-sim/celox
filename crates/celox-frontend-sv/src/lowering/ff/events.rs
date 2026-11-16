@@ -754,6 +754,15 @@ pub(super) fn impure_call_reading(
                 }
                 // A property can change without the handle changing.
                 sv::ir::Callee::Object(op) => return Some(op.to_string()),
+                // A read through a virtual interface is a value of the
+                // handle and the member; when the handle is `null` it is
+                // an error (IEEE 1800-2023 25.9), which an extra evaluation
+                // may report again, after which the standard leaves the
+                // simulation's course to the tool.
+                sv::ir::Callee::Checked {
+                    check: sv::ir::AccessCheck::VirtualInterface,
+                    ..
+                } => continue,
                 sv::ir::Callee::Checked { .. } => return Some("tagged union access".into()),
                 sv::ir::Callee::Subroutine(name) => name,
             };

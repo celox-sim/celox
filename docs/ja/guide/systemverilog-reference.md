@@ -97,8 +97,9 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 - **識別子:** interface を使うデザインでは、自分の名前に `$` を使えません。
   単純識別子でないエスケープ識別子も使えません。展開が `$` を生成名用に予約します。
 - interface 配列のメンバに対する変数宣言初期化子。
-- virtual interface <a id="virtual-interfaces"></a>: 自動変数・引数・クラスプロパティに保持した
-  virtual interface 越しの `wait` 文。パラメータ付き interface の virtual interface。
+- virtual interface <a id="virtual-interfaces"></a>: 自動変数・引数、またはそれらが保持する
+  オブジェクトのクラスプロパティに保持した virtual interface 越しの `wait` 文（`this`
+  または静的変数が保持するオブジェクトのプロパティは監視します）。パラメータ付き interface の virtual interface。
   virtual interface 越しに到達する interface の clocking ブロック・入れ子インスタンス。
   virtual interface 越しのネットへの書き込み。package・クラス内での、virtual
   interface 越しの interface 関数呼び出しへの `$bits`（その解析は interface の

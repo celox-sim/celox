@@ -303,12 +303,39 @@ impl BodyBuilder<'_, '_, '_> {
         if handles.is_empty() {
             return Ok(vec![Stmt::Wait(condition)]);
         }
-        if !handles.iter().all(|handle| self.watched_handle(handle)) {
+        if !handles
+            .iter()
+            .all(|handle| self.watched_handle(handle) || self.watched_property(handle))
+        {
             return Err(unsupported_watch());
         }
         // The process evaluates the condition, so a read through `null`
         // fails only where the condition's guards let it be evaluated.
         Ok(vec![Stmt::Wait(condition)])
+    }
+
+    /// Whether a level wait can watch handle `handle` that a class property
+    /// holds, of the method's object (`this.p`, or `p` in a method) or of an
+    /// object a watched variable holds: the wait evaluates its condition
+    /// again after each store of the property, as it does for any property
+    /// it reads, and after each change of the variable, so it follows a
+    /// change of the handle as well as of the member it selects (IEEE
+    /// 1800-2023 9.4.2, 9.4.3). `this` does not change during the
+    /// activation.
+    fn watched_property(&self, handle: &Expr) -> bool {
+        let Expr::Call {
+            callee: Callee::Object(op),
+            args,
+            ..
+        } = handle
+        else {
+            return false;
+        };
+        let mut this = Expr::Ident(classes::THIS.to_string());
+        self.rename_expr(&mut this);
+        matches!(**op, system_functions::ObjectOp::Load(_))
+            && matches!(args.as_slice(), [Some(object)]
+                if *object == this || self.watched_handle(object))
     }
 
     /// Whether a wait can watch handle `handle`, of a virtual interface or a
@@ -458,10 +485,11 @@ pub(super) fn implicit_event_kind(body: &[Stmt], removed: &[Stmt], always_comb: 
     }
 }
 
-/// A wait through a virtual interface that is not a static variable.
+/// A wait through a virtual interface that neither a static variable nor a
+/// class property of a watched object holds.
 fn unsupported_watch() -> AnalyzerError {
     unsupported(
-        "wait on a member through a virtual interface held by an automatic variable, \
-         an argument or a class property",
+        "wait on a member through a virtual interface held by an automatic variable \
+         or an argument, or by a class property of an object that one holds",
     )
 }
