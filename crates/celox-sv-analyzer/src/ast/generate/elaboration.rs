@@ -467,10 +467,13 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         if !self.condition(*condition, &iteration, "loop-generate condition")? {
             return Ok(());
         }
-        self.remaining = self
-            .remaining
-            .checked_sub(1)
-            .ok_or_else(|| { eprintln!("PROBE unroll scope={:?} var={name} value={value}", parent.path); unsupported("loop-generate unroll limit exceeded") })?;
+        self.remaining = self.remaining.checked_sub(1).ok_or_else(|| {
+            eprintln!(
+                "PROBE unroll scope={:?} var={name} value={value}",
+                parent.path
+            );
+            unsupported("loop-generate unroll limit exceeded")
+        })?;
         let iteration = Rc::new(iteration);
         jobs.push(Job::Update {
             id,

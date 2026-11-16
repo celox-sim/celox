@@ -482,6 +482,19 @@ pub(super) fn array_parameters_from_scope(
             )?);
         }
     }
+    Ok(parameters)
+}
+
+/// The unpacked array parameters of the generate blocks of the scope, which
+/// elaborating the blocks finds: after the elements of the scope's own array
+/// parameters are constants, which a generate condition may read.
+pub(super) fn generate_array_parameters(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    const_env: &ConstEnv,
+    type_aliases: &TypeAliases,
+) -> Converted<Vec<ArrayParameter>> {
+    let mut parameters = Vec::new();
     // An array parameter of a generate block is a constant variable of the
     // block, named by it (IEEE 1800-2023 27.2), whose type and value are
     // those of the block.

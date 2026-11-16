@@ -812,10 +812,19 @@ fn parameter_override(
         )?
         .ok_or_else(|| {
             let mut k = format!("{:?}", declarations.expression(native).kind);
-            if let celox_sv_syntax::ExprKind::Cast { target, expression } = &declarations.expression(native).kind {
-                k.push_str(&format!(" TARGET={:?} EXPR={:?}", declarations.expression(*target).kind, declarations.expression(*expression).kind));
+            if let celox_sv_syntax::ExprKind::Cast { target, expression } =
+                &declarations.expression(native).kind
+            {
+                k.push_str(&format!(
+                    " TARGET={:?} EXPR={:?}",
+                    declarations.expression(*target).kind,
+                    declarations.expression(*expression).kind
+                ));
             }
-            eprintln!("PROBE override name={name} kind={}", k.chars().take(800).collect::<String>());
+            eprintln!(
+                "PROBE override name={name} kind={}",
+                k.chars().take(800).collect::<String>()
+            );
             unsupported("parameter override expression")
         })?
     };

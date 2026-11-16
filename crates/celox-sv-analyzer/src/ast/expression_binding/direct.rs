@@ -467,8 +467,16 @@ pub(in crate::ast) fn cast_target_native(
         .and_then(|name| dimensions.type_aliases.get(name))
     {
         (
-            casts::expr_type_from_type(&tree.functions, ty, &dimensions.const_env)
-                .ok_or_else(|| { eprintln!("PROBE cast target={:?} named={:?}", native.expression(target).kind, call_name(tree, target, native)); unsupported("cast target type") })?,
+            casts::expr_type_from_type(&tree.functions, ty, &dimensions.const_env).ok_or_else(
+                || {
+                    eprintln!(
+                        "PROBE cast target={:?} named={:?}",
+                        native.expression(target).kind,
+                        call_name(tree, target, native)
+                    );
+                    unsupported("cast target type")
+                },
+            )?,
             false,
             matches!(ty.kind(), TypeKind::Bit | TypeKind::Chandle),
         )
@@ -488,13 +496,37 @@ pub(in crate::ast) fn cast_target_native(
                         | "time"
                 ) => {}
             celox_sv_syntax::DataTypeKind::Named(_) => {}
-            _ => return Err({ eprintln!("PROBE cast target={:?} named={:?}", native.expression(target).kind, call_name(tree, target, native)); unsupported("cast target type") }),
+            _ => {
+                return Err({
+                    eprintln!(
+                        "PROBE cast target={:?} named={:?}",
+                        native.expression(target).kind,
+                        call_name(tree, target, native)
+                    );
+                    unsupported("cast target type")
+                });
+            }
         }
         let ty = type_binding::binding::bind_in(id, native, tree, session, dimensions)?
-            .ok_or_else(|| { eprintln!("PROBE cast target={:?} named={:?}", native.expression(target).kind, call_name(tree, target, native)); unsupported("cast target type") })?;
+            .ok_or_else(|| {
+                eprintln!(
+                    "PROBE cast target={:?} named={:?}",
+                    native.expression(target).kind,
+                    call_name(tree, target, native)
+                );
+                unsupported("cast target type")
+            })?;
         (
-            casts::expr_type_from_type(&tree.functions, &ty, &dimensions.const_env)
-                .ok_or_else(|| { eprintln!("PROBE cast target={:?} named={:?}", native.expression(target).kind, call_name(tree, target, native)); unsupported("cast target type") })?,
+            casts::expr_type_from_type(&tree.functions, &ty, &dimensions.const_env).ok_or_else(
+                || {
+                    eprintln!(
+                        "PROBE cast target={:?} named={:?}",
+                        native.expression(target).kind,
+                        call_name(tree, target, native)
+                    );
+                    unsupported("cast target type")
+                },
+            )?,
             false,
             matches!(ty.kind(), TypeKind::Bit | TypeKind::Chandle),
         )
@@ -512,7 +544,14 @@ pub(in crate::ast) fn cast_target_native(
             .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env))
             .and_then(|value| usize::try_from(value).ok())
             .filter(|width| *width > 0)
-            .ok_or_else(|| { eprintln!("PROBE cast target={:?} named={:?}", native.expression(target).kind, call_name(tree, target, native)); unsupported("cast target type") })?;
+            .ok_or_else(|| {
+                eprintln!(
+                    "PROBE cast target={:?} named={:?}",
+                    native.expression(target).kind,
+                    call_name(tree, target, native)
+                );
+                unsupported("cast target type")
+            })?;
         check_integral(session, "size")?;
         (
             ExprType {
