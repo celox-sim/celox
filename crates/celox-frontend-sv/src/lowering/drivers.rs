@@ -501,6 +501,15 @@ impl ModuleDrivers {
                     }
                     let range = net_lvalue_range(lvalue, constants, parameter_types);
                     let element = match lvalue {
+                        // A run-time select of a structure member drives
+                        // bits of the member only, its window (IEEE
+                        // 1800-2023 6.5, 11.5.1).
+                        sv::ir::LValue::Select {
+                            window: Some(window),
+                            ..
+                        } if range.is_none() => {
+                            Some((i128::from(window.lsb), i128::from(window.msb)))
+                        }
                         sv::ir::LValue::Select { lsb, .. } if range.is_none() => {
                             let shape = *shapes.entry(name.to_string()).or_insert_with(|| {
                                 types
@@ -743,21 +752,12 @@ fn unrolled_select_bits(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<Vec<(i128, i128)>> {
-    let sv::ir::LValue::Select {
-        msb,
-        lsb,
-        window: member,
-        ..
-    } = lvalue
-    else {
+    let sv::ir::LValue::Select { msb, lsb, .. } = lvalue else {
         return None;
     };
     if range.is_some() || loops.is_empty() {
         return None;
     }
-    let window = member
-        .map(|member| (i128::from(member.lsb), i128::from(member.msb)))
-        .or(window);
     let mut bits: Vec<_> =
         procedural::unrolled_select_bounds(msb, lsb, loops, constants, parameter_types)?
             .into_iter()
