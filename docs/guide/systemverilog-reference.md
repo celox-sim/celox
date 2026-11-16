@@ -605,6 +605,12 @@ Code that must stay portable should avoid relying on them.
   with a run-time initializer in a procedure that runs once, such as
   `initial`. In an `always` procedure a run-time initializer without the
   keyword is rejected; declare the local `static` or `automatic`.
+- **Packed values and fills of fixed-size unpacked arrays.** IEEE
+  1800-2023 7.6 assigns a fixed-size unpacked array only an unpacked array
+  of a compatible type. Celox also assigns it a packed value exactly as
+  wide as the whole array, bit for bit, and fills every element with an
+  unbased unsized literal such as `'0`. A value of any other width, a real or a string
+  variable is rejected.
 - **Program continuous assignments do not run in the Reactive region.**
   Continuous assignments in a program are evaluated with the design's
   combinational logic, and design logic that a program writes settles while
