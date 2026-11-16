@@ -48,16 +48,20 @@ sv_backends! {
         @setup { let source=r#"module Top;
             timeunit 1ps; timeprecision 1ps;
             int v;
+            bit [1:0] a;
             initial begin
-                $monitor("%0d", $time + v);
+                $monitor("%0d %0d %0d", $time + v, $time + a[0], $itor($time));
                 #1;
                 #1 v = 5;
+                #1 a[1] = 1;
+                #1 a[0] = 1;
                 #1;
             end
         endmodule"#; }
         @build celox::Simulation::from_sv_sources(vec![(source,Path::new("monitor_mixed.sv"))],"Top");
-        sim.run_until(3).unwrap();
-        assert_eq!(sim.drain_runtime_events(),["0","7"].map(|s| celox::RuntimeEvent::Display { message:s.as_bytes().to_vec() }).to_vec());
+        sim.run_until(5).unwrap();
+        // Time alone, and `a[1]` which no argument reads, report nothing.
+        assert_eq!(sim.drain_runtime_events(),["0 0 0","7 2 2","9 5 4"].map(|s| celox::RuntimeEvent::Display { message:s.as_bytes().to_vec() }).to_vec());
     }
 }
 

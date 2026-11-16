@@ -128,30 +128,37 @@ impl Ff<'_, '_> {
                     continue;
                 };
                 // A time query, also as a `%t` argument scaled to the time
-                // unit, changes in every slot without triggering the
-                // monitor (IEEE 1800-2023 21.2.3).
-                let mut calls = Vec::new();
-                collect_calls(expr, &mut calls);
-                if !matches!(expr, Expr::Call { .. })
-                    && calls.iter().any(|(callee, _)| {
-                        matches!(
-                            callee,
-                            Callee::System(
-                                sv::ir::SystemFunction::Time
-                                    | sv::ir::SystemFunction::Stime
-                                    | sv::ir::SystemFunction::Realtime
-                            )
-                        )
-                    })
-                {
-                    // The other operands of an argument that mixes one in,
-                    // such as `$time + value`, still trigger it.
-                    let mut names = HashSet::default();
-                    expr_idents(expr, &mut names);
-                    let mut operands: Vec<_> =
-                        names.iter().filter_map(|name| self.m.id(name)).collect();
-                    operands.sort_unstable();
-                    for id in operands {
+                // unit or the operand of a pure call, changes in every slot
+                // without triggering the monitor (IEEE 1800-2023 21.2.3).
+                // The largest parts of such an argument that read no time
+                // query, such as the `a[0]` of `$time + a[0]`, still
+                // trigger it by the changes of their values.
+                if reads_time_query(expr) {
+                    let mut parts = Vec::new();
+                    untimed_parts(expr, &mut parts);
+                    for part in parts {
+                        let part = match part {
+                            Expr::Literal(_) => continue,
+                            Expr::Ident(_) => part,
+                            part => {
+                                let mut samples = Vec::new();
+                                let event = self.event_expression(&part, &mut samples)?;
+                                let [(name, value)] = samples.as_slice() else {
+                                    return Err(unsupported(format!(
+                                        "`{task}` expression reading a process-local variable"
+                                    )));
+                                };
+                                self.assign(&sv::ir::LValue::Ident(name.clone()), value)?;
+                                Expr::Ident(self.m.var(event).path.join("."))
+                            }
+                        };
+                        let Expr::Ident(name) = &part else {
+                            unreachable!("a watched part is a variable");
+                        };
+                        let id = self
+                            .m
+                            .id(name)
+                            .ok_or_else(|| unsupported(format!("`{task}` argument")))?;
                         self.watch_monitor_variable(
                             task,
                             file,
@@ -251,5 +258,60 @@ impl Ff<'_, '_> {
             vec![resume.to_string()],
         )?;
         Ok(true)
+    }
+}
+
+/// Whether `expr` calls `$time`, `$stime` or `$realtime`.
+fn reads_time_query(expr: &sv::ir::Expr) -> bool {
+    let mut calls = Vec::new();
+    collect_calls(expr, &mut calls);
+    calls.iter().any(|(callee, _)| {
+        matches!(
+            callee,
+            sv::ir::Callee::System(
+                sv::ir::SystemFunction::Time
+                    | sv::ir::SystemFunction::Stime
+                    | sv::ir::SystemFunction::Realtime
+            )
+        )
+    })
+}
+
+/// The largest subexpressions of `expr` that read no time query, in order.
+fn untimed_parts(expr: &sv::ir::Expr, parts: &mut Vec<sv::ir::Expr>) {
+    use sv::ir::Expr;
+    if !reads_time_query(expr) {
+        parts.push(expr.clone());
+        return;
+    }
+    match expr {
+        Expr::Ident(_) | Expr::Literal(_) => {}
+        Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+            untimed_parts(expr, parts)
+        }
+        Expr::Concat(items) | Expr::RepeatConcat { parts: items, .. } => {
+            for item in items {
+                untimed_parts(item, parts);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            untimed_parts(left, parts);
+            untimed_parts(right, parts);
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            untimed_parts(condition, parts);
+            untimed_parts(then_expr, parts);
+            untimed_parts(else_expr, parts);
+        }
+        Expr::Call { args, .. } => {
+            for arg in args.iter().flatten() {
+                untimed_parts(arg, parts);
+            }
+        }
+        Expr::Inside { expr, .. } => untimed_parts(expr, parts),
     }
 }
