@@ -77,6 +77,8 @@ fn rejects_parameter_values_that_read_variables() {
     for body in [
         "integer v; localparam W = $bits(v);",
         "localparam A = 2; parameter B = A * 3;",
+        "integer a; function automatic [3:0] f(integer j = a); return j; endfunction \
+         localparam W = $bits(f());",
         // A pattern key names a member, not the variable of that name.
         "typedef struct packed { logic [7:0] opcode; } e_t; logic [7:0] opcode; \
          localparam e_t ENTRY = '{opcode: 8'h40};",
@@ -113,6 +115,8 @@ fn rejects_parameters_that_depend_on_their_own_value() {
     for body in [
         "parameter A = 1; parameter B = A + A;",
         "parameter B = A; parameter A = 3;",
+        // A data query does not evaluate its operand.
+        "parameter int A = $bits(B), B = $bits(A);",
         // A pattern key names a member, not the parameter of that name.
         "typedef struct packed { logic [3:0] A; } T; parameter T X = '{A: 1}; parameter A = X.A;",
         "parameter A = 1; if (1) begin : g localparam A2 = A; end",

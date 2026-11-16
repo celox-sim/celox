@@ -1136,7 +1136,7 @@ pub(in crate::ast) fn validate_scope(
         .filter(|(_, _, prefix)| *prefix)
         .map(|(parameter, _, _)| parameter)
         .collect::<Vec<_>>();
-    reject_circular_parameters(&prefix, native, tree.spans())?;
+    reject_circular_parameters(&prefix, tree)?;
     let variables = super::super::validation::element_variables(tree);
     for (parameter, scope, is_prefix) in &values {
         // A parameter of the design element takes a constant value, which
@@ -1217,6 +1217,37 @@ pub(in crate::ast) fn validate_scope(
     Ok(())
 }
 
+/// The token ranges of the operands of `expressions` that are not
+/// evaluated: the first argument of a data query or `$typename` (20.6.1).
+fn unevaluated_operands(
+    expressions: &[ExprId],
+    tree: &AnalysisContext<'_>,
+) -> Vec<celox_sv_syntax::TokenRange> {
+    let native = tree.declarations();
+    expressions
+        .iter()
+        .filter_map(|id| {
+            let ExprKind::Call {
+                expression,
+                arguments,
+            } = &native.expression(*id).kind
+            else {
+                return None;
+            };
+            let name = expression_binding::callable_name(tree, *expression, native)?;
+            SystemFunction::from_name(&name)
+                .filter(|function| function.has_unevaluated_operand())?;
+            Some(native.expression(arguments.first()?.value?).tokens)
+        })
+        .collect()
+}
+
+fn within(ranges: &[celox_sv_syntax::TokenRange], tokens: celox_sv_syntax::TokenRange) -> bool {
+    ranges
+        .iter()
+        .any(|range| range.start <= tokens.start && tokens.end <= range.end)
+}
+
 /// A variable or net that the default of an argument reads, of a call in
 /// native expression `root` of a function of the design element that omits
 /// that argument: the call is no constant function call, whose defaults are
@@ -1230,7 +1261,10 @@ fn default_argument_read(
     let native = tree.declarations();
     let unit = tree.root_unit().ok()?;
     let tokens = native.expression(root).tokens;
-    for id in tree.spans().expressions.within(&[tokens]) {
+    let expressions = tree.spans().expressions.within(&[tokens]);
+    // A call in an operand that is not evaluated is not made.
+    let unevaluated = unevaluated_operands(&expressions, tree);
+    for id in expressions {
         let ExprKind::Call {
             expression,
             arguments,
@@ -1238,6 +1272,9 @@ fn default_argument_read(
         else {
             continue;
         };
+        if within(&unevaluated, native.expression(id).tokens) {
+            continue;
+        }
         let Some(name) = expression_binding::callable_name(tree, *expression, native) else {
             continue;
         };
@@ -1290,9 +1327,10 @@ fn default_argument_read(
 /// satisfies it (IEEE 1800-2023 6.20.2).
 fn reject_circular_parameters(
     parameters: &[&celox_sv_syntax::Parameter],
-    native: &celox_sv_syntax::Declarations,
-    spans: &crate::source_tree::Spans,
+    tree: &AnalysisContext<'_>,
 ) -> Converted<()> {
+    let native = tree.declarations();
+    let spans = tree.spans();
     use celox_sv_syntax::ParameterKind;
     let names = parameters
         .iter()
@@ -1312,17 +1350,20 @@ fn reject_circular_parameters(
             let tokens = native.expression(root).tokens;
             let expressions = spans.expressions.within(&[tokens]);
             // The key of an assignment pattern item names a member or a
-            // type, not a parameter.
-            let keys = expressions
-                .iter()
-                .filter_map(|id| match &native.expression(*id).kind {
-                    ExprKind::Pattern { items, .. } => Some(items),
-                    _ => None,
-                })
-                .flatten()
-                .filter_map(|item| item.key)
-                .map(|key| native.expression(key).tokens)
-                .collect::<Vec<_>>();
+            // type, not a parameter, and the operand of a data query is not
+            // evaluated.
+            let mut keys = unevaluated_operands(&expressions, tree);
+            keys.extend(
+                expressions
+                    .iter()
+                    .filter_map(|id| match &native.expression(*id).kind {
+                        ExprKind::Pattern { items, .. } => Some(items),
+                        _ => None,
+                    })
+                    .flatten()
+                    .filter_map(|item| item.key)
+                    .map(|key| native.expression(key).tokens),
+            );
             let mut read = expressions
                 .into_iter()
                 .filter_map(|id| {
