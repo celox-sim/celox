@@ -407,3 +407,34 @@ endmodule
   (modify (set bits 0))
   (assert_eq narrow 0)
   (assert_eq wide 0))
+
+; IEEE 1800-2023 12.5: a `case` statement on a real value compares the
+; case items with it as real values, integral items converted (11.4.5);
+; Table 11-1 rejects the case equality operators themselves on reals.
+(case case_statements_compare_real_values
+  (source "real_case_statements.sv" #"
+module Top(output int selected, output int integral, output int fallback);
+  parameter real P = 1.5;
+  real r;
+  initial begin
+    r = P;
+    case (r)
+      1.0: selected = 1;
+      1.5: selected = 2;
+      default: selected = 3;
+    endcase
+    r = 2.0;
+    case (r)
+      1: integral = 1;
+      2: integral = 2;
+      default: integral = 3;
+    endcase
+    case (r * 0.5 + 0.25)
+      1.0: fallback = 1;
+      default: fallback = 4;
+    endcase
+  end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq selected 2) (assert_eq integral 2) (assert_eq fallback 4))
