@@ -44,24 +44,20 @@ sv_backends! {
 }
 
 sv_backends! {
-    fn monitor_arguments_mixing_time_and_variables_trigger_on_the_variables(sim) {
+    fn monitor_time_only_arguments_do_not_trigger(sim) {
         @setup { let source=r#"module Top;
             timeunit 1ps; timeprecision 1ps;
             int v;
-            bit [1:0] a;
             initial begin
-                $monitor("%0d %0d %0d", $time + v, $time + a[0], $itor($time));
+                $monitor("%0d %0d", $itor($time), v);
                 #1;
                 #1 v = 5;
-                #1 a[1] = 1;
-                #1 a[0] = 1;
                 #1;
             end
         endmodule"#; }
-        @build celox::Simulation::from_sv_sources(vec![(source,Path::new("monitor_mixed.sv"))],"Top");
-        sim.run_until(5).unwrap();
-        // Time alone, and `a[1]` which no argument reads, report nothing.
-        assert_eq!(sim.drain_runtime_events(),["0 0 0","7 2 2","9 5 4"].map(|s| celox::RuntimeEvent::Display { message:s.as_bytes().to_vec() }).to_vec());
+        @build celox::Simulation::from_sv_sources(vec![(source,Path::new("monitor_time_only.sv"))],"Top");
+        sim.run_until(3).unwrap();
+        assert_eq!(sim.drain_runtime_events(),["0 0","2 5"].map(|s| celox::RuntimeEvent::Display { message:s.as_bytes().to_vec() }).to_vec());
     }
 }
 
@@ -69,6 +65,8 @@ sv_backends! {
 fn monitor_rejects_effects_and_file_strings() {
     for body in [
         "int value; initial $monitor(value++);",
+        // Whether `$time + value` changed apart from time has no exact answer.
+        "int value; initial $monitor($time + value);",
         "string value; initial $fmonitor(1,value);",
     ] {
         let source = format!("module Top; {body} endmodule");
