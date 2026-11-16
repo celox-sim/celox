@@ -8,8 +8,8 @@ impl BodyBuilder<'_, '_, '_> {
     ) -> Converted<()> {
         if expression_binding::targets_tagged_union(
             root,
-            self.tree.declarations(),
-            self.tree,
+            self.syntax().declarations(),
+            &self.tree,
             self.session,
             &self.dims,
         )? {
@@ -28,7 +28,7 @@ impl BodyBuilder<'_, '_, '_> {
             operator,
             expression,
             ..
-        } = &self.tree.declarations().expression(id).kind
+        } = &self.syntax().declarations().expression(id).kind
         else {
             return Ok(None);
         };
@@ -47,7 +47,7 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         id: celox_sv_syntax::AssignId,
     ) -> Converted<Vec<Stmt>> {
-        let assign = self.tree.declarations().assign_statement(id);
+        let assign = self.syntax().declarations().assign_statement(id);
         // A procedural continuous assignment is one `variable_assignment`
         // without a strength or a delay (A.6.2).
         let [assignment] = assign.assignments.as_slice() else {
@@ -123,7 +123,7 @@ impl BodyBuilder<'_, '_, '_> {
                 "procedural continuous assignment in a subroutine, a final procedure, or an `always_comb`, `always_latch` or `always_ff` procedure",
             ));
         }
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let id = expression_binding::ungroup(target, native);
         match &native.expression(id).kind {
             // A bit-select or part-select of a variable is not a target (10.6.1).
@@ -252,10 +252,10 @@ impl BodyBuilder<'_, '_, '_> {
                     return Err(unsupported("delayed nonblocking event trigger"));
                 }
                 if !events::is_handle(
-                    self.tree,
+                    &self.tree,
                     self.session,
                     *target,
-                    self.tree.declarations(),
+                    self.syntax().declarations(),
                     &self.dims,
                 ) {
                     return Err(unsupported(

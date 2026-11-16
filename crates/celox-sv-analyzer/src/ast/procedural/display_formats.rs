@@ -109,7 +109,7 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(());
         }
         let text = text.clone();
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let rewritten = expression_binding::rewrite_template(text.as_bytes(), |index| {
             let position = template + 1 + index;
             Ok(match args.get_mut(position) {
@@ -120,7 +120,7 @@ impl BodyBuilder<'_, '_, '_> {
                         .flatten()
                         .ok_or_else(|| unsupported("omitted %p argument"))?;
                     if let Some(text) = expression_binding::format_aggregate_text(
-                        self.tree,
+                        &self.tree,
                         self.session,
                         id,
                         value,
@@ -131,7 +131,7 @@ impl BodyBuilder<'_, '_, '_> {
                         return Ok(&b"%s"[..]);
                     }
                     let pattern = expression_binding::format_pattern(
-                        self.tree,
+                        &self.tree,
                         self.session,
                         id,
                         value,
@@ -168,9 +168,9 @@ impl BodyBuilder<'_, '_, '_> {
         output: celox_sv_syntax::ExprId,
         value: Expr,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let property = expression_binding::object_property(
-            self.tree,
+            &self.tree,
             self.session,
             output,
             native,
@@ -181,7 +181,7 @@ impl BodyBuilder<'_, '_, '_> {
                 property.field.handle == Some(system_functions::HandleProperty::String)
             }
             None => expression_binding::native_string(
-                self.tree,
+                &self.tree,
                 self.session,
                 output,
                 native,
@@ -201,7 +201,7 @@ impl BodyBuilder<'_, '_, '_> {
         // object, after the value (4.9.3).
         if string && let Some((property, receiver)) = property {
             let handle = expression_binding::object_receiver(
-                self.tree,
+                &self.tree,
                 self.session,
                 receiver,
                 native,
@@ -229,15 +229,15 @@ impl BodyBuilder<'_, '_, '_> {
     ) -> Result<(Vec<Stmt>, Expr), AnalyzerError> {
         let current = expression_binding::value(
             output,
-            self.tree.declarations(),
-            self.tree,
+            self.syntax().declarations(),
+            &self.tree,
             self.session,
             &self.dims,
         )?;
         if expression_binding::real_value(&current, &self.dims) {
             return Err(unsupported("`$sformat` output that is not a string"));
         }
-        let ty = dimensions::bound_bits_type(self.tree, &current, &self.dims)
+        let ty = dimensions::bound_bits_type(&self.tree, &current, &self.dims)
             .ok_or_else(|| unsupported("`$sformat` output that is not a string"))?;
         let mut bits = Type::new(TypeKind::Logic);
         if ty.width > 1 {

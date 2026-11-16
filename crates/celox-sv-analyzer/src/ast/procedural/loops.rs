@@ -53,14 +53,14 @@ impl BodyBuilder<'_, '_, '_> {
         // A Boolean test, which may be of a chandle (IEEE 1800-2023 6.14).
         let condition = expression_binding::bind_chandle_value(
             item.expression,
-            self.tree.declarations(),
-            self.tree,
+            self.syntax().declarations(),
+            &self.tree,
             self.session,
             &self.dims,
             None,
         )?;
         let mut condition =
-            statements::simplify_condition(self.tree, self.session, condition, &self.dims);
+            statements::simplify_condition(&self.tree, self.session, condition, &self.dims);
         self.rename_expr(&mut condition);
         Ok(condition)
     }
@@ -77,8 +77,8 @@ impl BodyBuilder<'_, '_, '_> {
                 for group in groups {
                     let ty = type_binding::procedural_type(
                         group.data_type,
-                        self.tree.declarations(),
-                        self.tree,
+                        self.syntax().declarations(),
+                        &self.tree,
                         self.session,
                         &self.dims.const_env,
                         &self.type_aliases,
@@ -93,16 +93,16 @@ impl BodyBuilder<'_, '_, '_> {
                         expression_binding::check_chandle_assignment(
                             ty.is_chandle() && ty.unpacked_ranges.is_empty(),
                             variable.value,
-                            self.tree,
-                            self.tree.declarations(),
+                            &self.tree,
+                            self.syntax().declarations(),
                             &self.dims,
                             self.session,
                         )?;
                         let mut value = expression_binding::expression(
                             variable.value,
-                            self.tree.declarations(),
+                            self.syntax().declarations(),
                             &target,
-                            self.tree,
+                            &self.tree,
                             self.session,
                             &scoped,
                         )?;
