@@ -362,9 +362,6 @@ fn primitive_processes(
     dimensions: &PackedDimensions,
 ) -> Converted<Vec<CombProcess>> {
     let name = primitive.name.value();
-    if primitive.sequential {
-        return Err(unsupported("sequential user-defined primitive"));
-    }
     if gate.strength.is_some()
         || gate
             .instances
@@ -410,54 +407,42 @@ fn primitive_processes(
             }
             inputs.push(input);
         }
-        let is = |value: &Expr, bit: &str| Expr::Binary {
-            left: Box::new(value.clone()),
-            op: BinaryOp::EqCase,
-            right: Box::new(Expr::Literal(bit.into())),
+        // A sequential UDP drives its output with its state (see
+        // `primitives`).
+        let rhs = if primitive.sequential {
+            Expr::Ident(primitives::state_name(gate, instance))
+        } else {
+            let mut rhs = Expr::Literal("1'bx".into());
+            for row in primitive.rows.iter().rev() {
+                let condition = row
+                    .inputs
+                    .iter()
+                    .zip(&inputs)
+                    .filter_map(|(symbol, value)| primitives::level(symbol, value))
+                    .reduce(|left, right| Expr::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::LogicAnd,
+                        right: Box::new(right),
+                    });
+                let value = Expr::Literal(
+                    match row.output.as_str() {
+                        "0" => "1'b0",
+                        "1" => "1'b1",
+                        _ => "1'bx",
+                    }
+                    .into(),
+                );
+                rhs = match condition {
+                    Some(condition) => Expr::Mux {
+                        condition: Box::new(condition),
+                        then_expr: Box::new(value),
+                        else_expr: Box::new(rhs),
+                    },
+                    None => value,
+                };
+            }
+            rhs
         };
-        let either = |value: &Expr| Expr::Binary {
-            left: Box::new(is(value, "1'b0")),
-            op: BinaryOp::LogicOr,
-            right: Box::new(is(value, "1'b1")),
-        };
-        let mut rhs = Expr::Literal("1'bx".into());
-        for row in primitive.rows.iter().rev() {
-            let condition = row
-                .inputs
-                .iter()
-                .zip(&inputs)
-                .filter_map(|(symbol, value)| match symbol.as_str() {
-                    "0" => Some(is(value, "1'b0")),
-                    "1" => Some(is(value, "1'b1")),
-                    "b" => Some(either(value)),
-                    "x" => Some(Expr::Unary {
-                        op: UnaryOp::LogicNot,
-                        expr: Box::new(either(value)),
-                    }),
-                    _ => None,
-                })
-                .reduce(|left, right| Expr::Binary {
-                    left: Box::new(left),
-                    op: BinaryOp::LogicAnd,
-                    right: Box::new(right),
-                });
-            let value = Expr::Literal(
-                match row.output.as_str() {
-                    "0" => "1'b0",
-                    "1" => "1'b1",
-                    _ => "1'bx",
-                }
-                .into(),
-            );
-            rhs = match condition {
-                Some(condition) => Expr::Mux {
-                    condition: Box::new(condition),
-                    then_expr: Box::new(value),
-                    else_expr: Box::new(rhs),
-                },
-                None => value,
-            };
-        }
         let mut process = CombProcess::procedural(
             CombProcessKind::ContinuousAssign,
             None,
@@ -468,6 +453,15 @@ fn primitive_processes(
             }],
         );
         process.delay = delay;
+        // The output of a sequential UDP has its initial value when
+        // simulation begins, before any delay (29.3.3).
+        if primitive.sequential
+            && let Some(value) = primitive.initial
+        {
+            process.delay_initial = Some(expression_binding::value(
+                value, native, tree, session, dimensions,
+            )?);
+        }
         processes.push(process);
     }
     Ok(processes)
