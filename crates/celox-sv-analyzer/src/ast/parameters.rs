@@ -49,7 +49,112 @@ pub(super) fn binding_keys(name: &str, env: &ConstEnv, packed_count: usize) -> V
         }
     }
     keys.extend(member_keys(name, env));
+    keys.extend(element_keys(name, env));
     keys
+}
+
+/// The keys of the element constants `env` holds for the unpacked array
+/// parameter `name`.
+pub(super) fn element_keys(name: &str, env: &ConstEnv) -> Vec<String> {
+    let count = dimensions::parameter_elements_marker(name);
+    let Some(elements) = env
+        .get(&count)
+        .and_then(|count| usize::try_from(*count).ok())
+    else {
+        return Vec::new();
+    };
+    let mut keys = vec![
+        count,
+        dimensions::parameter_element_marker(name, "left"),
+        dimensions::parameter_element_marker(name, "right"),
+        dimensions::parameter_element_marker(name, "type"),
+    ];
+    keys.extend((0..elements).map(|position| dimensions::parameter_element_marker(name, position)));
+    let packed = dimensions::parameter_element_marker(name, "packed");
+    if let Some(count) = env.get(&packed).copied() {
+        for dimension in 0..count {
+            keys.push(element_packed_marker(name, dimension, "left"));
+            keys.push(element_packed_marker(name, dimension, "right"));
+        }
+        keys.push(packed);
+    }
+    keys
+}
+
+/// The `left` or `right` bound of the packed dimension `dimension`,
+/// outermost first, of the elements of the unpacked array parameter `name`.
+fn element_packed_marker(name: &str, dimension: i128, bound: &str) -> String {
+    dimensions::parameter_element_marker(name, format!("packed_{dimension}_{bound}"))
+}
+
+/// The constants that publish the elements of an unpacked array parameter:
+/// an element select of a parameter is a constant expression (IEEE 1800-2023
+/// 11.2.1, A.8.4 `constant_select`), of the element's width and sign.
+pub(super) fn element_markers(
+    name: &str,
+    elements: &array_parameters::ConstantElements,
+) -> Vec<(String, i128)> {
+    let mut markers = vec![
+        (
+            dimensions::parameter_elements_marker(name),
+            elements.values.len() as i128,
+        ),
+        (
+            dimensions::parameter_element_marker(name, "left"),
+            elements.left,
+        ),
+        (
+            dimensions::parameter_element_marker(name, "right"),
+            elements.right,
+        ),
+        (
+            dimensions::parameter_element_marker(name, "type"),
+            ((elements.width as i128) << 2)
+                | (i128::from(elements.two_state) << 1)
+                | i128::from(elements.signed),
+        ),
+    ];
+    markers.extend(
+        elements.values.iter().enumerate().map(|(position, value)| {
+            (dimensions::parameter_element_marker(name, position), *value)
+        }),
+    );
+    if !elements.packed.is_empty() {
+        markers.push((
+            dimensions::parameter_element_marker(name, "packed"),
+            elements.packed.len() as i128,
+        ));
+        for (dimension, (left, right)) in (0i128..).zip(&elements.packed) {
+            markers.push((element_packed_marker(name, dimension, "left"), *left));
+            markers.push((element_packed_marker(name, dimension, "right"), *right));
+        }
+    }
+    markers
+}
+
+/// The typed literal of the element that `index` selects in the unpacked
+/// array parameter `name`, when its elements are published. An index out of
+/// range reads the value of a nonexistent entry of the element type: zero
+/// for a two-state type and X otherwise (IEEE 1800-2023 Table 7-1).
+pub(super) fn array_element_literal(name: &str, index: i128, env: &ConstEnv) -> Option<String> {
+    let count = usize::try_from(*env.get(&dimensions::parameter_elements_marker(name))?).ok()?;
+    let left = *env.get(&dimensions::parameter_element_marker(name, "left"))?;
+    let right = *env.get(&dimensions::parameter_element_marker(name, "right"))?;
+    let r#type = *env.get(&dimensions::parameter_element_marker(name, "type"))?;
+    let width = usize::try_from(r#type >> 2).ok()?;
+    let signed = r#type & 1 != 0;
+    if index < left.min(right) || index > left.max(right) {
+        if r#type & 2 != 0 {
+            return Some(format_typed_parameter_literal(0, width, signed));
+        }
+        let signing = if signed { "s" } else { "" };
+        return Some(format!("{width}'{signing}b{}", "x".repeat(width)));
+    }
+    let position = usize::try_from(index.abs_diff(left))
+        .ok()
+        .filter(|p| *p < count)?;
+    let value = *env.get(&dimensions::parameter_element_marker(name, position))?;
+    Some(format_typed_parameter_literal(value, width, signed))
 }
 
 /// The keys of the member constants `env` holds for the packed structure
@@ -284,6 +389,13 @@ pub(super) struct ParameterEnvironment<'a> {
     // Numeric environments cannot represent X/Z. Keep resolved literals for
     // evaluating later declarations without dropping their state bits.
     literals: HashMap<String, Expr>,
+    /// The values of the scope's array parameters declared so far, and of
+    /// the packages it uses, that are constants: a later array parameter
+    /// may take its value from one.
+    arrays: HashMap<String, Expr>,
+    /// The shapes of the variables that hold the array parameters declared
+    /// so far.
+    array_shapes: HashMap<String, VariableDimensions>,
 }
 
 impl<'a> ParameterEnvironment<'a> {
@@ -354,6 +466,8 @@ impl<'a> ParameterEnvironment<'a> {
             constants,
             has_inherited_literal_shadow,
             literals,
+            arrays: HashMap::default(),
+            array_shapes: HashMap::default(),
         }
     }
 
@@ -549,9 +663,49 @@ pub(super) fn parameters_from_native_with_environment(
                 array_parameters::packed_pattern_value(native, syntax_tree, session, &context);
             if pattern_value.is_none() {
                 let name = instances::normalize_identifier(&native.name.spelling);
+                for key in element_keys(&name, &environment.constants) {
+                    environment.values.remove(&key);
+                    environment.constants.remove(&key);
+                }
                 let marker = unbounded_parameter_marker(&name);
                 environment.values.insert(marker.clone(), 0);
                 environment.constants.insert(marker, 0);
+                // The variable holds the array; its elements are constants
+                // of the scope when its value is one here, also a value it
+                // takes from an earlier array parameter.
+                if environment.arrays.is_empty() {
+                    for process in &imported.initial_processes {
+                        for statement in &process.body {
+                            if let Stmt::Assign {
+                                lhs: LValue::Ident(array),
+                                rhs,
+                                ..
+                            } = statement
+                            {
+                                environment.arrays.insert(array.clone(), rhs.clone());
+                            }
+                        }
+                    }
+                }
+                context.array_parameter_values = environment.arrays.clone().into();
+                for (array, shape) in &environment.array_shapes {
+                    context.insert(array.clone(), shape.clone());
+                }
+                if let Some((elements, shape)) = array_parameters::constant_elements_and_shape(
+                    native,
+                    syntax_tree,
+                    session,
+                    &context,
+                ) {
+                    environment.array_shapes.insert(name.clone(), shape);
+                    if let Some(elements) = elements {
+                        for (key, value) in element_markers(&name, &elements) {
+                            environment.values.insert(key.clone(), value);
+                            environment.constants.insert(key, value);
+                        }
+                        environment.arrays.insert(name, elements.value);
+                    }
+                }
                 continue;
             }
         }
@@ -1096,21 +1250,84 @@ pub(super) fn parameter_element_literal(
             ))
         })
         .collect::<Option<Vec<_>>>()?;
-    let size =
-        |(left, right): (i128, i128)| usize::try_from(left.abs_diff(right)).ok()?.checked_add(1);
-    let width_from = |start: usize| {
-        bounds[start..]
-            .iter()
-            .try_fold(1usize, |acc, bound| acc.checked_mul(size(*bound)?))
-    };
-    let element_width = width_from(indices.len())?;
-    let total_width = width_from(0)?;
-    if total_width > 128 {
-        return None;
-    }
     let signed = env
         .get(&parameter_signed_element_marker(name))
         .is_some_and(|depth| usize::try_from(*depth).ok() == Some(indices.len()));
+    packed_select_literal(&bounds, indices, signed, 'x', || env.get(name).copied())
+}
+
+/// The bits that the constant packed `selects` make of the element that
+/// `index` selects in the unpacked array parameter `name`, such as
+/// `table_p[0][1]`, when its elements and their packed dimensions are
+/// published: an unsigned literal of the remaining dimensions (IEEE 1800-2023
+/// 11.8.1). An index out of range of either kind gives the bits of a
+/// nonexistent entry: zero for a two-state element type and X otherwise
+/// (Table 7-1, 11.5.1).
+pub(super) fn array_element_select_literal(
+    name: &str,
+    index: i128,
+    selects: &[i128],
+    env: &ConstEnv,
+) -> Option<String> {
+    let dimensions = *env.get(&dimensions::parameter_element_marker(name, "packed"))?;
+    let bounds = (0..dimensions)
+        .map(|dimension| {
+            Some((
+                *env.get(&element_packed_marker(name, dimension, "left"))?,
+                *env.get(&element_packed_marker(name, dimension, "right"))?,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let bounds = bounds.as_slice();
+    let count = usize::try_from(*env.get(&dimensions::parameter_elements_marker(name))?).ok()?;
+    let left = *env.get(&dimensions::parameter_element_marker(name, "left"))?;
+    let right = *env.get(&dimensions::parameter_element_marker(name, "right"))?;
+    let r#type = *env.get(&dimensions::parameter_element_marker(name, "type"))?;
+    let width = usize::try_from(r#type >> 2).ok()?;
+    let fill = if r#type & 2 != 0 { '0' } else { 'x' };
+    if selects.is_empty() || selects.len() > bounds.len() || packed_width(bounds) != Some(width) {
+        return None;
+    }
+    if index < left.min(right) || index > left.max(right) {
+        let selected = packed_width(&bounds[selects.len()..])?;
+        return Some(format!("{selected}'b{}", fill.to_string().repeat(selected)));
+    }
+    let position = usize::try_from(index.abs_diff(left))
+        .ok()
+        .filter(|p| *p < count)?;
+    packed_select_literal(bounds, selects, false, fill, || {
+        env.get(&dimensions::parameter_element_marker(name, position))
+            .copied()
+    })
+}
+
+/// The number of bits of packed dimensions `bounds`.
+pub(super) fn packed_width(bounds: &[(i128, i128)]) -> Option<usize> {
+    bounds.iter().try_fold(1usize, |acc, (left, right)| {
+        acc.checked_mul(
+            usize::try_from(left.abs_diff(*right))
+                .ok()?
+                .checked_add(1)?,
+        )
+    })
+}
+
+/// The bits that constant `indices` select in the value of packed dimensions
+/// `bounds`, outermost first, that `value` gives, as a sized literal of the
+/// remaining dimensions; an index out of range gives `fill` bits (IEEE
+/// 1800-2023 11.5.1).
+fn packed_select_literal(
+    bounds: &[(i128, i128)],
+    indices: &[i128],
+    signed: bool,
+    fill: char,
+    value: impl FnOnce() -> Option<i128>,
+) -> Option<String> {
+    let element_width = packed_width(&bounds[indices.len()..])?;
+    let total_width = packed_width(bounds)?;
+    if total_width > 128 {
+        return None;
+    }
     let signing = if signed { "s" } else { "" };
     let mut offset = 0usize;
     for (position, index) in indices.iter().enumerate() {
@@ -1118,12 +1335,13 @@ pub(super) fn parameter_element_literal(
         if *index < left.min(right) || *index > left.max(right) {
             return Some(format!(
                 "{element_width}'{signing}b{}",
-                "x".repeat(element_width)
+                fill.to_string().repeat(element_width)
             ));
         }
         // The right bound is the least significant element.
         let from_right = usize::try_from(index.abs_diff(right)).ok()?;
-        offset = offset.checked_add(from_right.checked_mul(width_from(position + 1)?)?)?;
+        offset =
+            offset.checked_add(from_right.checked_mul(packed_width(&bounds[position + 1..])?)?)?;
     }
     let mask = |width| {
         if width == 128 {
@@ -1132,7 +1350,7 @@ pub(super) fn parameter_element_literal(
             (1u128 << width) - 1
         }
     };
-    let value = *env.get(name)? as u128 & mask(total_width);
+    let value = value()? as u128 & mask(total_width);
     let element = (value >> offset) & mask(element_width);
     Some(format!(
         "{element_width}'{signing}b{element:0element_width$b}"
