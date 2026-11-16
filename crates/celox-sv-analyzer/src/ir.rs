@@ -2103,6 +2103,65 @@ fn reads_only(callee: &Callee) -> bool {
 }
 
 impl ConstExpr {
+    /// The expression with each identifier `name` replaced by `f(name)`.
+    pub(crate) fn map_idents(self, f: &mut impl FnMut(String) -> ConstExpr) -> ConstExpr {
+        let mut boxed = |expr: Box<ConstExpr>| Box::new(expr.map_idents(&mut *f));
+        match self {
+            ConstExpr::Ident(name) => f(name),
+            ConstExpr::Literal(value) => ConstExpr::Literal(value),
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: boxed(expr),
+                msb: boxed(msb),
+                lsb: boxed(lsb),
+                signed,
+            },
+            ConstExpr::Select { expr, bit } => ConstExpr::Select {
+                expr: boxed(expr),
+                bit: boxed(bit),
+            },
+            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee,
+                args: args
+                    .into_iter()
+                    .map(|arg| arg.map_idents(&mut *f))
+                    .collect(),
+                site,
+            },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: boxed(expr),
+                width,
+                signed,
+            },
+            ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+                op,
+                expr: boxed(expr),
+            },
+            ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+                left: boxed(left),
+                op,
+                right: boxed(right),
+            },
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => ConstExpr::Mux {
+                condition: boxed(condition),
+                then_expr: boxed(then_expr),
+                else_expr: boxed(else_expr),
+            },
+        }
+    }
+
     fn operands(&self) -> Vec<&ConstExpr> {
         match self {
             ConstExpr::Literal(_) | ConstExpr::Ident(_) => Vec::new(),
@@ -3192,14 +3251,58 @@ mod virtual_instances {
                 }
                 Expr::Ident(member_name(&name, interface, id).unwrap_or(name))
             }
+            // A select's bounds may read the members too, as `a[i]` does at
+            // run time.
+            Expr::Select {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => Expr::Select {
+                expr: Box::new(for_instance(*expr, interface, id)),
+                msb: const_for_instance(msb, interface, id),
+                lsb: const_for_instance(lsb, interface, id),
+                signed,
+            },
             expr => map_operands(expr, &mut |child| for_instance(child, interface, id)),
         }
+    }
+
+    /// The bounds `expr` of a select for instance `id` of `interface`, as
+    /// [`for_instance`] makes an expression.
+    fn const_for_instance(expr: ConstExpr, interface: DefinitionId, id: u32) -> ConstExpr {
+        expr.map_idents(&mut |name| {
+            if instance(&Expr::Ident(name.clone())).is_some_and(|of| of == interface) {
+                return ConstExpr::Literal(format!("{WIDTH}'d{id}"));
+            }
+            ConstExpr::Ident(member_name(&name, interface, id).unwrap_or(name))
+        })
     }
 
     fn lvalue_for_instance(lvalue: &mut LValue, interface: DefinitionId, id: u32) {
         let (LValue::Ident(name) | LValue::Select { name, .. }) = lvalue;
         if let Some(renamed) = member_name(name, interface, id) {
             *name = renamed;
+        }
+        if let LValue::Select {
+            msb,
+            lsb,
+            array_slice_width,
+            ..
+        } = lvalue
+        {
+            let rename = |expr: &mut ConstExpr| {
+                *expr = const_for_instance(
+                    std::mem::replace(expr, ConstExpr::Literal(String::new())),
+                    interface,
+                    id,
+                );
+            };
+            rename(msb);
+            rename(lsb);
+            if let Some(width) = array_slice_width {
+                rename(width);
+            }
         }
     }
 
