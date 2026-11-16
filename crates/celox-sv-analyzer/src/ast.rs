@@ -130,7 +130,7 @@ use case::expr_is_two_state;
 use casts::{
     expr_type_from_type, resize_integral_literal_for_cast, resize_unbased_fill_literal_for_cast,
 };
-use comb_process::comb_processes_from_scope;
+use comb_process::{comb_processes_from_scope, port_connections};
 use comb_rewrite::{expr_static_width, whole_packed_lvalue};
 use constant_folding::{
     fold_const_integral_expr_preserving_mask, simplify_constant_mux_conditions,
@@ -338,6 +338,9 @@ pub struct Port {
     unresolved_net: bool,
     net_resolution: NetResolution,
     default: Option<ConstExpr>,
+    /// The expression of an explicitly named port (IEEE 1800-2023
+    /// 23.2.2.2), which a continuous connection joins to the port.
+    expression: Option<celox_sv_syntax::ExprId>,
 }
 
 /// The implicit driver of a pull or supply net (IEEE 1800-2023 6.6.5-6):

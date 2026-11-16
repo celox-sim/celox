@@ -321,11 +321,27 @@ impl Port {
             unresolved_net: false,
             net_resolution: NetResolution::Wire,
             default: None,
+            expression: None,
         }
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The expression of an explicitly named port.
+    pub(crate) fn expression(&self) -> Option<celox_sv_syntax::ExprId> {
+        self.expression
+    }
+
+    pub(crate) fn with_expression(mut self, expression: Option<celox_sv_syntax::ExprId>) -> Self {
+        self.expression = expression;
+        self
+    }
+
+    /// Give the port of an explicit port expression the expression's type.
+    pub(crate) fn set_type(&mut self, r#type: Type) {
+        self.r#type = r#type;
     }
 
     pub fn direction(&self) -> PortDirection {
