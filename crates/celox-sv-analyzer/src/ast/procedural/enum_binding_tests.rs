@@ -32,6 +32,7 @@ fn local_values_hide_enum_bindings_and_scope_exit_restores_them() {
         subroutine_statics: HashMap::default(),
         static_initializers: Vec::new(),
         constant_evaluation: false,
+        assertion_callees: Vec::new(),
     };
     let mut builder = BodyBuilder::new(
         &tree,
@@ -107,6 +108,7 @@ fn locals_are_bound_where_they_are_declared() {
         explicit_statics: HashSet::default(),
         static_initializers: Vec::new(),
         constant_evaluation: false,
+        assertion_callees: Vec::new(),
     };
     let mut builder = BodyBuilder::new(
         &tree,
