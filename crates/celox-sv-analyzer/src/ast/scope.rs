@@ -15,6 +15,10 @@ use super::*;
 pub(super) struct ScopeSymbols {
     /// User package qualifiers precede implicit std declarations (26.7).
     pub package_scopes: HashSet<String>,
+    /// The subroutines of every package of the design, which a scope copies
+    /// when its calls reach them though it imports no package that has them
+    /// (see [`packages::DesignSubroutines`]).
+    pub design_subroutines: packages::SharedDesignSubroutines,
     /// Declaration inspection omits executable bodies; it is not simulation validation.
     pub declarations_only: bool,
     /// Constant values of parameters and enum members, with their type
@@ -449,6 +453,7 @@ impl ScopeSymbols {
             // do not carry a compilation unit.
             unit: None,
             package_scopes: self.package_scopes.clone(),
+            design_subroutines: self.design_subroutines.clone(),
             // Classes have their qualified names already.
             classes: self.classes.clone(),
             class_member_types: self.class_member_types.clone(),

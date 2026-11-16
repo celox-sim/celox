@@ -225,14 +225,28 @@ impl ScopeElaboration<'_> {
     /// those its own code calls, and those they call in turn. The functions
     /// the types of its header may call are apart
     /// (`declaration_subroutines`): they call each other only.
+    ///
+    /// A name the imports do not have is looked up in `design`, the
+    /// subroutines of every package, unless the scope has it (`known`).
     pub(super) fn reachable_imports<'a>(
         &self,
         imported: &HashMap<&'a str, &'a Subroutine>,
+        design: Option<&'a packages::DesignSubroutines>,
+        known: &HashSet<&str>,
     ) -> HashSet<&'a str> {
         let mut reached = HashSet::default();
         let mut pending: Vec<&'a Subroutine> = Vec::new();
         let visit = |name: &str, reached: &mut HashSet<&'a str>, pending: &mut Vec<_>| {
-            if let Some((&name, &subroutine)) = imported.get_key_value(name)
+            let found = imported
+                .get_key_value(name)
+                .map(|(&name, &subroutine)| (name, subroutine))
+                .or_else(|| {
+                    design
+                        .filter(|_| !known.contains(name))
+                        .and_then(|design| design.subroutines.get_key_value(name))
+                        .map(|(name, subroutine)| (name.as_str(), subroutine.as_ref()))
+                });
+            if let Some((name, subroutine)) = found
                 && reached.insert(name)
             {
                 pending.push(subroutine);

@@ -20,6 +20,34 @@ use std::path::PathBuf;
 use super::scope::ScopeSymbols;
 use super::*;
 
+/// The subroutines and their locals of every package of a design, by name,
+/// with what their bodies may name of their packages: the packages'
+/// variables and DPI imports.
+#[derive(Debug, Default)]
+pub(crate) struct DesignSubroutines {
+    pub(super) subroutines: HashMap<String, Arc<Subroutine>>,
+    pub(super) locals: HashMap<String, Arc<LocalVariable>>,
+    pub(super) state_signals: HashMap<String, Signal>,
+    pub(super) dpi_imports: HashMap<String, crate::ir::DpiImport>,
+}
+
+/// [`DesignSubroutines`] shared by the scopes of a design, equal when they
+/// are the same.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SharedDesignSubroutines(pub(super) Option<Arc<DesignSubroutines>>);
+
+impl PartialEq for SharedDesignSubroutines {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for SharedDesignSubroutines {}
+
 /// The analyzed packages of a design.
 #[derive(Debug, Clone, Default)]
 pub struct Packages {
@@ -48,6 +76,8 @@ pub struct Packages {
     /// The subroutines that call the tasks and functions of interfaces
     /// through virtual interfaces (see [`Self::build_virtual_interface_calls`]).
     pub(super) virtual_interface_calls: Arc<virtual_interface_calls::Subroutines>,
+    /// The subroutines of all the packages (see [`Self::build_design_subroutines`]).
+    pub(super) design_subroutines: SharedDesignSubroutines,
     /// The assertion control state of the design, when a source calls
     /// `$asserton` or `$assertoff` (IEEE 1800-2023 20.11): the state module
     /// of a package no source declares, whose variable every module shares.
@@ -232,6 +262,43 @@ impl Packages {
                     .map(|(_, error)| error)
                     .find(|error| !error.is_unsupported())
             })
+    }
+
+    /// Collect the subroutines and locals of every package, with the
+    /// package variables and DPI imports their bodies may name, which a
+    /// scope copies when its calls reach them without its importing their
+    /// package: a specialization of a package's class template for a class
+    /// of another package, which every scope may receive, as UVM's
+    /// `uvm_object_registry#(T)` for a user's `T`, calls `T::new`.
+    pub(crate) fn build_design_subroutines(&mut self) {
+        let mut design = DesignSubroutines::default();
+        for package in self.packages.values() {
+            for subroutine in &package.symbols.subroutines {
+                design
+                    .subroutines
+                    .entry(subroutine.name.clone())
+                    .or_insert_with(|| subroutine.clone());
+            }
+            for local in &package.symbols.locals {
+                design
+                    .locals
+                    .entry(local.name.clone())
+                    .or_insert_with(|| local.clone());
+            }
+            for signal in &package.symbols.state_signals {
+                design
+                    .state_signals
+                    .entry(signal.name.clone())
+                    .or_insert_with(|| signal.clone());
+            }
+            for import in &package.symbols.dpi_imports {
+                design
+                    .dpi_imports
+                    .entry(import.name().to_owned())
+                    .or_insert_with(|| import.clone());
+            }
+        }
+        self.design_subroutines = SharedDesignSubroutines(Some(Arc::new(design)));
     }
 
     /// Build the subroutines through which classes and modules call the
