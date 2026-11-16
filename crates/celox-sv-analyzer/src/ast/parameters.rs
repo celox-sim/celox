@@ -310,7 +310,12 @@ fn insert_parameter_member_markers(
     literal: Option<&Expr>,
 ) {
     if parameter.name() == "Cfg" {
-        eprintln!("PROBE members Cfg members={} ranges={} value={value:?} literal={:?}", parameter.members.len(), parameter.packed_ranges.len(), literal.map(|l| format!("{l:?}").chars().take(300).collect::<String>()));
+        eprintln!(
+            "PROBE members Cfg members={} ranges={} value={value:?} literal={:?}",
+            parameter.members.len(),
+            parameter.packed_ranges.len(),
+            literal.map(|l| format!("{l:?}").chars().take(300).collect::<String>())
+        );
     }
     if parameter.members.is_empty() || parameter.packed_ranges.len() != 1 {
         return;

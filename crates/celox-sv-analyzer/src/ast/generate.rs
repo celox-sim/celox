@@ -779,7 +779,7 @@ impl<'a> Elaborator<'a, '_> {
     ) -> Result<Option<ConstExpr>, AnalyzerError> {
         // A select of a parameter names indices of its declared range,
         // which may be ascending (IEEE 1800-2023 7.4.1, 11.5.1).
-        let parameters = PackedDimensions::new(
+        let mut parameters = PackedDimensions::new(
             scope
                 .parameter_dimensions
                 .iter()
@@ -788,6 +788,10 @@ impl<'a> Elaborator<'a, '_> {
             &scope.env,
             &*self.aliases,
         );
+        // A parameter wider than the numeric environment holds is known by
+        // its literal, which a select of it, such as of a member of an
+        // element of a packed structure, reads (11.2.1).
+        parameters.parameter_values = scope.literals.clone();
         let Some(expr) = constant_binding::bind(root, &self.tree, self.session, &parameters)?
         else {
             return Ok(None);
@@ -912,30 +916,36 @@ impl<'a> Elaborator<'a, '_> {
             .map(|(name, ty)| (name, (ty.width, ty.signed)))
             .collect();
         let probe_expr = self.expression(root, scope)?;
-        let probe_text = { let t = self.tree.declarations().expression(root).tokens; format!("{t:?}") };
+        let probe_text = {
+            let t = self.tree.declarations().expression(root).tokens;
+            format!("{t:?}")
+        };
         let probe_dbg = format!("{probe_expr:?}");
-        let result = probe_expr
-            .and_then(|expr| {
-                let expr = expr.into();
-                // Preserve four-state truth first (IEEE 1800-2023 12.4).
-                // The numeric interpreter additionally handles user functions
-                // kept symbolic for declaration-contract specialization.
-                typecheck::eval_const_integral_literal_with_types(&expr, &*scope.env, &types)
-                    .map(|literal| typecheck::integral_literal_truth(&literal) == Some(true))
-                    .or_else(|| {
-                        typecheck::eval_const_expr_with_types_in_env(
-                            &expr,
-                            &const_functions::Environment {
-                                constants: &*scope.env,
-                                functions: &self.tree.functions,
-                            },
-                            &|name| types.get(name).copied(),
-                        )
-                        .map(|value| value != 0)
-                    })
-            });
+        let result = probe_expr.and_then(|expr| {
+            let expr = expr.into();
+            // Preserve four-state truth first (IEEE 1800-2023 12.4).
+            // The numeric interpreter additionally handles user functions
+            // kept symbolic for declaration-contract specialization.
+            typecheck::eval_const_integral_literal_with_types(&expr, &*scope.env, &types)
+                .map(|literal| typecheck::integral_literal_truth(&literal) == Some(true))
+                .or_else(|| {
+                    typecheck::eval_const_expr_with_types_in_env(
+                        &expr,
+                        &const_functions::Environment {
+                            constants: &*scope.env,
+                            functions: &self.tree.functions,
+                        },
+                        &|name| types.get(name).copied(),
+                    )
+                    .map(|value| value != 0)
+                })
+        });
         if result.is_none() {
-            eprintln!("PROBE gen-cond scope={:?} tokens={probe_text} expr={}", scope.path, &probe_dbg[..probe_dbg.len().min(3000)]);
+            eprintln!(
+                "PROBE gen-cond scope={:?} tokens={probe_text} expr={}",
+                scope.path,
+                &probe_dbg[..probe_dbg.len().min(3000)]
+            );
         }
         result.ok_or_else(|| AnalyzerError::Unsupported(detail.to_string()))
     }
