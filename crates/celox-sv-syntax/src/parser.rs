@@ -112,7 +112,8 @@ impl Declarations {
         Self::from_tokens(pp.sources, source.tokens)
     }
 
-    pub fn from_tokens(sources: SourceMap, tokens: Vec<Token>) -> Result<Self> {
+    pub fn from_tokens(sources: SourceMap, mut tokens: Vec<Token>) -> Result<Self> {
+        keywords::escape_unreserved_keywords(&mut tokens);
         let indices = tokens
             .iter()
             .enumerate()
@@ -128,7 +129,6 @@ impl Declarations {
             sequence_operands: 0,
             sequence_depth: 0,
             timing_operand_start: None,
-            keyword_versions: Vec::new(),
             source_items: Vec::new(),
             expressions: Vec::new(),
             types: Vec::new(),
@@ -405,7 +405,6 @@ struct Parser<'a> {
     /// parsed starts. A parenthesis after it begins the controlled
     /// expression or statement, not call arguments.
     timing_operand_start: Option<usize>,
-    keyword_versions: Vec<keywords::KeywordVersion>,
     source_items: Vec<SourceItem>,
     expressions: Vec<Expr>,
     types: Vec<DataType>,
