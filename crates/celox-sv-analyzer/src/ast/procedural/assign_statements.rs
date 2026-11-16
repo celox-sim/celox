@@ -80,6 +80,13 @@ impl BodyBuilder<'_, '_, '_> {
         deferred_destination_checks: Option<&mut Vec<Expr>>,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
         let (left, right) = native;
+        expression_binding::objects::reject_covergroup(
+            &self.tree,
+            self.session,
+            left,
+            self.syntax().declarations(),
+            &self.dims,
+        )?;
         if op != "="
             && unpacked_structs::value_struct(
                 left,

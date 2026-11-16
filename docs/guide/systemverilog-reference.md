@@ -37,7 +37,9 @@ constructs without a dedicated issue point to the frontend roadmap,
 ### Design structure
 
 - `bind`, `checker`, `config`, `covergroup`, clocking blocks and clocking
-  drives, user-defined primitives (UDP), and `specify` blocks.
+  drives, user-defined primitives (UDP), and `specify` blocks. A class may
+  declare a covergroup that nothing constructs; constructing one or calling
+  its methods is rejected.
 - `defparam` assignments other than to a parameter of a module instance of
   the module that has the statement, which may be in a generate block:
   names through a child instance, names that start at `$root`, elements of
