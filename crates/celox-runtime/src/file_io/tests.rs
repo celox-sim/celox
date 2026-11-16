@@ -256,29 +256,26 @@ fn stdout_fd_and_mcd_share_close_state_without_skipping_other_channels() {
 }
 
 #[test]
-fn zero_mcd_is_invalid_even_for_an_empty_write() {
+fn zero_mcd_writes_to_no_channel() {
+    // A failed `$fopen` returns MCD 0, which selects no channel (IEEE
+    // 1800-2023 21.3.1): writing to it writes nothing and is no error.
     let mut files = FileIo::default();
-    assert_eq!(
-        files.write(0, b"").unwrap_err().kind(),
-        io::ErrorKind::InvalidInput
-    );
+    assert!(!files.write(0, b"").unwrap());
     let (stdout, result) = files.write_with_stdout(0, b"lost");
     assert!(!stdout);
-    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    result.unwrap();
+    files.flush(Some(0)).unwrap();
 }
 
 #[test]
-fn zero_mcd_cannot_be_closed() {
+fn closing_zero_mcd_closes_nothing() {
     let mut files = FileIo::default();
-    assert_eq!(
-        files.close(0).unwrap_err().kind(),
-        io::ErrorKind::InvalidInput
-    );
-    // An invalid close must not close stdout or an unrelated valid file.
+    files.close(0).unwrap();
+    // It must not close stdout or an unrelated valid file.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("still-open.txt");
     let channel = files.open(&path, None);
-    assert!(files.close(0).is_err());
+    files.close(0).unwrap();
     assert!(files.write(channel | 1, b"open").unwrap());
     files.close(channel).unwrap();
     assert_eq!(std::fs::read(path).unwrap(), b"open");
