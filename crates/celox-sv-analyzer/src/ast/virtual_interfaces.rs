@@ -98,8 +98,35 @@ pub struct VirtualInterfaceDeclaration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VirtualInterfaceMember {
     pub name: String,
-    pub r#type: Type,
+    pub(crate) r#type: MemberType,
     pub is_net: bool,
+}
+
+/// The type of a member of an interface that virtual interface types name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MemberType {
+    /// A type that names no class.
+    Value(Type),
+    /// A handle of class `0` (IEEE 1800-2023 8.4). A handle type names its
+    /// class by its semantic type, which each reader binds in its own table:
+    /// the declarations are made before any table.
+    Handle(String),
+}
+
+impl VirtualInterfaceMember {
+    /// The type of the member as the analyses of `design` read it, such as
+    /// that of a signal which denotes the member of an instance.
+    pub fn declared_type(&self, design: &mut super::packages::Design) -> Type {
+        self.type_in(&mut design.types)
+    }
+
+    /// The type of the member, bound in `table` if it is a class handle.
+    pub(super) fn type_in(&self, table: &mut semantic_types::TyTable) -> Type {
+        match &self.r#type {
+            MemberType::Value(ty) => ty.clone(),
+            MemberType::Handle(class) => classes::handle(table, class),
+        }
+    }
 }
 
 impl VirtualInterfaceDeclaration {
@@ -165,7 +192,7 @@ impl VirtualInterfaces {
                     Some(VirtualInterfaceMember {
                         name: name.to_string(),
                         r#type: match enumeration {
-                            Some(r#type) => r#type,
+                            Some(r#type) => MemberType::Value(r#type),
                             None => resolved_type(r#type, &constants)?,
                         },
                         is_net,
@@ -233,7 +260,7 @@ impl VirtualInterfaces {
 
 /// `r#type` of a member of a non-parameterized interface, whose bounds are
 /// constants, possibly the interface's `constants`.
-pub(crate) fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> Option<Type> {
+pub(crate) fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> Option<MemberType> {
     // A handle of a class object, such as the proxy through which a bus
     // functional model calls back the class that drives it (8.4).
     if r#type.kind() == crate::ir::TypeKind::Object
@@ -241,7 +268,7 @@ pub(crate) fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> O
         && r#type.unpacked_ranges().is_empty()
         && r#type.container().is_none()
     {
-        return Some(classes::handle_shape(class));
+        return Some(MemberType::Handle(class.to_owned()));
     }
     let kind = match r#type.kind() {
         crate::ir::TypeKind::Bit => TypeKind::Bit,
@@ -260,7 +287,7 @@ pub(crate) fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> O
     if !r#type.unpacked_ranges().is_empty() {
         return None;
     }
-    Some(
+    Some(MemberType::Value(
         Type::resolved(
             kind,
             r#type.is_signed(),
@@ -269,7 +296,7 @@ pub(crate) fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> O
             &[],
         )
         .with_chandle(r#type.is_chandle()),
-    )
+    ))
 }
 
 /// The definition whose instances a placeholder selects among: an interface,
@@ -570,7 +597,7 @@ pub(super) fn member_signals(
     for (interface, declaration) in &interfaces {
         signals.extend(declaration.members.iter().map(|member| Signal {
             name: template(interface, &member.name),
-            r#type: member.r#type.clone(),
+            r#type: member.type_in(table),
             is_net: false,
             unresolved_net: false,
             net_resolution: NetResolution::Wire,
@@ -616,7 +643,7 @@ pub(super) fn member_signals(
                 hierarchical: Some(name.clone()),
                 force_control: None,
                 name,
-                r#type: member.r#type.clone(),
+                r#type: member.type_in(table),
                 is_net: member.is_net,
                 unresolved_net: false,
                 net_resolution: NetResolution::Wire,
@@ -919,6 +946,7 @@ pub(super) fn read(
 ) -> Converted<Expr> {
     let functions = &tree.functions;
     let (found, signals) = self::member(session, ty, member)?;
+    let found = found.clone().type_in(&mut session.types);
     check_pure(&handle)?;
     let mut arms = Vec::new();
     for (id, signal) in signals {
@@ -928,16 +956,15 @@ pub(super) fn read(
     // the interface declares it: a scope outside the instances, such as a
     // package's class, does not see their signals.
     let declared = || {
-        casts::expr_type_from_type(functions, &found.r#type, &ConstEnv::default())
-            .map(|shape| shape.width)
+        casts::expr_type_from_type(functions, &found, &ConstEnv::default()).map(|shape| shape.width)
     };
     let (width, signed) = match arms.first() {
         Some((_, value)) => (
             expr_static_width(tree, value, dimensions).or_else(declared),
             dimensions::expression_signedness(value, dimensions, &dimensions.const_env)
-                .unwrap_or_else(|| found.r#type.is_signed()),
+                .unwrap_or_else(|| found.is_signed()),
         ),
-        None => (declared(), found.r#type.is_signed()),
+        None => (declared(), found.is_signed()),
     };
     let width = width
         .ok_or_else(|| unsupported(format!("width of virtual interface member `{member}`")))?;
@@ -1572,7 +1599,8 @@ pub(super) fn watched(
 ) -> Converted<Expr> {
     let functions = &tree.functions;
     let (found, signals) = self::member(session, ty, member)?;
-    let width = casts::expr_type_from_type(functions, &found.r#type, &ConstEnv::default())
+    let found = found.clone().type_in(&mut session.types);
+    let width = casts::expr_type_from_type(functions, &found, &ConstEnv::default())
         .map(|shape| shape.width)
         .ok_or_else(|| unsupported(format!("width of virtual interface member `{member}`")))?;
     let mut value = Expr::Literal(format!("{width}'d0"));

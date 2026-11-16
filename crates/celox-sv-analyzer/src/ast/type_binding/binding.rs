@@ -207,7 +207,8 @@ fn bind_in_mode(
                         values.push(ty);
                     }
                     DataTypeKind::Builtin(name) => {
-                        let Some(mut ty) = builtin_type(name, data.signed) else {
+                        let Some(mut ty) = builtin_type_in(&mut session.types, name, data.signed)
+                        else {
                             return Ok(None);
                         };
                         if ty.is_chandle() {
