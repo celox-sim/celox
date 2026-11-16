@@ -973,6 +973,7 @@ impl Renamer<'_> {
                 signed,
                 array_slice_width,
                 array_slice_reversed,
+                window,
                 is_2state,
             } => LValue::Select {
                 name: self.name(&name),
@@ -981,6 +982,7 @@ impl Renamer<'_> {
                 signed,
                 array_slice_width: array_slice_width.map(|width| self.const_expr(width)),
                 array_slice_reversed,
+                window,
                 is_2state,
             },
         }

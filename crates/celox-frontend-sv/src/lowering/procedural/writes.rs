@@ -265,6 +265,7 @@ pub(in crate::lowering) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<s
                 lsb: lsb.clone(),
                 array_slice_width: None,
                 array_slice_reversed: false,
+                window: None,
             }]),
             // A select of a selected part of a variable, such as one of a
             // two-state member read through its conversion, selects bits
@@ -274,8 +275,10 @@ pub(in crate::lowering) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<s
                 let [
                     sv::ir::LValue::Select {
                         name,
+                        msb: top,
                         lsb: base,
                         array_slice_width: None,
+                        window: None,
                         ..
                     },
                 ] = parts.as_slice()
@@ -287,12 +290,28 @@ pub(in crate::lowering) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<s
                     op: sv::ir::BinaryOp::Add,
                     right: Box::new(bound.clone()),
                 };
+                // A run-time select of the part, such as one of a member of
+                // a packed structure, writes only the part's bits (IEEE
+                // 1800-2023 11.5.1): the part is its window.
+                let literal = |bound: &sv::ir::ConstExpr| match bound {
+                    sv::ir::ConstExpr::Literal(value) => value.parse::<u32>().ok(),
+                    _ => None,
+                };
+                let window = if literal(msb).is_some() && literal(lsb).is_some() {
+                    None
+                } else {
+                    Some(sv::ir::SelectWindow {
+                        lsb: literal(base)?,
+                        msb: literal(top)?,
+                    })
+                };
                 Some(vec![sv::ir::LValue::Select {
                     name: name.clone(),
                     msb: offset(msb),
                     lsb: offset(lsb),
                     array_slice_width: None,
                     array_slice_reversed: false,
+                    window,
                 }])
             }
         },
