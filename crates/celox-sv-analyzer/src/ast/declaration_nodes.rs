@@ -59,14 +59,24 @@ impl Parameter {
             constants,
             functions,
         };
-        let mut value = if self.has_declared_type && typecheck::const_expr_has_real_type(&value) {
-            // An explicitly integral parameter supplies an integer assignment
-            // context. Untyped real parameters retain their floating type.
+        let mut value = if (self.has_declared_type || self.declared_width.is_some())
+            && typecheck::const_expr_has_real_type(&value)
+        {
+            // An explicitly integral parameter, or one with a range, supplies
+            // an integer assignment context (IEEE 1800-2023 6.20.2). Untyped
+            // real parameters retain their floating type.
             typecheck::round_real_to_i128(typecheck::eval_real_const_expr(&value, &environment)?)
         } else {
             typecheck::eval_const_expr_in_env(&value, &environment)?
         };
-        if let Some(width) = self.declared_width {
+        // A signing without a range applies to the range of the final value
+        // (IEEE 1800-2023 6.20.2).
+        let width = self.declared_width.or_else(|| {
+            self.declared_signed?;
+            infer_parameter_value_type(self.value()?, self.has_declared_type, parameter_types)
+                .map(|r#type| r#type.width)
+        });
+        if let Some(width) = width {
             value =
                 coerce_const_parameter_value(value, width, self.declared_signed.unwrap_or(false));
         }
