@@ -29,7 +29,7 @@ workflows:
         - 'actions/setup-node@v7'
         - 'actions/setup-python@v7'
         - 'actions/upload-artifact@v7'
-        - 'cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b'
+        - 'cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086'
         - 'dtolnay/rust-toolchain@master'
         - 'mergifyio/gha-mergify-ci@392d123d84a27960993927aec1f2cbb059fb95c1'
         - 'pnpm/action-setup@v6'
@@ -63,7 +63,7 @@ workflows:
     '.github/workflows/external-comparisons.yml':
         - 'actions/checkout@v7'
         - 'actions/upload-artifact@v7'
-        - 'cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b'
+        - 'cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086'
     '.github/workflows/heliodor-bench.yml':
         - 'actions/checkout@v7'
         - 'actions/download-artifact@v8'
@@ -128,7 +128,7 @@ workflows:
         - 'actions/setup-node@v7'
         - 'actions/setup-python@v7'
         - 'actions/upload-artifact@v7'
-        - 'cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b'
+        - 'cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086'
         - 'dtolnay/rust-toolchain@master'
         - 'swatinem/rust-cache@v2'
     '.github/workflows/rtlmeter-steady-bench.yml':
@@ -138,7 +138,7 @@ workflows:
         - 'actions/setup-node@v7'
         - 'actions/setup-python@v7'
         - 'actions/upload-artifact@v7'
-        - 'cachix/install-nix-action@v31.11.3'
+        - 'cachix/install-nix-action@v31.11.5'
         - 'dtolnay/rust-toolchain@master'
         - 'swatinem/rust-cache@v2'
     '.github/workflows/rust-cache.yml':
@@ -178,12 +178,12 @@ workflows:
     '.github/workflows/update-mbx.yml':
         - 'actions/checkout@v7'
         - 'actions/create-github-app-token@v3'
-        - 'cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b'
+        - 'cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086'
         - 'peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1'
     '.github/workflows/updatecli.yml':
         - 'actions/checkout@v7'
         - 'actions/create-github-app-token@v3'
-        - 'cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b'
+        - 'cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086'
         - 'updatecli/updatecli-action@v3.10.0'
     '.github/workflows/verify-lockfile.yml':
         - 'actions/checkout@v7'
@@ -246,14 +246,14 @@ dependencies:
         commit: 'sha1-4322e5726e6334590d251fc4f92bec0efafc45dc'
         owner_id: 91769432
         repo_id: 219665796
-    'cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b':
-        ref: 'v31.11.3'
-        commit: 'sha1-75c75c31ebece974e48ebc36b4ad125bd97bd97b'
+    'cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086':
+        ref: 'v31.11.5'
+        commit: 'sha1-3dc140bfc76c49fbd4dd958429132e3746bcb086'
         owner_id: 36824654
         repo_id: 212301524
-    'cachix/install-nix-action@v31.11.3':
-        ref: 'v31.11.3'
-        commit: 'sha1-75c75c31ebece974e48ebc36b4ad125bd97bd97b'
+    'cachix/install-nix-action@v31.11.5':
+        ref: 'v31.11.5'
+        commit: 'sha1-3dc140bfc76c49fbd4dd958429132e3746bcb086'
         owner_id: 36824654
         repo_id: 212301524
     'codspeedhq/action@v5':

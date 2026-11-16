@@ -79,7 +79,7 @@ jobs:
         with:
           version: "5.054"
           revision: bbb60a403932a9f695cb6ff001ceb73de6ad9234
-      - uses: cachix/install-nix-action@v31.11.3
+      - uses: cachix/install-nix-action@v31.11.5
       - name: Build the release fixed by flake.lock
         run: |
           mkdir -p work
