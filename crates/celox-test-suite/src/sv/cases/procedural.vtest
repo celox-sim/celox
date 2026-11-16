@@ -1943,8 +1943,11 @@ endmodule
 (case repeat_rounds_real_counts_to_integers
   (source "repeat_real.sv" #"
 module Top(output int constant, output int rounded, output int negative,
-           output int comb_count);
+           output int comb_count, output int function_count);
     real r;
+    function automatic real half_of_five();
+        return 2.5;
+    endfunction
     initial begin
         constant = 0;
         repeat (10.4) constant++;
@@ -1959,10 +1962,15 @@ module Top(output int constant, output int rounded, output int negative,
         comb_count = 0;
         repeat (3.6) comb_count++;
     end
+    always_comb begin
+        function_count = 0;
+        repeat (half_of_five()) function_count++;
+    end
 endmodule
 "#)
   (top Top) (run_until 1)
   (assert_eq constant 10)
   (assert_eq rounded 3)
   (assert_eq negative 0)
-  (assert_eq comb_count 4))
+  (assert_eq comb_count 4)
+  (assert_eq function_count 3))
