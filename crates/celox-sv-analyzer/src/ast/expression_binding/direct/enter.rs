@@ -25,6 +25,15 @@ pub(super) fn enter(
         values.push(value.clone());
         return Ok(());
     }
+    // A member of an element of an array parameter that is no variable
+    // here, as in a parameter initializer, is the constant it selects
+    // (IEEE 1800-2023 11.2.1).
+    if let Some(literal) =
+        constant_binding::array_parameter_member(id, native, tree, session, dimensions)
+    {
+        values.push(Expr::Literal(literal));
+        return Ok(());
+    }
     unpacked_structs::check_operands(id, native, tree, session, dimensions)?;
     check_received(id, root, &target, native, tree, session, dimensions)?;
     // A container formal passed by value receives a copy of a
