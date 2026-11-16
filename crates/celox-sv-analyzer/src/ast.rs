@@ -470,8 +470,6 @@ pub struct TypeShape {
     /// named type, which is signed although the whole array is not (IEEE
     /// 1800-2023 7.4.1).
     signed_element_depth: Option<usize>,
-    /// The class of an object handle type.
-    class: Option<Arc<str>>,
     /// The members of an unpacked structure type (IEEE 1800-2023 7.2).
     unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
     /// The typedef that names an enumeration, struct or union type, and how
@@ -843,8 +841,6 @@ struct Function {
     return_is_2state: bool,
     /// The members of an enumerated return type, for its methods.
     return_enum_domain: Option<Arc<enums::EnumDomain>>,
-    /// The class of a class handle result.
-    return_class: Option<String>,
     /// The container type of a dynamic array, associative array or queue
     /// result (IEEE 1800-2023 7.5, 7.8, 7.10).
     return_container: Option<Arc<ContainerType>>,

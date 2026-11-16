@@ -225,7 +225,7 @@ impl Declared {
             && r#type.unpacked_ranges.len() == shape.unpacked.len()
             && r#type.is_signed == shape.signed
             && r#type.container.is_some() == shape.container.is_some()
-            && r#type.class() == shape.class.as_deref())
+            && r#type.element.identity() == shape.element_identity())
         .then_some(r#type)
     }
 }

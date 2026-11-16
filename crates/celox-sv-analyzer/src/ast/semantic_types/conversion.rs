@@ -129,7 +129,6 @@ fn convert(
     let parts = Parts {
         bound_element: ty.element.get(table),
         container: ty.container.as_deref(),
-        class: ty.class.as_deref(),
         unpacked_struct: ty.unpacked_struct.as_ref(),
         kind: ty.kind,
         enumeration: ty.is_enum || ty.packed_enum,
@@ -185,7 +184,6 @@ pub(in crate::ast) fn of_shape(
             .element_type(table)
             .map(|element| table.without_keyword(element)),
         container: shape.container.as_deref(),
-        class: shape.class.as_deref(),
         unpacked_struct: shape.unpacked_struct.as_ref(),
         kind,
         enumeration: shape.enum_domain.is_some()
@@ -222,7 +220,6 @@ struct Parts<'a> {
     /// the type keeps it: the fields below then only cross-check it.
     bound_element: Option<TyId>,
     container: Option<&'a ContainerType>,
-    class: Option<&'a str>,
     unpacked_struct: Option<&'a Arc<UnpackedStruct>>,
     kind: TypeKind,
     /// An enumeration or a packed array of one.
@@ -267,11 +264,13 @@ impl Parts<'_> {
         };
         let mut id = match self.bound_element {
             Some(element) => {
-                // The fields tell no virtual interface: only its kept type
-                // does (25.9).
+                // The fields tell no virtual interface or class: only its
+                // kept type does (25.9, 8.4).
                 #[cfg(debug_assertions)]
-                if !matches!(table.data(element), TyData::VirtualInterface { .. })
-                    && let Some(fields) = self.element_of_fields(table, functions, env, &range)
+                if !matches!(
+                    table.data(element),
+                    TyData::VirtualInterface { .. } | TyData::Class(_)
+                ) && let Some(fields) = self.element_of_fields(table, functions, env, &range)
                 {
                     assert_eq!(
                         fields, element,
@@ -333,10 +332,6 @@ impl Parts<'_> {
                 kind,
                 element: nested_type(table, functions, &container.element, env)?,
             });
-        }
-        // Events and processes are handles of built-in classes.
-        if let Some(class) = self.class {
-            return Some(TyData::Class(table.class(class)));
         }
         if let Some(aggregate) = self.unpacked_struct {
             let members = aggregate

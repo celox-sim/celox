@@ -1052,7 +1052,8 @@ mod tests {
         // `\v%foo@8`; the package that takes the method may have named
         // locals of its own so too. The method's must not become those,
         // whatever their spelling holds.
-        let logic = crate::ir::Type::from_ast(Type::new(TypeKind::Logic), &HashMap::default());
+        let logic =
+            crate::ir::Type::from_ast(Type::new(TypeKind::Logic), &HashMap::default(), &|_| None);
         let local = |name: &str, source: &str, owned: bool| LocalVariable {
             name: name.into(),
             source_name: source.into(),
