@@ -372,13 +372,17 @@ fn check_assignment(
         // A value that is no unpacked array, such as an integral or real
         // variable, an element of an array or an operation on them, is not
         // assignment compatible with a fixed-size unpacked array (7.6).
-        if matches!(
-            table.data(actual),
-            semantic_types::TyData::Packed(_)
-                | semantic_types::TyData::Real
-                | semantic_types::TyData::Shortreal
-                | semantic_types::TyData::String
-        ) {
+        // Celox assigns a packed value of the array's size bit for bit.
+        let rejected = match table.data(actual) {
+            semantic_types::TyData::Packed(packed) => {
+                fixed_array_bits(table, target) != Some(packed.bits())
+            }
+            semantic_types::TyData::Real
+            | semantic_types::TyData::Shortreal
+            | semantic_types::TyData::String => true,
+            _ => false,
+        };
+        if rejected {
             return Err(AnalyzerError::NotUnpackedArray {
                 context: context(),
                 target: table.spell(target),
@@ -391,18 +395,38 @@ fn check_assignment(
     assignments::check_types(tree, session, dims, actual, target, context)
 }
 
-/// Whether native expression `id` is a number, a name, a select or an
-/// operator, whose value has the type of its operands: not a string
-/// literal, which an unpacked array of bytes takes (5.9), an assignment
-/// pattern, a concatenation or a stream, which an unpacked array may take
-/// as its elements (IEEE 1800-2023 10.9, 10.10, 11.4.14), nor a call.
+/// The bits of fixed-size unpacked array type `id` of packed elements.
+fn fixed_array_bits(table: &semantic_types::TyTable, mut id: semantic_types::TyId) -> Option<u128> {
+    let mut count = 1u128;
+    loop {
+        match table.data(id) {
+            semantic_types::TyData::Array {
+                kind: semantic_types::ArrayKind::Fixed(range),
+                element,
+            } => {
+                count = count.checked_mul(range.size())?;
+                id = *element;
+            }
+            semantic_types::TyData::Packed(packed) => return count.checked_mul(packed.bits()),
+            _ => return None,
+        }
+    }
+}
+
+/// Whether native expression `id` is a number, a name, a select, a cast or
+/// an operator, whose value has the type of its operands: not a string
+/// literal, which an unpacked array of bytes takes (5.9), an unbased
+/// unsized literal, which Celox fills an unpacked array with, an
+/// assignment pattern, a concatenation or a stream, which an unpacked
+/// array may take as its elements (IEEE 1800-2023 10.9, 10.10, 11.4.14),
+/// nor a call.
 fn is_scalar_operand(id: celox_sv_syntax::ExprId, native: &celox_sv_syntax::Declarations) -> bool {
     use celox_sv_syntax::ExprKind;
     match &native
         .expression(expression_binding::ungroup(id, native))
         .kind
     {
-        ExprKind::Literal(text) => !text.starts_with('"'),
+        ExprKind::Literal(text) => !text.starts_with(['"', '\'']),
         kind => matches!(
             kind,
             ExprKind::Name(_)
@@ -410,6 +434,7 @@ fn is_scalar_operand(id: celox_sv_syntax::ExprId, native: &celox_sv_syntax::Decl
                 | ExprKind::Member { .. }
                 | ExprKind::Unary { .. }
                 | ExprKind::Binary { .. }
+                | ExprKind::Cast { .. }
         ),
     }
 }
