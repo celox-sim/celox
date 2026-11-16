@@ -515,7 +515,15 @@ pub(super) fn generate_array_parameters(
             .parameter_declaration(id)
             .parameters
             .iter()
-            .filter(|parameter| is_array_parameter(parameter, tree.declarations()))
+            // A parameter of a packed type given by a pattern, such as a
+            // structure, is a value the block binds, not an array.
+            .filter(|parameter| {
+                matches!(
+                    &parameter.kind,
+                    celox_sv_syntax::ParameterKind::Value { dimensions, .. }
+                        if !dimensions.is_empty()
+                )
+            })
             .collect::<Vec<_>>();
         let mut local = array_parameters_from_declaration(
             &authored,
