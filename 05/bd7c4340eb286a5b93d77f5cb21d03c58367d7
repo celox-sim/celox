@@ -1,0 +1,1 @@
+Address review: apply strict policy to WASM SV/mixed compilation and preserve strict across diagnostic_policy setter order
