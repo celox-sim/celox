@@ -175,7 +175,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                     unpacked_struct: port.r#type().unpacked_struct.clone(),
                 },
                 // The shape has the type the port was declared with.
-                &port.r#type().binding,
+                port.r#type(),
             ),
         );
     }
@@ -229,7 +229,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                     unpacked_struct: signal.r#type().unpacked_struct.clone(),
                 },
                 // The shape has the type the signal was declared with.
-                &signal.r#type().binding,
+                signal.r#type(),
             ),
         );
     }

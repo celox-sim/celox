@@ -1091,10 +1091,11 @@ pub(in crate::ast) fn selected_type(
     // A selection of unpacked dimensions has the element type of `whole`,
     // with the dimensions that remain, the first a slice's.
     if !selected_layers.is_empty() || !matches!(selected, TyData::Packed(_)) {
-        whole.unpacked_ranges.drain(..consumed);
-        if let (Some(ArrayKind::Fixed(range)), Some(first)) =
-            (selected_layers.first(), whole.unpacked_ranges.first_mut())
-        {
+        whole.unpacked_ranges_mut().drain(..consumed);
+        if let (Some(ArrayKind::Fixed(range)), Some(first)) = (
+            selected_layers.first(),
+            whole.unpacked_ranges_mut().first_mut(),
+        ) {
             *first = UnpackedRange::new(
                 ConstExpr::Literal(range.left.to_string()),
                 ConstExpr::Literal(range.right.to_string()),

@@ -1344,7 +1344,7 @@ pub(super) fn visible_classes(tree: &AnalysisContext<'_>, session: &mut Session)
 pub(super) fn handle(table: &mut semantic_types::TyTable, name: &str) -> Type {
     let mut ty = handle_shape(name);
     let id = handle_type_id(table, name);
-    ty.binding.set(table, id);
+    ty.bind(table, id);
     ty
 }
 
@@ -1669,7 +1669,7 @@ fn lay_out_shared_class(
                                 .try_fold(id, |id, member| session.types.member(id, member))
                         })
                     {
-                        leaf.r#type.binding.set(&session.types, id);
+                        leaf.r#type.bind(&session.types, id);
                     }
                     let mut field = field(&tree.functions, &leaf.r#type, env, size)?;
                     size = field.offset + field.storage();
