@@ -281,10 +281,6 @@ fn native_signature(
             .as_ref()
             .filter(|ty| ty.unpacked_ranges.is_empty())
             .and_then(|ty| ty.enum_domain.clone()),
-        return_class: ty
-            .as_ref()
-            .filter(|ty| ty.unpacked_ranges.is_empty() && ty.container.is_none())
-            .and_then(|ty| ty.class().map(str::to_owned)),
         return_container: ty.as_ref().and_then(|ty| ty.container.clone()),
         return_type: ty
             .filter(|ty| {

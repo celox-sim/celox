@@ -1822,11 +1822,6 @@ fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::
     let class = id
         .and_then(|id| table.handle_class(id))
         .map(|class| &**class);
-    debug_assert_eq!(
-        class,
-        ty.class(),
-        "a handle type is spelled from its semantic type"
-    );
     let mut spelled = if let Some(container) = &ty.container {
         // The element and key types of a container are those of its
         // semantic type, where they are not bound themselves.

@@ -83,7 +83,6 @@ fn pattern_value(
             container: None,
             real: false,
             string: false,
-            class: None,
             unpacked: rest.to_vec(),
             ..shape.clone_shape()
         });

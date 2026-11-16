@@ -326,7 +326,7 @@ impl Binding {
 
     /// What tells the type apart where its shape does not (see
     /// [`RetainedType::identity`]).
-    pub(super) fn identity(&self) -> Option<Arc<TyData>> {
+    pub(super) fn identity(&self) -> Option<Identity> {
         self.0.as_ref()?.identity()
     }
 
@@ -334,6 +334,14 @@ impl Binding {
     /// the shape of a variable declared with it.
     pub(super) fn retained(&self) -> Option<RetainedType> {
         self.0.clone()
+    }
+
+    /// Whether the type is bound to a class handle type that `table` does
+    /// not hold (see [`RetainedType::class_outside`]).
+    pub(super) fn class_outside(&self, table: &TyTable) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|retained| retained.class_outside(table))
     }
 }
 
@@ -343,16 +351,42 @@ impl Binding {
 pub(super) struct RetainedType {
     id: TyId,
     node: Weak<TyData>,
+    /// The class of a class handle type, by the name its declaration has
+    /// in the table the type was retained from.
+    class: Option<Arc<str>>,
 }
+
+/// What tells a type apart from another of the same shape, in any table.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Identity {
+    /// The interned data of a virtual interface type (IEEE 1800-2023
+    /// 25.9), which is the same in every table that shares the prefix the
+    /// design's interfaces were declared in.
+    Interface(Arc<TyData>),
+    /// The class of a class handle type (8.4) by its specialization name,
+    /// which tables that declared the class on their own also agree on.
+    Class(Arc<str>),
+}
+
 impl RetainedType {
+    /// Whether the type is a class handle type that `table` does not hold,
+    /// so that its class cannot be read there. Types are read in the table
+    /// they were bound in or one that extends it: the design's, which the
+    /// analyses of its packages and modules extend in turn.
+    pub(super) fn class_outside(&self, table: &TyTable) -> bool {
+        self.class.is_some() && self.in_table(table).is_none()
+    }
+
     /// What tells the type apart from another of the same shape, where its
-    /// shape does not: the interned data of a virtual interface type (IEEE
-    /// 1800-2023 25.9), which is the same in every table that shares the
-    /// prefix the design's interfaces were declared in.
-    pub(super) fn identity(&self) -> Option<Arc<TyData>> {
+    /// shape does not: a virtual interface or class handle type.
+    pub(super) fn identity(&self) -> Option<Identity> {
+        if let Some(class) = &self.class {
+            return Some(Identity::Class(class.clone()));
+        }
         self.node
             .upgrade()
             .filter(|data| matches!(**data, TyData::VirtualInterface { .. }))
+            .map(Identity::Interface)
     }
 
     pub(super) fn same_node(&self, other: &Self) -> bool {
@@ -432,9 +466,14 @@ impl TyTable {
     }
 
     pub(super) fn retain(&self, id: TyId) -> RetainedType {
+        let node = &self.types[id.0 as usize].0;
         RetainedType {
             id,
-            node: Arc::downgrade(&self.types[id.0 as usize].0),
+            node: Arc::downgrade(node),
+            class: match &**node {
+                TyData::Class(Decl::Class(decl)) => Some(self.decl(*decl).name.clone()),
+                _ => None,
+            },
         }
     }
 
