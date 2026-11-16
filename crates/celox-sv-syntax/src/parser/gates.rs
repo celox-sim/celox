@@ -1,9 +1,13 @@
-//! Native n-input gate declarations retain terminals and unsupported modifiers.
+//! Native n-input and n-output gate declarations (IEEE 1800-2023 28.4,
+//! 28.5) retain terminals and unsupported modifiers.
 use super::*;
 
 impl Parser<'_> {
     pub(super) fn logic_gate_start(&self) -> bool {
-        matches!(self.peek(), "and" | "nand" | "or" | "nor" | "xor" | "xnor")
+        matches!(
+            self.peek(),
+            "and" | "nand" | "or" | "nor" | "xor" | "xnor" | "buf" | "not"
+        )
     }
 
     pub(super) fn logic_gate(&mut self) -> Result<LogicGate> {
@@ -48,8 +52,10 @@ impl Parser<'_> {
             self.assignment_delay()?
         };
         if delay.as_ref().is_some_and(|delay| delay.values.len() > 2) {
-            return Err(self.error("n-input gate delay has more than two values"));
+            return Err(self.error(format!("{kind} gate delay has more than two values")));
         }
+        // An n-output gate's terminals are its outputs and then one input.
+        let outputs = matches!(kind.as_str(), "buf" | "not");
         let mut instances = Vec::new();
         loop {
             let start = self.at;
@@ -74,7 +80,14 @@ impl Parser<'_> {
                 if matches!(self.peek(), "," | ")" | ";") {
                     return Err(self.error("expected gate input terminal"));
                 }
-                terminals.push(self.expression(0)?);
+                let terminal = self.expression(0)?;
+                if outputs && self.peek() == "," && !self.variable_lvalue(terminal) {
+                    return Err(self.error_at(
+                        self.expressions[terminal.0].tokens,
+                        "expected gate output lvalue",
+                    ));
+                }
+                terminals.push(terminal);
                 if self.eat(")") {
                     break;
                 }
