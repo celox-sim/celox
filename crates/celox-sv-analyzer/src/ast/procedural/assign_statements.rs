@@ -8,7 +8,7 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         root: celox_sv_syntax::ExprId,
     ) -> Converted<Option<Vec<(celox_sv_syntax::ExprId, LValue)>>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let celox_sv_syntax::ExprKind::Concatenation(parts) = &native.expression(root).kind else {
             return Ok(None);
         };
@@ -21,7 +21,7 @@ impl BodyBuilder<'_, '_, '_> {
                 if expression_binding::member_context(
                     id,
                     native,
-                    self.tree,
+                    &self.tree,
                     self.session,
                     &self.dims,
                 )?
@@ -35,7 +35,7 @@ impl BodyBuilder<'_, '_, '_> {
                 let target = expression_binding::variable_lvalue(
                     id,
                     native,
-                    self.tree,
+                    &self.tree,
                     self.session,
                     &self.dims,
                     false,
@@ -83,8 +83,8 @@ impl BodyBuilder<'_, '_, '_> {
         if op != "="
             && unpacked_structs::value_struct(
                 left,
-                self.tree.declarations(),
-                self.tree,
+                self.syntax().declarations(),
+                &self.tree,
                 self.session,
                 &self.dims,
             )
@@ -94,20 +94,20 @@ impl BodyBuilder<'_, '_, '_> {
                 "operator `{op}` on an unpacked structure"
             )));
         }
-        let declarations = self.tree.declarations();
+        let declarations = self.syntax().declarations();
         // A chandle is only assigned (IEEE 1800-2023 6.14); the destinations
         // dispatched below write without `variable_lvalue`, so its target
         // check runs here.
         expression_binding::check_chandle_target(
             op == "=",
             left,
-            self.tree,
+            &self.tree,
             declarations,
             &self.dims,
             self.session,
         )?;
         let chandle = expression_binding::native_chandle(
-            self.tree,
+            &self.tree,
             left,
             declarations,
             &self.dims,
@@ -116,7 +116,7 @@ impl BodyBuilder<'_, '_, '_> {
         expression_binding::check_chandle_assignment(
             chandle,
             right,
-            self.tree,
+            &self.tree,
             declarations,
             &self.dims,
             self.session,
@@ -125,19 +125,19 @@ impl BodyBuilder<'_, '_, '_> {
         // is, is judged before its kind writes it (6.19.3, 6.19.4).
         if op == "=" {
             assignments::check_enum_target(
-                self.tree,
+                &self.tree,
                 self.session,
                 left,
                 right,
-                self.tree.declarations(),
+                self.syntax().declarations(),
                 &self.dims,
             )?;
         } else {
             assignments::check_enum_update(
-                self.tree,
+                &self.tree,
                 self.session,
                 left,
-                self.tree.declarations(),
+                self.syntax().declarations(),
                 &self.dims,
                 op,
             )?;
@@ -147,7 +147,7 @@ impl BodyBuilder<'_, '_, '_> {
             right,
             op,
             nonblocking,
-            self.tree,
+            &self.tree,
             self.session,
             &self.dims,
         )? {
@@ -176,10 +176,10 @@ impl BodyBuilder<'_, '_, '_> {
                     // 1800-2023 11.4.1), an enumerated one as one too
                     // (6.19.3, 6.19.4).
                     assignments::check_enum_update(
-                        self.tree,
+                        &self.tree,
                         self.session,
                         *id,
-                        self.tree.declarations(),
+                        self.syntax().declarations(),
                         &self.dims,
                         op,
                     )?;
@@ -210,7 +210,7 @@ impl BodyBuilder<'_, '_, '_> {
                         .iter()
                         .map(|part| {
                             statements::expr_from_lvalue(
-                                self.tree,
+                                &self.tree,
                                 &self.session.types,
                                 part,
                                 &self.dims,
@@ -219,7 +219,7 @@ impl BodyBuilder<'_, '_, '_> {
                         .collect(),
                 );
                 statements::assignment_op_value(
-                    self.tree,
+                    &self.tree,
                     self.session,
                     read,
                     op,
@@ -236,13 +236,13 @@ impl BodyBuilder<'_, '_, '_> {
         if op == "="
             && let Some(target) = array_compatibility::native_unpacked_shape(
                 left,
-                self.tree,
+                &self.tree,
                 self.session,
                 &self.dims,
             )
         {
             array_compatibility::check_native_unpacked_assignment(
-                self.tree,
+                &self.tree,
                 self.session,
                 right,
                 &target,
@@ -254,10 +254,10 @@ impl BodyBuilder<'_, '_, '_> {
         // (IEEE 1800-2023 25.9).
         if op != "="
             && let Some(ty) = virtual_interfaces::native_type(
-                self.tree,
+                &self.tree,
                 self.session,
                 left,
-                self.tree.declarations(),
+                self.syntax().declarations(),
                 &self.dims,
             )
         {
@@ -267,18 +267,18 @@ impl BodyBuilder<'_, '_, '_> {
         // given no target type below, so it is checked here (25.9).
         if op == "="
             && let Some(ty) = virtual_interfaces::native_type(
-                self.tree,
+                &self.tree,
                 self.session,
                 left,
-                self.tree.declarations(),
+                self.syntax().declarations(),
                 &self.dims,
             )
         {
             virtual_interfaces::check_assignment(
-                self.tree,
+                &self.tree,
                 self.session,
                 right,
-                self.tree.declarations(),
+                self.syntax().declarations(),
                 &self.dims,
                 &ty,
             )?;
@@ -317,10 +317,10 @@ impl BodyBuilder<'_, '_, '_> {
         }
         if op != "="
             && expression_binding::native_string(
-                self.tree,
+                &self.tree,
                 self.session,
                 left,
-                self.tree.declarations(),
+                self.syntax().declarations(),
                 &self.dims,
             )
         {
@@ -328,8 +328,8 @@ impl BodyBuilder<'_, '_, '_> {
         }
         let member_context = expression_binding::member_context(
             left,
-            self.tree.declarations(),
-            self.tree,
+            self.syntax().declarations(),
+            &self.tree,
             self.session,
             &self.dims,
         )?;
@@ -340,17 +340,17 @@ impl BodyBuilder<'_, '_, '_> {
             // An enumerated member of a union takes any value of its bits
             // (IEEE 1800-2023 6.19.3).
             if assignments::union_member(
-                self.tree,
+                &self.tree,
                 self.session,
                 left,
-                self.tree.declarations(),
+                self.syntax().declarations(),
                 &self.dims,
             )? {
                 shape = shape.without_enum();
             }
             if !shape.unpacked.is_empty() {
                 array_compatibility::check_native_unpacked_assignment(
-                    self.tree,
+                    &self.tree,
                     self.session,
                     right,
                     &shape,
@@ -360,13 +360,16 @@ impl BodyBuilder<'_, '_, '_> {
                 if !matches!(
                     self.tree
                         .declarations()
-                        .expression(expression_binding::ungroup(right, self.tree.declarations()))
+                        .expression(expression_binding::ungroup(
+                            right,
+                            self.syntax().declarations()
+                        ))
                         .kind,
                     celox_sv_syntax::ExprKind::Pattern { target: None, .. }
                 ) && let Some(actual) =
-                    dimensions::operand_shape(right, self.tree, self.session, &self.dims)?
+                    dimensions::operand_shape(right, &self.tree, self.session, &self.dims)?
                     && let Some((actual, target)) = array_compatibility::incompatible(
-                        self.tree,
+                        &self.tree,
                         self.session,
                         &actual,
                         &shape,
@@ -382,24 +385,24 @@ impl BodyBuilder<'_, '_, '_> {
             }
             expression_binding::bind_value(
                 right,
-                self.tree.declarations(),
-                self.tree,
+                self.syntax().declarations(),
+                &self.tree,
                 self.session,
                 &self.dims,
                 Some(&shape),
             )?
         } else if op == "="
             && matches!(written, LValue::Select { .. })
-            && expression_binding::is_stream(right, self.tree.declarations())
+            && expression_binding::is_stream(right, self.syntax().declarations())
             && let Some(shape) =
-                dimensions::operand_shape(left, self.tree, self.session, &self.dims)?
+                dimensions::operand_shape(left, &self.tree, self.session, &self.dims)?
         {
             // A stream fills the selected type, whose position may be known
             // only at run time (IEEE 1800-2023 11.4.14).
             expression_binding::bind_value(
                 right,
-                self.tree.declarations(),
-                self.tree,
+                self.syntax().declarations(),
+                &self.tree,
                 self.session,
                 &self.dims,
                 Some(&shape),
@@ -407,14 +410,14 @@ impl BodyBuilder<'_, '_, '_> {
         } else if op == "="
             && let Some(target) = array_compatibility::native_unpacked_shape(
                 left,
-                self.tree,
+                &self.tree,
                 self.session,
                 &self.dims,
             )
             && containers::value_container(
                 right,
-                self.tree.declarations(),
-                self.tree,
+                self.syntax().declarations(),
+                &self.tree,
                 self.session,
                 &self.dims,
             )
@@ -425,8 +428,8 @@ impl BodyBuilder<'_, '_, '_> {
             // (IEEE 1800-2023 7.6).
             expression_binding::bind_value(
                 right,
-                self.tree.declarations(),
-                self.tree,
+                self.syntax().declarations(),
+                &self.tree,
                 self.session,
                 &self.dims,
                 Some(&target),
@@ -436,7 +439,7 @@ impl BodyBuilder<'_, '_, '_> {
                 left,
                 right,
                 &written,
-                self.tree,
+                &self.tree,
                 self.session,
                 &self.dims,
             )?
@@ -445,9 +448,9 @@ impl BodyBuilder<'_, '_, '_> {
         } else if op == "=" {
             expression_binding::expression(
                 right,
-                self.tree.declarations(),
+                self.syntax().declarations(),
                 &written,
-                self.tree,
+                &self.tree,
                 self.session,
                 &self.dims,
             )?
@@ -458,7 +461,7 @@ impl BodyBuilder<'_, '_, '_> {
             let read = if place {
                 let (source, unique) = self.hidden_of(left)?;
                 let mut value = statements::expr_from_lvalue(
-                    self.tree,
+                    &self.tree,
                     &self.session.types,
                     &written,
                     &self.dims,
@@ -475,13 +478,13 @@ impl BodyBuilder<'_, '_, '_> {
             };
             let value = expression_binding::value(
                 right,
-                self.tree.declarations(),
-                self.tree,
+                self.syntax().declarations(),
+                &self.tree,
                 self.session,
                 &self.dims,
             )?;
             assignment_op_expr(
-                self.tree,
+                &self.tree,
                 self.session,
                 read.as_ref().unwrap_or(&written),
                 op,
@@ -491,10 +494,10 @@ impl BodyBuilder<'_, '_, '_> {
         };
         if op == "="
             && expression_binding::native_string(
-                self.tree,
+                &self.tree,
                 self.session,
                 left,
-                self.tree.declarations(),
+                self.syntax().declarations(),
                 &self.dims,
             )
         {
@@ -513,7 +516,7 @@ impl BodyBuilder<'_, '_, '_> {
             .as_ref()
             .is_some_and(|(guards, _)| !guards.is_empty())
         {
-            rhs = coerce_procedural_assignment_rhs(self.tree, rhs, &written, &self.dims);
+            rhs = coerce_procedural_assignment_rhs(&self.tree, rhs, &written, &self.dims);
         }
         // A class property or container element is written through its
         // object. An assignment evaluates its value, into a local of the
@@ -545,7 +548,7 @@ impl BodyBuilder<'_, '_, '_> {
         if let Some(deferred) = deferred_destination_checks {
             *deferred = guards;
         } else {
-            rhs = packed_structs::checked_value(guards, rhs, self.tree, &self.dims)?;
+            rhs = packed_structs::checked_value(guards, rhs, &self.tree, &self.dims)?;
         }
         self.emit_assign(written, rhs, nonblocking)
     }
@@ -590,8 +593,8 @@ impl BodyBuilder<'_, '_, '_> {
     ) -> Result<Option<Stmt>, AnalyzerError> {
         let Ok(written) = expression_binding::variable_lvalue(
             left,
-            self.tree.declarations(),
-            self.tree,
+            self.syntax().declarations(),
+            &self.tree,
             self.session,
             &self.dims,
             op == "=",
@@ -611,13 +614,13 @@ impl BodyBuilder<'_, '_, '_> {
         }
         let mut rhs = expression_binding::expression(
             right,
-            self.tree.declarations(),
+            self.syntax().declarations(),
             &written,
-            self.tree,
+            &self.tree,
             self.session,
             &self.dims,
         )?;
-        unpacked_structs::check_assignment(name, right, self.tree, self.session, &self.dims)?;
+        unpacked_structs::check_assignment(name, right, &self.tree, self.session, &self.dims)?;
         parts.iter_mut().for_each(|part| self.rename_lvalue(part));
         self.rename_expr(&mut rhs);
         Ok(Some(Stmt::AssignConcat {
@@ -636,7 +639,7 @@ impl BodyBuilder<'_, '_, '_> {
         left: celox_sv_syntax::ExprId,
         right: celox_sv_syntax::ExprId,
     ) -> Result<Option<Stmt>, AnalyzerError> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let celox_sv_syntax::ExprKind::Select {
             expression,
             dimension,
@@ -647,7 +650,7 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(None);
         };
         if !expression_binding::native_string(
-            self.tree,
+            &self.tree,
             self.session,
             *expression,
             native,
@@ -663,9 +666,9 @@ impl BodyBuilder<'_, '_, '_> {
                 "operator `{op}` on a string character"
             )));
         }
-        let index = expression_binding::value(index, native, self.tree, self.session, &self.dims)?;
+        let index = expression_binding::value(index, native, &self.tree, self.session, &self.dims)?;
         let character =
-            expression_binding::value(right, native, self.tree, self.session, &self.dims)?;
+            expression_binding::value(right, native, &self.tree, self.session, &self.dims)?;
         self.string_update(
             *expression,
             StringOp::Putc,
@@ -684,9 +687,14 @@ impl BodyBuilder<'_, '_, '_> {
         left: celox_sv_syntax::ExprId,
         right: celox_sv_syntax::ExprId,
     ) -> Result<Option<Stmt>, AnalyzerError> {
-        let native = self.tree.declarations();
-        let Some((property, receiver)) =
-            expression_binding::object_property(self.tree, self.session, left, native, &self.dims)?
+        let native = self.syntax().declarations();
+        let Some((property, receiver)) = expression_binding::object_property(
+            &self.tree,
+            self.session,
+            left,
+            native,
+            &self.dims,
+        )?
         else {
             return Ok(None);
         };
@@ -702,7 +710,7 @@ impl BodyBuilder<'_, '_, '_> {
             return Err(unsupported("nonblocking assignment to a class property"));
         }
         let handle = expression_binding::object_receiver(
-            self.tree,
+            &self.tree,
             self.session,
             receiver,
             native,
@@ -713,7 +721,7 @@ impl BodyBuilder<'_, '_, '_> {
             expression_binding::bind_value(
                 right,
                 native,
-                self.tree,
+                &self.tree,
                 session,
                 &self.dims,
                 Some(&target),
@@ -726,7 +734,7 @@ impl BodyBuilder<'_, '_, '_> {
                 ));
             }
             let value =
-                containers::fixed_assignment(right, self.tree, self.session, &self.dims, storage)?;
+                containers::fixed_assignment(right, &self.tree, self.session, &self.dims, storage)?;
             return self.property_store(&property, handle, op, value).map(Some);
         }
         if let Some(container) = property.r#type.container.as_deref() {
@@ -734,13 +742,13 @@ impl BodyBuilder<'_, '_, '_> {
                 return Err(unsupported("compound assignment to a container property"));
             }
             let value =
-                containers::assignment(right, self.tree, self.session, &self.dims, container)?;
+                containers::assignment(right, &self.tree, self.session, &self.dims, container)?;
             return self.property_store(&property, handle, op, value).map(Some);
         }
         let mut value = match property.r#type.class_in(&self.session.types) {
             Some(class) if op == "=" => {
                 match expression_binding::object_constructor(
-                    self.tree,
+                    &self.tree,
                     self.session,
                     right,
                     native,
@@ -750,7 +758,7 @@ impl BodyBuilder<'_, '_, '_> {
                     Some(call) => call,
                     None => {
                         expression_binding::check_handle_assignment(
-                            self.tree,
+                            &self.tree,
                             self.session,
                             right,
                             native,
@@ -763,7 +771,7 @@ impl BodyBuilder<'_, '_, '_> {
                 }
             }
             _ if op == "=" => bind(self.session, right)?,
-            _ => expression_binding::value(right, native, self.tree, self.session, &self.dims)?,
+            _ => expression_binding::value(right, native, &self.tree, self.session, &self.dims)?,
         };
         if property.field.handle == Some(system_functions::HandleProperty::String) {
             if op != "=" {
@@ -783,9 +791,9 @@ impl BodyBuilder<'_, '_, '_> {
         left: celox_sv_syntax::ExprId,
         right: celox_sv_syntax::ExprId,
     ) -> Result<Option<Stmt>, AnalyzerError> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let (handle, ty, member, selected) = match virtual_interfaces::native_member(
-            self.tree,
+            &self.tree,
             self.session,
             left,
             native,
@@ -793,7 +801,7 @@ impl BodyBuilder<'_, '_, '_> {
         ) {
             Some((handle, ty, member)) => (handle, ty, member, None),
             None => match virtual_interfaces::native_selected_member(
-                self.tree,
+                &self.tree,
                 self.session,
                 left,
                 native,
@@ -804,7 +812,7 @@ impl BodyBuilder<'_, '_, '_> {
                     let lowered = expression_binding::variable_lvalue(
                         left,
                         native,
-                        self.tree,
+                        &self.tree,
                         self.session,
                         &self.dims,
                         false,
@@ -829,22 +837,22 @@ impl BodyBuilder<'_, '_, '_> {
                 right,
                 native,
                 written,
-                self.tree,
+                &self.tree,
                 self.session,
                 &self.dims,
             )?,
             (None, "=") => expression_binding::bind_value(
                 right,
                 native,
-                self.tree,
+                &self.tree,
                 self.session,
                 &self.dims,
                 Some(&target),
             )?,
-            _ => expression_binding::value(right, native, self.tree, self.session, &self.dims)?,
+            _ => expression_binding::value(right, native, &self.tree, self.session, &self.dims)?,
         };
         let mut handle =
-            expression_binding::value(handle, native, self.tree, self.session, &self.dims)?;
+            expression_binding::value(handle, native, &self.tree, self.session, &self.dims)?;
         self.rename_expr(&mut handle);
         self.rename_expr(&mut value);
         let template = virtual_interfaces::template(&ty.interface, &member);
@@ -868,7 +876,7 @@ impl BodyBuilder<'_, '_, '_> {
                 let rhs = if op == "=" {
                     value.clone()
                 } else {
-                    assignment_op_expr(self.tree, session, &lhs, op, value.clone(), &self.dims)?
+                    assignment_op_expr(&self.tree, session, &lhs, op, value.clone(), &self.dims)?
                 };
                 Ok(vec![Stmt::Assign {
                     lhs,

@@ -14,12 +14,12 @@ impl BodyBuilder<'_, '_, '_> {
         left: celox_sv_syntax::ExprId,
         right: celox_sv_syntax::ExprId,
     ) -> Converted<Option<Vec<Stmt>>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let Some(unpack) = expression_binding::stream_unpack(
             left,
             right,
             native,
-            self.tree,
+            &self.tree,
             self.session,
             &self.dims,
         )?
@@ -58,7 +58,7 @@ impl BodyBuilder<'_, '_, '_> {
                     &format!("{}.{}.stream", tokens.start, tokens.end),
                     "stream",
                     handle,
-                    self.tree,
+                    &self.tree,
                     self.session,
                     &self.dims,
                 );
@@ -192,13 +192,13 @@ impl BodyBuilder<'_, '_, '_> {
         right: celox_sv_syntax::ExprId,
         nonblocking: bool,
     ) -> Converted<Vec<Stmt>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let mut widths = Vec::new();
         for &target in &targets {
             let lvalue = expression_binding::variable_lvalue(
                 target,
                 native,
-                self.tree,
+                &self.tree,
                 self.session,
                 &self.dims,
                 false,
@@ -210,11 +210,11 @@ impl BodyBuilder<'_, '_, '_> {
         }
         let total = widths.iter().sum::<usize>();
         let mut value =
-            expression_binding::value(right, native, self.tree, self.session, &self.dims)?;
+            expression_binding::value(right, native, &self.tree, self.session, &self.dims)?;
         // The value is extended to the targets' width as its signedness
         // gives (10.7, 11.8.2).
         let signed =
-            dimensions::bound_bits_type(self.tree, &value, &self.dims).is_some_and(|ty| ty.signed);
+            dimensions::bound_bits_type(&self.tree, &value, &self.dims).is_some_and(|ty| ty.signed);
         value = Expr::Resize {
             expr: Box::new(value),
             width: total,
@@ -283,7 +283,7 @@ impl BodyBuilder<'_, '_, '_> {
         for select in lasts.into_iter().rev() {
             // Of an element of any type: integral, a structure, a record.
             let Some(index) =
-                containers::element_index(select, self.tree, self.session, &self.dims)?
+                containers::element_index(select, &self.tree, self.session, &self.dims)?
             else {
                 continue;
             };
@@ -337,7 +337,7 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(vec![place.store(rhs)]);
         }
         let (local, unique) = self.hidden_of(whole)?;
-        let mut rhs = packed_structs::checked_value(guards, rhs, self.tree, &self.dims)?;
+        let mut rhs = packed_structs::checked_value(guards, rhs, &self.tree, &self.dims)?;
         retarget_object_selection(&mut select, &local);
         // The checks of the tags the selection crosses read the local.
         rename_expr_idents(&mut rhs, &mut |name| {
@@ -376,9 +376,9 @@ impl BodyBuilder<'_, '_, '_> {
         left: celox_sv_syntax::ExprId,
         right: celox_sv_syntax::ExprId,
     ) -> Converted<Option<Vec<Stmt>>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let Some((ty, _)) =
-            containers::element_member(left, native, self.tree, self.session, &self.dims)?
+            containers::element_member(left, native, &self.tree, self.session, &self.dims)?
         else {
             return Ok(None);
         };
@@ -399,13 +399,13 @@ impl BodyBuilder<'_, '_, '_> {
             .map(|leaf| leaf.offset + leaf.width)
             .max()
             .unwrap_or(0);
-        let id = unpacked_structs::type_id(&ty, self.tree, self.session, &self.dims)?;
-        unpacked_structs::check_value(id, right, native, self.tree, self.session, &self.dims)?;
+        let id = unpacked_structs::type_id(&ty, &self.tree, self.session, &self.dims)?;
+        unpacked_structs::check_value(id, right, native, &self.tree, self.session, &self.dims)?;
         let shape = dimensions_from_type(&ty);
         let mut value = expression_binding::bind_value(
             right,
             native,
-            self.tree,
+            &self.tree,
             self.session,
             &self.dims,
             Some(&shape),
@@ -440,9 +440,9 @@ impl BodyBuilder<'_, '_, '_> {
         left: celox_sv_syntax::ExprId,
         right: celox_sv_syntax::ExprId,
     ) -> Converted<Option<Vec<Stmt>>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let Some((aggregate, class, receiver)) = expression_binding::object_aggregate_property(
-            self.tree,
+            &self.tree,
             self.session,
             left,
             native,
@@ -460,7 +460,7 @@ impl BodyBuilder<'_, '_, '_> {
             )));
         }
         let mut handle = expression_binding::object_receiver(
-            self.tree,
+            &self.tree,
             self.session,
             receiver,
             native,
@@ -480,26 +480,26 @@ impl BodyBuilder<'_, '_, '_> {
         handle: Expr,
         right: celox_sv_syntax::ExprId,
     ) -> Converted<Vec<Stmt>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let structure = aggregate
             .r#type
             .unpacked_struct_in(&self.session.types)
             .expect("an unpacked structure property")
             .clone();
         let structure_type =
-            unpacked_structs::type_id(&aggregate.r#type, self.tree, self.session, &self.dims)?;
+            unpacked_structs::type_id(&aggregate.r#type, &self.tree, self.session, &self.dims)?;
         unpacked_structs::check_value(
             structure_type,
             right,
             native,
-            self.tree,
+            &self.tree,
             self.session,
             &self.dims,
         )?;
         let mut value = expression_binding::bind_value(
             right,
             native,
-            self.tree,
+            &self.tree,
             self.session,
             &self.dims,
             Some(&dimensions_from_type(&aggregate.r#type)),

@@ -287,7 +287,7 @@ impl BodyBuilder<'_, '_, '_> {
     /// Execute assignment, increment and decrement operators of `roots`, evaluated
     /// in that order, and return the statements that do.
     pub(super) fn effects(&mut self, roots: &[ExprId]) -> Converted<Vec<Stmt>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let updating = updating(native, roots, &mut |id| {
             matches!(self.hoisted_cast(id), Ok(Some(_)))
         });
@@ -310,7 +310,7 @@ impl BodyBuilder<'_, '_, '_> {
         if !updating.contains(&id) {
             return Ok(());
         }
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         if let Some((destination, source, CastPlan::Assign)) = self.cast_plan(id)? {
             self.effect(destination, updating, stmts)?;
             self.effect(source, updating, stmts)?;
@@ -449,7 +449,7 @@ impl BodyBuilder<'_, '_, '_> {
             Some((_, _, CastPlan::Object)) | None => {}
             Some((destination, source, _)) => return Ok(Some((destination, source))),
         }
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let Some((destination, source)) = cast_operands(native, id) else {
             return Ok(None);
         };
@@ -457,7 +457,7 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(None);
         }
         let cast = expression_binding::object_cast_to(
-            self.tree,
+            &self.tree,
             self.session,
             destination,
             source,
@@ -478,12 +478,12 @@ impl BodyBuilder<'_, '_, '_> {
         id: ExprId,
     ) -> Converted<Option<(ExprId, ExprId, CastPlan)>> {
         use semantic_types::{Assignable, Castable, TyData};
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let Some((destination, source)) = cast_operands(native, id) else {
             return Ok(None);
         };
         let domain = expression_binding::enum_domain(
-            self.tree,
+            &self.tree,
             self.session,
             destination,
             native,
@@ -492,16 +492,16 @@ impl BodyBuilder<'_, '_, '_> {
         // An anonymous enumeration whose members are not resolved has no
         // enumerated semantic type; its declaration still tells.
         if domain.is_none()
-            && dimensions::operand_shape(destination, self.tree, self.session, &self.dims)?
+            && dimensions::operand_shape(destination, &self.tree, self.session, &self.dims)?
                 .as_ref()
                 .is_some_and(|shape| shape.enumeration_in(&self.session.types).enumeration)
         {
             return Ok(None);
         }
         let types =
-            expression_types::type_of(self.tree, self.session, destination, native, &self.dims)
+            expression_types::type_of(&self.tree, self.session, destination, native, &self.dims)
                 .and_then(|target| {
-                    expression_types::type_of(self.tree, self.session, source, native, &self.dims)
+                    expression_types::type_of(&self.tree, self.session, source, native, &self.dims)
                         .map(|source| (source, target))
                 });
         let Ok((source_type, target)) = types else {
@@ -543,12 +543,12 @@ impl BodyBuilder<'_, '_, '_> {
     /// property or to an element of one, which is no variable that the
     /// cast's subroutine could write (8.16).
     fn property_cast(&mut self, id: ExprId) -> Converted<Option<(ExprId, ExprId)>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let Some((destination, source)) = cast_operands(native, id) else {
             return Ok(None);
         };
         if expression_binding::object_native_class(
-            self.tree,
+            &self.tree,
             self.session,
             destination,
             native,
@@ -561,7 +561,7 @@ impl BodyBuilder<'_, '_, '_> {
         let mut root = destination;
         loop {
             if expression_binding::object_property(
-                self.tree,
+                &self.tree,
                 self.session,
                 root,
                 native,
@@ -585,9 +585,9 @@ impl BodyBuilder<'_, '_, '_> {
     /// subroutine, also a method named without parentheses, as its bound
     /// value shows.
     fn effectful(&mut self, id: ExprId) -> bool {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         calls(native, id)
-            || expression_binding::value(id, native, self.tree, self.session, &self.dims)
+            || expression_binding::value(id, native, &self.tree, self.session, &self.dims)
                 .is_ok_and(|value| inlining::effectful(&value))
     }
 
@@ -605,7 +605,7 @@ impl BodyBuilder<'_, '_, '_> {
         destination: ExprId,
         all: bool,
     ) -> (Vec<ExprId>, Vec<ExprId>, Vec<ExprId>) {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let (mut receivers, mut indices, mut lasts) = (Vec::new(), Vec::new(), Vec::new());
         let mut id = expression_binding::ungroup(destination, native);
         loop {
@@ -617,7 +617,7 @@ impl BodyBuilder<'_, '_, '_> {
                 } if separator == "." => {
                     let receiver = *expression;
                     if expression_binding::object_native_class(
-                        self.tree,
+                        &self.tree,
                         self.session,
                         receiver,
                         native,
@@ -666,10 +666,10 @@ impl BodyBuilder<'_, '_, '_> {
         operands: Vec<ExprId>,
         stmts: &mut Vec<Stmt>,
     ) -> Converted<()> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         for operand in operands.into_iter().rev() {
             let mut value =
-                expression_binding::value(operand, native, self.tree, self.session, &self.dims)?;
+                expression_binding::value(operand, native, &self.tree, self.session, &self.dims)?;
             let (source, unique) = self.hidden_of(operand)?;
             self.rename_expr(&mut value);
             stmts.push(Stmt::Assign {
@@ -694,7 +694,7 @@ impl BodyBuilder<'_, '_, '_> {
         source: ExprId,
         stmts: &mut Vec<Stmt>,
     ) -> Converted<()> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         // The destination is addressed as an assignment to it is, after the
         // source, with the values it has when it is written (IEEE 1800-2023
         // 4.9.3); it is evaluated whether or not the cast succeeds, but only
@@ -720,7 +720,7 @@ impl BodyBuilder<'_, '_, '_> {
         }
         let (succeeded_source, succeeded) = self.hidden(int_type());
         let cast = expression_binding::object_cast_to(
-            self.tree,
+            &self.tree,
             self.session,
             destination,
             source,
@@ -732,7 +732,7 @@ impl BodyBuilder<'_, '_, '_> {
             // hidden handle of its class, which a failing cast knows.
             if self.effectful(source)
                 && let Some(_) = expression_binding::object_native_class(
-                    self.tree,
+                    &self.tree,
                     self.session,
                     source,
                     native,
@@ -740,8 +740,13 @@ impl BodyBuilder<'_, '_, '_> {
                 )
             {
                 let (_, handle) = self.hidden_of(source)?;
-                let mut value =
-                    expression_binding::value(source, native, self.tree, self.session, &self.dims)?;
+                let mut value = expression_binding::value(
+                    source,
+                    native,
+                    &self.tree,
+                    self.session,
+                    &self.dims,
+                )?;
                 self.rename_expr(&mut value);
                 stmts.push(Stmt::Assign {
                     lhs: LValue::Ident(handle),
@@ -761,7 +766,8 @@ impl BodyBuilder<'_, '_, '_> {
         // The cast's subroutine writes a hidden handle of the destination's
         // type.
         let (handle_source, _) = self.hidden_of(destination)?;
-        let value = expression_binding::value(source, native, self.tree, self.session, &self.dims)?;
+        let value =
+            expression_binding::value(source, native, &self.tree, self.session, &self.dims)?;
         let mut call = Expr::Call {
             callee: Callee::Subroutine(name),
             args: vec![Some(Expr::Ident(handle_source.clone())), Some(value)],
@@ -803,7 +809,7 @@ impl BodyBuilder<'_, '_, '_> {
         indices: Vec<ExprId>,
         stmts: &mut Vec<Stmt>,
     ) -> Converted<()> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         if !matches!(plan, CastPlan::Pack) {
             self.evaluate_unassigned(source, stmts)?;
             self.save_operands(indices, stmts)?;
@@ -815,7 +821,7 @@ impl BodyBuilder<'_, '_, '_> {
             source,
             Some(receiver),
             native,
-            self.tree,
+            &self.tree,
             self.session,
             &self.dims,
         )?;
@@ -850,11 +856,11 @@ impl BodyBuilder<'_, '_, '_> {
         indices: Vec<ExprId>,
         stmts: &mut Vec<Stmt>,
     ) -> Converted<()> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let container =
-            containers::native_type(source, native, self.tree, self.session, &self.dims)?
+            containers::native_type(source, native, &self.tree, self.session, &self.dims)?
                 .ok_or_else(|| unsupported("`$cast` of a dynamically sized array of this type"))?;
-        let shape = dimensions::operand_shape(destination, self.tree, self.session, &self.dims)?
+        let shape = dimensions::operand_shape(destination, &self.tree, self.session, &self.dims)?
             .ok_or_else(|| unsupported("`$cast` to a fixed-size array of this type"))?;
         // The source is saved once, before the destination's operands are
         // evaluated, so the size checked is that of the elements copied.
@@ -863,7 +869,7 @@ impl BodyBuilder<'_, '_, '_> {
         let (saved_source, saved) = match self.hidden_of(source) {
             Ok(saved) => saved,
             Err(error) => {
-                let ty = dimensions::operand_shape(source, self.tree, self.session, &self.dims)?
+                let ty = dimensions::operand_shape(source, &self.tree, self.session, &self.dims)?
                     .as_ref()
                     .and_then(type_names::declared_type)
                     .cloned()
@@ -872,7 +878,7 @@ impl BodyBuilder<'_, '_, '_> {
             }
         };
         let mut value =
-            expression_binding::value(source, native, self.tree, self.session, &self.dims)?;
+            expression_binding::value(source, native, &self.tree, self.session, &self.dims)?;
         self.rename_expr(&mut value);
         stmts.push(Stmt::Assign {
             lhs: LValue::Ident(saved.clone()),
@@ -900,7 +906,7 @@ impl BodyBuilder<'_, '_, '_> {
             Expr::Ident(saved_source),
             &container,
             &shape,
-            self.tree,
+            &self.tree,
             self.session,
             &self.dims,
         )?;
@@ -925,7 +931,7 @@ impl BodyBuilder<'_, '_, '_> {
     /// that is not a scalar value, such as a chandle (6.14) or an aggregate,
     /// is saved into a hidden variable of its type when it has an effect.
     fn evaluate_unassigned(&mut self, source: ExprId, stmts: &mut Vec<Stmt>) -> Converted<()> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         // A call runs as a call statement, whose result of any type, an
         // aggregate or chandle included, is discarded.
         if matches!(
@@ -940,11 +946,12 @@ impl BodyBuilder<'_, '_, '_> {
             );
             return Ok(());
         }
-        if expression_binding::native_chandle(self.tree, source, native, &self.dims, self.session) {
+        if expression_binding::native_chandle(&self.tree, source, native, &self.dims, self.session)
+        {
             let value = expression_binding::bind_chandle_value(
                 source,
                 native,
-                self.tree,
+                &self.tree,
                 self.session,
                 &self.dims,
                 None,
@@ -964,14 +971,19 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(());
         }
         let semantic =
-            expression_types::type_of(self.tree, self.session, source, native, &self.dims)
+            expression_types::type_of(&self.tree, self.session, source, native, &self.dims)
                 .ok()
                 .map(|ty| self.session.types.data(ty).clone());
         match semantic {
             // A handle is saved, into a hidden handle of its class.
             Some(semantic_types::TyData::Class(semantic_types::Decl::Class(_))) => {
-                let mut value =
-                    expression_binding::value(source, native, self.tree, self.session, &self.dims)?;
+                let mut value = expression_binding::value(
+                    source,
+                    native,
+                    &self.tree,
+                    self.session,
+                    &self.dims,
+                )?;
                 if inlining::effectful(&value) {
                     let (_, handle) = self.hidden_of(source)?;
                     self.rename_expr(&mut value);
@@ -988,8 +1000,13 @@ impl BodyBuilder<'_, '_, '_> {
                 | semantic_types::TyData::Shortreal
                 | semantic_types::TyData::String,
             ) => {
-                let mut value =
-                    expression_binding::value(source, native, self.tree, self.session, &self.dims)?;
+                let mut value = expression_binding::value(
+                    source,
+                    native,
+                    &self.tree,
+                    self.session,
+                    &self.dims,
+                )?;
                 if inlining::effectful(&value) {
                     self.rename_expr(&mut value);
                     stmts.push(Stmt::Eval(value));
@@ -999,11 +1016,12 @@ impl BodyBuilder<'_, '_, '_> {
             // Any other value with an effect, such as an aggregate property
             // behind a call, is saved into a hidden variable of its type.
             _ if self.effectful(source) => {
-                let shape = dimensions::operand_shape(source, self.tree, self.session, &self.dims)?;
+                let shape =
+                    dimensions::operand_shape(source, &self.tree, self.session, &self.dims)?;
                 let mut value = expression_binding::bind_value(
                     source,
                     native,
-                    self.tree,
+                    &self.tree,
                     self.session,
                     &self.dims,
                     shape.as_ref(),
@@ -1032,15 +1050,15 @@ impl BodyBuilder<'_, '_, '_> {
         source: ExprId,
     ) -> Converted<expression_binding::StreamReceiver> {
         use semantic_types::{StreamLayout, StreamRole};
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let source =
-            expression_types::type_of(self.tree, self.session, source, native, &self.dims)?;
+            expression_types::type_of(&self.tree, self.session, source, native, &self.dims)?;
         self.session
             .types
             .stream_layout(source, StreamRole::Operand)
             .map_err(unsupported)?;
         let target =
-            expression_types::type_of(self.tree, self.session, destination, native, &self.dims)?;
+            expression_types::type_of(&self.tree, self.session, destination, native, &self.dims)?;
         let width = |bits: u128| {
             usize::try_from(bits).map_err(|_| unsupported("`$cast` destination width"))
         };
@@ -1075,11 +1093,11 @@ impl BodyBuilder<'_, '_, '_> {
     /// from its self-determined type (6.22.4, 6.24.2). A source whose type
     /// is not resolved is unsupported rather than read as a number.
     fn cast_source_kind(&mut self, id: ExprId) -> Converted<CastSource> {
-        let native = self.tree.declarations();
-        if expression_binding::native_chandle(self.tree, id, native, &self.dims, self.session) {
+        let native = self.syntax().declarations();
+        if expression_binding::native_chandle(&self.tree, id, native, &self.dims, self.session) {
             return Ok(CastSource::Other);
         }
-        let semantic = expression_types::type_of(self.tree, self.session, id, native, &self.dims)
+        let semantic = expression_types::type_of(&self.tree, self.session, id, native, &self.dims)
             .ok()
             .map(|ty| self.session.types.data(ty).clone());
         match semantic {
@@ -1124,7 +1142,7 @@ impl BodyBuilder<'_, '_, '_> {
         indices: Vec<ExprId>,
         stmts: &mut Vec<Stmt>,
     ) -> Converted<()> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let (succeeded_source, succeeded) = self.hidden(int_type());
         // Whether the source is cast compatible follows from its type,
         // whatever form of expression gives it (6.22.4): only an integral
@@ -1146,7 +1164,7 @@ impl BodyBuilder<'_, '_, '_> {
             }
         };
         let mut rhs =
-            expression_binding::value(source, native, self.tree, self.session, &self.dims)?;
+            expression_binding::value(source, native, &self.tree, self.session, &self.dims)?;
         let source_type = ExprType {
             width: source_width,
             signed: source_signed,
@@ -1240,20 +1258,21 @@ impl BodyBuilder<'_, '_, '_> {
         right: ExprId,
         stmts: &mut Vec<Stmt>,
     ) -> Converted<()> {
-        let native = self.tree.declarations();
-        let current = expression_binding::value(left, native, self.tree, self.session, &self.dims)?;
+        let native = self.syntax().declarations();
+        let current =
+            expression_binding::value(left, native, &self.tree, self.session, &self.dims)?;
         if inlining::effectful(&current) {
             return Err(unsupported(
                 "assignment expression target selected with a side effect",
             ));
         }
-        dimensions::bound_bits_type(self.tree, &current, &self.dims)
+        dimensions::bound_bits_type(&self.tree, &current, &self.dims)
             .ok_or_else(|| unsupported("assignment expression target type"))?;
-        let shape = dimensions::operand_shape(left, self.tree, self.session, &self.dims)?;
+        let shape = dimensions::operand_shape(left, &self.tree, self.session, &self.dims)?;
         if shape.as_ref().is_some_and(|shape| {
             !shape.unpacked.is_empty()
-                || containers::holds_container(shape, self.tree, self.session, &self.dims)
-                || unpacked_structs::holds_struct(shape, self.tree, self.session, &self.dims)
+                || containers::holds_container(shape, &self.tree, self.session, &self.dims)
+                || unpacked_structs::holds_struct(shape, &self.tree, self.session, &self.dims)
         }) {
             return Err(unsupported(
                 "assignment expression to an unpacked aggregate",
@@ -1264,14 +1283,14 @@ impl BodyBuilder<'_, '_, '_> {
                 shape.enumeration_in(&self.session.types).domain.is_some()
                     || expression_binding::objects::shape_class(
                         shape,
-                        self.tree,
+                        &self.tree,
                         self.session,
                         &self.dims,
                     )
                     .is_some()
                     || virtual_interfaces::holds_virtual_interface(
                         shape,
-                        self.tree,
+                        &self.tree,
                         self.session,
                         &self.dims,
                     )
@@ -1341,8 +1360,8 @@ impl BodyBuilder<'_, '_, '_> {
     /// and return its source and unique names. Every saved operand, value
     /// and target is declared through this.
     pub(super) fn hidden_of(&mut self, id: ExprId) -> Converted<(String, String)> {
-        let native = self.tree.declarations();
-        if let Some(name) = expression_binding::native_name(self.tree, id, native)
+        let native = self.syntax().declarations();
+        if let Some(name) = expression_binding::native_name(&self.tree, id, native)
             && let Some(ty) = self
                 .dims
                 .get(&name)
@@ -1353,14 +1372,14 @@ impl BodyBuilder<'_, '_, '_> {
         }
         // A class property has its declared type too.
         if let Some((property, _)) =
-            expression_binding::object_property(self.tree, self.session, id, native, &self.dims)?
+            expression_binding::object_property(&self.tree, self.session, id, native, &self.dims)?
         {
             return Ok(self.hidden(property.r#type));
         }
         // So does a member of a container element, whose selects are those
         // of its declared range (`q[i].m[8]` of `bit [15:8] m`).
         if let Some((ty, _)) =
-            containers::element_member(id, native, self.tree, self.session, &self.dims)?
+            containers::element_member(id, native, &self.tree, self.session, &self.dims)?
             && !ty.is_unpacked_struct_in(&self.session.types)
         {
             return Ok(self.hidden(ty));
@@ -1375,7 +1394,7 @@ impl BodyBuilder<'_, '_, '_> {
             let mut four_state = false;
             for &item in expressions {
                 let semantic =
-                    expression_types::type_of(self.tree, self.session, item, native, &self.dims)?;
+                    expression_types::type_of(&self.tree, self.session, item, native, &self.dims)?;
                 let semantic_types::TyData::Packed(packed) = self.session.types.data(semantic)
                 else {
                     return Err(unsupported("a saved stream of this type"));
@@ -1393,7 +1412,7 @@ impl BodyBuilder<'_, '_, '_> {
             ty.packed_ranges = vector_type(width, false).packed_ranges.clone();
             return Ok(self.hidden(ty));
         }
-        let semantic = expression_types::type_of(self.tree, self.session, id, native, &self.dims)?;
+        let semantic = expression_types::type_of(&self.tree, self.session, id, native, &self.dims)?;
         let ty = match self.session.types.data(semantic).clone() {
             semantic_types::TyData::Packed(packed) => {
                 let width = usize::try_from(packed.bits())
@@ -1423,7 +1442,7 @@ impl BodyBuilder<'_, '_, '_> {
             }
             semantic_types::TyData::Class(semantic_types::Decl::Class(decl)) => {
                 let class = self.session.types.decl(decl).name.clone();
-                classes::handle_type(self.tree, self.session, &class)
+                classes::handle_type(&self.tree, self.session, &class)
                     .ok_or_else(|| unsupported(format!("class `{class}`")))?
             }
             _ => return Err(unsupported("a saved value of this type")),
@@ -1436,8 +1455,8 @@ impl BodyBuilder<'_, '_, '_> {
     fn truth(&mut self, id: ExprId, stmts: &mut Vec<Stmt>) -> Converted<String> {
         let value = expression_binding::bind_chandle_value(
             id,
-            self.tree.declarations(),
-            self.tree,
+            self.syntax().declarations(),
+            &self.tree,
             self.session,
             &self.dims,
             None,
@@ -1473,9 +1492,9 @@ impl BodyBuilder<'_, '_, '_> {
         increment: bool,
         stmts: &mut Vec<Stmt>,
     ) -> Converted<()> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         self.reject_tagged_integral_target(operand)?;
-        if unpacked_structs::value_struct(operand, native, self.tree, self.session, &self.dims)
+        if unpacked_structs::value_struct(operand, native, &self.tree, self.session, &self.dims)
             .is_some()
         {
             return Err(unsupported(
@@ -1483,7 +1502,7 @@ impl BodyBuilder<'_, '_, '_> {
             ));
         }
         assignments::check_enum_update(
-            self.tree,
+            &self.tree,
             self.session,
             operand,
             native,
@@ -1492,14 +1511,15 @@ impl BodyBuilder<'_, '_, '_> {
         )?;
         // A virtual interface is no number to step (IEEE 1800-2023 25.9).
         if let Some(ty) =
-            virtual_interfaces::native_type(self.tree, self.session, operand, native, &self.dims)
+            virtual_interfaces::native_type(&self.tree, self.session, operand, native, &self.dims)
         {
             return Err(virtual_interfaces::arithmetic(
                 if increment { "++" } else { "--" },
                 &ty,
             ));
         }
-        if expression_binding::native_string(self.tree, self.session, operand, native, &self.dims) {
+        if expression_binding::native_string(&self.tree, self.session, operand, native, &self.dims)
+        {
             return Err(unsupported("increment or decrement of a string"));
         }
         // The operator evaluates the address of a place once, before it reads
@@ -1507,7 +1527,7 @@ impl BodyBuilder<'_, '_, '_> {
         if let Ok(LValue::Object { .. }) = expression_binding::variable_lvalue(
             operand,
             native,
-            self.tree,
+            &self.tree,
             self.session,
             &self.dims,
             false,
@@ -1515,13 +1535,13 @@ impl BodyBuilder<'_, '_, '_> {
             self.save_destination(operand, true, stmts)?;
         }
         let current =
-            expression_binding::value(operand, native, self.tree, self.session, &self.dims)?;
+            expression_binding::value(operand, native, &self.tree, self.session, &self.dims)?;
         // The operand is read and then written: a select of it must not
         // change in between. A member read through a virtual interface checks
         // for `null`, which changes nothing; its handle is pure.
         if inlining::effectful(&current)
             && virtual_interfaces::native_member(
-                self.tree,
+                &self.tree,
                 self.session,
                 operand,
                 native,
