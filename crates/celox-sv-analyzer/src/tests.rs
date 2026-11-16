@@ -8729,7 +8729,6 @@ fn scalar_logic_gates_keep_unsupported_modifiers_explicit() {
     for gate in [
         "and #1 (y,a,b);",
         "and (strong1,weak0) (y,a,b);",
-        "and g[1:0](y,a,b);",
         "tran (y,a);",
     ] {
         let source = format!("module Top(input logic a,b,output wire y); {gate} endmodule");
@@ -8739,6 +8738,18 @@ fn scalar_logic_gates_keep_unsupported_modifiers_explicit() {
             "{error}"
         );
     }
+    // An array of instances has one range (IEEE 1800-2023 28.3.5).
+    let error = analyze_source(
+        "module Top(input logic a,b,output wire y); and g[1:0][1:0](y,a,b); endmodule",
+        Path::new("gates.sv"),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("gate primitive instantiation with a multidimensional instance array"),
+        "{error}"
+    );
     for source in [
         "module Top(input logic [1:0] a,b,output wire y); and (y,a,b); endmodule",
         "module Top(input a,b,output wire [1:0] y); and ({y},a,b); endmodule",
