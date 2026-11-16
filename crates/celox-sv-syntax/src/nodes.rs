@@ -348,7 +348,34 @@ pub struct AssignSyntax {
     pub tokens: TokenRange,
 }
 
-/// A scalar n-input logic gate declaration (IEEE 1800-2023 28.4).
+/// A user-defined primitive declaration (IEEE 1800-2023 29.3).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Primitive {
+    pub name: Name,
+    /// The output, then the inputs (29.3.2).
+    pub ports: Vec<Name>,
+    /// Whether the output is a `reg`: the UDP is sequential (29.3.2).
+    pub sequential: bool,
+    /// The initial value of the output of a sequential UDP (29.5).
+    pub initial: Option<ExprId>,
+    pub rows: Vec<PrimitiveRow>,
+    pub end_label: Option<Name>,
+    pub tokens: TokenRange,
+}
+
+/// One entry of the state table of a UDP (29.3.6, Table 29-1): a symbol for
+/// each input, `(vw)` for an edge, the current state of a sequential UDP,
+/// and the output or next state, all lowercase.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrimitiveRow {
+    pub inputs: Vec<String>,
+    pub state: Option<String>,
+    pub output: String,
+    pub tokens: TokenRange,
+}
+
+/// A scalar n-input logic gate declaration (IEEE 1800-2023 28.4). The
+/// instances of a user-defined primitive are gates of the primitive's name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LogicGate {
     pub kind: String,

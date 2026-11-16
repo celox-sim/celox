@@ -7,7 +7,8 @@ impl Parser<'_> {
     }
 
     pub(super) fn logic_gate(&mut self) -> Result<LogicGate> {
-        let kind = self.peek().to_owned();
+        let kind = self.peek();
+        let kind = kind.strip_prefix('\\').unwrap_or(kind).to_owned();
         self.at += 1;
         let strength = self.drive_strength()?;
         let delay = if self.peek() == "#" && self.nth(1) != "(" {
