@@ -1,6 +1,1 @@
-Revision history for #4156:
-
-rev 2 (rebase) 2026-11-16 12:14 UTC — Update validation count in PR body to the 2371-case SystemVerilog suite result on the rebased master
-rev 1 (initial) 2026-11-16 12:14 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":4156,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"bb28a367efb03f49c281ff2b39dc017d7771ab62","timestamp_iso":"2026-11-16T12:14:32Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"bb28a367efb03f49c281ff2b39dc017d7771ab62","new_sha":"6f7e5b65b364d813f22b9e1b2297e170197671e7","timestamp_iso":"2026-11-16T12:14:32Z","reason":"Update validation count in PR body to the 2371-case SystemVerilog suite result on the rebased master","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/bb28a367efb03f49c281ff2b39dc017d7771ab62...6f7e5b65b364d813f22b9e1b2297e170197671e7"}]} -->
+Address review: apply strict policy to WASM SV/mixed compilation and preserve strict across diagnostic_policy setter order
