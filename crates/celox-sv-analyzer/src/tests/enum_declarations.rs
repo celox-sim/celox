@@ -82,6 +82,11 @@ fn rejects_enumeration_values_that_are_not_unique_or_increment_the_maximum() {
             "increments the maximum value",
         ),
         ("enum byte {a = 127, b} e;", "increments the maximum value"),
+        // A wide value through the name of the member that has it.
+        (
+            "enum bit [255:0] {A = 256'h8000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000, B = A} e;",
+            "have the same value",
+        ),
         // A value only a constant function call gives.
         (
             "function automatic int one(); return 1; endfunction enum {A = one(), B = 1} e;",

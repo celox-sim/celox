@@ -1166,6 +1166,21 @@ pub(in crate::ast) fn validate_enum_initializers(
             )?,
             (None, None) => values.unknown(),
         }
+        // The numeric environment cannot hold a value wider than 128 bits
+        // either; keep its literal for the members that name it.
+        if next.is_none()
+            && !previous_unknown
+            && let Some(literal) = literal.clone()
+        {
+            unknown_literals.insert(
+                name.clone(),
+                Expr::Literal(resize_integral_literal_for_cast(
+                    literal,
+                    shape.width,
+                    shape.signed,
+                )),
+            );
+        }
         if let Some(value) = next {
             env.insert(name.clone(), value);
             dimensions::insert_parameter_type_markers(&mut env, &name, shape);
