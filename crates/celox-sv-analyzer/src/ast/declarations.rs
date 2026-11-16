@@ -124,8 +124,21 @@ pub(super) fn ports_from_scope(
                 return Err(unsupported("unpacked structure port default"));
             }
         }
+        let variable = native.variable
+            || typed_output
+            || (direction == PortDirection::Output
+                && native.net_type.is_none()
+                && native.direction.is_none()
+                && native.data_type.is_none()
+                && inherited_variable);
+        // The initializer of a variable output port initializes the
+        // variable (IEEE 1800-2023 23.2.2.2), as a variable declaration
+        // assignment does: see `procedural::port_initializers`. It is no
+        // default of the port.
+        let initialized_output = direction == PortDirection::Output && variable;
         let default = native
             .default
+            .filter(|_| !initialized_output)
             .map(|value| {
                 if direction != PortDirection::Input {
                     return Err(unsupported("default value on a non-input port"));
@@ -163,13 +176,6 @@ pub(super) fn ports_from_scope(
                 .ok_or_else(|| unsupported("nonconstant input port default"))
             })
             .transpose()?;
-        let variable = native.variable
-            || typed_output
-            || (direction == PortDirection::Output
-                && native.net_type.is_none()
-                && native.direction.is_none()
-                && native.data_type.is_none()
-                && inherited_variable);
         inherited_variable = variable;
         inherited_unresolved = if let Some(net_type) = &native.net_type {
             net_type == "uwire"
