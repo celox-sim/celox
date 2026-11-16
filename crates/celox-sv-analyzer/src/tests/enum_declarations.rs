@@ -77,6 +77,20 @@ fn rejects_enumeration_values_that_are_not_unique_or_increment_the_maximum() {
             "increments the maximum value",
         ),
         ("enum byte {a = 127, b} e;", "increments the maximum value"),
+        // Bases of 128 bits and more keep every bit of the values.
+        (
+            "enum bit [127:0] {a = 128'hffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff, b} e;",
+            "increments the maximum value",
+        ),
+        (
+            "enum logic signed [127:0] {a = 128'sh7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff, b} e;",
+            "increments the maximum value",
+        ),
+        (
+            "enum bit [255:0] {a = 256'h8000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000, \
+             b = 256'h8000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000} e;",
+            "have the same value",
+        ),
     ] {
         let error = enumeration(declarations).unwrap_err();
         assert!(
@@ -96,6 +110,9 @@ fn accepts_unique_enumeration_values() {
         "enum bit [3:0] {bronze = 'h3, silver, gold = 'h5} e;",
         "enum byte {a = -128, b, c = 127} e;",
         "enum integer {IDLE, XX = 'x, S1 = 'b01, S2 = 'b10} e;",
+        "enum bit [127:0] {a = 128'hffff_ffff_ffff_ffff_ffff_ffff_ffff_fffe, b} e;",
+        "enum logic signed [127:0] {a = -128'sd1, b} e;",
+        "enum bit [255:0] {a = 256'h1_0000_0000_0000_0000_0000_0000_0000_0000, b, c = 0} e;",
     ] {
         enumeration(declarations).unwrap_or_else(|error| panic!("{declarations}: {error}"));
     }

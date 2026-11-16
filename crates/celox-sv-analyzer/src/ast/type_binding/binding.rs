@@ -1040,9 +1040,10 @@ pub(in crate::ast) fn validate_enum_initializers(
     let mut unknown_literals = HashMap::default();
     let mut previous_unknown = false;
     let mut next = Some(0i128);
-    // The values of the members before, as their base type holds them,
-    // which shall be unique (6.19).
-    let mut values = Vec::<(String, i128)>::new();
+    // The values of the members before, as the bits of their base type,
+    // which shall be unique (6.19), and those of the last one, unless it is
+    // not known yet or has X/Z bits.
+    let mut values = EnumValues::new(shape.width, shape.signed);
     for item in items {
         let name = normalize_identifier(&item.name.spelling);
         let Some(value) = item.value else {
@@ -1053,19 +1054,11 @@ pub(in crate::ast) fn validate_enum_initializers(
             }
             if !item.dimensions.is_empty() {
                 next = None;
+                values.unknown();
                 continue;
             }
+            values.increment(&name)?;
             if let Some(value) = next {
-                // It shall be an error to automatically increment the
-                // maximum representable value of the enum (6.19).
-                if parameters::coerce_const_parameter_value(value, shape.width, shape.signed)
-                    != value
-                {
-                    return types::invalid_enumeration(format!(
-                        "member `{name}` increments the maximum value of the base type"
-                    ));
-                }
-                unique_enum_value(&mut values, &name, value)?;
                 env.insert(name.clone(), value);
                 dimensions::insert_parameter_type_markers(&mut env, &name, shape);
                 next = value.checked_add(1);
@@ -1134,7 +1127,13 @@ pub(in crate::ast) fn validate_enum_initializers(
         }
         if !item.dimensions.is_empty() {
             next = None;
+            values.unknown();
             continue;
+        }
+        match literal.as_ref() {
+            // An X/Z value is not compared with the known ones.
+            Some(literal) if !previous_unknown => values.assign(&name, literal)?,
+            _ => values.unknown(),
         }
         if previous_unknown {
             // Preserve masks when a later enumerator refers to this member.
@@ -1156,10 +1155,6 @@ pub(in crate::ast) fn validate_enum_initializers(
                 parameters::coerce_const_parameter_value(value, shape.width, shape.signed)
             });
         if let Some(value) = next {
-            // An X/Z value is not compared with the known ones.
-            if !previous_unknown {
-                unique_enum_value(&mut values, &name, value)?;
-            }
             env.insert(name.clone(), value);
             dimensions::insert_parameter_type_markers(&mut env, &name, shape);
             next = value.checked_add(1);
@@ -1168,16 +1163,98 @@ pub(in crate::ast) fn validate_enum_initializers(
     Ok(())
 }
 
-/// Record that member `name` has `value`, which no member before it of
-/// `values` may have (IEEE 1800-2023 6.19).
-fn unique_enum_value(values: &mut Vec<(String, i128)>, name: &str, value: i128) -> Converted<()> {
-    if let Some((other, _)) = values.iter().find(|(_, other)| *other == value) {
-        return types::invalid_enumeration(format!(
-            "members `{other}` and `{name}` have the same value {value}"
-        ));
+/// The values of the members of an enumeration, as the bits of its base
+/// type of `width` bits, which are unique (IEEE 1800-2023 6.19).
+struct EnumValues {
+    width: usize,
+    signed: bool,
+    members: Vec<(String, num_bigint::BigUint)>,
+    /// The value of the last member, if it is known and has no X/Z bits;
+    /// before the first member, the value an implicit first member takes.
+    last: Option<num_bigint::BigUint>,
+    first: bool,
+}
+
+impl EnumValues {
+    fn new(width: usize, signed: bool) -> Self {
+        Self {
+            width,
+            signed,
+            members: Vec::new(),
+            last: Some(num_bigint::BigUint::default()),
+            first: true,
+        }
     }
-    values.push((name.to_owned(), value));
-    Ok(())
+
+    fn keep(&self) -> num_bigint::BigUint {
+        (num_bigint::BigUint::from(1u8) << self.width) - 1u8
+    }
+
+    /// A member whose value is not known here, or has X/Z bits.
+    fn unknown(&mut self) {
+        self.first = false;
+        self.last = None;
+    }
+
+    /// Member `name` without a value, which increments the last one; it
+    /// shall not increment the maximum representable value (6.19).
+    fn increment(&mut self, name: &str) -> Converted<()> {
+        let first = std::mem::replace(&mut self.first, false);
+        let Some(last) = self.last.take() else {
+            return Ok(());
+        };
+        let value = if first {
+            last
+        } else {
+            let maximum = if self.signed {
+                (num_bigint::BigUint::from(1u8) << (self.width - 1)) - 1u8
+            } else {
+                self.keep()
+            };
+            if last == maximum {
+                return types::invalid_enumeration(format!(
+                    "member `{name}` increments the maximum value of the base type"
+                ));
+            }
+            (last + 1u8) & self.keep()
+        };
+        self.insert(name, value)
+    }
+
+    /// Member `name` of the value `literal` gives, cast to the base type.
+    fn assign(&mut self, name: &str, literal: &typecheck::IntegralLiteral) -> Converted<()> {
+        self.first = false;
+        let mut value = literal.value.clone();
+        if literal.signed
+            && literal.width > 0
+            && literal.width < self.width
+            && value.bit((literal.width - 1) as u64)
+        {
+            value |= ((num_bigint::BigUint::from(1u8) << (self.width - literal.width)) - 1u8)
+                << literal.width;
+        }
+        value &= self.keep();
+        self.insert(name, value)
+    }
+
+    fn insert(&mut self, name: &str, value: num_bigint::BigUint) -> Converted<()> {
+        if let Some((other, _)) = self.members.iter().find(|(_, other)| *other == value) {
+            let shown = if self.signed && value.bit((self.width - 1) as u64) {
+                format!(
+                    "-{}",
+                    (num_bigint::BigUint::from(1u8) << self.width) - &value
+                )
+            } else {
+                value.to_string()
+            };
+            return types::invalid_enumeration(format!(
+                "members `{other}` and `{name}` have the same value {shown}"
+            ));
+        }
+        self.members.push((name.to_owned(), value.clone()));
+        self.last = Some(value);
+        Ok(())
+    }
 }
 
 /// Domain metadata is best-effort during signature discovery. Only a caller
