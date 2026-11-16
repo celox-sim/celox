@@ -1,5 +1,7 @@
 use super::*;
 
+mod end_labels;
+
 fn parse(code: &str) -> Declarations {
     Declarations::parse(code, Path::new("headers.sv")).unwrap()
 }

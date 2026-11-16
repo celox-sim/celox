@@ -1607,10 +1607,10 @@ impl Parser<'_> {
                     if end {
                         let join = self.peek().to_owned();
                         self.at += 1;
-                        let end_label = if !braced && self.eat(":") {
-                            Some(self.name()?)
-                        } else {
+                        let end_label = if braced {
                             None
+                        } else {
+                            self.end_label(label.as_ref().or(header.label.as_ref()))?
                         };
                         let kind = if parallel {
                             StatementKind::Parallel {
