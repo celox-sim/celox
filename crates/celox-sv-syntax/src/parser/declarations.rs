@@ -449,7 +449,7 @@ impl Parser<'_> {
             self.at += 1;
             if closing && let Some((start, category, items)) = captured.pop() {
                 if category == "class" {
-                    self.finish_class(None);
+                    self.finish_class(None)?;
                 }
                 if let Some((_, _, parent)) = captured.last_mut() {
                     parent.push(super::generate::Builder::node(
@@ -599,6 +599,9 @@ impl Parser<'_> {
                 frame.unit.items = std::mem::take(&mut frame.builder.roots);
                 self.adopt_non_ansi_ports(&mut frame.unit)?;
                 self.declare_implicit_nets(&mut frame.unit)?;
+                self.reject_variable_loop_indices(&frame.unit)?;
+                self.reject_duplicate_block_names(&frame.unit)?;
+                self.reject_circular_typedefs(&frame.unit)?;
                 frame.unit.body = self.range(frame.body_start);
                 if !frame.unit.external {
                     self.expect(frame.end)?;
@@ -1198,7 +1201,7 @@ impl Parser<'_> {
                     .chain(frames.iter().rev())
                     .find(|frame| frame.unit.kind == UnitKind::Package)
                     .map(|frame| frame.unit.name.spelling.clone());
-                self.finish_class(package);
+                self.finish_class(package)?;
                 let class = frame
                     .classes
                     .pop()
