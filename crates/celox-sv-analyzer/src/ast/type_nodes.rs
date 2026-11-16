@@ -15,7 +15,6 @@ impl Type {
             members: Vec::new(),
             signed_element_depth: None,
             class: None,
-            virtual_interface: None,
             container: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
@@ -34,7 +33,6 @@ impl Type {
             members: Vec::new(),
             signed_element_depth: None,
             class: None,
-            virtual_interface: None,
             container: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
@@ -173,11 +171,6 @@ impl Type {
             packed: self.packed_enum,
             domain: self.enum_domain.clone(),
         }
-    }
-
-    /// The interface of a virtual interface type.
-    pub fn virtual_interface(&self) -> Option<&virtual_interfaces::VirtualInterface> {
-        self.virtual_interface.as_deref()
     }
 
     pub fn kind(&self) -> TypeKind {

@@ -376,25 +376,17 @@ impl VirtualInterfaceSignal {
     }
 }
 
-/// The type of a virtual interface value: an unsigned two-state number.
-pub(super) fn value_type(interface: VirtualInterface) -> Type {
+/// The type of a virtual interface value: an unsigned two-state number,
+/// bound to its semantic type in `table`, which tells its interface and
+/// modport (IEEE 1800-2023 25.9) and which an array of it keeps as the type
+/// of its elements.
+pub(super) fn value_type(table: &mut semantic_types::TyTable, interface: VirtualInterface) -> Type {
+    let id = interface.type_id(table);
     let mut ty = Type::new(TypeKind::Bit);
     ty.packed_ranges.push(PackedRange::new(
         ConstExpr::Literal((WIDTH - 1).to_string()),
         ConstExpr::Literal("0".into()),
     ));
-    ty.virtual_interface = Some(Arc::new(interface));
-    ty
-}
-
-/// [`value_type`] bound to its semantic type in `table`, which an array of
-/// it keeps as the type of its elements.
-pub(super) fn bound_value_type(
-    table: &mut semantic_types::TyTable,
-    interface: VirtualInterface,
-) -> Type {
-    let id = interface.type_id(table);
-    let mut ty = value_type(interface);
     ty.bind(table, id);
     ty
 }
@@ -416,7 +408,7 @@ pub(super) fn bind_type(
     // The packages are analyzed once to find the interfaces before the
     // declarations exist; the analysis that uses the types checks them.
     let Some(declarations) = declarations(state) else {
-        return Ok(bound_value_type(
+        return Ok(value_type(
             &mut state.types,
             VirtualInterface { interface, modport },
         ));
@@ -442,7 +434,7 @@ pub(super) fn bind_type(
             "modport `{modport}` of interface `{interface}`"
         )));
     }
-    Ok(bound_value_type(
+    Ok(value_type(
         &mut state.types,
         VirtualInterface { interface, modport },
     ))
@@ -549,7 +541,7 @@ pub(super) fn member_signals(
         signals.push(Signal {
             hierarchical: Some(instance.clone()),
             name: instance,
-            r#type: bound_value_type(
+            r#type: value_type(
                 table,
                 VirtualInterface {
                     interface: interface.clone(),
@@ -764,24 +756,23 @@ pub(super) fn holds_virtual_interface(
 }
 
 /// [`holds_virtual_interface`] with the constants of `env`. A shape whose
-/// type cannot be formed in `env` is told by its metadata, which every
-/// shape keeps until declarations bind their types.
+/// type cannot be formed in `env` is told by the type of its elements, which
+/// the shape keeps.
 fn shape_holds_virtual_interface(
     shape: &VariableDimensions,
     table: &mut semantic_types::TyTable,
     functions: &const_functions::ConstantFunctions,
     env: &ConstEnv,
 ) -> bool {
-    let metadata = shape.virtual_interface.is_some() && shape.container.is_none();
-    let Some(ty) = shape.type_id(table, functions, env) else {
-        return metadata;
-    };
-    let found = of_type(table, ty).is_some() || element_of_array(table, ty).is_some();
-    debug_assert_eq!(
-        found, metadata,
-        "the type and the virtual interface metadata of a shape disagree"
-    );
-    found
+    match shape.type_id(table, functions, env) {
+        Some(ty) => of_type(table, ty).is_some() || element_of_array(table, ty).is_some(),
+        None => {
+            shape.container.is_none()
+                && shape
+                    .element_type(table)
+                    .is_some_and(|element| of_type(table, element).is_some())
+        }
+    }
 }
 
 /// The virtual interface type of the elements of `ty`, if it is a fixed-size
@@ -1094,7 +1085,7 @@ pub(super) fn identity_signal(
             handle: handle.to_owned(),
         }
         .name(),
-        r#type: bound_value_type(
+        r#type: value_type(
             &mut state.types,
             VirtualInterface {
                 interface: interface.to_owned(),
@@ -1875,17 +1866,19 @@ mod holds_virtual_interface_tests {
     }
 
     #[test]
-    fn shapes_whose_type_is_not_formed_keep_their_virtual_interface_metadata() {
+    fn shapes_whose_type_is_not_formed_keep_their_virtual_interface_element_type() {
         // `virtual I handles[N]` where the scope has no `N`.
-        let mut ty = Type::new(TypeKind::Bit);
-        ty.virtual_interface = Some(Arc::new(VirtualInterface {
-            interface: "I".into(),
-            modport: None,
-        }));
-        ty.unpacked_ranges.push(symbolic_range());
+        let mut table = semantic_types::TyTable::default();
+        let mut ty = value_type(
+            &mut table,
+            VirtualInterface {
+                interface: "I".into(),
+                modport: None,
+            },
+        );
+        ty.unpacked_ranges_mut().push(symbolic_range());
         let shape = procedural::dimensions_from_type(&ty);
         let functions = const_functions::ConstantFunctions::default();
-        let mut table = semantic_types::TyTable::default();
         assert!(
             shape
                 .type_id(&mut table, &functions, &ConstEnv::default())
@@ -1917,7 +1910,7 @@ mod holds_virtual_interface_tests {
             modport: Some("mp".into()),
         };
         let element = interface.type_id(&mut table);
-        let mut ty = bound_value_type(&mut table, interface);
+        let mut ty = value_type(&mut table, interface);
         let literal = |value: &str| ConstExpr::Literal(value.into());
         ty.unpacked_ranges_mut()
             .push(UnpackedRange::new(literal("0"), literal("3")));
@@ -1936,5 +1929,40 @@ mod holds_virtual_interface_tests {
         // Any other change of the type may change its elements.
         ty.is_signed = true;
         assert!(ty.element.get(&table).is_none());
+    }
+
+    /// A virtual interface type has the shape of the number that holds its
+    /// value; its element type tells it apart from that number and from
+    /// other interfaces and modports (IEEE 1800-2023 25.9).
+    #[test]
+    fn virtual_interface_types_are_equal_by_their_interface_and_modport() {
+        let mut table = semantic_types::TyTable::default();
+        let mut vif = |interface: &str, modport: Option<&str>| {
+            value_type(
+                &mut table,
+                VirtualInterface {
+                    interface: interface.into(),
+                    modport: modport.map(Into::into),
+                },
+            )
+        };
+        let (bus, again, mp, other) = (
+            vif("bus_if", None),
+            vif("bus_if", None),
+            vif("bus_if", Some("mp")),
+            vif("other_if", None),
+        );
+        let mut number = Type::new(TypeKind::Bit);
+        number.packed_ranges.push(PackedRange::new(
+            ConstExpr::Literal((WIDTH - 1).to_string()),
+            ConstExpr::Literal("0".into()),
+        ));
+        assert_eq!(bus, again);
+        assert_ne!(bus, mp);
+        assert_ne!(bus, other);
+        assert_ne!(bus, number);
+        let shape = |ty: &Type| procedural::dimensions_from_type(ty);
+        assert_eq!(shape(&bus), shape(&again));
+        assert_ne!(shape(&bus), shape(&number));
     }
 }
