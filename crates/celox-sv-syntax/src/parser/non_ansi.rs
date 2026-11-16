@@ -328,9 +328,6 @@ impl Parser<'_> {
             }],
             tokens: declarator.tokens,
         });
-        if self.body_items.len() >= 1_000_000 {
-            return Err(self.unsupported("native body-item arena exceeds one million entries"));
-        }
         let item = BodyItemId(self.body_items.len());
         self.body_items.push(BodyItem {
             kind: BodyItemKind::Assign(id),
@@ -403,9 +400,6 @@ impl Parser<'_> {
         }
         if !changed {
             return Ok((object_type, declared));
-        }
-        if self.types.len() >= 1_000_000 {
-            return Err(self.unsupported("native type arena exceeds one million nodes"));
         }
         let id = TypeId(self.types.len());
         self.types.push(object);

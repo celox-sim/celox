@@ -49,8 +49,8 @@ test("every full-validation checkout uses the requested immutable source", () =>
   assert.match(workflow, /FULL_VALIDATION: .*inputs.validation_ref != ''/);
 });
 
-test("both stable publishers verify release-branch qualification of their actual build SHA", () => {
-  for (const [file, source] of [["publish-crates.yml", "needs.validate.outputs.source_sha"], ["ci-napi.yml", "needs.validate-release.outputs.build_sha"]]) {
+test("every stable publisher verifies release-branch qualification of its actual build SHA", () => {
+  for (const [file, source] of [["publish-crates.yml", "needs.validate.outputs.source_sha"], ["publish-cli.yml", "needs.validate.outputs.source_sha"], ["ci-napi.yml", "needs.validate-release.outputs.build_sha"]]) {
     const text = readFileSync(new URL(`../.github/workflows/${file}`, import.meta.url), "utf8");
     const qualification = job(text, "qualify");
     assert.match(qualification, /run: node scripts\/check-release-qualification.mjs/);
@@ -69,7 +69,7 @@ test("queue integration tests run before reports are collected and keep normal f
   const rust = job(workflow, "rust-tests");
   const smoke = rust.split("      - name: Run merge queue integration tests")[1].split("      - name:")[0];
   assert.match(smoke, /if: needs.changes.outputs.fast_queue == 'true'/);
-  assert.match(smoke, /cargo nextest run --locked -p celox --features systemverilog --profile ci/);
+  assert.match(smoke, /cargo nextest run --locked -p celox --profile ci/);
   assert.doesNotMatch(smoke, /no-tests=pass|continue-on-error/);
   assert.ok(rust.indexOf("Run merge queue integration tests") < rust.indexOf("Collect Rust test reports"));
   assert.match(rust, /test_step_outcome: .*steps.queue-tests.outcome/);

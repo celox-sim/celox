@@ -114,12 +114,15 @@ pub(in crate::ast) fn selection(
             tree,
             session,
             &scope,
+            &scope,
             false,
             false,
         )?,
         (_, false) => {
             packed_structs::select_member(tree, parts, None, &scope, |name, context, strict| {
-                direct::select_suffix(name, &suffix, native, tree, session, context, strict, false)
+                direct::select_suffix(
+                    name, &suffix, native, tree, session, context, &scope, strict, false,
+                )
             })?
         }
     };
@@ -158,6 +161,12 @@ pub(in crate::ast) fn read(
             "tagged union member of a value read with a side effect",
         ));
     }
-    let read = statements::expr_from_selection(tree, value, &selection.lvalue, &selection.scope);
+    let read = statements::expr_from_selection(
+        tree,
+        &session.types,
+        value,
+        &selection.lvalue,
+        &selection.scope,
+    );
     packed_structs::checked_value(selection.guards, read, tree, &selection.scope)
 }

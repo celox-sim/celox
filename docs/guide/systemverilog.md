@@ -1,8 +1,7 @@
 # SystemVerilog Support
 
 Celox can simulate SystemVerilog through its **Rust API**.
-Enable the `systemverilog` Cargo feature, supply your source files and
-choose a top module. The TypeScript package and Vite plugin currently load
+Supply your source files and choose a top module. The TypeScript package and Vite plugin currently load
 Veryl only.
 
 Celox follows IEEE Std 1800™-2023.
@@ -14,11 +13,11 @@ difference you cannot find there is a bug.
 
 ## Start with a module
 
-Enable the feature in your Rust project:
+Add Celox to your Rust project:
 
 ```toml
 [dependencies]
-celox = { version = "*", features = ["systemverilog"] }
+celox = "*"
 ```
 
 Pass the source text and its path to `Simulator::from_sv_sources`, followed by
@@ -85,10 +84,11 @@ The areas most likely to require changes when porting a design are:
 - `bind`, checkers, covergroups, clocking blocks, `specify` blocks, UDPs,
   `defparam`, procedural `force` / `release`, and `disable` (other than
   `disable fork`).
-- Nonblocking assignments in `always_comb` and `always_latch`, multiple net
-  drivers and tri-state buses, and `iff` in `always_ff`.
-- Wildcard `.*` connections, `ref` ports, non-ANSI port expressions, gate
-  primitives with delays or strengths, and several interface features.
+- Nonblocking assignments in `always_comb` and `always_latch`, net drivers
+  in several modules (tri-state buses across modules), and `iff` in
+  `always_ff`.
+- `ref` ports, non-ANSI port expressions, gate primitives with delays or
+  strengths, and several interface features.
 - Inferred latches in `always_comb`, which are an error unless
   `inferred_latch = "warn"` or `"allow"` is set.
 
@@ -108,11 +108,12 @@ See [mixed-language designs](./systemverilog-reference#mixed-language).
 
 ## DPI-C imports
 
-Enable `sv-dpi` to call C functions from `always_ff` processes.
-Register functions or shared libraries with `dpi_function` or
-`dpi_library`; these are `unsafe` APIs because the C signatures must match
-the SV imports. See [DPI-C imports](./systemverilog-reference#dpi-c-imports)
-for the supported types and call sites.
+Procedural code can call C functions. Register
+functions or shared libraries with `dpi_function` or `dpi_library`; these
+are `unsafe` APIs because the C signatures must match the SV imports. The
+`celox run` command links shared libraries with `--dpi-lib PATH`. See
+[DPI-C imports](./systemverilog-reference#dpi-c-imports) for the supported
+types and call sites.
 
 ## Find a specific behavior {#semantics-worth-knowing}
 

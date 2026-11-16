@@ -50,7 +50,7 @@ test("qualification, failures, partial samples and altered runner contracts cann
 
 test("workflow retains failed logs, pairs collection on one host and gates publication", () => {
   const workflow = readFileSync(new URL("../.github/workflows/circuit-bench.yml", import.meta.url), "utf8");
-  assert.match(workflow, /cargo build --release --locked -p celox-vpi --bin celox/);
+  assert.match(workflow, /cargo build --release --locked -p celox --bin celox/);
   assert.match(workflow, /measure all work\/circuits\/sources work\/circuits\/results target\/release\/celox/);
   assert.match(workflow, /if: always\(\)/);
   assert.match(workflow, /needs: circuits\n    if: github.ref == 'refs\/heads\/master'/);

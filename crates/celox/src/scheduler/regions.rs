@@ -1,10 +1,5 @@
 //! Regression coverage for portable entry into native scheduling regions.
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
 mod tests {
     use crate::{SchedulerMode, Simulation};
     use celox_runtime::{UnitExecutor, backend::SimBackend};
@@ -91,12 +86,7 @@ endmodule"#;
     }
 }
 
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
 mod assertions {
     use crate::{SchedulerMode, Simulation};
     use celox_runtime::{UnitExecutor, backend::SimBackend};
@@ -179,12 +169,7 @@ endmodule"#;
     }
 }
 
-#[cfg(all(
-    test,
-    feature = "systemverilog",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
 mod deferred {
     use crate::{SchedulerMode, Simulation};
     use celox_runtime::{UnitExecutor, backend::SimBackend};

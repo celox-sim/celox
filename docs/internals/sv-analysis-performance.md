@@ -802,7 +802,7 @@ regressions also run:
 cargo fmt --all -- --check
 cargo clippy --locked -p celox-sv-analyzer -p celox-frontend-sv --all-targets --all-features -- -D warnings
 cargo test --locked -p celox-sv-analyzer -p celox-frontend-sv --all-features
-cargo test --locked -p celox --features sv-dpi --test systemverilog --test sv_unpacked_array --test sv_dpi
+cargo test --locked -p celox --test systemverilog --test sv_unpacked_array --test sv_dpi
 cargo doc --locked -p celox-sv-analyzer -p celox-frontend-sv --no-deps
 pnpm docs:build
 ```

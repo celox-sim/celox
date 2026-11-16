@@ -179,26 +179,20 @@ fn select<'a>(
     shape: Shape<'a>,
     dims: &PackedDimensions,
 ) -> Converted<(Vec<Selected<'a>>, bool, bool)> {
-    if let Some(aggregate) = shape.unpacked_struct.clone()
+    if let Some(aggregate) = shape.unpacked_struct_in(&session.types).cloned()
         && shape.unpacked.is_empty()
     {
         return Ok((
-            unpacked_struct_items(tree, session, functions, &aggregate, kind, bindings, dims)?,
+            unpacked_struct_items(
+                tree, session, functions, &shape, &aggregate, kind, bindings, dims,
+            )?,
             false,
             true,
         ));
     }
-    if let Some((dim, rest)) = shape.unpacked.split_first() {
+    if let Some(dim) = shape.unpacked.first() {
         let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
-        // Selecting an unpacked dimension keeps the declaration of its
-        // element type, including the nominal structure identity and the
-        // class of a handle element.
-        let sub = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
-            container: None,
-            real: false,
-            unpacked: rest.to_vec(),
-            ..(*shape).clone_shape()
-        })));
+        let sub = Shape::Owned(Rc::new(shape.unpacked_element(&session.types)));
         let (kind, bindings, fill) =
             extract_type_fill(tree, session, functions, kind, bindings, &sub, dims)?;
         let items = indexed_items(
@@ -241,7 +235,6 @@ fn select<'a>(
             real: false,
             string: false,
             class: None,
-            virtual_interface: None,
             packed: rest.to_vec(),
             unpacked: Vec::new(),
             signed: shape.signed_element_depth == Some(1),
@@ -361,7 +354,11 @@ fn select<'a>(
                 .zip(values)
                 .map(|(member, (value, default))| Selected {
                     value,
-                    shape: Shape::Owned(Rc::new(procedural::dimensions_from_type(member.r#type()))),
+                    shape: Shape::Owned(Rc::new(shape.member_shape(
+                        &session.types,
+                        member.name(),
+                        member.r#type(),
+                    ))),
                     default,
                     check: false,
                 })
@@ -382,7 +379,6 @@ fn select<'a>(
         real: false,
         string: false,
         class: None,
-        virtual_interface: None,
         packed: Vec::new(),
         unpacked: Vec::new(),
         signed: false,
@@ -496,10 +492,15 @@ pub(in crate::ast) fn bind_native(
         Broadcast(usize),
     }
     let owned = typed_shape(root, tree, dims)?;
-    let shape = owned
-        .as_ref()
-        .or(shape)
-        .ok_or_else(|| unsupported("assignment pattern without target shape"))?;
+    let shape = owned.as_ref().or(shape).ok_or_else(|| {
+        // The pattern itself tells which of a design's many it is.
+        let mut text = native.token_text(native.expression(root).tokens);
+        if let Some((end, _)) = text.char_indices().nth(80) {
+            text.truncate(end);
+            text.push_str("...");
+        }
+        unsupported(format!("assignment pattern without target shape: `{text}`"))
+    })?;
     let mut jobs = vec![Job::Pattern(root, Shape::Borrowed(shape))];
     let mut values = Vec::new();
     while let Some(job) = jobs.pop() {
@@ -532,20 +533,24 @@ pub(in crate::ast) fn bind_native(
                 while let ExprKind::Group(inner) = native.expression(id).kind {
                     id = inner;
                 }
+                // A container member or element receives its item as a
+                // container variable is assigned (10.9, 7.5-7.10): a
+                // pattern, a concatenation or a container value.
+                if let Some(container) = shape.container.clone()
+                    && shape.unpacked.is_empty()
+                {
+                    values.push(containers::assignment(id, tree, session, dims, &container)?);
+                    continue;
+                }
                 let pattern = matches!(native.expression(id).kind, ExprKind::Pattern { .. });
                 if default
-                    && let Some((dim, rest)) = shape.unpacked.split_first()
+                    && let Some(dim) = shape.unpacked.first()
                     && !pattern
                     && native_rank(id, native, tree, session, dims)? < shape.unpacked.len()
                 {
                     let (_, _, count) =
                         dimension_bounds(&tree.functions, &dim.left, &dim.right, dims)?;
-                    let sub = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
-                        container: None,
-                        real: false,
-                        unpacked: rest.to_vec(),
-                        ..(*shape).clone_shape()
-                    })));
+                    let sub = Shape::Owned(Rc::new(shape.unpacked_element(&session.types)));
                     jobs.push(Job::Broadcast(count));
                     jobs.push(Job::Value(Selected {
                         value: id,
@@ -569,21 +574,23 @@ pub(in crate::ast) fn bind_native(
                 }
                 // A typed pattern of a member must name the member's
                 // structure type (6.22.3).
-                if pattern && shape.unpacked.is_empty() && shape.unpacked_struct.is_some() {
-                    let structure = shape
-                        .type_id(&mut session.types, &tree.functions, &dims.const_env)
-                        .ok_or_else(|| unsupported("unpacked structure member type"))?;
+                if pattern
+                    && shape.unpacked.is_empty()
+                    && let Some(structure) =
+                        unpacked_structs::shape_struct(&shape, tree, session, dims)?
+                {
                     unpacked_structs::check_value(structure, id, native, tree, session, dims)?;
                 }
-                if let Some(aggregate) = shape.unpacked_struct.clone()
+                if let Some(aggregate) = shape.unpacked_struct_in(&session.types).cloned()
                     && shape.unpacked.is_empty()
                     && !pattern
                 {
                     // A default that is not a structure of the member's type
                     // applies to each of its members (IEEE 1800-2023 10.9.2).
                     if default
-                        && !unpacked_structs::native_struct(id, native, tree, session, dims)?
-                            .is_some_and(|value| value.same_type(&aggregate))
+                        && !unpacked_structs::value_struct(id, native, tree, session, dims)
+                            .zip(unpacked_structs::shape_struct(&shape, tree, session, dims)?)
+                            .is_some_and(|(value, target)| session.types.matches(value, target))
                     {
                         let members = aggregate.members();
                         jobs.push(Job::Finish {
@@ -594,7 +601,9 @@ pub(in crate::ast) fn bind_native(
                         jobs.extend(members.iter().rev().map(|member| {
                             Job::Value(Selected {
                                 value: id,
-                                shape: Shape::Owned(Rc::new(procedural::dimensions_from_type(
+                                shape: Shape::Owned(Rc::new(shape.member_shape(
+                                    &session.types,
+                                    &member.name,
                                     &member.r#type,
                                 ))),
                                 default: true,
@@ -615,7 +624,7 @@ pub(in crate::ast) fn bind_native(
                 // An item of an enumerated element is of its type (6.19.3).
                 if !pattern
                     && shape.unpacked.is_empty()
-                    && shape.container.is_none()
+                    && !containers::holds_container(&shape, tree, session, dims)
                     && let Some(enumeration) = shape
                         .type_id(&mut session.types, &tree.functions, &dims.const_env)
                         .filter(|ty| session.types.is_enum(*ty))
@@ -632,7 +641,8 @@ pub(in crate::ast) fn bind_native(
                 }
                 // A handle is checked where it is one element; a value
                 // given to a subarray is an array, checked as one above.
-                if let Some(class) = shape.class.as_deref()
+                let class = expression_binding::objects::shape_class(&shape, tree, session, dims);
+                if let Some(class) = class.as_deref()
                     && !pattern
                     && shape.unpacked.is_empty()
                 {
@@ -653,7 +663,7 @@ pub(in crate::ast) fn bind_native(
                     )?;
                 }
                 let scalar_string = shape.string && shape.unpacked.is_empty();
-                if (scalar_string || shape.class.is_some()) && !pattern {
+                if (scalar_string || class.is_some()) && !pattern {
                     let value =
                         expression_binding::bind_value(id, native, tree, session, dims, None)?;
                     values.push(if scalar_string {
@@ -748,6 +758,7 @@ fn unpacked_struct_items<'a>(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     functions: &const_functions::ConstantFunctions,
+    parent: &VariableDimensions,
     aggregate: &unpacked_structs::UnpackedStruct,
     kind: NativeKind,
     bindings: Vec<Pair>,
@@ -829,7 +840,11 @@ fn unpacked_struct_items<'a>(
         .zip(values)
         .map(|(member, (value, default))| Selected {
             value,
-            shape: Shape::Owned(Rc::new(procedural::dimensions_from_type(&member.r#type))),
+            shape: Shape::Owned(Rc::new(parent.member_shape(
+                &session.types,
+                &member.name,
+                &member.r#type,
+            ))),
             default,
             check: false,
         })
@@ -896,7 +911,7 @@ fn check_subarray_item(
     let Some(item) = dimensions::operand_shape(id, tree, session, dims)? else {
         return Ok(());
     };
-    if !item.unpacked.is_empty() || item.container.is_some() {
+    if !item.unpacked.is_empty() || containers::holds_container(&item, tree, session, dims) {
         return Ok(());
     }
     let Some(target) = shape.type_id(&mut session.types, &tree.functions, &dims.const_env) else {
@@ -965,7 +980,7 @@ mod tests {
         let dims = PackedDimensions::new(
             HashMap::default(),
             &ConstEnv::default(),
-            &HashMap::from_iter([("T".into(), Type::new(TypeKind::Logic))]),
+            &TypeAliases::from_iter([("T".into(), Type::new(TypeKind::Logic))]),
         );
         let result = bind_native(root, tree.declarations(), tree, session, &dims, None).map(Some);
         drop(context);
@@ -1003,7 +1018,7 @@ mod tests {
         let dims = PackedDimensions::new(
             HashMap::default(),
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
         );
         let result = expression(root, &shape, tree, session, &dims);
         let mut ty = Type::new(TypeKind::Logic);

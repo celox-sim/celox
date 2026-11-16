@@ -63,7 +63,7 @@ pub(super) fn bind(
                 "array reduction arguments require a with expression",
             ));
         }
-        if container.record.is_some() && container.element.unpacked_struct().is_none() {
+        if container.record.is_some() && !container.element_is_unpacked_struct(&session.types) {
             return Err(unsupported(
                 "array reduction of elements wider than 64 bits",
             ));
@@ -95,7 +95,7 @@ pub(super) fn bind(
     let Some(shape) = dims.get(&receiver) else {
         return Ok(None);
     };
-    if shape.container.is_none() && shape.unpacked.is_empty() {
+    if !containers::holds_container(shape, tree, session, dims) && shape.unpacked.is_empty() {
         return Ok(None);
     }
     if let ExprKind::Call { arguments, .. } = &native.expression(id).kind
@@ -108,7 +108,11 @@ pub(super) fn bind(
     if expression_binding::holds_chandle(shape) {
         return Err(chandle_elements());
     }
-    if shape.unpacked.len() != 1 || shape.real || shape.string || shape.class.is_some() {
+    if shape.unpacked.len() != 1
+        || shape.real
+        || shape.string
+        || expression_binding::objects::shape_class(shape, tree, session, dims).is_some()
+    {
         return Err(unsupported(
             "array reduction requires one-dimensional integral elements",
         ));

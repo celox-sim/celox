@@ -34,6 +34,15 @@ pub(super) fn check_actual(
         detail: detail.to_owned(),
     };
     let actual = ungroup(actual, native);
+    // An object holds a fixed-size array property in a container, which a
+    // reference to the array does not reach (see `classes::Property::storage`).
+    if let Some((property, _)) = object_property(tree, session, actual, native, dimensions)?
+        && property.storage.is_some()
+    {
+        return Err(unsupported(
+            "fixed-size array class property as a ref or const ref argument",
+        ));
+    }
     let shape = match &native.expression(actual).kind {
         ExprKind::Name(variable) => {
             let variable = instances::normalize_identifier(&variable.spelling);
@@ -106,7 +115,7 @@ pub(super) fn check_actual(
                     "ref argument of `{name}` bound to an element of a class property"
                 )));
             };
-            if array.container.is_some() {
+            if containers::holds_container(array, tree, session, dimensions) {
                 if indices == 1 {
                     // Elements of dynamically sized arrays: their reference
                     // must outlive a resize or a deletion of the element.

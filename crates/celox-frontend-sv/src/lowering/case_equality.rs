@@ -25,6 +25,17 @@ pub(super) fn compare<A: std::hash::Hash + Eq + Clone>(
     if builder.zero(l.1) && builder.zero(r.1) {
         return builder.node(SLTNode::Binary(l.0, op, r.0));
     }
+    // A side whose unknown mask is a nonzero constant can never exactly
+    // match a side that provably carries no unknowns: at a bit where the
+    // constant is X/Z the known side has a definite 0/1 (IEEE 1800-2023
+    // 11.4.10). The comparison is constant either way.
+    if (builder.nonzero(l.1) && builder.zero(r.1)) || (builder.nonzero(r.1) && builder.zero(l.1)) {
+        return if op == BinaryOp::NeCase {
+            builder.ones(1)
+        } else {
+            builder.zeros(1)
+        };
+    }
     builder.exact(l, r, op == BinaryOp::NeCase)
 }
 
@@ -93,6 +104,11 @@ impl<A: std::hash::Hash + Eq + Clone> Builder<'_, A> {
     fn zero(&mut self, node: NodeId) -> bool {
         slt_const4(self.arena, &mut self.constants, node)
             .is_some_and(|(v, m, _)| v.is_zero() && m.is_zero())
+    }
+    /// Whether `node` is a constant whose value bits are not all zero
+    /// (used on mask planes, whose constant value is the unknown mask).
+    fn nonzero(&mut self, node: NodeId) -> bool {
+        slt_const4(self.arena, &mut self.constants, node).is_some_and(|(v, _, _)| !v.is_zero())
     }
     fn any(&mut self, node: NodeId) -> Result<NodeId, celox_slt::SLTNodeFactsError> {
         self.unary(UnaryOp::Or, node)

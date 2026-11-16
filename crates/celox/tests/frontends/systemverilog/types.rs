@@ -1,127 +1,5 @@
 use super::*;
 
-sv_backends! {
-    fn inline_enum_wider_expression_initializer(sim) { @case "types::inline_enum_wider_expression_initializer"; }
-    fn enum_explicit_integral_assignments(sim) { @case "types::enum_explicit_integral_assignments"; }
-    fn enum_wide_parameters_preserve_declared_types(sim) { @case "types::enum_wide_parameters_preserve_declared_types"; }
-    fn scalar_integral_type_casts(sim) { @case "types::scalar_integral_type_casts"; }
-    fn scalar_integral_type_casts_four_state(sim) { @case "types::scalar_integral_type_casts_four_state"; }
-    fn inline_enum_wide_unknown_explicit_successor(sim) { @case "types::inline_enum_wide_unknown_explicit_successor"; }
-    fn inline_enum_wide_unused(sim) { @case "types::inline_enum_wide_unused"; }
-    fn inline_enum_wide_constants(sim) { @case "types::inline_enum_wide_constants"; }
-    fn inline_enum_state_machine(sim) { @case "types::inline_enum_state_machine"; }
-    fn inline_enum_four_state_constants(sim) { @case "types::inline_enum_four_state_constants"; }
-
-    fn package_enum_unknown_constants(sim) {
-        @case "types::package_enum_unknown_constants";
-    }
-    fn package_enum_unknown_storage(sim) {
-        @case "types::package_enum_unknown_storage";
-    }
-    fn inherited_parameter_aliases_materialize_replication_masks(sim) {
-        @case "types::inherited_parameter_aliases_materialize_replication_masks";
-    }
-    fn inherited_parameter_aliases_preserve_types_and_unknowns(sim) {
-        @case "types::inherited_parameter_aliases_preserve_types_and_unknowns";
-    }
-}
-
-sv_backends! {
-    fn constant_functions_in_unpacked_port_dimensions(sim) {
-        @case "types::constant_functions_in_unpacked_port_dimensions";
-    }
-
-    fn constant_functions_in_unpacked_dimensions(sim) {
-        @case "types::constant_functions_in_unpacked_dimensions";
-    }
-
-    fn passes_unpacked_arrays_of_equivalent_element_types(sim) {
-        @case "types::passes_unpacked_arrays_of_equivalent_element_types";
-    }
-
-    fn passes_unpacked_arguments_of_equivalent_element_types(sim) {
-        @case "types::passes_unpacked_arguments_of_equivalent_element_types";
-    }
-
-    fn rejects_unpacked_argument_of_a_wider_element_type(sim) {
-        @case "types::rejects_unpacked_argument_of_a_wider_element_type";
-    }
-
-    fn rejects_unpacked_assignment_of_a_different_state_count(sim) {
-        @case "types::rejects_unpacked_assignment_of_a_different_state_count";
-    }
-
-    fn rejects_unpacked_assignment_of_a_different_element_count(sim) {
-        @case "types::rejects_unpacked_assignment_of_a_different_element_count";
-    }
-
-    fn rejects_unpacked_port_connection_of_a_narrower_element_type(sim) {
-        @case "types::rejects_unpacked_port_connection_of_a_narrower_element_type";
-    }
-
-    fn rejects_assignment_pattern_item_of_a_narrower_array_type(sim) {
-        @case "types::rejects_assignment_pattern_item_of_a_narrower_array_type";
-    }
-
-    fn packed_arrays_of_signed_named_types_have_signed_elements(sim) {
-        @case "types::packed_arrays_of_signed_named_types_have_signed_elements";
-    }
-
-    fn packed_parameters_of_signed_named_types_have_signed_elements(sim) {
-        @case "types::packed_parameters_of_signed_named_types_have_signed_elements";
-    }
-
-    fn simulates_systemverilog_parameterized_port_widths(sim) {
-        @case "types::simulates_systemverilog_parameterized_port_widths";
-    }
-
-    fn simulates_systemverilog_bit_ports_as_two_state(sim) {
-        @case "types::simulates_systemverilog_bit_ports_as_two_state";
-    }
-
-    fn preserves_integer_atom_state_kinds(sim) {
-        @case "types::preserves_integer_atom_state_kinds";
-    }
-}
-
-sv_backends! {
-    fn undriven_internal_nets_are_high_impedance(sim) {
-        @case "types::undriven_internal_nets_are_high_impedance";
-    }
-    fn undriven_internal_nets_convert_to_two_state_zero(sim) {
-        @case "types::undriven_internal_nets_convert_to_two_state_zero";
-    }
-    fn chandles_hold_null_and_copies(sim) {
-        @case "types::chandles_hold_null_and_copies";
-    }
-}
-
-sv_backends! {
-    fn enum_methods_iterate_members(sim) {
-        @case "types::enum_methods_iterate_members";
-    }
-
-    fn enum_methods_wrap_and_count(sim) {
-        @case "types::enum_methods_wrap_and_count";
-    }
-
-    fn enum_methods_in_combinational_and_sequential_logic(sim) {
-        @case "types::enum_methods_in_combinational_and_sequential_logic";
-    }
-
-    fn unpacked_array_assignments_through_selects_and_calls(sim) {
-        @case "types::unpacked_array_assignments_through_selects_and_calls";
-    }
-
-    fn local_typedefs(sim) {
-        @case "types::local_typedefs";
-    }
-
-    fn type_operator(sim) {
-        @case "types::type_operator";
-    }
-}
-
 // Receivers, counts and contexts that the external simulators of the shared
 // suite do not accept: Verilator rejects non-constant counts and methods of
 // casts, constants and call results; Icarus rejects methods of call results
@@ -271,6 +149,29 @@ endmodule
     }
 }
 
+/// Types whose widths name parameters are integral (IEEE 1800-2023 6.11.1):
+/// an intra-assignment delay assigns a variable of such a type, and a
+/// parameter of such a type takes an assignment pattern.
+#[test]
+fn parameter_sized_types_are_integral() {
+    let source = "`timescale 1ns/1ns
+    module Top #(parameter int W = 8);
+        localparam logic [W-1:0] P = '{default: 1'b1};
+        logic [W-1:0] a, b;
+        logic [W-1:0] pattern;
+        initial begin b = 3; pattern = P; a = #1 b; end
+    endmodule";
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("integral.sv"))], "Top")
+            .build_interpreter()
+            .unwrap();
+    sim.run_until(2).unwrap();
+    let a = sim.signal("a");
+    assert_eq!(sim.get(a), BigUint::from(3u8));
+    let pattern = sim.signal("pattern");
+    assert_eq!(sim.get(pattern), BigUint::from(0xffu8));
+}
+
 /// Methods of an element of a packed array of enums are not supported yet;
 /// they are rejected, not given the members of another type.
 #[test]
@@ -318,6 +219,67 @@ fn local_enumerations_of_one_name_are_distinct_types() {
     };
     let error = error.to_string();
     assert!(error.contains("assignment"), "{error}");
+}
+
+/// Each anonymous enumeration declares a type of its own, which matches
+/// only the variables of its own declaration (IEEE 1800-2023 6.22.1 c): a
+/// variable of another, even with the same members, is assigned to one only
+/// by a cast (6.19.3, 6.22.3).
+#[test]
+fn anonymous_enumerations_with_the_same_members_are_distinct_types() {
+    let build = |assignment: &str| {
+        let source = format!(
+            "package p; enum {{A, B}} v; endpackage
+            module Top(output int seen);
+                enum {{A, B}} x, y;
+                initial begin
+                    p::v = p::B;
+                    y = B;
+                    x = y;
+                    {assignment}
+                    seen = x;
+                end
+            endmodule"
+        );
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("enums.sv"))], "Top")
+            .build()
+    };
+    let Err(error) = build("x = p::v;") else {
+        panic!("a variable of another anonymous enumeration needs a cast");
+    };
+    let error = error.to_string();
+    assert!(error.contains("is not assignment"), "{error}");
+    let mut sim = build("void'($cast(x, p::v));").unwrap();
+    let seen = sim.signal("seen");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(seen), BigUint::from(1u8));
+}
+
+/// An unpacked array of one anonymous enumeration takes only an array of
+/// the same one, by the rule for its elements (IEEE 1800-2023 7.6, 6.22.1
+/// c).
+#[test]
+fn arrays_of_anonymous_enumerations_with_the_same_members_are_incompatible() {
+    let build = |assignment: &str| {
+        let source = format!(
+            "package p; enum {{A, B}} pa [2]; endpackage
+            module Top(output int seen);
+                enum {{A, B}} xa [2], ya [2];
+                initial begin
+                    xa = ya;
+                    {assignment}
+                    seen = xa[1];
+                end
+            endmodule"
+        );
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("enums.sv"))], "Top")
+            .build()
+    };
+    build("").unwrap();
+    let Err(error) = build("xa = p::pa;") else {
+        panic!("an array of another anonymous enumeration is not compatible");
+    };
+    assert!(error.to_string().contains("compatible"), "{error}");
 }
 
 /// A member of a local enumeration is a member of that enumeration, also
@@ -571,4 +533,358 @@ fn enumerated_variables_take_only_values_of_their_type() {
     assert_eq!(sim.get(sim.signal("first")), 2u32.into());
     assert_eq!(sim.get(sim.signal("second")), 2u32.into());
     assert_eq!(sim.get(sim.signal("third")), 1u32.into());
+}
+
+/// A compilation-unit typedef binds its target as a use does, so one that
+/// names what nothing declares makes the design illegal even when no module
+/// uses it (IEEE 1800-2023 3.12.1, 6.18); an unused unsupported declaration
+/// there does not stop the design.
+#[test]
+fn unused_unit_and_package_subroutines_reading_undeclared_names_are_errors() {
+    // Data are declared before they are used, and a read declares no
+    // implicit net (IEEE 1800-2023 6.6, 6.10): a subroutine of a package or
+    // of the compilation unit that reads an undeclared name is an error,
+    // whether or not anything calls it.
+    for subroutine in [
+        "function automatic int f(); return missing; endfunction",
+        "function void f(); int x; x = missing + 1; endfunction",
+        "task t(); int x; x = missing; endtask",
+        "package q; function int f(); return missing; endfunction endpackage",
+        "class C; static int s; endclass function automatic int f(); return C::missing; endfunction",
+    ] {
+        let source = format!("{subroutine}\nmodule Top(output int y); assign y = 1; endmodule\n");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("unit.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("{subroutine} is accepted"))
+        .to_string();
+        assert!(
+            error.contains("missing` is not declared"),
+            "{subroutine}: {error}"
+        );
+    }
+    // A name a package qualifies is one the package declares or exports
+    // (26.3, 26.6).
+    for subroutine in [
+        "package q; int x; endpackage function automatic int f(); return q::missing; endfunction",
+        "package q; int x; function automatic int f(); return q::missing; endfunction endpackage",
+    ] {
+        let source = format!("{subroutine}\nmodule Top(output int y); assign y = 1; endmodule\n");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("unit.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("{subroutine} is accepted"))
+        .to_string();
+        assert!(
+            error.contains("package `q` has no item `missing`"),
+            "{subroutine}: {error}"
+        );
+    }
+    // Every name such a subroutine reads that its body, its scope or an
+    // import declares (23.9).
+    let source = "package p;
+        typedef enum {A, B} e_t;
+        localparam int P = 2;
+        int pv = 3;
+        function automatic int g(int a); return a + P; endfunction
+    endpackage
+    import p::*;
+    localparam int U = 5;
+    int uv;
+    typedef enum {C0, C1} u_t;
+    class K; static int ks = 4; endclass
+    function automatic int f(int a);
+        int l = a;
+        static int s = 1;
+        for (int i = 0; i < 2; i++) l += i;
+        begin : blk int b = 1; l += b; end
+        f = l + U + uv + pv + P + C1 + B + g(a) + s + p::pv + p::P + K::ks;
+    endfunction
+    function int h(); return f(1); endfunction
+    task automatic t(output int o); o = U; endtask
+    module Top(output int y); initial y = h(); endmodule
+    ";
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("unit.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(1).unwrap();
+    let y = sim.signal("y");
+    assert_eq!(sim.get(y), num_bigint::BigUint::from(28u8));
+}
+
+#[test]
+fn unreferenced_interfaces_reading_undeclared_names_are_errors() {
+    // No hierarchy elaborates an interface nothing instantiates (IEEE
+    // 1800-2023 3.12.1), but its body is compiled with its defaults: a value
+    // it reads that is not declared is an error (6.6, 6.10).
+    for interface in [
+        "interface Bus; logic x; assign x = missing; endinterface",
+        "interface Bus #(parameter int W = 4); logic [W-1:0] x; always_comb x = missing; endinterface",
+        "interface Bus; logic x; function automatic logic f(); return missing; endfunction endinterface",
+    ] {
+        let source = format!("{interface}\nmodule Top(output int y); assign y = 1; endmodule\n");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("bus.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("{interface} is accepted"))
+        .to_string();
+        assert!(
+            error.contains("`missing` is not declared"),
+            "{interface}: {error}"
+        );
+    }
+    // Every name its body declares or imports, and one only an instance
+    // can give the parameters of, are left as they are.
+    let source = "package p; localparam int P = 1; endpackage
+    interface Bus #(parameter int W = 4) (input logic clk);
+        import p::*;
+        typedef enum logic {IDLE, BUSY} state_t;
+        logic [W-1:0] data;
+        state_t state;
+        logic ready;
+        assign ready = state == IDLE && data != P;
+        always_ff @(posedge clk) data <= data + W;
+        function automatic logic [W-1:0] next(); return data + 1; endfunction
+        modport source(output data, input ready);
+    endinterface
+    interface Wide #(parameter int W); logic [W-1:0] x; endinterface
+    module Top(output int y); assign y = 1; endmodule
+    ";
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("bus.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(1).unwrap();
+}
+
+#[test]
+fn unused_compilation_unit_typedefs_of_undeclared_names_are_errors() {
+    for typedef in [
+        "typedef some_other_type myalias;",
+        "typedef missing_forward_typedef;",
+        "class C; typedef int T; endclass typedef C::Missing Alias;",
+    ] {
+        let source = format!("{typedef}\nmodule Top(output int y); assign y = 1; endmodule\n");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("unit.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("{typedef} is accepted"))
+        .to_string();
+        assert!(error.contains("not declared"), "{typedef}: {error}");
+    }
+    // A virtual interface names an interface of any source (IEEE 1800-2023
+    // 25.9).
+    let source = "module Top(output int y); typedef virtual interface Missing vif_t; assign y = 1; endmodule\n";
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("top.sv"))], "Top")
+            .build()
+    else {
+        panic!("a virtual interface of no interface is accepted");
+    };
+    let error = error.to_string();
+    assert!(
+        error.contains("Missing") && error.contains("not declared"),
+        "{error}"
+    );
+    let interface = "interface Bus; logic v; endinterface\n";
+    let top = "module Top(output int y); typedef virtual interface Bus vif_t; vif_t vif; assign y = 1; endmodule\n";
+    celox::Simulation::from_sv_sources(
+        vec![
+            (interface, std::path::Path::new("bus.sv")),
+            (top, std::path::Path::new("top.sv")),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let source =
+        "typedef union { int i; bit b; } u_t;\nmodule Top(output int y); assign y = 1; endmodule\n";
+    celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("unit.sv"))], "Top")
+        .build()
+        .unwrap();
+}
+
+// An enum constant, or a parameter of an enumerated type, that a constant
+// function passes to a formal of its enumerated type is assignment compatible
+// with it (IEEE 1800-2023 6.19.3, 13.4.3), in a package and in a module, where
+// the result sizes a declaration and bounds a loop generate construct, as
+// fpnew's lane counts pass formats; an integral value is not, without a cast.
+#[test]
+fn constant_functions_pass_enum_constants_to_enum_formals() {
+    let source = r#"
+        `timescale 1ns/1ns
+        package fp;
+            typedef enum logic [2:0] { FP32, FP64, FP16 } fmt_e;
+            localparam fmt_e HALF = FP16;
+            function automatic int unsigned width(fmt_e fmt);
+                return fmt == FP16 ? 16 : fmt == FP64 ? 64 : 32;
+            endfunction
+            function automatic int unsigned lanes();
+                return width(FP16) + width(fp::FP64) + width(HALF);
+            endfunction
+        endpackage
+        module Top;
+            typedef enum logic [1:0] { A, B, C } kind_e;
+            localparam kind_e K = C;
+            function automatic int unsigned size(kind_e kind);
+                return kind == C ? 3 : 1;
+            endfunction
+            function automatic int unsigned sizes();
+                return size(C) + size(K) + size(A);
+            endfunction
+            localparam int unsigned N = fp::lanes();
+            localparam int unsigned M = sizes();
+            logic [N-1:0] lanes;
+            logic [M-1:0] kinds;
+            for (genvar g = 0; g < M; g++) begin : gen_kinds
+                initial #1 $display("kind %0d", g);
+            end
+            // The functions of the scope also evaluate in a generate block.
+            for (genvar g = 0; g < 2; g++) begin : gen_blocks
+                localparam int unsigned X = size(K) + g;
+                logic [X-1:0] v;
+                if (sizes() == 7) begin : sized
+                    initial #2 $display("block %0d %0d", g, $bits(v));
+                end
+            end
+            initial #3 $display("%0d %0d", $bits(lanes), $bits(kinds));
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("enums.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    let mut expected: Vec<_> = (0..7).map(|g| format!("kind {g}")).collect();
+    expected.extend(["block 0 3", "block 1 4", "96 7"].map(String::from));
+    assert_eq!(displayed, expected);
+    let source = r#"
+        module Top;
+            typedef enum logic [1:0] { A, B, C } kind_e;
+            function automatic int unsigned size(kind_e kind);
+                return kind == C ? 3 : 1;
+            endfunction
+            function automatic int unsigned sizes();
+                return size(2'd2);
+            endfunction
+            localparam int unsigned M = sizes();
+            logic [M-1:0] kinds;
+        endmodule
+    "#;
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("integral.sv"))], "Top").build()
+    else {
+        panic!("an integral argument of an enum formal is accepted");
+    };
+    let error = error.to_string();
+    assert!(
+        error.contains("argument 1 of `size`") && error.contains("Top::kind_e"),
+        "{error}"
+    );
+}
+
+// An enumeration declared in a parameterized module is a type of each
+// instance's specialization (IEEE 1800-2023 6.19, 23.10): its methods take
+// the members of the instance's own type, whose base width and values the
+// parameter sets.
+sv_backends! {
+    fn enum_methods_of_module_specializations(sim) {
+        @setup {
+            let source = r#"
+    module Leaf #(parameter int W = 2)(output logic [7:0] last);
+      typedef enum logic [W-1:0] {A, B = W - 1} e_t;
+      e_t v;
+      always_comb begin
+        v = A;
+        last = 8'(v.last());
+      end
+    endmodule
+    module Top(output logic [7:0] narrow, output logic [7:0] wide);
+      Leaf #(2) n(.last(narrow));
+      Leaf #(5) w(.last(wide));
+    endmodule
+  "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("enum_specializations.sv"))], "Top");
+        let narrow = sim.signal("narrow");
+        let wide = sim.signal("wide");
+        sim.eval_comb().unwrap();
+        assert_eq!(u64::try_from(sim.get(narrow)).unwrap(), 1);
+        assert_eq!(u64::try_from(sim.get(wide)).unwrap(), 4);
+    }
+}
+
+// Instances whose parameters change only the values of an enumeration's
+// members, not its base type, still declare types of their own (IEEE
+// 1800-2023 6.19, 6.22): the methods of each take its own members.
+sv_backends! {
+    fn enum_methods_of_specializations_with_one_base_type(sim) {
+        @setup {
+            let source = r#"
+    module Leaf #(parameter int W = 1)(output logic [7:0] last);
+      typedef enum logic [3:0] {A, B = W} e_t;
+      e_t v;
+      always_comb begin
+        v = A;
+        last = 8'(v.last());
+      end
+    endmodule
+    module Top(output logic [7:0] one, output logic [7:0] two);
+      Leaf #(1) a(.last(one));
+      Leaf #(2) b(.last(two));
+    endmodule
+  "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("enum_values.sv"))], "Top");
+        let one = sim.signal("one");
+        let two = sim.signal("two");
+        sim.eval_comb().unwrap();
+        assert_eq!(u64::try_from(sim.get(one)).unwrap(), 1);
+        assert_eq!(u64::try_from(sim.get(two)).unwrap(), 2);
+    }
+}
+
+#[test]
+fn array_parameter_overrides_take_equivalent_element_types() {
+    // IEEE 1800-2023 6.22.2, 7.6, 23.10: an unpacked array argument is
+    // assigned to the parameter, so its element type is equivalent to the
+    // parameter's. Two enumerations are not, though their typedefs share a
+    // name.
+    let source = "package pc; typedef enum logic [1:0] {X, Y} e_t; endpackage
+    module Child import pc::*; #(parameter e_t P [2] = '{X, X}) (output logic [1:0] o);
+        assign o = P[1];
+    endmodule
+    module Top(output logic [1:0] o);
+        typedef enum logic [1:0] {A, B} e_t;
+        localparam e_t L [2] = '{A, B};
+        Child #(.P(L)) child(.o(o));
+    endmodule";
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("override.sv"))], "Top")
+            .build_cranelift()
+    else {
+        panic!("an argument of another enumeration type was accepted");
+    };
+    let error = error.to_string();
+    assert!(error.contains("module parameter override"), "{error}");
 }

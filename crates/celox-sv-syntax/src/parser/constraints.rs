@@ -72,7 +72,7 @@ impl Parser<'_> {
         if let Some(class) = self.class_stack.last_mut() {
             class.constraints.push(ClassConstraint {
                 name,
-                expressions: if is_static { None } else { expressions },
+                expressions,
                 defined: true,
                 is_static,
             });
@@ -178,15 +178,13 @@ impl Parser<'_> {
             return Err(self.error("duplicate external constraint block"));
         }
         block.defined = true;
-        // A static prototype completed externally stays static, which the
-        // analyzer treats as unsupported as it does an in-class static
-        // block (18.5.10).
-        block.expressions = if block.is_static { None } else { expressions };
+        // A static prototype completed externally stays static (18.5.10).
+        block.expressions = expressions;
         Ok(())
     }
 
     pub(super) fn constraint_block(&mut self) -> Result<Option<Vec<ExprId>>> {
-        let mut expressions = Vec::new();
+        let mut expressions: Vec<ExprId> = Vec::new();
         let mut supported = true;
         self.expect("{")?;
         let mut jobs = vec![Job::Block(true)];
@@ -198,12 +196,14 @@ impl Parser<'_> {
                         continue;
                     }
                     jobs.push(Job::Block(solve));
+                    let start = self.at;
                     if solve && self.eat("solve") {
-                        supported = false;
-                        self.constraint_primary_list()?;
+                        let before = self.constraint_primary_list()?;
                         self.expect("before")?;
-                        self.constraint_primary_list()?;
+                        let after = self.constraint_primary_list()?;
                         self.expect(";")?;
+                        expressions
+                            .push(self.node(start, ExprKind::SolveBefore { before, after })?);
                     } else {
                         jobs.push(Job::Expression);
                     }
@@ -236,14 +236,65 @@ impl Parser<'_> {
                     };
                     let body: Vec<_> = expressions.drain(first..).collect();
                     for expression in body {
-                        expressions.push(self.node(
+                        // A guarded `disable soft` discards while the guard
+                        // does not hold the body true, that is while its
+                        // condition holds (18.5.13.2).
+                        if let ExprKind::DisableSoft {
+                            variable,
+                            condition,
+                        } = self.expressions[expression.0].kind
+                        {
+                            let mut applies = self.node(
+                                start,
+                                ExprKind::Unary {
+                                    operator: "!".into(),
+                                    expression: guard,
+                                    postfix: false,
+                                },
+                            )?;
+                            if let Some(condition) = condition {
+                                applies = self.node(
+                                    start,
+                                    ExprKind::Binary {
+                                        left: applies,
+                                        operator: "&&".into(),
+                                        right: condition,
+                                    },
+                                )?;
+                            }
+                            expressions.push(self.node(
+                                start,
+                                ExprKind::DisableSoft {
+                                    variable,
+                                    condition: Some(applies),
+                                },
+                            )?);
+                            continue;
+                        }
+                        // A guarded soft constraint is a soft constraint of
+                        // the guarded expression: discarded, both are true
+                        // (18.5.13).
+                        let soft = match &self.expressions[expression.0].kind {
+                            ExprKind::SoftConstraint { expression } => Some(*expression),
+                            _ => None,
+                        };
+                        let guarded = self.node(
                             start,
                             ExprKind::Binary {
                                 left: guard,
                                 operator: "||".into(),
-                                right: expression,
+                                right: soft.unwrap_or(expression),
                             },
-                        )?);
+                        )?;
+                        expressions.push(match soft {
+                            Some(_) => self.node(
+                                start,
+                                ExprKind::SoftConstraint {
+                                    expression: guarded,
+                                },
+                            )?,
+                            None => guarded,
+                        });
                     }
                     if has_else && self.eat("else") {
                         jobs.push(Job::Guard {
@@ -296,19 +347,63 @@ impl Parser<'_> {
                         });
                         jobs.push(Job::Set);
                     } else if self.eat("disable") {
-                        supported = false;
                         self.expect("soft")?;
-                        self.constraint_primary()?;
+                        let variable = self.constraint_primary()?;
+                        expressions.push(self.node(
+                            start,
+                            ExprKind::DisableSoft {
+                                variable,
+                                condition: None,
+                            },
+                        )?);
                         self.expect(";")?;
                     } else if self.eat("unique") {
-                        supported = false;
-                        self.constraint_ranges(false)?;
+                        let items = self.unique_items()?;
+                        expressions.push(self.node(start, ExprKind::Unique(items))?);
                         self.expect(";")?;
                     } else {
                         let soft = self.eat("soft");
                         if soft {
-                            supported = false;
-                            self.expression(0)?;
+                            // `soft` takes an expression or a
+                            // distribution, not a constraint set (Syntax
+                            // 18-2).
+                            // `soft a -> b` is the soft expression
+                            // `!a || b`, as a guard is (18.5.6).
+                            let (first, simple) = self.constraint_condition()?;
+                            supported &= simple;
+                            let mut chain = vec![first];
+                            while self.eat("->") {
+                                let (next, simple) = self.constraint_condition()?;
+                                supported &= simple;
+                                chain.push(next);
+                            }
+                            let mut expression = chain.pop().expect("a soft expression");
+                            // `soft expression_or_dist` (Syntax 18-2).
+                            if self.eat("dist") {
+                                let items = self.dist_items()?;
+                                expression =
+                                    self.node(start, ExprKind::Dist { expression, items })?;
+                            }
+                            while let Some(condition) = chain.pop() {
+                                let negated = self.node(
+                                    start,
+                                    ExprKind::Unary {
+                                        operator: "!".into(),
+                                        expression: condition,
+                                        postfix: false,
+                                    },
+                                )?;
+                                expression = self.node(
+                                    start,
+                                    ExprKind::Binary {
+                                        left: negated,
+                                        operator: "||".into(),
+                                        right: expression,
+                                    },
+                                )?;
+                            }
+                            expressions
+                                .push(self.node(start, ExprKind::SoftConstraint { expression })?);
                         } else {
                             let (expression, simple) = self.constraint_condition()?;
                             expressions.push(expression);
@@ -325,9 +420,11 @@ impl Parser<'_> {
                             });
                             jobs.push(Job::Set);
                         } else {
-                            if self.eat("dist") {
-                                supported = false;
-                                self.constraint_ranges(true)?;
+                            if !soft && self.eat("dist") {
+                                let items = self.dist_items()?;
+                                let expression = expressions.pop().expect("condition retained");
+                                expressions
+                                    .push(self.node(start, ExprKind::Dist { expression, items })?);
                             }
                             self.expect(";")?;
                         }
@@ -350,42 +447,109 @@ impl Parser<'_> {
         Ok((expression, simple))
     }
 
-    fn constraint_ranges(&mut self, distribution: bool) -> Result<()> {
+    /// The members of a uniqueness constraint `{ item {, item} }`, each a
+    /// variable or a slice of an array variable (IEEE 1800-2023 18.5.4).
+    fn unique_items(&mut self) -> Result<Vec<Dimension>> {
         self.expect("{")?;
+        let mut items = Vec::new();
         loop {
-            if self.peek() == "default" {
-                return Err(self.unsupported(
-                    "default distribution weights are outside the existing constraint grammar",
-                ));
-            }
+            let start = self.at;
+            // A value range is in the grammar of the list, though no member
+            // of the group (18.5.4).
             if self.peek() == "[" {
                 let dimension = self.dimension()?;
                 if !matches!(dimension.kind, DimensionKind::Range { .. }) {
                     return Err(self.error("constraint value range requires two endpoints"));
                 }
+                items.push(dimension);
             } else {
-                self.expression(0)?;
-            }
-            if distribution && (self.eat(":=") || self.eat(":/")) {
-                self.expression(0)?;
+                let value = self.expression(0)?;
+                items.push(Dimension {
+                    kind: DimensionKind::Index(value),
+                    tokens: self.range(start),
+                });
             }
             if self.eat("}") {
-                return Ok(());
+                return Ok(items);
             }
             self.expect(",")?;
         }
     }
 
-    fn constraint_primary_list(&mut self) -> Result<()> {
-        self.constraint_primary()?;
-        while self.eat(",") {
-            self.constraint_primary()?;
+    /// The items of a distribution `{ item [weight] {, item [weight]} }`
+    /// (IEEE 1800-2023 18.5.3).
+    fn dist_items(&mut self) -> Result<Vec<DistItem>> {
+        self.expect("{")?;
+        let mut items = Vec::new();
+        loop {
+            if self.peek() == "default" {
+                return Err(self.unsupported("default distribution weight `default :/`"));
+            }
+            let item_start = self.at;
+            // A range `[low:high]`, either bound `$` (11.4.13).
+            let value = if self.eat("[") {
+                let left = self.expression(0)?;
+                if !self.eat(":") {
+                    return Err(
+                        self.unsupported("distribution value range other than `[low:high]`")
+                    );
+                }
+                let right = self.expression(0)?;
+                self.expect("]")?;
+                Dimension {
+                    kind: DimensionKind::Range { left, right },
+                    tokens: self.range(item_start),
+                }
+            } else {
+                let value = self.expression(0)?;
+                Dimension {
+                    kind: DimensionKind::Index(value),
+                    tokens: self.range(item_start),
+                }
+            };
+            let weight = if self.eat(":=") {
+                Some(DistWeight {
+                    per_range: false,
+                    value: self.expression(0)?,
+                })
+            } else if self.eat(":/") {
+                Some(DistWeight {
+                    per_range: true,
+                    value: self.expression(0)?,
+                })
+            } else {
+                None
+            };
+            items.push(DistItem { value, weight });
+            if self.eat("}") {
+                return Ok(items);
+            }
+            self.expect(",")?;
         }
-        Ok(())
     }
 
-    fn constraint_primary(&mut self) -> Result<()> {
-        let mut id = self.expression(14)?;
+    fn constraint_primary_list(&mut self) -> Result<Vec<ExprId>> {
+        let mut primaries = vec![self.constraint_primary()?];
+        while self.eat(",") {
+            primaries.push(self.constraint_primary()?);
+        }
+        Ok(primaries)
+    }
+
+    fn constraint_primary(&mut self) -> Result<ExprId> {
+        let primary = self.expression(14)?;
+        let mut id = primary;
+        // Parentheses follow only an array method such as `size()`
+        // (Syntax 18-8).
+        if let ExprKind::Call {
+            expression,
+            arguments,
+        } = &self.expressions[id.0].kind
+            && arguments.is_empty()
+            && matches!(&self.expressions[expression.0].kind, ExprKind::Member { name, .. } if name.spelling == "size")
+        {
+            id = *expression;
+        }
         let mut receiver = false;
         loop {
             match &self.expressions[id.0].kind {
@@ -399,7 +563,7 @@ impl Parser<'_> {
                     if !self.reserved_word(&name.spelling)
                         || receiver && matches!(name.spelling.as_str(), "this" | "super") =>
                 {
-                    return Ok(());
+                    return Ok(primary);
                 }
                 _ => return Err(self.error("expected a constraint variable reference")),
             }

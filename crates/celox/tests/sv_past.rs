@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! `$past(e, k, gate)` is the sampled value of `e` at the `k`-th previous
 //! tick of its clock at which `gate` held, and `$rose`, `$fell`, `$stable`
 //! and `$changed` compare the sampled value with the one at the previous
@@ -339,11 +338,7 @@ past!(wasm, build_wasm);
 /// disable the partitioned settle: before this was fixed, copying a sampled
 /// value took a raw mutable view of the state, which forced every settle
 /// partition to run on every settle for the rest of the run.
-#[cfg(all(
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen"),
-    feature = "systemverilog"
-))]
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 #[test]
 fn sampled_copies_do_not_disable_partitioned_settle() {
     let mut chain = String::from("  logic [7:0] c1;\n  assign c1 = a + 8'd1;\n");

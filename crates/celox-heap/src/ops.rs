@@ -192,10 +192,58 @@ pub const UVM_TOOL_NAME: u64 = 137;
 pub const UVM_TOOL_VERSION: u64 = 138;
 // `call` dispatches the low opcode byte by range, so the UVM range shares no
 // operation with the container and stream ranges.
+/// `dpi_area(words)`: start the call area of a DPI-C call with `words`
+/// zeroed 64-bit words and no C strings (see the `dpi` module).
+pub const DPI_AREA: u64 = 144;
+/// `dpi_store(index, value)`: set word `index` of the call area.
+pub const DPI_STORE: u64 = 145;
+/// `dpi_pointer()`: the address of the words of the call area, which the
+/// C function reads and writes until the area is started again.
+pub const DPI_POINTER: u64 = 146;
+/// `dpi_load(index)`: word `index` of the call area.
+pub const DPI_LOAD: u64 = 147;
+/// `dpi_c_string(a)`: the address of a NUL-terminated copy of string `a`,
+/// valid until the call area is started again.
+pub const DPI_C_STRING: u64 = 148;
+/// `dpi_from_c_string(pointer)`: the string holding the NUL-terminated C
+/// string at `pointer`, or `""` for a null pointer.
+pub const DPI_FROM_C_STRING: u64 = 149;
+/// `get_randstate(object)`: the string holding the state of the object's
+/// RNG (IEEE 1800-2023 18.13.4).
+pub const OBJECT_GET_RANDSTATE: u64 = 150;
+/// `set_randstate(object, state)`: restore the state of the object's RNG
+/// from string `state`, as `get_randstate` returned it (18.13.5).
+pub const OBJECT_SET_RANDSTATE: u64 = 151;
+/// UVM 1.2's `uvm_re_match(re, str)` (see `uvm_dpi`): `0` on a match.
+pub const UVM_RE_MATCH: u64 = 152;
+/// UVM 1.2's `uvm_glob_to_re(glob)`.
+pub const UVM_GLOB_TO_RE: u64 = 153;
+/// UVM 1.2's `uvm_dpi_regcomp(regex)` (see `uvm_dpi`): the handle of the
+/// expression compiled as it is written, or `0` (`null`).
+pub const UVM_DPI_REGCOMP: u64 = 154;
+/// Field `a` of the report a UVM function recorded (see `uvm_dpi`): with
+/// `0`, whether one was recorded, which then is the one the other fields
+/// read.
+pub const UVM_REPORT_FIELD: u64 = 155;
+/// UVM 1.2's `uvm_dump_re_cache()`, which only reports.
+pub const UVM_DUMP_RE_CACHE: u64 = 156;
+/// Register the static constraint blocks of class a, the JSON pairs in
+/// string b of a block's index and the class that declares it, see
+/// [`Heap::register_static_blocks`].
+pub const OBJECT_REGISTER_STATIC_BLOCKS: u64 = 157;
+/// Solve the random variables in the arguments of the functions the
+/// constraints of object a call, as `OBJECT_RANDOMIZE_INPUTS` takes its
+/// program and inputs, without changing the object: whether they have a
+/// solution, see [`Heap::solve_arguments`].
+pub const OBJECT_SOLVE_ARGUMENTS: u64 = 158;
+/// The value of argument `parameter` of the last solve of arguments.
+pub const OBJECT_ARGUMENT_VALUE: u64 = 159;
+
 const _: () = assert!(
     crate::containers::RSORT < UVM_RE_COMP
         && crate::streams::TRUNCATE < UVM_RE_COMP
         && UVM_TOOL_VERSION <= 0xff
+        && UVM_DUMP_RE_CACHE <= 0xff
 );
 
 impl Heap {
@@ -220,7 +268,13 @@ impl Heap {
             crate::containers::HANDLE_PATTERN => {
                 self.new_buffer(crate::containers::handle_pattern(a as u32 as u64))
             }
-            op @ UVM_RE_COMP..=UVM_TOOL_VERSION => self.uvm_call(op, a, b, c),
+            op @ (UVM_RE_COMP..=UVM_TOOL_VERSION
+            | UVM_RE_MATCH
+            | UVM_GLOB_TO_RE
+            | UVM_DPI_REGCOMP
+            | UVM_REPORT_FIELD
+            | UVM_DUMP_RE_CACHE) => self.uvm_call(op, a, b, c),
+            op @ DPI_AREA..=DPI_FROM_C_STRING => self.dpi_call(op, a, b),
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {
                 let lower = |handle| {
@@ -370,14 +424,15 @@ impl Heap {
                 self.end_visits();
                 0
             }
-            op @ (OBJECT_RANDOMIZE | OBJECT_RANDOMIZE_INPUTS) => {
-                let input_bytes = (op == OBJECT_RANDOMIZE_INPUTS).then(|| self.take_buffer(c));
+            op @ (OBJECT_RANDOMIZE | OBJECT_RANDOMIZE_INPUTS | OBJECT_SOLVE_ARGUMENTS) => {
+                let buffered = op != OBJECT_RANDOMIZE;
+                let input_bytes = buffered.then(|| self.take_buffer(c));
                 let result = (|| -> Result<_, String> {
                     let program = serde_json::from_slice::<crate::randomization::Program>(
                         self.string(b as Handle),
                     )
                     .map_err(|error| error.to_string())?;
-                    let (check_only, inputs) = if op == OBJECT_RANDOMIZE_INPUTS {
+                    let (check_only, inputs) = if buffered {
                         let bytes = input_bytes.as_ref().unwrap();
                         let (&check, values) = bytes
                             .split_first()
@@ -397,12 +452,16 @@ impl Heap {
                     } else {
                         (c != 0, Vec::new())
                     };
-                    Ok(self.randomize_object_with_inputs(
-                        a as Handle,
-                        &program,
-                        check_only,
-                        &inputs,
-                    ))
+                    Ok(if op == OBJECT_SOLVE_ARGUMENTS {
+                        self.solve_arguments(a as Handle, &program, check_only, &inputs)
+                    } else {
+                        self.randomize_object_with_inputs(
+                            a as Handle,
+                            &program,
+                            check_only,
+                            &inputs,
+                        )
+                    })
                 })();
                 match result {
                     Ok(success) => u64::from(success),
@@ -413,10 +472,28 @@ impl Heap {
                     }
                 }
             }
+            OBJECT_ARGUMENT_VALUE => self.argument_value(parameter as usize),
             OBJECT_RANDOM => self.random_object(a as Handle),
             OBJECT_RANDOM_CYCLIC => self.random_cyclic_object(a as Handle, parameter as u32, b),
             OBJECT_SEED => {
                 self.seed_object(a as Handle, b as u32);
+                0
+            }
+            OBJECT_GET_RANDSTATE => u64::from(self.object_randstate(a as Handle)),
+            OBJECT_SET_RANDSTATE => {
+                self.set_object_randstate(a as Handle, b as Handle);
+                0
+            }
+            OBJECT_REGISTER_STATIC_BLOCKS => {
+                match serde_json::from_slice::<Vec<(u32, u32)>>(self.string(b as Handle)) {
+                    Ok(blocks) => self.register_static_blocks(a as u32, blocks),
+                    Err(error) => {
+                        self.fault
+                            .get_or_insert(crate::Fault::ConstraintRandomization(
+                                error.to_string(),
+                            ));
+                    }
+                }
                 0
             }
             OBJECT_CHECK => u64::from(self.check_object(a as Handle, parameter as u32)),

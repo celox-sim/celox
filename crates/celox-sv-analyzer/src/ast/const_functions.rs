@@ -10,7 +10,8 @@
 mod value;
 use value::Value;
 mod runtime;
-pub use runtime::RuntimeConstantFunctions;
+pub(in crate::ast) use runtime::persistent_state_is_unobservable;
+pub use runtime::{RuntimeConstantFunctions, RuntimeConstantTable};
 
 use num_bigint::BigUint;
 
@@ -160,11 +161,15 @@ impl ConstantFunctions {
                 super::warnings::AnalyzerWarning::ExitOutsideProgram { site: right },
             ) => left.cmp(right),
             (
-                super::warnings::AnalyzerWarning::MixedTimescale,
-                super::warnings::AnalyzerWarning::MixedTimescale,
-            ) => std::cmp::Ordering::Equal,
-            (super::warnings::AnalyzerWarning::MixedTimescale, _) => std::cmp::Ordering::Less,
-            (_, super::warnings::AnalyzerWarning::MixedTimescale) => std::cmp::Ordering::Greater,
+                super::warnings::AnalyzerWarning::MixedTimescale { element: left, .. },
+                super::warnings::AnalyzerWarning::MixedTimescale { element: right, .. },
+            ) => left.cmp(right),
+            (super::warnings::AnalyzerWarning::MixedTimescale { .. }, _) => {
+                std::cmp::Ordering::Less
+            }
+            (_, super::warnings::AnalyzerWarning::MixedTimescale { .. }) => {
+                std::cmp::Ordering::Greater
+            }
             // This collector emits only ExitOutsideProgram warnings.
             _ => std::cmp::Ordering::Equal,
         });
@@ -375,79 +380,131 @@ fn scope_flags(tree: &AnalysisContext<'_>) -> (bool, bool) {
     (functions, controls)
 }
 
+/// The constant functions of the scope of `tree`. `constant_types` holds the
+/// declaration types of the scope's parameters and enum constants, which the
+/// bodies' expressions have (IEEE 1800-2023 6.19.3, 13.4.3).
 pub(super) fn module_constant_functions(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
+    constant_types: &Arc<HashMap<String, semantic_types::ConstantType>>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> ConstantFunctions {
-    symbolic_module_constant_functions(
+    module_constant_functions_with_variables(
         tree,
         session,
         const_env,
         type_aliases,
+        constant_types,
         parameter_literals,
-        &HashSet::default(),
+        &HashMap::default(),
     )
+}
+
+/// [`module_constant_functions`] whose bodies may read the module variables
+/// `variables`, such as the variables that hold its unpacked array
+/// parameters, by their shapes.
+pub(super) fn module_constant_functions_with_variables(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    const_env: &ConstEnv,
+    type_aliases: &TypeAliases,
+    constant_types: &Arc<HashMap<String, semantic_types::ConstantType>>,
+    parameter_literals: &HashMap<String, Expr>,
+    variables: &HashMap<String, VariableDimensions>,
+) -> ConstantFunctions {
+    let (has_functions, has_controls) = scope_flags(tree);
+    if !has_functions {
+        return ConstantFunctions::default();
+    }
+    let symbolic_parameters = HashSet::default();
+    let collect = |tree: &AnalysisContext<'_>, session: &mut Session| {
+        collect_module_constant_functions(
+            tree,
+            session,
+            const_env,
+            type_aliases,
+            constant_types,
+            parameter_literals,
+            &symbolic_parameters,
+            procedural::ClassMethods::StaticFunctions,
+            variables,
+        )
+    };
+    bootstrapped(tree, session, has_controls, collect)
 }
 
 pub(super) fn symbolic_module_constant_functions(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
+    constant_types: &Arc<HashMap<String, semantic_types::ConstantType>>,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
+    class_methods: procedural::ClassMethods,
 ) -> ConstantFunctions {
     let (has_functions, has_controls) = scope_flags(tree);
     if !has_functions {
         return ConstantFunctions::default();
     }
-    let needs_bootstrap = !tree.root_subroutines && has_controls;
-    if !needs_bootstrap {
-        return collect_module_constant_functions(
+    let variables = HashMap::default();
+    let collect = |tree: &AnalysisContext<'_>, session: &mut Session| {
+        collect_module_constant_functions(
             tree,
             session,
             const_env,
             type_aliases,
+            constant_types,
             parameter_literals,
             symbolic_parameters,
-        );
+            class_methods,
+            &variables,
+        )
+    };
+    bootstrapped(tree, session, has_controls, collect)
+}
+
+/// The functions that `collect` collects in `tree`, whose generate
+/// conditions may call them: those of the scope itself are collected
+/// first, before the generate scopes select their items.
+fn bootstrapped(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    has_controls: bool,
+    collect: impl Fn(&AnalysisContext<'_>, &mut Session) -> ConstantFunctions,
+) -> ConstantFunctions {
+    let needs_bootstrap = !tree.root_subroutines && has_controls;
+    if !needs_bootstrap {
+        return collect(tree, session);
     }
     // Seed the module's functions before conditions need to call them:
     // generate scopes still select their items, but their subroutines are
     // left for the full pass.
-    let mut roots = collect_module_constant_functions(
+    let mut roots = collect(
         &AnalysisContext {
             root_subroutines: true,
             ..tree.clone()
         },
         session,
-        const_env,
-        type_aliases,
-        parameter_literals,
-        symbolic_parameters,
     );
     roots.extend_missing(&scope::imported(tree).constant_functions);
     let tree = &tree.with_functions(roots);
-    collect_module_constant_functions(
-        tree,
-        session,
-        const_env,
-        type_aliases,
-        parameter_literals,
-        symbolic_parameters,
-    )
+    collect(tree, session)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_module_constant_functions(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
+    constant_types: &Arc<HashMap<String, semantic_types::ConstantType>>,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
+    class_methods: procedural::ClassMethods,
+    variables: &HashMap<String, VariableDimensions>,
 ) -> ConstantFunctions {
     let (has_functions, _) = scope_flags(tree);
     if !has_functions {
@@ -480,10 +537,18 @@ fn collect_module_constant_functions(
             Ok(names) => names,
             Err(error) => return ConstantFunctions::unconverted(error),
         };
-    let mut dimensions = PackedDimensions::new(HashMap::default(), const_env, type_aliases);
+    let mut dimensions = PackedDimensions::new(variables.clone(), const_env, type_aliases);
+    dimensions.constant_types = constant_types.clone();
+    let mut returns = scope::imported(tree).function_return_types.clone();
+    match procedural::function_returns(tree, session, &type_aliases.clone().into(), const_env) {
+        Ok(own) => returns.extend(own),
+        Err(error) => return ConstantFunctions::unconverted(error),
+    }
+    dimensions.function_return_types = returns.into();
     dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
     dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes);
     dimensions.subroutine_directions = Arc::new(subroutine_directions.clone());
+    dimensions.constant_function_bodies = true;
     let mut locals = Vec::new();
     let mut counter = 0usize;
     let mut state = procedural::BodyState {
@@ -494,8 +559,10 @@ fn collect_module_constant_functions(
         automatic: lifetimes::automatic_by_default(tree),
         statics: Vec::new(),
         explicit_statics: HashSet::default(),
+        subroutine_statics: HashMap::default(),
         static_initializers: Vec::new(),
         constant_evaluation: true,
+        assertion_callees: Vec::new(),
     };
     let mut rejected = HashMap::default();
     let subroutines = match procedural::subroutines_with_symbolic_parameters(
@@ -507,6 +574,7 @@ fn collect_module_constant_functions(
         &mut state,
         Some(&mut rejected),
         symbolic_parameters,
+        class_methods,
     ) {
         Ok(subroutines) => subroutines,
         Err(error) => return ConstantFunctions::unconverted(error),
@@ -905,6 +973,39 @@ pub(super) fn eval_call_literal(
     eval_ir_call(name, args, &env, &mut Budget::default()).map(Value::into_literal)
 }
 
+/// The constants of a scope with the values of its unpacked array
+/// parameters, each of which a function reads as one wide value.
+struct WithArrays<'a> {
+    constants: &'a ConstEnv,
+    arrays: &'a HashMap<String, typecheck::IntegralLiteral>,
+}
+
+impl ConstantEnvironment for WithArrays<'_> {
+    fn get(&self, name: &str) -> Option<&i128> {
+        self.constants.get(name)
+    }
+    fn literal(&self, name: &str) -> Option<&typecheck::IntegralLiteral> {
+        self.arrays.get(name)
+    }
+}
+
+/// [`eval_call_literal`] of a function that may read the unpacked array
+/// parameters `arrays` of the caller's scope.
+pub(super) fn eval_call_literal_with_arrays(
+    functions: &ConstantFunctions,
+    name: &str,
+    args: &[crate::ir::ConstExpr],
+    constants: &ConstEnv,
+    arrays: &HashMap<String, typecheck::IntegralLiteral>,
+) -> Option<typecheck::IntegralLiteral> {
+    let constants = WithArrays { constants, arrays };
+    let env = Environment {
+        constants: &constants,
+        functions,
+    };
+    eval_ir_call(name, args, &env, &mut Budget::default()).map(Value::into_literal)
+}
+
 /// The value of a call of function `name` of `constants`, whose frame sees
 /// the constants of the caller's scope but not the caller's locals.
 fn call_value(
@@ -971,7 +1072,7 @@ fn call_in_frame(
             frame.set(return_name, value)?;
         }
         Flow::Next | Flow::Return(None) => {}
-        Flow::Break | Flow::Continue => return None,
+        Flow::Break | Flow::Continue | Flow::Disable(_) => return None,
     }
     frame.scope.values.remove(return_name)
 }
@@ -981,6 +1082,8 @@ enum Flow {
     Break,
     Continue,
     Return(Option<Value>),
+    /// Leave the named block of this id (9.6.2).
+    Disable(u64),
 }
 
 /// Calls borrow their caller's values; only parameters, locals, the return
@@ -1000,6 +1103,9 @@ struct Locals<'a> {
     constants: &'a dyn ConstantEnvironment,
     values: HashMap<String, Value>,
     types: HashMap<String, (usize, bool)>,
+    /// The declared range `(left, right)` of each variable with one packed
+    /// dimension, whose selects name declared indices.
+    ranges: HashMap<String, (i128, i128)>,
     two_state: HashSet<String>,
 }
 
@@ -1053,6 +1159,7 @@ impl<'a> Frame<'a> {
                 constants,
                 values: HashMap::default(),
                 types: HashMap::default(),
+                ranges: HashMap::default(),
                 two_state: HashSet::default(),
             },
             budget,
@@ -1091,7 +1198,6 @@ impl<'a> Frame<'a> {
         }
         if !r#type.unpacked_ranges().is_empty() {
             self.scope.constants.functions()?;
-            self.budget.two_state?;
         }
         // Resolved runtime types already include unpacked dimensions.
         // Elaboration types still need their dimensions evaluated here.
@@ -1125,7 +1231,36 @@ impl<'a> Frame<'a> {
         self.scope
             .types
             .insert(name.to_string(), (width, r#type.is_signed()));
+        // The bounds the lowering of a process maps selects by.
+        self.scope.ranges.remove(name);
+        let range = match r#type.packed_bounds() {
+            Some(&[bounds]) => Some(bounds),
+            Some(_) => None,
+            None => match r#type.packed_ranges() {
+                [range] => self
+                    .eval_lowered(range.left())
+                    .zip(self.eval_lowered(range.right())),
+                _ => None,
+            },
+        };
+        if let Some(range) = range
+            && r#type.unpacked_ranges().is_empty()
+        {
+            self.scope.ranges.insert(name.to_string(), range);
+        }
         Some(())
+    }
+
+    /// The bit position of declared index `index` of variable `name`: a
+    /// select of a variable with one packed dimension names declared
+    /// indices, counted from its right bound towards its left one (IEEE
+    /// 1800-2023 7.4.1, 11.5.1), as the lowering of a process maps them.
+    fn position(&self, name: &str, index: i128) -> Option<i128> {
+        match self.scope.ranges.get(name) {
+            Some(&(left, right)) if left >= right => index.checked_sub(right),
+            Some(&(_, right)) => right.checked_sub(index),
+            None => Some(index),
+        }
     }
 
     fn initial_value(&self, name: &str) -> Option<Value> {
@@ -1296,6 +1431,12 @@ impl<'a> Frame<'a> {
                 op: *op,
                 right: Box::new(placeholder(self.expression_type(right)?)),
             },
+            // The guard of a division by zero has the operation's type.
+            Expr::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } if division_guard(then_expr) => return self.expression_type(else_expr),
             Expr::Mux {
                 then_expr,
                 else_expr,
@@ -1389,8 +1530,12 @@ impl<'a> Frame<'a> {
                 lsb,
                 signed,
             } => {
-                let msb = self.eval_lowered(&msb.clone().into())?;
-                let lsb = self.eval_lowered(&lsb.clone().into())?;
+                let mut msb = self.eval_lowered(&msb.clone().into())?;
+                let mut lsb = self.eval_lowered(&lsb.clone().into())?;
+                if let Expr::Ident(name) = &**expr {
+                    msb = self.position(name, msb)?;
+                    lsb = self.position(name, lsb)?;
+                }
                 ConstExpr::SelectRange {
                     expr: Box::new(self.lower(expr)?),
                     msb: Box::new(const_expr_from_i128(msb)),
@@ -1453,6 +1598,29 @@ impl<'a> Frame<'a> {
         then_expr: &Expr,
         else_expr: &Expr,
     ) -> Option<ConstExpr> {
+        // The guard of a division or modulus by an operand that may be zero
+        // (see `guard_zero_divisions`): the operation itself, or for a zero
+        // divisor the operation by an unknown one, every bit of whose result
+        // is unknown at the width its context gives it (IEEE 1800-2023
+        // 11.4.2, 11.8.2).
+        if division_guard(then_expr) {
+            if self.eval(condition)?.truth() == Some(false) {
+                return self.lower(else_expr);
+            }
+            let Expr::Binary { left, op, right } = else_expr else {
+                return None;
+            };
+            let ExprType { width, signed } = self.expression_type(right)?;
+            return Some(ConstExpr::Binary {
+                left: Box::new(self.lower(left)?),
+                op: *op,
+                right: Box::new(ConstExpr::Literal(format!(
+                    "{width}'{}b{}",
+                    if signed { "s" } else { "" },
+                    "x".repeat(width.max(1))
+                ))),
+            });
+        }
         let condition = self.eval(condition)?;
         let truth = condition.truth();
         let condition = self.temporary(condition)?;
@@ -1616,6 +1784,7 @@ impl<'a> Frame<'a> {
                 }
                 let msb = self.eval_lowered(&msb.clone().into())?;
                 let lsb = self.eval_lowered(&lsb.clone().into())?;
+                let (msb, lsb) = (self.position(name, msb)?, self.position(name, lsb)?);
                 let old = self.scope.values.get(name)?.clone();
                 let value = old.write(msb.max(lsb), msb.min(lsb), value)?;
                 self.set(name, value)?;
@@ -1783,6 +1952,7 @@ impl<'a> Frame<'a> {
                         Flow::Next | Flow::Continue => {}
                         Flow::Break => break,
                         Flow::Return(value) => return Some(Flow::Return(value)),
+                        flow @ Flow::Disable(_) => return Some(flow),
                     }
                     if !matches!(self.block(step)?, Flow::Next) {
                         return None;
@@ -1791,6 +1961,13 @@ impl<'a> Frame<'a> {
             }
             Stmt::Break => return Some(Flow::Break),
             Stmt::Continue => return Some(Flow::Continue),
+            Stmt::Block { id, body } => {
+                return match self.block(body)? {
+                    Flow::Disable(disabled) if disabled == *id => Some(Flow::Next),
+                    flow => Some(flow),
+                };
+            }
+            Stmt::DisableBlock(id) => return Some(Flow::Disable(*id)),
             Stmt::Return(value) => {
                 let value = match value {
                     Some(value) => {
@@ -1824,6 +2001,11 @@ impl<'a> Frame<'a> {
             | Stmt::WaitFork
             | Stmt::DisableFork
             | Stmt::AssignConcat { .. }
+            | Stmt::ProceduralAssign { .. }
+            | Stmt::Deassign { .. }
+            | Stmt::Force { .. }
+            | Stmt::Release { .. }
+            | Stmt::ForceStore { .. }
             | Stmt::Call { .. } => return None,
         }
         Some(Flow::Next)
@@ -1839,3 +2021,8 @@ thread_local! {
 
 #[cfg(test)]
 mod tests;
+
+/// Whether `expr` is the unknown arm of the guard of a division by zero.
+fn division_guard(expr: &Expr) -> bool {
+    matches!(expr, Expr::Literal(text) if text == crate::DIV_ZERO_UNKNOWN_LITERAL)
+}

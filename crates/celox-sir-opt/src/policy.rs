@@ -132,6 +132,11 @@ define_sir_passes! {
     /// SIR transform: the frontend consumes it. Enabled by O2; the frontend
     /// keeps small and lane-parallel schedules whole.
     PartitionedSettle => "partitioned_settle",
+    /// Substitute the combinational nets the host does not observe into
+    /// the paths that read them, and drop the ones nothing reads, before
+    /// the settle is scheduled. Not a SIR transform: the frontend consumes
+    /// it, and only for a design whose dead-store policy lets signals go.
+    NetInlining => "net_inlining",
 }
 /// Diagnostics and additional verification for the SIR optimizer.
 ///
@@ -179,6 +184,7 @@ pub struct OptimizeOptions {
     parallel_partition: ParallelPartition,
     settle_partition: SettlePartition,
     settle_profile: bool,
+    unobserved_nets: celox_design::DeadStorePolicy,
     value_change_objects: Vec<String>,
     pub diagnostics: SirDiagnostics,
 }
@@ -228,6 +234,7 @@ impl OptimizeOptions {
             parallel_partition: ParallelPartition::Estimated,
             settle_partition: SettlePartition::Estimated,
             settle_profile: false,
+            unobserved_nets: celox_design::DeadStorePolicy::Off,
             value_change_objects: Vec::new(),
             diagnostics: SirDiagnostics::default(),
         }
@@ -320,6 +327,26 @@ impl OptimizeOptions {
         self.settle_profile
     }
 
+    /// Tell the frontend which state the host observes of the design, by
+    /// the dead-store policy that guarantees it. With anything but
+    /// [`celox_design::DeadStorePolicy::Off`], [`SirPass::NetInlining`]
+    /// may take the combinational nets outside it out of the program.
+    pub fn with_unobserved_nets(mut self, policy: celox_design::DeadStorePolicy) -> Self {
+        self.unobserved_nets = policy;
+        self
+    }
+
+    /// The policy given to [`Self::with_unobserved_nets`], or
+    /// [`celox_design::DeadStorePolicy::Off`] with [`SirPass::NetInlining`]
+    /// disabled.
+    pub fn unobserved_nets(&self) -> celox_design::DeadStorePolicy {
+        if self.is_enabled(SirPass::NetInlining) {
+            self.unobserved_nets
+        } else {
+            celox_design::DeadStorePolicy::Off
+        }
+    }
+
     /// Show the host each blocking update of the objects at these
     /// hierarchical paths that a process makes, right after it is made: the
     /// build puts a value change point after each such write before any pass
@@ -346,12 +373,16 @@ impl OptimizeOptions {
     }
 
     /// Returns true if any SIR transform is enabled: any pass other than
-    /// the TailCallSplit, DerivedEdgeUnits and PartitionedSettle selectors.
+    /// the TailCallSplit, DerivedEdgeUnits, PartitionedSettle and
+    /// NetInlining selectors.
     pub fn any_enabled(&self) -> bool {
         SirPass::ALL.iter().any(|&p| {
             !matches!(
                 p,
-                SirPass::TailCallSplit | SirPass::DerivedEdgeUnits | SirPass::PartitionedSettle
+                SirPass::TailCallSplit
+                    | SirPass::DerivedEdgeUnits
+                    | SirPass::PartitionedSettle
+                    | SirPass::NetInlining
             ) && self.is_enabled(p)
         })
     }

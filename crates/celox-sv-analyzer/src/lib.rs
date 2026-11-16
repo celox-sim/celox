@@ -28,10 +28,13 @@ pub mod syntax;
 pub mod system_functions;
 pub mod typecheck;
 
-pub use ast::const_functions::RuntimeConstantFunctions;
+pub use ast::const_functions::{RuntimeConstantFunctions, RuntimeConstantTable};
+/// The name an identifier denotes: an escaped identifier that is a simple
+/// one, `\\foo `, denotes `foo` (IEEE 1800-2023 5.6.1).
+pub use ast::instances::normalize_identifier;
 pub use ast::interfaces::{
     InterfaceMemberPath, InterfaceMemberPaths, NativeInterfacePlan, plan_interfaces,
-    plan_interfaces_with_member_paths,
+    plan_interfaces_of_first_modules, plan_interfaces_with_member_paths,
 };
 pub use ast::interfaces::{
     InterfacePrototype, interface_prototypes, interface_prototypes_for,
@@ -50,13 +53,31 @@ pub use parsed::ParsedSource;
 /// simulator's two-state/four-state mode is known.
 pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
 
+/// The variable, which no source declares, that is one while `$assertoff`
+/// has stopped the assertions of the design (IEEE 1800-2023 20.11). The
+/// assertions of a process read it, but no expression of its source does.
+pub const ASSERTIONS_OFF: &str = "%assertions_off";
+
+/// The package, which no source declares, of [`ASSERTIONS_OFF`]. Its
+/// variable is simulator state rather than a variable of the design: any
+/// process may write it, so it has no driver restrictions.
+pub const ASSERTION_CONTROL_PACKAGE: &str = "$assertion_control";
+
 /// Language compatibility checks and implementation-defined timing defaults.
 #[derive(Debug, Clone, Default)]
 pub struct AnalysisOptions {
     pub allow_mixed_timescales: bool,
+    /// Use the first of several declarations of a module of one name and
+    /// ignore the others, instead of rejecting the design. Off by default;
+    /// see the `duplicate_module` diagnostic.
+    pub first_duplicate_module: bool,
     /// Compatibility mode: return zero for every empty array reduction,
     /// rather than the product/bitwise-AND identity. Disabled by default.
     pub legacy_empty_reductions: bool,
+    /// The selected top is a module the frontend generated to instantiate
+    /// several top-level modules (IEEE 1800-2023 23.3.1), see
+    /// `celox_frontend_sv::top_level_root_source`. It stands for `$root`.
+    pub generated_root: bool,
     /// Treat a variable that only several `always @*` blocks write, each
     /// before it reads it, and that nothing else reads, as a temporary of
     /// each block, instead of a variable whose writes wake the other blocks
@@ -175,6 +196,9 @@ pub enum AnalyzerError {
     UnknownParameterOverride { name: String },
     #[error("localparam override `{name}`")]
     LocalParameterOverride { name: String },
+    /// A name that nothing in the design declares (IEEE 1800-2023 6.18).
+    #[error("`{name}` is not declared: {context}")]
+    UndeclaredIdentifier { name: String, context: String },
     /// A `$name` call that is not a system task or function Celox knows.
     #[error("unknown system task or function `{name}`")]
     UnknownSystemTf { name: String },
@@ -273,6 +297,11 @@ pub enum AnalyzerError {
     /// (IEEE 1800-2023 8.25).
     #[error("class `{class}` has no parameter `{name}` that a specialization may assign")]
     UnknownClassParameter { class: String, name: String },
+    /// A member select through a handle names nothing that the class, its
+    /// bases or the interface classes it implements declare (IEEE 1800-2023
+    /// 8.5).
+    #[error("no member named `{name}` in class `{class}`")]
+    UnknownClassMember { class: String, name: String },
     /// A `ref` or `const ref` formal bound to an actual, or used in a way,
     /// that IEEE 1800-2023 13.5.2 forbids.
     /// A use of a `chandle` that IEEE 1800-2023 6.14 does not allow.
@@ -301,6 +330,10 @@ pub enum AnalyzerError {
     /// between types of different sizes.
     #[error("cast: {0} (IEEE 1800-2023 6.24)")]
     InvalidCast(String),
+    /// A `defparam` assignment that IEEE 1800-2023 23.10.1 or 6.20.3
+    /// forbids, such as one out of the generate block it is in.
+    #[error("defparam: {0}")]
+    InvalidDefparam(String),
 }
 
 impl miette::Diagnostic for AnalyzerError {}
@@ -361,6 +394,20 @@ impl AnalyzerError {
             Self::WithWarnings { warnings, .. } => warnings,
             _ => &[],
         }
+    }
+
+    /// The underlying source error, as [`Self::into_error`] gives it.
+    pub fn source_error(&self) -> &Self {
+        match self {
+            Self::WithWarnings { error, .. } => error.source_error(),
+            error => error,
+        }
+    }
+
+    /// Whether this rejects a construct Celox does not support, not an
+    /// illegal design.
+    pub fn is_unsupported(&self) -> bool {
+        matches!(self.source_error(), Self::Unsupported(_))
     }
 
     /// The underlying source error, without its separately reported diagnostics.
@@ -552,6 +599,16 @@ pub fn source_module_implicit_net_permissions(
     path: &Path,
 ) -> Result<Vec<(String, bool)>, AnalyzerError> {
     syntax::source_module_implicit_net_permissions(code, path)
+}
+
+/// [`source_module_implicit_net_permissions`] of the modules a source
+/// declares first; see [`syntax::source_first_module_implicit_net_permissions`].
+pub fn source_first_module_implicit_net_permissions(
+    code: &str,
+    path: &Path,
+    declared: &mut fxhash::FxHashSet<String>,
+) -> Result<Vec<(String, bool)>, AnalyzerError> {
+    syntax::source_first_module_implicit_net_permissions(code, path, declared)
 }
 
 /// Analyze only one module from a source file, applying its parameter

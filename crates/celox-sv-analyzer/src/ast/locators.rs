@@ -7,22 +7,23 @@
 //! procedural body, the way `foreach` declares its loop variables.
 use super::*;
 use celox_sv_syntax::{Declarations, ExprId, ExprKind};
-use std::sync::Mutex;
 use system_functions::{
-    ContainerKind, ContainerLayout, HandleProperty, Locator, LocatorKey, LocatorMethod,
-    LocatorSource,
+    ContainerKind, ContainerLayout, ContainerOp, HandleProperty, Locator, LocatorKey,
+    LocatorMethod, LocatorSource,
 };
 
-/// The locals that locator methods declare while a procedural body binds
-/// its expressions, which the body then declares (see
-/// [`procedural::BodyBuilder`]).
-#[derive(Debug, Clone, Default)]
-pub(super) struct LocalSink(Arc<Mutex<Sink>>);
-
-#[derive(Debug, Default)]
-struct Sink {
-    prefix: usize,
-    locals: Vec<LocalVariable>,
+/// Where the locals that locator methods declare while a procedural body
+/// binds its expressions are collected, which the body then declares (see
+/// [`procedural::BodyBuilder`]). The locals are kept in the session, by the
+/// sink's id: binding contexts pass the sink by copy, and binding has the
+/// session by `&mut`.
+#[derive(Debug, Clone)]
+pub(super) struct LocalSink {
+    id: u64,
+    /// What joins the source name and the site in a local's name.
+    prefix: Arc<str>,
+    /// Whether that names the body's subroutine (see `LocalVariable::owned`).
+    owned: bool,
 }
 
 /// A body's sink is its own: binding contexts compare equal regardless.
@@ -35,16 +36,33 @@ impl PartialEq for LocalSink {
 impl Eq for LocalSink {}
 
 impl LocalSink {
-    pub(super) fn new(prefix: usize) -> Self {
-        Self(Arc::new(Mutex::new(Sink {
-            prefix,
-            ..Sink::default()
-        })))
+    pub(super) fn new(session: &mut Session, prefix: usize) -> Self {
+        Self::open(session, format!("@{prefix}."), false)
+    }
+
+    /// The sink of the body of subroutine `owner`, whose locals its name
+    /// tells apart from those of every other body, in every analysis that
+    /// lowers it (see `BodyBuilder::declare`).
+    pub(super) fn owned(session: &mut Session, owner: &str) -> Self {
+        Self::open(
+            session,
+            format!("%{:016x}@", fxhash::hash64(&(owner, "locator"))),
+            true,
+        )
+    }
+
+    fn open(session: &mut Session, prefix: String, owned: bool) -> Self {
+        session.next_locator_sink += 1;
+        Self {
+            id: session.next_locator_sink,
+            prefix: prefix.into(),
+            owned,
+        }
     }
 
     /// Declare local `source` of the locator call at `site`. The name joins
-    /// the local counter of the body when it started, which tells the bodies
-    /// of a scope apart, and the site.
+    /// what tells the body apart from the others of the scope, its
+    /// subroutine or the local counter when it started, and the site.
     pub(super) fn declare(
         &self,
         site: &str,
@@ -54,27 +72,48 @@ impl LocalSink {
         session: &mut Session,
         dims: &PackedDimensions,
     ) -> String {
-        let mut sink = self.0.lock().expect("locator locals");
-        let name = format!("{source}@{}.{site}", sink.prefix);
-        if sink.locals.iter().any(|local| local.name == name) {
+        let name = format!("{source}{}{site}", self.prefix);
+        if session
+            .locator_locals
+            .get(&self.id)
+            .is_some_and(|locals| locals.iter().any(|local| local.name == name))
+        {
             return name;
         }
-        sink.locals.push(LocalVariable {
-            name: name.clone(),
-            source_name: source.to_string(),
-            r#type: super::ir_type(
-                session,
-                &tree.functions,
-                procedural::scoped_type(r#type, &dims.const_env),
-                &dims.const_env,
-            ),
-        });
+        // The local is declared where the call is (IEEE 1800-2023 6.18).
+        let mut r#type = procedural::scoped_type(r#type, &dims.const_env);
+        semantic_types::bind_declared(
+            &mut session.types,
+            &tree.functions,
+            &mut r#type,
+            &dims.const_env,
+        );
+        let r#type = super::ir_type(session, &tree.functions, r#type, &dims.const_env);
+        session
+            .locator_locals
+            .entry(self.id)
+            .or_default()
+            .push(LocalVariable {
+                name: name.clone(),
+                source_name: source.to_string(),
+                r#type,
+                owned: self.owned,
+            });
         name
     }
 
     /// The locals declared since the last call.
-    pub(super) fn take(&self) -> Vec<LocalVariable> {
-        std::mem::take(&mut self.0.lock().expect("locator locals").locals)
+    pub(super) fn take(&self, session: &mut Session) -> Vec<LocalVariable> {
+        session
+            .locator_locals
+            .get_mut(&self.id)
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// Forget the sink, once its body is complete.
+    pub(super) fn close(&self, session: &mut Session) {
+        session.locator_locals.remove(&self.id);
     }
 }
 
@@ -82,13 +121,30 @@ impl LocalSink {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Iterator {
     source: String,
-    /// The name of the index querying method (7.12.4).
-    method: String,
+    /// The name of the index querying method (7.12.4), if the iterator has
+    /// one.
+    method: Option<String>,
     /// The local holding the index.
     index: String,
     /// For elements of unpacked structure type kept as records, the
     /// container and the local holding the record of the element.
     record: Option<(Arc<ContainerType>, String)>,
+}
+
+impl Iterator {
+    /// The iterator `source` of the `with` expression of an ordering method
+    /// over elements kept as records of `container`, whose record handle
+    /// local `handle` holds (see [`record_iterator`]). Like the iterator of
+    /// one over other elements, it has no index querying method, so that
+    /// `item.index` of an element with an `index` member reads that member.
+    pub(super) fn record(source: String, container: Arc<ContainerType>, handle: String) -> Self {
+        Self {
+            source,
+            method: None,
+            index: String::new(),
+            record: Some((container, handle)),
+        }
+    }
 }
 
 /// The array a locator method searches.
@@ -99,6 +155,10 @@ enum Array {
         right: i64,
         element: Type,
         layout: ContainerLayout,
+        /// The container that holds a fixed-size array class property,
+        /// whose positions are not its indices (see
+        /// `classes::Property::storage`).
+        storage: Option<Arc<ContainerType>>,
     },
 }
 
@@ -142,10 +202,9 @@ impl Array {
                     signed,
                     two_state: string
                         || object
-                        || container
-                            .key
-                            .as_ref()
-                            .is_some_and(|key| key.kind() == TypeKind::Bit),
+                        || container.key.as_ref().is_some_and(|key| {
+                            matches!(key.kind(), TypeKind::Bit | TypeKind::Chandle)
+                        }),
                     handle: if string {
                         Some(HandleProperty::String)
                     } else if object {
@@ -297,6 +356,29 @@ fn array(
         {
             return Err(unsupported("array locator method on a wildcard index"));
         }
+        // A fixed-size array property whose range does not run from 0 up
+        // is searched by its indices, which `item.index` and the index
+        // methods return (7.12.4).
+        if let Some((left, right)) = container.fixed
+            && (left != 0 || right < left)
+        {
+            if container.record.is_some() {
+                return Err(unsupported(
+                    "array locator method on a fixed-size array class property of unpacked structures whose range does not run from 0 up",
+                ));
+            }
+            // Its bounds are within `int` (see `containers::fixed_storage`).
+            return Ok(Some(Array::Fixed {
+                left: left as i64,
+                right: right as i64,
+                element: container.element.clone(),
+                layout: ContainerLayout {
+                    kind: ContainerKind::Queue { capacity: 0 },
+                    ..container.layout
+                },
+                storage: Some(container),
+            }));
+        }
         return Ok(Some(Array::Container(container)));
     }
     let ExprKind::Name(name) = &native
@@ -308,7 +390,7 @@ fn array(
     let Some(shape) = dims.get(&instances::normalize_identifier(&name.spelling)) else {
         return Ok(None);
     };
-    if shape.container.is_some() || shape.unpacked.is_empty() {
+    if containers::holds_container(shape, tree, session, dims) || shape.unpacked.is_empty() {
         return Ok(None);
     }
     if shape.unpacked.len() != 1 {
@@ -330,8 +412,9 @@ fn array(
     let right = bound(&shape.unpacked[0].right)?;
     let element = if shape.string {
         type_binding::builtin_type("string", None).expect("string is a builtin type")
-    } else if let Some(class) = &shape.class {
-        classes::handle(class)
+    } else if let Some(class) = expression_binding::objects::shape_class(shape, tree, session, dims)
+    {
+        classes::handle(&mut session.types, &class)
     } else {
         let mut ty = Type::new(if shape.is_2state {
             TypeKind::Bit
@@ -349,7 +432,7 @@ fn array(
         ty.enum_domain = shape.enum_domain.clone();
         ty.packed_enum = shape.packed_enum;
         ty.signed_element_depth = shape.signed_element_depth;
-        ty.chandle = shape.chandle;
+        ty = ty.with_chandle(shape.chandle);
         ty
     };
     let width = casts::expr_type_from_type(&tree.functions, &element, &dims.const_env)
@@ -358,7 +441,7 @@ fn array(
         .ok_or_else(|| unsupported("array locator method on elements wider than 64 bits"))?;
     let handle = if shape.string {
         Some(HandleProperty::String)
-    } else if shape.class.is_some() {
+    } else if expression_binding::objects::shape_class(shape, tree, session, dims).is_some() {
         Some(HandleProperty::Object)
     } else {
         None
@@ -375,6 +458,7 @@ fn array(
         right,
         element,
         layout,
+        storage: None,
     }))
 }
 
@@ -402,6 +486,8 @@ pub(super) fn result_type(
             call.array.element().clone()
         },
         record,
+        fixed: None,
+        binding: Default::default(),
     })))
 }
 
@@ -479,7 +565,7 @@ pub(super) fn bind(
             }
             Arc::make_mut(&mut scope.locator_iterators).push(Iterator {
                 source: call.iterator.clone(),
-                method: call.index_method.clone(),
+                method: Some(call.index_method.clone()),
                 index: index.clone(),
                 record: record
                     .clone()
@@ -535,13 +621,13 @@ pub(super) fn bind(
         None => {
             let key = match &call.array {
                 _ if element.kind() == TypeKind::String => LocatorKey::String,
-                _ if element.chandle
+                _ if element.is_chandle()
                     && matches!(call.method, LocatorMethod::Min | LocatorMethod::Max) =>
                 {
                     return Err(min_max_chandles());
                 }
-                _ if element.class().is_some()
-                    || element.unpacked_struct().is_some()
+                _ if element.class_in(&session.types).is_some()
+                    || element.is_unpacked_struct_in(&session.types)
                     || element.container.is_some() =>
                 {
                     return Err(unsupported(
@@ -573,6 +659,26 @@ pub(super) fn bind(
             LocatorSource::Container(container.layout),
             expression_binding::value(call.base, native, tree, session, dims)?,
         ),
+        Array::Fixed {
+            left,
+            right,
+            storage: Some(storage),
+            ..
+        } => {
+            let receiver = expression_binding::value(call.base, native, tree, session, dims)?;
+            let position = containers::fixed_position(storage, Expr::Ident(index.clone()))?;
+            (
+                LocatorSource::Fixed {
+                    left: *left,
+                    right: *right,
+                },
+                containers::element_read(
+                    storage,
+                    &session.types,
+                    containers::call(ContainerOp::Get, storage.layout, vec![receiver, position]),
+                ),
+            )
+        }
         Array::Fixed { left, right, .. } => {
             let ExprKind::Name(name) = &native
                 .expression(expression_binding::ungroup(call.base, native))
@@ -592,7 +698,7 @@ pub(super) fn bind(
                     left: *left,
                     right: *right,
                 },
-                statements::expr_from_lvalue(tree, &lvalue, dims),
+                statements::expr_from_lvalue(tree, &session.types, &lvalue, dims),
             )
         }
     };
@@ -643,7 +749,11 @@ pub(super) fn index(
     }
     // The whole value of an element kept as a record.
     if let Some((container, handle)) = record_iterator(id, native, dims) {
-        return Ok(Some(containers::element_read(&container, handle)));
+        return Ok(Some(containers::element_read(
+            &container,
+            &session.types,
+            handle,
+        )));
     }
     let (member, arguments) = match &native.expression(id).kind {
         ExprKind::Call {
@@ -674,7 +784,7 @@ pub(super) fn index(
     else {
         return Ok(None);
     };
-    if separator != "." || name.spelling != iterator.method {
+    if separator != "." || iterator.method.as_deref() != Some(name.spelling.as_str()) {
         return Ok(None);
     }
     let arguments = match arguments {

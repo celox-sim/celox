@@ -10,6 +10,10 @@
 
 #![allow(clippy::disallowed_methods)] // This binary is the process environment boundary.
 
+// The allocator of the `celox` CLI, which this driver stands in for.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::{collections::BTreeSet, env, path::PathBuf, process::ExitCode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +37,9 @@ struct Options {
     simvariants: Vec<String>,
     files: Vec<PathBuf>,
     source_encoding: celox_sv_analyzer::syntax::SourceEncoding,
+    /// Stop a simulation once its time reaches this (not an sv-tests
+    /// option): a window of a long run, for measuring it.
+    max_time: Option<u64>,
 }
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -44,6 +51,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut simvariants = Vec::new();
     let mut files = Vec::new();
     let mut source_encoding = Default::default();
+    let mut max_time = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         if arg == "--" {
@@ -104,6 +112,13 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             }
             "--include" => includes.push(value.into()),
             "--simvariant" => simvariants.push(value.clone()),
+            "--max-time" if max_time.is_none() => {
+                max_time = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("invalid simulation time: {value}"))?,
+                );
+            }
             _ => return Err(format!("unknown, duplicate or invalid option: {arg}")),
         }
     }
@@ -119,38 +134,38 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         simvariants,
         files,
         source_encoding,
+        max_time,
     })
 }
 
 /// Select roots from parsed instantiations, including inactive generate
-/// branches (IEEE 1800-2023 23.3.1). Celox's simulator accepts one root.
-fn select_top(
+/// branches (IEEE 1800-2023 23.3.1). Every top-level module is simulated, the
+/// ones after the first together with it.
+fn select_tops(
     parsed: &[celox_sv_analyzer::ParsedSource],
     explicit: Option<&str>,
-) -> Result<String, String> {
+) -> Result<Vec<String>, String> {
     if let Some(top) = explicit {
-        return Ok(top.to_string());
+        return Ok(vec![top.to_string()]);
     }
+    // Declarations and references name a module alike, `\\foo ` as `foo`
+    // (IEEE 1800-2023 5.6.1).
     let names: BTreeSet<_> = parsed
         .iter()
         .flat_map(|source| source.module_names())
-        .cloned()
+        .map(|name| celox_sv_analyzer::normalize_identifier(name))
         .collect();
     let referenced: BTreeSet<_> = parsed
         .iter()
         .flat_map(|source| source.component_references())
         .collect();
     let roots: Vec<_> = names.difference(&referenced).cloned().collect();
-    match roots.as_slice() {
-        [root] => Ok(root.clone()),
-        [] => {
-            Err("elaboration requires a module root; none found in the parsed sources".to_string())
-        }
-        _ => Err(format!(
-            "multiple module roots ({}) are unsupported by Celox's single-root simulator; select one with --top",
-            roots.join(", ")
-        )),
+    if roots.is_empty() {
+        return Err(
+            "elaboration requires a module root; none found in the parsed sources".to_string(),
+        );
     }
+    Ok(roots)
 }
 
 fn run(options: &Options) -> Result<(), String> {
@@ -220,7 +235,7 @@ fn run(options: &Options) -> Result<(), String> {
         }
         return Ok(());
     }
-    let top = select_top(&parsed, options.top.as_deref())?;
+    let tops = select_tops(&parsed, options.top.as_deref())?;
     match options.mode {
         Mode::Preprocessing | Mode::Parsing => {
             unreachable!("preprocessing and parsing returned before root selection")
@@ -230,7 +245,8 @@ fn run(options: &Options) -> Result<(), String> {
         // `CELOX_SV_RECURSION_REPORT`.
         Mode::Plan => {
             let start = std::time::Instant::now();
-            let report = celox::Simulation::from_sv_sources(sources, &top)
+            let report = celox::Simulation::from_sv_sources(sources, &tops[0])
+                .tops(tops.clone())
                 .four_state(options.four_state)
                 .diagnostics_from_env()
                 .build_plan();
@@ -240,16 +256,18 @@ fn run(options: &Options) -> Result<(), String> {
         }
         Mode::Elaboration => {
             let start = std::time::Instant::now();
-            let built = celox::Simulation::from_sv_sources(sources, &top)
+            celox::Simulation::from_sv_sources(sources, &tops[0])
+                .tops(tops.clone())
                 .four_state(options.four_state)
                 .diagnostics_from_env()
-                .build();
+                .build()
+                .map_err(|error| error.to_string())?;
             tracing::debug!("[elaboration] total: {:?}", start.elapsed());
-            built.map(|_| ()).map_err(|error| error.to_string())
+            Ok(())
         }
         Mode::Simulation => {
+            let top = &tops[0];
             // Upstream simvariants are separate runs, each with one plusarg.
-            // Recreate the simulation so no variable or scheduler state leaks.
             let variants: Vec<Vec<String>> = if options.simvariants.is_empty() {
                 vec![Vec::new()]
             } else {
@@ -259,25 +277,109 @@ fn run(options: &Options) -> Result<(), String> {
                     .map(|arg| vec![arg.clone()])
                     .collect()
             };
-            for plusargs in variants {
-                let sim = celox::Simulation::from_sv_sources(sources.clone(), &top)
+            if let [plusargs] = variants.as_slice() {
+                let sim = celox::Simulation::from_sv_sources(sources, top)
+                    .tops(tops.clone())
                     .four_state(options.four_state)
                     .diagnostics_from_env()
-                    .plusargs(plusargs)
+                    .plusargs(plusargs.clone())
                     .build()
                     .map_err(|error| error.to_string())?;
-                simulate(sim)?;
+                return simulate(sim, options.max_time);
             }
-            Ok(())
+            simulate_variants(
+                sources,
+                &tops,
+                options.four_state,
+                &variants,
+                options.max_time,
+            )
         }
     }
+}
+
+/// Run each of `variants` in a fresh simulation of `top`. Plusargs are read
+/// at run time (IEEE 1800-2023 21.6), so the design compiles once and each
+/// variant starts its own instance of the one compiled program: no variable,
+/// heap, random or scheduler state is shared, while the analysis and code
+/// generation of a large design such as UVM run once rather than per
+/// variant. Only the host's native backend loads the image: a build with a
+/// cross-codegen feature compiles for the other architecture, and simulates
+/// on Cranelift as `celox::DefaultBackend` does.
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+))]
+#[cfg_attr(not(test), allow(dead_code))]
+const VARIANTS_SHARE_AN_IMAGE: bool = true;
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+))]
+fn simulate_variants(
+    sources: Vec<(&str, &std::path::Path)>,
+    tops: &[String],
+    four_state: bool,
+    variants: &[Vec<String>],
+    max_time: Option<u64>,
+) -> Result<(), String> {
+    let image = celox::Simulation::from_sv_sources(sources, &tops[0])
+        .tops(tops.to_vec())
+        .four_state(four_state)
+        .diagnostics_from_env()
+        .compile_native()
+        .map_err(|error| error.to_string())?
+        .into_program_image();
+    for plusargs in variants {
+        let sim = celox::Simulation::from_sv_sources(Vec::new(), "")
+            .diagnostics_from_env()
+            .plusargs(plusargs.clone())
+            .build_native_from_image(image.clone())
+            .map_err(|error| error.to_string())?;
+        simulate(sim, max_time)?;
+    }
+    Ok(())
+}
+
+/// Run each of `variants` in a simulation of `top` built for it, without a
+/// native image the host can load.
+#[cfg(not(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+)))]
+#[cfg_attr(not(test), allow(dead_code))]
+const VARIANTS_SHARE_AN_IMAGE: bool = false;
+#[cfg(not(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+)))]
+fn simulate_variants(
+    sources: Vec<(&str, &std::path::Path)>,
+    tops: &[String],
+    four_state: bool,
+    variants: &[Vec<String>],
+    max_time: Option<u64>,
+) -> Result<(), String> {
+    for plusargs in variants {
+        let sim = celox::Simulation::from_sv_sources(sources.clone(), &tops[0])
+            .tops(tops.to_vec())
+            .four_state(four_state)
+            .diagnostics_from_env()
+            .plusargs(plusargs.clone())
+            .build()
+            .map_err(|error| error.to_string())?;
+        simulate(sim, max_time)?;
+    }
+    Ok(())
 }
 
 /// Runs the simulation until `$finish` or until no event is left. A run
 /// that issued a run-time error (`$error`, or a failed assertion's default
 /// action) still runs to its end, then fails, as a Verilator model does: the
 /// exit status of a simulation is tool-specific (IEEE 1800-2023 20.10).
-fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
+/// With `max_time`, the run ends at that time without finishing: no event
+/// after it runs, and the errors reported before it still fail the run.
+fn simulate(mut sim: celox::Simulation, max_time: Option<u64>) -> Result<(), String> {
     use std::io::Write as _;
     let mut stdout = std::io::stdout().lock();
     let mut errors = 0usize;
@@ -320,29 +422,66 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
         }
         fatal.map_or(Ok(()), Err)
     };
+    let start = std::time::Instant::now();
+    let mut steps = 0u64;
+    let mut last_report = start;
     let initial = sim.eval_comb().map_err(|error| error.to_string());
     output(&mut sim)?;
     initial?;
+    // Whether the run stopped at the end of the window.
+    let mut window = false;
     while !sim.is_finished() {
-        let step = sim.step().map_err(|error| error.to_string());
+        if last_report.elapsed() >= std::time::Duration::from_secs(30) {
+            report_simulation(&sim, start, steps, "progress");
+            last_report = std::time::Instant::now();
+        }
+        steps += 1;
+        // A window runs no event past its end: each step stops there.
+        let ended = match max_time {
+            Some(max_time) => sim
+                .run_until_bounded(max_time, 1)
+                .map(|reached| reached || sim.time() >= max_time),
+            None => sim.step().map(|step| step.is_none()),
+        }
+        .map_err(|error| error.to_string());
         output(&mut sim)?;
         // A batch run has no interactive mode to suspend into, so it ends at
         // `$stop`, as `vvp -n` does.
-        if step?.is_none() || sim.is_stopped() {
+        if sim.is_stopped() {
+            break;
+        }
+        if ended? {
+            window = max_time.is_some();
             break;
         }
     }
-    if !sim.is_stopped() {
+    if !window && !sim.is_stopped() {
         // Quiescence ends this batch run, but is not itself terminal for the
         // reusable Simulation API (a host can still supply new inputs).
         let finished = sim.finish().map_err(|error| error.to_string());
         output(&mut sim)?;
         finished?;
     }
+    report_simulation(&sim, start, steps, if window { "window" } else { "end" });
     match errors {
         0 => Ok(()),
         count => Err(format!("run-time errors reported: {count}")),
     }
+}
+
+/// Reports, as a `[simulation]` timing event (see [`PhaseTimingReport`]),
+/// how long the simulation ran, how far and what its scheduler did.
+fn report_simulation(sim: &celox::Simulation, start: std::time::Instant, steps: u64, at: &str) {
+    let stats = sim.scheduler_stats();
+    tracing::debug!(
+        "[simulation] {at} wall={:?} time={} steps={steps} compiled_slots={} compiled_runs={} reference_steps={} native_service_calls={}",
+        start.elapsed(),
+        sim.time(),
+        stats.compiled_slots,
+        stats.compiled_runs,
+        stats.reference_steps,
+        stats.native_service_calls,
+    );
 }
 
 /// Prints the compiler's timing events (`[phase-timing]`, `[sv-frontend]`,
@@ -385,6 +524,7 @@ impl tracing::Subscriber for PhaseTimingReport {
             "[analysis]",
             "[flatten]",
             "[elaboration]",
+            "[simulation]",
         ]
         .iter()
         .any(|prefix| message.0.starts_with(prefix))
@@ -434,6 +574,15 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn variants_share_an_image_only_where_the_default_backend_is_native() {
+        // A build with a cross-codegen feature compiles native code for the
+        // other architecture, which the host cannot load: its variants are
+        // built each on the default backend, Cranelift.
+        let native = std::any::type_name::<celox::DefaultBackend>().ends_with("NativeBackend");
+        assert_eq!(VARIANTS_SHARE_AN_IMAGE, native);
+    }
     use std::path::Path;
 
     fn options(args: &[&str]) -> Result<Options, String> {
@@ -495,21 +644,17 @@ mod tests {
         let parsed = [parse(
             "module Leaf; endmodule module Parent; Leaf u(); string name = \"Parent\"; endmodule",
         )];
-        assert_eq!(select_top(&parsed, None).unwrap(), "Parent");
+        assert_eq!(select_tops(&parsed, None).unwrap(), ["Parent"]);
         let parsed = [parse("module A; endmodule module top; endmodule")];
-        assert!(
-            select_top(&parsed, None)
-                .unwrap_err()
-                .contains("multiple module roots")
-        );
-        assert_eq!(select_top(&parsed, Some("A")).unwrap(), "A");
+        assert_eq!(select_tops(&parsed, None).unwrap(), ["A", "top"]);
+        assert_eq!(select_tops(&parsed, Some("A")).unwrap(), ["A"]);
         let parsed = [parse(
             "module Leaf; endmodule module Parent; if (0) begin Leaf u(); end endmodule",
         )];
-        assert_eq!(select_top(&parsed, None).unwrap(), "Parent");
+        assert_eq!(select_tops(&parsed, None).unwrap(), ["Parent"]);
         let parsed = [parse("typedef logic T;")];
         assert!(
-            select_top(&parsed, None)
+            select_tops(&parsed, None)
                 .unwrap_err()
                 .contains("none found")
         );
@@ -530,6 +675,7 @@ mod tests {
             simvariants: Vec::new(),
             files,
             source_encoding: Default::default(),
+            max_time: None,
         }
     }
 
@@ -739,35 +885,45 @@ endmodule
         ] {
             let path = fixture(dir.path(), name, code);
             let mut options = fixture_options(vec![path], Mode::Elaboration);
-            assert!(run(&options).unwrap_err().contains("module root"));
+            // Elaboration of packages and compilation-unit items alone
+            // elaborates those scopes (IEEE 1800-2023 3.12.1); a simulation
+            // needs a module root.
+            run(&options).unwrap_or_else(|error| panic!("{name}: {error}"));
             options.mode = Mode::Simulation;
             assert!(run(&options).unwrap_err().contains("module root"));
             options.mode = Mode::Elaboration;
             options.top = Some("Missing".into());
             assert!(run(&options).is_err());
         }
+        // A class or an interface no module instantiates elaborates as well,
+        // and has no module root to simulate.
+        for (name, code) in [
+            ("class.sv", "class C; int x; endclass"),
+            ("interface.sv", "interface Bus; logic x; endinterface"),
+        ] {
+            let path = fixture(dir.path(), name, code);
+            let mut options = fixture_options(vec![path], Mode::Elaboration);
+            run(&options).unwrap_or_else(|error| panic!("{name}: {error}"));
+            options.mode = Mode::Simulation;
+            assert!(run(&options).unwrap_err().contains("module root"), "{name}");
+        }
+        // Errors of such sources are errors of the elaboration.
         for (name, code, diagnostic) in [
-            ("class.sv", "class C; int x; endclass", "module root"),
-            (
-                "interface.sv",
-                "interface Bus; logic x; endinterface",
-                "module root",
-            ),
-            (
-                "unresolved_unit.sv",
-                "function automatic int f(); return missing; endfunction",
-                "module root",
-            ),
             ("parse.sv", "typedef logic [7:0]", "parse error"),
             (
                 "bad_unit.sv",
                 "function automatic int f(); #1; return 0; endfunction",
-                "module root",
+                "delay control in a function",
             ),
             (
-                "bad_interface.sv",
+                "undeclared_unit.sv",
+                "function automatic int f(); return missing; endfunction",
+                "`missing` is not declared",
+            ),
+            (
+                "undeclared_interface.sv",
                 "interface Bus; logic x; assign x = missing; endinterface",
-                "module root",
+                "`missing` is not declared",
             ),
         ] {
             let path = fixture(dir.path(), name, code);

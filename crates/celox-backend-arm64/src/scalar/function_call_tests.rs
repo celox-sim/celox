@@ -393,9 +393,11 @@ fn compile(
         .iter()
         .enumerate()
         .map(|(index, function)| {
+            let mut function_layout = layout.clone();
+            super::place_frame_slots(&mut function_layout, &function.frame).unwrap();
             let emitted = emit_prepared_eu_with_functions(
                 &function.unit,
-                layout,
+                &function_layout,
                 layout.four_state,
                 "function",
                 false,

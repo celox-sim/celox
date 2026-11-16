@@ -215,6 +215,25 @@ pub(super) fn union_member(
     else {
         return Ok(false);
     };
+    // A member of an interface instance or port, such as `bus.m`, is the
+    // instance's own variable (IEEE 1800-2023 25.3): its receiver is no value
+    // whose members could share storage.
+    if expression_binding::callable_name(tree, id, native)
+        .is_some_and(|name| dims.get(&name).is_some())
+        // An element of an array of them, such as `bus[i].m`; another
+        // receiver is no interface handle.
+        || matches!(
+            expression_binding::interface_member_name(tree, session, id, native, dims),
+            Ok(Some(name)) if dims.get(&name).is_some()
+        )
+    {
+        return Ok(false);
+    }
+    // A container element of unpacked structure type, such as `q[i][j]` of
+    // a queue of queues, whose shape the operand's does not describe.
+    if containers::native_struct_element(*receiver, native, tree, session, dims)?.is_some() {
+        return Ok(false);
+    }
     let Some(shape) = dimensions::operand_shape(*receiver, tree, session, dims)? else {
         return Ok(false);
     };

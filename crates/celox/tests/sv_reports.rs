@@ -1,4 +1,3 @@
-#![cfg(feature = "systemverilog")]
 //! Severity tasks report their severity, the file and line of the call and
 //! the scope that issued them (IEEE 1800-2023 20.10). A report in an action
 //! block of an assertion names that assertion (16.3).

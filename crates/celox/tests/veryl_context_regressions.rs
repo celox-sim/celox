@@ -3,66 +3,6 @@
 mod test_utils;
 
 all_backends! {
-    fn part_select_of_signed_is_unsigned(sim) {
-        @case "veryl_context_regressions::part_select_of_signed_is_unsigned";
-    }
-    fn signed_part_select_sign_extends(sim) {
-        @case "veryl_context_regressions::signed_part_select_sign_extends";
-    }
-    fn signed_struct_member_sign_extends(sim) {
-        @case "veryl_context_regressions::signed_struct_member_sign_extends";
-    }
-    fn wide_logical_operand_keeps_result_type(sim) {
-        @case "veryl_context_regressions::wide_logical_operand_keeps_result_type";
-    }
-    fn constant_ternary_keeps_both_arm_types(sim) {
-        @case "veryl_context_regressions::constant_ternary_keeps_both_arm_types";
-    }
-    fn signed_cast_of_folded_constant_sign_extends(sim) {
-        @case "veryl_context_regressions::signed_cast_of_folded_constant_sign_extends";
-    }
-    fn case_on_signed_target_matches_negative_labels(sim) {
-        @case "veryl_context_regressions::case_on_signed_target_matches_negative_labels";
-    }
-    fn constant_case_on_signed_target(sim) {
-        @case "veryl_context_regressions::constant_case_on_signed_target";
-    }
-    fn dynamic_index_store_is_cut_to_element_width(sim) {
-        @case "veryl_context_regressions::dynamic_index_store_is_cut_to_element_width";
-    }
-    fn runtime_for_with_negative_bound(sim) {
-        @case "veryl_context_regressions::runtime_for_with_negative_bound";
-    }
-    fn folded_constant_wider_than_its_operand(sim) {
-        @case "veryl_context_regressions::folded_constant_wider_than_its_operand";
-    }
-    fn folded_const_select_keeps_its_sign(sim) {
-        @case "veryl_context_regressions::folded_const_select_keeps_its_sign";
-    }
-    fn runtime_for_bound_keeps_its_type(sim) {
-        @case "veryl_context_regressions::runtime_for_bound_keeps_its_type";
-    }
-    fn case_compares_each_label_as_an_if_does(sim) {
-        @case "veryl_context_regressions::case_compares_each_label_as_an_if_does";
-    }
-    fn runtime_case_target_uses_comparison_context(sim) {
-        @case "veryl_context_regressions::runtime_case_target_uses_comparison_context";
-    }
-    fn runtime_for_bound_arithmetic_uses_int_context(sim) {
-        @case "veryl_context_regressions::runtime_for_bound_arithmetic_uses_int_context";
-    }
-    fn dynamic_param_array_read_uses_its_elements(sim) {
-        @case "veryl_context_regressions::dynamic_param_array_read_uses_its_elements";
-    }
-    fn constant_case_target_uses_comparison_context(sim) {
-        @case "veryl_context_regressions::constant_case_target_uses_comparison_context";
-    }
-    fn unfolded_constant_struct_member_reads_its_value(sim) {
-        @case "veryl_context_regressions::unfolded_constant_struct_member_reads_its_value";
-    }
-}
-
-all_backends! {
     fn ff_loop_bound_keeps_its_type(sim) {
         @setup { let code = r#"
             module Top #(

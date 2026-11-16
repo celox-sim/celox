@@ -20,6 +20,9 @@ pub struct ParsedSource {
     index: ast::module_index::ModuleIndex,
     /// Immutable declaration diagnostics, indexed once alongside module syntax.
     warnings: HashMap<String, Vec<ir::AnalyzerWarning>>,
+    /// The modules whose later declarations were left out
+    /// ([`Self::parse_with_first_modules`]).
+    duplicate_modules: Vec<String>,
 }
 
 /// What a module analysis lowers.
@@ -32,7 +35,35 @@ enum ModuleAnalysis<'a> {
 
 impl ParsedSource {
     pub fn parse(code: &str, path: &Path) -> Result<Self, AnalyzerError> {
-        let tree = source_tree::parse_source(code, path)?;
+        Self::index(
+            source_tree::parse_source(code, path)?,
+            Vec::new(),
+            code,
+            path,
+        )
+    }
+
+    /// [`Self::parse`] for a design that may declare a module more than
+    /// once: the first declaration is the module and the others are left out
+    /// ([`crate::AnalysisOptions::first_duplicate_module`]). `declared`
+    /// holds the modules of the sources parsed before this one, in source
+    /// order, and receives the modules of this one.
+    pub fn parse_with_first_modules(
+        code: &str,
+        path: &Path,
+        declared: &mut fxhash::FxHashSet<String>,
+    ) -> Result<Self, AnalyzerError> {
+        let (tree, duplicate_modules) =
+            source_tree::parse_source_with_first_modules(code, path, declared)?;
+        Self::index(tree, duplicate_modules, code, path)
+    }
+
+    fn index(
+        tree: source_tree::SourceTree,
+        duplicate_modules: Vec<String>,
+        code: &str,
+        path: &Path,
+    ) -> Result<Self, AnalyzerError> {
         let index = ast::module_index::ModuleIndex::from_declarations(&tree, tree.declarations())?;
         let warnings = ast::warnings::components(&tree);
         Ok(Self {
@@ -41,6 +72,7 @@ impl ParsedSource {
             tree: std::rc::Rc::new(tree),
             index,
             warnings,
+            duplicate_modules,
         })
     }
 
@@ -68,6 +100,62 @@ impl ParsedSource {
             .collect()
     }
 
+    /// The subroutines that each interface in `interfaces` declares, with
+    /// the names of their formals in order (IEEE 1800-2023 13.3, 13.4), or
+    /// `None` for a DPI import (35.5).
+    pub(crate) fn interface_subroutine_formals(
+        &self,
+        interfaces: &fxhash::FxHashSet<String>,
+    ) -> Vec<(String, String, Option<Vec<String>>)> {
+        let native = self.declarations();
+        let mut found = Vec::new();
+        for unit in native.all_units() {
+            let name = ast::instances::normalize_identifier(&unit.name.spelling);
+            if unit.kind != celox_sv_syntax::UnitKind::Interface || !interfaces.contains(&name) {
+                continue;
+            }
+            for item in &unit.items {
+                // A DPI import has no formal names to call it with here; a
+                // call through a virtual interface is rejected by name.
+                if let celox_sv_syntax::BodyItemKind::Dpi(id) = native.body_item(*item).kind {
+                    let dpi = native.dpi_declaration(id);
+                    if dpi.import {
+                        found.push((
+                            name.clone(),
+                            ast::instances::normalize_identifier(&dpi.name.spelling),
+                            None,
+                        ));
+                    }
+                    continue;
+                }
+                let celox_sv_syntax::BodyItemKind::Subroutine(id) = native.body_item(*item).kind
+                else {
+                    continue;
+                };
+                let subroutine = native.subroutine(id);
+                let formals = subroutine
+                    .ports
+                    .iter()
+                    .flatten()
+                    .chain(
+                        subroutine
+                            .port_declarations
+                            .iter()
+                            .flat_map(|declaration| &declaration.ports),
+                    )
+                    .filter_map(|port| port.name.as_ref())
+                    .map(|name| ast::instances::normalize_identifier(&name.spelling))
+                    .collect();
+                found.push((
+                    name.clone(),
+                    ast::instances::normalize_identifier(&subroutine.name.spelling),
+                    Some(formals),
+                ));
+            }
+        }
+        found
+    }
+
     /// Module and interface declarations share the SV design-element namespace.
     pub fn component_names(&self) -> fxhash::FxHashSet<String> {
         self.declarations()
@@ -81,7 +169,7 @@ impl ParsedSource {
                 ) && !unit.external
                     && unit.port_style != celox_sv_syntax::PortStyle::Wildcard
             })
-            .map(|unit| unit.name.spelling.clone())
+            .map(|unit| ast::normalize_identifier(&unit.name.spelling))
             .collect()
     }
 
@@ -98,7 +186,12 @@ impl ParsedSource {
                     .map(|name| name.spelling.clone()),
             );
         }
+        // Spelled as the declarations are named: `\foo ` is `foo`
+        // (IEEE 1800-2023 5.6.1).
         references
+            .into_iter()
+            .map(|name| ast::normalize_identifier(&name))
+            .collect()
     }
 
     /// Analyze the packages declared in `sources`, each once, after the
@@ -122,6 +215,7 @@ impl ParsedSource {
         roots: Option<&[&str]>,
         options: crate::AnalysisOptions,
     ) -> Result<Packages, AnalyzerError> {
+        let first_duplicate_module = options.first_duplicate_module;
         let trees: Vec<_> = sources
             .iter()
             .map(|source| (source.tree.as_ref(), source.path.as_path()))
@@ -129,6 +223,13 @@ impl ParsedSource {
         let mut warnings = Vec::new();
         for source in sources {
             ast::warnings::append(&mut warnings, ast::warnings::packages(&source.tree));
+            ast::warnings::append(
+                &mut warnings,
+                source
+                    .duplicate_modules
+                    .iter()
+                    .map(|name| ir::AnalyzerWarning::DuplicateModule { name: name.clone() }),
+            );
         }
         let packages = (|| {
             // Module and interface names share a namespace regardless of
@@ -202,9 +303,18 @@ impl ParsedSource {
                     .iter()
                     .map(|source| (source.code.as_ref(), source.path.as_path()))
                     .collect::<Vec<_>>();
-                packages.interface_plan =
-                    std::sync::Arc::new(ast::interfaces::plan_interfaces(&sources, &[])?);
+                packages.interface_plan = std::sync::Arc::new(
+                    ast::interfaces::plan_interfaces_of_first_modules(
+                        &sources,
+                        &[],
+                        first_duplicate_module,
+                    )?
+                    .0,
+                );
             }
+            packages.build_virtual_interface_calls()?;
+            packages.build_design_subroutines();
+            packages.check_unreferenced_interfaces(&trees)?;
             Ok(packages)
         })();
         match packages {
@@ -406,7 +516,7 @@ impl ParsedSource {
             packages,
             design,
         )?;
-        analyze::analyze_source(source)
+        analyze::analyze_source_in(source, design)
     }
 
     /// Analyze without rewriting the source, retaining literal override
@@ -490,7 +600,7 @@ impl ParsedSource {
                 packages,
                 design,
             )?;
-            analyze::analyze_source(source)
+            analyze::analyze_source_in(source, design)
         })();
         crate::finish_analysis(ir, warnings)
     }
@@ -651,6 +761,72 @@ mod tests {
         assert_eq!(
             actual.modules()[0].ports()[0].r#type().resolved_width(),
             Some(8)
+        );
+    }
+
+    /// A type parameter bound to `chandle` makes its variables chandles,
+    /// although no source of the design names the type (IEEE 1800-2023
+    /// 6.14): their uses as integral operands are rejected.
+    #[test]
+    fn type_parameters_bound_to_chandle_check_chandle_uses() {
+        let code = "module Top #(parameter type T = int);
+            T x;
+            int n;
+            initial n = $countones(x);
+        endmodule";
+        let source = ParsedSource::parse(code, Path::new("chandle-override.sv")).unwrap();
+        let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
+        let types = vec![("T".into(), type_binding("chandle"))];
+        let error = source
+            .analyze_module(
+                "Top",
+                &HashMap::default(),
+                &types,
+                &[],
+                &ModuleInterfaces::default(),
+                &packages,
+                &mut packages.design(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, AnalyzerError::IllegalChandleUse { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// A type parameter bound to a queue of chandles makes its elements
+    /// chandles, although no source of the design names the type (IEEE
+    /// 1800-2023 6.14, 7.10).
+    #[test]
+    fn type_parameters_bound_to_containers_of_chandles_check_chandle_uses() {
+        let caller =
+            "module Caller; typedef chandle handles_t[$]; Child #(.T(handles_t)) c(); endmodule";
+        let ir = crate::analyze_source(caller, Path::new("caller.sv")).unwrap();
+        let handles = ir.modules()[0].instances()[0].parameter_overrides()[0]
+            .bound_type()
+            .unwrap()
+            .clone();
+        let code = "module Top #(parameter type T = int);
+            T x;
+            int n;
+            initial n = $countones(x[0]);
+        endmodule";
+        let source = ParsedSource::parse(code, Path::new("chandle-queue-override.sv")).unwrap();
+        let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
+        let error = source
+            .analyze_module(
+                "Top",
+                &HashMap::default(),
+                &[("T".into(), handles)],
+                &[],
+                &ModuleInterfaces::default(),
+                &packages,
+                &mut packages.design(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, AnalyzerError::IllegalChandleUse { .. }),
+            "{error:?}"
         );
     }
 

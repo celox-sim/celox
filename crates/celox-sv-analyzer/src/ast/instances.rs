@@ -10,11 +10,20 @@ pub(super) fn instances_from_scope(
     packed_dimensions: &PackedDimensions,
     interfaces: &InterfaceLookup<'_>,
 ) -> Result<Vec<Instance>, AnalyzerError> {
-    let type_aliases = type_aliases_from_scope(syntax_tree, session)?;
+    // The types of the scope with its constants: a variable of a generate
+    // block may have a type whose shape a parameter gives.
+    let type_aliases = packed_dimensions.type_aliases.clone();
     let active = generate::items(syntax_tree, session, const_env, &type_aliases)?;
     let mut instances = Vec::new();
     let mut views = generate::ScopeViews::new(packed_dimensions);
+    let mut defparams = Vec::new();
     for item in &active {
+        if let celox_sv_syntax::BodyItemKind::Defparam(assignments) =
+            &syntax_tree.declarations().body_item(item.id).kind
+        {
+            defparams.extend(assignments.iter().map(|assignment| (item, assignment)));
+            continue;
+        }
         let syntax_tree = &item.scoped(syntax_tree);
         let celox_sv_syntax::BodyItemKind::Instance(native) =
             syntax_tree.declarations().body_item(item.id).kind
@@ -60,7 +69,241 @@ pub(super) fn instances_from_scope(
         }
     }
     instances.retain(|instance| !type_aliases.contains_key(instance.module_name()));
+    // The last `defparam` of a parameter in the source text gives its value
+    // (IEEE 1800-2023 23.10.1).
+    defparams.sort_by_key(|(_, assignment)| assignment.tokens.start);
+    for (item, assignment) in defparams {
+        apply_defparam(
+            item,
+            assignment,
+            syntax_tree,
+            session,
+            &mut views,
+            &mut instances,
+        )?;
+    }
     Ok(instances)
+}
+
+/// Give the instance that `assignment` names the parameter value it assigns
+/// (IEEE 1800-2023 23.10.1). The value is evaluated in the scope of the
+/// `defparam` and takes precedence over a parameter assignment of the
+/// instantiation (23.10); the instance is one of this module, in the
+/// generate block of the `defparam` when it is in one.
+fn apply_defparam<'a>(
+    item: &'a generate::Item,
+    assignment: &celox_sv_syntax::DefparamAssignment,
+    syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    views: &mut generate::ScopeViews<'a>,
+    instances: &mut [Instance],
+) -> Converted<()> {
+    let scoped = item.scoped(syntax_tree);
+    let tree = &item.enter(&scoped);
+    let dimensions = views.dimensions(item);
+    let Some((parameter, scopes)) = assignment.path.split_last() else {
+        return Err(AnalyzerError::Parse("defparam without a target".into()));
+    };
+    let parameter_name = normalize_identifier(&parameter.name.spelling);
+    let spelled = || {
+        assignment
+            .path
+            .iter()
+            .map(|segment| segment.name.spelling.as_str())
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    if assignment.rooted {
+        return Err(unsupported(format!(
+            "defparam of the `$root` name `{}`",
+            spelled()
+        )));
+    }
+    if parameter.index.is_some() {
+        return Err(AnalyzerError::InvalidDefparam(format!(
+            "the target `{}` selects from a parameter",
+            spelled()
+        )));
+    }
+    // Keep each parsed index separate from its name: an escaped name may
+    // itself contain `[` (5.6.1), which is not an index.
+    let mut components = Vec::new();
+    for segment in scopes {
+        let component = normalize_identifier(&segment.name.spelling);
+        let index = match segment.index {
+            Some(index) => Some(
+                constant_binding::bind(index, tree, session, dimensions)?
+                    .and_then(|index| eval_ast_const_expr(&tree.functions, &index, &item.env))
+                    .ok_or_else(|| {
+                        unsupported(format!(
+                            "index of defparam target `{}` that is not constant",
+                            spelled()
+                        ))
+                    })?,
+            ),
+            None => None,
+        };
+        components.push((component, index));
+    }
+    // The name may start at the module itself (23.6).
+    let module = tree
+        .root_unit()
+        .ok()
+        .map(|unit| normalize_identifier(&unit.name.spelling));
+    if components.len() > 1 && module.as_deref() == Some(components[0].0.as_str()) {
+        components.remove(0);
+    }
+    if components.is_empty() {
+        return Err(unsupported(format!(
+            "defparam of `{}`, a parameter of its own scope",
+            spelled()
+        )));
+    }
+    // The scopes of the name are searched for from the scope of the
+    // `defparam` outward (23.8); an instance of the name ends the search.
+    let mut scope = Some(item.scope_name());
+    let mut target = None;
+    let mut below = false;
+    let mut array_element = false;
+    'search: while let Some(prefix) = scope {
+        for length in (1..=components.len()).rev() {
+            let name = generate::scoped_instance_name(prefix, &components[..length]);
+            if let Some(index) = instances.iter().position(|instance| instance.name == name) {
+                if length == components.len() {
+                    target = Some(index);
+                } else {
+                    below = true;
+                }
+                break 'search;
+            }
+            // An indexed name whose base is an instance array selects an
+            // element of that array, stored under the base name alone.
+            if components[length - 1].1.is_some() {
+                let mut base = components[..length].to_vec();
+                base[length - 1].1 = None;
+                let name = generate::scoped_instance_name(prefix, &base);
+                if instances
+                    .iter()
+                    .any(|instance| instance.name == name && instance.array_range.is_some())
+                {
+                    array_element = true;
+                    break 'search;
+                }
+            }
+        }
+        scope = if prefix.is_empty() {
+            None
+        } else {
+            Some(generate::parent_scope(prefix))
+        };
+    }
+    if array_element {
+        return Err(unsupported(format!(
+            "defparam of `{}`, a parameter of an instance array",
+            spelled()
+        )));
+    }
+    if below {
+        return Err(unsupported(format!(
+            "defparam of `{}`, a parameter below a child instance",
+            spelled()
+        )));
+    }
+    let Some(target) = target else {
+        return Err(unsupported(format!(
+            "defparam of `{}`, which names no module instance of this module",
+            spelled()
+        )));
+    };
+    let instance = &mut instances[target];
+    if instance.array_range.is_some() {
+        return Err(unsupported(format!(
+            "defparam of `{}`, a parameter of an instance array",
+            spelled()
+        )));
+    }
+    // A `defparam` in a generate block changes no parameter outside the
+    // block (23.10.1).
+    let own = item.scope_name();
+    if !own.is_empty()
+        && !instance
+            .name
+            .strip_prefix(own)
+            .is_some_and(|rest| rest.starts_with('.'))
+    {
+        return Err(AnalyzerError::InvalidDefparam(format!(
+            "the target `{}` is outside the generate block of the statement (IEEE 1800-2023 23.10.1)",
+            spelled()
+        )));
+    }
+    let mut value = parameter_override(
+        parameter_name.clone(),
+        assignment.value,
+        tree,
+        session,
+        dimensions,
+        false,
+    )?;
+    // A type parameter is not overridden by a `defparam` (6.20.3).
+    if value.bound_type.is_some() {
+        return Err(AnalyzerError::InvalidDefparam(format!(
+            "the target `{}` is assigned a data type (IEEE 1800-2023 6.20.3)",
+            spelled()
+        )));
+    }
+    resolve_override(&mut value, tree, session, &item.env, dimensions)?;
+    match instance
+        .parameter_overrides
+        .iter_mut()
+        .find(|existing| existing.name == parameter_name)
+    {
+        Some(existing) => *existing = value,
+        None => {
+            instance.parameter_names.push(parameter_name);
+            instance.parameter_overrides.push(value);
+        }
+    }
+    Ok(())
+}
+
+/// Make the value of an override a constant of the scope that gives it.
+fn resolve_override(
+    override_: &mut ParameterOverride,
+    syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    const_env: &ConstEnv,
+    packed_dimensions: &PackedDimensions,
+) -> Converted<()> {
+    let Some(value) = override_.value.take() else {
+        return Ok(());
+    };
+    let value = substitute_typed_parameter_literals(
+        value,
+        const_env,
+        &parameter_types_from_const_env(const_env),
+    );
+    let value = expr_to_index_const(
+        syntax_tree,
+        session,
+        substitute_expr_idents(
+            const_expr_to_expr(value),
+            &packed_dimensions.parameter_values,
+        ),
+        packed_dimensions,
+    )
+    .ok_or_else(|| {
+        AnalyzerError::Unsupported(format!(
+            "constant module parameter override `{}`",
+            override_.name
+        ))
+    })?;
+    let value = substitute_const_expr_constants_preserving_enum_types(value, const_env);
+    override_.value = Some(constant_calls_folded(
+        value,
+        &syntax_tree.functions,
+        const_env,
+    ));
+    Ok(())
 }
 
 fn instances_from_native_declaration(
@@ -86,31 +329,13 @@ fn instances_from_native_declaration(
         false,
     )?;
     for override_ in &mut parameter_overrides {
-        if let Some(value) = override_.value.take() {
-            let value = substitute_typed_parameter_literals(
-                value,
-                const_env,
-                &parameter_types_from_const_env(const_env),
-            );
-            let value = expr_to_index_const(
-                syntax_tree,
-                session,
-                substitute_expr_idents(
-                    const_expr_to_expr(value),
-                    &packed_dimensions.parameter_values,
-                ),
-                packed_dimensions,
-            )
-            .ok_or_else(|| {
-                AnalyzerError::Unsupported(format!(
-                    "constant module parameter override `{}`",
-                    override_.name
-                ))
-            })?;
-            override_.value = Some(substitute_const_expr_constants_preserving_enum_types(
-                value, const_env,
-            ));
-        }
+        resolve_override(
+            override_,
+            syntax_tree,
+            session,
+            const_env,
+            packed_dimensions,
+        )?;
     }
     let condition =
         condition.map(|condition| substitute_const_expr_constants(condition, const_env));
@@ -313,7 +538,7 @@ pub(super) fn instance_ranges(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Result<Vec<UnpackedRange>, AnalyzerError> {
     constant_binding::unpacked_ranges(&native.dimensions, tree, session, env, aliases)
 }
@@ -327,8 +552,11 @@ pub(super) fn expr_ident_name(expr: &Expr) -> Option<String> {
 
 /// An escaped identifier is the same identifier as its text without the
 /// backslash (IEEE 1800-2023 5.6.1): `\a` names `a`. One that cannot be written
-/// without escaping, such as `\a.b`, keeps its backslash.
-pub(crate) fn normalize_identifier(text: &str) -> String {
+/// without escaping, such as `\a.b`, keeps its backslash. A keyword is the
+/// same identifier too (`\module` names `module`), whatever keywords a
+/// `begin_keywords` directive selects (22.14): code that writes a name back
+/// into source text escapes it.
+pub fn normalize_identifier(text: &str) -> String {
     match text.strip_prefix('\\') {
         Some(name)
             if name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
@@ -342,10 +570,59 @@ pub(crate) fn normalize_identifier(text: &str) -> String {
     }
 }
 
+/// The shape of the unpacked array that a call of a function returns (IEEE
+/// 1800-2023 13.4.1), from the declared result type of the function. A
+/// parameter argument is bound before the functions of the scope are
+/// collected, when the declaration of a function of the module gives it.
+fn call_result_shape(
+    id: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Option<VariableDimensions> {
+    use celox_sv_syntax::{ExprKind, SubroutineKind};
+    let native = tree.declarations();
+    let ExprKind::Call { expression, .. } = native.expression(id).kind else {
+        return None;
+    };
+    let ExprKind::Name(name) = &native
+        .expression(expression_binding::ungroup(expression, native))
+        .kind
+    else {
+        return None;
+    };
+    let name = normalize_identifier(&name.spelling);
+    let ty = match dims
+        .function_return_types
+        .get(&name)
+        .and_then(|metadata| metadata.pattern_type.clone())
+    {
+        Some(ty) => ty,
+        None => {
+            let subroutine = tree
+                .root_unit()
+                .ok()?
+                .subroutines
+                .iter()
+                .map(|id| native.subroutine(*id))
+                .find(|subroutine| {
+                    subroutine.kind == SubroutineKind::Function
+                        && subroutine.scope.is_empty()
+                        && normalize_identifier(&subroutine.name.spelling) == name
+                })?;
+            type_binding::bind(subroutine.return_type?, tree, session, dims)
+                .ok()
+                .flatten()?
+        }
+    };
+    let shape = procedural::dimensions_from_type(&ty);
+    (!shape.unpacked.is_empty()).then_some(shape)
+}
+
 /// Keep whole-array conditional arguments out of the scalar constant path.
 /// Traverse branch types iteratively, including branches a constant condition
 /// does not select. Array sizes and integral element types must agree.
-fn array_argument_shape(
+pub(super) fn array_argument_shape(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -373,19 +650,24 @@ fn array_argument_shape(
                     jobs.push(Job::Enter(else_expression));
                     jobs.push(Job::Enter(then_expression));
                 } else {
-                    values.push(array_compatibility::native_unpacked_shape(
-                        id, tree, session, dims,
-                    )?);
+                    values.push(
+                        array_compatibility::native_unpacked_shape(id, tree, session, dims)
+                            .or_else(|| call_result_shape(id, tree, session, dims))?,
+                    );
                 }
             }
             Job::Conditional => {
                 let right = values.pop()?;
                 let left = values.pop()?;
-                let left_type =
-                    array_compatibility::unpacked_array_type(&tree.functions, &left, dims)?;
-                let right_type =
-                    array_compatibility::unpacked_array_type(&tree.functions, &right, dims)?;
-                if left_type != right_type
+                // The branches are of equivalent unpacked array types (IEEE
+                // 1800-2023 11.4.11, 6.22.2), as the type system tells.
+                if left.unpacked.is_empty() || right.unpacked.is_empty() {
+                    return None;
+                }
+                let table = &mut session.types;
+                let left_type = left.type_id(table, &tree.functions, &dims.const_env)?;
+                let right_type = right.type_id(table, &tree.functions, &dims.const_env)?;
+                if !table.equivalent(left_type, right_type)
                     || left.packed != right.packed
                     || left.members != right.members
                 {
@@ -441,39 +723,8 @@ fn parameter_override(
         pending.extend(parameters::skipped::children(id, declarations));
     }
     if let Some(shape) = array_argument_shape(native, syntax_tree, session, packed_dimensions) {
-        // Aggregate conditional expressions require equivalent branch types
-        // (11.4.11). A known condition selects a whole array before element
-        // binding; treating it as a packed mux would use the wrong X merge rule.
-        let mut selected = root;
-        while let ExprKind::Conditional {
-            condition,
-            then_expression,
-            else_expression,
-        } = declarations.expression(selected).kind
-        {
-            let condition =
-                constant_binding::bind(condition, syntax_tree, session, packed_dimensions)?
-                    .and_then(|value| {
-                        eval_ast_const_expr(
-                            &syntax_tree.functions,
-                            &value,
-                            &packed_dimensions.const_env,
-                        )
-                    })
-                    .ok_or_else(|| {
-                        unsupported(
-                            "nonconstant or ambiguous condition in array parameter argument",
-                        )
-                    })?;
-            selected = expression_binding::ungroup(
-                if condition != 0 {
-                    then_expression
-                } else {
-                    else_expression
-                },
-                declarations,
-            );
-        }
+        let selected =
+            array_parameters::selected_branch(root, syntax_tree, session, packed_dimensions)?;
         let pattern = bound_patterns::from_array_parameter(
             selected,
             syntax_tree,
@@ -537,8 +788,20 @@ fn parameter_override(
             session,
             packed_dimensions,
         )?;
-        expr_to_const(session, value)
-            .ok_or_else(|| unsupported("constant interface parameter override"))?
+        match expr_to_const(session, value) {
+            Some(value) => value,
+            // A value the binder gives as a concatenation or resize, such as
+            // one that selects a field of a wide constant, is bound as a
+            // constant expression, as a module parameter override is.
+            None => constant_binding::value_expression(
+                native,
+                declarations,
+                syntax_tree,
+                session,
+                packed_dimensions,
+            )?
+            .ok_or_else(|| unsupported("constant interface parameter override"))?,
+        }
     } else {
         constant_binding::value_expression(
             native,
@@ -563,4 +826,79 @@ fn parameter_override(
         return Ok(ParameterOverride::type_override(name, ty));
     }
     Ok(ParameterOverride::new(name, Some(value)))
+}
+
+/// `value` with each call of a constant function (IEEE 1800-2023 13.4.3)
+/// whose arguments are constants replaced by its result, of the function's
+/// return type. The instance is specialized by the value the call returns
+/// in the scope that gives the override; a call that does not evaluate
+/// stays.
+fn constant_calls_folded(
+    value: ConstExpr,
+    functions: &const_functions::ConstantFunctions,
+    constants: &ConstEnv,
+) -> ConstExpr {
+    let fold =
+        |value: Box<ConstExpr>| Box::new(constant_calls_folded(*value, functions, constants));
+    match value {
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => value,
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: fold(expr),
+            bit: fold(bit),
+        },
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: fold(expr),
+            msb: fold(msb),
+            lsb: fold(lsb),
+            signed,
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: fold(expr),
+            width,
+            signed,
+        },
+        ConstExpr::Function { callee, args, site } => {
+            let args: Vec<_> = args
+                .into_iter()
+                .map(|arg| constant_calls_folded(arg, functions, constants))
+                .collect();
+            if let Callee::Subroutine(name) = &callee {
+                let ir_args: Vec<crate::ir::ConstExpr> =
+                    args.iter().cloned().map(Into::into).collect();
+                if let Some(literal) =
+                    const_functions::eval_call_literal(functions, name, &ir_args, constants)
+                {
+                    return ConstExpr::Literal(typecheck::format_integral_literal_binary(&literal));
+                }
+            }
+            ConstExpr::Function { callee, args, site }
+        }
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op,
+            expr: fold(expr),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: fold(left),
+            op,
+            right: fold(right),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: fold(condition),
+            then_expr: fold(then_expr),
+            else_expr: fold(else_expr),
+        },
+    }
 }

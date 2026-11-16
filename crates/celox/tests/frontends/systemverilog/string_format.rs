@@ -1,28 +1,6 @@
 use super::*;
 
 sv_backends! {
-    fn sformatf_matches_display(sim) { @case "string_format::sformatf_matches_display"; }
-    fn sformatf_four_state_values(sim) { @case "string_format::sformatf_four_state_values"; }
-    fn sformatf_in_expressions(sim) { @case "string_format::sformatf_in_expressions"; }
-    fn sformat_property_output(sim) { @case "string_format::sformat_property_output"; }
-    fn sformatf_runtime_formats(sim) { @case "string_format::sformatf_runtime_formats"; }
-    fn sformatf_packed_runtime_format(sim) { @case "string_format::sformatf_packed_runtime_format"; }
-    fn sformatf_in_conditional_expressions(sim) { @case "string_format::sformatf_in_conditional_expressions"; }
-    fn sformatf_time_values(sim) { @case "string_format::sformatf_time_values"; }
-    fn sformatf_in_omitted_default(sim) { @case "string_format::sformatf_in_omitted_default"; }
-    fn sformatf_runtime_format_bytes(sim) { @case "string_format::sformatf_runtime_format_bytes"; }
-    fn sformatf_after_wider_input(sim) { @case "string_format::sformatf_after_wider_input"; }
-    fn sformatf_in_container_operands(sim) { @case "string_format::sformatf_in_container_operands"; }
-    fn sformatf_with_associative_index(sim) { @case "string_format::sformatf_with_associative_index"; }
-    fn sformatf_with_reference_argument(sim) { @case "string_format::sformatf_with_reference_argument"; }
-    fn swrite_matches_write(sim) { @case "string_format::swrite_matches_write"; }
-    fn display_later_formats(sim) { @case "string_format::display_later_formats"; }
-    fn pattern_format(sim) { @case "string_format::pattern_format"; }
-    fn pattern_format_keys_and_handles(sim) { @case "string_format::pattern_format_keys_and_handles"; }
-    fn pattern_format_structure_containers(sim) { @case "string_format::pattern_format_structure_containers"; }
-    fn pattern_format_structure_values(sim) { @case "string_format::pattern_format_structure_values"; }
-    fn pattern_format_enums(sim) { @case "string_format::pattern_format_enums"; }
-    fn formatted_strings_into_integral_outputs(sim) { @case "string_format::formatted_strings_into_integral_outputs"; }
     // A string literal operand leaves a conditional integral (5.9): `%p`
     // prints it unformatted, not in quotes.
     fn pattern_format_conditional_string_literal(sim) {
@@ -187,17 +165,6 @@ sv_backends! {
     }
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-#[test]
-fn sformatf_native_image() {
-    for case in [
-        "string_format::sformatf_in_expressions",
-        "string_format::sformatf_runtime_formats",
-    ] {
-        crate::suite::run_case(case, "native-image");
-    }
-}
-
 /// A property's owner is captured before the operands of a container method
 /// run, as without a formatting operand. IEEE 1800-2023 leaves this order to
 /// the implementation, so the case is Celox's own contract.
@@ -278,9 +245,22 @@ fn pattern_format_rejects_unsupported_types() {
             "typedef enum bit {A, B} e_t; e_t [1:0] v;",
             "%p of an enum value",
         ),
+        // A member that is a packed array of enum values, which prints as
+        // no single name.
         (
-            "typedef struct packed { bit [3:0] a; } s_t; s_t v;",
-            "%p of a structure or unpacked array",
+            "typedef enum logic [1:0] {A, B} e_t; \
+             typedef struct packed { e_t [1:0] a; } s_t; s_t v;",
+            "%p of a packed structure with an enum member",
+        ),
+        // A packed union prints none of its members by name, also with a
+        // single member, whose layout equals a one-member structure's.
+        (
+            "typedef union packed { bit [3:0] a; } u_t; u_t v;",
+            "%p of a packed union",
+        ),
+        (
+            "typedef union packed { bit [3:0] a; bit [3:0] b; } u_t; u_t v;",
+            "%p of a packed union",
         ),
         (
             "class C; endclass int v[C];",
@@ -290,11 +270,6 @@ fn pattern_format_rejects_unsupported_types() {
         check_rejected(declarations, "v", expected);
     }
     for (declarations, value) in [
-        ("typedef struct packed { bit [3:0] a; } s_t;", "s_t'(4'h3)"),
-        (
-            "typedef struct packed { bit [3:0] a; } s_t; s_t q[2];",
-            "q[0]",
-        ),
         ("int m[2][3];", "m[1]"),
         ("int a[4];", "a[1:2]"),
         ("typedef struct { int n; string s; } r_t; r_t q[$];", "q[0]"),
@@ -303,14 +278,17 @@ fn pattern_format_rejects_unsupported_types() {
              function automatic r_t make(); r_t r; r.n = 1; return r; endfunction",
             "make()",
         ),
-        (
-            "typedef struct packed { bit [3:0] a; } s_t; \
-             function automatic s_t make(); return s_t'(4'h3); endfunction",
-            "make()",
-        ),
     ] {
         check_rejected(declarations, value, "%p of a structure or unpacked array");
     }
+    // A packed structure is printed through one select of each member, so
+    // a function result, as any call that may have effects, is rejected.
+    check_rejected(
+        "typedef struct packed { bit [3:0] a; } s_t; \
+         function automatic s_t make(); return s_t'(4'h3); endfunction",
+        "make()",
+        "%p of a packed structure value of a call with effects",
+    );
     // An enum value is printed by name through more than one evaluation.
     for (declarations, value) in [
         ("typedef enum {A, B} e_t; e_t q[$];", "q.pop_front()"),
@@ -346,4 +324,290 @@ fn check_rejected(declarations: &str, value: &str, expected: &str) {
     };
     let error = error.to_string();
     assert!(error.contains(expected), "{declarations} {value}: {error}");
+}
+
+// `$psprintf`, which simulators take as `$sformatf` (IEEE 1800-2023
+// 21.3.3), formats as it does, at run time and as a constant (a documented
+// deviation).
+#[test]
+fn psprintf_is_sformatf() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+            localparam string NAME = $psprintf("unit%0d", 3);
+            string s;
+            int n = 5;
+            initial begin
+                s = $psprintf("%0d-%s", n, "x");
+                $display("%s %s", s, NAME);
+            end
+        endmodule
+    "#;
+    assert_eq!(
+        super::hierarchical_references::displayed(source),
+        ["5-x unit3"]
+    );
+}
+
+// `$sformatf` of constant expressions is a constant system function call
+// (IEEE 1800-2023 11.2.1): it gives parameters and parameter overrides
+// their values, here the instance names a design derives level by level.
+#[test]
+fn sformatf_of_constants_is_a_constant_expression() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Leaf #(parameter string ID = "", parameter int N = 0) ();
+            localparam string TAG = $sformatf("%s#%0d", ID, N);
+            initial #1 $display("%s|%s", ID, TAG);
+        endmodule
+        module Mid #(parameter string ID = "") ();
+            Leaf #(.ID($sformatf("%s-alu", ID)), .N(1)) alu();
+            for (genvar i = 0; i < 2; ++i) begin : g
+                Leaf #(.ID($sformatf("%s-socket%0d", ID, i)), .N(i + 10)) socket();
+            end
+        endmodule
+        module Top;
+            localparam int WIDTH = 12;
+            localparam string NAME = $sformatf("gbar%0d", WIDTH);
+            localparam string RADIX = $sformatf(
+                "%h/%0h/%d/%0d/%b/%o/%c%%", 12'h02a, 12'h02a, 8'd7, -8'sd7, 4'd5, 6'd9, 8'h41);
+            // A value wider than its characters is right-justified in its
+            // width; a string holds no NUL byte.
+            localparam string PADDED = $sformatf("[%s][%0s][%c]", 24'h004142, 24'h004142, 8'd0);
+            Mid #(.ID("core0")) core();
+            Mid #(.ID(NAME)) bar();
+            string padded, unpadded;
+            logic [23:0] characters = 24'h004142;
+            initial begin
+                $display("%s", RADIX);
+                // The same calls at run time.
+                padded = $sformatf("[%s][%0s][%c]", characters, characters, 8'd0);
+                unpadded = PADDED;
+                $display("%s %0d", PADDED, padded == unpadded);
+            end
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let mut displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed.remove(0), "02a/2a/  7/-7/0101/11/A%");
+    assert_eq!(displayed.remove(0), "[ AB][AB][] 1");
+    // The instances display in no specified order.
+    displayed.sort();
+    assert_eq!(
+        displayed,
+        [
+            "core0-alu|core0-alu#1",
+            "core0-socket0|core0-socket0#10",
+            "core0-socket1|core0-socket1#11",
+            "gbar12-alu|gbar12-alu#1",
+            "gbar12-socket0|gbar12-socket0#10",
+            "gbar12-socket1|gbar12-socket1#11",
+        ]
+    );
+}
+
+// A string parameter longer than an `i128` (16 bytes) still gives a
+// constant `$sformatf` override its value.
+#[test]
+fn sformatf_overrides_use_long_string_parameters() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Leaf #(parameter string ID = "") ();
+            initial #1 $display("%s", ID);
+        endmodule
+        module Mid #(parameter string ID = "") ();
+            Leaf #(.ID($sformatf("%s-alu-unit", ID))) alu();
+        endmodule
+        module Top;
+            Mid #(.ID("a-very-long-instance-name")) core();
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["a-very-long-instance-name-alu-unit"]);
+}
+
+// A NUL byte in the format value is removed before the directives are
+// parsed, as the runtime formatter removes it: `%\0d` is `%d`, with its
+// default field width, not `%0d`.
+#[test]
+fn sformatf_of_constants_ignores_nul_bytes_in_the_format() {
+    let source = r#"
+        module Leaf #(parameter string ID = "") ();
+            initial $display("[%s]", ID);
+        endmodule
+        module Top;
+            Leaf #(.ID($sformatf(24'h250064, 8'd7))) leaf();
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["[  7]"]);
+}
+
+// A string parameter that takes its value from an earlier wider string
+// parameter still gives a constant `$sformatf` override its value.
+#[test]
+fn sformatf_overrides_use_derived_long_string_parameters() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Leaf #(parameter string ID = "") ();
+            initial #1 $display("%s", ID);
+        endmodule
+        module Mid #(parameter string ID = "",
+                     parameter string TAG = ID) ();
+            Leaf #(.ID($sformatf("%s-alu", TAG))) alu();
+        endmodule
+        module Top;
+            Mid #(.ID("a-very-long-instance-name")) core();
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["a-very-long-instance-name-alu"]);
+}
+
+// A constant string-valued query is a constant `%s` operand: the packed
+// bytes of `$typename(...)` format as the string it names.
+#[test]
+fn sformatf_of_constants_formats_a_typename_operand() {
+    let source = r#"
+        module Leaf #(parameter string ID = "") ();
+            initial $display("%s", ID);
+        endmodule
+        module Top;
+            Leaf #(.ID($sformatf("%s", $typename(byte unsigned)))) leaf();
+            initial $display("%s", $sformatf("%s", $typename(byte unsigned)));
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed.len(), 2);
+    assert_eq!(displayed[0], displayed[1]);
+    assert!(displayed[0].contains("byte"), "{displayed:?}");
+}
+
+// A conversion of an operand too wide to fit the result is not folded;
+// it must decline without formatting the whole width first.
+#[test]
+fn sformatf_of_a_huge_operand_is_not_folded() {
+    let source = r#"
+        module Top;
+            localparam string NAME = $sformatf("%b", 100000000'b0);
+            initial #1 $display("%s", NAME);
+        endmodule
+    "#;
+    assert!(
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+            .build_cranelift()
+            .is_err()
+    );
+}
+
+sv_backends! {
+    // A packed structure prints as an assignment pattern with named members
+    // (IEEE 1800-2023 21.2.1.6): a packed structure member as a pattern, an
+    // enum member by name, others unformatted; also an element of a packed
+    // structure array, a member that is a structure and a conditional of
+    // two structures, as BlackParrot prints its configuration. An operator
+    // makes a vector of a structure, which prints as one (7.2.1, 11.4).
+    fn pattern_format_packed_structures(sim) {
+        @setup {
+            let source = r#"
+                module Top;
+                    typedef enum logic [1:0] {OFF, ON, IDLE} mode_e;
+                    typedef struct packed { logic [3:0] c; logic signed [3:0] d; } inner_t;
+                    typedef struct packed { logic [7:0] a; inner_t b; mode_e m; } outer_t;
+                    outer_t v;
+                    outer_t arr [2];
+                    string s;
+                    logic sel;
+                    struct packed { logic [3:0] \%s ; } esc;
+                    initial begin
+                        v = '{a: 8'd200, b: '{c: 4'd5, d: -4'sd3}, m: ON};
+                        arr[1] = v;
+                        arr[1].m = IDLE;
+                        $display("%p", v);
+                        s = $sformatf("<%p>", arr[1]);
+                        $display("%s", s);
+                        $display("%p", v.b);
+                        $display("%p", inner_t'(8'h5d));
+                        sel = 1;
+                        esc = 4'd6;
+                        $display("%p", sel ? v.b : inner_t'(8'h00));
+                        $display("%p", ~v.b);
+                        $display("%p", v.b << 1);
+                        $display("%p", esc);
+                    end
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("pattern_packed.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"'{a:200, b:'{c:5, d:-3}, m:ON}".to_vec() },
+            celox::RuntimeEvent::Display { message: b"<'{a:200, b:'{c:5, d:-3}, m:IDLE}>".to_vec() },
+            celox::RuntimeEvent::Display { message: b"'{c:5, d:-3}".to_vec() },
+            celox::RuntimeEvent::Display { message: b"'{c:5, d:-3}".to_vec() },
+            celox::RuntimeEvent::Display { message: b"'{c:5, d:-3}".to_vec() },
+            celox::RuntimeEvent::Display { message: b"162".to_vec() },
+            celox::RuntimeEvent::Display { message: b"186".to_vec() },
+            celox::RuntimeEvent::Display { message: br"'{\%s:6}".to_vec() },
+        ]);
+    }
 }

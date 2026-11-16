@@ -1,5 +1,8 @@
 (group nba_cross_block_empty (category sequential))
 
+; Test: Two always_ff blocks in the same module, same clock.
+; Block 1 updates `count`. Block 2 reads `count` to set `r_empty`.
+; NBA semantics: r_empty should see the OLD count value.
 (case test_same_module_count_and_empty_ff
   (source "test.veryl" #"
 module Top (
@@ -68,6 +71,8 @@ assign empty = r_empty;
   (tick clk)
   (assert_eq empty 1 "After settling: r_empty sees count=0 → empty=1"))
 
+; Test: count FF in parent module, r_empty FF in child module.
+; The child reads count through a port. NBA: should see OLD count.
 (case test_cross_module_count_and_empty_ff
   (source "test.veryl" #"
 module EmptyDetector (
@@ -144,6 +149,8 @@ r_empty: empty,
   (tick clk)
   (assert_eq empty 1 "empty=1 after settling"))
 
+; Stress test: push N items, pop all, verify empty eventually goes high.
+; This specifically catches the "empty=0 forever" bug.
 (case test_empty_never_stuck_at_zero
   (source "test.veryl" #"
 module Top (

@@ -1,4 +1,3 @@
-#[cfg(feature = "systemverilog")]
 #[test]
 fn supports_fixed_unpacked_array_selects() {
     let source = r#"
@@ -35,7 +34,6 @@ fn supports_fixed_unpacked_array_selects() {
     assert_eq!(simulator.get(all), 0x1312u16.into());
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn supports_fixed_unpacked_array_ports() {
     let source = r#"
@@ -61,7 +59,6 @@ fn supports_fixed_unpacked_array_ports() {
     assert_eq!(simulator.get(output), 0x34u8.into());
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn supports_fixed_multidimensional_unpacked_array_selects() {
     let source = r#"
@@ -96,7 +93,6 @@ fn supports_fixed_multidimensional_unpacked_array_selects() {
     assert_eq!(simulator.get(all), 0x1300_0000_0012u64.into());
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn preserves_typedef_owned_unpacked_array_dimensions() {
     let source = r#"
@@ -134,7 +130,6 @@ fn preserves_typedef_owned_unpacked_array_dimensions() {
     assert_eq!(simulator.get(all), 0x1312u16.into());
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn preserves_typedef_declarator_unpacked_array_dimensions() {
     let source = r#"
@@ -172,7 +167,6 @@ fn preserves_typedef_declarator_unpacked_array_dimensions() {
     assert_eq!(simulator.get(all), 0x1312u16.into());
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn preserves_signedness_of_unpacked_array_elements() {
     let source = r#"
@@ -201,7 +195,6 @@ fn preserves_signedness_of_unpacked_array_elements() {
     assert_eq!(simulator.get(output), 1u8.into());
 }
 
-#[cfg(feature = "systemverilog")]
 #[test]
 fn preserves_width_of_zero_literal_casts() {
     let source = r#"
@@ -219,7 +212,6 @@ fn preserves_width_of_zero_literal_casts() {
 }
 
 // Exercise physical layout and host API contracts as well as HDL behavior.
-#[cfg(feature = "systemverilog")]
 macro_rules! strided_backend_tests {
     ($name:ident, $build:ident) => {
         mod $name {
@@ -346,19 +338,15 @@ macro_rules! strided_backend_tests {
     };
 }
 
-#[cfg(feature = "systemverilog")]
 strided_backend_tests!(interpreter_strided, build_interpreter);
-#[cfg(all(
-    feature = "systemverilog",
-    any(
-        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-    )
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
 ))]
 strided_backend_tests!(native_strided, build_native);
-#[cfg(all(feature = "systemverilog", feature = "cranelift"))]
+#[cfg(feature = "cranelift")]
 strided_backend_tests!(cranelift_strided, build_cranelift);
-#[cfg(all(feature = "systemverilog", feature = "wasm-runtime"))]
+#[cfg(feature = "wasm-runtime")]
 strided_backend_tests!(wasm_strided, build_wasm);
 
 #[test]

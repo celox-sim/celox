@@ -63,6 +63,7 @@ jobs:
       rust_vpi_e2e: ${{ steps.classify.outputs.rust_vpi_e2e }}
       rust_features: ${{ steps.classify.outputs.rust_features }}
       rust_filter: ${{ steps.classify.outputs.rust_filter }}
+      rust_vtest: ${{ steps.classify.outputs.rust_vtest }}
       rust_backend_filter: ${{ steps.classify.outputs.rust_backend_filter }}
       rust_libraries: ${{ steps.classify.outputs.rust_libraries }}
       rust_library_features: ${{ steps.classify.outputs.rust_library_features }}
@@ -132,7 +133,7 @@ jobs:
           submodules: recursive
 
       - name: Install Nix
-        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31
+        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
 
       - name: Check locked Nix development environment
@@ -174,7 +175,7 @@ jobs:
 
       - name: cargo clippy
         if: needs.changes.outputs.fast_queue != 'true' && ((needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') && needs.changes.outputs.rust_full != 'false')
-        run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim --no-deps
+        run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim --no-deps
 
       - name: Lint the crates this pull request can affect
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_lint_packages != '')
@@ -224,6 +225,7 @@ jobs:
           bash scripts/tests/run-heliodor-bench-results.sh
           bash scripts/tests/run-heliodor-bench-gate.sh
           python3 -m unittest discover -s .updatecli/tests -v
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_run_vtest.py -v
           python3 -m venv "$RUNNER_TEMP/rtlmeter-tests"
           "$RUNNER_TEMP/rtlmeter-tests/bin/python" -m pip install -r benchmarks/rtlmeter/requirements.txt
           PYTHONDONTWRITEBYTECODE=1 "$RUNNER_TEMP/rtlmeter-tests/bin/python" -m unittest discover -s scripts/tests -p test_rtlmeter_bench.py -v
@@ -265,8 +267,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           # The vtest executor's build plan (profile, scope, features) lives in
-          # run-vtest.mjs; a change of it is a different cache.
-          key: vtest-${{ hashFiles('scripts/run-vtest.mjs') }}
+          # run-vtest.py; a change of it is a different cache.
+          key: vtest-${{ hashFiles('scripts/run-vtest.py') }}
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Initialize Rust test reports
@@ -286,13 +288,6 @@ jobs:
         with:
           tool: cargo-nextest@0.9.144
 
-      - name: Build the optimized vtest executor
-        if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_packages), ' celox '))
-        env:
-          CELOX_RUST_FULL: ${{ needs.changes.outputs.rust_full }}
-          BUILDS: ${{ needs.changes.outputs.rust_builds }}
-        run: node scripts/run-vtest.mjs --prepare-ci
-
       # Enable the frontend and suite features together so common integration
       # tests run once, rather than once per Cargo feature combination.
       # nextest schedules tests from all binaries on one pool; `cargo test`
@@ -305,7 +300,7 @@ jobs:
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false')
         run: >-
           cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci --cargo-profile vtest -E "$CELOX_BACKEND_FILTER"
-          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
+          --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the tests this pull request can affect
         id: scoped-tests
@@ -321,10 +316,35 @@ jobs:
         if: needs.changes.outputs.fast_queue == 'true'
         timeout-minutes: 20
         run: >-
-          cargo nextest run --locked -p celox --features systemverilog --profile ci
-          --test counter --test hierarchy --test native_exec
+          cargo nextest run --locked -p celox --profile ci
+          --test hierarchy --test native_exec
           --test simulation_limits --test sv_unit_scope --test sv_packages
           -E "$CELOX_BACKEND_FILTER"
+
+      # The suite cases run through scripts/run-vtest.py, not nextest: one
+      # executor process per case and backend of crates/celox/vtest.toml.
+      # The executor builds with the test build's profile, packages and
+      # features, so the workspace crates compile once for both.
+      - name: Run the suite cases this change can affect
+        id: vtest
+        if: >-
+          needs.changes.outputs.fast_queue != 'true'
+          && (needs.changes.outputs.rust_full != 'false' || needs.changes.outputs.rust_vtest != '')
+          && (success() || steps.workspace-tests.outcome == 'failure' || steps.scoped-tests.outcome == 'failure')
+        env:
+          CELOX_RUST_FULL: ${{ needs.changes.outputs.rust_full }}
+          BUILDS: ${{ needs.changes.outputs.rust_builds }}
+          SCOPE: ${{ needs.changes.outputs.rust_vtest }}
+        run: python3 scripts/run-vtest.py ${SCOPE:+--scope "$SCOPE"} --junit "$CELOX_CI_REPORT_DIR/vtest.xml"
+
+      - name: Run merge queue suite cases
+        id: queue-vtest
+        if: needs.changes.outputs.fast_queue == 'true' && (success() || steps.queue-tests.outcome == 'failure')
+        timeout-minutes: 20
+        run: >-
+          python3 scripts/run-vtest.py --cargo-profile dev
+          'veryl/counter::' 'veryl/hierarchy::'
+          --junit "$CELOX_CI_REPORT_DIR/vtest.xml"
 
       - name: Collect Rust test reports
         if: success() || failure()
@@ -354,7 +374,7 @@ jobs:
           token: ${{ secrets.MERGIFY_TOKEN }}
           report_path: work/ci-reports/rust/*.xml
           job_name: rust-tests
-          test_step_outcome: ${{ steps.queue-tests.outcome != 'skipped' && steps.queue-tests.outcome || steps.cocotb-tests.outcome == 'failure' && 'failure' || steps.workspace-tests.outcome != 'skipped' && steps.workspace-tests.outcome || steps.scoped-tests.outcome }}
+          test_step_outcome: ${{ (steps.vtest.outcome == 'failure' || steps.queue-vtest.outcome == 'failure') && 'failure' || steps.queue-tests.outcome != 'skipped' && steps.queue-tests.outcome || steps.cocotb-tests.outcome == 'failure' && 'failure' || steps.workspace-tests.outcome != 'skipped' && steps.workspace-tests.outcome || steps.scoped-tests.outcome != 'skipped' && steps.scoped-tests.outcome || steps.vtest.outcome }}
 
       # nextest does not run documentation tests. They build with the tests'
       # profile, so they reuse the libraries the test build compiled.
@@ -362,7 +382,7 @@ jobs:
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false')
         run: >-
           cargo test --locked --workspace --exclude 'lydite*' --doc --profile vtest
-          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
+          --features celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the documentation tests of the changed libraries
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full == 'false' && needs.changes.outputs.rust_libraries != '')
@@ -423,7 +443,7 @@ jobs:
           git -C "$RUNNER_TEMP/common-cells" checkout -q FETCH_HEAD
 
       - name: Build the SystemVerilog CLI
-        run: cargo build --locked -p celox-vpi --features systemverilog --bin celox
+        run: cargo build --locked -p celox --bin celox
 
       - name: Run upstream TB and assertion negative control
         run: >-
@@ -466,7 +486,7 @@ jobs:
           python scripts/run-rtlmeter-bench.py prepare "$RUNNER_TEMP/rtlmeter"
 
       - name: Build the SystemVerilog CLI
-        run: cargo build --locked --release -p celox-vpi --features systemverilog --bin celox
+        run: cargo build --locked --release -p celox --bin celox
 
       - name: Verify RTLMeter completion and cycle counts
         run: >-
@@ -496,7 +516,7 @@ jobs:
     timeout-minutes: 120
     env:
       CELOX_SV_FORCE_OUT_OF_LINE: "1"
-      CELOX_TEST_FEATURES: systemverilog,cranelift,wasm-runtime
+      CELOX_TEST_FEATURES: cranelift,wasm-runtime
     steps:
       - uses: actions/checkout@v7
         with:
@@ -511,10 +531,19 @@ jobs:
         with:
           tool: cargo-nextest@0.9.144
 
-      - name: Run the SystemVerilog suite with calls out of line
-        run: node scripts/run-vtest.mjs --test systemverilog --no-fail-fast
+      - name: Run the SystemVerilog tests with calls out of line
+        run: >-
+          cargo nextest run --locked -p celox --cargo-profile vtest --no-fail-fast
+          --features "celox-test-suite/runtime-cases,$CELOX_TEST_FEATURES" --test systemverilog
+
+      - name: Run the SystemVerilog suite cases with calls out of line
+        if: success() || failure()
+        run: python3 scripts/run-vtest.py --language sv
 
   # The driver is built once; the shards run the conformance cases with it.
+  # Pull requests run every case except the UVM ones in one job; the UVM
+  # cases are nearly all of the corpus' time, and full runs (daily, release,
+  # `ci:full`) cover them in shards of their own.
   sv-tests:
     name: sv-tests driver
     needs: changes
@@ -533,7 +562,7 @@ jobs:
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Build the Celox single-case driver
-        run: cargo build --locked --release -p celox --features systemverilog --example sv_tests
+        run: cargo build --locked --release -p celox --example sv_tests
 
       - name: Hand the driver to the shards
         uses: actions/upload-artifact@v7
@@ -543,8 +572,14 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # The cases compiled with the UVM library (libs.json) take up to about
+  # 175 s and typically peak at 5.5-9 GB each (uvm_test_init at 12.8 GB) with
+  # the release driver, so they run one at a time in twelve shards of their
+  # own, under a longer case timeout;
+  # the others run four at a time. Full validation runs both sets, a pull
+  # request the main set.
   sv-tests-shard:
-    name: sv-tests conformance (${{ matrix.shard }}/5)
+    name: sv-tests conformance${{ matrix.set == 'library' && ' UVM' || '' }} (${{ matrix.shard }}/${{ matrix.of }})
     needs: [changes, sv-tests]
     if: ${{ !cancelled() && needs.sv-tests.result == 'success' }}
     runs-on: ubuntu-latest
@@ -552,7 +587,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
+        include: ${{ fromJSON(needs.changes.outputs.full_validation == 'false' && '[{"set":"main","shard":1,"of":1}]' || '[{"set":"main","shard":1,"of":5},{"set":"main","shard":2,"of":5},{"set":"main","shard":3,"of":5},{"set":"main","shard":4,"of":5},{"set":"main","shard":5,"of":5},{"set":"library","shard":1,"of":12},{"set":"library","shard":2,"of":12},{"set":"library","shard":3,"of":12},{"set":"library","shard":4,"of":12},{"set":"library","shard":5,"of":12},{"set":"library","shard":6,"of":12},{"set":"library","shard":7,"of":12},{"set":"library","shard":8,"of":12},{"set":"library","shard":9,"of":12},{"set":"library","shard":10,"of":12},{"set":"library","shard":11,"of":12},{"set":"library","shard":12,"of":12}]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -580,7 +615,7 @@ jobs:
         run: python conformance/sv-tests/prepare.py "$RUNNER_TEMP/sv-tests"
 
       - name: Validate the adapter against the official runner
-        if: matrix.shard == 1
+        if: matrix.set == 'main' && matrix.shard == 1
         env:
           SV_TESTS_ROOT: ${{ runner.temp }}/sv-tests
           PYTHONDONTWRITEBYTECODE: "1"
@@ -594,6 +629,10 @@ jobs:
 
       # The unmodified upstream tools/runner owns test selection and judgement.
       # Improvements also require review before changing the retained results.
+      # The UVM shards' 480-second case timeout absorbs runner variance at
+      # their memory peak (uvm_test_init, 12.8 GB, once took over 300 seconds);
+      # it comes back down to 300 once the memory stack (#3881-#3883, #3886)
+      # lands.
       - name: Compare official runner verdicts with the retained expectations
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -602,10 +641,11 @@ jobs:
           python conformance/sv-tests/run.py "$RUNNER_TEMP/sv-tests"
           --driver "$RUNNER_TEMP/driver/sv_tests"
           --out-dir "$RUNNER_TEMP/sv-tests-results"
-          --jobs 4
-          --case-timeout 78
+          --jobs ${{ matrix.set == 'library' && 1 || 4 }}
+          --case-timeout ${{ matrix.set == 'library' && 480 || 78 }}
           --state-mode both
-          --shard ${{ matrix.shard }}/5
+          --shard ${{ matrix.shard }}/${{ matrix.of }}
+          ${{ matrix.set == 'library' && '--only-library-cases' || '--exclude-library-cases' }}
           --expected conformance/sv-tests/expected.tsv
           --report "$RUNNER_TEMP/sv-tests-report.tsv"
 
@@ -622,7 +662,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: sv-tests-report-${{ matrix.shard }}
+          name: sv-tests-report-${{ matrix.set == 'library' && 'uvm-' || '' }}${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/sv-tests-report.tsv
             ${{ runner.temp }}/sv-tests-report.summary.json
@@ -821,11 +861,11 @@ jobs:
         run: cargo test --locked -p celox --lib --test native_exec
 
       - name: Test hotspot JIT on AArch64
-        run: cargo test --locked -p celox --features systemverilog --lib hotspot
+        run: cargo test --locked -p celox --lib hotspot
 
       - name: Test partial-word reduction AND on AArch64
         run: >-
-          cargo test --locked -p celox --features systemverilog,cranelift,wasm-runtime,wasm-component
+          cargo test --locked -p celox --features cranelift,wasm-runtime,wasm-component
           --test systemverilog wide_reduction_and_respects_partial_storage_words::native
 
       - name: Check x86-64 cross-codegen from AArch64

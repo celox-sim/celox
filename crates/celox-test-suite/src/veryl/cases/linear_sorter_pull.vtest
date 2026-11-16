@@ -182,6 +182,8 @@ pub module Top #(
   ; settle
   (assert_eq empty 1 "Should be empty after popping all elements"))
 
+; Focused test: push one element, then pop it.
+; The empty flag should go 1 → 0 → 1 across the three phases.
 (case test_sorter_empty_flag_single_push_pop
   (source "test.veryl" #"
 proto package SorterItemProto {
@@ -348,6 +350,7 @@ pub module Top #(
   (tick clk)
   (assert_eq empty 1 "still empty"))
 
+; Test: push+pop simultaneously — count should not change.
 (case test_sorter_simultaneous_push_pop
   (source "test.veryl" #"
 proto package SorterItemProto {

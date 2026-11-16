@@ -80,6 +80,18 @@ pub enum SystemFunction {
     Bits,
     /// `$isunbounded` (20.6.3).
     Isunbounded,
+    /// `$coverage_control` (40.3.2.1).
+    CoverageControl,
+    /// `$coverage_get_max` (40.3.2.2).
+    CoverageGetMax,
+    /// `$coverage_get` (40.3.2.3).
+    CoverageGet,
+    /// `$coverage_merge` (40.3.2.4).
+    CoverageMerge,
+    /// `$coverage_save` (40.3.2.5).
+    CoverageSave,
+    /// `$get_coverage` (19.9).
+    GetCoverage,
     /// `$dimensions` (20.7).
     Dimensions,
     /// `$unpacked_dimensions` (20.7).
@@ -317,6 +329,12 @@ impl SystemFunction {
             Self::Typename => "$typename",
             Self::Bits => "$bits",
             Self::Isunbounded => "$isunbounded",
+            Self::CoverageControl => "$coverage_control",
+            Self::CoverageGetMax => "$coverage_get_max",
+            Self::CoverageGet => "$coverage_get",
+            Self::CoverageMerge => "$coverage_merge",
+            Self::CoverageSave => "$coverage_save",
+            Self::GetCoverage => "$get_coverage",
             Self::Dimensions => "$dimensions",
             Self::UnpackedDimensions => "$unpacked_dimensions",
             Self::Size => "$size",
@@ -368,6 +386,21 @@ impl SystemFunction {
             Support::Function(function) => Some(function),
             Support::Task(..) | Support::Unsupported => None,
         }
+    }
+
+    /// The coverage functions (19.9, 40.3.2), whose calls fold to their
+    /// results without coverage. None is a constant system function
+    /// (11.2.1).
+    pub fn is_coverage(self) -> bool {
+        matches!(
+            self,
+            Self::CoverageControl
+                | Self::CoverageGetMax
+                | Self::CoverageGet
+                | Self::CoverageMerge
+                | Self::CoverageSave
+                | Self::GetCoverage
+        )
     }
 
     /// The queries of a data object's or type's shape (20.6.2, 20.7), whose
@@ -527,6 +560,11 @@ impl SystemFunction {
             | Self::Clog2
             | Self::Countbits
             | Self::Countones
+            | Self::CoverageControl
+            | Self::CoverageGetMax
+            | Self::CoverageGet
+            | Self::CoverageMerge
+            | Self::CoverageSave
             | Self::ScopeRandomize
             | Self::ScopeRandomizeEnum => Some((32, true)),
             Self::Onehot
@@ -561,7 +599,11 @@ impl SystemFunction {
             | Self::Feof => Some((32, true)),
             Self::Urandom | Self::UrandomRange | Self::Stime | Self::Fopen => Some((32, false)),
             Self::Rtoi => Some((32, true)),
-            Self::Itor | Self::Bitstoreal | Self::Realtobits | Self::Realtime => Some((64, false)),
+            Self::Itor
+            | Self::Bitstoreal
+            | Self::Realtobits
+            | Self::Realtime
+            | Self::GetCoverage => Some((64, false)),
             Self::Shortrealtobits | Self::Bitstoshortreal => Some((32, false)),
             Self::Time => Some((64, false)),
             Self::Signed
@@ -597,8 +639,23 @@ pub enum SystemTask {
     /// `$printtimescale` (20.4.1); the analyzer rewrites it into a
     /// [`SystemTask::Display`] of the message.
     Printtimescale,
+    /// `$timeformat` (20.4.3), whose arguments the analyzer makes the
+    /// powers of ten from the simulation's time unit to the reported unit,
+    /// the precision, the suffix and the minimum field width that `%t`
+    /// reports with until the next call.
+    Timeformat,
+    /// `$set_coverage_db_name` (40.3.2.7); with no coverage database the
+    /// analyzer drops the call.
+    SetCoverageDbName,
+    /// `$load_coverage_db` (40.3.2.7); with no coverage database the
+    /// analyzer drops the call.
+    LoadCoverageDb,
     /// `$fatal` (20.10).
     Fatal,
+    /// `$asserton` and `$assertoff` (20.11); the analyzer rewrites them
+    /// into assignments of the assertion control state of the design.
+    AssertOn,
+    AssertOff,
     /// `$error`, `$warning`, `$info` (20.10).
     Severity(Severity),
     /// `$display` and its `b`, `o` and `h` variants (21.2.1).
@@ -724,7 +781,12 @@ impl SystemTask {
             Self::Stop => "$stop",
             Self::Exit => "$exit",
             Self::Printtimescale => "$printtimescale",
+            Self::Timeformat => "$timeformat",
+            Self::SetCoverageDbName => "$set_coverage_db_name",
+            Self::LoadCoverageDb => "$load_coverage_db",
             Self::Fatal => "$fatal",
+            Self::AssertOn => "$asserton",
+            Self::AssertOff => "$assertoff",
             Self::Severity(Severity::Error) => "$error",
             Self::Severity(Severity::Warning) => "$warning",
             Self::Severity(Severity::Info) => "$info",
@@ -1151,7 +1213,9 @@ pub enum ContainerOp {
     CaseEqual,
     New,
     Literal,
-    /// Empty associative array with the supplied default element.
+    /// Empty container with the supplied default element: an associative
+    /// array's default, or the element a dynamic array's `New` takes for
+    /// the elements past the ones it copies (`new[n]('{default: v})`).
     WithDefault,
     /// An associative array of the pattern `'{k0: v0, ..., default: d}`
     /// (IEEE 1800-2023 10.9.1): with `default`, the first argument is the
@@ -1263,11 +1327,27 @@ impl ContainerOp {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ObjectOp {
     Randomize(celox_heap::randomization::Program),
+    /// Solve the random variables in the arguments of the functions the
+    /// constraints of the program call, as [`ObjectOp::Randomize`] takes its
+    /// arguments, without changing the object: whether they have a solution
+    /// (IEEE 1800-2023 18.5.11).
+    SolveArguments(celox_heap::randomization::Program),
+    /// The value of argument `0` of the last [`ObjectOp::SolveArguments`].
+    ArgumentValue(u32),
+    /// `std::randomize(v...) with { ... }` (IEEE 1800-2023 18.12.1): the
+    /// variables in the first arguments, one field of the program each at
+    /// its offset, solved in a new object and written back on success; the
+    /// values the constraints read follow.
+    ScopeRandomize(celox_heap::randomization::Program),
     /// Register the constraint program of class `0` for the objects of it
     /// that rand handles reach (IEEE 1800-2023 18.4).
     RegisterProgram(u32, celox_heap::randomization::Registered),
     /// Whether class `0` registered its constraint program.
     ProgramRegistered(u32),
+    /// Register the static constraint blocks of class `0`: each block's
+    /// index with the class that declares it, whose objects share its mode
+    /// (IEEE 1800-2023 18.5.11).
+    RegisterStaticBlocks(u32, Vec<(u32, u32)>),
     /// The number of objects the enabled rand object handles of the object
     /// in the argument refer to, whose pre_randomize hooks run (18.6.2);
     /// `VisitExpand` adds those of the visited object in the argument once
@@ -1302,10 +1382,15 @@ pub enum ObjectOp {
     /// Draw a domain index without replacement for the property at `offset`.
     RandomCyclic {
         offset: u32,
-        count: u16,
+        count: u32,
     },
     /// Seed the object's RNG from the second argument.
     Seed,
+    /// The state of the object's RNG, as a string (IEEE 1800-2023 18.13.4).
+    GetRandstate,
+    /// Restore the object's RNG from the string in the second argument
+    /// (18.13.5).
+    SetRandstate,
     /// Validate a receiver; a nonzero class also rejects unsupported dynamic
     /// dispatch through a base handle before randomizing its properties.
     Check(u32),
@@ -1473,6 +1558,7 @@ impl ObjectOp {
     /// Memory arguments changed by a container operation, including traversal's ref index.
     pub fn writes_argument(&self, position: usize) -> bool {
         match self {
+            Self::ScopeRandomize(program) => position < program.fields.len(),
             Self::Container { op, .. } if op.mutates() => position == 0,
             Self::Container {
                 op: ContainerOp::First | ContainerOp::Last | ContainerOp::Next | ContainerOp::Prev,
@@ -1488,14 +1574,19 @@ impl ObjectOp {
             Self::Container { op, layout } => op.result_type(*layout),
             Self::Random | Self::RandomCyclic { .. } => (64, false),
             Self::ProgramRegistered(_) => (1, false),
+            Self::ArgumentValue(_) => (64, false),
             Self::Randomize(_)
+            | Self::SolveArguments(_)
             | Self::RegisterProgram(..)
+            | Self::RegisterStaticBlocks(..)
             | Self::VisitBegin
             | Self::VisitExpand
             | Self::VisitSolved
             | Self::Visit
             | Self::VisitEnd
             | Self::Seed
+            | Self::GetRandstate
+            | Self::SetRandstate
             | Self::Check(_)
             | Self::ConstraintModeSet(_)
             | Self::ModeSet(_)
@@ -1503,7 +1594,8 @@ impl ObjectOp {
             | Self::ModePop
             | Self::ModeSelect(..)
             | Self::ModeSelected(_) => (32, false),
-            Self::ModeGet(..) | Self::ConstraintModeGet(_) => (32, true),
+            // `std::randomize` returns an `int` (IEEE 1800-2023 18.12).
+            Self::ScopeRandomize(_) | Self::ModeGet(..) | Self::ConstraintModeGet(_) => (32, true),
             Self::Load(field) => (field.width as usize, field.signed),
             Self::Unbox(record) => (record.width(), false),
             Self::Stream(op) => op.result_type(),
@@ -1534,7 +1626,11 @@ impl fmt::Display for ObjectOp {
             Self::ClassOf => "class query",
             Self::Random => "object random bits",
             Self::Randomize(_) => "constrained object randomization",
+            Self::ScopeRandomize(_) => "constrained scope randomization",
+            Self::SolveArguments(_) => "solve of the arguments of constraint functions",
+            Self::ArgumentValue(_) => "constraint function argument",
             Self::RegisterProgram(..) => "constraint program registration",
+            Self::RegisterStaticBlocks(..) => "static constraint block registration",
             Self::ProgramRegistered(_) => "constraint program query",
             Self::VisitBegin => "begin randomization visits",
             Self::VisitSolved => "begin solved randomization visits",
@@ -1543,6 +1639,8 @@ impl fmt::Display for ObjectOp {
             Self::VisitEnd => "end randomization visits",
             Self::RandomCyclic { .. } => "object random cyclic index",
             Self::Seed => "object random seed",
+            Self::GetRandstate => "object random state",
+            Self::SetRandstate => "object random state update",
             Self::Check(_) => "object receiver check",
             Self::ModeGet(..) => "random mode query",
             Self::ConstraintModeGet(_) => "constraint mode query",
@@ -1938,7 +2036,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     function(SystemFunction::Realtime, 0, Some(0)),
     // 20.4 Timescale system tasks and system functions
     task(SystemTask::Printtimescale, ProceduralAndInitial, 0, Some(1)),
-    unsupported("$timeformat", Task),
+    task(SystemTask::Timeformat, ProceduralAndInitial, 0, Some(4)),
     function(SystemFunction::Timeunit, 0, Some(1)),
     function(SystemFunction::Timeprecision, 0, Some(1)),
     // 20.5 Conversion functions
@@ -2021,8 +2119,8 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
         None,
     ),
     // 20.11 Assertion control system tasks
-    unsupported("$asserton", Task),
-    unsupported("$assertoff", Task),
+    task(SystemTask::AssertOn, ProceduralAndInitial, 0, None),
+    task(SystemTask::AssertOff, ProceduralAndInitial, 0, None),
     unsupported("$assertkill", Task),
     unsupported("$assertpasson", Task),
     unsupported("$assertpassoff", Task),
@@ -2048,15 +2146,21 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$falling_gclk", Function),
     unsupported("$steady_gclk", Function),
     unsupported("$changing_gclk", Function),
-    // 20.13 Coverage system functions
-    unsupported("$coverage_control", Function),
-    unsupported("$coverage_get_max", Function),
-    unsupported("$coverage_get", Function),
-    unsupported("$coverage_merge", Function),
-    unsupported("$coverage_save", Function),
-    unsupported("$get_coverage", Function),
-    unsupported("$set_coverage_db_name", Task),
-    unsupported("$load_coverage_db", Task),
+    // 40.3.2 Coverage system functions. Celox collects no code coverage,
+    // so binding constant-folds them to their no-coverage results.
+    function(SystemFunction::CoverageControl, 4, Some(4)),
+    function(SystemFunction::CoverageGetMax, 3, Some(3)),
+    function(SystemFunction::CoverageGet, 3, Some(3)),
+    function(SystemFunction::CoverageMerge, 2, Some(2)),
+    function(SystemFunction::CoverageSave, 2, Some(2)),
+    function(SystemFunction::GetCoverage, 0, Some(0)),
+    task(
+        SystemTask::SetCoverageDbName,
+        ProceduralAndInitial,
+        1,
+        Some(1),
+    ),
+    task(SystemTask::LoadCoverageDb, ProceduralAndInitial, 1, Some(1)),
     // 20.14 Probabilistic distribution functions
     function(SystemFunction::Random, 0, Some(1)),
     function(SystemFunction::DistUniform, 3, Some(3)),
@@ -2438,6 +2542,10 @@ pub fn lookup(name: &str) -> Option<&'static SystemTf> {
 pub enum Body {
     /// `always`, `always_comb`, or `always_ff`.
     Always,
+    /// An `always` or `always_ff` that runs as a process: it suspends on
+    /// its event control, as an initial body may, and it may call the
+    /// procedural system tasks an always body may.
+    Process,
     Initial,
     /// A final procedure, restricted to function statements (9.2.3).
     Final,

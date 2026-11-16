@@ -155,11 +155,11 @@ pub(super) fn assignment_value(
     // value. Preserve its leaf expressions instead of resizing the handles
     // and state bits together as an integral vector (10.9.2).
     if shape.unpacked.is_empty()
-        && let Some(target) = &shape.unpacked_struct
+        && let Some(target) = shape.unpacked_struct_in(&session.types)
         && value_type.is_some_and(|ty| {
             ty.unpacked_ranges().is_empty()
                 && ty
-                    .unpacked_struct()
+                    .unpacked_struct_in(&session.types)
                     .is_some_and(|actual| actual.same_type(target))
         })
     {
@@ -210,7 +210,7 @@ pub(super) fn assignment_value(
                 count
             ]));
         }
-        if let Some(aggregate) = &shape.unpacked_struct {
+        if let Some(aggregate) = shape.unpacked_struct_in(&session.types).cloned() {
             return Ok(Expr::Concat(
                 aggregate
                     .members()
@@ -222,7 +222,7 @@ pub(super) fn assignment_value(
                             value,
                             signed,
                             value_type,
-                            &procedural::dimensions_from_type(&member.r#type),
+                            &shape.member_shape(&session.types, &member.name, &member.r#type),
                             dims,
                             true,
                         )
@@ -230,16 +230,19 @@ pub(super) fn assignment_value(
                     .collect::<Converted<_>>()?,
             ));
         }
-        if !shape.members.is_empty() {
-            if shape
-                .members
-                .iter()
-                .any(packed_structs::PackedMember::is_tagged)
-                || (shape.members.len() > 1
-                    && shape.members.iter().all(|member| member.offset() == 0))
-            {
-                return Err(unsupported("assignment pattern for a packed union"));
-            }
+        if shape
+            .members
+            .iter()
+            .any(packed_structs::PackedMember::is_tagged)
+        {
+            return Err(unsupported("assignment pattern for a packed union"));
+        }
+        // A default reaches the members of a nested structure only (10.9.2):
+        // a packed union member takes the value as a whole, as any other
+        // packed member does (7.3.1).
+        let union =
+            shape.members.len() > 1 && shape.members.iter().all(|member| member.offset() == 0);
+        if !shape.members.is_empty() && !union {
             return Ok(Expr::Concat(
                 shape
                     .members
@@ -251,7 +254,7 @@ pub(super) fn assignment_value(
                             value,
                             signed,
                             value_type,
-                            &procedural::dimensions_from_type(member.r#type()),
+                            &shape.member_shape(&session.types, member.name(), member.r#type()),
                             dims,
                             true,
                         )
@@ -262,7 +265,9 @@ pub(super) fn assignment_value(
     }
     // Structure metadata on an array describes its element, not a scalar
     // structure value. Array-valued items use the compatibility path below.
-    if (shape.unpacked.is_empty() && shape.unpacked_struct.is_some())
+    if (shape.unpacked.is_empty() && unpacked_structs::holds_struct(shape, tree, session, dims))
+        // The type of the value expression is made from its operands,
+        // without a semantic type of its own.
         || value_type
             .is_some_and(|ty| ty.unpacked_ranges().is_empty() && ty.unpacked_struct().is_some())
     {
@@ -271,10 +276,11 @@ pub(super) fn assignment_value(
         ));
     }
     let actual_shape = value_type.map(procedural::dimensions_from_type);
-    let actual = actual_shape
-        .as_ref()
-        .and_then(|actual| array_compatibility::unpacked_array_type(&tree.functions, actual, dims));
-    let target = array_compatibility::unpacked_array_type(&tree.functions, shape, dims);
+    let actual = actual_shape.as_ref().and_then(|actual| {
+        array_compatibility::unpacked_array_type(&tree.functions, &session.types, actual, dims)
+    });
+    let target =
+        array_compatibility::unpacked_array_type(&tree.functions, &session.types, shape, dims);
     if let Some((actual, target)) = actual_shape
         .as_ref()
         .and_then(|actual| array_compatibility::incompatible(tree, session, actual, shape, dims))

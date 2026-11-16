@@ -123,6 +123,7 @@ fn functions() -> ConstantFunctions {
                     signed: false,
                     array_slice_width: None,
                     array_slice_reversed: false,
+                    window: None,
                     is_2state: false,
                 },
                 rhs: literal("4'ha"),
@@ -211,6 +212,7 @@ fn copied_call(
                     .into_iter()
                     .map(|(name, ty)| (name, (ty.width, ty.signed)))
                     .collect(),
+                ranges: HashMap::default(),
                 two_state: HashSet::default(),
             },
             budget: &mut budget,
@@ -513,6 +515,7 @@ fn partial_return_assignments_reach_the_127_and_128_bit_boundaries() {
             signed: false,
             array_slice_width: None,
             array_slice_reversed: false,
+            window: None,
             is_2state: false,
         };
         let mut function = function(
@@ -559,6 +562,7 @@ fn partial_returns_preserve_unwritten_unknown_bits() {
                 signed: false,
                 array_slice_width: None,
                 array_slice_reversed: false,
+                window: None,
                 is_2state: false,
             },
             rhs: literal("2'b01"),
@@ -591,6 +595,7 @@ fn full_width_return_assignments_keep_all_128_bits() {
                 signed: false,
                 array_slice_width: None,
                 array_slice_reversed: false,
+                window: None,
                 is_2state: false,
             },
             rhs: literal("128'hfedcba98765432100123456789abcdef"),

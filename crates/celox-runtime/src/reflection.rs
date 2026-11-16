@@ -28,6 +28,10 @@ pub struct ReflectionScope {
     pub parent: Option<ReflectionScopeId>,
     pub children: Vec<ReflectionScopeId>,
     pub signals: Vec<ReflectionSignalId>,
+    /// The scope is a package, which holds the package's variables outside
+    /// the hierarchy of module instances.
+    #[serde(default)]
+    pub package: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,8 +103,13 @@ impl DesignReflection {
         if self.scopes[0].parent.is_some() {
             return Err("reflection root scope has a parent".into());
         }
+        // Every scope without a parent is a top-level module (IEEE 1800-2023
+        // 23.3.1); the name order puts one first.
         for (index, scope) in self.scopes.iter().enumerate() {
-            if index != 0 && scope.parent.and_then(|parent| self.scope(parent)).is_none() {
+            if scope
+                .parent
+                .is_some_and(|parent| self.scope(parent).is_none())
+            {
                 return Err(format!("scope `{}` has an invalid parent", scope.full_name));
             }
             if index > 0 && self.scopes[index - 1].full_name >= scope.full_name {

@@ -22,7 +22,7 @@ fn unresolved_local_parameter_masks_imported_bindings() {
     let parameters = parameters_from_scope(
         &tree,
         session,
-        &HashMap::default(),
+        &TypeAliases::default(),
         &imported.const_env,
         &HashMap::default(),
     )
@@ -49,7 +49,7 @@ fn unresolved_local_parameter_masks_imported_bindings() {
     let specialized = parameters_from_scope(
         &tree,
         session,
-        &HashMap::default(),
+        &TypeAliases::default(),
         &imported.const_env,
         &overrides,
     )
@@ -78,7 +78,7 @@ fn short_circuit_proof_does_not_inherit_a_required_parameter_literal() {
     let error = parameters_from_scope(
         &tree,
         session,
-        &HashMap::default(),
+        &TypeAliases::default(),
         &ConstEnv::default(),
         &HashMap::default(),
     )
@@ -200,7 +200,7 @@ fn incremental_collection_binds_each_prefix_entry_once() {
     let parameters = parameters_from_scope(
         &tree,
         session,
-        &HashMap::default(),
+        &TypeAliases::default(),
         &ConstEnv::default(),
         &HashMap::default(),
     )
@@ -216,7 +216,7 @@ fn incremental_collection_binds_each_prefix_entry_once() {
         &tree,
         session,
         &ConstEnv::default(),
-        &HashMap::default(),
+        &TypeAliases::default(),
         &HashMap::default(),
     )
     .unwrap();
@@ -351,7 +351,7 @@ fn collects_the_declarations_of_a_package() {
     let parameters = parameters_from_scope(
         &tree,
         session,
-        &HashMap::default(),
+        &TypeAliases::default(),
         &ConstEnv::default(),
         &HashMap::default(),
     )
@@ -391,7 +391,7 @@ fn numeric_ranged_headers_do_not_copy_the_environment() {
         let parameters = parameters_from_scope(
             &tree,
             session,
-            &HashMap::default(),
+            &TypeAliases::default(),
             &ConstEnv::default(),
             &HashMap::default(),
         )
@@ -490,7 +490,7 @@ fn four_state_prefix_keeps_the_separate_range_projection() {
     let parameters = parameters_from_scope(
         &tree,
         session,
-        &HashMap::default(),
+        &TypeAliases::default(),
         &base,
         &HashMap::default(),
     )
@@ -583,7 +583,7 @@ fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_sha
                 &mut borrowed,
                 false,
                 &base,
-                &HashMap::default(),
+                &TypeAliases::default(),
                 &HashMap::default(),
                 &mut borrowed_env,
             )
@@ -595,7 +595,7 @@ fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_sha
                 &mut copied,
                 false,
                 &base,
-                &HashMap::default(),
+                &TypeAliases::default(),
                 &HashMap::default(),
                 &mut copied_env,
             )
@@ -1479,7 +1479,7 @@ fn unbased_parameter_overrides_fill_declared_width_before_dependent_parameters()
         let mut parameters = parameters_from_scope(
             &tree,
             session,
-            &HashMap::default(),
+            &TypeAliases::default(),
             &ConstEnv::default(),
             &overrides,
         )
@@ -1523,7 +1523,7 @@ fn inherited_alias_prefixes_bind_once_without_copying_declaration_environments()
         let parameters = parameters_from_scope(
             &tree,
             session,
-            &HashMap::default(),
+            &TypeAliases::default(),
             &base,
             &HashMap::default(),
         )
@@ -1666,7 +1666,7 @@ fn body_parameters_are_local_where_the_lrm_makes_them_so() {
         let parameters = parameters_from_scope(
             &tree,
             session,
-            &HashMap::default(),
+            &TypeAliases::default(),
             &ConstEnv::default(),
             &HashMap::default(),
         )
@@ -1679,4 +1679,51 @@ fn body_parameters_are_local_where_the_lrm_makes_them_so() {
             "{source}"
         );
     }
+}
+
+/// The member constants of a structure parameter are keyed by its name
+/// last, as its other markers are, so that an import or a hiding name
+/// takes or drops them with the parameter.
+#[test]
+fn member_constants_follow_their_parameter() {
+    let mut env = ConstEnv::default();
+    env.insert(parameter_members_marker("pkg::cfg"), 1);
+    env.insert(parameter_member_value_marker("pkg::cfg", "a.b"), 5);
+    env.insert(
+        parameter_member_type_marker("pkg::cfg", "a.b"),
+        (4 << 1) | 1,
+    );
+    env.insert(parameter_members_marker("other"), 1);
+    env.insert(parameter_member_value_marker("other", "a.b"), 9);
+    env.insert(parameter_member_type_marker("other", "a.b"), 8 << 1);
+    let mut keys = member_keys("pkg::cfg", &env);
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "__parameter::member::type::a.b::pkg::cfg",
+            "__parameter::member::value::a.b::pkg::cfg",
+            "__parameter::members::pkg::cfg",
+        ]
+    );
+    assert!(binding_keys("pkg::cfg", &env, 0).contains(&keys[1]));
+    // A name without the count marker has none, also one that ends alike.
+    assert!(member_keys("cfg", &env).is_empty());
+    assert_eq!(
+        scope::split_marker(&keys[1]),
+        Some(("__parameter::member::value::a.b::", "pkg::cfg"))
+    );
+    assert_eq!(
+        scope::split_marker(&keys[2]),
+        Some(("__parameter::members::", "pkg::cfg"))
+    );
+    assert_eq!(
+        member_literal("pkg::cfg", "a.b", &env).as_deref(),
+        Some("4'sd5")
+    );
+    assert_eq!(
+        member_literal("other", "a.b", &env).as_deref(),
+        Some("8'd9")
+    );
+    assert_eq!(member_literal("other", "a", &env), None);
 }

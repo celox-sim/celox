@@ -1,34 +1,5 @@
-#[path = "test_utils/mod.rs"]
-#[macro_use]
-#[allow(unused_macros)]
-mod test_utils;
-
-all_backends! {
-    fn queue_aggregate_and_selected_returns(sim) {
-        @omit_veryl;
-        @ignore_on(sv);
-        @case "tb_queue::aggregate_and_selected_returns";
-    }
-    fn queue_operations(sim) {
-        // The shared SystemVerilog emitter does not support native queue handles.
-        // The legacy Veryl adapter does not execute native testbenches.
-        @omit_veryl;
-        @ignore_on(sv);
-        @case "tb_queue::operations";
-    }
-    fn queue_four_state_values(sim) {
-        // The legacy Veryl adapter does not execute native testbenches.
-        @omit_veryl;
-        @ignore_on(sv);
-        @case "tb_queue::four_state_values";
-    }
-    fn queue_shared_processes(sim) {
-        // The legacy Veryl adapter does not execute native testbenches.
-        @omit_veryl;
-        @ignore_on(sv);
-        @case "tb_queue::shared_processes";
-    }
-}
+//! Native `$tb::queue` testbench values (the shared cases run from
+//! `tb_queue.vtest`; these cover the compiled-testbench runtime itself).
 
 #[test]
 fn compound_four_state_queue_arguments_do_not_silently_lose_unknowns() {

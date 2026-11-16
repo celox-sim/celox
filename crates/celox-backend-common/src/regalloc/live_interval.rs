@@ -9,7 +9,6 @@ use std::collections::VecDeque;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::Hash;
-use std::sync::OnceLock;
 
 use super::FunctionAllocationFacts;
 
@@ -271,22 +270,11 @@ impl<V, S: LiveSegmentStorage> LiveInterval<V, S> {
 }
 
 /// Exact SSA liveness reconstructed from allocation facts.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveIntervals<V, S = Vec<LiveSegment>> {
     intervals: BTreeMap<V, LiveInterval<V, S>>,
-    // Most allocators only query intervals. Materialize the legacy block-set
-    // views on demand, without making every analysis retain them twice.
-    live_in: Vec<OnceLock<BTreeSet<V>>>,
-    live_out: Vec<OnceLock<BTreeSet<V>>>,
     block_exits: Vec<u64>,
 }
-
-impl<V: PartialEq, S: PartialEq> PartialEq for LiveIntervals<V, S> {
-    fn eq(&self, other: &Self) -> bool {
-        self.intervals == other.intervals && self.block_exits == other.block_exits
-    }
-}
-impl<V: Eq, S: Eq> Eq for LiveIntervals<V, S> {}
 
 impl<V: Ord, S> LiveIntervals<V, S> {
     pub fn get(&self, value: &V) -> Option<&LiveInterval<V, S>> {
@@ -299,36 +287,38 @@ impl<V: Ord, S> LiveIntervals<V, S> {
 }
 
 impl<V: Copy + Ord, S: LiveSegmentStorage> LiveIntervals<V, S> {
-    pub fn live_in(&self, block: usize) -> Option<&BTreeSet<V>> {
-        self.live_in.get(block).map(|cache| {
-            cache.get_or_init(|| {
-                self.intervals
-                    .iter()
-                    .filter_map(|(&value, interval)| {
-                        interval
-                            .segment_in_block(block)
-                            .filter(|segment| segment.start == 0)
-                            .map(|_| value)
-                    })
-                    .collect()
-            })
-        })
+    /// The values live on entry to `block`. Most allocators only query
+    /// intervals, so the block-set views are computed when asked for, not
+    /// retained by every analysis.
+    pub fn live_in(&self, block: usize) -> Option<BTreeSet<V>> {
+        self.block_exits.get(block)?;
+        Some(
+            self.intervals
+                .iter()
+                .filter_map(|(&value, interval)| {
+                    interval
+                        .segment_in_block(block)
+                        .filter(|segment| segment.start == 0)
+                        .map(|_| value)
+                })
+                .collect(),
+        )
     }
 
-    pub fn live_out(&self, block: usize) -> Option<&BTreeSet<V>> {
-        self.live_out.get(block).map(|cache| {
-            cache.get_or_init(|| {
-                self.intervals
-                    .iter()
-                    .filter_map(|(&value, interval)| {
-                        interval
-                            .segment_in_block(block)
-                            .filter(|segment| segment.end == self.block_exits[block])
-                            .map(|_| value)
-                    })
-                    .collect()
-            })
-        })
+    /// The values live on exit from `block` (see [`Self::live_in`]).
+    pub fn live_out(&self, block: usize) -> Option<BTreeSet<V>> {
+        let exit = *self.block_exits.get(block)?;
+        Some(
+            self.intervals
+                .iter()
+                .filter_map(|(&value, interval)| {
+                    interval
+                        .segment_in_block(block)
+                        .filter(|segment| segment.end == exit)
+                        .map(|_| value)
+                })
+                .collect(),
+        )
     }
 }
 
@@ -924,8 +914,6 @@ where
     }
     Ok(LiveIntervals {
         intervals,
-        live_in: (0..facts.blocks.len()).map(|_| OnceLock::new()).collect(),
-        live_out: (0..facts.blocks.len()).map(|_| OnceLock::new()).collect(),
         block_exits,
     })
 }
@@ -1059,9 +1047,6 @@ mod tests {
 
     fn assert_matches_dataflow(facts: &FunctionAllocationFacts<u32, ()>) {
         let actual = analyze_live_intervals(facts).unwrap();
-        let unqueried = actual.clone();
-        assert!(actual.live_in.iter().all(|cache| cache.get().is_none()));
-        assert!(actual.live_out.iter().all(|cache| cache.get().is_none()));
         let mut predecessors = vec![Vec::new(); facts.blocks.len()];
         for (block, facts) in facts.blocks.iter().enumerate() {
             for &successor in &facts.successors {
@@ -1073,10 +1058,10 @@ mod tests {
         let compact = analyze_compact_live_intervals(facts).unwrap();
         let (live_in, live_out) = solve_liveness(facts, &predecessors, &model);
         for block in 0..facts.blocks.len() {
-            assert_eq!(actual.live_in(block).unwrap(), &live_in[block]);
-            assert_eq!(actual.live_out(block).unwrap(), &live_out[block]);
-            assert_eq!(compact.live_in(block).unwrap(), &live_in[block]);
-            assert_eq!(compact.live_out(block).unwrap(), &live_out[block]);
+            assert_eq!(actual.live_in(block).unwrap(), live_in[block]);
+            assert_eq!(actual.live_out(block).unwrap(), live_out[block]);
+            assert_eq!(compact.live_in(block).unwrap(), live_in[block]);
+            assert_eq!(compact.live_out(block).unwrap(), live_out[block]);
             for (&value, definition) in &model.definitions {
                 let expected = if live_in[block].contains(&value)
                     || live_out[block].contains(&value)
@@ -1110,10 +1095,6 @@ mod tests {
                 );
             }
         }
-        assert_eq!(
-            actual, unqueried,
-            "queries must not change interval equality"
-        );
     }
 
     #[test]
@@ -1223,8 +1204,6 @@ mod tests {
                 .sum::<usize>(),
             512 * 256
         );
-        assert!(intervals.live_in.iter().all(|cache| cache.get().is_none()));
-        assert!(intervals.live_out.iter().all(|cache| cache.get().is_none()));
         assert_eq!(intervals.live_in(256).unwrap().len(), 256);
     }
 

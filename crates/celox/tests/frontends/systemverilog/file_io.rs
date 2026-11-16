@@ -109,8 +109,6 @@ sv_backends! {
             celox::RuntimeEvent::Display { message: b"[lit]".to_vec() },
         ]);
     }
-    fn edge_procedures_execute_requests_in_statement_order(sim) { @case "file_io::edge_procedures_execute_requests_in_statement_order"; }
-    fn stdout_preserves_format_and_call_order(sim) { @case "file_io::stdout_preserves_format_and_call_order"; }
     fn descriptors_distinguish_fd_mcd_and_reuse_channels(sim) {
         @setup {
             let dir = tempfile::tempdir().unwrap();

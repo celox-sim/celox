@@ -23,7 +23,8 @@ pub(in crate::ast) fn capture_member_type(
     {
         return None;
     }
-    for range in &mut ty.packed_ranges {
+    // The bounds become their values, which the type had already.
+    for range in &mut ty.shape_keeping_binding().packed_ranges {
         range.left = ConstExpr::Literal(format_typed_parameter_literal(
             eval_ast_const_expr(functions, &range.left, env)?,
             128,
@@ -54,7 +55,7 @@ pub(in crate::ast) fn native_type(
         .into_iter()
         .map(|(name, ty, is_void)| {
             // A chandle is no packed type (IEEE 1800-2023 6.14).
-            if !names.insert(name.clone()) || ty.chandle {
+            if !names.insert(name.clone()) || ty.is_chandle() {
                 return None;
             }
             Some(PackedMember {
@@ -63,6 +64,7 @@ pub(in crate::ast) fn native_type(
                 offset: 0,
                 tag: None,
                 is_void,
+                in_union: !matches!(kind, AggregateKind::Struct),
                 r#type: capture_member_type(functions, ty, env)?,
             })
         })
@@ -113,7 +115,7 @@ fn finish_type(
     let kind = if !tagged
         && members
             .iter()
-            .all(|member| member.r#type.kind == TypeKind::Bit)
+            .all(|member| matches!(member.r#type.kind, TypeKind::Bit | TypeKind::Chandle))
     {
         TypeKind::Bit
     } else {

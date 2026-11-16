@@ -60,7 +60,7 @@ jobs:
 
       - name: Install queue metadata reader
         if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'mergify/merge-queue/')
-        uses: Mergifyio/setup-cli@7816afe056a19ad5eb899d903f199ba2626f9de5 # v1.4.0
+        uses: Mergifyio/setup-cli@f4029a9e48b04e184138fdb17df2b27eb035d8bf # v1.5.0
         with:
           mergify_cli_version: 2026.10.5
 

@@ -41,6 +41,51 @@ pub(in crate::ast) fn native_class(
     expression_types::class_name(&session.types, ty)
 }
 
+/// The class of the handles declared shape `shape` holds: of a handle, or of
+/// the elements of a fixed-size array of handles (8.4), as its type tells.
+/// A shape whose type cannot be formed with the constants of `dimensions`
+/// is told by its class metadata, which every shape keeps until
+/// declarations bind their types.
+pub(in crate::ast) fn shape_class(
+    shape: &VariableDimensions,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    class_of(
+        shape,
+        &mut session.types,
+        &tree.functions,
+        &dimensions.const_env,
+    )
+}
+
+/// [`shape_class`] with the constants of `env`.
+fn class_of(
+    shape: &VariableDimensions,
+    table: &mut semantic_types::TyTable,
+    functions: &const_functions::ConstantFunctions,
+    env: &ConstEnv,
+) -> Option<String> {
+    let metadata = shape.class.clone().filter(|_| shape.container.is_none());
+    let Some(mut ty) = shape.type_id(table, functions, env) else {
+        return metadata;
+    };
+    while let semantic_types::TyData::Array {
+        kind: semantic_types::ArrayKind::Fixed(_),
+        element,
+    } = table.data(ty)
+    {
+        ty = *element;
+    }
+    let found = expression_types::class_name(table, ty);
+    debug_assert_eq!(
+        found, metadata,
+        "the type and the class metadata of a shape disagree"
+    );
+    found
+}
+
 /// Access depends on the lexical class, not the class of the receiver (8.18).
 pub(in crate::ast) fn check_access(
     tree: &AnalysisContext<'_>,
@@ -73,6 +118,210 @@ pub(in crate::ast) fn check_access(
         name: name.to_owned(),
         visibility: if local { "local" } else { "protected" },
     })
+}
+
+/// Reject `h.m`, a select or a method call through a handle `h` that no
+/// binder resolved, when the class of `h` declares no member `m` (IEEE
+/// 1800-2023 8.5): no property, method, constraint, parameter, local
+/// parameter, enumeration label or typedef of that name in its member
+/// tables, those of its bases or those of the interface classes it
+/// implements. An undeclared name is an error of the source, not a shape
+/// the analyzer leaves unsupported. In a chain `h.a.b` whose receiver
+/// `h.a` has no class, the first link is checked. A class whose constants
+/// and types are not at hand is left to the caller.
+pub(in crate::ast) fn check_member_declared(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(ungroup(id, native)).kind
+    else {
+        return Ok(());
+    };
+    if separator != "." {
+        return Ok(());
+    }
+    let Some(class_name) = native_class(tree, session, *expression, native, dimensions) else {
+        // `h.a.b`: the receiver `h.a` may name no member of the class of
+        // `h`, which is the error.
+        return check_member_declared(tree, session, *expression, native, dimensions);
+    };
+    if classes::builtin(&class_name) {
+        return Ok(());
+    }
+    let member = instances::normalize_identifier(&name.spelling);
+    let mut pending = vec![class_name.clone()];
+    let mut seen = HashSet::default();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current.clone()) {
+            continue;
+        }
+        let Ok(class) = class(tree, session, dimensions, &current) else {
+            return Ok(());
+        };
+        match declares(session, &class, &member) {
+            Some(false) => {}
+            Some(true) | None => return Ok(()),
+        }
+        // A covergroup the class declares (IEEE 1800-2023 19.4), which the
+        // analyzer does not lay out as a member.
+        match declares_covergroup(tree, session, &current, &member) {
+            Some(false) => {}
+            Some(true) | None => return Ok(()),
+        }
+        pending.extend(class.base.iter().cloned());
+        pending.extend(class.interfaces.iter().cloned());
+    }
+    Err(AnalyzerError::UnknownClassMember {
+        class: classes::specializations::generic(session, &class_name),
+        name: member,
+    })
+}
+
+/// Rejects native expression `id` if it names a covergroup that a class
+/// declares (IEEE 1800-2023 19.4), `cg` in a method of the class or
+/// `h.cg`: the analysis does not make covergroup instances, so constructing
+/// one or calling its methods is unsupported rather than read as something
+/// else. A covergroup that nothing constructs has no instance, which is why
+/// its declaration alone is accepted.
+pub(in crate::ast) fn reject_covergroup(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    let (class_name, member) = match &native.expression(ungroup(id, native)).kind {
+        // A name a scope of the method declares hides the class's.
+        ExprKind::Name(name) => {
+            let member = instances::normalize_identifier(&name.spelling);
+            if dimensions.get(&member).is_some() {
+                return Ok(());
+            }
+            let Some(class) = scope_class(dimensions) else {
+                return Ok(());
+            };
+            (class, member)
+        }
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "." => {
+            let Some(class) = native_class(tree, session, *expression, native, dimensions) else {
+                return Ok(());
+            };
+            (class, instances::normalize_identifier(&name.spelling))
+        }
+        _ => return Ok(()),
+    };
+    let mut pending = vec![class_name];
+    let mut seen = HashSet::default();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current.clone()) || classes::builtin(&current) {
+            continue;
+        }
+        let Ok(class) = class(tree, session, dimensions, &current) else {
+            return Ok(());
+        };
+        // A property or method of the name hides a covergroup of a base.
+        if declares(session, &class, &member) != Some(false) {
+            return Ok(());
+        }
+        if declares_covergroup(tree, session, &current, &member) == Some(true) {
+            // The class as the source names it, not its specialization.
+            let spelled = classes::declaration(tree, session, &current).map_or_else(
+                || classes::specializations::generic(session, &current),
+                |declaration| instances::normalize_identifier(&declaration.name.spelling),
+            );
+            return Err(unsupported(format!(
+                "covergroup `{member}` of class `{spelled}` (IEEE 1800-2023 19.4)"
+            )));
+        }
+        pending.extend(class.base.iter().cloned());
+    }
+    Ok(())
+}
+
+/// Whether class `name` declares a covergroup `member`, or `None` when its
+/// declaration is not at hand.
+fn declares_covergroup(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    name: &str,
+    member: &str,
+) -> Option<bool> {
+    let generic = classes::specializations::generic(session, name);
+    match classes::declaration(tree, session, name) {
+        Some(declaration) => Some(classes::declares_covergroup(
+            tree.declarations(),
+            declaration,
+            member,
+        )),
+        None => session.foreign.declares_covergroup(&generic, member),
+    }
+}
+
+/// Whether `class` itself declares a member `name` (IEEE 1800-2023 8.5),
+/// or `None` when its constants and types are not known here.
+fn declares(session: &Session, class: &Class, name: &str) -> Option<bool> {
+    // A property of unpacked structure type is laid out as its leaves,
+    // `s.a`, which its name `s` heads.
+    let heads = |path: &str| {
+        path == name
+            || path
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with('.'))
+    };
+    if class
+        .properties
+        .iter()
+        .any(|property| heads(&property.name))
+        || class
+            .aggregates
+            .iter()
+            .any(|aggregate| heads(&aggregate.name))
+        || class.statics.iter().any(|property| heads(&property.name))
+        || class.method(name).is_some()
+        || class
+            .constraints
+            .iter()
+            .any(|(constraint, _)| constraint == name)
+        || class
+            .declarations
+            .iter()
+            .any(|(declared, _)| declared == name)
+    {
+        return Some(true);
+    }
+    // Parameters, local parameters, enumeration labels and typedefs: those
+    // of the specialization this scope made, or of a package's class.
+    if let Some(specialization) = classes::specializations::lookup(session, &class.name)
+        .or_else(|| session.foreign.specialization(&class.name))
+    {
+        return Some(
+            specialization.declared_env.contains_key(name)
+                || specialization.declared_aliases.contains_key(name)
+                || specialization.literals.contains_key(name)
+                || specialization.constant_types.contains_key(name)
+                || specialization.nonconstant_members.contains(name)
+                || specialization.hidden.iter().any(|hidden| hidden == name),
+        );
+    }
+    let declarations = session.foreign.declarations(&class.name)?;
+    Some(
+        declarations.env.contains_key(name)
+            || declarations.types.contains_key(name)
+            || declarations.literals.contains_key(name)
+            || declarations.constant_types.contains_key(name)
+            || declarations.nonconstant_members.contains(name),
+    )
 }
 
 /// The class whose method is being bound, whose properties and methods
@@ -130,7 +379,7 @@ pub(in crate::ast) fn named_class(
                             &scope_class,
                             &instances::normalize_identifier(&name.spelling),
                         )
-                        .and_then(|ty| ty.class().map(str::to_owned)),
+                        .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string())),
                         None => None,
                     },
                 );
@@ -140,20 +389,20 @@ pub(in crate::ast) fn named_class(
             if let Some(scope_class) = dimensions
                 .type_aliases
                 .get(&scope_name)
-                .and_then(|ty| ty.class().map(str::to_owned))
+                .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
                 .or_else(|| classes::resolve(tree, session, &scope_name))
                 && let Some(ty) =
                     classes::specializations::member_type(tree, session, &scope_class, &member_name)
-                && let Some(class) = ty.class()
+                && let Some(class) = ty.class_in(&session.types)
             {
-                return Ok(Some(class.to_owned()));
+                return Ok(Some(class.to_string()));
             }
             let class = scope::qualified_name(tree, &scope_name, &member_name);
             // A typedef of the package may name a class or a specialization.
             if let Some(aliased) = dimensions
                 .type_aliases
                 .get(&class)
-                .and_then(|ty| ty.class().map(str::to_owned))
+                .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
             {
                 return Ok(Some(aliased));
             }
@@ -212,7 +461,7 @@ pub(in crate::ast) fn named_class(
                     .get(&classes::specializations::scope_key(&class))
             })
             .or_else(|| dimensions.type_aliases.get(&name))
-            .and_then(|ty| ty.class().map(str::to_owned))
+            .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string()))
     {
         return Ok(Some(class));
     }
@@ -257,13 +506,37 @@ pub(in crate::ast) fn class_parameter(
         "::" => named_class(tree, session, *expression, native, dimensions)?,
         _ => None,
     };
-    Ok(class.and_then(|class| {
-        classes::specializations::parameter(
-            session,
-            &class,
-            &instances::normalize_identifier(&name.spelling),
-        )
-    }))
+    let Some(class) = class else {
+        return Ok(None);
+    };
+    let member = instances::normalize_identifier(&name.spelling);
+    if let Some(value) = classes::specializations::parameter(session, &class, &member) {
+        return Ok(Some(value));
+    }
+    // `C::p` of a class without parameter ports that nothing has made yet,
+    // as when a typedef of its package names one of its constants before
+    // any declaration uses the class: `p` is a constant of the class itself
+    // (8.25), which its only specialization holds.
+    let declares = |tree: &AnalysisContext<'_>, session: &mut Session| {
+        classes::declaration(tree, session, &class).is_some_and(|declaration| {
+            declaration
+                .parameter_ports
+                .iter()
+                .chain(&declaration.parameters)
+                .flat_map(|id| &tree.declarations().parameter_declaration(*id).parameters)
+                .any(|parameter| {
+                    instances::normalize_identifier(&parameter.name.spelling) == member
+                })
+        })
+    };
+    if separator == "::"
+        && !classes::is_parameterized(tree, session, &class)
+        && declares(tree, session)
+    {
+        let made = classes::specializations::specialize(tree, session, &class, &[], dimensions)?;
+        return Ok(classes::specializations::parameter(session, &made, &member));
+    }
+    Ok(None)
 }
 
 /// The variable of the static property that native expression `id` names:
@@ -311,10 +584,14 @@ pub(in crate::ast) fn static_property_declaration(
         return Ok(None);
     }
     let class = class(tree, session, dimensions, &class_name)?;
-    let Some(property) = class.static_property(&instances::normalize_identifier(&name.spelling))
+    // The member the name denotes, which an instance property of a derived
+    // class hides as a static one does (8.14).
+    let Some(classes::Member::Static(index)) =
+        class.member(&instances::normalize_identifier(&name.spelling))
     else {
         return Ok(None);
     };
+    let property = &class.statics[index];
     check_access(
         tree,
         session,
@@ -337,7 +614,7 @@ fn static_property_class(
     dimensions: &PackedDimensions,
 ) -> Converted<Option<String>> {
     Ok(static_property_type(tree, id, native, dimensions, session)?
-        .and_then(|ty| ty.class().map(str::to_owned)))
+        .and_then(|ty| ty.class_in(&session.types).map(|class| class.to_string())))
 }
 
 /// The type of the static property that native expression `id` names,
@@ -525,10 +802,11 @@ pub(in crate::ast) fn aggregate_load(
     aggregate: &classes::AggregateProperty,
     class: &Class,
     handle: &Expr,
+    table: &semantic_types::TyTable,
 ) -> Converted<Expr> {
     let leaves = aggregate
         .r#type
-        .unpacked_struct()
+        .unpacked_struct_in(table)
         .expect("an unpacked structure property")
         .leaves();
     // Each member is read through the receiver, so it must not change: a
@@ -760,7 +1038,20 @@ fn method_named(
                 (class, name, Receiver::This)
             }
             Some(class) => (class, name, Receiver::Handle(*expression)),
-            None => return Ok(None),
+            // A task or function of the interface instance a virtual
+            // interface denotes (IEEE 1800-2023 25.9), which takes the
+            // handle as a method takes its object.
+            None => {
+                return Ok(virtual_interfaces::method(
+                    tree,
+                    session,
+                    *expression,
+                    &instances::normalize_identifier(&name.spelling),
+                    native,
+                    dimensions,
+                )?
+                .map(|(name, formals)| (name, formals, Receiver::Handle(*expression))));
+            }
         },
         ExprKind::Member {
             expression,
@@ -820,7 +1111,10 @@ pub(in crate::ast) fn method_of(
             )),
         };
     }
-    if matches!(method_name, "randomize" | "srandom") {
+    if matches!(
+        method_name,
+        "randomize" | "srandom" | "get_randstate" | "set_randstate"
+    ) {
         if receiver == Receiver::Static
             || (receiver == Receiver::This && dimensions.get(THIS).is_none())
         {
@@ -829,11 +1123,18 @@ pub(in crate::ast) fn method_of(
             ));
         }
         if method_name == "randomize" {
-            class.check_randomize()?;
+            class.check_randomize(&session.types)?;
         }
+        // `get_randstate` has no argument but the object (IEEE 1800-2023
+        // 18.13.4).
+        let formals = if method_name == "get_randstate" {
+            Vec::new()
+        } else {
+            vec![None]
+        };
         return Ok(Some((
             Class::subroutine_name(class_name, method_name),
-            vec![None],
+            formals,
             receiver,
         )));
     }
@@ -1156,7 +1457,8 @@ pub(in crate::ast) fn constructor(
                 session,
             )?;
         }
-        let target = super::direct::copied_in_target(dimensions, &name, position + 1);
+        let target =
+            super::direct::copied_in_target(tree, session, dimensions, &name, position + 1);
         args.push(
             actual
                 .map(|value| bind_value(value, native, tree, session, dimensions, target))
@@ -1189,7 +1491,7 @@ pub(super) fn random_selection(
     let class = class(tree, session, dimensions, owner)?;
     // A selected property the constraint program cannot hold.
     let mut unsolvable = false;
-    let mut bits = vec!['0'; class.properties.len() + 1];
+    let mut bits = vec!['0'; class.properties.len() + class.static_slots.len() + 1];
     if !arguments.is_empty() {
         bits[0] = '1';
     }
@@ -1202,24 +1504,42 @@ pub(super) fn random_selection(
             ExprKind::Literal(value) if value == "null" && arguments.len() == 1 => {}
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
-                let index = class
-                    .properties
-                    .iter()
-                    .rposition(|p| p.name == name)
-                    .ok_or_else(|| {
-                        unsupported(format!(
+                let index = match class.member(&name) {
+                    Some(classes::Member::Instance(index)) => index,
+                    // A static rand property is solved in the object's slot
+                    // for it (see `classes::StaticProperty::rand`).
+                    Some(classes::Member::Static(index)) => {
+                        let property = &class.statics[index];
+                        check_access(
+                            tree,
+                            session,
+                            dimensions,
+                            &property.owner,
+                            &property.name,
+                            property.local,
+                            property.protected,
+                        )?;
+                        let slot = class
+                            .static_slot(property)
+                            .filter(|_| property.rand)
+                            .ok_or_else(|| {
+                                unsupported(format!(
+                                    "randomize argument `{name}`, a static property that is not rand"
+                                ))
+                            })?;
+                        bits[class.slot_bits[slot]] = '1';
+                        continue;
+                    }
+                    Some(classes::Member::Aggregate(_)) | None => {
+                        return Err(unsupported(format!(
                             "randomize argument `{name}` is not an instance property"
-                        ))
-                    })?;
+                        )));
+                    }
+                };
                 let property = &class.properties[index];
                 check_random_access(tree, session, dimensions, property)?;
                 if property.constant {
                     return Err(unsupported("randomize argument is a const property"));
-                }
-                // The constraint solver writes plain property bytes, not
-                // the planes of a 4-state value (IEEE 1800-2023 18.4).
-                if property.field.four_state {
-                    return Err(unsupported("randomization of a 4-state class property"));
                 }
                 // A selected array is random for the call, as a rand one
                 // (18.11).
@@ -1231,15 +1551,15 @@ pub(super) fn random_selection(
                 );
                 if (property.field.handle.is_some() && !array)
                     || property.r#type.holds_chandle()
-                    || (property.r#type.is_enum && property.r#type.enum_domain.is_none())
-                    || (property.randc && property.cyclic_domain_size().is_none())
+                    || property.r#type.enumeration_in(&session.types).unresolved()
+                    || (property.randc && property.cyclic_domain_size(&session.types).is_none())
                 {
                     return Err(unsupported(
                         "randomize arguments require integral properties with a supported enum domain",
                     ));
                 }
                 unsolvable |= !classes::constraints::constrainable(property) && !array;
-                bits[index + 1] = '1';
+                bits[class.property_bits[index]] = '1';
             }
             _ => {
                 return Err(unsupported(
@@ -1255,13 +1575,13 @@ pub(super) fn random_selection(
     // it.
     if unsolvable
         && (inline
-            || class.solved()
+            || class.solved(&session.types)
             || classes::visible_classes(tree, session)
                 .into_iter()
                 .filter(|name| *name != class.name)
                 .any(|name| {
                     self::class(tree, session, dimensions, &name).is_ok_and(|derived| {
-                        derived.solved()
+                        derived.solved(&session.types)
                             && derived.derives_from(
                                 tree,
                                 session,
@@ -1411,6 +1731,87 @@ pub(in crate::ast) fn constraint_mode_call(
 
 /// Bind rand_mode's void setter and integer getter separately (18.8).
 /// A getter requires one random property; only the setter accepts an object.
+/// `h.p.rand_mode()` or `h.p.rand_mode(on_off)` of a static rand property
+/// `p`: the variable of the bit that turns it off for every object (see
+/// `classes::StaticProperty::rand`), and the argument of the setter.
+pub(in crate::ast) fn static_rand_mode(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(String, Option<ExprId>)>> {
+    let (callee, args) = match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Call {
+            expression,
+            arguments,
+        } => (*expression, arguments.as_slice()),
+        _ => (id, &[][..]),
+    };
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(ungroup(callee, native)).kind
+    else {
+        return Ok(None);
+    };
+    if separator != "." || name.spelling != "rand_mode" {
+        return Ok(None);
+    }
+    // `p.rand_mode()` in a method of the class names the member `p` as
+    // `this.p` would (8.9, 18.8): its static property, if that is it. A
+    // local or formal `p` of the method hides it (6.21): the call is then
+    // that variable's, an object's or an error.
+    let unqualified = match &native.expression(ungroup(*expression, native)).kind {
+        ExprKind::Name(name)
+            if !dimensions
+                .class_static_members
+                .contains(&instances::normalize_identifier(&name.spelling)) =>
+        {
+            None
+        }
+        ExprKind::Name(name) => match scope_class(dimensions) {
+            Some(scope) => {
+                let class = class(tree, session, dimensions, &scope)?;
+                match class.member(&instances::normalize_identifier(&name.spelling)) {
+                    Some(classes::Member::Static(index)) => {
+                        let property = &class.statics[index];
+                        check_access(
+                            tree,
+                            session,
+                            dimensions,
+                            &property.owner,
+                            &property.name,
+                            property.local,
+                            property.protected,
+                        )?;
+                        Some(property.clone())
+                    }
+                    _ => None,
+                }
+            }
+            None => None,
+        },
+        _ => None,
+    };
+    let property = match unqualified {
+        Some(property) => Some(property),
+        None => static_property_declaration(tree, session, *expression, native, dimensions)?,
+    };
+    let Some(property) = property.filter(|property| property.rand) else {
+        return Ok(None);
+    };
+    let off = classes::static_rand_mode_variable(&property.owner, &property.name);
+    match args {
+        [] => Ok(Some((off, None))),
+        [argument] if argument.name.is_none() && argument.value.is_some() => {
+            Ok(Some((off, argument.value)))
+        }
+        _ => Err(unsupported("rand_mode setter requires one on_off argument")),
+    }
+}
+
 pub(in crate::ast) fn rand_mode_call(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -1432,9 +1833,27 @@ pub(in crate::ast) fn rand_mode_call(
             separator,
             name,
         } if separator == "." && name.spelling == "rand_mode" => {
+            // That of a static rand property is shared by every object.
+            if let Some((off, argument)) = static_rand_mode(tree, session, id, native, dimensions)?
+            {
+                if argument.is_some() {
+                    return Err(unsupported(
+                        "rand_mode setter is void and cannot be used as a value",
+                    ));
+                }
+                // The getter's value is an `int` (IEEE 1800-2023 18.8), as
+                // that of an instance property's mode.
+                return Ok(Some(Expr::Mux {
+                    condition: Box::new(Expr::Ident(off)),
+                    then_expr: Box::new(Expr::Literal("32'sd0".into())),
+                    else_expr: Box::new(Expr::Literal("32'sd1".into())),
+                }));
+            }
             let property_target = property(tree, session, *expression, native, dimensions)?;
             if let Some((property, object)) = property_target.filter(|(property, _)| {
-                property.rand || property.randc || property.r#type.class().is_none()
+                property.rand
+                    || property.randc
+                    || property.r#type.class_in(&session.types).is_none()
             }) {
                 check_random_access(tree, session, dimensions, &property)?;
                 if !property.rand && !property.randc {
@@ -1525,29 +1944,278 @@ fn check_random_access(
     )
 }
 
-pub(super) fn randomize_with(
+/// `std::randomize(v...) with { ... }` (IEEE 1800-2023 18.12.1), or
+/// `randomize(v...) with` outside a class: the variables are the fields of
+/// a constraint program solved in a new object and written back (see
+/// [`ObjectOp::ScopeRandomize`]); `None` for a class randomize call.
+#[allow(clippy::too_many_arguments)]
+fn scope_randomize_with(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     expression: ExprId,
+    arguments: &[celox_sv_syntax::Argument],
     constraints: Option<&[ExprId]>,
     native: &Declarations,
     dimensions: &PackedDimensions,
-) -> Converted<Expr> {
-    let arguments = match &native.expression(ungroup(expression, native)).kind {
-        ExprKind::Call { arguments, .. } => arguments.as_slice(),
-        _ => &[][..],
+) -> Converted<Option<Expr>> {
+    let callee = match &native.expression(ungroup(expression, native)).kind {
+        ExprKind::Call { expression, .. } => *expression,
+        _ => return Ok(None),
     };
-    let (method_name, _, receiver) = call_method(tree, session, expression, native, dimensions)?
-        .filter(|(name, _, _)| name.ends_with("::randomize"))
-        .ok_or_else(|| unsupported("inline constraints require class randomize"))?;
-    let owner = method_name.strip_suffix("::randomize").unwrap();
-    let class = class(tree, session, dimensions, owner)?;
-    // Inline constraints need the solver even on otherwise unconstrained classes.
-    class.check_constraint_program()?;
+    let scope = match &native.expression(ungroup(callee, native)).kind {
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } => {
+            separator == "::"
+                && name.spelling == "randomize"
+                && matches!(&native.expression(ungroup(*expression, native)).kind,
+                    ExprKind::Name(root) if root.spelling == "std")
+        }
+        ExprKind::Name(name) => {
+            name.spelling == "randomize"
+                && scope_class(dimensions).is_none()
+                && dimensions.get("randomize").is_none()
+        }
+        _ => false,
+    };
+    if !scope {
+        return Ok(None);
+    }
     let constraint_ids = constraints.ok_or_else(|| unsupported("inline constraint form"))?;
+    // Each variable is a field of the program, read through a marked input
+    // while the constraints are bound.
+    let mut fields = Vec::new();
+    let mut variables = Vec::new();
     let mut inputs = HashMap::default();
+    for argument in arguments {
+        let Some(id) = argument.value.filter(|_| argument.name.is_none()) else {
+            return Err(unsupported(
+                "scope randomize with a named or empty argument",
+            ));
+        };
+        let ExprKind::Name(name) = &native.expression(ungroup(id, native)).kind else {
+            return Err(unsupported("scope randomize of other than a variable"));
+        };
+        let name = instances::normalize_identifier(&name.spelling);
+        // The name resolves as anywhere in the caller (18.12): a variable
+        // of its scope, or else a property of the class of its method,
+        // inherited ones included, which the call writes through `this`.
+        let ty = expression_types::type_of(tree, session, id, native, dimensions).ok();
+        let (width, signed) = match dimensions.get(&name) {
+            Some(variable) => {
+                if variable.real
+                    || variable.string
+                    || variable.chandle
+                    || !variable.randomizable
+                    || variable.class_in(&session.types).is_some()
+                    || variable.container.is_some()
+                    || !variable.unpacked.is_empty()
+                    || variable.enumeration_in(&session.types).enumeration
+                {
+                    return Err(unsupported(
+                        "scope randomize with constraints of other than an integral variable",
+                    ));
+                }
+                if !crate::ast::expressions::query_actual_is_writable(
+                    &Expr::Ident(name.clone()),
+                    dimensions,
+                ) {
+                    return Err(unsupported("scope randomize argument is not writable"));
+                }
+                let width = expr_static_width(tree, &Expr::Ident(name.clone()), dimensions)
+                    .filter(|width| (1..=64).contains(width))
+                    .ok_or_else(|| unsupported("scope randomize variable wider than 64 bits"))?;
+                (width as u32, variable.signed)
+            }
+            None => {
+                let class = match scope_class(dimensions) {
+                    Some(scope) if !classes::builtin(&scope) => {
+                        Some(class(tree, session, dimensions, &scope)?)
+                    }
+                    _ => None,
+                };
+                if !class
+                    .as_ref()
+                    .is_some_and(|class| class.member(&name).is_some())
+                {
+                    return Err(unsupported(format!("scope randomize variable `{name}`")));
+                }
+                let packed = match ty.map(|ty| session.types.data(ty)) {
+                    Some(semantic_types::TyData::Packed(packed))
+                        if !matches!(
+                            packed.element,
+                            semantic_types::PackedElement::Enum { .. }
+                        ) =>
+                    {
+                        packed
+                    }
+                    _ => {
+                        return Err(unsupported(
+                            "scope randomize with constraints of other than an integral variable",
+                        ));
+                    }
+                };
+                let width = u32::try_from(packed.bits())
+                    .ok()
+                    .filter(|width| (1..=64).contains(width))
+                    .ok_or_else(|| unsupported("scope randomize variable wider than 64 bits"))?;
+                let signed = packed.signed;
+                // `this.m` names the same variable in the constraints, as
+                // does `super.m` for an inherited property.
+                let class = class.expect("a class with the member");
+                let offset = class.property(&name).map(|property| property.field.offset);
+                let inherited = offset.is_some()
+                    && class.base.as_ref().is_some_and(|base| {
+                        self::class(tree, session, dimensions, base).is_ok_and(|base| {
+                            base.property(&name).map(|property| property.field.offset) == offset
+                        })
+                    });
+                for root in ["this", "super"] {
+                    if root == "this" || inherited {
+                        inputs.insert(
+                            format!("{root}.{name}"),
+                            classes::constraints::CallerInput {
+                                index: classes::constraints::SCOPE_FIELDS + fields.len(),
+                                width,
+                                signed,
+                                ty,
+                            },
+                        );
+                    }
+                }
+                (width, signed)
+            }
+        };
+        inputs.insert(
+            name.clone(),
+            classes::constraints::CallerInput {
+                index: classes::constraints::SCOPE_FIELDS + fields.len(),
+                width,
+                signed,
+                ty,
+            },
+        );
+        fields.push(celox_heap::randomization::Field {
+            offset: 8 * fields.len() as u32,
+            width,
+            random: true,
+            domain: Vec::new(),
+            cyclic: false,
+            four_state: false,
+        });
+        variables.push(bind_value(id, native, tree, session, dimensions, None)?);
+    }
+    // Without variables the call checks the constraints and changes
+    // nothing (18.12): a program without fields, whose solution is whether
+    // they hold.
     let mut input_types = Vec::new();
     let mut input_values = Vec::new();
+    caller_inputs(
+        tree,
+        session,
+        native,
+        dimensions,
+        constraint_ids,
+        &|_| false,
+        true,
+        None,
+        &mut inputs,
+        0,
+        &mut input_types,
+        &mut input_values,
+    )?;
+    // A 4-state input passes its known bits, and after the inputs, the mask
+    // of its X and Z bits, as one of `randomize() with` does.
+    let mut unknown_inputs = Vec::new();
+    let mut masks = Vec::new();
+    for (index, ty) in input_types.iter().enumerate() {
+        if ty.kind() == TypeKind::Logic
+            && let Some(value) = input_values[index].take()
+        {
+            let (value, mask) = classes::known_bits(value);
+            input_values[index] = Some(value);
+            unknown_inputs.push((index, input_values.len() + masks.len()));
+            masks.push(Some(mask));
+        }
+    }
+    input_values.extend(masks);
+    let scope = scope_class(dimensions);
+    session
+        .constraint_scopes
+        .push((scope.clone().unwrap_or_default(), scope));
+    let constraints = constraint_ids
+        .iter()
+        .enumerate()
+        .map(|(index, &id)| {
+            classes::constraints::bind_inputs(
+                id,
+                tree,
+                session,
+                &[],
+                &classes::constraints::Names {
+                    lineage: &[],
+                    scopes: &[],
+                    aggregates: &[],
+                    statics: &[],
+                    inputs: &[],
+                    slots: &[],
+                    receiver: None,
+                },
+                &dimensions.const_env,
+                &inputs,
+            )
+            .map(|constraint| {
+                classes::constraints::scope_fields(classes::constraints::prioritize(
+                    constraint,
+                    classes::constraints::inline_priority(index),
+                ))
+            })
+            .map_err(|reason| unsupported(format!("inline constraints: {reason}")))
+        })
+        .collect::<Converted<Vec<_>>>();
+    session.constraint_scopes.pop();
+    let program = celox_heap::randomization::Program {
+        fields,
+        constraints: constraints?,
+        unknown_inputs,
+        ..Default::default()
+    };
+    Ok(Some(Expr::Call {
+        callee: Callee::Object(Box::new(ObjectOp::ScopeRandomize(program))),
+        args: variables
+            .into_iter()
+            .map(Some)
+            .chain(input_values)
+            .collect(),
+        arg_order: Vec::new(),
+    }))
+}
+
+/// The caller's values that inline constraints `constraint_ids` name, other
+/// than those `owned` names, added to `inputs` from index `first_input` on
+/// with their types and values (IEEE 1800-2023 18.7): a variable of the
+/// caller's scope, a member of the class of the caller's method, also
+/// through `this.` or `super.` with `this_is_caller`, or an element of an
+/// array of either at a position the caller gives (see
+/// [`classes::constraints::caller_key`]), but not a constant, which the
+/// constraint binds as its value.
+#[allow(clippy::too_many_arguments)]
+fn caller_inputs(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+    constraint_ids: &[ExprId],
+    owned: &dyn Fn(&str) -> bool,
+    this_is_caller: bool,
+    receiver: Option<&str>,
+    inputs: &mut HashMap<String, classes::constraints::CallerInput>,
+    first_input: usize,
+    input_types: &mut Vec<Type>,
+    input_values: &mut Vec<Option<Expr>>,
+) -> Converted<()> {
     // The caller's variables the constraints name, each with the variables
     // of the constraint loops around it, which are not the caller's. Every
     // node kind is listed, so that a new one has to say what it holds.
@@ -1555,25 +2223,68 @@ pub(super) fn randomize_with(
         constraint_ids.iter().map(|&id| (id, Vec::new())).collect();
     while let Some((id, loops)) = pending.pop() {
         let candidate = match &native.expression(id).kind {
+            // `$`, an open bound of a range (11.4.13), names no variable.
+            ExprKind::Name(name) if name.spelling == "$" => None,
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
-                if loops.contains(&name) || class.properties.iter().any(|p| p.name == name) {
+                if loops.contains(&name) || owned(&name) {
                     None
-                } else if class.statics.iter().any(|p| p.name == name) {
-                    return Err(unsupported("static properties in inline constraints"));
                 } else {
                     Some((name.clone(), name))
                 }
             }
+            ExprKind::Member { name, .. }
+                if classes::constraints::caller_key(id, native, this_is_caller).is_some() =>
+            {
+                Some((
+                    classes::constraints::caller_key(id, native, this_is_caller).unwrap(),
+                    instances::normalize_identifier(&name.spelling),
+                ))
+            }
+            // A dotted name whose first identifier does not resolve into
+            // the class, as one a restricted block does not list, resolves
+            // in the caller's scope (IEEE 1800-2023 18.7), whose members
+            // constraints do not read, unless it is the variable that holds
+            // the object the call randomizes (see `Names::receiver`).
             ExprKind::Member {
                 expression,
                 separator,
-                name,
-            } if separator == "::"
-                && matches!(&native.expression(*expression).kind, ExprKind::Name(root) if root.spelling == "local") =>
+                ..
+            } if separator == "."
+                && matches!(
+                    &native.expression(ungroup(*expression, native)).kind,
+                    ExprKind::Name(root) if !matches!(root.spelling.as_str(), "this" | "super") && {
+                        let root = instances::normalize_identifier(&root.spelling);
+                        !loops.contains(&root) && !owned(&root) && receiver != Some(root.as_str())
+                    }
+                ) =>
             {
-                let name = instances::normalize_identifier(&name.spelling);
-                Some((format!("local::{name}"), name))
+                return Err(unsupported(
+                    "a member of a variable of the caller in inline constraints",
+                ));
+            }
+            // An element of an array of the caller at a position the caller
+            // gives (see `caller_key`): the call supplies its value.
+            ExprKind::Select { .. }
+                if classes::constraints::caller_key(id, native, this_is_caller).is_some()
+                    && classes::constraints::element_names(id, native).is_some_and(
+                        |(array, index)| {
+                            let caller = |name: &String| {
+                                !loops.contains(name)
+                                    && !owned(name)
+                                    && receiver != Some(name.as_str())
+                            };
+                            caller(&array) && index.as_ref().is_none_or(caller)
+                        },
+                    ) =>
+            {
+                let (array, _) =
+                    classes::constraints::element_names(id, native).expect("an element select");
+                Some((
+                    classes::constraints::caller_key(id, native, this_is_caller)
+                        .expect("an element key"),
+                    array,
+                ))
             }
             ExprKind::Group(id) | ExprKind::Unary { expression: id, .. } => {
                 pending.push((*id, loops));
@@ -1581,6 +2292,33 @@ pub(super) fn randomize_with(
             }
             ExprKind::Binary { left, right, .. } => {
                 pending.extend([(*right, loops.clone()), (*left, loops)]);
+                None
+            }
+            ExprKind::Unique(items) => {
+                for item in items {
+                    if let celox_sv_syntax::DimensionKind::Index(id) = item.kind {
+                        pending.push((id, loops.clone()));
+                    }
+                }
+                None
+            }
+            ExprKind::Dist { expression, items } => {
+                pending.push((*expression, loops.clone()));
+                for item in items {
+                    pending.extend(item.weight.map(|weight| (weight.value, loops.clone())));
+                    match item.value.kind {
+                        celox_sv_syntax::DimensionKind::Index(id) => {
+                            pending.push((id, loops.clone()))
+                        }
+                        celox_sv_syntax::DimensionKind::Range { left, right } => {
+                            pending.extend([(right, loops.clone()), (left, loops.clone())])
+                        }
+                        celox_sv_syntax::DimensionKind::Unsized
+                        | celox_sv_syntax::DimensionKind::Indexed { .. }
+                        | celox_sv_syntax::DimensionKind::Queue(_)
+                        | celox_sv_syntax::DimensionKind::Wildcard => {}
+                    }
+                }
                 None
             }
             ExprKind::Set(items) => {
@@ -1598,6 +2336,22 @@ pub(super) fn randomize_with(
                         | celox_sv_syntax::DimensionKind::Wildcard => {}
                     }
                 }
+                None
+            }
+            ExprKind::SoftConstraint { expression } => {
+                pending.push((*expression, loops));
+                None
+            }
+            ExprKind::DisableSoft {
+                variable,
+                condition,
+            } => {
+                pending.extend(condition.map(|condition| (condition, loops.clone())));
+                pending.push((*variable, loops));
+                None
+            }
+            ExprKind::SolveBefore { before, after } => {
+                pending.extend(before.iter().chain(after).map(|id| (*id, loops.clone())));
                 None
             }
             // A loop's body sees its variables (18.5.8.1).
@@ -1643,9 +2397,66 @@ pub(super) fn randomize_with(
         if inputs.contains_key(&key) {
             continue;
         }
-        let variable = dimensions
-            .get(&name)
-            .ok_or_else(|| unsupported(format!("inline local variable `{name}`")))?;
+        let through_this = key.starts_with("this.") || key.starts_with("super.");
+        // An element is read as the caller reads it, whose type gives the
+        // input's.
+        let element = matches!(native.expression(id).kind, ExprKind::Select { .. });
+        let Some(variable) = dimensions.get(&name).filter(|_| !through_this && !element) else {
+            // A member of the class of the caller's method, read as the
+            // method reads it; a constant binds as its value.
+            let member = match scope_class(dimensions) {
+                Some(scope) if !classes::builtin(&scope) => {
+                    class(tree, session, dimensions, &scope)?
+                        .member(&name)
+                        .is_some()
+                }
+                _ => false,
+            } || (element && dimensions.get(&name).is_some());
+            if !through_this && !member {
+                if dimensions.const_env.contains_key(&name) {
+                    continue;
+                }
+                return Err(unsupported(format!("inline local variable `{name}`")));
+            }
+            let ty = expression_types::type_of(tree, session, id, native, dimensions)?;
+            let (width, signed, four_state) = match session.types.data(ty) {
+                semantic_types::TyData::Chandle => {
+                    return Err(AnalyzerError::IllegalChandleUse {
+                        detail: "a chandle in a constraint".into(),
+                    });
+                }
+                semantic_types::TyData::Packed(packed) => {
+                    (packed.bits(), packed.signed, packed.four_state)
+                }
+                _ => {
+                    return Err(unsupported(
+                        "inline inputs require integral scalar variables of at most 64 bits",
+                    ));
+                }
+            };
+            let width = u32::try_from(width)
+                .ok()
+                .filter(|width| (1..=64).contains(width))
+                .ok_or_else(|| {
+                    unsupported(
+                        "inline inputs require integral scalar variables of at most 64 bits",
+                    )
+                })?;
+            let value = bind_value(id, native, tree, session, dimensions, None)?;
+            let input_type = input_type(width as usize, signed, four_state);
+            inputs.insert(
+                key,
+                classes::constraints::CallerInput {
+                    index: first_input + input_types.len(),
+                    width,
+                    signed,
+                    ty: Some(ty),
+                },
+            );
+            input_types.push(input_type);
+            input_values.push(Some(value));
+            continue;
+        };
         if variable.chandle {
             return Err(AnalyzerError::IllegalChandleUse {
                 detail: "a chandle in a constraint".into(),
@@ -1653,25 +2464,147 @@ pub(super) fn randomize_with(
         }
         if variable.real
             || variable.string
-            || variable.class.is_some()
-            || variable.container.is_some()
+            || shape_class(variable, tree, session, dimensions).is_some()
+            || containers::holds_container(variable, tree, session, dimensions)
             || !variable.unpacked.is_empty()
-            || !variable.is_2state
         {
             return Err(unsupported(
-                "inline inputs require two-state scalar variables",
+                "inline inputs require integral scalar variables of at most 64 bits",
             ));
         }
         let value = Expr::Ident(name);
         let width = expr_static_width(tree, &value, dimensions)
             .filter(|width| (1..=64).contains(width))
             .ok_or_else(|| unsupported("inline input width"))?;
-        let mut ty = classes::unsigned_type(width);
-        ty.is_signed = variable.signed;
-        inputs.insert(key, (input_types.len(), width as u32, variable.signed));
+        let ty = input_type(width, variable.signed, !variable.is_2state);
+        inputs.insert(
+            key,
+            classes::constraints::CallerInput {
+                index: first_input + input_types.len(),
+                width: width as u32,
+                signed: variable.signed,
+                ty: expression_types::type_of(tree, session, id, native, dimensions).ok(),
+            },
+        );
         input_types.push(ty);
         input_values.push(Some(value));
     }
+    Ok(())
+}
+
+/// The type of an input of inline constraints, a `width`-bit integral one:
+/// a 4-state one keeps its X and Z bits, which a constraint may not read
+/// (IEEE 1800-2023 18.3; see `Program::unknown_inputs`).
+fn input_type(width: usize, signed: bool, four_state: bool) -> Type {
+    let mut ty = classes::unsigned_type(width);
+    ty.is_signed = signed;
+    if four_state {
+        ty.kind = TypeKind::Logic;
+    }
+    ty
+}
+
+pub(super) fn randomize_with(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    expression: ExprId,
+    constraints: Option<&[ExprId]>,
+    restricted: Option<&[celox_sv_syntax::Name]>,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Expr> {
+    let arguments = match &native.expression(ungroup(expression, native)).kind {
+        ExprKind::Call { arguments, .. } => arguments.as_slice(),
+        _ => &[][..],
+    };
+    if let Some(call) = scope_randomize_with(
+        tree,
+        session,
+        expression,
+        arguments,
+        constraints,
+        native,
+        dimensions,
+    )? {
+        // A scope randomize has no object class to restrict names to
+        // (18.7).
+        if restricted.is_some() {
+            return Err(AnalyzerError::Parse(
+                "a restricted constraint block `with (...)` in a scope randomize call \
+                 (IEEE 1800-2023 18.7)"
+                    .into(),
+            ));
+        }
+        return Ok(call);
+    }
+    let (method_name, _, receiver) = call_method(tree, session, expression, native, dimensions)?
+        .filter(|(name, _, _)| name.ends_with("::randomize"))
+        .ok_or_else(|| unsupported("inline constraints require class randomize"))?;
+    let owner = method_name.strip_suffix("::randomize").unwrap();
+    let class = class(tree, session, dimensions, owner)?;
+    // Inline constraints need the solver even on otherwise unconstrained classes.
+    class.check_constraint_program()?;
+    let constraint_ids = constraints.ok_or_else(|| unsupported("inline constraint form"))?;
+    // The static properties the constraints read are the first inputs of
+    // the program; the caller's variables follow.
+    let mut inputs = HashMap::default();
+    let first_input = class.static_inputs.len();
+    let mut input_types = Vec::new();
+    let mut input_values = Vec::new();
+    // A name resolves into the class of the object first, in a restricted
+    // constraint block only one it lists, and otherwise in the caller's
+    // scope (18.7): a member of the class, also a static property, is an
+    // input or a solver variable of the program (see
+    // `classes::StaticInput`), a name of the caller an input.
+    let listed = restricted.map(|names| {
+        names
+            .iter()
+            .map(|name| instances::normalize_identifier(&name.spelling))
+            .collect::<HashSet<_>>()
+    });
+    // A listed name resolves into the class, so one the class does not
+    // declare is an error, never a name of the caller (18.7).
+    if let Some(missing) = restricted.into_iter().flatten().find(|name| {
+        class
+            .member(&instances::normalize_identifier(&name.spelling))
+            .is_none()
+    }) {
+        return Err(AnalyzerError::Parse(format!(
+            "`{}` in the restricted constraint block `with (...)` is not a member of class \
+             `{owner}` (IEEE 1800-2023 18.7)",
+            missing.spelling
+        )));
+    }
+    let owned = |name: &str| {
+        class.member(name).is_some() && listed.as_ref().is_none_or(|listed| listed.contains(name))
+    };
+    // The caller's variable through which the call names its object, as
+    // `h` of `h.randomize() with {...}`, when its name resolves in the
+    // caller's scope: read once as the call starts, it names that object
+    // in the constraints (see `Names::receiver`).
+    let receiver_name = match receiver {
+        Receiver::Handle(handle) => match &native.expression(ungroup(handle, native)).kind {
+            ExprKind::Name(name) => Some(instances::normalize_identifier(&name.spelling)),
+            _ => None,
+        },
+        Receiver::This | Receiver::Static => None,
+    }
+    .filter(|name| !owned(name));
+    caller_inputs(
+        tree,
+        session,
+        native,
+        dimensions,
+        constraint_ids,
+        &owned,
+        false,
+        receiver_name.as_deref(),
+        &mut inputs,
+        first_input,
+        &mut input_types,
+        &mut input_values,
+    )?;
+    let scopes = classes::scope_identifiers(tree, session, &class.lineage);
     // Inline constraints access members as the caller's class does (18.7).
     let scope = scope_class(dimensions);
     session
@@ -1679,47 +2612,36 @@ pub(super) fn randomize_with(
         .push((scope.clone().unwrap_or_default(), scope));
     let constraints = constraint_ids
         .iter()
-        .map(|&id| {
+        .enumerate()
+        .map(|(index, &id)| {
             classes::constraints::bind_inputs(
                 id,
                 tree,
                 session,
                 &class.properties,
+                &classes::constraints::Names {
+                    lineage: &class.lineage,
+                    scopes: &scopes,
+                    aggregates: &class.aggregates,
+                    statics: &class.statics,
+                    inputs: &class.static_inputs,
+                    slots: &class.static_slots,
+                    receiver: receiver_name.as_deref(),
+                },
                 &dimensions.const_env,
                 &inputs,
             )
+            .map(|constraint| {
+                classes::constraints::prioritize(
+                    constraint,
+                    classes::constraints::inline_priority(index),
+                )
+            })
             .map_err(|reason| unsupported(format!("inline constraints: {reason}")))
         })
         .collect::<Converted<Vec<_>>>();
     session.constraint_scopes.pop();
     let constraints = constraints?;
-    // An inline loop cannot be disabled (18.9), so one over an array the call
-    // selects, which is random for the call (18.11), would always constrain
-    // its elements; a loop of a class block is checked when the call runs,
-    // with its constraint mode.
-    let mut looped = Vec::new();
-    for constraint in &constraints {
-        classes::constraints::looped_arrays(constraint, &mut looped);
-    }
-    for argument in arguments {
-        if let Some(id) = argument.value
-            && let ExprKind::Name(name) = &native.expression(ungroup(id, native)).kind
-            && let Some(index) = class.properties.iter().rposition(|property| {
-                property.name == instances::normalize_identifier(&name.spelling)
-            })
-            && class.properties[index].sequence()
-            && looped.contains(
-                &class.properties[..index]
-                    .iter()
-                    .filter(|property| property.sequence())
-                    .count(),
-            )
-        {
-            return Err(unsupported(
-                "an inline constraint foreach over an array the call randomizes",
-            ));
-        }
-    }
     let selection = random_selection(
         tree,
         session,
@@ -1810,4 +2732,46 @@ pub(in crate::ast) fn method_result(
     Ok(class(tree, session, dimensions, &class_name)?
         .method(&instances::normalize_identifier(&name.spelling))
         .and_then(|method| method.result.clone().flatten()))
+}
+
+#[cfg(test)]
+mod shape_class_tests {
+    use super::*;
+
+    /// `[N-1:0]`, a range that names `N`.
+    fn symbolic_range() -> UnpackedRange {
+        UnpackedRange::new(
+            ConstExpr::Binary {
+                left: Box::new(ConstExpr::Ident("N".into())),
+                op: BinaryOp::Sub,
+                right: Box::new(ConstExpr::Literal("1".into())),
+            },
+            ConstExpr::Literal("0".into()),
+        )
+    }
+
+    #[test]
+    fn shapes_whose_type_is_not_formed_keep_their_class_metadata() {
+        // `C handles[N]` where the scope has no `N`: still handles of `C`.
+        let mut ty = Type::new(TypeKind::Object);
+        ty.class = Some(Arc::from("C"));
+        ty.unpacked_ranges.push(symbolic_range());
+        let shape = procedural::dimensions_from_type(&ty);
+        let functions = const_functions::ConstantFunctions::default();
+        let mut table = semantic_types::TyTable::default();
+        assert!(
+            shape
+                .type_id(&mut table, &functions, &ConstEnv::default())
+                .is_none()
+        );
+        assert_eq!(
+            class_of(&shape, &mut table, &functions, &ConstEnv::default()).as_deref(),
+            Some("C")
+        );
+        let env = ConstEnv::from_iter([("N".into(), 2)]);
+        assert_eq!(
+            class_of(&shape, &mut table, &functions, &env).as_deref(),
+            Some("C")
+        );
+    }
 }

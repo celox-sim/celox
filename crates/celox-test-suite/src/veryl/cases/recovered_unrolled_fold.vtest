@@ -1,5 +1,7 @@
 (group recovered_unrolled_fold (category control_flow))
 
+; Read enables determine the write grant, but never read the granted writes.
+; Recovering both reductions as one atomic fold must not invent that feedback.
 (case recovered_mmio_read_write_dependencies_are_independent
   (source "test.veryl" #"
         module Top (
@@ -32,6 +34,7 @@
       (assert_eq write_enable (&& (== r 0) (!= w 0))))))
 
 (case recovered_unrolled_store_forward_selects_older_entry
+  (allow_inferred_latches)
   (source "test.veryl" #"
         module StoreShadow (
             store_idx : input  logic<5>,
@@ -202,6 +205,8 @@
   (eval)
   (assert_eq value (fourstate 0b1010 0) "a known one bit must make the procedural guard true despite another unknown bit"))
 
+; Independent reductions without feedback retain their shared loop and
+; induction variable. Check both reductions across changing external inputs.
 (case recovered_independent_reductions_share_input_correctly
   (source "test.veryl" #"
         module Top (

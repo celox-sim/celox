@@ -17,6 +17,7 @@ use std::sync::Arc;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 pub mod containers;
+mod dpi;
 mod edges;
 mod objects;
 pub mod ops;
@@ -26,7 +27,8 @@ mod uvm_dpi;
 pub use uvm_dpi::deglob as uvm_deglob;
 
 pub use objects::{
-    BOX_CLASS, FIRST_RESERVED_CLASS, Fault, NULL, RECORD_CLASS, SCHEDULER_CLASS, class_identifier,
+    BOX_CLASS, FIRST_RESERVED_CLASS, Fault, NULL, RECORD_CLASS, SCHEDULER_CLASS,
+    SCOPE_RANDOMIZE_CLASS, class_identifier,
 };
 
 /// A reference to a heap entry, as stored in state memory.
@@ -110,15 +112,46 @@ pub struct Heap {
     /// [`Heap::register_program`].
     #[serde(default)]
     programs: HashMap<u32, randomization::Registered>,
+    /// The static constraint blocks of classes by class id, each block's
+    /// index with the class that declares it, see
+    /// [`Heap::register_static_blocks`].
+    #[serde(default)]
+    static_blocks: HashMap<u32, Vec<(u32, u32)>>,
+    /// The constraint modes of static constraint blocks, by the class that
+    /// declares a block and its index (see [`Heap::static_block_key`]):
+    /// each one of every object of the class (IEEE 1800-2023 18.5.11).
+    #[serde(default)]
+    static_modes: HashMap<u64, bool>,
+    /// The solutions of the arguments of the functions the constraints of
+    /// the randomize calls in progress call, innermost last, each of which
+    /// the solve of the rest of its call keeps (see
+    /// [`Heap::solve_arguments`]). A function may randomize another object
+    /// between the two solves of a call.
+    #[serde(default)]
+    arguments: Vec<randomization::Arguments>,
     /// The objects each randomize call in progress runs the hooks of, see
     /// [`Heap::begin_visits`].
     #[serde(default)]
     visits: Vec<randomization::Visits>,
     /// The rand object members whose pre_randomize ran, by the object whose
-    /// randomize call ran them, for the solve that follows, see
-    /// [`Heap::end_visits`].
+    /// randomize call ran them, for the solves of that call, innermost call
+    /// last, see [`Heap::end_visits`]: each call keeps its own for every
+    /// solve, also while a function its constraints call randomizes
+    /// another object.
     #[serde(default)]
-    prepared: Option<(Handle, Vec<Handle>)>,
+    prepared: Vec<(Handle, Vec<Handle>)>,
+    /// The sizes solves of sizes gave the random arrays of the randomize
+    /// calls in progress whose size and elements constraints name, for the
+    /// solves that follow them, innermost last (see `randomization::Staged`):
+    /// a function a constraint calls may randomize another object between
+    /// the solves of a call. They last only within their calls.
+    #[serde(skip)]
+    staged: Vec<randomization::Staged>,
+    /// The sizes a solve of sizes may not give again, each set of them
+    /// one with which the solve of the rest had no solution (see
+    /// `randomization::SIZE_ATTEMPTS`).
+    #[serde(skip)]
+    rejected_sizes: Vec<fxhash::FxHashMap<(Handle, usize), usize>>,
     /// The rand object members the last successful randomize solve took,
     /// whose post_randomize runs, see [`Heap::begin_solved_visits`].
     #[serde(default)]
@@ -128,6 +161,9 @@ pub struct Heap {
     /// with its object.
     #[serde(default)]
     edges: HashMap<Handle, Vec<edges::Watch>>,
+    /// The call area of the DPI-C call being made, which no state outlives.
+    #[serde(skip)]
+    dpi: dpi::CallArea,
 }
 
 impl Default for Heap {
@@ -163,10 +199,16 @@ impl Heap {
             live_after_collection: 1,
             uvm: uvm_dpi::UvmDpi::default(),
             programs: HashMap::default(),
+            static_blocks: HashMap::default(),
+            static_modes: HashMap::default(),
+            arguments: Vec::new(),
             visits: Vec::new(),
-            prepared: None,
+            prepared: Vec::new(),
+            staged: Vec::new(),
+            rejected_sizes: Vec::new(),
             solved: Vec::new(),
             edges: HashMap::default(),
+            dpi: dpi::CallArea::default(),
         }
     }
 
@@ -224,6 +266,9 @@ impl Heap {
             && self.containers == other.containers
             && self.uvm == other.uvm
             && self.programs == other.programs
+            && self.static_blocks == other.static_blocks
+            && self.static_modes == other.static_modes
+            && self.arguments == other.arguments
             // The occurrences of watched properties decide the waits.
             && self.edges == other.edges
     }

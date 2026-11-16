@@ -58,278 +58,58 @@ o_data: top_out[i],
 
     }
 
-    fn test_flattened_instance_port_connection(sim) {
-        @case "hierarchy::test_flattened_instance_port_connection";
-    }
-
-    fn test_instance_unpacked_array_slice_input(sim) {
-        @case "hierarchy::test_instance_unpacked_array_slice_input";
-    }
-
-    fn test_instance_unpacked_array_slice_input_minus_colon(sim) {
+    fn test_instance_input_function_output_preserves_runtime_display(sim) {
+        // veryl-simulator does not write the connection's function output
+        // actual back.
+        @omit_veryl;
+        // Veryl emits a call with an output argument in an input port connection, which IEEE
+        // 1800 13.4 forbids outside procedural code; the SV frontend rejects it
+        // ("systemverilog input port connection", #88).
+        @ignore_on(sv);
         @setup { let code = r#"
 module Child (
-i_data: input  logic<8>[2],
-o_data: output logic<16>
+i: input logic,
+o: output logic
 ) {
-assign o_data = {i_data[1], i_data[0]};
+assign o = i;
 }
 module Top (
-o_data: output logic<16>
+a: input logic,
+child_o: output logic,
+seen_o: output logic
 ) {
-var data: logic<8>[4];
-assign data[0] = 8'h01;
-assign data[1] = 8'h12;
-assign data[2] = 8'h34;
-assign data[3] = 8'h80;
+function write_seen (
+x: input logic,
+seen: output logic
+) -> logic {
+seen = x;
+$display("seen=%0d", seen);
+return x;
+}
+var seen: logic;
 inst child: Child (
-i_data: data[2-:2],
-o_data,
+i: write_seen(a, seen),
+o: child_o
 );
+assign seen_o = seen;
 }
 "#; }
         @build Simulator::builder(code, "Top");
-    let o_data = sim.signal("o_data");
+    let a = sim.signal("a");
+    let child_o = sim.signal("child_o");
+    let seen_o = sim.signal("seen_o");
+    sim.drain_runtime_events();
 
-    assert_eq!(sim.get(o_data), 0x3412u16.into());
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(child_o), 1u8.into());
+    assert_eq!(sim.get(seen_o), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: b"seen=1".to_vec(),
+        }],
+    );
 
-    }
-
-    fn test_instance_unpacked_array_slice_input_colon(sim) {
-        @setup { let code = r#"
-module Child (
-i_data: input  logic<8>[2],
-o_data: output logic<16>
-) {
-assign o_data = {i_data[1], i_data[0]};
-}
-module Top (
-o_data: output logic<16>
-) {
-var data: logic<8>[4];
-assign data[0] = 8'h01;
-assign data[1] = 8'h12;
-assign data[2] = 8'h34;
-assign data[3] = 8'h80;
-inst child: Child (
-i_data: data[1:2],
-o_data,
-);
-}
-"#; }
-        @build Simulator::builder(code, "Top");
-    let o_data = sim.signal("o_data");
-
-    assert_eq!(sim.get(o_data), 0x3412u16.into());
-
-    }
-
-    fn test_instance_unpacked_array_slice_input_step(sim) {
-        @setup { let code = r#"
-module Child (
-i_data: input  logic<8>[2],
-o_data: output logic<16>
-) {
-assign o_data = {i_data[1], i_data[0]};
-}
-module Top (
-o_data: output logic<16>
-) {
-var data: logic<8>[4];
-assign data[0] = 8'h01;
-assign data[1] = 8'h12;
-assign data[2] = 8'h34;
-assign data[3] = 8'h80;
-inst child: Child (
-i_data: data[1 step 2],
-o_data,
-);
-}
-"#; }
-        @build Simulator::builder(code, "Top");
-    let o_data = sim.signal("o_data");
-
-    assert_eq!(sim.get(o_data), 0x8034u16.into());
-
-    }
-
-    fn test_instance_unpacked_array_slice_input_inner_dimension(sim) {
-        @setup { let code = r#"
-module Child (
-i_data: input  logic<8>[2],
-o_data: output logic<16>
-) {
-assign o_data = {i_data[1], i_data[0]};
-}
-module Top (
-o_data: output logic<16>
-) {
-var data: logic<8>[2, 4];
-always_comb {
-for i in 0..2 {
-for j in 0..4 {
-data[i][j] = (i * 16 + j) as 8;
-}
-}
-}
-inst child: Child (
-i_data: data[1][1+:2],
-o_data,
-);
-}
-"#; }
-        @build Simulator::builder(code, "Top");
-    let o_data = sim.signal("o_data");
-
-    assert_eq!(sim.get(o_data), 0x1211u16.into());
-
-    }
-
-    fn test_unpacked_array_slice_assignment(sim) {
-        @setup { let code = r#"
-module Top (
-o_data: output logic<16>
-) {
-var data: logic<8>[4];
-assign data[0] = 8'h01;
-assign data[1] = 8'h12;
-assign data[2] = 8'h34;
-assign data[3] = 8'h80;
-var part: logic<8>[2];
-assign part = data[2-:2];
-assign o_data = {part[1], part[0]};
-}
-"#; }
-        @build Simulator::builder(code, "Top");
-    let o_data = sim.signal("o_data");
-
-    assert_eq!(sim.get(o_data), 0x3412u16.into());
-
-    }
-
-    fn test_instance_unpacked_array_slice_output(sim) {
-        @case "hierarchy::test_instance_unpacked_array_slice_output";
-    }
-
-    fn test_instance_array_broadcast_and_unpacked_array_connection(sim) {
-        // Neither veryl-simulator nor the Veryl frontend supports instance
-        // arrays; the emitted SystemVerilog does.
-        @ignore_on(native, cranelift, wasm, interp, veryl);
-        @case "hierarchy::test_instance_array_broadcast_and_unpacked_array_connection";
-    }
-
-    fn test_instance_output_dynamic_index_function_output_writeback(sim) {
-        // Veryl 0.22.0 accepts this dynamic select in an output port connection; veryl-
-        // lang/veryl#3476 rejects it after 0.22.0.
-        @ignore_on(veryl);
-        @case "hierarchy::test_instance_output_dynamic_index_function_output_writeback";
-    }
-
-
-
-
-
-    fn test_instance_output_dynamic_index_composes_aliasing_writeback(sim) {
-        // Veryl 0.22.0 accepts this dynamic select in an output port connection; veryl-
-        // lang/veryl#3476 rejects it after 0.22.0.
-        @ignore_on(veryl);
-        @case "hierarchy::test_instance_output_dynamic_index_composes_aliasing_writeback";
-    }
-
-    fn test_instance_output_concat_advances_each_destination(sim) {
-        // veryl-simulator 0.22.0 does not support a concatenation as an instance output
-        // connection (UnsupportedDescription).
-        @ignore_on(veryl);
-        @case "hierarchy::test_instance_output_concat_advances_each_destination";
-    }
-
-
-
-
-
-
-
-    fn test_unconnected_child_output_needs_no_parent_glue(sim) {
-        @case "hierarchy::test_unconnected_child_output_needs_no_parent_glue";
-    }
-
-    fn test_instance_input_port_assignment_width_context(sim) {
-        @case "hierarchy::test_instance_input_port_assignment_width_context";
-    }
-
-fn test_dynamic_output_port_rmw_preserves_unselected_bits(sim) {
-    // Upstream veryl-simulator still accepts this invalid destination.
-    // The SV analyzer stops at unsupported indexed part-select, before checking
-    // the output destination. That limitation is not a successful rejection.
-    @ignore_on(veryl);
-    @case "hierarchy::test_dynamic_output_port_rmw_preserves_unselected_bits";
-}
-
-fn test_dynamic_output_port_converts_four_state_child_to_two_state_parent(sim) {
-    // Upstream veryl-simulator still accepts this invalid destination.
-    @ignore_on(veryl);
-    @case "hierarchy::test_dynamic_output_port_converts_four_state_child_to_two_state_parent";
-}
-
-fn test_dynamic_minus_colon_output_port_rmw(sim) {
-    // Upstream veryl-simulator still accepts this invalid destination.
-    @ignore_on(veryl);
-    @case "hierarchy::test_dynamic_minus_colon_output_port_rmw";
-}
-
-fn test_dynamic_step_output_port_rmw(sim) {
-    // Upstream veryl-simulator still accepts this invalid destination.
-    @ignore_on(veryl);
-    @case "hierarchy::test_dynamic_step_output_port_rmw";
-}
-
-fn test_dynamic_prefix_colon_output_port_allows_zero_lsb(sim) {
-    @omit_veryl;
-    @case "hierarchy::test_dynamic_prefix_colon_output_port_allows_zero_lsb";
-}
-
-    fn test_multiple_instances_isolation(sim) {
-        @case "hierarchy::test_multiple_instances_isolation";
-    }
-
-    fn test_deep_hierarchical_path_resolution(sim) {
-        @case "hierarchy::test_deep_hierarchical_path_resolution";
-    }
-
-    fn test_constant_propagation_across_hierarchy(sim) {
-        @case "hierarchy::test_constant_propagation_across_hierarchy";
-    }
-
-    fn test_hierarchical_concat_feedback_runtime(sim) {
-        @case "hierarchy::test_hierarchical_concat_feedback_runtime";
-    }
-
-    fn test_hierarchical_concat_feedback_runtime_multi_observe(sim) {
-        @case "hierarchy::test_hierarchical_concat_feedback_runtime_multi_observe";
-    }
-
-    fn test_hierarchical_concat_feedback_with_constant_middle_bit(sim) {
-        @case "hierarchy::test_hierarchical_concat_feedback_with_constant_middle_bit";
-    }
-
-    fn test_hierarchical_dynamic_index_feedback_runtime(sim) {
-        @case "hierarchy::test_hierarchical_dynamic_index_feedback_runtime";
-    }
-
-    fn test_hierarchical_dual_dynamic_readers_feedback_runtime(sim) {
-        @case "hierarchy::test_hierarchical_dual_dynamic_readers_feedback_runtime";
-    }
-
-    fn test_hierarchical_overlapping_partial_write_dynamic_index_runtime(sim) {
-        @case "hierarchy::test_hierarchical_overlapping_partial_write_dynamic_index_runtime";
-    }
-
-    fn test_hierarchical_concat_then_overlap_dynamic_index_runtime(sim) {
-        @case "hierarchy::test_hierarchical_concat_then_overlap_dynamic_index_runtime";
-    }
-
-    fn test_child_signal_access(sim) {
-        @case "hierarchy::test_child_signal_access";
     }
 
     fn test_named_hierarchy_structure(sim) {

@@ -3,124 +3,6 @@ use super::*;
 // IEEE 1800-2023 11.5.1: the index operator and declaration direction
 // independently determine the endpoints of the selected range.
 sv_backends! {
-    fn wide_parameter_index_bounds(sim) {
-        @case "indexed_select::wide_parameter_index_bounds";
-    }
-
-    fn wide_parameter_unknown_index_bounds(sim) {
-        @case "indexed_select::wide_parameter_unknown_index_bounds";
-    }
-
-    fn procedural_loop_selects_constant_packed_bytes(sim) {
-        @case "indexed_select::procedural_loop_selects_constant_packed_bytes";
-    }
-
-    fn procedural_loop_selects_packed_words(sim) {
-        @case "indexed_select::procedural_loop_selects_packed_words";
-    }
-    fn procedural_loop_reads_packed_words_into_memory(sim) {
-        @case "indexed_select::procedural_loop_reads_packed_words_into_memory";
-    }
-
-    fn procedural_loop_writes_memory_word_part_selects(sim) {
-        @case "indexed_select::procedural_loop_writes_memory_word_part_selects";
-    }
-
-    fn constant_parameter_initializers_preserve_inferred_dimensions(sim) {
-        @case "indexed_select::constant_parameter_initializers_preserve_inferred_dimensions";
-    }
-    fn constant_parameter_initializers_short_circuit_wide_operands(sim) {
-        @case "indexed_select::constant_parameter_initializers_short_circuit_wide_operands";
-    }
-    fn constant_parameter_initializers_short_circuit_repetitions_and_selections(sim) {
-        @case "indexed_select::constant_parameter_initializers_short_circuit_repetitions_and_selections";
-    }
-    fn constant_parameter_initializers_short_circuit_four_state_bindings(sim) {
-        @case "indexed_select::constant_parameter_initializers_short_circuit_four_state_bindings";
-    }
-    fn nested_array_indices_preserve_cast_widths(sim) {
-        @case "indexed_select::nested_array_indices_preserve_cast_widths";
-    }
-
-    fn nested_array_indices_freeze_concat_targets(sim) {
-        @case "indexed_select::nested_array_indices_freeze_concat_targets";
-    }
-
-    fn nested_array_indices_preserve_elements_and_ranges(sim) {
-        @case "indexed_select::nested_array_indices_preserve_elements_and_ranges";
-    }
-
-    fn nested_array_indices_preserve_invalid_reads_and_writes(sim) {
-        @case "indexed_select::nested_array_indices_preserve_invalid_reads_and_writes";
-    }
-
-    fn signed_indices_access_clocked_negative_range_arrays(sim) {
-        @case "indexed_select::signed_indices_access_clocked_negative_range_arrays";
-    }
-
-    fn constant_part_select_indices_of_concatenations(sim) {
-        @case "indexed_select::constant_part_select_indices_of_concatenations";
-    }
-
-    fn constant_part_select_indices_of_signed_slices(sim) {
-        @case "indexed_select::constant_part_select_indices_of_signed_slices";
-    }
-
-    fn constant_part_select_indices_in_continuous_targets(sim) {
-        @case "indexed_select::constant_part_select_indices_in_continuous_targets";
-    }
-
-    fn constant_part_select_indices_read_and_write_unpacked_arrays(sim) {
-        @case "indexed_select::constant_part_select_indices_read_and_write_unpacked_arrays";
-    }
-
-    fn constant_part_select_indices_preserve_selected_unknowns(sim) {
-        @case "indexed_select::constant_part_select_indices_preserve_selected_unknowns";
-    }
-
-    fn indexed_select_reads_and_writes_both_declaration_directions(sim) {
-        @case "indexed_select::indexed_select_reads_and_writes_both_declaration_directions";
-    }
-
-    fn runtime_indices_select_multidimensional_packed_elements(sim) {
-        @case "indexed_select::runtime_indices_select_multidimensional_packed_elements";
-    }
-
-    fn runtime_indices_select_within_multidimensional_packed_elements(sim) {
-        @case "indexed_select::runtime_indices_select_within_multidimensional_packed_elements";
-    }
-
-    fn signed_index_expressions_wrap_at_their_own_width(sim) {
-        @case "indexed_select::signed_index_expressions_wrap_at_their_own_width";
-    }
-
-    fn runtime_index_expressions_wrap_at_their_own_width(sim) {
-        @case "indexed_select::runtime_index_expressions_wrap_at_their_own_width";
-    }
-
-    fn out_of_range_inner_indices_stay_in_their_element(sim) {
-        @case "indexed_select::out_of_range_inner_indices_stay_in_their_element";
-    }
-
-    fn out_of_range_inner_indices_stay_in_their_unpacked_element(sim) {
-        @case "indexed_select::out_of_range_inner_indices_stay_in_their_unpacked_element";
-    }
-
-    fn runtime_inner_bits_of_unpacked_elements_feed_child_ports(sim) {
-        @case "indexed_select::runtime_inner_bits_of_unpacked_elements_feed_child_ports";
-    }
-
-    fn out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element(sim) {
-        @case "indexed_select::out_of_range_inner_indices_stay_in_their_multidimensional_unpacked_element";
-    }
-
-    fn runtime_index_reads_single_bit_unpacked_elements(sim) {
-        @case "indexed_select::runtime_index_reads_single_bit_unpacked_elements";
-    }
-
-    fn indexed_select_parameterized_generate_and_ff(sim) {
-        @case "indexed_select::indexed_select_parameterized_generate_and_ff";
-    }
 
     fn veryl_emitted_parameterized_step_generate(sim) {
         @setup {
@@ -147,130 +29,6 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("narrow")), 0x1bu8.into());
     }
 
-    fn runtime_indexed_bases_preserve_numeric_and_type_casts(sim) {
-        @case "indexed_select::runtime_indexed_bases_preserve_numeric_and_type_casts";
-    }
-
-    fn indexed_select_preserves_selected_and_cast_bases(sim) {
-        @case "indexed_select::indexed_select_preserves_selected_and_cast_bases";
-    }
-
-    fn indexed_widths_preserve_parameter_selections(sim) {
-        @case "indexed_select::indexed_widths_preserve_parameter_selections";
-    }
-
-    fn indexed_compound_bases_fold_selected_operands(sim) {
-        @case "indexed_select::indexed_compound_bases_fold_selected_operands";
-    }
-
-    fn indexed_constants_respect_declared_parameter_indices(sim) {
-        @case "indexed_select::indexed_constants_respect_declared_parameter_indices";
-    }
-
-    fn indexed_functions_preserve_selected_arguments(sim) {
-        @case "indexed_select::indexed_functions_preserve_selected_arguments";
-    }
-
-    // IEEE 1800-2023 11.6.1: both ternary arms determine the result width.
-    fn indexed_ternaries_preserve_both_arm_types(sim) {
-        @case "indexed_select::indexed_ternaries_preserve_both_arm_types";
-    }
-
-    fn constant_parameter_initializers_preserve_selections(sim) {
-        @case "indexed_select::constant_parameter_initializers_preserve_selections";
-    }
-
-    fn constant_parameter_initializers_preserve_imported_shapes(sim) {
-        @case "indexed_select::constant_parameter_initializers_preserve_imported_shapes";
-    }
-
-    fn constant_parameter_initializers_preserve_overhanging_parts(sim) {
-        @case "indexed_select::constant_parameter_initializers_preserve_overhanging_parts";
-    }
-
-    fn constant_parameter_initializers_preserve_unknown_indices(sim) {
-        @case "indexed_select::constant_parameter_initializers_preserve_unknown_indices";
-    }
-
-    fn constant_parameter_initializers_shape_ports_and_generate(sim) {
-        @case "indexed_select::constant_parameter_initializers_shape_ports_and_generate";
-    }
-
-    fn indexed_parameter_initializers_preserve_selections(sim) {
-        @case "indexed_select::indexed_parameter_initializers_preserve_selections";
-    }
-
-    fn indexed_parameter_initializers_use_assignment_width(sim) {
-        @case "indexed_select::indexed_parameter_initializers_use_assignment_width";
-    }
-
-    fn indexed_parameter_initializers_resolve_enum_constants(sim) {
-        @case "indexed_select::indexed_parameter_initializers_resolve_enum_constants";
-    }
-
-    fn indexed_parameter_ports_preserve_declared_ranges(sim) {
-        @case "indexed_select::indexed_parameter_ports_preserve_declared_ranges";
-    }
-
-    fn indexed_bases_resolve_size_queries(sim) {
-        @case "indexed_select::indexed_bases_resolve_size_queries";
-    }
-
-    fn indexed_initializers_preserve_four_state_parameters(sim) {
-        @case "indexed_select::indexed_initializers_preserve_four_state_parameters";
-    }
-
-    fn indexed_initializers_accept_casts_around_selections(sim) {
-        @case "indexed_select::indexed_initializers_accept_casts_around_selections";
-    }
-
-    fn indexed_size_queries_preserve_parameter_dimensions(sim) {
-        @case "indexed_select::indexed_size_queries_preserve_parameter_dimensions";
-    }
-
-    fn indexed_widths_accept_replication_concatenations(sim) {
-        @case "indexed_select::indexed_widths_accept_replication_concatenations";
-    }
-
-    fn indexed_constants_work_in_ordinary_selection_indices(sim) {
-        @case "indexed_select::indexed_constants_work_in_ordinary_selection_indices";
-    }
-
-    fn indexed_runtime_replications_preserve_attached_selections(sim) {
-        @case "indexed_select::indexed_runtime_replications_preserve_attached_selections";
-    }
-
-    fn indexed_generate_parameters_retain_local_metadata(sim) {
-        @case "indexed_select::indexed_generate_parameters_retain_local_metadata";
-    }
-
-    fn indexed_constants_lower_selected_concatenations(sim) {
-        @case "indexed_select::indexed_constants_lower_selected_concatenations";
-    }
-
-    fn indexed_unsigned_bases_cross_zero(sim) {
-        @case "indexed_select::indexed_unsigned_bases_cross_zero";
-    }
-
-    fn runtime_indexed_reads_follow_the_declared_direction(sim) {
-        @case "indexed_select::runtime_indexed_reads_follow_the_declared_direction";
-    }
-
-    fn runtime_indexed_base_may_select_a_parameter_bit(sim) {
-        @case "indexed_select::runtime_indexed_base_may_select_a_parameter_bit";
-    }
-
-    fn runtime_indexed_writes_keep_unselected_bits_and_clip_overhang(sim) {
-        @case "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang";
-    }
-
-    fn runtime_indexed_ff_write_updates_only_the_selected_slice(sim) {
-        @case "indexed_select::runtime_indexed_ff_write_updates_only_the_selected_slice";
-    }
-
-    fn indexed_select_multidimensional_packed_reads(sim) {
-        @case "indexed_select::indexed_select_multidimensional_packed_reads";
-    }
 }
 
 #[test]
@@ -305,12 +63,6 @@ fn rejects_selected_widths_that_are_nonpositive() {
     }
 }
 
-sv_backends! {
-    fn indexed_selections_in_constant_declaration_contexts(sim) {
-        @case "indexed_select::indexed_selections_in_constant_declaration_contexts";
-    }
-}
-
 #[test]
 fn rejects_unresolved_indexed_parameter_initializers_after_collection() {
     let source = "module Top; localparam logic [7:0] P = 8'hab; localparam logic [3:0] Q = P[MISSING +: 4]; endmodule";
@@ -340,18 +92,6 @@ fn rejects_unresolved_logical_parameter_type_queries() {
     }
 }
 
-sv_backends! {
-    fn constant_part_selects_partly_outside_write_the_bits_inside(sim) {
-        @case "indexed_select::constant_part_selects_partly_outside_write_the_bits_inside";
-    }
-    fn ascending_part_selects_partly_outside_write_the_bits_inside(sim) {
-        @case "indexed_select::ascending_part_selects_partly_outside_write_the_bits_inside";
-    }
-    fn known_run_time_selects_stay_within_their_element(sim) {
-        @case "indexed_select::known_run_time_selects_stay_within_their_element";
-    }
-}
-
 /// A continuous assignment to a part-select partly outside its vector drives
 /// the bits inside, and one wholly outside drives nothing (IEEE 1800-2023
 /// 11.5.1). Icarus 13.0 aborts on the partial assignment, so this is no
@@ -378,21 +118,6 @@ fn continuous_part_selects_partly_outside_drive_the_bits_inside() {
     assert_eq!(sim.get(r), 0x5au8.into());
 }
 
-sv_backends! {
-    fn generated_pipeline_with_unselected_invalid_array_element(sim) {
-        @case "indexed_select::generated_pipeline_with_unselected_invalid_array_element";
-    }
-    fn generated_pipeline_with_unselected_invalid_array_element_four_state(sim) {
-        @case "indexed_select::generated_pipeline_with_unselected_invalid_array_element_four_state";
-    }
-    fn invalid_unpacked_elements_preserve_type_in_conditionals(sim) {
-        @case "indexed_select::invalid_unpacked_elements_preserve_type_in_conditionals";
-    }
-    fn constant_invalid_unpacked_indices_read_defaults_and_ignore_writes(sim) {
-        @case "indexed_select::constant_invalid_unpacked_indices_read_defaults_and_ignore_writes";
-    }
-}
-
 // Icarus 13.0 returns X here, contrary to IEEE 1800-2023 7.4.5 Table 7-1.
 // Keep this regression local, like the partial continuous-select check above.
 sv_backends! {
@@ -403,18 +128,6 @@ sv_backends! {
         @build Simulator::from_sv_sources(vec![(source, Path::new("invalid_bit_element.sv"))], "Top").four_state(true);
         let q=sim.signal("q");
         assert_eq!(sim.get_four_state(q), (BigUint::default(), BigUint::default()));
-    }
-}
-
-sv_backends! {
-    fn generated_pipeline_with_explicit_generate_branches(sim) {
-        @case "indexed_select::generated_pipeline_with_explicit_generate_branches";
-    }
-}
-
-sv_backends! {
-    fn disjoint_single_bit_array_drivers(sim) {
-        @case "indexed_select::disjoint_single_bit_array_drivers";
     }
 }
 
@@ -444,11 +157,232 @@ sv_backends! {
     }
 }
 
+// An element of an unpacked array whose element width calls `$clog2` is read
+// and written at a run-time index (IEEE 1800-2023 20.8.1), as Vortex's MSHR
+// table `reg [32 - $clog2(64) - $clog2(4) - 1:0] addr_table [16]` is, with a
+// constant argument or a parameter.
+#[test]
+fn unpacked_elements_whose_width_calls_clog2_take_run_time_indices() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top #(parameter int M = 32) ();
+            logic [32 - $clog2(64) - $clog2(4) - 1:0] table_a [16];
+            logic [$clog2(M)-1:0] table_b [4];
+            logic clk = 0;
+            logic [3:0] id = 3;
+            logic [1:0] k = 2;
+            logic [23:0] read_a;
+            logic [4:0] read_b;
+            always_comb read_a = table_a[id];
+            always @(posedge clk) begin
+                table_a[id] <= 24'habcdef;
+                table_b[k] <= 5'd21;
+            end
+            initial begin
+                foreach (table_a[i]) table_a[i] = '0;
+                foreach (table_b[i]) table_b[i] = '0;
+                table_b[k + 1] = 5'd9;
+                #1 clk = 1;
+                #1 read_b = table_b[k];
+                $display("%h %h %0d %0d %0d", read_a, table_a[id - 1], read_b, table_b[3],
+                    $bits(table_b[k]));
+            end
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("clog2_elements.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build_cranelift()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let displayed: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8(message).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            displayed,
+            ["abcdef 000000 21 9 5"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+// A select whose index reads an element of an unpacked array, such as
+// OpenTitan's Keccak `state[PiRotate[x][y]][x]` with a localparam array,
+// or a variable array a process computes (IEEE 1800-2023 7.4.6, 11.5.1).
+// Verilator 5.054 gives the same values.
 sv_backends! {
-    fn disjoint_shifted_single_bit_array_drivers(sim) {
-        @case "indexed_select::disjoint_shifted_single_bit_array_drivers";
+    fn selects_index_by_unpacked_array_elements(sim) {
+        @setup {
+            let source = r#"
+                module Top(input logic [1:0] rot, output logic [2:0][2:0][3:0] r, p);
+                    localparam int W = 4;
+                    typedef logic [2:0][2:0][W-1:0] box_t;
+                    localparam int PiRotate [9] = '{0, 2, 1, 1, 0, 2, 2, 1, 0};
+                    function automatic box_t pi(box_t state);
+                        box_t result;
+                        for (int x = 0; x < 3; x++)
+                            for (int y = 0; y < 3; y++)
+                                result[x][y][W-1:0] = state[PiRotate[3*x+y]][x][W-1:0];
+                        return result;
+                    endfunction
+                    box_t s;
+                    int idx [3][3];
+                    assign s = 36'h876543210;
+                    always_comb
+                        for (int x = 0; x < 3; x++)
+                            for (int y = 0; y < 3; y++) idx[x][y] = (x + y + rot) % 3;
+                    always_comb
+                        for (int x = 0; x < 3; x++)
+                            for (int y = 0; y < 3; y++) r[x][y] = s[idx[x][y]][x];
+                    assign p = pi(s);
+                endmodule
+            "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("element_index.sv"))], "Top");
+        let (rot, r, p) = (sim.signal("rot"), sim.signal("r"), sim.signal("p"));
+        for (value, expected) in [(0u8, 0x5_2817_4630u64), (1, 0x8_5241_7063), (2, 0x2_8574_1306)] {
+            sim.modify(|io| io.set(rot, value)).unwrap();
+            assert_eq!(sim.get(r), expected.into(), "rot={value}");
+            assert_eq!(sim.get(p), 0x2_5871_4360u64.into(), "rot={value}");
+        }
     }
-    fn disjoint_negative_single_bit_array_drivers(sim) {
-        @case "indexed_select::disjoint_negative_single_bit_array_drivers";
-    }
+}
+
+// A counted loop over a module variable, as Verilog-2001 memory models
+// write their masked words: each iteration selects a constant part of the
+// addressed word, though other processes can see the loop variable.
+#[test]
+fn loops_over_module_variables_select_parts_of_memory_words() {
+    let source = r#"
+        module Top(
+            input logic clk, en, input logic [2:0] addr, input logic [1:0] mask,
+            input logic [99:0] wdata, output logic [99:0] rdata, output integer last
+        );
+            reg [99:0] ram [7:0];
+            integer i;
+            always @(posedge clk)
+                if (en) begin
+                    for (i = 0; i < 2; i = i + 1) begin
+                        if (mask[i]) ram[addr][i*50 +: 50] <= wdata[i*50 +: 50];
+                    end
+                end
+            assign rdata = ram[addr];
+            assign last = i;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("memory.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let clk = sim.event("clk");
+    let (en, addr, mask, wdata) = (
+        sim.signal("en"),
+        sim.signal("addr"),
+        sim.signal("mask"),
+        sim.signal("wdata"),
+    );
+    let (rdata, last) = (sim.signal("rdata"), sim.signal("last"));
+    let word = |high: u64, low: u64| (BigUint::from(high) << 50u32) | BigUint::from(low);
+    sim.modify(|io| {
+        io.set(en, 1u8);
+        io.set(addr, 3u8);
+        io.set(mask, 0b11u8);
+        io.set_wide(wdata, word(0x1234567, 0x89abcde));
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(rdata), word(0x1234567, 0x89abcde));
+    // The variable holds the value that ended the loop.
+    assert_eq!(sim.get(last), 2u8.into());
+    sim.modify(|io| {
+        io.set(mask, 0b10u8);
+        io.set_wide(wdata, word(0x3_ffff_ffff_ffff, 0));
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(rdata), word(0x3_ffff_ffff_ffff, 0x89abcde));
+    // Another word is untouched.
+    sim.modify(|io| io.set(addr, 4u8)).unwrap();
+    assert_eq!(sim.get(rdata), 0u8.into());
+}
+
+// A loop whose body changes its module variable through a system function
+// that writes an argument runs as written: `$random(i)` stores the next
+// seed in `i` (IEEE 1800-2023 20.14.1), which ends this loop after one
+// iteration.
+#[test]
+fn loops_whose_body_writes_the_variable_through_a_system_function_run_as_written() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+            integer i, count, x;
+            initial begin
+                count = 0;
+                for (i = 1; i < 4; i = i + 1) begin
+                    x = $random(i);
+                    count = count + 1;
+                end
+                #1 $display("%0d %0d", count, i > 4);
+            end
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("seed.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["1 1"]);
+}
+
+// A sampled value of the variable of a loop over a module variable is that
+// of the start of the time slot (IEEE 1800-2023 16.9.3), whatever the
+// iterations give the variable.
+#[test]
+fn loops_over_module_variables_keep_sampled_values() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+            integer i, s0, s1;
+            initial begin
+                i = 7;
+                #1;
+                s0 = 0; s1 = 0;
+                for (i = 0; i < 3; i = i + 1) begin
+                    s0 = s0 + $sampled(i);
+                    s1 = s1 + i;
+                end
+                $display("%0d %0d", s0, s1);
+            end
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("sampled.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["21 3"]);
 }

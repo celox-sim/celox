@@ -358,6 +358,14 @@ struct Program {
     state_size: usize,
 }
 
+/// `layout` with the objects of the slots of `frame` placed, as a function
+/// unit is compiled with.
+fn placed(layout: &MemoryLayout, frame: &FrameLayout<RegionedAbsoluteAddr>) -> MemoryLayout {
+    let mut layout = layout.clone();
+    crate::native::emit::place_frame_slots(&mut layout, frame).unwrap();
+    layout
+}
+
 fn compile(
     functions: &[FunctionUnit<RegionedAbsoluteAddr>],
     unit: &ExecutionUnit<RegionedAbsoluteAddr>,
@@ -395,7 +403,7 @@ fn compile_for(
     for (index, function) in functions.iter().enumerate() {
         let emitted = emit_prepared_eu(
             &function.unit,
-            layout,
+            &placed(layout, &function.frame),
             four_state,
             "function",
             &options(Some(FunctionId(index as u32))),
@@ -644,7 +652,7 @@ fn recursive_activations_keep_their_own_spills() {
         };
         let emitted = emit_prepared_eu(
             &spilling().unit,
-            &layout,
+            &placed(&layout, &spilling().frame),
             four_state,
             "function",
             &options,
@@ -1210,7 +1218,7 @@ fn spilled_vectors_of_a_function_unit_are_aligned_without_avx() {
     };
     emit_prepared_eu(
         &function.unit,
-        &layout,
+        &placed(&layout, &function.frame),
         false,
         "function",
         &options,

@@ -165,7 +165,7 @@ impl Generator<'_> {
     }
 }
 
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 mod tests {
     use crate::{KernelSchedule, SchedulerMode, SimBackend, Simulation};
 
@@ -210,11 +210,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(
-        feature = "sv-dpi",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
     #[test]
     fn opaque_dependencies_use_generated_scans() {
         extern "C" fn increment(value: i32) -> i32 {
@@ -439,7 +435,7 @@ endmodule"#,
     }
 }
 
-#[cfg(all(test, feature = "systemverilog"))]
+#[cfg(test)]
 mod restored_and_scheduled_gates {
     use crate::{BaselineRecord, SchedulerMode, Simulation};
 

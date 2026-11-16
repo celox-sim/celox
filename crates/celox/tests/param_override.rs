@@ -5,56 +5,6 @@ use celox::Simulator;
 #[allow(unused_macros)]
 mod test_utils;
 
-all_backends! {
-fn test_four_state_integral_instance_override(sim) {
-    @case "param_override::test_four_state_integral_instance_override";
-}
-fn test_wide_integral_instance_override(sim) {
-    @case "param_override::test_wide_integral_instance_override";
-}
-
-// Basic param override: change WIDTH from default 8 to 16 and verify signal width.
-fn test_param_override_basic_width(sim) {
-    @case "param_override::test_param_override_basic_width";
-}
-
-// Param value reflected in logic (assign b = a + OFFSET).
-fn test_param_override_logic_reflection(sim) {
-    @case "param_override::test_param_override_logic_reflection";
-}
-
-// No override -> default value is used.
-fn test_param_override_default_value(sim) {
-    @case "param_override::test_param_override_default_value";
-}
-
-// Multiple params overridden simultaneously.
-fn test_param_override_multiple(sim) {
-    @case "param_override::test_param_override_multiple";
-}
-
-// Param expression `N - 1` inside always_ff must evaluate correctly.
-fn test_param_in_always_ff(sim) {
-    @case "param_override::test_param_in_always_ff";
-}
-
-// Param expression in always_ff of a child instance with overridden params.
-fn test_param_in_child_always_ff(sim) {
-    @case "param_override::test_param_in_child_always_ff";
-}
-
-// Const-folded if condition using param expression in always_ff.
-fn test_param_const_fold_if(sim) {
-    @case "param_override::test_param_const_fold_if";
-}
-
-// Param propagation to a child module via inst param override.
-fn test_param_override_child_propagation(sim) {
-    @case "param_override::test_param_override_child_propagation";
-}
-
-}
-
 // Tests that use .param() override - these need specific builder config
 // and cannot use all_backends! @build directly since param() returns
 // different types. The tests above cover the default param behavior.

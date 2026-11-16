@@ -16,6 +16,7 @@ mod generate;
 mod implicit_nets;
 mod instances;
 mod keywords;
+mod lets;
 mod modports;
 mod nets;
 mod non_ansi;
@@ -70,6 +71,13 @@ pub struct Declarations {
     pub package_bindings: Vec<PackageBinding>,
     pub modport_declarations: Vec<ModportDeclaration>,
     pub assertion_declarations: Vec<AssertionDeclaration>,
+    /// The headers of every covergroup declaration, whose bodies stay
+    /// unconverted.
+    pub covergroups: Vec<CovergroupDeclaration>,
+    /// Every user-defined nettype declaration, which stays unconverted.
+    pub nettypes: Vec<NettypeDeclaration>,
+    /// Every `let` declaration, whose item stays unconverted.
+    pub lets: Vec<LetDeclaration>,
     pub sequences: Vec<Sequence>,
     pub type_aliases: Vec<TypeAlias>,
     pub time_declarations: Vec<TimeDeclaration>,
@@ -86,6 +94,9 @@ pub struct Declarations {
     pub timing_controls: Vec<TimingControl>,
     pub subroutines: Vec<Subroutine>,
     pub classes: Vec<ClassDeclaration>,
+    /// The productions of the `randsequence` statements whose structure
+    /// parsed (see [`Randsequence`]).
+    pub randsequences: Vec<Randsequence>,
 }
 
 impl Declarations {
@@ -114,6 +125,9 @@ impl Declarations {
             at: 0,
             next_parameter_id: 0,
             inline_constraint_depth: 0,
+            sequence_operands: 0,
+            sequence_depth: 0,
+            timing_operand_start: None,
             keyword_versions: Vec::new(),
             source_items: Vec::new(),
             expressions: Vec::new(),
@@ -123,6 +137,8 @@ impl Declarations {
             package_bindings: Vec::new(),
             modport_declarations: Vec::new(),
             assertion_declarations: Vec::new(),
+            covergroups: Vec::new(),
+            nettypes: Vec::new(),
             sequences: Vec::new(),
             type_aliases: Vec::new(),
             time_declarations: Vec::new(),
@@ -138,9 +154,11 @@ impl Declarations {
             statements: Vec::new(),
             timing_controls: Vec::new(),
             subroutines: Vec::new(),
+            randsequences: Vec::new(),
             class_stack: Vec::new(),
             classes: Vec::new(),
             class_scopes: Vec::new(),
+            lets: Vec::new(),
             default_nettype: Some("wire".to_string()),
         };
         let units = parser.units()?;
@@ -152,6 +170,9 @@ impl Declarations {
         let package_bindings = parser.package_bindings;
         let modport_declarations = parser.modport_declarations;
         let assertion_declarations = parser.assertion_declarations;
+        let covergroups = parser.covergroups;
+        let nettypes = parser.nettypes;
+        let lets = parser.lets;
         let sequences = parser.sequences;
         let type_aliases = parser.type_aliases;
         let time_declarations = parser.time_declarations;
@@ -168,6 +189,7 @@ impl Declarations {
         let timing_controls = parser.timing_controls;
         let subroutines = parser.subroutines;
         let classes = parser.classes;
+        let randsequences = parser.randsequences;
         Ok(Self {
             source_items,
             expressions,
@@ -177,6 +199,9 @@ impl Declarations {
             package_bindings,
             modport_declarations,
             assertion_declarations,
+            covergroups,
+            nettypes,
+            lets,
             sequences,
             type_aliases,
             time_declarations,
@@ -193,6 +218,7 @@ impl Declarations {
             timing_controls,
             subroutines,
             classes,
+            randsequences,
             sources,
             tokens,
             units,
@@ -205,6 +231,24 @@ impl Declarations {
             .iter()
             .enumerate()
             .map(|(index, node)| (ExprId(index), node))
+    }
+
+    /// Add an expression node, such as one of the analyzer's expansion of a
+    /// call, and return its handle.
+    pub fn push_expression(&mut self, expression: Expr) -> ExprId {
+        self.expressions.push(expression);
+        ExprId(self.expressions.len() - 1)
+    }
+
+    /// The node of `id`, to rewrite in place.
+    pub fn expression_mut(&mut self, id: ExprId) -> &mut Expr {
+        &mut self.expressions[id.0]
+    }
+
+    /// Add a type node and return its handle.
+    pub fn push_data_type(&mut self, data_type: DataType) -> TypeId {
+        self.types.push(data_type);
+        TypeId(self.types.len() - 1)
     }
 
     /// Resolve an expression handle without recursive tree traversal.
@@ -296,6 +340,13 @@ impl Declarations {
         &self.procedures[id.0]
     }
 
+    /// The productions of `randsequence` statement `id`, if they parsed.
+    pub fn randsequence(&self, id: StatementId) -> Option<&Randsequence> {
+        self.randsequences
+            .iter()
+            .find(|randsequence| randsequence.statement == id)
+    }
+
     pub fn statement(&self, id: StatementId) -> &Statement {
         &self.statements[id.0]
     }
@@ -346,6 +397,14 @@ struct Parser<'a> {
     at: usize,
     next_parameter_id: usize,
     inline_constraint_depth: usize,
+    /// The Boolean operands of the property specification being parsed.
+    sequence_operands: usize,
+    /// The groups and clocked subsequences the sequence being parsed is in.
+    sequence_depth: usize,
+    /// Where the delay value or event name of the timing control being
+    /// parsed starts. A parenthesis after it begins the controlled
+    /// expression or statement, not call arguments.
+    timing_operand_start: Option<usize>,
     keyword_versions: Vec<keywords::KeywordVersion>,
     source_items: Vec<SourceItem>,
     expressions: Vec<Expr>,
@@ -355,6 +414,8 @@ struct Parser<'a> {
     package_bindings: Vec<PackageBinding>,
     modport_declarations: Vec<ModportDeclaration>,
     assertion_declarations: Vec<AssertionDeclaration>,
+    covergroups: Vec<CovergroupDeclaration>,
+    nettypes: Vec<NettypeDeclaration>,
     sequences: Vec<Sequence>,
     type_aliases: Vec<TypeAlias>,
     time_declarations: Vec<TimeDeclaration>,
@@ -370,6 +431,7 @@ struct Parser<'a> {
     statements: Vec<Statement>,
     timing_controls: Vec<TimingControl>,
     subroutines: Vec<Subroutine>,
+    randsequences: Vec<Randsequence>,
     /// Classes whose `endclass` is still ahead, innermost last.
     class_stack: Vec<ClassDeclaration>,
     classes: Vec<ClassDeclaration>,
@@ -380,6 +442,7 @@ struct Parser<'a> {
     /// The net type of implicit nets (IEEE 1800-2023 22.8), `None` after
     /// `default_nettype none`.
     default_nettype: Option<String>,
+    lets: Vec<LetDeclaration>,
 }
 
 impl Parser<'_> {

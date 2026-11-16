@@ -26,10 +26,29 @@ pub(super) struct ScopeImports {
     pub packages: Vec<String>,
     /// Every `p::x` reference, as `(p, x)`. `p` may also name a class.
     pub qualified: Vec<(String, String)>,
+    /// The first token of each reference of `qualified`.
+    pub qualified_tokens: Vec<usize>,
     /// The package exports (IEEE 1800-2023 26.6).
     pub exports: Vec<Export>,
     /// The source offset of each `export p::x;` item, by `(p, x)`.
     pub export_offsets: HashMap<(String, String), usize>,
+    /// The imports declared in procedural blocks (IEEE 1800-2023 A.2.8).
+    pub procedural: Vec<ProceduralImport>,
+}
+
+/// An import declared in a procedural block (`begin import p::x; ... end`),
+/// or in the body of a task or function: it binds the names the block
+/// references after it (IEEE 1800-2023 26.3).
+#[derive(Debug, Clone, Default)]
+pub(super) struct ProceduralImport {
+    /// The source offset of the import.
+    pub offset: usize,
+    /// Where the block that declares it ends.
+    pub end: usize,
+    /// `import p::x;`, as `(p, x)`.
+    pub explicit: Vec<(String, String)>,
+    /// `import p::*;`
+    pub wildcard: Vec<String>,
 }
 
 /// A package export declaration item.
@@ -56,6 +75,13 @@ impl ScopeImports {
         let classes = visible_classes(tree);
         for view in package_owners::scope(tree)? {
             let binding = tree.declarations().package_binding(view.id);
+            // An import of a procedural block binds in the block only.
+            if let Some(end) = view.procedural_end {
+                if binding.kind == PackageBindingKind::Import {
+                    imports.procedural.push(procedural_import(binding, end));
+                }
+                continue;
+            }
             for native in &binding.items {
                 let in_block = blocks
                     .iter()
@@ -108,6 +134,15 @@ impl ScopeImports {
         // Qualified expression and type names carry their package segment natively.
         let native = tree.declarations();
         let ranges = active_ranges(tree)?;
+        for import in &imports.procedural {
+            imports.packages.extend(
+                import
+                    .explicit
+                    .iter()
+                    .map(|(package, _)| package.clone())
+                    .chain(import.wildcard.iter().cloned()),
+            );
+        }
         let spans = tree.spans();
         for id in spans.expressions.within(&ranges) {
             let expression = native.expression(id);
@@ -147,6 +182,7 @@ impl ScopeImports {
                     imports
                         .qualified
                         .push((package, normalize_identifier(&name.spelling)));
+                    imports.qualified_tokens.push(offset);
                 }
             }
         }
@@ -167,6 +203,7 @@ impl ScopeImports {
                     imports
                         .qualified
                         .push((package, normalize_identifier(&name.name.spelling)));
+                    imports.qualified_tokens.push(ty.tokens.start);
                 }
             }
         }
@@ -181,6 +218,30 @@ impl ScopeImports {
         imports.wildcard.retain(|name| seen.insert(name.clone()));
         Ok(imports)
     }
+}
+
+/// The import `binding`, which a procedural block or a subroutine body
+/// ending at `end` declares.
+fn procedural_import(binding: &celox_sv_syntax::PackageBinding, end: usize) -> ProceduralImport {
+    use celox_sv_syntax::PackageBindingItemKind;
+    let mut import = ProceduralImport {
+        offset: binding.tokens.start,
+        end,
+        ..ProceduralImport::default()
+    };
+    for item in &binding.items {
+        match &item.kind {
+            PackageBindingItemKind::Named { package, name } => import.explicit.push((
+                normalize_identifier(&package.spelling),
+                normalize_identifier(&name.spelling),
+            )),
+            PackageBindingItemKind::Wildcard(package) => import
+                .wildcard
+                .push(normalize_identifier(&package.spelling)),
+            _ => {}
+        }
+    }
+    import
 }
 
 /// The names of the classes declared in the current scope or in the
@@ -360,6 +421,28 @@ pub(super) fn item_names(id: celox_sv_syntax::BodyItemId, tree: &SyntaxTree) -> 
                 }
             }
         }
+        // The type a covergroup or a user-defined nettype declares (IEEE
+        // 1800-2023 19.3, 6.6.7), which Celox keeps unconverted.
+        BodyItemKind::Unconverted { category, .. }
+            if matches!(category.as_str(), "covergroup" | "nettype") =>
+        {
+            let tokens = native.body_item(id).tokens.range();
+            for name in native
+                .covergroups
+                .iter()
+                .map(|covergroup| (&covergroup.name, covergroup.tokens))
+                .chain(
+                    native
+                        .nettypes
+                        .iter()
+                        .map(|nettype| (&nettype.name, nettype.tokens)),
+                )
+                .filter(|(_, declared)| tokens.contains(&declared.start))
+                .map(|(name, _)| name)
+            {
+                add(name);
+            }
+        }
         _ => {}
     }
     for id in types {
@@ -511,9 +594,13 @@ pub(crate) struct Facts {
 
 impl Facts {
     fn of(tree: &SyntaxTree) -> &Self {
+        &tree.spans().imports
+    }
+
+    /// The facts of the file whose arenas `native` are.
+    pub(crate) fn new(native: &celox_sv_syntax::Declarations) -> Self {
         use celox_sv_syntax::{DataTypeKind, ExprKind};
-        tree.spans().imports.get_or_init(|| {
-            let native = tree.declarations();
+        {
             let name = |id| {
                 matches!(native.expression(id).kind, ExprKind::Name(_))
                     .then_some(native.expression(id).tokens)
@@ -552,7 +639,7 @@ impl Facts {
                 qualified_bases,
                 pattern_keys,
             }
-        })
+        }
     }
 }
 
@@ -614,10 +701,21 @@ fn qualifier_offsets(tree: &SyntaxTree) -> HashSet<usize> {
         .collect()
 }
 
-/// Native generate scopes, keyed by their authored body owner.
+/// The block that owns a lexical scope with imports of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopeOwner {
+    /// A generate block, by its native body identity.
+    Generate(celox_sv_syntax::BodyItemId),
+    /// A procedural block or a task or function body, by the source offset
+    /// of its first import (see [`scope::ScopeSymbols::block_imports`]).
+    Procedural(usize),
+}
+
+/// The lexical scopes of a module that may import: its generate blocks, and
+/// the procedural blocks and subroutine bodies that declare imports.
 struct GenerateScope {
     parent: Option<usize>,
-    id: celox_sv_syntax::BodyItemId,
+    id: ScopeOwner,
     start: usize,
     end: usize,
     explicit: Vec<(String, String)>,
@@ -628,6 +726,53 @@ impl GenerateScope {
     fn contains(&self, offset: usize) -> bool {
         (self.start..self.end).contains(&offset)
     }
+
+    fn generate_block(&self) -> celox_sv_syntax::BodyItemId {
+        match self.id {
+            ScopeOwner::Generate(id) => id,
+            ScopeOwner::Procedural(_) => unreachable!("generate scopes own generate blocks"),
+        }
+    }
+}
+
+/// The scopes of the procedural blocks and subroutine bodies that declare
+/// `procedural`: each such block's imports, from its first import to its end,
+/// with the names the block declares (IEEE 1800-2023 26.3, A.2.8).
+fn procedural_scopes(procedural: &[ProceduralImport], tree: &SyntaxTree) -> Vec<GenerateScope> {
+    if procedural.is_empty() {
+        return Vec::new();
+    }
+    let mut blocks: Vec<GenerateScope> = Vec::new();
+    for import in procedural {
+        if let Some(block) = blocks.iter_mut().find(|block| block.end == import.end) {
+            block.start = block.start.min(import.offset);
+            block.explicit.extend(import.explicit.iter().cloned());
+            block.wildcard.extend(import.wildcard.iter().cloned());
+            continue;
+        }
+        blocks.push(GenerateScope {
+            parent: None,
+            id: ScopeOwner::Procedural(import.offset),
+            start: import.offset,
+            end: import.end,
+            explicit: import.explicit.clone(),
+            wildcard: import.wildcard.clone(),
+            declared: HashSet::default(),
+        });
+    }
+    let declarations = nested_declarations(tree);
+    for block in &mut blocks {
+        block.id = ScopeOwner::Procedural(block.start);
+        // The innermost block or body that ends where the imports' block does.
+        if let Some((_, _, names)) = declarations
+            .iter()
+            .filter(|(start, end, _)| *end == block.end && *start <= block.start)
+            .max_by_key(|(start, _, _)| *start)
+        {
+            block.declared = names.clone();
+        }
+    }
+    blocks
 }
 fn generate_scopes(tree: &SyntaxTree) -> Converted<Vec<GenerateScope>> {
     use celox_sv_syntax::{BodyItemKind, PackageBindingItemKind, PackageBindingKind};
@@ -659,7 +804,7 @@ fn generate_scopes(tree: &SyntaxTree) -> Converted<Vec<GenerateScope>> {
             // A loop body label is declared beside the loop, not in its
             // implicit genvar scope.
             let parent = if matches!(
-                native.body_item(scopes[parent].id).kind,
+                native.body_item(scopes[parent].generate_block()).kind,
                 BodyItemKind::Loop { .. }
             ) {
                 scopes[parent].parent
@@ -679,7 +824,7 @@ fn generate_scopes(tree: &SyntaxTree) -> Converted<Vec<GenerateScope>> {
             ) {
             scopes.push(GenerateScope {
                 parent,
-                id,
+                id: ScopeOwner::Generate(id),
                 start: item.tokens.start,
                 end: item.tokens.end,
                 explicit: Vec::new(),
@@ -765,7 +910,7 @@ enum ScopeLookup {
     Declared,
     /// The declaration an import of a block around it binds: that block's
     /// source offset, and the declaration.
-    Imported(celox_sv_syntax::BodyItemId, String),
+    Imported(ScopeOwner, String),
     /// Nothing in the blocks around it: the module's scope decides.
     Outside,
 }
@@ -1038,22 +1183,75 @@ pub(super) fn resolve_imports(
     unit: Option<&packages::Unit>,
 ) -> Result<ResolvedImports, AnalyzerError> {
     let mut resolved = resolve_scope_imports(tree, packages, unit)?;
+    resolved.symbols.design_subroutines = packages.design_subroutines.clone();
     // Every scope may reach the interface instances through virtual
     // interfaces (IEEE 1800-2023 25.9), but those of an interface would be
     // bound into each instance of it.
-    if let Some(declarations) = &packages.virtual_interfaces
+    if packages.virtual_interfaces.is_some()
         && !tree
             .root_unit()
             .is_ok_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Interface)
     {
         let symbols = &mut resolved.symbols;
-        for signal in virtual_interfaces::member_signals(declarations) {
+        for signal in packages.virtual_interface_signals.iter().cloned() {
             if !symbols
                 .state_signals
                 .iter()
                 .any(|known| known.name == signal.name)
             {
                 symbols.state_signals.push(signal);
+            }
+        }
+        // The subroutines that call interface tasks and functions through
+        // virtual interfaces, which a scope copies when it calls them.
+        for subroutine in &packages.virtual_interface_calls.subroutines {
+            if symbols
+                .subroutines
+                .iter()
+                .any(|known| known.name == subroutine.name)
+            {
+                continue;
+            }
+            symbols.subroutine_params.insert(
+                subroutine.name.clone(),
+                subroutine
+                    .params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect(),
+            );
+            if let Some(shapes) = packages
+                .virtual_interface_calls
+                .shapes
+                .get(&subroutine.name)
+            {
+                symbols
+                    .subroutine_shapes
+                    .insert(subroutine.name.clone(), shapes.clone());
+            }
+            symbols.subroutines.push(subroutine.clone());
+        }
+        for (name, metadata) in &packages.virtual_interface_calls.function_return_types {
+            symbols
+                .function_return_types
+                .entry(name.clone())
+                .or_insert_with(|| metadata.clone());
+        }
+        for signal in &packages.virtual_interface_calls.statics {
+            if !symbols
+                .state_signals
+                .iter()
+                .any(|known| known.name == signal.name)
+            {
+                symbols.state_signals.push(signal.clone());
+            }
+        }
+        if let Some(initializer) = &packages.virtual_interface_calls.static_initializer {
+            symbols.initial_processes.push(initializer.clone());
+        }
+        for local in &packages.virtual_interface_calls.locals {
+            if !symbols.locals.iter().any(|known| known.name == local.name) {
+                symbols.locals.push(local.clone());
             }
         }
     }
@@ -1090,7 +1288,10 @@ fn resolve_scope_imports(
     }
     // So does an import of a generate block, whether or not a reference uses
     // it.
-    let all_scopes = generate_scopes(tree)?;
+    // So does one of a procedural block: blocks are looked up as generate
+    // blocks are.
+    let mut all_scopes = generate_scopes(tree)?;
+    all_scopes.extend(procedural_scopes(&imports.procedural, tree));
     for scope in &all_scopes {
         for name in scope
             .explicit
@@ -1325,6 +1526,7 @@ fn resolve_scope_imports(
     // imports of a block bind, by name, with the block and the declaration.
     let mut scoped: HashMap<String, Vec<(celox_sv_syntax::BodyItemId, String)>> =
         HashMap::default();
+    let mut block_imports: HashMap<usize, HashMap<String, String>> = HashMap::default();
     if scoped_imports {
         for scope in &all_scopes {
             let mut explicit: HashMap<&String, String> = HashMap::default();
@@ -1342,11 +1544,14 @@ fn resolve_scope_imports(
                 }
                 explicit.insert(name, target);
                 if scope.declared.contains(name) {
+                    let block = match scope.id {
+                        ScopeOwner::Generate(_) => "generate block",
+                        ScopeOwner::Procedural(_) => "block",
+                    };
                     return Err(AnalyzerError::ImportConflict {
                         name: name.clone(),
                         detail: format!(
-                            "`import {package_name}::{name};` names an item the generate block \
-                             declares"
+                            "`import {package_name}::{name};` names an item the {block} declares"
                         ),
                     });
                 }
@@ -1357,11 +1562,19 @@ fn resolve_scope_imports(
             for &offset in offsets.iter() {
                 match scope_lookup(name, offset, &all_scopes, &provided, packages)? {
                     ScopeLookup::Declared => {}
-                    ScopeLookup::Imported(block, target) => {
+                    ScopeLookup::Imported(ScopeOwner::Generate(block), target) => {
                         scoped
                             .entry(name.clone())
                             .or_default()
                             .push((block, target));
+                    }
+                    // The builder of the block's body binds it there, from
+                    // the block's first import on.
+                    ScopeLookup::Imported(ScopeOwner::Procedural(block), target) => {
+                        block_imports
+                            .entry(block)
+                            .or_default()
+                            .insert(name.clone(), target);
                     }
                     ScopeLookup::Outside => outer.push(offset),
                 }
@@ -1577,9 +1790,9 @@ fn resolve_scope_imports(
         if outside.is_none()
             && !local.contains(&name)
             && !referenced.contains_key(&name)
-            && !all_scopes
-                .iter()
-                .any(|scope| scope.declared.contains(&name))
+            && !all_scopes.iter().any(|scope| {
+                matches!(scope.id, ScopeOwner::Generate(_)) && scope.declared.contains(&name)
+            })
             && uses.iter().all(|(_, target)| target == first)
         {
             bindings.push(Binding {
@@ -1593,7 +1806,7 @@ fn resolve_scope_imports(
             (
                 all_scopes
                     .iter()
-                    .find(|scope| scope.id == *id)
+                    .find(|scope| scope.id == ScopeOwner::Generate(*id))
                     .map(|scope| scope.start),
                 target.clone(),
             )
@@ -1604,15 +1817,15 @@ fn resolve_scope_imports(
         let encloses = |scope: &GenerateScope, block: celox_sv_syntax::BodyItemId| {
             all_scopes
                 .iter()
-                .find(|inner| inner.id == block)
+                .find(|inner| inner.id == ScopeOwner::Generate(block))
                 .is_some_and(|inner| scope.start < inner.start && scope.contains(inner.start))
         };
         let hidden = |block: celox_sv_syntax::BodyItemId, target: &String| {
             uses.iter().any(|(outer, other)| {
                 other != target
-                    && all_scopes
-                        .iter()
-                        .any(|scope| scope.id == *outer && encloses(scope, block))
+                    && all_scopes.iter().any(|scope| {
+                        scope.id == ScopeOwner::Generate(*outer) && encloses(scope, block)
+                    })
             }) || all_scopes
                 .iter()
                 .any(|scope| scope.declared.contains(&name) && encloses(scope, block))
@@ -1628,6 +1841,7 @@ fn resolve_scope_imports(
         }
     }
     symbols.generate_imports = generate_imports;
+    symbols.block_imports = block_imports;
     let mut exports = HashMap::default();
     for export in &imports.exports {
         for binding in &bindings {
@@ -1655,10 +1869,29 @@ fn resolve_scope_imports(
             symbols.alias(&format!("{own}::{name}"), target);
         }
     }
-    if let Some(unit) = unit
-        && uses_unit
-    {
-        symbols.extend(&unit.scope.as_ref().map_err(Clone::clone)?.symbols);
+    if let Some(unit) = unit {
+        if uses_unit {
+            symbols.extend(&unit.scope.as_ref().map_err(Clone::clone)?.symbols);
+        } else {
+            // A specialization the scope takes may still name a class of the
+            // unit, such as a class a package's factory creates: one the
+            // scope sees, declared before it (3.12.1). A unit that cannot be
+            // analyzed is reported when one does.
+            symbols.unit = Some(Arc::new(crate::ast::scope::DeferredUnit {
+                items: unit
+                    .visibility
+                    .declared_at
+                    .keys()
+                    .filter(|name| unit.declares_before(name, start))
+                    .map(|name| packages::unit_item_identity(tree.compilation_path(), name))
+                    .collect(),
+                symbols: unit
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.symbols.clone())
+                    .map_err(Clone::clone),
+            }));
+        }
     }
     for binding in &bindings {
         symbols.alias(&binding.name, &binding.target);

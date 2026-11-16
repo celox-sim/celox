@@ -73,11 +73,6 @@ impl Parser<'_> {
             }
         }
         self.expect(";")?;
-        if self.net_declarations.len() >= 1_000_000 {
-            return Err(
-                self.unsupported("native net-declaration arena exceeds one million entries")
-            );
-        }
         let id = NetDeclarationId(self.net_declarations.len());
         self.net_declarations.push(NetDeclaration {
             net_type,

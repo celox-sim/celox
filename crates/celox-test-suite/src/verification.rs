@@ -10,10 +10,17 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: the scoped case-runner threads of the verification run push their result rows through it"
+)]
+use std::sync::Mutex;
+#[expect(
+    clippy::disallowed_types,
+    reason = "cross-thread: case and reuse counters are shared by the scoped case-runner threads of the verification run"
+)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 mod report;
 pub use report::read_report;
@@ -217,8 +224,20 @@ pub fn run(tool: Tool, suite: &Suite, frontend: &'static dyn Frontend) -> Result
     } else {
         BTreeMap::new()
     };
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the scoped case-runner threads claim the next case index from it"
+    )]
     let next = AtomicUsize::new(0);
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the scoped case-runner threads count reused cached results in it"
+    )]
     let reused = AtomicUsize::new(0);
+    #[expect(
+        clippy::disallowed_types,
+        reason = "cross-thread: the scoped case-runner threads push their result rows into it"
+    )]
     let results = Mutex::new(Vec::new());
     // Compiler and assertion panics are captured, with full diagnostics on disk.
     std::panic::set_hook(Box::new(|_| {}));
@@ -546,48 +565,42 @@ pub fn is_failure(status: &str) -> bool {
 // I/O failures without guessing from Rust's panic-message formatting.
 struct ObservedBackend {
     backend: Box<dyn Backend>,
-    failed: Arc<AtomicBool>,
+    /// Told of every backend failure, which the runner reads after the
+    /// case has unwound and dropped the adapter.
+    failures: std::sync::mpsc::Sender<()>,
+}
+impl ObservedBackend {
+    fn report(&self) {
+        // The runner keeps the receiver until it has classified the case.
+        let _ = self.failures.send(());
+    }
 }
 impl Backend for ObservedBackend {
     fn run_testbench(&mut self) -> Result<()> {
-        self.backend
-            .run_testbench()
-            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+        self.backend.run_testbench().inspect_err(|_| self.report())
     }
     fn write(&mut self, signal: &SignalPath, payload: BigUint, mask: BigUint) -> Result<()> {
         self.backend
             .write(signal, payload, mask)
-            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+            .inspect_err(|_| self.report())
     }
     fn read(&mut self, signal: &SignalPath) -> Result<(BigUint, BigUint)> {
-        self.backend
-            .read(signal)
-            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+        self.backend.read(signal).inspect_err(|_| self.report())
     }
     fn eval_comb(&mut self) -> Result<()> {
-        self.backend
-            .eval_comb()
-            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+        self.backend.eval_comb().inspect_err(|_| self.report())
     }
     fn tick(&mut self, event: &str) -> Result<()> {
-        self.backend
-            .tick(event)
-            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+        self.backend.tick(event).inspect_err(|_| self.report())
     }
     fn take_output(&mut self) -> Result<Vec<u8>> {
-        self.backend
-            .take_output()
-            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+        self.backend.take_output().inspect_err(|_| self.report())
     }
     fn run_until(&mut self, time: u64) -> Result<()> {
-        self.backend
-            .run_until(time)
-            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+        self.backend.run_until(time).inspect_err(|_| self.report())
     }
     fn run_to_finish(&mut self) -> Result<()> {
-        self.backend
-            .run_to_finish()
-            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+        self.backend.run_to_finish().inspect_err(|_| self.report())
     }
 }
 
@@ -692,7 +705,7 @@ pub fn run_case(
         let (status, phase, detail) = run_script(case, &directory, four_state, builders.script);
         return finish(case, &directory, status, phase, detail, known_issue);
     }
-    let adapter_failed = Arc::new(AtomicBool::new(false));
+    let (adapter_failures, failures) = std::sync::mpsc::channel();
     let mut phase = "setup";
     let mut unsupported = false;
     let mut design_index = 0;
@@ -716,7 +729,7 @@ pub fn run_case(
                     phase = "execute";
                     Ok(Box::new(ObservedBackend {
                         backend,
-                        failed: adapter_failed.clone(),
+                        failures: adapter_failures.clone(),
                     }) as Box<dyn Backend>)
                 }
                 Err(error) => {
@@ -754,7 +767,7 @@ pub fn run_case(
                 "execute" if case.expectation == Expectation::CompilationError => {
                     "unexpected_accept"
                 }
-                "execute" if !adapter_failed.load(Ordering::Relaxed) => "mismatch",
+                "execute" if failures.try_recv().is_err() => "mismatch",
                 _ => "runtime_error",
             };
             (status, detail)
@@ -900,6 +913,55 @@ mod script_failure_tests {
     #[ignore = "requires live xezim and timeout tools"]
     fn binary_assertion_failure_is_mismatch_on_xezim() {
         binary_assertion_failure(Tool::Xezim);
+    }
+}
+
+#[cfg(test)]
+mod adapter_failure_tests {
+    use super::*;
+
+    /// A backend whose every call fails, as a broken simulator process does.
+    struct Broken;
+
+    impl Backend for Broken {
+        fn write(&mut self, _: &SignalPath, _: BigUint, _: BigUint) -> Result<()> {
+            Err("broken".into())
+        }
+        fn read(&mut self, _: &SignalPath) -> Result<(BigUint, BigUint)> {
+            Err("broken".into())
+        }
+        fn eval_comb(&mut self) -> Result<()> {
+            Err("broken".into())
+        }
+        fn tick(&mut self, _: &str) -> Result<()> {
+            Err("broken".into())
+        }
+    }
+
+    #[test]
+    fn a_failing_backend_is_a_runtime_error_not_a_mismatch() {
+        let case = crate::load_group(
+            "adapter_failure.vtest",
+            r##"(group adapter_failure (category regression))
+            (case native_testbench
+              (source "top.sv" #"
+                module Top;
+                  initial $finish;
+                endmodule
+              "#)
+              (top Top) (run_testbench))"##,
+            crate::no_std_library,
+        )[0];
+        let output =
+            std::env::temp_dir().join(format!("celox-adapter-failure-{}", std::process::id()));
+        let builders = Builders {
+            design: &|_, _| Ok(Box::new(Broken) as Box<dyn Backend>),
+            script: &|_, _| unreachable!("the case runs its own testbench"),
+        };
+        let row = run_case(case, &output, true, &builders, None, None);
+        std::fs::remove_dir_all(&output).unwrap();
+        assert_eq!(row["status"], "runtime_error", "{row}");
+        assert_eq!(row["phase"], "execute", "{row}");
     }
 }
 

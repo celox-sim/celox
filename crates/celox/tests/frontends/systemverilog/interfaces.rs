@@ -1,126 +1,5 @@
 use super::*;
 
-sv_backends! {
-    fn forwards_header_ports_through_modports(sim) {
-        @case "interfaces::forwards_header_ports_through_modports";
-    }
-    fn defers_interface_dependent_declarations_before_binding_array_ports(sim) {
-        @case "interfaces::defers_interface_dependent_declarations_before_binding_array_ports";
-    }
-    fn connects_interface_array_slices_in_declaration_order(sim) {
-        @case "interfaces::connects_interface_array_slices_in_declaration_order";
-    }
-    fn drives_interface_array_slices_through_generated_relays(sim) {
-        @case "interfaces::drives_interface_array_slices_through_generated_relays";
-    }
-    fn connects_multidimensional_interface_array_slices(sim) {
-        @case "interfaces::connects_multidimensional_interface_array_slices";
-    }
-
-    fn distributes_multidimensional_connections_to_interface_arrays(sim) {
-        @case "interfaces::distributes_multidimensional_connections_to_interface_arrays";
-    }
-
-    fn distributes_array_port_connections_to_interface_arrays(sim) {
-        @case "interfaces::distributes_array_port_connections_to_interface_arrays";
-    }
-
-    fn distributes_unpacked_connections_to_interface_arrays(sim) {
-        @case "interfaces::distributes_unpacked_connections_to_interface_arrays";
-    }
-
-    fn mixes_module_contracts_with_local_interface_connections(sim) {
-        @case "interfaces::mixes_module_contracts_with_local_interface_connections";
-    }
-    fn distributes_packed_connections_to_interface_arrays(sim) {
-        @case "interfaces::distributes_packed_connections_to_interface_arrays";
-    }
-
-    fn binds_implicit_named_interface_ports(sim) {
-        @case "interfaces::binds_implicit_named_interface_ports";
-    }
-    fn binds_implicit_named_interface_arrays_in_generate_scopes(sim) {
-        @case "interfaces::binds_implicit_named_interface_arrays_in_generate_scopes";
-    }
-    fn propagates_interface_dependent_ports(sim) {
-        @case "interfaces::propagates_interface_dependent_ports";
-    }
-    fn keeps_lexical_names_in_interface_scopes(sim) {
-        @case "interfaces::keeps_lexical_names_in_interface_scopes";
-    }
-    fn binds_interfaces_without_declaration_name_dependencies(sim) {
-        @case "interfaces::binds_interfaces_without_declaration_name_dependencies";
-    }
-    fn binds_local_interfaces_before_dependent_declarations(sim) {
-        @case "interfaces::binds_local_interfaces_before_dependent_declarations";
-    }
-    fn queries_interface_packed_struct_member_dimensions(sim) {
-        @case "interfaces::queries_interface_packed_struct_member_dimensions";
-    }
-
-    fn binds_interface_array_ports_in_declaration_order(sim) {
-        @case "interfaces::binds_interface_array_ports_in_declaration_order";
-    }
-    fn infers_directions_of_ports_without_modport(sim) {
-        @case "interfaces::infers_directions_of_ports_without_modport";
-    }
-
-    fn binds_positional_connections_and_parameter_values(sim) {
-        @case "interfaces::binds_positional_connections_and_parameter_values";
-    }
-
-    fn runs_interface_processes_once_per_array_element(sim) {
-        @case "interfaces::runs_interface_processes_once_per_array_element";
-    }
-
-    fn runs_interface_array_processes_at_integer_boundaries(sim) {
-        @case "interfaces::runs_interface_array_processes_at_integer_boundaries";
-    }
-
-    fn calls_functions_and_reads_parameters_through_instances_and_ports(sim) {
-        @case "interfaces::calls_functions_and_reads_parameters_through_instances_and_ports";
-    }
-
-    fn elaborates_net_members_typedefs_and_localparams(sim) {
-        @case "interfaces::elaborates_net_members_typedefs_and_localparams";
-    }
-
-    fn binds_generic_interface_ports_per_interface(sim) {
-        @case "interfaces::binds_generic_interface_ports_per_interface";
-    }
-
-    fn clocks_interface_processes_from_member_clocks(sim) {
-        @case "interfaces::clocks_interface_processes_from_member_clocks";
-    }
-
-    fn reads_undriven_interface_members_as_unknown(sim) {
-        @case "interfaces::reads_undriven_interface_members_as_unknown";
-    }
-
-    fn overrides_body_parameters_and_drives_members_from_imported_functions(sim) {
-        @case "interfaces::overrides_body_parameters_and_drives_members_from_imported_functions";
-    }
-
-    fn rewrites_nested_references_and_keeps_declaration_functions(sim) {
-        @case "interfaces::rewrites_nested_references_and_keeps_declaration_functions";
-    }
-
-    fn drives_members_through_child_outputs_and_array_generate_regions(sim) {
-        @case "interfaces::drives_members_through_child_outputs_and_array_generate_regions";
-    }
-
-    fn initializes_interface_members_from_their_declarations(sim) {
-        @case "interfaces::initializes_interface_members_from_their_declarations";
-    }
-    fn initializes_interface_array_members_from_their_declarations(sim) {
-        @case "interfaces::initializes_interface_array_members_from_their_declarations";
-    }
-    fn distinguishes_interface_dependency_bindings(sim) {
-        @case "interfaces::distinguishes_interface_dependency_bindings";
-    }
-
-}
-
 // Verilator 5.052 faults internally on this generic interface relay; keep the
 // generic binding regression in the Celox harness and the concrete form shared.
 sv_backends! {
@@ -155,6 +34,106 @@ sv_backends! {
             sim.modify(|io| io.set(x, value)).unwrap();
             assert_eq!(u64::try_from(sim.get(y)).unwrap(), u64::from(value));
         }
+    }
+}
+
+// `.*` connects each port no connection names as `.name` does (IEEE
+// 1800-2023 23.3.2.4), on a module with interface ports as on any other:
+// beside interface ports connected by name, and the interface ports
+// themselves.
+sv_backends! {
+    fn wildcard_connections_beside_named_interface_ports(sim) {
+        @setup {
+            let source = r#"
+    interface Bus;
+      logic [7:0] wdata, rdata;
+      modport src(output wdata, input rdata);
+    endinterface
+    module Leaf(input logic [7:0] din, output logic [7:0] dout, Bus.src port);
+      assign port.wdata = din;
+      assign dout = port.rdata;
+    endmodule
+    module Top(input logic [7:0] din, output logic [7:0] dout);
+      Bus bus();
+      assign bus.rdata = bus.wdata + 8'd1;
+      Leaf leaf(.port(bus), .*);
+    endmodule
+  "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("wildcard_beside_interface.sv"))], "Top");
+        let din = sim.signal("din");
+        let dout = sim.signal("dout");
+        for value in [0u8, 0x21, 0xff] {
+            sim.modify(|io| io.set(din, value)).unwrap();
+            assert_eq!(u64::try_from(sim.get(dout)).unwrap(), u64::from(value.wrapping_add(1)));
+        }
+    }
+    fn wildcard_connections_bind_interface_ports(sim) {
+        @setup {
+            let source = r#"
+    interface Bus;
+      logic [7:0] data;
+      modport writer(output data);
+      modport reader(input data);
+    endinterface
+    module Writer(Bus.writer bus, input logic [7:0] x);
+      assign bus.data = x;
+    endmodule
+    module Reader(Bus.reader bus, output logic [7:0] y, output logic [7:0] z);
+      assign y = bus.data;
+      assign z = ~bus.data;
+    endmodule
+    module Top(input logic [7:0] x, output logic [7:0] y, output logic [7:0] inverted);
+      Bus bus();
+      Writer w(.*);
+      if (1) begin : inner
+        Reader r(.z(inverted), .*);
+      end
+    endmodule
+  "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("wildcard_interface.sv"))], "Top");
+        let x = sim.signal("x");
+        let y = sim.signal("y");
+        let inverted = sim.signal("inverted");
+        for value in [0u8, 0x41, 0xff] {
+            sim.modify(|io| io.set(x, value)).unwrap();
+            assert_eq!(u64::try_from(sim.get(y)).unwrap(), u64::from(value));
+            assert_eq!(u64::try_from(sim.get(inverted)).unwrap(), u64::from(!value));
+        }
+    }
+}
+
+#[test]
+fn wildcard_connections_need_an_interface_of_the_port_name() {
+    // An interface port cannot stay unconnected (23.3.3.4), `.name()` does
+    // not fall back to the wildcard, and an implicit connection cannot bind a
+    // generic interface port (25.3.3).
+    let interface = "interface Bus; logic [7:0] data; endinterface\n";
+    for (child, instance) in [
+        (
+            "module Child(Bus port); endmodule",
+            "Bus other(); Child child(.*);",
+        ),
+        (
+            "module Child(Bus bus); endmodule",
+            "Bus bus(); Child child(.bus(), .*);",
+        ),
+        (
+            "module Child(interface bus); endmodule",
+            "Bus bus(); Child child(.*);",
+        ),
+    ] {
+        let source = format!("{interface}{child}\nmodule Top; {instance} endmodule");
+        assert!(
+            Simulator::from_sv_sources(
+                vec![(source.as_str(), Path::new("wildcard_rejections.sv"))],
+                "Top"
+            )
+            .build_cranelift()
+            .is_err(),
+            "{source}"
+        );
     }
 }
 
@@ -320,4 +299,273 @@ fn interface_array_parameter_shorthand_does_not_bind_runtime_members() {
         .err()
         .unwrap();
     assert!(error.to_string().contains("bus.data"), "{error}");
+}
+
+// A module with a non-ANSI header beside an interface declaration, as
+// OpenPiton's `monitor`: the declarations of its header ports are in its body
+// (IEEE 1800-2023 23.2.2.1), and the interface does not change them.
+#[test]
+fn non_ansi_modules_beside_interfaces_keep_their_ports() {
+    let source = r#"
+        `timescale 1ns/1ns
+        interface bus_if;
+            logic v;
+        endinterface
+        module counter(/*AUTOARG*/
+            // Inputs
+            clk, n
+            );
+            input clk;
+            output integer n;
+            initial n = 0;
+            always @(posedge clk) n = n + 1;
+        endmodule
+        module Top;
+            logic clk = 0;
+            integer n;
+            bus_if b();
+            always #5 clk = ~clk;
+            counter c(.clk(clk), .n(n));
+            initial #32 $display("%0d", n);
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("non_ansi.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        sim.run_until(40).unwrap();
+        let displayed: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8(message).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(displayed, ["3"], "four_state={four_state}");
+    }
+}
+
+// A select of a member of an element of an interface instance array has the
+// type of that member (IEEE 1800-2023 25.3), here a structure member of a
+// width that differs between the two buses.
+#[test]
+fn selects_of_interface_array_element_members_are_typed() {
+    let source = r#"
+        interface Bus #(parameter DATA_SIZE = 1, parameter TAG_WIDTH = 1) ();
+            typedef struct packed {
+                logic [DATA_SIZE*8-1:0] data;
+                logic [TAG_WIDTH-1:0] tag;
+            } rsp_data_t;
+            rsp_data_t rsp_data;
+        endinterface
+        module Top(
+            input logic [21:0] first, second,
+            output logic [19:0] narrowed, output logic [1:0] low, output logic top
+        );
+            localparam TD = 6, TS = 4;
+            Bus #(.DATA_SIZE(2), .TAG_WIDTH(TD)) wide[2]();
+            Bus #(.DATA_SIZE(2), .TAG_WIDTH(TS)) narrow();
+            assign wide[0].rsp_data = first;
+            assign wide[1].rsp_data = second;
+            assign narrow.rsp_data.data = wide[0].rsp_data.data;
+            assign narrow.rsp_data.tag = wide[0].rsp_data.tag[TD-1 -: TS];
+            assign narrowed = narrow.rsp_data;
+            assign low = wide[1].rsp_data.tag[1:0];
+            assign top = wide[1].rsp_data.tag[5];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("array_member.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let (first, second) = (sim.signal("first"), sim.signal("second"));
+    sim.modify(|io| {
+        io.set(first, 0x2a_bcd5u32);
+        io.set(second, 0x3f_ffe2u32);
+    })
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("narrowed")), BigUint::from(0xaaf35u32));
+    assert_eq!(sim.get(sim.signal("low")), BigUint::from(2u8));
+    assert_eq!(sim.get(sim.signal("top")), BigUint::from(1u8));
+}
+
+// A variable of a task, a generate block or a procedure hides an array of
+// interface instances of its name (IEEE 1800-2023 23.9): a member select of
+// its element has the type of the variable's member, here of an ascending
+// range, not that of the interface signal.
+#[test]
+fn variables_hide_interface_arrays_of_their_name() {
+    let source = r#"
+        `timescale 1ns/1ns
+        interface Bus ();
+            logic [7:0] data;
+        endinterface
+        module Top;
+            typedef struct packed { logic [0:3] data; } item_t;
+            Bus bus[2]();
+            logic [3:0] a = 4'b1000;
+            logic [1:0] t, g_out, p_out;
+            assign bus[0].data = 8'h81;
+            assign bus[1].data = 8'h7e;
+            task automatic run(input logic [3:0] v, output logic [1:0] r);
+                item_t bus [2];
+                bus[0].data = v;
+                bus[1].data = ~v;
+                r = {bus[0].data[0], bus[1].data[0 +: 1]};
+            endtask
+            if (1) begin : g
+                item_t bus [2];
+                assign bus[0].data = a;
+                assign bus[1].data = ~a;
+                assign g_out = {bus[0].data[0], bus[1].data[0]};
+            end
+            always_comb begin : p
+                item_t bus [2];
+                bus[0].data = a;
+                bus[1].data = ~a;
+                p_out = {bus[0].data[0], bus[1].data[0]};
+            end
+            initial begin
+                #1 run(a, t);
+                $display("%b %b %b %b%b", t, g_out, p_out, bus[0].data[0], bus[1].data[0]);
+            end
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("hidden_array.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["10 10 10 10"]);
+}
+
+sv_backends! {
+    // A task declared in an interface is called through the instance or a
+    // port, also through an imported modport task (IEEE 1800-2023 25.7),
+    // and its timing controls wait on the interface's signals.
+    fn interface_tasks_wait_on_interface_signals(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            interface bus_if(input logic clk);
+              logic [7:0] data;
+              logic valid;
+              task automatic send(input logic [7:0] value);
+                @(posedge clk);
+                data <= value;
+                valid <= 1'b1;
+                @(posedge clk);
+                valid <= 1'b0;
+              endtask
+              task get(output logic [7:0] value);
+                do @(posedge clk); while (!valid);
+                value = data;
+              endtask
+              modport drv(output data, output valid, import send);
+            endinterface
+            module Driver(bus_if.drv b);
+              initial begin
+                b.send(8'h11);
+                b.send(8'h22);
+              end
+            endmodule
+            module Top(output logic [7:0] got, seen, output int got_at);
+              logic clk = 0;
+              always #5 clk = ~clk;
+              bus_if bus(.clk(clk));
+              bus_if loop(.clk(clk));
+              Driver d(.b(bus));
+              always @(posedge clk) if (bus.valid) seen <= bus.data;
+              initial begin
+                loop.valid = 0;
+                fork
+                  begin loop.send(8'h5a); loop.send(8'h3c); end
+                  begin loop.get(got); got_at = $time; end
+                join
+              end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("interface_tasks.sv"))], "Top");
+        sim.run_until(60).unwrap();
+        assert_eq!(sim.get(sim.signal("got")), BigUint::from(0x5au8));
+        assert_eq!(sim.get(sim.signal("got_at")), BigUint::from(15u8));
+        assert_eq!(sim.get(sim.signal("seen")), BigUint::from(0x22u8));
+    }
+}
+
+sv_backends! {
+    // The element types of the container formals of an interface function
+    // are those of the instance it is called through (IEEE 1800-2023 25.7,
+    // 7.6): through an instance, with named arguments, an instance of other
+    // parameter values, an output formal, and an imported modport function
+    // through a port, also where the caller declares a constant of the
+    // parameter's name (Verilator: cf12 80 1000 2).
+    fn interface_container_formals_take_instance_parameters(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            interface Bus #(parameter DW = 32);
+              logic [DW-1:0] base;
+              function automatic logic [DW-1:0] sum(input logic [DW-1:0] data [], input logic [DW/8-1:0] strb []);
+                return base + data[data.size() - 1] + DW'(data.size() * 10 + strb.size()) + DW'(strb[0]);
+              endfunction
+              function automatic void fill(output logic [DW-1:0] data []);
+                data = new[2];
+                data[1] = base;
+              endfunction
+              modport rd(input base, import sum);
+            endinterface
+            module User(Bus.rd b, output logic [7:0] y);
+              logic [7:0] bytes [];
+              logic [0:0] strb [];
+              initial begin
+                #1;
+                bytes = new[2];
+                bytes[1] = 8'h5a;
+                strb = new[1];
+                strb[0] = 1'b1;
+                y = b.sum(.strb(strb), .data(bytes));
+              end
+            endmodule
+            module Top(output logic [15:0] wide, output logic [7:0] narrow, output logic [15:0] back, output int back_size);
+              localparam DW = 4;
+              Bus #(.DW(16)) wide_bus();
+              Bus #(.DW(8)) narrow_bus();
+              assign wide_bus.base = 16'h1000;
+              assign narrow_bus.base = 8'h10;
+              User u(.b(narrow_bus), .y(narrow));
+              logic [15:0] blob [];
+              logic [1:0] wstrb [];
+              logic [15:0] got [];
+              initial begin
+                #1;
+                blob = new[3];
+                blob[2] = 16'hbeef;
+                wstrb = new[2];
+                wstrb[0] = 2'b11;
+                wstrb[1] = 2'b01;
+                wide = wide_bus.sum(.data(blob), .strb(wstrb));
+                wide_bus.fill(got);
+                back = got[1];
+                back_size = got.size();
+              end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("interface_container_formals.sv"))], "Top");
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("wide")), BigUint::from(0xcf12u16));
+        assert_eq!(sim.get(sim.signal("narrow")), BigUint::from(0x80u8));
+        assert_eq!(sim.get(sim.signal("back")), BigUint::from(0x1000u16));
+        assert_eq!(sim.get(sim.signal("back_size")), BigUint::from(2u8));
+    }
 }

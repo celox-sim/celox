@@ -3149,7 +3149,7 @@ fn flattens_unpacked_array_range_selections() {
     assert_eq!(eval_test_const_expr(msb), Some(15));
     assert_eq!(eval_test_const_expr(lsb), Some(0));
     assert_eq!(
-        array_slice_width.as_ref().map(eval_test_const_expr),
+        array_slice_width.as_deref().map(eval_test_const_expr),
         Some(Some(8))
     );
     assert!(*array_slice_reversed);
@@ -3593,7 +3593,6 @@ fn rejects_unimplemented_timing_constructs() {
             "event e; logic c; initial @(e or posedge c);",
             "event control mixing named events with other events",
         ),
-        ("initial begin : b disable b; end", "disable statement"),
     ] {
         let code = format!("module Top; {body} endmodule");
         let error = analyze_source(&code, Path::new("timing.sv"))
@@ -3771,6 +3770,65 @@ fn unsupported_constructs_map_to_their_tracking_issues() {
 }
 
 #[test]
+fn modules_carry_only_the_package_subroutines_they_can_call() {
+    // `used` reaches `helper`, `C::new` and, through the dispatcher of
+    // `C::m`, the override `D::m`; `randomize` reaches the hooks. `unused`
+    // and `E::other` are not called from `top`.
+    let source = r#"
+      package p;
+        function automatic int helper(int x); return x + 1; endfunction
+        function automatic int used(int x); return helper(x); endfunction
+        function automatic int unused(int x); return x - 1; endfunction
+        class C;
+          rand int v;
+          virtual function int m(); return 1; endfunction
+          function void pre_randomize(); endfunction
+        endclass
+        class D extends C;
+          virtual function int m(); return 2; endfunction
+        endclass
+        class E;
+          function int other(); return 3; endfunction
+        endclass
+      endpackage
+      module top;
+        import p::*;
+        int r;
+        initial begin
+          C c;
+          c = new;
+          void'(c.randomize());
+          r = used(1) + c.m();
+        end
+      endmodule
+    "#;
+    let ir = analyze_source(source, Path::new("reachable-imports.sv")).unwrap();
+    let names = |module: &str| -> Vec<String> {
+        let module = ir
+            .modules()
+            .iter()
+            .find(|candidate| candidate.name() == module)
+            .unwrap_or_else(|| {
+                let modules: Vec<_> = ir.modules().iter().map(ir::Module::name).collect();
+                panic!("no module {module} in {modules:?}")
+            });
+        module
+            .subroutines()
+            .iter()
+            .map(|subroutine| subroutine.name.clone())
+            .collect()
+    };
+    let top = names("top");
+    let has = |names: &[String], part: &str| names.iter().any(|name| name.contains(part));
+    for reached in ["used", "helper", "C::m", "D::m", "pre_randomize"] {
+        assert!(has(&top, reached), "{reached} missing from {top:?}");
+    }
+    for unreached in ["unused", "E::other"] {
+        assert!(!has(&top, unreached), "{unreached} carried in {top:?}");
+    }
+}
+
+#[test]
 fn analyzes_package_variables_into_a_state_module() {
     // A package variable is one object: the package's state module holds it,
     // and a module's signal for it names that variable.
@@ -3822,11 +3880,19 @@ fn package_functions_give_shapes_to_instance_connections() {
         .iter()
         .find(|module| module.name() == "Top")
         .unwrap();
+    // The port takes a variable that a continuous assignment of the call
+    // computes.
     let connection = &top.instances()[0].port_connections()[0];
-    assert!(
-        matches!(connection.actual_expr(), Some(ir::Expr::Call { callee: ir::Callee::Subroutine(name), .. }) if name == "p::sum"),
-        "{connection:?}"
-    );
+    let Some(ir::Expr::Ident(hidden)) = connection.actual_expr() else {
+        panic!("{connection:?}");
+    };
+    let computes_call = top.comb_processes().iter().any(|process| {
+        process.body().iter().any(|stmt| {
+            matches!(stmt, ir::Stmt::Assign { lhs: ir::LValue::Ident(name), rhs: ir::Expr::Call { callee: ir::Callee::Subroutine(callee), .. }, .. }
+                if name == hidden && callee == "p::sum")
+        })
+    });
+    assert!(computes_call, "{connection:?}");
 }
 
 #[test]
@@ -4920,6 +4986,10 @@ fn rejects_unsupported_interface_uses() {
         (
             "interface I; logic a; modport m(inout a); endinterface",
             "inout or ref modport port in interface `I`",
+        ),
+        (
+            "interface I; function new(); endfunction endinterface",
+            "constructor in interface `I`",
         ),
     ] {
         assert_eq!(
@@ -6386,7 +6456,37 @@ fn scope_randomize_validates_variable_arguments() {
         ("string value;", "randomize(value)"),
         ("class C; endclass C value;", "randomize(value)"),
         ("enum bit [1:0] {A=3, B} value;", "randomize(value)"),
-        ("bit value;", "std::randomize(value) with {value == 1;}"),
+        // Inline constraints take integral variables (18.12.1).
+        ("real value;", "std::randomize(value) with {value > 1;}"),
+        ("wire value;", "std::randomize(value) with {value == 1;}"),
+        (
+            "const bit value = 1;",
+            "std::randomize(value) with {value == 1;}",
+        ),
+        (
+            "localparam value = 1;",
+            "std::randomize(value) with {value == 1;}",
+        ),
+        (
+            "enum bit [1:0] {A, B} value;",
+            "std::randomize(value) with {value == A;}",
+        ),
+        (
+            "logic [64:0] value;",
+            "std::randomize(value) with {value == 1;}",
+        ),
+        ("bit value;", "std::randomize(value[0]) with {value == 1;}"),
+        // Its arguments are its random variables, the caller's other
+        // variables state values (18.12.1), which no order names (18.5.9).
+        (
+            "bit [3:0] a, b, s;",
+            "std::randomize(a, b) with {solve s before a;}",
+        ),
+        // A scope randomize takes no restricted constraint block (18.7).
+        (
+            "bit value;",
+            "std::randomize(value) with (value) {value == 1;}",
+        ),
     ] {
         let source = format!("module Top; {declaration} bit ok; initial ok = {call}; endmodule");
         assert!(
@@ -6394,6 +6494,19 @@ fn scope_randomize_validates_variable_arguments() {
             "accepted {source}"
         );
     }
+}
+
+#[test]
+fn restricted_blocks_reject_names_the_class_does_not_declare() {
+    // A listed name resolves into the object's class (18.7): one it does not
+    // declare is an error, not the caller's variable of that name.
+    let source = "module Top; class C; rand int x; endclass C c; int y; bit ok; \
+        initial begin c = new; ok = c.randomize() with (y) { y == 5; x == 1; }; end endmodule";
+    let error = analyze_source(source, Path::new("restricted_names.sv")).unwrap_err();
+    assert!(
+        error.to_string().contains("is not a member of class"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -6701,14 +6814,104 @@ fn explicit_output_data_types_default_to_variables() {
 fn class_randomize_rejects_unsupported_semantics() {
     for (members, call, expected) in [
         (
-            "rand int x; constraint c { soft x == 1; }",
+            "rand int x; int a[$]; constraint c { foreach (a[i]) soft x == a[i]; }",
             "c.randomize()",
-            "constraints",
+            "soft constraint in a constraint loop",
+        ),
+        // An indexed part-select whose end is past the integers is outside
+        // the range, not an overflow.
+        (
+            "rand bit [7:0] x; constraint c { x[2 +: 128'h7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff] == 0; }",
+            "c.randomize()",
+            "outside the range of its variable",
+        ),
+        // A dotted name that a restricted block does not list resolves in
+        // the caller's scope (18.7), whose members constraints do not read.
+        (
+            "class D; int limit; endclass rand int x; D settings;",
+            "c.randomize() with (x) { settings.limit == 3; }",
+            "a member of a variable of the caller",
+        ),
+        // Soft constraints may not be specified for randc variables
+        // (18.5.13.1).
+        (
+            "randc bit [1:0] x; constraint c { soft x == 1; }",
+            "c.randomize()",
+            "a soft constraint on a randc variable",
+        ),
+        // Functions in constraints (18.5.11): in a loop, with an argument
+        // other than an input, or whose argument calls one, and in inline
+        // constraints.
+        (
+            "rand int x; int a[$]; function int f(int v); return v; endfunction constraint c { foreach (a[i]) x == f(a[i]); }",
+            "c.randomize()",
+            "a function call in a constraint loop",
         ),
         (
-            "rand int x, y; constraint c { solve x before y; x == y; }",
+            "rand int x, y; function int f(output int v); v = 1; return 1; endfunction constraint c { x == f(y); }",
             "c.randomize()",
-            "constraints",
+            "with an argument other than an input",
+        ),
+        (
+            "rand int x, y; function int f(int v); return v; endfunction constraint c { x == f(f(y)); }",
+            "c.randomize()",
+            "whose argument calls a function",
+        ),
+        (
+            "rand int x, y; function int f(int v); return v; endfunction",
+            "c.randomize() with { x == f(y); }",
+            "in inline constraints",
+        ),
+        // `solve before` orders rand variables only (18.5.9).
+        (
+            "int x; rand int y; constraint c { solve x before y; }",
+            "c.randomize()",
+            "solve before of other than a rand variable",
+        ),
+        (
+            "randc bit [1:0] x; rand int y; constraint c { solve y before x; }",
+            "c.randomize()",
+            "solve before of other than a rand variable",
+        ),
+        (
+            "rand int x; int a[$];",
+            "c.randomize() with { solve a.size() before x; }",
+            "solve before of other than a rand variable",
+        ),
+        (
+            "class D; int m; endclass rand D h; rand int x; constraint c { solve h.m before x; }",
+            "c.randomize()",
+            "solve before of other than a rand variable",
+        ),
+        // However the variable is named (8.11).
+        (
+            "rand int x; int y; constraint c { solve this.y before x; }",
+            "c.randomize()",
+            "solve before of other than a rand variable",
+        ),
+        // A select of a variable that is not random, a class-scoped static
+        // property that is not rand, and more than one variable (Syntax
+        // 18-8).
+        (
+            "bit [1:0] a; rand bit b; constraint c { solve a[0] before b; }",
+            "c.randomize()",
+            "solve before of other than a rand variable",
+        ),
+        (
+            "static bit [7:0] s; rand int x; constraint c { solve C::s before x; }",
+            "c.randomize()",
+            "solve before of other than a rand variable",
+        ),
+        (
+            "rand bit [7:0] x, y, z; constraint c { solve x + y before z; }",
+            "c.randomize()",
+            "expected `before`",
+        ),
+        // `super` names a member of the base class (8.15).
+        (
+            "rand int x; constraint c { super.x == 1; }",
+            "c.randomize()",
+            "`super` in a class without a base class",
         ),
         (
             "rand int x; constraint c { x inside {[1:$]}; }",
@@ -6720,12 +6923,7 @@ fn class_randomize_rejects_unsupported_semantics() {
             "c.randomize()",
             "constraints",
         ),
-        (
-            "rand int x; constraint c { x dist {1 := 2}; }",
-            "c.randomize()",
-            "constraints",
-        ),
-        ("randc bit [8:0] x;", "c.randomize()", "randc"),
+        ("randc bit [16:0] x;", "c.randomize()", "randc"),
         ("rand int x;", "c.srandom()", "argument"),
         ("rand int x;", "c.srandom(1, 2)", "arguments"),
         (
@@ -6734,7 +6932,7 @@ fn class_randomize_rejects_unsupported_semantics() {
             "constraints",
         ),
         ("rand const int x;", "c.randomize()", "const"),
-        ("static rand int x;", "c.randomize()", "static random"),
+        ("randc static bit [1:0] x;", "c.randomize()", "randc static"),
         ("rand int x;", "C::randomize()", "object receiver"),
         ("rand int x;", "C::srandom(1)", "object receiver"),
         (
@@ -6939,24 +7137,188 @@ endmodule
 
 #[test]
 fn class_randc_checks_domain_limits() {
+    // IEEE 1800-2023 18.4.2: an implementation may limit the size of a randc
+    // variable to no less than 8 bits; Celox keeps cycles of up to 16 bits
+    // or 65536 enumeration members.
     let values = (0..257)
         .map(|i| format!("V{i}={i}"))
         .collect::<Vec<_>>()
         .join(",");
-    for (declarations, members) in [
-        (String::new(), "randc bit [8:0] x;"),
-        (
-            format!("typedef enum bit [15:0] {{{values}}} E;"),
-            "randc E x;",
-        ),
-    ] {
-        for call in ["c.randomize()", "c.randomize(x)"] {
-            let source = format!(
-                "module Top; {declarations} class C; {members} endclass C c; initial begin c=new; void'({call}); end endmodule"
-            );
-            let error = analyze_source(&source, Path::new("randc_limits.sv")).unwrap_err();
-            assert!(error.to_string().contains("randc"), "{error}");
+    let enumeration = format!("typedef enum bit [15:0] {{{values}}} E;");
+    let source = |declarations: &str, members: &str, call: &str| {
+        format!(
+            "module Top; {declarations} class C; {members} endclass C c; initial begin c=new; void'({call}); end endmodule"
+        )
+    };
+    for call in ["c.randomize()", "c.randomize(x)"] {
+        let error = analyze_source(
+            &source("", "randc bit [16:0] x;", call),
+            Path::new("randc_limits.sv"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("randc"), "{error}");
+        for (declarations, members) in [
+            ("", "randc bit [15:0] x;"),
+            (enumeration.as_str(), "randc E x;"),
+        ] {
+            analyze_source(&source(declarations, members, call), Path::new("randc.sv"))
+                .unwrap_or_else(|error| panic!("{members}: {error}"));
         }
+    }
+}
+
+#[test]
+fn undeclared_class_members_are_errors() {
+    let classes = "class K; int depth; endclass \
+        class P; K knobs; function new(); knobs = new; endfunction endclass \
+        class C; int x; endclass class D extends C; endclass";
+    for (access, class, member) in [
+        ("result = p.nope;", "P", "nope"),
+        ("result = p.knobs.sprint;", "K", "sprint"),
+        ("p.knobs.sprint = 1;", "K", "sprint"),
+        ("result = d.nope;", "D", "nope"),
+        ("result = ds[0].nope;", "D", "nope"),
+        ("result = p.knobs.sprint[0];", "K", "sprint"),
+        // The name of the class is no member of it.
+        ("result = p.knobs.K;", "K", "K"),
+        // A method call, as an operand and as a statement.
+        ("result = p.nope();", "P", "nope"),
+        ("p.knobs.nope();", "K", "nope"),
+        // The first link of a chain that names no member.
+        ("result = p.nope.more;", "P", "nope"),
+        ("p.nope.more = 1;", "P", "nope"),
+        ("result = p.nope.more();", "P", "nope"),
+        // A constant of the scope around the class is no member of it.
+        ("result = p.NOPE;", "P", "NOPE"),
+    ] {
+        let source = format!(
+            "module Top; localparam int NOPE = 3; {classes} P p; D d; D ds[2]; int result; \
+             initial begin p = new; d = new; ds[0] = d; {access} end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("members.sv")).unwrap_err();
+        assert!(
+            matches!(&error, AnalyzerError::UnknownClassMember { class: c, name } if c == class && name == member),
+            "{source}: {error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("no member named `{member}` in class `{class}`")
+        );
+    }
+    // Members the class, a base or an implemented interface class declares
+    // are still read: properties, statics, parameters, local parameters
+    // and enumeration labels (8.5).
+    for access in [
+        "result = p.knobs.depth;",
+        "result = d.x;",
+        "result = g.W;",
+        "result = g.L;",
+        "result = g.s;",
+        "result = g.GREEN;",
+    ] {
+        let source = format!(
+            "module Top; {classes} \
+             class G #(int W = 3); localparam int L = W + 1; static int s = 5; \
+             typedef enum {{RED, GREEN}} color_t; endclass \
+             P p; D d; G #(4) g; int result; \
+             initial begin p = new; d = new; g = new; {access} end endmodule"
+        );
+        analyze_source(&source, Path::new("members.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+}
+
+#[test]
+fn covergroups_of_classes_are_declared_members() {
+    // A covergroup a class declares is a member of it (IEEE 1800-2023
+    // 19.4): a select of it is no undeclared member, whatever the analyzer
+    // makes of it otherwise. The class constructs none, which the analysis
+    // of its package would reject.
+    let class = "class C; int x; covergroup cg; coverpoint x; endgroup \
+        function new(); endfunction endclass";
+    for access in ["c.cg.sample();", "void'(c.cg);"] {
+        let source =
+            format!("module Top; {class} C c; initial begin c = new; {access} end endmodule");
+        if let Err(error) = analyze_source(&source, Path::new("covergroups.sv")) {
+            assert!(
+                !matches!(error, AnalyzerError::UnknownClassMember { .. }),
+                "{access}: {error}"
+            );
+        }
+    }
+    let package = format!("package p; {class} endpackage");
+    for access in ["c.cg.sample();", "void'(c.cg);"] {
+        let packages = analyze_packages(&[(&package, Path::new("covergroups-p.sv"))]).unwrap();
+        let result = analyze_source_module_with_packages(
+            &format!("module Top; import p::*; C c; initial begin c = new; {access} end endmodule"),
+            Path::new("covergroups-top.sv"),
+            "Top",
+            &HashMap::default(),
+            &packages,
+            &mut packages.design(),
+        );
+        if let Err(error) = result {
+            assert!(
+                !matches!(error, AnalyzerError::UnknownClassMember { .. }),
+                "{access}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn undeclared_members_of_classes_of_other_files_are_errors() {
+    let base = r#"
+        package base_pkg;
+            class K; int depth; endclass
+            class P; K knobs; function new(); knobs = new; endfunction endclass
+            class C #(int W = 2); int x; localparam int L = W + 1;
+                typedef enum {RED, GREEN} color_t; endclass
+        endpackage
+    "#;
+    let analyze = |access: &str| {
+        let agent = format!(
+            "package agent_pkg; import base_pkg::*; \
+             class D extends C #(5); endclass \
+             class Item; function int f(P printer, D d); {access} endfunction endclass \
+             endpackage"
+        );
+        let packages = analyze_packages(&[
+            (base, Path::new("members-base.sv")),
+            (&agent, Path::new("members-agent.sv")),
+        ])?;
+        analyze_source_module_with_packages(
+            "module Top; import base_pkg::*; import agent_pkg::*; Item i; P p; D d; int r; \
+             initial begin i = new; p = new; d = new; r = i.f(p, d); end endmodule",
+            Path::new("members-top.sv"),
+            "Top",
+            &HashMap::default(),
+            &packages,
+            &mut packages.design(),
+        )
+    };
+    for (access, class, member) in [
+        ("return printer.knobs.sprint;", "base_pkg::K", "sprint"),
+        ("return printer.nope;", "base_pkg::P", "nope"),
+        ("return d.nope;", "agent_pkg::D", "nope"),
+        ("return printer.knobs.K;", "base_pkg::K", "K"),
+        ("return printer.nope();", "base_pkg::P", "nope"),
+        ("return printer.nope.more;", "base_pkg::P", "nope"),
+    ] {
+        let error = analyze(access).unwrap_err();
+        assert!(
+            matches!(&error, AnalyzerError::UnknownClassMember { class: c, name } if c == class && name == member),
+            "{access}: {error}"
+        );
+    }
+    for access in [
+        "return printer.knobs.depth;",
+        "return d.x;",
+        "return d.W;",
+        "return d.L;",
+        "return d.GREEN;",
+    ] {
+        analyze(access).unwrap_or_else(|error| panic!("{access}: {error}"));
     }
 }
 
@@ -7033,6 +7395,30 @@ fn class_visibility_rejects_inaccessible_members() {
             "{source}: {error}"
         );
     }
+}
+
+/// A module analyzed apart from the sources of its packages types its
+/// chandles although none of those sources names one (IEEE 1800-2023 6.14).
+#[test]
+fn modules_of_other_sources_than_their_packages_check_chandles() {
+    let packages = analyze_packages(&[(
+        "package p; localparam int N = 1; endpackage",
+        Path::new("chandle-free-package.sv"),
+    )])
+    .unwrap();
+    let error = analyze_source_module_with_packages(
+        "module Top; chandle h; int n; initial n = $countones(h); endmodule",
+        Path::new("chandle-top.sv"),
+        "Top",
+        &HashMap::default(),
+        &packages,
+        &mut packages.design(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, AnalyzerError::IllegalChandleUse { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -7554,20 +7940,24 @@ fn folded_function_branches_still_reject_blocking_statements() {
 
 #[test]
 fn detached_function_scheduling_requires_a_process_caller() {
+    let function = "function int f(); fork #1; join_none return 1; endfunction";
     for body in [
         "final f();",
-        "int initialized = f();",
         "always_comb value = f();",
         "always_ff @(posedge clk) value <= f();",
     ] {
-        let source = format!(
-            "module Top; bit clk; int value; function int f(); fork #1; join_none return 1; endfunction {body} endmodule"
-        );
+        let source = format!("module Top; bit clk; int value; {function} {body} endmodule");
         assert!(
             analyze_source(&source, Path::new("invalid_join_none.sv")).is_err(),
             "{source}"
         );
     }
+    // A declaration initializer's fork is an error when it runs (IEEE
+    // 1800-2023 13.4.4 allows either), which the simulation reports (see
+    // `initializers_fork_only_on_paths_they_take` in celox's tests).
+    let source = format!("module Top; {function} int initialized = f(); endmodule");
+    analyze_source(&source, Path::new("initializer_join_none.sv"))
+        .unwrap_or_else(|error| panic!("{source}: {error}"));
     for statement in ["#1;", "wait (1);", "fork #1; join", "fork #1; join_any"] {
         let source = format!(
             "module Top; function void f(); {statement} endfunction initial f(); endmodule"
@@ -7669,7 +8059,9 @@ fn class_inline_randomize_binds_local_inputs() {
 
 #[test]
 fn class_inline_randomize_static_names_do_not_capture_caller_locals() {
-    for (expression, supported) in [("x == limit", false), ("x == local::limit", true)] {
+    // A name of the class's scope is the class's (IEEE 1800-2023 18.7): the
+    // static property, not the caller's variable, either way.
+    for (expression, supported) in [("x == limit", true), ("x == local::limit", true)] {
         let source = format!(
             r#"module Top;
             class C; rand bit [7:0] x; static bit [7:0] limit = 5; endclass
@@ -7822,6 +8214,27 @@ fn unresolved_class_alias_type_arguments_still_fail() {
         error.to_string().contains("class type parameter value"),
         "{error}"
     );
+}
+
+#[test]
+fn unresolved_class_alias_value_arguments_still_fail() {
+    // A value waits for the package's constants, but a variable or a
+    // constant of another scope is still no constant of the package.
+    for value in ["v", "MISSING"] {
+        let source = format!(
+            "package p; int v = 3; class C #(int W = 1); endclass \
+             typedef C#({value}) c_t; endpackage \
+             module Top; localparam int MISSING = 29; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("unresolved-class-value-argument.sv"))
+            .expect_err("a package value argument must be a constant of the package");
+        assert!(
+            error
+                .to_string()
+                .contains("class parameter value that is not constant"),
+            "{value}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -8289,8 +8702,6 @@ fn wide_container_elements_reject_whole_container_operations() {
             "ix = q.unique_index();",
             "elements wider than 64 bits requires a with",
         ),
-        ("b = q[0][99];", "container element wider than 64 bits"),
-        ("r = q[0][7:0];", "container element wider than 64 bits"),
         ("ix[0] = $bits(q[0][99]);", "query selection"),
         ("q[0][3] = 1'b1;", "requires a compatible container"),
     ] {
@@ -8351,4 +8762,159 @@ fn preserves_package_enum_unknown_values() {
         endmodule
     "#;
     analyze_source(source, Path::new("package_enum_unknown.sv")).unwrap();
+}
+
+#[test]
+fn static_class_functions_are_constant_functions() {
+    // A static function is called without an object, also where its class
+    // has methods that need one, and by a scope that imports the class
+    // (IEEE 1800-2023 8.10, 13.4.3).
+    let ir = analyze_source(
+        "package p;
+            class E;
+                static function int two(); return 2; endfunction
+            endclass
+        endpackage
+        class D;
+            int v;
+            static function int inc(int x); return x + 1; endfunction
+            function int get(); return v; endfunction
+            virtual task run(); #1; endtask
+        endclass
+        module Top;
+            localparam int A = D::inc(3);
+            localparam int B = p::E::two();
+            logic [A:0] a;
+            logic [B:0] b;
+        endmodule",
+        Path::new("static-class-functions.sv"),
+    )
+    .expect("static class functions are constant functions");
+    let widths = ir.modules()[0]
+        .signals()
+        .iter()
+        .map(|signal| signal.r#type().resolved_width())
+        .collect::<Vec<_>>();
+    assert_eq!(widths, [Some(5), Some(3)]);
+}
+
+/// Only a named block that a `disable` names stays a block (IEEE 1800-2023
+/// 9.6.2): a label alone leaves the statements in their enclosing list, as
+/// the analyses of a process body expect them.
+#[test]
+fn only_disabled_named_blocks_stay_blocks() {
+    let code = "module Top(input logic clk, input logic d, output logic q, r);\n\
+                always_ff @(posedge clk) begin : plain q <= d; end\n\
+                always_ff @(posedge clk) begin : left if (d) disable left; r <= d; end\n\
+                endmodule";
+    let ir = analyze_source(code, Path::new("named_blocks.sv")).expect("named blocks");
+    let blocks = |process: &ir::FfProcess| {
+        let mut blocks = 0;
+        for stmt in process.body() {
+            stmt.walk(&mut |stmt| blocks += usize::from(matches!(stmt, ir::Stmt::Block { .. })));
+        }
+        blocks
+    };
+    let processes = ir.modules()[0].ff_processes();
+    assert_eq!(processes.iter().map(blocks).collect::<Vec<_>>(), [0, 1]);
+    assert!(matches!(
+        processes[0].body(),
+        [ir::Stmt::Assign {
+            nonblocking: true,
+            ..
+        }]
+    ));
+}
+
+/// A constant `$timeformat` units number is a time unit from 2 to -15, and
+/// its precision and minimum field width are not negative (IEEE 1800-2023
+/// 20.4.3).
+#[test]
+fn rejects_constant_time_format_arguments_outside_their_ranges() {
+    for (arguments, name) in [
+        ("5, 0, \"\", 0", "units number"),
+        ("-16, 0, \"\", 0", "units number"),
+        ("-9, -1, \"\", 0", "precision number"),
+        ("-9, 0, \"\", -2", "minimum field width"),
+    ] {
+        let source = format!("module Top; initial $timeformat({arguments}); endmodule");
+        let error = analyze_source(&source, Path::new("time_format.sv"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(name) && error.contains("20.4.3"),
+            "{arguments}: {error}"
+        );
+    }
+    analyze_source(
+        "module Top; int u = -9; initial $timeformat(u, 2, \" ns\", 10); endmodule",
+        Path::new("time_format.sv"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn static_formals_of_package_functions_that_fork_are_rejected() {
+    // The static formals of a package function whose own body forks
+    // outlive the call, which keeps them nowhere; a function that only
+    // calls one that forks needs none of them after it returns, as UVM
+    // 1.2's `uvm_create_random_seed` (IEEE 1800-2023 13.4.4). A package
+    // task that suspends keeps its static formals as variables of the
+    // package (13.3.2).
+    let helper =
+        "bit enabled; function void helper(); if (enabled) fork $display(1); join_none endfunction";
+    for (subroutine, rejected) in [
+        (
+            "function int seed(string s); helper(); return s.len(); endfunction",
+            false,
+        ),
+        (
+            "function int seed(string s); fork $display(s); join_none return s.len(); endfunction",
+            true,
+        ),
+        ("task seed(string s); #1 $display(s); endtask", false),
+    ] {
+        let call = if subroutine.starts_with("task") {
+            "p::seed(\"abc\");"
+        } else {
+            "x = p::seed(\"abc\");"
+        };
+        let source = format!(
+            "package p; {helper} {subroutine} endpackage module Top; int x; initial begin {call} end endmodule"
+        );
+        let result = analyze_source(&source, Path::new("package_formals.sv"));
+        if rejected {
+            let error = result.unwrap_err();
+            assert!(
+                error.to_string().contains("static arguments in a package"),
+                "{subroutine}: {error}"
+            );
+        } else {
+            result.unwrap_or_else(|error| panic!("{subroutine}: {error}"));
+        }
+    }
+}
+
+#[test]
+fn block_imports_bind_the_calls_of_folded_branches() {
+    // The branch a constant condition never takes stays in the process's
+    // sensitivity body (IEEE 1800-2023 9.2.2.2.1), where the block's import
+    // binds its call as in the statements the process runs.
+    let code = "package q; int v; function int g(); return v; endfunction endpackage\n\
+                module Top #(parameter bit EN = 0) (output int y);\n\
+                always_comb begin import q::*; if (EN) y = g(); else y = 7; end\n\
+                endmodule";
+    let ir = analyze_source(code, Path::new("folded.sv")).unwrap();
+    let module = ir
+        .modules()
+        .iter()
+        .find(|module| module.name() == "Top")
+        .unwrap();
+    let sensitivity = module
+        .comb_processes()
+        .iter()
+        .map(|process| format!("{:?}", process.sensitivity_body()))
+        .collect::<String>();
+    assert!(sensitivity.contains("\"q::g\""), "{sensitivity}");
+    assert!(!sensitivity.contains("\"g\""), "{sensitivity}");
 }

@@ -369,7 +369,6 @@ fn simulation_restore_refuses_to_rewind_vcd_until_switched() {
     assert_eq!(std::fs::read_to_string(&second).unwrap(), vcd);
 }
 
-#[cfg(feature = "systemverilog")]
 mod persisted_core {
     use std::path::Path;
     const SOURCE: &str = r#"

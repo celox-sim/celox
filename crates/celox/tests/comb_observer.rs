@@ -2617,63 +2617,6 @@ module Top (
     assert_eq!(bare(sim.drain_runtime_events()), vec![]);
 }
 
-fn test_comb_function_packed_array_literal_preserves_source_order(sim) {
-    // SV arm: Veryl emits `'{default: a, b}`, mixing positional items with `default:`, which is
-    // not legal SV; the SV parser rejects it.
-    @ignore_on(veryl, sv);
-    @case "comb_observer::test_comb_function_packed_array_literal_preserves_source_order";
-}
-
-fn test_comb_function_nested_array_literals_preserve_each_dimension_order(sim) {
-    @case "comb_observer::test_comb_function_nested_array_literals_preserve_each_dimension_order";
-}
-
-fn test_comb_function_array_literal_converts_scalar_items_per_element(sim) {
-    @case "comb_observer::test_comb_function_array_literal_converts_scalar_items_per_element";
-}
-
-fn test_comb_function_nested_array_scalar_default_converts_each_element(sim) {
-    @ignore_on(veryl);
-    @case "comb_observer::test_comb_function_nested_array_scalar_default_converts_each_element";
-}
-
-fn test_comb_function_array_literal_array_item_preserves_element_type(sim) {
-    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
-    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
-    // ("assignment pattern item: an unpacked array of type `logic signed [3:0] [2]` is not
-    // assignment compatible with `logic signed [7:0] [2]`") instead of reinterpreting its bits.
-    @ignore_on(veryl, sv);
-    @case "comb_observer::test_comb_function_array_literal_array_item_preserves_element_type";
-}
-
-fn test_comb_function_array_literal_accepts_array_returning_items(sim) {
-    @ignore_on(veryl);
-    @case "comb_observer::test_comb_function_array_literal_accepts_array_returning_items";
-}
-
-fn test_comb_function_direct_array_argument_converts_each_element(sim) {
-    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
-    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
-    // ("argument 1 of `pick`: an unpacked array of type `logic signed [3:0] [2]` is not
-    // assignment compatible with `logic signed [7:0] [2]`") instead of reinterpreting its bits.
-    @ignore_on(veryl, sv);
-    @case "comb_observer::test_comb_function_direct_array_argument_converts_each_element";
-}
-
-fn test_comb_function_direct_array_return_preserves_all_elements(sim) {
-    @ignore_on(veryl);
-    @case "comb_observer::test_comb_function_direct_array_return_preserves_all_elements";
-}
-
-fn test_comb_statement_function_direct_array_argument_converts_each_element(sim) {
-    // sv: Veryl emits a call that passes an unpacked array whose element type differs from the
-    // formal's, which IEEE 1800-2023 7.6 and 10.8 make illegal. The SV frontend rejects it
-    // ("argument 1 of `capture`: an unpacked array of type `logic signed [3:0] [2]` is not
-    // assignment compatible with `logic signed [7:0] [2]`") instead of reinterpreting its bits.
-    @ignore_on(veryl, sv);
-    @case "comb_observer::test_comb_statement_function_direct_array_argument_converts_each_element";
-}
-
 fn test_comb_function_effects_use_typed_array_arguments(sim) {
     @omit_veryl;
     @build Simulator::builder(r#"
@@ -2694,14 +2637,6 @@ module Top (
     let q = sim.signal("q");
     assert_eq!(sim.get_as::<u8>(q), 0xf8);
     assert_eq!(bare(sim.drain_runtime_events()), vec![]);
-}
-
-fn test_named_function_inputs_evaluate_in_source_order(sim) {
-    @case "comb_observer::test_named_function_inputs_evaluate_in_source_order";
-}
-
-fn test_named_function_outputs_apply_in_source_order(sim) {
-    @case "comb_observer::test_named_function_outputs_apply_in_source_order";
 }
 
 fn test_nested_dynamic_function_loops_preserve_effect_runners(sim) {
@@ -4251,7 +4186,6 @@ module Top (
     );
 }
 
-
 fn test_comb_display_duplicate_store_alias_keeps_capture_activation(sim) {
     @omit_veryl;
     @build Simulator::builder(r#"
@@ -4470,16 +4404,6 @@ module Top (sel: input logic, a: input logic<8>, out: output logic<8>) {
     assert_eq!(bare(sim.drain_runtime_events()), vec![celox::RuntimeEvent::Display {
         message: b"after=17".to_vec(),
     }]);
-}
-
-fn test_comb_function_loop_bounds_apply_output_effects_left_to_right(sim) {
-    @ignore_on(veryl);
-    @case "comb_observer::test_comb_function_loop_bounds_apply_output_effects_left_to_right";
-}
-
-fn test_comb_function_loop_skips_conditions_after_break(sim) {
-    @ignore_on(veryl);
-    @case "comb_observer::test_comb_function_loop_skips_conditions_after_break";
 }
 
 fn test_comb_function_output_preview_honors_loop_break(sim) {

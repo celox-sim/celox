@@ -30,6 +30,86 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq same 1))
 
+; The ordering methods of a fixed-size unpacked array variable of one
+; dimension, of a module, a block or a task, which no container holds:
+; `reverse`, `sort`, `rsort` and `shuffle` reorder its elements in place
+; (IEEE 1800-2023 7.12.2), positions counted from its left index (7.4), so
+; `d[3:0].reverse()` swaps `d[3]` and `d[0]`, also with negative bounds
+; (`n[-2:1]`); class handles too, a shuffle
+; keeping each element once.
+(case ordering_fixed_variables
+  (source "ordering_fixed.sv" #"
+module Top(output int checks);
+  class C; int id; function new(int i); id = i; endfunction endclass
+  int a[4];
+  int d[3:0];
+  int n[-2:1];
+  task handles(output int result);
+    C seq_array[4];
+    int sum, prod, moved;
+    foreach (seq_array[i]) seq_array[i] = new(i + 1);
+    moved = 0;
+    repeat (10) begin
+      seq_array.shuffle();
+      if (seq_array[0].id != 1) moved = 1;
+    end
+    sum = 0; prod = 1;
+    foreach (seq_array[i]) begin sum += seq_array[i].id; prod *= seq_array[i].id; end
+    result = (sum == 10 && prod == 24) + moved * 2;
+  endtask
+  initial begin
+    int b[4];
+    int sum, prod, ok, result;
+    foreach (a[i]) a[i] = i + 1;
+    a.reverse();
+    checks = (a[0] == 4 && a[1] == 3 && a[2] == 2 && a[3] == 1) * 1;
+    b = '{3, 1, 4, 2};
+    b.sort();
+    checks += (b[0] == 1 && b[1] == 2 && b[2] == 3 && b[3] == 4) * 2;
+    b.rsort;
+    checks += (b[0] == 4 && b[1] == 3 && b[2] == 2 && b[3] == 1) * 4;
+    d[3] = 10; d[2] = 20; d[1] = 30; d[0] = 40;
+    d.reverse();
+    checks += (d[3] == 40 && d[2] == 30 && d[1] == 20 && d[0] == 10) * 8;
+    ok = 1;
+    repeat (8) begin
+      a.shuffle();
+      sum = 0; prod = 1;
+      foreach (a[i]) begin sum += a[i]; prod *= a[i]; end
+      ok &= sum == 10 && prod == 24;
+    end
+    checks += ok * 16;
+    handles(result);
+    checks += result * 32;
+    n = '{1, 2, 3, 4};
+    n.reverse();
+    checks += (n[-2] == 4 && n[-1] == 3 && n[0] == 2 && n[1] == 1) * 128;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 255))
+
+; 4-state elements keep their X and Z bits as an ordering method of a
+; fixed-size array variable moves them.
+(case ordering_fixed_four_state
+  (source "ordering_fixed.sv" #"
+module Top(output bit same);
+  logic [3:0] l[3];
+  int a, b, c;
+  initial begin
+    l = '{4'b10xz, 4'h3, 4'bxxxx};
+    l.reverse();
+    same = l[0] === 4'bxxxx && l[1] === 4'h3 && l[2] === 4'b10xz;
+    l.shuffle();
+    foreach (l[i]) begin
+      a += l[i] === 4'b10xz; b += l[i] === 4'h3; c += l[i] === 4'bxxxx;
+    end
+    same = same && a == 1 && b == 1 && c == 1;
+  end
+endmodule
+"#)
+  (four_state) (top Top) (run_until 0) (assert_eq same 1))
+
 (case shuffle_four_state
   (source "shuffle.sv" #"
 module Top(output bit same);

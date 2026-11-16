@@ -122,7 +122,51 @@ pub(super) fn identifier_expression(
             "use of interface `{name}` other than as a port connection or through a member"
         )));
     }
+    check_declared(tree, &name, dimensions)?;
     Ok(Expr::Ident(name))
+}
+
+/// Report value name `name` as not declared where `dimensions` know every
+/// value a read may name and none is `name`: data are declared before they
+/// are used, and no read declares an implicit net (IEEE 1800-2023 6.6,
+/// 6.10; see [`PackedDimensions::declared_values`]).
+pub(super) fn check_declared(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    if dimensions.declared_values && !declared_value(tree, name, dimensions) {
+        return Err(AnalyzerError::UndeclaredIdentifier {
+            name: name.to_owned(),
+            context: "a value read where no declaration of it is visible".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Whether value name `name` is one the tables of `dimensions` or the
+/// symbols the scope imports declare: a variable, formal or local, a
+/// parameter or enumeration constant, a subroutine, or a static property
+/// of a class `C::x` (IEEE 1800-2023 8.23). A name a package or the
+/// compilation unit qualifies, `q::x`, the imports of the scope resolved
+/// already, which report an item the package does not declare or export
+/// (26.3, 26.6; see [`PackedDimensions::declared_values`]).
+fn declared_value(tree: &AnalysisContext<'_>, name: &str, dimensions: &PackedDimensions) -> bool {
+    let imported = scope::imported(tree);
+    let package_item = name.split_once("::").is_some_and(|(scope, _)| {
+        scope == packages::UNIT || imported.package_scopes.contains(scope)
+    });
+    package_item
+        || dimensions.get(name).is_some()
+        || dimensions.const_env.contains_key(name)
+        || dimensions.parameter_values.contains_key(name)
+        || dimensions.constant_types.contains_key(name)
+        || dimensions.functions.contains_key(name)
+        || dimensions.class_static_members.contains(name)
+        || imported.aliases.contains_key(name)
+        || imported.functions.contains_key(name)
+        || imported.const_env.contains_key(name)
+        || imported.local_names().contains(name)
 }
 
 /// Numeric system-function semantics for already-bound native arguments.
@@ -324,6 +368,24 @@ pub(super) fn validate_call_argument(
         )));
     }
     Ok(())
+}
+
+/// [`query_actual_is_writable`] for the bound value of a member select or a
+/// select of one: a member of a two-state type of a four-state structure is
+/// read through a conversion of its bits (and a resize to the member's
+/// width), which a write passes through.
+pub(super) fn member_actual_is_writable(expression: &Expr, dimensions: &PackedDimensions) -> bool {
+    match expression {
+        Expr::Unary {
+            op: UnaryOp::ToTwoState,
+            expr,
+        }
+        | Expr::Resize { expr, .. } => member_actual_is_writable(expr, dimensions),
+        Expr::Select { expr, .. } if !matches!(**expr, Expr::Ident(_)) => {
+            member_actual_is_writable(expr, dimensions)
+        }
+        expression => query_actual_is_writable(expression, dimensions),
+    }
 }
 
 pub(super) fn query_actual_is_writable(expression: &Expr, dimensions: &PackedDimensions) -> bool {

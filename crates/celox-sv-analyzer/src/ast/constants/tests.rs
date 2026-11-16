@@ -141,7 +141,7 @@ fn native_constant_calls_preserve_contextual_operand_shapes() {
         ConstExpr::Literal("7".into()),
         ConstExpr::Literal("0".into()),
     ));
-    let aliases = HashMap::from_iter([("byte_t".into(), alias)]);
+    let aliases = TypeAliases::from_iter([("byte_t".into(), alias)]);
     let mut context = PackedDimensions::new(HashMap::default(), &env, &aliases);
     context.constant_indexed_base = true;
     context.scope_types_complete = true;

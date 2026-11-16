@@ -49,6 +49,11 @@ mod testbench_compile;
 pub(crate) mod timing;
 #[cfg(feature = "host-runtime")]
 mod value_change;
+/// The IEEE VPI host of the `celox` command. It is public for the command and
+/// its tests, not a stable API.
+#[cfg(all(feature = "cli", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[doc(hidden)]
+pub mod vpi;
 pub use backend::SimulatorErrorCode as RuntimeErrorCode;
 pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,
@@ -61,7 +66,6 @@ pub use celox_frontend_core::FrontendArtifactError;
 pub use celox_frontend_sdk as frontend_sdk;
 pub use celox_frontend_sdk::FrontendArtifact;
 /// Warnings of the SystemVerilog frontend, in [`CompilationWarning::SystemVerilog`].
-#[cfg(feature = "systemverilog")]
 pub use celox_frontend_sv::{
     FrontendWarning as SvFrontendWarning, FrontendWarningKind as SvFrontendWarningKind,
     WarningLocation as SvWarningLocation,
@@ -345,7 +349,6 @@ pub use simulator::{
     compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_diagnostic_policy,
     compile_to_sir_with_file_dependencies, compile_to_sir_with_latch_policy,
 };
-#[cfg(feature = "systemverilog")]
 pub use simulator::{
     compile_mixed_to_sir, compile_mixed_to_sir_with_file_dependencies, compile_sv_to_sir,
 };

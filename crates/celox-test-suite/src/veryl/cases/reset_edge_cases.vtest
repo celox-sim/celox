@@ -1,5 +1,6 @@
 (group reset_edge_cases (category sequential))
 
+; Test `reset_async_high`: the FF resets when the reset signal is HIGH.
 (case test_reset_async_high
   (source "test.veryl" #"
 module Top (
@@ -40,6 +41,7 @@ assign q = r;
   (tick clk)
   (assert_eq q 0))
 
+; Test `reset_sync_high`: synchronous reset, active HIGH.
 (case test_reset_sync_high
   (source "test.veryl" #"
 module Top (
@@ -72,6 +74,7 @@ assign q = r;
   (tick clk)
   (assert_eq q 0xBB))
 
+; Test `reset_sync_low`: synchronous reset, active LOW.
 (case test_reset_sync_low
   (source "test.veryl" #"
 module Top (
@@ -104,6 +107,7 @@ assign q = r;
   (tick clk)
   (assert_eq q 0xCC))
 
+; Test multiple FF blocks sharing the same reset signal.
 (case test_shared_reset
   (source "test.veryl" #"
 module Top (
@@ -150,6 +154,8 @@ assign q2 = r2;
   (assert_eq q1 0xAA)
   (assert_eq q2 0xBB))
 
+; Reset value that is non-zero: verifies the reset assignment uses
+; the specified value, not just zero.
 (case test_nonzero_reset_value
   (source "test.veryl" #"
 module Top (

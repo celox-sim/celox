@@ -1430,6 +1430,7 @@ fn lower_statements(
                     value: staged,
                     position: None,
                     pending,
+                    unit: false,
                 };
                 kernel.nonblocking(index, &site, |builder| {
                     let value = coerce_sir_expression(
@@ -1988,6 +1989,7 @@ pub fn lower_frontend_artifact(
             .into_iter()
             .collect(),
         root_id: module_id,
+        hidden_root: false,
         packages: Vec::new(),
         instance_values: Vec::new(),
     };

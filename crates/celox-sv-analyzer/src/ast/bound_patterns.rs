@@ -18,6 +18,8 @@ enum Items {
     ArrayValue {
         value: Expr,
         ty: typecheck::UnpackedArrayType,
+        /// The semantic type of the argument, where the caller binds it.
+        semantic: semantic_types::Binding,
     },
     List(Vec<Value>),
     Repeat(usize, Vec<Value>),
@@ -68,15 +70,23 @@ pub(super) fn from_array_parameter(
     dims: &PackedDimensions,
     shape: &VariableDimensions,
 ) -> Converted<BoundPattern> {
-    let ty = array_compatibility::unpacked_array_type(&tree.functions, shape, dims)
+    let ty = array_compatibility::unpacked_array_type(&tree.functions, &session.types, shape, dims)
         .ok_or_else(|| unsupported("array parameter argument type"))?;
+    let mut semantic = semantic_types::Binding::default();
+    if let Some(id) = shape.type_id(&mut session.types, &tree.functions, &dims.const_env) {
+        semantic.set(&session.types, id);
+    }
     let value = substitute_expr_idents(
         expression_binding::bind(root, tree, session, dims)?,
         &dims.array_parameter_values,
     );
     let value = frozen(tree, session, value, dims)?;
     Ok(BoundPattern {
-        items: Items::ArrayValue { value, ty },
+        items: Items::ArrayValue {
+            value,
+            ty,
+            semantic,
+        },
     })
 }
 
@@ -108,11 +118,13 @@ fn frozen(
             then_expr: freeze(*then_expr)?,
             else_expr: freeze(*else_expr)?,
         },
+        // The actuals are in the order of the formals; the order in which
+        // the call names them does not change the value of a constant one.
         Expr::Call {
             callee: Callee::Subroutine(name),
             args,
-            arg_order,
-        } if arg_order.is_empty() => {
+            arg_order: _,
+        } => {
             let args = args
                 .into_iter()
                 .map(|arg| {
@@ -129,9 +141,31 @@ fn frozen(
                         .ok_or_else(|| unsupported("constant pattern function argument"))
                 })
                 .collect::<Converted<Vec<crate::ir::ConstExpr>>>()?;
-            let literal =
-                const_functions::eval_call_literal(functions, &name, &args, &dims.const_env)
-                    .ok_or_else(|| unsupported("constant parameter pattern function"))?;
+            // The function may read an unpacked array parameter of the
+            // scope, a variable there whose value is a constant.
+            let arrays = dims
+                .array_parameter_values
+                .iter()
+                .filter_map(|(array, value)| {
+                    let Expr::Literal(text) = fold_const_integral_expr_preserving_mask(
+                        tree,
+                        session,
+                        value.clone(),
+                        &dims.const_env,
+                    ) else {
+                        return None;
+                    };
+                    Some((array.clone(), typecheck::parse_integral_literal(&text)?))
+                })
+                .collect::<HashMap<_, _>>();
+            let literal = const_functions::eval_call_literal_with_arrays(
+                functions,
+                &name,
+                &args,
+                &dims.const_env,
+                &arrays,
+            )
+            .ok_or_else(|| unsupported("constant parameter pattern function"))?;
             Expr::Literal(typecheck::format_integral_literal_binary(&literal))
         }
         value => {
@@ -202,10 +236,27 @@ impl BoundPattern {
         dims: &PackedDimensions,
     ) -> Converted<Expr> {
         let functions = &tree.functions;
-        if let Items::ArrayValue { value, ty } = &self.items {
-            let target = array_compatibility::unpacked_array_type(&tree.functions, shape, dims)
-                .ok_or_else(|| unsupported("unpacked array parameter supplied to a scalar"))?;
-            if !ty.is_assignment_compatible_with(&target) {
+        if let Items::ArrayValue {
+            value,
+            ty,
+            semantic,
+        } = &self.items
+        {
+            let target =
+                array_compatibility::unpacked_array_type(functions, &session.types, shape, dims)
+                    .ok_or_else(|| unsupported("unpacked array parameter supplied to a scalar"))?;
+            // The argument is assigned to the parameter (IEEE 1800-2023 7.6,
+            // 23.10): their types, the argument's as the caller bound it,
+            // decide, as the type system tells.
+            let target_type = shape.type_id(&mut session.types, functions, &dims.const_env);
+            let compatible = match (semantic.get(&session.types), target_type) {
+                (Some(actual), Some(target)) => {
+                    array_compatibility::incompatible_types(&session.types, actual, target)
+                        .is_none()
+                }
+                _ => ty.is_assignment_compatible_with(&target),
+            };
+            if !compatible {
                 return Err(AnalyzerError::IncompatibleUnpackedArray {
                     context: "module parameter override".into(),
                     actual: ty.to_string(),
@@ -229,18 +280,21 @@ impl BoundPattern {
             let right = eval(&dim.right)?;
             let count = usize::try_from(left.abs_diff(right) + 1)
                 .map_err(|_| unsupported("assignment pattern target size"))?;
-            shapes = vec![
-                VariableDimensions::new(VariableShape {
-                    declared: type_names::Declared::default(),
-                    container: None,
-                    real: false,
-                    string: false,
-                    class: None,
-                    unpacked: rest.to_vec(),
-                    ..shape.clone_shape()
-                });
-                count
-            ];
+            let mut element = VariableDimensions::new(VariableShape {
+                declared: type_names::Declared::default(),
+                container: None,
+                real: false,
+                string: false,
+                class: None,
+                unpacked: rest.to_vec(),
+                ..shape.clone_shape()
+            });
+            // An element has the element type of the array (7.4), which
+            // tells a virtual interface apart by its semantic type.
+            if let Some(id) = shape.bound_element(&session.types) {
+                element.bind_to(&session.types, id);
+            }
+            shapes = vec![element; count];
             keys = (0..count)
                 .map(|i| {
                     Key::Index(if left <= right {
@@ -283,7 +337,7 @@ impl BoundPattern {
                     })
                 })
                 .collect();
-        } else if let Some(aggregate) = &shape.unpacked_struct {
+        } else if let Some(aggregate) = shape.unpacked_struct_in(&session.types) {
             keys = aggregate
                 .members()
                 .iter()
@@ -293,7 +347,7 @@ impl BoundPattern {
                 aggregate
                     .members()
                     .iter()
-                    .map(|member| procedural::dimensions_from_type(&member.r#type)),
+                    .map(|member| shape.member_shape(&session.types, &member.name, &member.r#type)),
             );
         } else if !shape.members.is_empty() {
             if shape
@@ -313,7 +367,7 @@ impl BoundPattern {
                 shape
                     .members
                     .iter()
-                    .map(|m| procedural::dimensions_from_type(m.r#type())),
+                    .map(|m| shape.member_shape(&session.types, m.name(), m.r#type())),
             );
         } else {
             let width = patterns::shape_width(&tree.functions, shape, dims)
@@ -361,7 +415,7 @@ impl BoundPattern {
                 // Type keys apply to array and structure elements, not to
                 // the bits of a packed integer (10.9.1-2).
                 if shape.unpacked.is_empty()
-                    && shape.unpacked_struct.is_none()
+                    && !unpacked_structs::holds_struct(shape, tree, session, dims)
                     && shape.members.is_empty()
                     && shape.packed.len() <= 1
                     && items.iter().any(|(key, _)| matches!(key, Key::Type(_)))
@@ -370,7 +424,7 @@ impl BoundPattern {
                 }
                 let structure = shape.unpacked.is_empty()
                     && shape.packed.len() <= 1
-                    && (!shape.members.is_empty() || shape.unpacked_struct.is_some());
+                    && (!shape.members.is_empty() || shape.is_unpacked_struct_in(&session.types));
                 let items = items
                     .iter()
                     .map(|(key, value)| {
@@ -451,10 +505,12 @@ impl BoundPattern {
         if unpacked {
             parts.reverse();
         }
-        Ok(if parts.len() == 1 && shape.unpacked_struct.is_none() {
-            parts.remove(0)
-        } else {
-            Expr::Concat(parts)
-        })
+        Ok(
+            if parts.len() == 1 && !shape.is_unpacked_struct_in(&session.types) {
+                parts.remove(0)
+            } else {
+                Expr::Concat(parts)
+            },
+        )
     }
 }

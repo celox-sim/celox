@@ -216,7 +216,14 @@ impl Parser<'_> {
                 if self.peek().is_empty() {
                     return Err(self.error("attribute without a source declaration"));
                 }
-                pending = Some((start, self.at, self.peek().to_owned()));
+                // `virtual class` declares a class (IEEE 1800-2023 8.21), as
+                // `class` does.
+                let category = if self.peek() == "virtual" && self.nth(1) == "class" {
+                    "class"
+                } else {
+                    self.peek()
+                };
+                pending = Some((start, self.at, category.to_owned()));
             }
             if class_boundary
                 && scopes.last() == Some(&"endclass")
@@ -595,9 +602,6 @@ impl Parser<'_> {
                 }
                 frame.unit.tokens = self.range(frame.start);
                 if let Some(parent) = frames.last_mut() {
-                    if self.nested_units.len() >= 1_000_000 {
-                        return Err(self.unsupported("native unit arena exceeds one million nodes"));
-                    }
                     let id = UnitId(self.nested_units.len());
                     self.nested_units.push(frame.unit);
                     let start = frame.start;
@@ -804,6 +808,16 @@ impl Parser<'_> {
                 let start = self.at;
                 let gate = self.logic_gate()?;
                 frame.record(self, start, BodyItemKind::LogicGate(Box::new(gate)))?;
+                frame.conditional = frame.builder.active();
+                frame.prototype = false;
+                frame.item_start = true;
+                frames.push(frame);
+                continue;
+            }
+            if frame.delimiters.is_empty() && self.peek() == "defparam" {
+                let start = self.at;
+                let assignments = self.defparam()?;
+                frame.record(self, start, BodyItemKind::Defparam(assignments))?;
                 frame.conditional = frame.builder.active();
                 frame.prototype = false;
                 frame.item_start = true;
@@ -1229,6 +1243,12 @@ impl Parser<'_> {
                 }
                 if let Some(category) = frame.typed_category.take() {
                     let start = frame.builder.pending.unwrap_or(self.at - 1);
+                    if category == "nettype" {
+                        self.record_nettype(start);
+                    }
+                    if category == "let" {
+                        self.record_let(start)?;
+                    }
                     frame.builder.complete(
                         self,
                         start,

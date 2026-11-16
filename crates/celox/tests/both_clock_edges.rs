@@ -10,8 +10,6 @@
 //! The event-based `Simulator`, whose `tick` is a clock period, is covered by
 //! `tick_semantics.rs`.
 
-#![cfg(feature = "systemverilog")]
-
 use celox::{BigUint, OptLevel, Simulation};
 
 fn build(source: &str, four_state: bool) -> Simulation {

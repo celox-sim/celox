@@ -11,7 +11,93 @@ use super::*;
 pub(super) struct ArrayParameter {
     pub signal: Signal,
     native_pattern: Option<celox_sv_syntax::ExprId>,
+    /// A default that is not an assignment pattern: an expression of the
+    /// array type, such as another array parameter or a conditional of
+    /// array parameters and patterns.
+    native_value: Option<celox_sv_syntax::ExprId>,
     bound: Option<BoundPattern>,
+}
+
+/// The value of the expression `root` as the value of the array parameter
+/// `name` of shape `shape`: a pattern, an expression that names an unpacked
+/// array, or a conditional of these whose condition is a constant. Every
+/// operand of a conditional is a value of the parameter, also the one that
+/// is not selected (IEEE 1800-2023 11.4.11).
+fn array_value(
+    root: celox_sv_syntax::ExprId,
+    shape: &VariableDimensions,
+    name: &str,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Expr> {
+    let native = tree.declarations();
+    let id = expression_binding::ungroup(root, native);
+    match native.expression(id).kind {
+        celox_sv_syntax::ExprKind::Conditional {
+            condition,
+            then_expression,
+            else_expression,
+        } => {
+            let condition = constant_binding::bind(condition, tree, session, dims)?
+                .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dims.const_env))
+                .ok_or_else(|| {
+                    unsupported("nonconstant or ambiguous condition in array parameter argument")
+                })?;
+            let then_value = array_value(then_expression, shape, name, tree, session, dims)?;
+            let else_value = array_value(else_expression, shape, name, tree, session, dims)?;
+            Ok(if condition != 0 {
+                then_value
+            } else {
+                else_value
+            })
+        }
+        celox_sv_syntax::ExprKind::Pattern { .. } => {
+            patterns::native_expression(id, shape, tree, session, dims)?
+                .ok_or_else(|| unsupported("array parameter pattern target"))
+        }
+        _ => {
+            let actual = instances::array_argument_shape(id, tree, session, dims)
+                .ok_or_else(|| unsupported(format!("value of array parameter `{name}`")))?;
+            bound_patterns::from_array_parameter(id, tree, session, dims, &actual)?
+                .lower(tree, session, shape, dims)
+        }
+    }
+}
+
+/// The operand a conditional expression of an unpacked array type selects.
+/// Aggregate conditional expressions require equivalent branch types (IEEE
+/// 1800-2023 11.4.11). A known condition selects a whole array before element
+/// binding; treating it as a packed mux would use the wrong X merge rule.
+pub(super) fn selected_branch(
+    root: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<celox_sv_syntax::ExprId> {
+    let native = tree.declarations();
+    let mut selected = expression_binding::ungroup(root, native);
+    while let celox_sv_syntax::ExprKind::Conditional {
+        condition,
+        then_expression,
+        else_expression,
+    } = native.expression(selected).kind
+    {
+        let condition = constant_binding::bind(condition, tree, session, dims)?
+            .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dims.const_env))
+            .ok_or_else(|| {
+                unsupported("nonconstant or ambiguous condition in array parameter argument")
+            })?;
+        selected = expression_binding::ungroup(
+            if condition != 0 {
+                then_expression
+            } else {
+                else_expression
+            },
+            native,
+        );
+    }
+    Ok(selected)
 }
 
 /// An authored unpacked parameter or an assignment-pattern value.
@@ -38,12 +124,41 @@ pub(super) fn is_array_parameter(
         })
 }
 
+/// Whether `name` names an array parameter of the scope or of a package it
+/// imports, also before the scope binds its array parameters.
+pub(super) fn names_array_parameter(tree: &AnalysisContext<'_>, name: &str) -> bool {
+    let native = tree.declarations();
+    let named = |parameter: &celox_sv_syntax::Parameter| {
+        instances::normalize_identifier(&parameter.name.spelling) == name
+            && is_array_parameter(parameter, native)
+    };
+    let header = tree
+        .root_unit()
+        .is_ok_and(|unit| unit.parameters.iter().flatten().any(named));
+    let body = tree.body_membership().is_ok_and(|ids| {
+        ids.into_iter().any(|id| match native.body_item(id).kind {
+            celox_sv_syntax::BodyItemKind::Parameter(id) => native
+                .parameter_declaration(id)
+                .parameters
+                .iter()
+                .any(named),
+            _ => false,
+        })
+    });
+    header
+        || body
+        || scope::imported(tree)
+            .signals
+            .iter()
+            .any(|signal| signal.name() == name)
+}
+
 fn declared_type(
     native: &celox_sv_syntax::Parameter,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
 ) -> Converted<Option<Type>> {
     let celox_sv_syntax::ParameterKind::Value { data_type, .. } = native.kind else {
         return Err(unsupported(
@@ -65,7 +180,7 @@ pub(super) fn uses_signal_representation(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<bool> {
     if !is_array_parameter(parameter, tree.declarations()) {
         return Ok(false);
@@ -82,22 +197,109 @@ pub(super) fn uses_signal_representation(
     Ok(true)
 }
 
+/// The value of a parameter of packed type that is given by an assignment
+/// pattern, its own or one its instantiation binds, when the pattern is a
+/// constant in `dims`: the literal of the pattern's value in the declared
+/// type (IEEE 1800-2023 6.20.2, 10.9). `None` leaves the parameter to the
+/// constant variable that holds a pattern which is not one here.
+pub(super) fn packed_pattern_value(
+    native: &celox_sv_syntax::Parameter,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Option<ConstExpr> {
+    let celox_sv_syntax::ParameterKind::Value { dimensions, .. } = &native.kind else {
+        return None;
+    };
+    if !dimensions.is_empty() {
+        return None;
+    }
+    let ty = declared_type(native, tree, session, &dims.const_env, &dims.type_aliases)
+        .ok()
+        .flatten()?;
+    // A parameter of the scope: its type in the scope's constants.
+    let mut shape = procedural::dimensions_from_type(&ty);
+    shape.bind_in(&mut session.types, &tree.functions, &dims.const_env);
+    if shape.packed.is_empty()
+        || !shape
+            .bound(&session.types)
+            .is_some_and(|ty| session.types.is_integral(ty))
+    {
+        return None;
+    }
+    let bound = scope::imported(tree)
+        .pattern_parameter_bindings
+        .get(&native.id)
+        .cloned();
+    let value = if let Some(bound) = bound {
+        bound.lower(tree, session, &shape, dims).ok()?
+    } else {
+        let root = parameters::ownership::default(native).filter(|id| {
+            matches!(
+                tree.declarations()
+                    .expression(expression_binding::ungroup(*id, tree.declarations()))
+                    .kind,
+                celox_sv_syntax::ExprKind::Pattern { .. }
+            )
+        })?;
+        patterns::native_expression(root, &shape, tree, session, dims)
+            .ok()
+            .flatten()?
+    };
+    let width = patterns::shape_width(&tree.functions, &shape, dims)?;
+    // The pattern's concatenation is self-determined in the declared type
+    // before any conversion at a receiving declaration (6.20.2).
+    let mut value = Expr::Resize {
+        expr: Box::new(value),
+        width,
+        signed: shape.signed,
+    };
+    if shape.is_2state {
+        value = Expr::Unary {
+            op: UnaryOp::ToTwoState,
+            expr: Box::new(value),
+        };
+    }
+    let literals = dims
+        .parameter_values
+        .iter()
+        .filter(|(name, _)| !dims.const_env.contains_key(*name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    let value = substitute_expr_constants_with_parameter_literals(
+        tree,
+        session,
+        value,
+        &dims.const_env,
+        &literals,
+    );
+    match fold_const_integral_expr_preserving_mask(tree, session, value, &dims.const_env) {
+        Expr::Literal(text) => Some(ConstExpr::Literal(text)),
+        _ => None,
+    }
+}
+
 /// Array parameters declared directly in the selected native unit/scope.
+/// The names in `values` are value parameters already.
 pub(super) fn array_parameters_from_scope(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
+    values: &[Parameter],
 ) -> Converted<Vec<ArrayParameter>> {
+    let values: HashSet<&str> = values.iter().map(Parameter::name).collect();
+    let is_array = |parameter: &&celox_sv_syntax::Parameter| {
+        matches!(parameter.kind, celox_sv_syntax::ParameterKind::Value { .. })
+            && !values.contains(instances::normalize_identifier(&parameter.name.spelling).as_str())
+    };
     let mut parameters = Vec::new();
     if let Ok(unit) = tree.root_unit() {
         let authored = unit
             .parameters
             .iter()
             .flatten()
-            .filter(|parameter| {
-                matches!(parameter.kind, celox_sv_syntax::ParameterKind::Value { .. })
-            })
+            .filter(is_array)
             .collect::<Vec<_>>();
         parameters.extend(array_parameters_from_declaration(
             &authored,
@@ -116,9 +318,7 @@ pub(super) fn array_parameters_from_scope(
                 .parameter_declaration(id)
                 .parameters
                 .iter()
-                .filter(|parameter| {
-                    matches!(parameter.kind, celox_sv_syntax::ParameterKind::Value { .. })
-                })
+                .filter(is_array)
                 .collect::<Vec<_>>();
             parameters.extend(array_parameters_from_declaration(
                 &authored,
@@ -139,7 +339,7 @@ fn array_parameters_from_declaration(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     publish: &mut impl FnMut(&ArrayParameter),
 ) -> Result<Vec<ArrayParameter>, AnalyzerError> {
     let mut parameters = Vec::new();
@@ -175,7 +375,8 @@ fn array_parameters_from_declaration(
                 )
             })
             .collect::<Converted<Vec<_>>>()?;
-        let pattern = parameters::ownership::default(native).filter(|id| {
+        let default = parameters::ownership::default(native);
+        let pattern = default.filter(|id| {
             matches!(
                 tree.declarations()
                     .expression(expression_binding::ungroup(*id, tree.declarations()))
@@ -183,7 +384,7 @@ fn array_parameters_from_declaration(
                 celox_sv_syntax::ExprKind::Pattern { .. }
             )
         });
-        if pattern.is_none() && bound.is_none() {
+        if default.is_none() && bound.is_none() {
             return Err(AnalyzerError::Unsupported(format!(
                 "value of array parameter `{name}`"
             )));
@@ -191,9 +392,15 @@ fn array_parameters_from_declaration(
         // A supplied caller-bound pattern takes precedence over the authored
         // default. Only defaults actually consumed here require their native ID.
         let native_pattern = if bound.is_none() { pattern } else { None };
+        let native_value = if bound.is_none() && pattern.is_none() {
+            default
+        } else {
+            None
+        };
         let parameter = ArrayParameter {
             signal: Signal::new(name, type_with_unpacked_ranges(element, ranges)?),
             native_pattern,
+            native_value,
             bound,
         };
         // Publish before the next declarator can query this array's shape.
@@ -212,7 +419,9 @@ impl ArrayParameter {
         dims: &PackedDimensions,
     ) -> Result<InitialProcess, AnalyzerError> {
         let name = self.signal.name().to_string();
-        let shape = procedural::dimensions_from_type(self.signal.r#type());
+        // A parameter of the scope: its type in the scope's constants.
+        let mut shape = procedural::dimensions_from_type(self.signal.r#type());
+        shape.bind_in(&mut session.types, &tree.functions, &dims.const_env);
         let value = if let Some(bound) = &self.bound {
             bound.lower(tree, session, &shape, dims)?
         } else {
@@ -223,9 +432,10 @@ impl ArrayParameter {
                     None => return Err(unsupported("array parameter pattern target")),
                 },
                 None => {
-                    return Err(AnalyzerError::Parse(
-                        "native array parameter default is missing".into(),
-                    ));
+                    let root = self.native_value.ok_or_else(|| {
+                        AnalyzerError::Parse("native array parameter default is missing".into())
+                    })?;
+                    array_value(root, &shape, &name, tree, session, dims)?
                 }
             }
         };

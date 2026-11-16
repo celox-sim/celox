@@ -81,14 +81,9 @@ impl<B: SimBackend> SimulationState<B> {
         // Keep the shared frame current so its retirement retains the phase's
         // latest RNG state even after its own body completed earlier.
         let frame = self.model.processes[identity].frame.as_ref().unwrap();
-        if let Some(position) = frame
+        shared
             .private
-            .iter()
-            .position(|&value| value == frame.random)
-            && let Some(value) = shared.private.get_mut(position)
-        {
-            *value = (random.into(), 0u8.into());
-        }
+            .set_value_of(frame.random, &(random.into(), 0u8.into()));
     }
 
     fn run_final_procedures<E>(&mut self, executor: &mut E) -> Result<(), Halt>

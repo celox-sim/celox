@@ -22,7 +22,7 @@ impl Ff<'_, '_> {
             return Ok(true);
         }
         let monitor = matches!(task, SystemTask::Monitor(_) | SystemTask::Fmonitor(_));
-        if self.kernel.is_none() || !self.active_calls.is_empty() {
+        if self.kernel.is_none() || !self.call_stack.active_calls.is_empty() {
             return Err(unsupported(format!(
                 "`{task}` requires a scheduled process outside subroutines"
             )));
@@ -33,7 +33,10 @@ impl Ff<'_, '_> {
             };
             let mut names = HashSet::default();
             expr_idents(expr, &mut names);
-            if names.iter().any(|name| self.overlay.contains_key(name)) {
+            if names
+                .iter()
+                .any(|name| self.scope.overlay.contains_key(name))
+            {
                 return Err(unsupported(format!(
                     "`{task}` with an unrolled loop variable"
                 )));
@@ -136,8 +139,8 @@ impl Ff<'_, '_> {
                 }
             }
             if !watched.is_empty() {
-                self.wait_sites.push(WaitSite {
-                    process: self.process,
+                self.sites.wait.push(WaitSite {
+                    process: self.sites.process,
                     terms: watched
                         .into_iter()
                         .map(|id| (id, CounterKind::Changes))

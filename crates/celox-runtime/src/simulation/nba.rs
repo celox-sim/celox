@@ -74,7 +74,10 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(false);
         }
         round.nba_published = true;
-        let flagged = if round.kernels_ran && self.model.has_pending_nba_sites {
+        // Pending flags are set by process kernels and by fused flip-flop
+        // domains staging a delayed update, so a round in which only
+        // domains ran may still have flagged sites to publish.
+        let flagged = if self.model.has_pending_nba_sites {
             let backend = executor.backend();
             self.model
                 .processes
@@ -214,6 +217,30 @@ impl<B: SimBackend> SimulationState<B> {
                     continue;
                 };
                 let (target, value) = (site.target, site.value);
+                if site.delay > 0 {
+                    // A delayed update is queued for its due time, as a
+                    // kernel's delayed nonblocking assignment is (IEEE
+                    // 1800-2023 9.4.5, 10.4.2).
+                    let time = self.scheduler.time.checked_add(site.delay).ok_or_else(|| {
+                        Halt::Error(crate::SimulatorErrorCode::Runtime {
+                            message: "nonblocking assignment delay overflows simulation time"
+                                .into(),
+                            signals: Vec::new(),
+                        })
+                    })?;
+                    let update = NbaUpdate {
+                        target,
+                        lsb,
+                        width,
+                        value: read(backend, value),
+                    };
+                    self.process_state
+                        .delayed_nba
+                        .entry(time)
+                        .or_default()
+                        .push((program, update));
+                    continue;
+                }
                 let update = NbaUpdate {
                     target,
                     lsb,

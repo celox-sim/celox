@@ -132,6 +132,26 @@ pub fn native_baseline() -> bool {
     std::env::var_os("CELOX_NATIVE_BASELINE").is_some_and(|value| value != "0")
 }
 
+/// The backends [`build`] accepts in this build.
+pub fn backends() -> Vec<&'static str> {
+    let mut backends = Vec::new();
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    backends.extend(["native", "native-baseline", "native-parallel"]);
+    #[cfg(any(
+        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+    ))]
+    backends.push("hotspot");
+    #[cfg(feature = "cranelift")]
+    backends.extend(["cranelift", "cranelift-parallel"]);
+    #[cfg(feature = "wasm-runtime")]
+    backends.push("wasm");
+    backends.extend(["interp", "sv"]);
+    #[cfg(feature = "veryl-reference")]
+    backends.push("veryl");
+    backends
+}
+
 pub fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
     let sources = design
         .sources
@@ -147,7 +167,6 @@ pub fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
             super::veryl_sim::build_veryl_adapter(&sources, &design.top, design.four_state),
         )));
     }
-    #[cfg(feature = "systemverilog")]
     if backend == "sv" {
         return build_sv(design, &sources);
     }
@@ -239,7 +258,6 @@ pub fn classify_build_error(error: SimulatorError) -> celox_test_suite::Error {
 }
 
 // Keep the recursive SV frontend out of the multi-backend dispatch frame.
-#[cfg(feature = "systemverilog")]
 fn build_sv(design: &Design, sources: &[(&str, &std::path::Path)]) -> Result<Box<dyn Backend>> {
     let emitted = super::veryl_sv::emit_veryl_sources(sources);
     Ok(Box::new(CeloxBackend(
@@ -255,30 +273,4 @@ fn build_sv(design: &Design, sources: &[(&str, &std::path::Path)]) -> Result<Box
             .build()
             .map_err(classify_build_error)?,
     )))
-}
-
-pub fn run_case(name: &str, backend: &str) {
-    if super::vtest_exec::dispatch("veryl", name, backend) {
-        return;
-    }
-    let run = || {
-        celox_test_suite::veryl::case(name)
-            .unwrap_or_else(|| panic!("unknown Veryl test case: {name}"))
-            .run(&mut |design| build(design, backend));
-    };
-    if backend == "sv" {
-        // The recursive SV parser is close to libtest's default stack limit.
-        // The shared driver adds call frames, so reserve room in this runner
-        // instead of requiring RUST_MIN_STACK in every consuming environment.
-        std::thread::scope(|scope| {
-            std::thread::Builder::new()
-                .stack_size(8 * 1024 * 1024)
-                .spawn_scoped(scope, run)
-                .unwrap()
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        });
-    } else {
-        run();
-    }
 }

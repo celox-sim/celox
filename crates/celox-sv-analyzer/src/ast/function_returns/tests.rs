@@ -148,6 +148,7 @@ fn dpi_return_ids_are_available_during_discovery_and_final_publication() {
         ("longint", "f", 64, true, false),
         ("chandle", "f", 64, false, false),
         ("string", "uvm_dpi_get_tool_name_c", 0, false, false),
+        ("string", "f", 0, false, false),
     ] {
         let declarations = format!("import \"DPI-C\" function {declaration} {function}();");
         let (syntax, mut session, dims, id) = fixture(&declarations, &format!("{function}()"));
@@ -156,7 +157,9 @@ fn dpi_return_ids_are_available_during_discovery_and_final_publication() {
         let expected = early.semantic_type.expect(&declarations);
         let import = dpi::import(
             tree.root_unit().unwrap().dpi_declarations[0],
-            tree.declarations(),
+            &tree,
+            &mut session,
+            &dims,
         )
         .unwrap();
         let late = FunctionReturnMetadata::from_dpi(&import, &mut session.types).unwrap();
