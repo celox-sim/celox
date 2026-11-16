@@ -334,6 +334,11 @@ pub enum AnalyzerError {
     /// forbids, such as one out of the generate block it is in.
     #[error("defparam: {0}")]
     InvalidDefparam(String),
+    /// An enumeration declaration that IEEE 1800-2023 6.19 forbids, such
+    /// as one whose base type is not an integer type or that gives two
+    /// members the same value.
+    #[error("enumeration: {0} (IEEE 1800-2023 6.19)")]
+    InvalidEnumeration(String),
 }
 
 impl miette::Diagnostic for AnalyzerError {}
