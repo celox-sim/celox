@@ -219,4 +219,8 @@ pub(super) const GROUPS: &[Group] = &[
         file: "src/sv/cases/types.vtest",
         text: include_str!("types.vtest"),
     },
+    Group {
+        file: "src/sv/cases/keyword_versions.vtest",
+        text: include_str!("keyword_versions.vtest"),
+    },
 ];

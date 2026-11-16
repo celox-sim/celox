@@ -1,0 +1,47 @@
+(group keyword_versions (category regression))
+
+; A word the `begin_keywords` version does not reserve is an ordinary
+; identifier wherever an identifier may appear (IEEE 1800-2023 22.14):
+; ports of either header style, nets, variables, generate block names,
+; function arguments, parameters, event expressions and statement
+; targets.
+(case words_unreserved_by_begin_keywords_are_identifiers
+  (source "keyword_versions.sv" #"
+    `begin_keywords "1364-2005"
+    module shl(out, bit);
+      output [7:0] out;
+      input [2:0] bit;
+      parameter int = 1;
+      reg [7:0] r;
+      always @(bit) r = 8'h01 << (bit + int);
+      assign out = r;
+    endmodule
+    module Top(a, y, z, w);
+      input [2:0] a;
+      output [7:0] y;
+      output [7:0] z;
+      output [1:0] w;
+      wire [7:0] int;
+      reg [7:0] expect;
+      shl #(0) s(int, a);
+      always @(int) expect = int + 1;
+      assign y = expect;
+      genvar i;
+      generate for (i = 0; i < 2; i = i + 1) begin : byte
+        wire [7:0] var = int + i;
+      end endgenerate
+      assign z = byte[1].var;
+      function [1:0] f;
+        input [1:0] bit;
+        f = ~bit;
+      endfunction
+      assign w = f(a[1:0]);
+    endmodule
+    `end_keywords
+  "#)
+  (top Top)
+  (for value (range 0 8)
+    (modify (set a value))
+    (assert_eq y (+ (<< 1 value) 1))
+    (assert_eq z (+ (<< 1 value) 1))
+    (assert_eq w (^ (& value 3) 3))))
