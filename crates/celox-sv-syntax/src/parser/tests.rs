@@ -4,6 +4,8 @@ fn parse(code: &str) -> Declarations {
     Declarations::parse(code, Path::new("headers.sv")).unwrap()
 }
 
+mod illegal_items;
+
 #[test]
 fn checker_scopes_capture_native_control_and_procedure_ownership_without_leaking_items() {
     let syntax = parse(
