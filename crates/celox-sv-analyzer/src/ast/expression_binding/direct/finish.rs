@@ -143,7 +143,7 @@ pub(super) fn finish_value(
                 dimensions,
             );
             if dimensions.constant_indexed_base {
-                let operand = selects::indexed_expression_value(tree, session, operand, dimensions)
+                let operand = selects::indexed_context_operand(tree, session, operand, dimensions)
                     .ok_or_else(|| unsupported("constant cast operand"))?;
                 const_expr_to_expr(
                     casts::cast_constant_target(

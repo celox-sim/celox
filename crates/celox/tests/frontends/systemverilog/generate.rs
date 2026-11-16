@@ -611,6 +611,104 @@ endmodule"#;
     }
 }
 
+/// A typed parameter is assigned its value (IEEE 1800-2023 6.20.2), and a
+/// size cast evaluates its operand as such an assignment (6.24.1): the
+/// declared width is the context of the context-determined operands, which
+/// are extended before they are evaluated (11.6.1, 11.8.2), while the value
+/// keeps its own signedness (11.8.1). An untyped parameter keeps the
+/// self-determined width. BlackParrot's dcache ORs shifted feature bits into
+/// its enum-sized `amo_support_p`. Verilator 5.054 and Icarus 13 print the
+/// same lines.
+#[test]
+fn typed_parameters_evaluate_their_values_at_the_width_of_their_type() {
+    let source = r#"`timescale 1ns/1ns
+typedef logic [15:0] word_t;
+typedef enum logic [3:0] { s_none, s_lr, s_sc, s_swap, s_add } op_e;
+typedef logic [(1<<$bits(op_e))-1:0] ops_t;
+module m #(parameter logic [15:0] f = 16'h00b0,
+           parameter logic [15:0] p = f[5] << 3,
+           parameter word_t q = 1'b1 << 4,
+           parameter ops_t ops = (f[4] << s_lr) | (f[5] << s_sc) | (f[7] << s_add)) ();
+  initial #1 $display("%m p=%h q=%h ops=%h", p, q, ops);
+endmodule
+module top;
+  localparam logic [15:0] f = 16'h00b0;
+  localparam logic [15:0] lp = f[5] << 3;
+  localparam logic [15:0] lq = 1'b1 << 3;
+  localparam int unsigned li = f[5] << 3;
+  localparam logic [15:0] lc = 16'(f[5] << 3);
+  localparam logic [15:0] a = 1'b1 + 1'b1;
+  localparam logic [15:0] n = ~1'b0;
+  localparam logic [15:0] t = 4'hf << 4;
+  localparam logic [15:0] mu = 4'hf * 4'h2;
+  localparam logic [15:0] c = 1'b1 ? (1'b1 << 3) : 1'b0;
+  localparam logic signed [7:0] ss = 4'sb1000 + 4'sb0000;
+  localparam logic signed [7:0] su = 4'sb1000 + 4'b0000;
+  localparam int ii = 4'sb1000 >>> 1;
+  localparam logic [7:0] ln = -4'sd1;
+  localparam logic [15:0] cc = 16'(4'hf + 4'h1);
+  localparam logic [3:0] tr = 8'hff + 8'h01;
+  localparam u = 1'b1 << 3;
+  localparam [15:0] r = 1'b1 << 3;
+  localparam uc = 16'(4'hf + 4'h1);
+  localparam int ic = int'(1'b1 << 3);
+  localparam logic [199:0] w = 1'b1 << 150;
+  localparam logic [7:0] xs = {1'b1, 1'bx} << 2;
+  localparam logic [7:0] xa = 4'b10x1 + 4'b0000;
+  m d ();
+  m #(.f(16'h0010)) o ();
+  initial begin
+    $display("%h %h %0d %h %h %h %h %h %h", lp, lq, li, lc, a, n, t, mu, c);
+    $display("%h %h %0d %h %h %h", ss, su, ii, ln, cc, tr);
+    $display("%0d %0d %h %h %0d", u, $bits(u), r, uc, ic);
+    $display("%h", w);
+    $display("%b %b", xs, xa);
+    #2 $finish;
+  end
+endmodule"#;
+    // Two-state simulation reads the X bits as zeros.
+    for (four_state, unknown) in [(false, "00001000 00000000"), (true, "00001x00 xxxxxxxx")] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("typed.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        let (constants, instances) = lines.split_at(5);
+        let mut instances = instances.to_vec();
+        instances.sort();
+        assert_eq!(
+            constants,
+            [
+                "0008 0008 8 0008 0002 ffff 00f0 001e 0008",
+                "f8 08 -4 ff 0010 0",
+                "0 1 0008 0010 8",
+                "00000000000040000000000000000000000000000000000000",
+                unknown,
+            ],
+            "four_state={four_state}"
+        );
+        assert_eq!(
+            instances,
+            [
+                "top.d p=0008 q=0010 ops=0016",
+                "top.o p=0000 q=0010 ops=0002"
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
+
 /// The negated reductions `~&`, `~|`, `~^` and `^~` are the complements of
 /// the reductions (IEEE 1800-2023 11.4.9) in generate conditions too, as
 /// BlackParrot's `if (~|fpu_support_p)` (Icarus: y=1110).
