@@ -497,6 +497,28 @@ impl Parser<'_> {
         };
         TokenRange { start: first, end }
     }
+    /// Parse the optional `: name` after the keyword that ends a block or
+    /// declaration named `begin`, which shall be that name (IEEE 1800-2023
+    /// 9.3.4): a name after the end of an unnamed block differs from it.
+    fn end_label(&mut self, begin: Option<&Name>) -> Result<Option<Name>> {
+        if !self.eat(":") {
+            return Ok(None);
+        }
+        let label = self.name()?;
+        if begin.is_none_or(|begin| begin.value() != label.value()) {
+            self.at -= 1;
+            let error = self.error(match begin {
+                Some(begin) => format!(
+                    "end label `{}` differs from the name `{}` of its block",
+                    label.value(),
+                    begin.value()
+                ),
+                None => format!("end label `{}` of an unnamed block", label.value()),
+            });
+            return Err(error);
+        }
+        Ok(Some(label))
+    }
     fn error(&self, message: impl Into<String>) -> ParseError {
         let token = self
             .token()
