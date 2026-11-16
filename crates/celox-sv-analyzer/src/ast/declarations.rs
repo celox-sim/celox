@@ -35,17 +35,28 @@ pub(super) fn ports_from_scope(
                     celox_sv_syntax::DataTypeKind::Implicit
                 )
             });
-        let base = match type_binding::port_type(
-            native,
-            syntax_tree,
-            session,
-            const_env,
-            type_aliases,
-            &declarations,
-        )? {
-            Some(ty) => ty,
-            None if native.data_type.is_none() => inherited_type.clone(),
-            None => return Err(unsupported("unsupported port data type")),
+        // The self-determined type of the expression of an explicitly named
+        // port is the port's type (IEEE 1800-2023 23.2.2.2), which takes the
+        // module's declarations: see `ScopeElaboration::ports_and_signals`.
+        // A port without an expression connects nothing.
+        let expression = match &native.kind {
+            celox_sv_syntax::PortKind::Explicit { expression, .. } => Some(*expression),
+            _ => None,
+        };
+        let base = match expression {
+            Some(_) => Type::new(TypeKind::Logic),
+            None => match type_binding::port_type(
+                native,
+                syntax_tree,
+                session,
+                const_env,
+                type_aliases,
+                &declarations,
+            )? {
+                Some(ty) => ty,
+                None if native.data_type.is_none() => inherited_type.clone(),
+                None => return Err(unsupported("unsupported port data type")),
+            },
         };
         if !type_binding::declared_port_range_matches(
             native.declared_type,
@@ -200,7 +211,8 @@ pub(super) fn ports_from_scope(
         )
         .with_unresolved_net(inherited_unresolved)
         .with_net_resolution(inherited_resolution)
-        .with_default(default);
+        .with_default(default)
+        .with_expression(expression.flatten());
         port.randomizable = variable && direction != PortDirection::Input;
         ports.push(port);
     }
@@ -226,7 +238,12 @@ pub(super) fn module_interface_from_scope(
 ) -> Result<ModuleInterface, AnalyzerError> {
     let ports = port_owners::scope(None, syntax_tree)?
         .into_iter()
-        .filter(|port| matches!(port.kind, celox_sv_syntax::PortKind::Named(_)))
+        .filter(|port| {
+            matches!(
+                port.kind,
+                celox_sv_syntax::PortKind::Named(_) | celox_sv_syntax::PortKind::Explicit { .. }
+            )
+        })
         .map(native_port_name)
         .collect::<Converted<Vec<_>>>()?;
     let mut parameters = Vec::new();

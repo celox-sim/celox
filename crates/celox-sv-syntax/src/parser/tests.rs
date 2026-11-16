@@ -432,7 +432,7 @@ fn macro_headers_retain_original_spelling_and_expansion_chain() {
 #[test]
 fn nonansi_external_and_wildcard_units_are_explicit() {
     let syntax = parse(
-        "extern module E(input int x); module N(a,.b({x,y})); output a; endmodule : N module W(.*); endmodule interface Bus; endinterface",
+        "extern module E(input int x); module N(a,.b({x,y})); output a; inout x, y; endmodule : N module W(.*); endmodule interface Bus; endinterface",
     );
     assert!(syntax.units[0].external);
     assert_eq!(syntax.units[1].port_style, PortStyle::NonAnsi);
@@ -3280,6 +3280,56 @@ fn port_declarations_need_a_list_of_ports() {
     }
     // A subroutine of such a design element keeps its non-ANSI formals.
     parse("module M; task t; input x; endtask endmodule");
+}
+
+#[test]
+fn non_ansi_port_expressions_become_explicit_ports() {
+    let syntax = parse(
+        "module M(a[7:4], a[3:0], , .e({c, d}), f, f);\n input [7:0] a;\n \
+         output c;\n output reg [1:0] d;\n input f;\nendmodule\n",
+    );
+    let unit = &syntax.units[0];
+    assert_eq!(unit.port_style, PortStyle::Ansi);
+    let ports: Vec<_> = unit
+        .ports
+        .iter()
+        .map(|port| match &port.kind {
+            PortKind::Explicit { name, expression } => (
+                name.value().to_string(),
+                expression.is_some(),
+                port.direction,
+            ),
+            PortKind::Named(name) => (name.value().to_string(), false, port.direction),
+            kind => panic!("{kind:?}"),
+        })
+        .collect();
+    assert_eq!(
+        ports,
+        [
+            ("%port1".into(), true, Some(Direction::Input)),
+            ("%port2".into(), true, Some(Direction::Input)),
+            ("%port3".into(), false, Some(Direction::Input)),
+            ("e".into(), true, Some(Direction::Output)),
+            ("%port5".into(), true, Some(Direction::Input)),
+            ("%port6".into(), true, Some(Direction::Input)),
+        ]
+    );
+    // The port declarations declare the objects: nets, and the variable
+    // of the output of a data type (23.2.2.3).
+    assert_eq!(unit.net_declarations.len(), 3);
+    assert_eq!(unit.data_declarations.len(), 1);
+    // The first port of an output that a port expression reads too keeps
+    // its name; the ports of an input that several drive do not.
+    let syntax = parse("module M(y, y[0], a, a); output [1:0] y; input a; endmodule");
+    let kinds: Vec<_> = syntax.units[0]
+        .ports
+        .iter()
+        .map(|port| matches!(port.kind, PortKind::Named(_)))
+        .collect();
+    assert_eq!(kinds, [true, false, false, false]);
+    // An inout port expression keeps the non-ANSI form.
+    let syntax = parse("module M(a, a); inout a; endmodule");
+    assert_eq!(syntax.units[0].port_style, PortStyle::NonAnsi);
 }
 
 #[test]

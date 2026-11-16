@@ -85,7 +85,9 @@ impl ModuleIndex {
                     .ports
                     .iter()
                     .filter_map(|port| match &port.kind {
-                        PortKind::Named(name) => Some(normalize_identifier(&name.spelling)),
+                        PortKind::Named(name) | PortKind::Explicit { name, .. } => {
+                            Some(normalize_identifier(&name.spelling))
+                        }
                         _ => None,
                     })
                     .collect();
