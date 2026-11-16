@@ -1370,7 +1370,6 @@ fn handle_shape(name: &str) -> Type {
         ConstExpr::Literal((HANDLE_WIDTH - 1).to_string()),
         ConstExpr::Literal("0".into()),
     ));
-    ty.class = Some(Arc::from(name));
     ty
 }
 

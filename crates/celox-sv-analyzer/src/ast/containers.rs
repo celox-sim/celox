@@ -342,13 +342,13 @@ impl ContainerType {
     /// The class of the elements of a container of handles (IEEE 1800-2023
     /// 8.4), from their semantic type.
     pub(super) fn element_class(&self, table: &semantic_types::TyTable) -> Option<Arc<str>> {
-        Self::part_class(&self.element, self.element_id(table), table)
+        Self::part_class(self.element_id(table), table)
     }
 
     /// The class of the index of an associative array with a class index
     /// (7.8.5), from its semantic type.
     pub(super) fn key_class(&self, table: &semantic_types::TyTable) -> Option<Arc<str>> {
-        Self::part_class(self.key.as_ref()?, self.key_id(table), table)
+        Self::part_class(self.key_id(table), table)
     }
 
     /// Whether the container's elements are of an unpacked structure type
@@ -395,20 +395,13 @@ impl ContainerType {
         })
     }
 
-    /// The class of `part`, the element or index type of the container,
-    /// whose semantic type is `id`.
+    /// The class of the element or index type of the container whose
+    /// semantic type is `id`.
     fn part_class(
-        part: &Type,
         id: Option<semantic_types::TyId>,
         table: &semantic_types::TyTable,
     ) -> Option<Arc<str>> {
-        let class = id.and_then(|id| table.handle_class(id)).cloned();
-        debug_assert_eq!(
-            class.as_deref(),
-            part.class(),
-            "the class of a container's elements or index is told by its semantic type"
-        );
-        class
+        id.and_then(|id| table.handle_class(id)).cloned()
     }
 
     /// The number of elements of the fixed-size array the container holds.

@@ -543,7 +543,6 @@ fn pattern_items(
                     chandle: false,
                     real: false,
                     string: false,
-                    class: None,
                     unpacked: rest.to_vec(),
                     ..shape.clone_shape()
                 }),
@@ -569,7 +568,6 @@ fn pattern_items(
                     container: None,
                     real: false,
                     string: false,
-                    class: None,
                     packed: rest.to_vec(),
                     ..shape.clone_shape()
                 }),
@@ -590,7 +588,6 @@ fn pattern_items(
                     packed_enum: false,
                     real: false,
                     string: false,
-                    class: None,
                     packed: Vec::new(),
                     unpacked: Vec::new(),
                     members: Vec::new(),
