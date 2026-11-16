@@ -7,6 +7,7 @@ fn rejects_nets_of_strings_and_class_handles() {
         ("wire string x;", "x", "type `string`"),
         ("class C; endclass wire C x;", "x", "a handle type"),
         ("wire event e;", "e", "a handle type"),
+        ("wire chandle h;", "h", "type `chandle`"),
     ] {
         let source = format!("module test; {body} initial $display(\"x\"); endmodule");
         let error = analyze_source(&source, Path::new("nets.sv")).unwrap_err();
