@@ -2763,10 +2763,10 @@ generated/uvm-examples/uvm_id_register.sv	2state	fail
 generated/uvm-examples/uvm_id_register.sv	4state	fail
 generated/uvm-examples/uvm_interrupts_parallel_processing.sv	2state	fail
 generated/uvm-examples/uvm_interrupts_parallel_processing.sv	4state	fail
-generated/uvm-examples/uvm_interrupts_prioritized.sv	2state	fail
-generated/uvm-examples/uvm_interrupts_prioritized.sv	4state	fail
-generated/uvm-examples/uvm_interrupts_simple.sv	2state	fail
-generated/uvm-examples/uvm_interrupts_simple.sv	4state	fail
+generated/uvm-examples/uvm_interrupts_prioritized.sv	2state	pass
+generated/uvm-examples/uvm_interrupts_prioritized.sv	4state	pass
+generated/uvm-examples/uvm_interrupts_simple.sv	2state	pass
+generated/uvm-examples/uvm_interrupts_simple.sv	4state	pass
 generated/uvm-examples/uvm_many_to_one.sv	2state	pass
 generated/uvm-examples/uvm_many_to_one.sv	4state	pass
 generated/uvm-examples/uvm_messaging_example.sv	2state	pass
@@ -2807,8 +2807,8 @@ generated/uvm-examples/uvm_vif_config_db.sv	2state	fail
 generated/uvm-examples/uvm_vif_config_db.sv	4state	fail
 generated/uvm-examples/uvm_virt_seq_find_all.sv	2state	pass
 generated/uvm-examples/uvm_virt_seq_find_all.sv	4state	pass
-generated/uvm-examples/uvm_wait_for_signal.sv	2state	fail
-generated/uvm-examples/uvm_wait_for_signal.sv	4state	fail
+generated/uvm-examples/uvm_wait_for_signal.sv	2state	pass
+generated/uvm-examples/uvm_wait_for_signal.sv	4state	pass
 generated/uvm_classes_0/uvm_agent_class_0.sv	2state	pass
 generated/uvm_classes_0/uvm_agent_class_0.sv	4state	pass
 generated/uvm_classes_0/uvm_component_class_0.sv	2state	pass
