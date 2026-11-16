@@ -271,7 +271,14 @@ impl VariableDimensions {
         // A shape whose bounds are all literals has the same type in every
         // context: a parameter of a structure type is typed once, not at
         // each access of one of its members.
-        if !self.shape.is_closed() {
+        // Nor does the shape tell a virtual interface from the number that
+        // holds it: its element type does.
+        if !self.shape.is_closed()
+            || self
+                .element
+                .as_ref()
+                .is_some_and(|e| e.identity().is_some())
+        {
             return semantic_types::of_shape(table, functions, self, env);
         }
         let key = self.shape.closed_hash();
@@ -326,7 +333,13 @@ impl PartialEq for VariableDimensions {
     fn eq(&self, other: &Self) -> bool {
         // Enriching a shape is not a lexical edit. Signature publishers use
         // same_declaration when a newly resolved binding must be published.
+        // A virtual interface is told by its element type (see `Type`).
         self.shape == other.shape
+            && self.element.as_ref().and_then(|element| element.identity())
+                == other
+                    .element
+                    .as_ref()
+                    .and_then(|element| element.identity())
     }
 }
 impl Eq for VariableDimensions {}
@@ -360,9 +373,6 @@ pub(super) struct VariableShape {
     pub(super) string: bool,
     /// The class of an object handle variable.
     pub(super) class: Option<String>,
-    /// The interface of a virtual interface variable, which only the
-    /// conversion to its semantic type reads (see `TypeShape`).
-    pub(super) virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
     pub(super) packed: Vec<PackedDimension>,
     pub(super) unpacked: Vec<UnpackedDimension>,
     pub(super) signed: bool,
@@ -390,7 +400,6 @@ impl VariableShape {
             && type_names::Declared::of_shape(self).is_none_or(|ty| !ty.is_enum)
             && self.container.is_none()
             && self.class.is_none()
-            && self.virtual_interface.is_none()
             && self.unpacked_struct.is_none()
             // The width of a dimension is computed from its bounds.
             && self

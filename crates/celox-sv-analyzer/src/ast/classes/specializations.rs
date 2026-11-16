@@ -1809,12 +1809,6 @@ fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::
     {
         return table.spell(id);
     }
-    debug_assert!(
-        ty.virtual_interface().is_none()
-            || !ty.unpacked_ranges().is_empty()
-            || ty.container.is_some(),
-        "a virtual interface type is spelled from its semantic type"
-    );
     // A handle type is its class (8.4), which a container element without
     // a binding of its own takes from the container's semantic type.
     let class = id
@@ -2455,10 +2449,10 @@ mod tests {
 
     use std::path::Path;
 
+    use super::super::super::semantic_types;
     use super::super::super::shared_map::{SharedAliases, SharedEnv};
     use super::super::super::virtual_interfaces::{VirtualInterface, value_type};
     use super::super::super::{AnalysisContext, ConstEnv, Session, TypeAliases};
-    use super::super::super::{const_functions, semantic_types};
     use super::spelling;
 
     /// A virtual interface type argument is spelled by the semantic type it
@@ -2467,14 +2461,14 @@ mod tests {
     #[test]
     fn virtual_interface_type_arguments_are_spelled_by_their_semantic_types() {
         let mut table = semantic_types::TyTable::default();
-        let functions = const_functions::ConstantFunctions::default();
-        let env = ConstEnv::default();
         let mut spelled = |modport: Option<&str>| {
-            let mut ty = value_type(VirtualInterface {
-                interface: "bus_if".into(),
-                modport: modport.map(Into::into),
-            });
-            semantic_types::bind_declared(&mut table, &functions, &mut ty, &env);
+            let ty = value_type(
+                &mut table,
+                VirtualInterface {
+                    interface: "bus_if".into(),
+                    modport: modport.map(Into::into),
+                },
+            );
             spelling(&ty, &table)
         };
         assert_eq!(spelled(None), "virtual bus_if");

@@ -210,7 +210,6 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
             real: false,
             string: false,
             class: None,
-            virtual_interface: None,
             packed: function_packed_dimension_widths(&r#type.packed_ranges),
             unpacked: dimensions::unpacked_dimension_widths(&r#type.unpacked_ranges),
             signed: r#type.is_signed,

@@ -686,26 +686,31 @@ impl Port {
         self
     }
 
-    /// Bind an aggregate pattern as independently typed values for the leaf ports.
+    /// Bind an aggregate pattern as independently typed values for the leaf
+    /// ports, in the types of `design`: the design whose analysis published
+    /// the port, which bound its type there.
     pub fn bind_structure_pattern(
         &self,
         pattern: &crate::ast::BoundPattern,
+        design: &mut crate::Design,
     ) -> Result<Vec<Expr>, crate::AnalyzerError> {
         let target = self.pattern_target.as_ref().ok_or_else(|| {
             crate::AnalyzerError::Unsupported("unpacked structure port pattern type".into())
         })?;
-        pattern.bind_structure_port(target)
+        pattern.bind_structure_port(target, design)
     }
 
-    /// Bind caller-owned pattern values in this specialized port's type.
+    /// Bind caller-owned pattern values in this specialized port's type, in
+    /// the types of `design` (see [`Self::bind_structure_pattern`]).
     pub fn bind_pattern(
         &self,
         pattern: &crate::ast::BoundPattern,
+        design: &mut crate::Design,
     ) -> Result<Expr, crate::AnalyzerError> {
         let target = self.pattern_target.as_ref().ok_or_else(|| {
             crate::AnalyzerError::Unsupported("assignment pattern port type".into())
         })?;
-        pattern.bind_port(target)
+        pattern.bind_port(target, design)
     }
 
     pub fn name(&self) -> &str {

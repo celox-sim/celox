@@ -506,6 +506,7 @@ fn prepare_external_hierarchy_collecting(
             &HashSet::default(),
             warnings,
             None,
+            &mut design,
         )?;
         modules.insert(
             module_id,

@@ -169,28 +169,56 @@ impl BoundPattern {
         }
     }
 
-    pub(crate) fn bind_structure_port(&self, target: &Type) -> Converted<Vec<crate::ir::Expr>> {
-        let session = &mut Session::default();
-        let aggregate = target
-            .unpacked_struct()
-            .ok_or_else(|| unsupported("unpacked structure port type"))?;
-        let syntax = SyntaxTree::empty();
-        let tree = AnalysisContext::unspecialized(&syntax);
-        let shape = port_shape(session, &tree, target);
-        let value = self.lower(&tree, session, &shape, &PackedDimensions::default())?;
-        unpacked_structs::leaf_parts(aggregate, &value)
-            .ok_or_else(|| unsupported("unpacked structure port pattern layout"))
-            .map(|parts| parts.into_iter().map(Into::into).collect())
+    /// Bind the pattern to unpacked structure port type `target`, as a
+    /// value of each leaf, in the types of `design`, which the analysis
+    /// that published the port bound `target` in.
+    pub(crate) fn bind_structure_port(
+        &self,
+        target: &Type,
+        design: &mut packages::Design,
+    ) -> Converted<Vec<crate::ir::Expr>> {
+        in_design(design, |session| {
+            let aggregate = target
+                .unpacked_struct()
+                .ok_or_else(|| unsupported("unpacked structure port type"))?;
+            let syntax = SyntaxTree::empty();
+            let tree = AnalysisContext::unspecialized(&syntax);
+            let shape = port_shape(session, &tree, target);
+            let value = self.lower(&tree, session, &shape, &PackedDimensions::default())?;
+            unpacked_structs::leaf_parts(aggregate, &value)
+                .ok_or_else(|| unsupported("unpacked structure port pattern layout"))
+                .map(|parts| parts.into_iter().map(Into::into).collect())
+        })
     }
 
-    pub(crate) fn bind_port(&self, target: &Type) -> Converted<crate::ir::Expr> {
-        let session = &mut Session::default();
-        let syntax = SyntaxTree::empty();
-        let tree = AnalysisContext::unspecialized(&syntax);
-        let shape = port_shape(session, &tree, target);
-        self.lower(&tree, session, &shape, &PackedDimensions::default())
-            .map(Into::into)
+    /// Bind the pattern to port type `target` in the types of `design`
+    /// (see [`Self::bind_structure_port`]).
+    pub(crate) fn bind_port(
+        &self,
+        target: &Type,
+        design: &mut packages::Design,
+    ) -> Converted<crate::ir::Expr> {
+        in_design(design, |session| {
+            let syntax = SyntaxTree::empty();
+            let tree = AnalysisContext::unspecialized(&syntax);
+            let shape = port_shape(session, &tree, target);
+            self.lower(&tree, session, &shape, &PackedDimensions::default())
+                .map(Into::into)
+        })
     }
+}
+
+/// `bind` in a session of its own that works in the types of `design`: those
+/// the analyses of the design published their IR with, so a port type keeps
+/// the semantic type its module bound it to.
+fn in_design<T>(design: &mut packages::Design, bind: impl FnOnce(&mut Session) -> T) -> T {
+    let mut session = Session {
+        types: std::mem::take(&mut design.types),
+        ..Session::default()
+    };
+    let result = bind(&mut session);
+    design.types = std::mem::take(&mut session.types);
+    result
 }
 
 impl Type {
@@ -205,11 +233,14 @@ impl Type {
                 .map(|value| ConstExpr::Literal(value.to_string()))
         };
         let mut ty = self.clone();
-        for range in &mut ty.packed_ranges {
+        // The values of the bounds are those the type was bound with, so it
+        // keeps its semantic type.
+        let shape = ty.shape_keeping_binding();
+        for range in &mut shape.packed_ranges {
             range.left = literal(&range.left)?;
             range.right = literal(&range.right)?;
         }
-        for range in &mut ty.unpacked_ranges {
+        for range in &mut shape.unpacked_ranges {
             range.left = literal(&range.left)?;
             range.right = literal(&range.right)?;
             range.size = match range.size.as_ref() {
@@ -217,7 +248,7 @@ impl Type {
                 None => None,
             };
         }
-        ty.members = std::mem::take(&mut ty.members)
+        shape.members = std::mem::take(&mut shape.members)
             .into_iter()
             .map(|member| {
                 let ty = member.r#type().pattern_target(constants)?;
@@ -356,6 +387,10 @@ fn port_shape(
     tree: &AnalysisContext<'_>,
     target: &Type,
 ) -> VariableDimensions {
+    debug_assert!(
+        target.binding.get(&session.types).is_some(),
+        "a port's pattern target is bound in the types of the design that published it"
+    );
     let mut target = target.clone();
     semantic_types::bind_declared(
         &mut session.types,

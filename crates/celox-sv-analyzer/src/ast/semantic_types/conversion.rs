@@ -4,7 +4,7 @@ use super::*;
 use crate::ast::{
     ConstEnv, ConstExpr, ContainerKind, ContainerType, Type, TypeKind, VariableDimensions,
     const_functions, enums::EnumDomain, eval_ast_const_expr, packed_structs::PackedMember,
-    type_names, unpacked_structs::UnpackedStruct, virtual_interfaces::VirtualInterface,
+    type_names, unpacked_structs::UnpackedStruct,
 };
 
 /// The semantic type of `ty`, whose ranges name constants of `env`; `None`
@@ -130,7 +130,6 @@ fn convert(
         bound_element: ty.element.get(table),
         container: ty.container.as_deref(),
         class: ty.class.as_deref(),
-        virtual_interface: ty.virtual_interface.as_deref(),
         unpacked_struct: ty.unpacked_struct.as_ref(),
         kind: ty.kind,
         enumeration: ty.is_enum || ty.packed_enum,
@@ -187,7 +186,6 @@ pub(in crate::ast) fn of_shape(
             .map(|element| table.without_keyword(element)),
         container: shape.container.as_deref(),
         class: shape.class.as_deref(),
-        virtual_interface: shape.virtual_interface.as_deref(),
         unpacked_struct: shape.unpacked_struct.as_ref(),
         kind,
         enumeration: shape.enum_domain.is_some()
@@ -225,7 +223,6 @@ struct Parts<'a> {
     bound_element: Option<TyId>,
     container: Option<&'a ContainerType>,
     class: Option<&'a str>,
-    virtual_interface: Option<&'a VirtualInterface>,
     unpacked_struct: Option<&'a Arc<UnpackedStruct>>,
     kind: TypeKind,
     /// An enumeration or a packed array of one.
@@ -270,8 +267,12 @@ impl Parts<'_> {
         };
         let mut id = match self.bound_element {
             Some(element) => {
+                // The fields tell no virtual interface: only its kept type
+                // does (25.9).
                 #[cfg(debug_assertions)]
-                if let Some(fields) = self.element_of_fields(table, functions, env, &range) {
+                if !matches!(table.data(element), TyData::VirtualInterface { .. })
+                    && let Some(fields) = self.element_of_fields(table, functions, env, &range)
+                {
                     assert_eq!(
                         fields, element,
                         "the element type a type keeps converts to another type"
@@ -336,12 +337,6 @@ impl Parts<'_> {
         // Events and processes are handles of built-in classes.
         if let Some(class) = self.class {
             return Some(TyData::Class(table.class(class)));
-        }
-        if let Some(interface) = self.virtual_interface {
-            return Some(TyData::VirtualInterface {
-                interface: table.interface(&interface.interface),
-                modport: interface.modport.as_deref().map(Into::into),
-            });
         }
         if let Some(aggregate) = self.unpacked_struct {
             let members = aggregate
