@@ -200,10 +200,13 @@ fn interface_subroutines(
         .keys()
         .map(|name| virtual_interfaces::subroutine_name(interface, name))
         .collect();
-    let ty = virtual_interfaces::value_type(VirtualInterface {
-        interface: interface.to_string(),
-        modport: None,
-    });
+    let ty = virtual_interfaces::bound_value_type(
+        &mut session.types,
+        VirtualInterface {
+            interface: interface.to_string(),
+            modport: None,
+        },
+    );
     let handle_shape = procedural::dimensions_from_type(&ty);
     let ty = type_nodes::ir_type(session, &context.functions, ty, &ConstEnv::default());
     for subroutine in &bound.subroutines {

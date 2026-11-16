@@ -73,6 +73,10 @@ pub struct Packages {
     /// The virtual interfaces of the design, which the modules that use the
     /// packages are analyzed with.
     pub(crate) virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
+    /// The signals through which every scope reaches the interface
+    /// instances of the design (see [`virtual_interfaces::member_signals`]),
+    /// with types bound in the table the modules start from.
+    pub(super) virtual_interface_signals: Arc<[Signal]>,
     /// The subroutines that call the tasks and functions of interfaces
     /// through virtual interfaces (see [`Self::build_virtual_interface_calls`]).
     pub(super) virtual_interface_calls: Arc<virtual_interface_calls::Subroutines>,
@@ -551,6 +555,10 @@ impl Packages {
         };
         let mut packages =
             Self::analyze_packages(trees, timescales, needed.map(|(needed, _)| needed), session)?;
+        if let Some(declarations) = &options.virtual_interfaces {
+            packages.virtual_interface_signals =
+                virtual_interfaces::member_signals(declarations, &mut session.types).into();
+        }
         packages.virtual_interfaces = options.virtual_interfaces;
         if trees
             .iter()

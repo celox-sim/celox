@@ -290,7 +290,7 @@ pub(in crate::ast) fn native_type(
                     functions,
                 })?;
                 let mut element = ty.clone();
-                element.unpacked_ranges.clear();
+                element.unpacked_ranges_mut().clear();
                 let width = ty.unpacked_ranges.iter().try_fold(
                     casts::expr_type_from_type(functions, &element, env)?.width,
                     |width, range| {

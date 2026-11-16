@@ -471,8 +471,10 @@ fn specialize(
     }
     // Like every scope, a specialization may reach the interface
     // instances through virtual interfaces (IEEE 1800-2023 25.9).
-    if let Some(declarations) = crate::ast::virtual_interfaces::declarations(session) {
-        for signal in crate::ast::virtual_interfaces::member_signals(declarations) {
+    if let Some(declarations) = session.virtual_interfaces.clone() {
+        for signal in
+            crate::ast::virtual_interfaces::member_signals(&declarations, &mut session.types)
+        {
             if !imports
                 .state_signals
                 .iter()
