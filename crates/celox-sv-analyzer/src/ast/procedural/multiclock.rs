@@ -374,7 +374,7 @@ impl BodyBuilder<'_, '_, '_> {
                     .filter(|(at, _)| *at == age)
                     .map(|(_, expression)| {
                         let condition = self.native_value(*expression)?;
-                        assertions::concurrent_operand(&condition)?;
+                        self.concurrent_operand(&condition)?;
                         sampled_history(&condition)?;
                         Ok(procedural_truth_condition(assertions::sampled(condition)))
                     })
