@@ -23,7 +23,7 @@ impl BodyBuilder<'_, '_, '_> {
         let delayed = nonblocking
             && repeat_count.is_none()
             && matches!(
-                self.tree.declarations().timing_control(control).kind,
+                self.syntax().declarations().timing_control(control).kind,
                 celox_sv_syntax::TimingControlKind::Delay { .. }
             );
         if !delayed {
@@ -34,7 +34,7 @@ impl BodyBuilder<'_, '_, '_> {
         }
         let mut output = self.effects(&[right])?;
         let target_effects = self.effects(&[left])?;
-        let shape = dimensions::operand_shape(left, self.tree, self.session, &self.dims)?
+        let shape = dimensions::operand_shape(left, &self.tree, self.session, &self.dims)?
             .ok_or_else(|| unsupported("intra-assignment target type"))?;
         if type_names::declared_type(&shape)
             .is_some_and(|ty| matches!(ty.kind, TypeKind::Process | TypeKind::Event))
@@ -95,7 +95,7 @@ impl BodyBuilder<'_, '_, '_> {
         if let Some(count) = repeat_count {
             output.extend(self.effects(&[count])?);
             let count_shape =
-                dimensions::operand_shape(count, self.tree, self.session, &self.dims)?
+                dimensions::operand_shape(count, &self.tree, self.session, &self.dims)?
                     .ok_or_else(|| unsupported("intra-assignment repeat count type"))?;
             if !count_shape
                 .type_id(
@@ -132,7 +132,7 @@ impl BodyBuilder<'_, '_, '_> {
         let mut rhs = packed_structs::checked_value(
             destination_checks,
             Expr::Ident(saved_source),
-            self.tree,
+            &self.tree,
             &self.dims,
         )?;
         self.rename_expr(&mut rhs);

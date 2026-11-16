@@ -21,7 +21,7 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         id: celox_sv_syntax::ExprId,
     ) -> Converted<Option<Vec<Stmt>>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let id = expression_binding::ungroup(id, native);
         let (member, arguments) = match &native.expression(id).kind {
             ExprKind::Call {
@@ -75,7 +75,7 @@ impl BodyBuilder<'_, '_, '_> {
         // The array is written as an assignment writes it.
         self.native_lvalue(*base, false)?;
         let target =
-            containers::fixed_storage(&declared, &self.session.types, self.tree, &self.dims)?;
+            containers::fixed_storage(&declared, &self.session.types, &self.tree, &self.dims)?;
         let layout = target.layout;
         if matches!(op, ContainerOp::Sort | ContainerOp::Rsort) {
             // Chandles have no relational operators (6.14, 7.12.2).
@@ -92,7 +92,7 @@ impl BodyBuilder<'_, '_, '_> {
         }
         let mut elements = containers::fixed_array_literal(
             *base,
-            self.tree,
+            &self.tree,
             &self.session.types,
             &self.dims,
             &target,
@@ -134,7 +134,7 @@ impl BodyBuilder<'_, '_, '_> {
                 vec![ident(), Expr::Literal(position.to_string())],
             );
             let mut lhs = selects::lvalue_from_indices(
-                self.tree,
+                &self.tree,
                 array.clone(),
                 vec![ConstExpr::Literal(index.to_string())],
                 &self.dims,
@@ -155,7 +155,7 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         id: celox_sv_syntax::ExprId,
     ) -> Converted<Option<Vec<Stmt>>> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         let ExprKind::ArrayMethodWith {
             expression: call,
             predicate,
@@ -186,9 +186,9 @@ impl BodyBuilder<'_, '_, '_> {
         if separator != "." {
             return Ok(None);
         }
-        containers::check_written_storage(*base, self.tree, self.session, &self.dims)?;
+        containers::check_written_storage(*base, &self.tree, self.session, &self.dims)?;
         let Some(target) =
-            containers::native_type(*base, native, self.tree, self.session, &self.dims)?
+            containers::native_type(*base, native, &self.tree, self.session, &self.dims)?
         else {
             return Err(unsupported(
                 "ordering method with expression on a fixed array",
@@ -403,7 +403,7 @@ impl BodyBuilder<'_, '_, '_> {
         item: &str,
         record: Option<Arc<ContainerType>>,
     ) -> Converted<(Expr, Type)> {
-        let native = self.tree.declarations();
+        let native = self.syntax().declarations();
         // The iterator is visible in the with expression only (7.12).
         let mut scope = self.dims.clone();
         let shape = dimensions_from_type(element);
@@ -431,10 +431,10 @@ impl BodyBuilder<'_, '_, '_> {
             }
         }
         let mut key =
-            expression_binding::value(predicate, native, self.tree, self.session, &scope)?;
+            expression_binding::value(predicate, native, &self.tree, self.session, &scope)?;
         let string = expression_binding::string_value(&key, &scope)
             || expression_binding::native_string(
-                self.tree,
+                &self.tree,
                 self.session,
                 predicate,
                 native,
@@ -447,7 +447,7 @@ impl BodyBuilder<'_, '_, '_> {
             if expression_binding::real_value(&key, &scope) {
                 return Err(unsupported("ordering method with a real key"));
             }
-            let bits = dimensions::bound_bits_type(self.tree, &key, &scope)
+            let bits = dimensions::bound_bits_type(&self.tree, &key, &scope)
                 .filter(|bits| (1..=64).contains(&bits.width))
                 .ok_or_else(|| unsupported("ordering method with a key wider than 64 bits"))?;
             key = Expr::Resize {
