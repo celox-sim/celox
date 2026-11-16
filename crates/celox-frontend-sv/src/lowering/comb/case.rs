@@ -159,6 +159,46 @@ impl Comb<'_, '_> {
             }
             return Ok(conditions);
         }
+        // A real selector or label compares the values as reals, an
+        // integral one converted (IEEE 1800-2023 12.5, 11.4.5), not as bit
+        // patterns.
+        let real = |expr: &sv::ir::Expr| {
+            self.m.expr_float_precision(expr).is_some()
+                || floating::precision(expr, self.m.variables, self.m.name_to_id).is_some()
+        };
+        if real(selector)
+            || items
+                .iter()
+                .flat_map(|item| &item.labels)
+                .any(|label| matches!(label, sv::ir::CaseLabel::Value(value) if real(value)))
+        {
+            for item in items {
+                let mut condition: Option<sv::ir::Expr> = None;
+                for label in &item.labels {
+                    let sv::ir::CaseLabel::Value(value) = label else {
+                        return Err(unsupported("range label outside case inside"));
+                    };
+                    let matches = sv::ir::Expr::Binary {
+                        left: Box::new(selector.clone()),
+                        op: sv::ir::BinaryOp::EqCase,
+                        right: Box::new(value.clone()),
+                    };
+                    condition = Some(match condition {
+                        None => matches,
+                        Some(previous) => sv::ir::Expr::Binary {
+                            left: Box::new(previous),
+                            op: sv::ir::BinaryOp::LogicOr,
+                            right: Box::new(matches),
+                        },
+                    });
+                }
+                let condition = condition.ok_or_else(|| unsupported("case item without labels"))?;
+                let (node, sources) = self.eval(store, frames, &condition, None)?;
+                let truth = slt_truth(self.arena, node)?;
+                conditions.push((truth, sources));
+            }
+            return Ok(conditions);
+        }
         let selector_signed = self.expr_signed(selector);
         let (selector_node, selector_sources) = self.eval_mode(
             store,
