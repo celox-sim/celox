@@ -1974,3 +1974,28 @@ endmodule
   (top Top) (run_until 1)
   (assert_eq x 3) (assert_eq y 4) (assert_eq seen 1)
   (assert_eq n 5) (assert_eq m 6))
+
+; A net or variable declaration of a non-ANSI port with a type keyword or
+; name and no range declares a port of the type's width, which the port
+; declaration's range must give (IEEE 1800-2023 23.2.2.1).
+(case non_ansi_ports_take_types_of_their_range_width
+  (source "non_ansi_type_width.sv" #"
+module Child(n, b, w);
+  output [31:0] n;
+  output [0:0] b;
+  output [3:0] w;
+  integer n;
+  bit b;
+  var w;
+  initial begin
+    n = -2;
+    b = 1'b1;
+    w = 4'd9;
+  end
+endmodule
+module Top(output logic [31:0] n, output logic b, output logic [3:0] w);
+  Child child(.n(n), .b(b), .w(w));
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq n 0xfffffffe) (assert_eq b 1) (assert_eq w 9))

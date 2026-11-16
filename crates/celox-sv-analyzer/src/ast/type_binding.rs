@@ -89,10 +89,12 @@ pub(super) fn port_type(
 }
 
 /// Whether the range of the port declaration of a non-ANSI port, which its
-/// net or variable declaration repeats in other words, has the bounds of the
-/// port's type (IEEE 1800-2023 23.2.2.1).
+/// net or variable declaration of type `object_type` repeats in other
+/// words, has the bounds of the port's type `ty`, or the width of a type
+/// without a range (IEEE 1800-2023 23.2.2.1).
 pub(super) fn declared_port_range_matches(
     declared_type: Option<celox_sv_syntax::TypeId>,
+    object_type: Option<celox_sv_syntax::TypeId>,
     ty: &Type,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -110,6 +112,34 @@ pub(super) fn declared_port_range_matches(
             constants::eval_ast_const_expr(&tree.functions, range.right(), env),
         )
     };
+    // A type keyword or name without a range has the width of the port
+    // declaration's range; a real type has none.
+    let object_ranged = object_type.is_some_and(|id| {
+        !tree
+            .declarations()
+            .data_type(id)
+            .packed_dimensions
+            .is_empty()
+    });
+    if !object_ranged {
+        let Some(width) = declared.iter().try_fold(1u128, |width, range| {
+            let (left, right) = bounds(range)?;
+            width.checked_mul(left.abs_diff(right) + 1)
+        }) else {
+            return Ok(true);
+        };
+        let bits =
+            semantic_types::of_type(&mut session.types, &tree.functions, ty, env).map(|id| {
+                match session.types.data(id) {
+                    semantic_types::TyData::Packed(packed) => Some(packed.bits()),
+                    _ => None,
+                }
+            });
+        return Ok(match bits {
+            Some(bits) => bits == Some(width),
+            None => true,
+        });
+    }
     Ok(declared.len() == ty.packed_ranges.len()
         && declared
             .iter()
