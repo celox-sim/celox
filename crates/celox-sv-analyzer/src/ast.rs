@@ -307,7 +307,7 @@ pub(crate) fn generated_time_declarations(
     timescales::generated_source_declarations(sources, roots, crate::AnalysisOptions::default())
 }
 
-const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;
+const MAX_GENERATE_LOOP_EXPANSION: usize = 1 << 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
