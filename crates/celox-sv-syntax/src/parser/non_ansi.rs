@@ -19,6 +19,11 @@ struct PortDeclaration {
     tokens: TokenRange,
 }
 
+/// The net type, `var`, type, port declaration type to check (see
+/// [`Parser::take_port_object`]) and initializer of the net or variable
+/// declaration of a non-ANSI port.
+type PortObject = (Option<String>, bool, TypeId, Option<TypeId>, Option<ExprId>);
+
 impl Parser<'_> {
     /// Fold the body port declarations of a non-ANSI `unit` into its header.
     pub(super) fn adopt_non_ansi_ports(&mut self, unit: &mut Unit) -> Result<()> {
@@ -71,7 +76,7 @@ impl Parser<'_> {
                 self.at = resume;
                 return Err(self.error(format!("port `{name}` has no port declaration")));
             };
-            let (_, declaration) = declarations.swap_remove(index);
+            let (_, mut declaration) = declarations.swap_remove(index);
             let (net_type, variable, data_type, declared_type) = if declaration.net_type.is_some()
                 || declaration.variable
                 || !matches!(
@@ -104,7 +109,21 @@ impl Parser<'_> {
                     &name,
                     declaration.data_type,
                 )? {
-                    Some(object) => object,
+                    Some((net_type, variable, data_type, declared_type, initializer)) => {
+                        // Only a variable output port is initialized
+                        // (IEEE 1800-2023 23.2.2.2).
+                        if initializer.is_some() {
+                            if declaration.direction != Direction::Output {
+                                self.at = resume;
+                                return Err(self.error(format!(
+                                    "variable declaration with an initializer of non-ANSI \
+                                     port `{name}` that is not an output"
+                                )));
+                            }
+                            declaration.default = initializer;
+                        }
+                        (net_type, variable, data_type, declared_type)
+                    }
                     None => (None, false, declaration.data_type, None),
                 }
             };
@@ -189,12 +208,13 @@ impl Parser<'_> {
     }
 
     /// Remove the declarator of `name` from the module-scope net or variable
-    /// declarations, returning the port's net type, `var` and type, and the
+    /// declarations, returning the port's net type, `var` and type, the
     /// port declaration's type when its range must be checked against the
-    /// object's (see [`Self::merge_port_type`]). The port declaration's
-    /// packed range and signing carry over to a type that has neither (IEEE
-    /// 1800-2023 23.2.2.1). A net declaration assignment stays as the
-    /// continuous assignment it is (10.3.1).
+    /// object's (see [`Self::merge_port_type`]), and the initializer of a
+    /// variable declaration. The port declaration's packed range and signing
+    /// carry over to a type that has neither (IEEE 1800-2023 23.2.2.1). A
+    /// net declaration assignment stays as the continuous assignment it is
+    /// (10.3.1).
     fn take_port_object(
         &mut self,
         items: &mut Vec<BodyItemId>,
@@ -205,7 +225,7 @@ impl Parser<'_> {
         ),
         name: &str,
         port_type: TypeId,
-    ) -> Result<Option<(Option<String>, bool, TypeId, Option<TypeId>)>> {
+    ) -> Result<Option<PortObject>> {
         let qualified = items
             .iter()
             .any(|&item| match self.body_items[item.0].kind {
@@ -263,15 +283,15 @@ impl Parser<'_> {
         else {
             return Ok(None);
         };
-        if !declarator.dimensions.is_empty() || (variable && declarator.value.is_some()) {
+        if !declarator.dimensions.is_empty() {
             return Err(self.error(format!(
-                "variable declaration of non-ANSI port `{name}` with an initializer, or net or \
-                 variable declaration of it with unpacked dimensions"
+                "net or variable declaration of non-ANSI port `{name}` with unpacked dimensions"
             )));
         }
-        let assign = match declarator.value {
-            Some(right) => Some(self.declaration_assignment(&declarator, right)?),
-            None => None,
+        let (assign, initializer) = match declarator.value {
+            Some(right) if variable => (None, Some(right)),
+            Some(right) => (Some(self.declaration_assignment(&declarator, right)?), None),
+            None => (None, None),
         };
         if let Some((id, _)) = assign {
             unit_assigns.push(id);
@@ -302,7 +322,13 @@ impl Parser<'_> {
             (None, false) => {}
         }
         let (data_type, declared_type) = self.merge_port_type(port_type, object_type)?;
-        Ok(Some((net_type, variable, data_type, declared_type)))
+        Ok(Some((
+            net_type,
+            variable,
+            data_type,
+            declared_type,
+            initializer,
+        )))
     }
 
     /// The continuous assignment `name = right` of a net declaration

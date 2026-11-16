@@ -57,6 +57,35 @@ pub(in crate::ast) fn initial_processes_from_scope(
     // `always` procedure (IEEE 1800-2023 10.5).
     let mut initializers = Vec::new();
     let mut processes = Vec::new();
+    // So do the initializers of variable output ports (23.2.2.2), which
+    // `ports_from_scope` allows on no other port but an input's default.
+    let mut direction = None;
+    for native in port_owners::scope(None, tree)? {
+        direction = native.direction.or(direction);
+        let (Some(value), Some(celox_sv_syntax::Direction::Output)) = (native.default, direction)
+        else {
+            continue;
+        };
+        let (celox_sv_syntax::PortKind::Named(name)
+        | celox_sv_syntax::PortKind::Explicit { name, .. }) = &native.kind
+        else {
+            continue;
+        };
+        let name = instances::normalize_identifier(&name.spelling);
+        let mut stmt =
+            declaration_initializer(tree, session, state, None, packed_dimensions, name, value)?;
+        substitute_stmt_constants(tree, session, &mut stmt, const_env, parameter_literals);
+        initializers.push(InitialProcess {
+            creation_order: 0,
+            site: process_site("port initializer", native.tokens, tree),
+            condition: None,
+            body: vec![stmt],
+            kind: celox_design::ProcessKind::Initializer,
+            validation_body: Vec::new(),
+            synthetic: false,
+            repeats: false,
+        });
+    }
     let active = generate::items(tree, session, const_env, &type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for (creation_order, item) in active.iter().enumerate() {
@@ -151,74 +180,15 @@ pub(in crate::ast) fn initial_processes_from_scope(
                     Some((dimensions, literals)) => (dimensions, literals),
                     None => (item_dimensions, &**literals),
                 };
-                if let Some(target) = selected_unpacked_shape(&name, 0, item_dimensions) {
-                    let id = native;
-                    array_compatibility::check_native_unpacked_assignment(
-                        tree,
-                        session,
-                        id,
-                        &target,
-                        || format!("initializer of `{name}`"),
-                        item_dimensions,
-                    )?;
-                }
-                expression_binding::check_chandle_assignment(
-                    item_dimensions
-                        .get(&name)
-                        .is_some_and(|shape| shape.chandle && shape.unpacked.is_empty()),
-                    native,
+                let mut stmt = declaration_initializer(
                     tree,
-                    tree.declarations(),
-                    item_dimensions,
                     session,
+                    state,
+                    owner.as_deref().map(|owner| (item, owner, &*type_aliases)),
+                    item_dimensions,
+                    name,
+                    native,
                 )?;
-                let lhs = LValue::Ident(name);
-                let rhs = match &owner {
-                    Some(owner) => static_initializer(
-                        tree,
-                        session,
-                        state,
-                        item,
-                        owner,
-                        &type_aliases,
-                        item_dimensions,
-                        native,
-                        &lhs,
-                    )?,
-                    None => expression_binding::expression(
-                        native,
-                        tree.declarations(),
-                        &lhs,
-                        tree,
-                        session,
-                        item_dimensions,
-                    )?,
-                };
-                let LValue::Ident(name) = lhs else {
-                    unreachable!("an initializer target is a variable")
-                };
-                // A variable of unpacked structure type initializes its leaves.
-                let mut stmt = match unpacked_structs::targets(&name, item_dimensions) {
-                    Some(parts) => {
-                        unpacked_structs::check_assignment(
-                            &name,
-                            native,
-                            tree,
-                            session,
-                            item_dimensions,
-                        )?;
-                        Stmt::AssignConcat {
-                            parts,
-                            rhs,
-                            nonblocking: false,
-                        }
-                    }
-                    None => Stmt::Assign {
-                        lhs: LValue::Ident(name),
-                        rhs,
-                        nonblocking: false,
-                    },
-                };
                 // The parameters of the class are its own constants.
                 if scoped.is_some() {
                     substitute_stmt_constants(
@@ -413,5 +383,81 @@ pub(in crate::ast) fn process_site(
         path: file.path.clone(),
         line,
         column,
+    })
+}
+
+/// The assignment of the initializer `native` of variable `name` of a
+/// declaration, or of static property `name` of class `owner` declared by
+/// `item` (see [`static_initializer`]).
+fn declaration_initializer(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    state: &mut BodyState<'_>,
+    owner: Option<(&generate::Item, &str, &TypeAliases)>,
+    item_dimensions: &PackedDimensions,
+    name: String,
+    native: celox_sv_syntax::ExprId,
+) -> Result<Stmt, AnalyzerError> {
+    if let Some(target) = selected_unpacked_shape(&name, 0, item_dimensions) {
+        let id = native;
+        array_compatibility::check_native_unpacked_assignment(
+            tree,
+            session,
+            id,
+            &target,
+            || format!("initializer of `{name}`"),
+            item_dimensions,
+        )?;
+    }
+    expression_binding::check_chandle_assignment(
+        item_dimensions
+            .get(&name)
+            .is_some_and(|shape| shape.chandle && shape.unpacked.is_empty()),
+        native,
+        tree,
+        tree.declarations(),
+        item_dimensions,
+        session,
+    )?;
+    let lhs = LValue::Ident(name);
+    let rhs = match owner {
+        Some((item, owner, type_aliases)) => static_initializer(
+            tree,
+            session,
+            state,
+            item,
+            owner,
+            type_aliases,
+            item_dimensions,
+            native,
+            &lhs,
+        )?,
+        None => expression_binding::expression(
+            native,
+            tree.declarations(),
+            &lhs,
+            tree,
+            session,
+            item_dimensions,
+        )?,
+    };
+    let LValue::Ident(name) = lhs else {
+        unreachable!("an initializer target is a variable")
+    };
+    // A variable of unpacked structure type initializes its leaves.
+    Ok(match unpacked_structs::targets(&name, item_dimensions) {
+        Some(parts) => {
+            unpacked_structs::check_assignment(&name, native, tree, session, item_dimensions)?;
+            Stmt::AssignConcat {
+                parts,
+                rhs,
+                nonblocking: false,
+            }
+        }
+        None => Stmt::Assign {
+            lhs: LValue::Ident(name),
+            rhs,
+            nonblocking: false,
+        },
     })
 }

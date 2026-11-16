@@ -541,8 +541,8 @@ fn rejects_malformed_non_ansi_port_declarations() {
             "port `q` with a net or variable type is declared again",
         ),
         (
-            "module Top(q); output q; reg q = 1'b1; endmodule",
-            "variable declaration of non-ANSI port `q` with an initializer",
+            "module Top(q); input q; reg q = 1'b1; endmodule",
+            "initializer of non-ANSI port `q` that is not an output",
         ),
         (
             "module Top({y, z}); output y, z; assign y = 1'b1; assign z = 1'b0; endmodule",
