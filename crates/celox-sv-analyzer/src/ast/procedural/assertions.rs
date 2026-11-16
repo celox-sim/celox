@@ -792,16 +792,22 @@ fn not(expr: Expr) -> Expr {
 
 impl BodyBuilder<'_, '_, '_> {
     /// The monitor of a sequence with several ways to match, `paths`
-    /// (see [`sequence_paths`]), without local variables or match items.
+    /// (see [`sequence_paths`]), without local variables or match items,
+    /// as the consequent of an implication whose antecedent is the one way
+    /// `antecedent` when that is not empty.
     ///
     /// An attempt matches at the first tick one of its ways matches, and
     /// fails at the first tick none of them can match any more (16.7,
     /// 16.12.2, 16.14.1); each tick decides the attempt of each age it
     /// reaches from the matches of the Boolean expressions of its earlier
-    /// ticks, so a decided attempt needs no state of its own.
+    /// ticks, so a decided attempt needs no state of its own. A step of the
+    /// antecedent that misses makes the attempt succeed vacuously; the
+    /// consequent starts at the tick the antecedent ends, `|=>` having added
+    /// its tick to the consequent's first delay (16.12.7).
     pub(super) fn sequence_alternatives(
         &mut self,
         paths: Vec<Vec<celox_sv_syntax::SequenceStep>>,
+        antecedent: Vec<celox_sv_syntax::SequenceStep>,
         max_ticks: u32,
     ) -> Converted<SequenceMonitor> {
         // The assertion control tasks stop new attempts while assertions are
@@ -813,10 +819,10 @@ impl BodyBuilder<'_, '_, '_> {
                 "sequence with more than one way to match in a design that calls $assertoff or $asserton",
             ));
         }
-        // Each way as the offsets of its Boolean expressions from the start.
-        let mut offsets: Vec<Vec<(u32, celox_sv_syntax::ExprId)>> = Vec::new();
-        for path in &paths {
-            let mut at = 0u32;
+        // The antecedent and each way as the offsets of their Boolean
+        // expressions from the start.
+        let offsets_of = |path: &[celox_sv_syntax::SequenceStep], start: u32| {
+            let mut at = start;
             let mut steps = Vec::new();
             for step in path {
                 if !step.items.is_empty() {
@@ -829,13 +835,26 @@ impl BodyBuilder<'_, '_, '_> {
                     .ok_or_else(|| unsupported("sequence longer than 2^32 ticks"))?;
                 steps.push((at, step.expression));
             }
-            offsets.push(steps);
+            Ok(steps)
+        };
+        let antecedent = offsets_of(&antecedent, 0)?;
+        // The tick the consequent starts at.
+        let first = antecedent.last().map_or(0, |(at, _)| *at);
+        let mut offsets: Vec<Vec<(u32, celox_sv_syntax::ExprId)>> = Vec::new();
+        for path in &paths {
+            offsets.push(offsets_of(path, first)?);
         }
         let ends: Vec<u32> = offsets
             .iter()
-            .map(|steps| steps.last().map_or(0, |(at, _)| *at))
+            .map(|steps| steps.last().map_or(first, |(at, _)| *at))
             .collect();
-        let length = ends.iter().copied().max().unwrap_or(0);
+        let length = ends.iter().copied().max().unwrap_or(first);
+        // The antecedent's expressions are kept as those of a way are, after
+        // the ways.
+        let antecedent = (!antecedent.is_empty()).then(|| {
+            offsets.push(antecedent);
+            offsets.len() - 1
+        });
         if length > max_ticks {
             return Err(unsupported(format!(
                 "sequence longer than {max_ticks} ticks"
@@ -874,46 +893,79 @@ impl BodyBuilder<'_, '_, '_> {
             register_of.insert(*expression, registers.len() - 1);
         }
         // Whether way `path` of the attempt `age` ticks old has matched each
-        // of its expressions up to its tick `upto`.
-        let mut matched = |this: &mut Self, path: usize, age: u32, upto: u32| {
-            let terms = offsets[path]
-                .iter()
-                .filter(|(at, _)| *at <= upto)
-                .map(|(at, expression)| {
-                    let register = register_of[expression];
-                    let ago = age - at;
-                    if ago == 0 {
-                        registers[register].now.clone()
-                    } else {
-                        Expr::Ident(this.sequence_register(&mut registers, register, ago))
-                    }
+        // of its expressions that `keep` keeps, by position and tick.
+        let mut matched =
+            |this: &mut Self, path: usize, age: u32, keep: &dyn Fn(usize, u32) -> bool| {
+                let terms = offsets[path]
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, (at, _))| keep(*index, *at))
+                    .map(|(_, (at, expression))| {
+                        let register = register_of[expression];
+                        let ago = age - at;
+                        if ago == 0 {
+                            registers[register].now.clone()
+                        } else {
+                            Expr::Ident(this.sequence_register(&mut registers, register, ago))
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                all(terms)
+            };
+        let upto = |tick: u32| move |_: usize, at: u32| at <= tick;
+        let exists_at = |ticks: &Option<String>, age: u32| {
+            ticks
+                .as_ref()
+                .filter(|_| age > 0)
+                .map(|ticks| Expr::Binary {
+                    left: Box::new(Expr::Ident(ticks.clone())),
+                    op: BinaryOp::Ge,
+                    right: Box::new(Expr::Literal(age.to_string())),
                 })
-                .collect::<Vec<_>>();
-            all(terms)
         };
         let mut stages = Vec::new();
-        for age in 0..=length {
+        // Each step of the antecedent that an attempt reaches: a miss makes
+        // it succeed vacuously.
+        if let Some(index) = antecedent {
+            for (position, &(at, _)) in offsets[index].clone().iter().enumerate() {
+                let before = matched(self, index, at, &|step, _| step < position);
+                let now = matched(self, index, at, &|step, _| step == position);
+                stages.push(SequenceStage {
+                    alive: Some(all(exists_at(&ticks, at).into_iter().chain([before]))),
+                    matched: now,
+                    antecedent: true,
+                    last: false,
+                    calls: Vec::new(),
+                    offset: at,
+                });
+            }
+        }
+        for age in first..=length {
             // A way that ends earlier matched before this tick.
             let mut earlier = Vec::new();
             for (path, &end) in ends.iter().enumerate() {
                 if end < age {
-                    earlier.push(matched(self, path, age, end));
+                    earlier.push(matched(self, path, age, &upto(end)));
                 }
             }
             let passed_before = any(earlier);
             // Every way ended or failed by the previous tick.
-            let failed_before = if age == 0 {
+            let failed_before = if age == first {
                 Expr::Literal("1'b0".into())
             } else {
                 let mut dead = Vec::new();
                 for (path, &end) in ends.iter().enumerate() {
                     if end >= age {
-                        dead.push(not(matched(self, path, age, age - 1)));
+                        dead.push(not(matched(self, path, age, &upto(age - 1))));
                     }
                 }
                 all(dead)
             };
             let mut exists = vec![not(passed_before), not(failed_before)];
+            // The consequent of an attempt whose antecedent matched.
+            if let Some(index) = antecedent {
+                exists.push(matched(self, index, age, &|_, _| true));
+            }
             if age > 0
                 && let Some(ticks) = &ticks
             {
@@ -931,9 +983,9 @@ impl BodyBuilder<'_, '_, '_> {
             let mut alive = Vec::new();
             for (path, &end) in ends.iter().enumerate() {
                 if end == age {
-                    ending.push(matched(self, path, age, age));
+                    ending.push(matched(self, path, age, &upto(age)));
                 } else if end > age {
-                    alive.push(matched(self, path, age, age));
+                    alive.push(matched(self, path, age, &upto(age)));
                 }
             }
             let pass = any(ending);
