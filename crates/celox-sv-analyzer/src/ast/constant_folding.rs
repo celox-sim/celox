@@ -325,6 +325,25 @@ fn eval_const_integral_expr_preserving_mask(
             width,
             signed,
         } => {
+            // The width is the context of the operand's context-determined
+            // operands (IEEE 1800-2023 6.24.1, 11.6.1).
+            if let Some(operand) = constant_with_folded_selections_with_lookup(
+                tree,
+                session,
+                expr,
+                const_env,
+                parameter_types,
+            ) && let Some(literal) = typecheck::eval_const_integral_literal_with_lookup(
+                &crate::ir::ConstExpr::Resize {
+                    expr: Box::new(operand.into()),
+                    width: *width,
+                    signed: *signed,
+                },
+                const_env,
+                parameter_types,
+            ) {
+                return Some(literal);
+            }
             let operand = eval_const_integral_expr_preserving_mask(
                 tree,
                 session,
@@ -442,7 +461,7 @@ pub(super) fn constant_with_folded_selections(
     })
 }
 
-fn constant_with_folded_selections_with_lookup(
+pub(super) fn constant_with_folded_selections_with_lookup(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     expr: &Expr,
