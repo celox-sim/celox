@@ -4248,6 +4248,8 @@ fn named_assertion_instances_follow_clock_and_disable_rules() {
     }
 }
 
+mod parameter_values;
+
 /// Only an abstract or interface class declares pure virtual methods (IEEE
 /// 1800-2023 8.21, 8.26), also when nothing uses the class.
 #[test]
