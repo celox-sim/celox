@@ -798,6 +798,49 @@ pub(super) fn chandle_enum<T>() -> Result<T, AnalyzerError> {
     })
 }
 
+/// The error of an enumeration that IEEE 1800-2023 6.19 forbids, returned
+/// directly by the recursive type binder. Out of line like
+/// [`packed_chandles`].
+#[inline(never)]
+#[cold]
+pub(super) fn invalid_enumeration<T>(detail: String) -> Result<T, AnalyzerError> {
+    Err(AnalyzerError::InvalidEnumeration(detail))
+}
+
+/// Why `base`, the bound base type of an enumeration together with the
+/// packed dimension the declaration adds to it, is no enumeration base:
+/// an integer atom type, or an integer vector type with at most one packed
+/// dimension, also through a type name (IEEE 1800-2023 6.19, Syntax 6-5
+/// and its footnote 19). A chandle base has its own error.
+pub(super) fn illegal_enum_base(base: &Type) -> Option<&'static str> {
+    if base.is_container() || !base.unpacked_ranges.is_empty() || base.unpacked_struct.is_some() {
+        return Some("its base type is an unpacked type");
+    }
+    match base.kind {
+        TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Chandle => {}
+        TypeKind::Real | TypeKind::Shortreal => return Some("its base type is a real type"),
+        TypeKind::String => return Some("its base type is `string`"),
+        TypeKind::Object | TypeKind::Process | TypeKind::Event => {
+            return Some("its base type is a handle type");
+        }
+        // A typedef of an implicit type, such as `signed [3:0]`, is a
+        // vector of `logic`.
+        TypeKind::Implicit => {}
+    }
+    if base.is_enum {
+        return Some("its base type is an enumeration");
+    }
+    if !base.members.is_empty() {
+        return Some("its base type is a packed structure or union");
+    }
+    // An integer atom type is held with the packed range of its width, so
+    // an atom with a packed dimension has two, as a vector with two has.
+    if base.packed_ranges.len() > 1 {
+        return Some("its base type has more than one packed dimension");
+    }
+    None
+}
+
 /// `r#type` with the fixed-size unpacked dimensions `ranges` (IEEE 1800-2023
 /// 7.4) in front of its own. Every declaration of a fixed-size unpacked
 /// array, also of a typedef, a parameter or a container element, takes its
