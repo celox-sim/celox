@@ -369,7 +369,6 @@ impl<B: SimBackend> Simulator<B> {
                     metadata,
                     state,
                     state_size,
-                    files: &mut self.file_io,
                     pending: &self.pending_host_events,
                     read_seq: &self.runtime_events.read_seq,
                     error: None,

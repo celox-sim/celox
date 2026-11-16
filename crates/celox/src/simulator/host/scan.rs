@@ -94,7 +94,7 @@ impl<B: SimBackend> Simulator<B> {
                 let descriptor = source.to_u32().unwrap_or_default();
                 celox_runtime::scan::scan_typed(
                     &mut FileInput {
-                        files: &mut self.file_io,
+                        files: self.files_mut(),
                         descriptor,
                     },
                     format,

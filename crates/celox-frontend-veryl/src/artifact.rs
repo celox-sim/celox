@@ -114,6 +114,7 @@ pub fn external_signatures_named(
             comb_observers: Vec::new(),
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
+            memory_file_bases: Vec::new(),
             initial_memory_values: Vec::new(),
             comb_boundaries: HashMap::default(),
             arena: SLTNodeArena::new(),
@@ -180,6 +181,9 @@ pub struct VerylSimModule {
     pub comb_observers: Vec<CombObserver<VarId>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
+    /// The directories the memory file loads of the units look relative
+    /// names up in.
+    pub memory_file_bases: Vec<celox_design::MemoryFileBase>,
     pub initial_memory_values: Vec<InitialStateValue<VarId>>,
     pub comb_boundaries: HashMap<VarId, BTreeSet<usize>>,
     pub arena: SLTNodeArena<VarId>,
@@ -648,6 +652,7 @@ pub(crate) fn project_module_with_ids(
                 })
                 .collect(),
             runtime_event_sites: module.runtime_event_sites.clone(),
+            memory_file_bases: module.memory_file_bases.clone(),
             extern_functions: Vec::new(),
             folded_initial_memory_values: Vec::new(),
             declaration_initial_memory_values: module

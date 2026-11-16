@@ -630,6 +630,12 @@ impl FileIo {
         self.positioned_file(descriptor)
     }
 
+    /// The contents of `path`, read through the injected backend, such as
+    /// the memory file of a `$readmemh` (IEEE 1800-2023 21.4).
+    pub fn read_to_string(&mut self, path: impl AsRef<Path>) -> io::Result<String> {
+        read_to_string(self.backend.as_mut(), path)
+    }
+
     /// Write memory through the injected backend, including its snapshot policy.
     pub fn write_memory_with_backend<'a>(
         &mut self,
@@ -688,6 +694,19 @@ pub struct FileIoSnapshot {
 
 /// An open file of a backend, for one operation of the manager that owns
 /// both.
+/// The contents of `path`, read through file system `backend`.
+pub fn read_to_string(backend: &mut dyn FileSystem, path: impl AsRef<Path>) -> io::Result<String> {
+    let id = backend.open(path.as_ref(), FileMode::parse("r").unwrap())?;
+    let mut content = String::new();
+    let read = BackendFile {
+        backend: &mut *backend,
+        id,
+    }
+    .read_to_string(&mut content);
+    let closed = backend.close(id);
+    read.and(closed).map(|()| content)
+}
+
 struct BackendFile<'a> {
     backend: &'a mut dyn FileSystem,
     id: u64,

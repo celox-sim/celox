@@ -7,7 +7,8 @@ mod image_file;
 mod lanes;
 mod runtime_image;
 pub use backend::{
-    NativeBackend, NativeCodeEntry, NativeExecutionTiming, NativeProgramImage, SharedNativeCode,
+    InitialMemoryFileReport, NativeBackend, NativeCodeEntry, NativeExecutionTiming,
+    NativeProgramImage, SharedNativeCode,
 };
 #[cfg(any(
     feature = "arm64-codegen",
