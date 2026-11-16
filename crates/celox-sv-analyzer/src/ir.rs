@@ -1206,6 +1206,7 @@ impl Type {
     pub(crate) fn from_ast(
         r#type: ast::Type,
         constants: &dyn typecheck::ConstantEnvironment,
+        class: &dyn Fn(&ast::Type) -> Option<String>,
     ) -> Self {
         let structure = r#type.structure_identity().map(|identity| {
             std::sync::Arc::new(StructureType {
@@ -1213,14 +1214,14 @@ impl Type {
                 leaves: r#type
                     .structure_leaves()
                     .into_iter()
-                    .map(|(name, ty)| (name, Self::from_ast(ty, constants)))
+                    .map(|(name, ty)| (name, Self::from_ast(ty, constants, class)))
                     .collect(),
             })
         });
         let tagged_identity = r#type.tagged_identity().map(str::to_owned);
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
-        let class = r#type.class().map(str::to_owned);
+        let class = class(&r#type);
         let signed_element_depth = r#type.signed_element_depth();
         let chandle = r#type.is_chandle();
         // The declaration's bounds, resolved where its constant functions

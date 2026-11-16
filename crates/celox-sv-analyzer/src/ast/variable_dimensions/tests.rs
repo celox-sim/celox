@@ -85,23 +85,30 @@ fn editing_a_cloned_shape_invalidates_only_its_own_binding() {
     assert!(!shape.same_declaration(&edited));
 }
 
+/// Handles of two classes have one shape: their element types tell them
+/// apart (IEEE 1800-2023 8.4), in another table too, and a handle whose
+/// shape changes forgets its class with its binding.
 #[test]
-fn class_identity_changes_cannot_reuse_a_previous_binding() {
-    let mut shape = procedural::dimensions_from_type(&Type::new(TypeKind::Bit));
-    shape.class = Some("C".into());
+fn handles_of_classes_are_told_apart_by_their_element_types() {
     let mut table = TyTable::default();
     let functions = const_functions::ConstantFunctions::default();
-    let first = shape
-        .bind_type(&mut table, &functions, &ConstEnv::default())
-        .unwrap();
-    shape.class = Some("D".into());
-    let second = shape
-        .type_id(&mut table, &functions, &ConstEnv::default())
-        .unwrap();
-    assert_ne!(first, second);
-    assert!(
-        matches!(table.data(second), TyData::Class(semantic_types::Decl::Class(decl)) if table.decl(*decl).name.as_ref() == "D")
-    );
+    let c = procedural::dimensions_from_type(&classes::handle(&mut table, "C"));
+    let d = procedural::dimensions_from_type(&classes::handle(&mut table, "D"));
+    assert_eq!(c.clone_shape(), d.clone_shape());
+    assert_ne!(c, d);
+    let id = |shape: &VariableDimensions, table: &mut TyTable| {
+        shape.type_id(table, &functions, &ConstEnv::default())
+    };
+    assert_ne!(id(&c, &mut table), id(&d, &mut table));
+    assert_eq!(c.class_in(&table).as_deref(), Some("C"));
+    // A table that declared the class on its own tells the same class.
+    let mut other = TyTable::default();
+    let again = procedural::dimensions_from_type(&classes::handle(&mut other, "C"));
+    assert_eq!(c, again);
+    assert_eq!(again.class_in(&other).as_deref(), Some("C"));
+    let mut changed = c.clone();
+    changed.signed = true;
+    assert_eq!(changed.class_in(&table), None);
 }
 
 #[test]

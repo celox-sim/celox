@@ -44,8 +44,8 @@ pub(in crate::ast) fn native_class(
 /// The class of the handles declared shape `shape` holds: of a handle, or of
 /// the elements of a fixed-size array of handles (8.4), as its type tells.
 /// A shape whose type cannot be formed with the constants of `dimensions`
-/// is told by its class metadata, which every shape keeps until
-/// declarations bind their types.
+/// is told by its element type, which a shape keeps across changes of its
+/// unpacked dimensions.
 pub(in crate::ast) fn shape_class(
     shape: &VariableDimensions,
     tree: &AnalysisContext<'_>,
@@ -67,9 +67,15 @@ fn class_of(
     functions: &const_functions::ConstantFunctions,
     env: &ConstEnv,
 ) -> Option<String> {
-    let metadata = shape.class.clone().filter(|_| shape.container.is_none());
     let Some(mut ty) = shape.type_id(table, functions, env) else {
-        return metadata;
+        // A shape whose dimensions are not formed still holds handles of
+        // the class of its element type.
+        return shape
+            .container
+            .is_none()
+            .then(|| shape.class_in(table))
+            .flatten()
+            .map(|class| class.to_string());
     };
     while let semantic_types::TyData::Array {
         kind: semantic_types::ArrayKind::Fixed(_),
@@ -78,12 +84,7 @@ fn class_of(
     {
         ty = *element;
     }
-    let found = expression_types::class_name(table, ty);
-    debug_assert_eq!(
-        found, metadata,
-        "the type and the class metadata of a shape disagree"
-    );
-    found
+    expression_types::class_name(table, ty)
 }
 
 /// Access depends on the lexical class, not the class of the receiver (8.18).
@@ -2751,14 +2752,13 @@ mod shape_class_tests {
     }
 
     #[test]
-    fn shapes_whose_type_is_not_formed_keep_their_class_metadata() {
+    fn shapes_whose_type_is_not_formed_keep_their_class() {
         // `C handles[N]` where the scope has no `N`: still handles of `C`.
-        let mut ty = Type::new(TypeKind::Object);
-        ty.class = Some(Arc::from("C"));
-        ty.unpacked_ranges.push(symbolic_range());
+        let mut table = semantic_types::TyTable::default();
+        let mut ty = classes::handle(&mut table, "C");
+        ty.unpacked_ranges_mut().push(symbolic_range());
         let shape = procedural::dimensions_from_type(&ty);
         let functions = const_functions::ConstantFunctions::default();
-        let mut table = semantic_types::TyTable::default();
         assert!(
             shape
                 .type_id(&mut table, &functions, &ConstEnv::default())

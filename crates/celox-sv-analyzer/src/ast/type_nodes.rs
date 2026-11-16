@@ -14,7 +14,6 @@ impl Type {
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
             signed_element_depth: None,
-            class: None,
             container: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
@@ -32,7 +31,6 @@ impl Type {
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
             signed_element_depth: None,
-            class: None,
             container: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
@@ -106,29 +104,18 @@ impl Type {
         })
     }
 
-    /// The class of an object handle type, or of the elements of an array
-    /// of them. Conversions of the type read it, and the readers that have
-    /// no type table; the others ask `class_in`.
-    pub fn class(&self) -> Option<&str> {
-        self.class.as_deref()
-    }
-
     /// The class of an object handle type, or of the elements of a
     /// fixed-size array of them, as its semantic type in `table` tells.
     pub(in crate::ast) fn class_in(&self, table: &semantic_types::TyTable) -> Option<Arc<str>> {
-        let Some(id) = self.binding.get(table) else {
-            debug_assert!(
-                self.class.is_none(),
-                "a class handle type is told by its semantic type"
-            );
-            return None;
-        };
-        let class = table.handle_class(id);
-        debug_assert_eq!(
-            class.map(|class| &**class),
-            self.class(),
-            "the semantic type of a handle type"
+        debug_assert!(
+            !self.binding.class_outside(table) && !self.element.class_outside(table),
+            "a class handle type is read in a table that does not hold it: {self:?}"
         );
+        let class = self
+            .binding
+            .get(table)
+            .or_else(|| self.element.get(table))
+            .and_then(|id| table.handle_class(id));
         class.cloned()
     }
 
@@ -376,7 +363,7 @@ pub(crate) fn ir_type(
     env: &ConstEnv,
 ) -> crate::ir::Type {
     let bounds = semantic_types::packed_bounds(&mut session.types, functions, &ty, env);
-    ir_type_with_bounds(functions, ty, env, bounds)
+    ir_type_with_bounds(&session.types, functions, ty, env, bounds)
 }
 
 /// [`ir_type`] for a type `env` may not name the way its declaring scope
@@ -389,10 +376,11 @@ pub(crate) fn declared_ir_type(
     env: &ConstEnv,
 ) -> crate::ir::Type {
     let bounds = semantic_types::declared_packed_bounds(&mut session.types, functions, &ty, env);
-    ir_type_with_bounds(functions, ty, env, bounds)
+    ir_type_with_bounds(&session.types, functions, ty, env, bounds)
 }
 
 fn ir_type_with_bounds(
+    table: &semantic_types::TyTable,
     functions: &const_functions::ConstantFunctions,
     ty: Type,
     env: &ConstEnv,
@@ -404,6 +392,7 @@ fn ir_type_with_bounds(
             constants: env,
             functions,
         },
+        &|ty| ty.class_in(table).map(|class| class.to_string()),
     )
     .with_packed_bounds(bounds)
 }

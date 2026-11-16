@@ -135,6 +135,12 @@ impl VariableDimensions {
         self.element.as_ref()?.in_table(table)
     }
 
+    /// What tells the element type apart where the shape does not, such
+    /// as the class of a handle (see [`semantic_types::Identity`]).
+    pub(super) fn element_identity(&self) -> Option<semantic_types::Identity> {
+        self.element.as_ref()?.identity()
+    }
+
     pub(super) fn clone_shape(&self) -> VariableShape {
         self.shape.clone()
     }
@@ -241,20 +247,17 @@ impl VariableDimensions {
     /// The class of a variable of object handle type, or of the elements of
     /// a fixed-size array of them, as its semantic type in `table` tells.
     pub(super) fn class_in(&self, table: &semantic_types::TyTable) -> Option<Arc<str>> {
-        let Some(id) = self.bound(table) else {
-            debug_assert!(
-                self.class.is_none(),
-                "a variable of class handle type is told by its semantic type"
-            );
-            return None;
-        };
-        let class = table.handle_class(id).cloned();
-        debug_assert_eq!(
-            class.as_deref(),
-            self.class.as_deref(),
-            "the semantic type of a variable of handle type"
+        debug_assert!(
+            [&self.binding, &self.element]
+                .into_iter()
+                .flatten()
+                .all(|retained| !retained.class_outside(table)),
+            "a class handle shape is read in a table that does not hold it: {self:?}"
         );
-        class
+        self.bound(table)
+            .or_else(|| self.element_type(table))
+            .and_then(|id| table.handle_class(id))
+            .cloned()
     }
 
     /// A bound declaration keeps its type when a caller shadows its parameter
@@ -371,8 +374,6 @@ pub(super) struct VariableShape {
     pub(super) real: bool,
     /// A `string`: each element is a heap handle, not packed bits.
     pub(super) string: bool,
-    /// The class of an object handle variable.
-    pub(super) class: Option<String>,
     pub(super) packed: Vec<PackedDimension>,
     pub(super) unpacked: Vec<UnpackedDimension>,
     pub(super) signed: bool,
@@ -399,7 +400,6 @@ impl VariableShape {
             && !self.packed_enum
             && type_names::Declared::of_shape(self).is_none_or(|ty| !ty.is_enum)
             && self.container.is_none()
-            && self.class.is_none()
             && self.unpacked_struct.is_none()
             // The width of a dimension is computed from its bounds.
             && self
@@ -455,7 +455,6 @@ pub(super) fn type_is_closed(ty: &Type) -> bool {
         && ty.enum_domain.is_none()
         && !ty.packed_enum
         && ty.container.is_none()
-        && ty.class.is_none()
         && ty.unpacked_struct.is_none()
         && ty
             .packed_ranges
