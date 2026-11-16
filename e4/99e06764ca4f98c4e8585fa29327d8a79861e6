@@ -1,0 +1,1 @@
+Fix CI failures in sv_lifetimes and sv_timescale_options that still assumed error-by-default
