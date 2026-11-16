@@ -549,6 +549,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "references::ref_actual_of_an_equivalent_type",
                 "references::ref_array_element_index_is_fixed_at_the_call",
                 "references::ref_class_property_names_the_object_of_the_call",
+                "string_format::display_empty_arguments_and_later_formats",
                 "string_format::formatted_strings_into_integral_outputs",
                 "system_functions::casts_evaluate_destination_operands_once",
                 "system_functions::casts_to_enumerated_types",

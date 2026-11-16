@@ -32,6 +32,28 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "[         -5|-5|a5|10100101|245|cat|A|  cat|7    |123456789abcdef012|%]\n[         -5|-5|a5|10100101|245|cat|A|  cat|7    |123456789abcdef012|%]\n[2.500000e+00|2.500000|2.5|2.50|-2.500e+00]\n[2.500000e+00|2.500000|2.5|2.50|-2.500e+00]\n[a|-6|  1023|10 |]\n[a|-6|  1023|10 |]\n"))
 
+; IEEE 1800-2023 21.2.1: an empty argument writes one space, and a string
+; literal after other arguments still holds formats for the values after it.
+(case display_empty_arguments_and_later_formats
+  (source "display_empty_arguments.sv" #"
+module Top(output bit done);
+    bit [7:0] a;
+    int b;
+    initial begin
+        a = 5;
+        b = 7;
+        $display("a",,"b");
+        $display(a,,"x=%0d",b);
+        $write(",",);
+        $display(,);
+        $displayh(a,,"%0d",b);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "a b\n  5 x=7\n,   \n05 7\n"))
+
 ; 21.2.1.5: unknown and high-impedance bits.
 (case sformatf_four_state_values
   (four_state)

@@ -27,6 +27,33 @@ impl BodyBuilder<'_, '_, '_> {
         let Some(start) = template_index(task, args) else {
             return;
         };
+        // An empty argument that no conversion consumes produces a single
+        // space (IEEE 1800-2023 21.2.1.1), as a string literal of one space
+        // does.
+        let mut pending = 0;
+        for arg in args.iter_mut().skip(start) {
+            match arg {
+                SystemTaskArg::Str(literal) if pending == 0 => {
+                    pending = format_conversions(literal).len();
+                }
+                _ if pending > 0 => pending -= 1,
+                SystemTaskArg::Empty => *arg = SystemTaskArg::Str(" ".to_string()),
+                SystemTaskArg::Expr(_) | SystemTaskArg::Str(_) => {}
+            }
+        }
+        // Every string literal argument may hold formats for the values
+        // after it, not only the first argument (21.2.1). Values before the
+        // first literal take their default conversions in a format that
+        // starts empty.
+        if !matches!(args.get(start), Some(SystemTaskArg::Str(_)))
+            && args
+                .iter()
+                .skip(start)
+                .any(|arg| matches!(arg, SystemTaskArg::Str(_)))
+        {
+            args.insert(start, SystemTaskArg::Str(String::new()));
+            ids.insert(start, None);
+        }
         let Some(SystemTaskArg::Str(first)) = args.get(start) else {
             return;
         };
