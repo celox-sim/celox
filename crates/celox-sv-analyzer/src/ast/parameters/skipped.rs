@@ -1310,16 +1310,35 @@ fn reject_circular_parameters(
                 return Vec::new();
             };
             let tokens = native.expression(root).tokens;
-            let mut read = spans
-                .expressions
-                .within(&[tokens])
-                .into_iter()
-                .filter_map(|id| match &native.expression(id).kind {
-                    ExprKind::Name(name) => {
-                        let name = instances::normalize_identifier(&name.spelling);
-                        names.iter().position(|other| *other == name)
-                    }
+            let expressions = spans.expressions.within(&[tokens]);
+            // The key of an assignment pattern item names a member or a
+            // type, not a parameter.
+            let keys = expressions
+                .iter()
+                .filter_map(|id| match &native.expression(*id).kind {
+                    ExprKind::Pattern { items, .. } => Some(items),
                     _ => None,
+                })
+                .flatten()
+                .filter_map(|item| item.key)
+                .map(|key| native.expression(key).tokens)
+                .collect::<Vec<_>>();
+            let mut read = expressions
+                .into_iter()
+                .filter_map(|id| {
+                    let expression = native.expression(id);
+                    match &expression.kind {
+                        ExprKind::Name(name)
+                            if !keys.iter().any(|key| {
+                                key.start <= expression.tokens.start
+                                    && expression.tokens.end <= key.end
+                            }) =>
+                        {
+                            let name = instances::normalize_identifier(&name.spelling);
+                            names.iter().position(|other| *other == name)
+                        }
+                        _ => None,
+                    }
                 })
                 .collect::<Vec<_>>();
             read.sort_unstable();

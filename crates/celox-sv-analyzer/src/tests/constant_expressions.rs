@@ -113,6 +113,8 @@ fn rejects_parameters_that_depend_on_their_own_value() {
     for body in [
         "parameter A = 1; parameter B = A + A;",
         "parameter B = A; parameter A = 3;",
+        // A pattern key names a member, not the parameter of that name.
+        "typedef struct packed { logic [3:0] A; } T; parameter T X = '{A: 1}; parameter A = X.A;",
         "parameter A = 1; if (1) begin : g localparam A2 = A; end",
     ] {
         let source = format!("module top; {body} endmodule");
