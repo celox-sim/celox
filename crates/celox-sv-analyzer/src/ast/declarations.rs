@@ -49,6 +49,7 @@ pub(super) fn ports_from_scope(
         };
         if !type_binding::declared_port_range_matches(
             native.declared_type,
+            native.data_type,
             &base,
             syntax_tree,
             session,
