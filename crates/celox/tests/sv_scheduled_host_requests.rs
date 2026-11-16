@@ -5,7 +5,7 @@ macro_rules! scheduled_requests {
         mod $module {
             use super::*;
             #[test]
-            fn failed_mcd_open_cannot_be_silently_closed() {
+            fn closing_a_failed_mcd_open_closes_nothing() {
                 let directory = tempfile::tempdir().unwrap();
                 let path = directory.path().join("missing").join("output.txt");
                 let source = format!(
@@ -21,10 +21,9 @@ macro_rules! scheduled_requests {
                 )
                 .$backend()
                 .unwrap();
-                let error = sim
-                    .run_until(0)
-                    .expect_err("closing zero MCD must be invalid");
-                assert!(error.to_string().contains("invalid or closed"), "{error}");
+                // A failed `$fopen` returns MCD 0, which selects no channel
+                // (IEEE 1800-2023 21.3.1).
+                sim.run_until(0).unwrap();
             }
 
             #[test]
@@ -94,7 +93,7 @@ macro_rules! scheduled_requests {
             }
 
             #[test]
-            fn failed_mcd_open_cannot_silently_discard_output() {
+            fn output_to_a_failed_mcd_open_goes_nowhere() {
                 let directory = tempfile::tempdir().unwrap();
                 let path = directory.path().join("missing").join("output.txt");
                 for operation in ["$fwrite", "$fdisplay"] {
@@ -111,8 +110,7 @@ macro_rules! scheduled_requests {
                     )
                     .$backend()
                     .unwrap();
-                    let error = sim.run_until(0).expect_err("zero MCD must be invalid");
-                    assert!(error.to_string().contains("invalid or closed"), "{error}");
+                    sim.run_until(0).unwrap();
                     assert!(!path.exists());
                 }
             }
