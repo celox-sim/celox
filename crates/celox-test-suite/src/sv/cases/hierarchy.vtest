@@ -1999,3 +1999,100 @@ endmodule
 "#)
   (top Top) (run_until 1)
   (assert_eq n 0xfffffffe) (assert_eq b 1) (assert_eq w 9))
+
+; The self-determined type of the expression of an explicitly named port is
+; the port's type, and the port is connected to its expression: an input
+; port drives it, and it drives an output port (IEEE 1800-2023 23.2.2.2).
+(case explicitly_named_ports_connect_their_expressions
+  (source "explicit_ports.sv" #"
+module Split(input .hi(x[7:4]), input .lo(x[3:0]), output .swapped({p, q}),
+             output .same(x));
+  logic [7:0] x;
+  logic [3:0] p, q;
+  assign p = x[3:0];
+  assign q = x[7:4];
+endmodule
+module Top(input logic [3:0] a, b, output logic [7:0] y, x);
+  Split split(.hi(a), .lo(b), .swapped(y), .same(x));
+endmodule
+"#)
+  (top Top)
+  (modify (set a 0x1) (set b 0x2))
+  (assert_eq x 0x12) (assert_eq y 0x21))
+
+; The port of an element of an unpacked array has the element's type, so
+; a signed element extends with its sign to a wider net (IEEE 1800-2023
+; 23.2.2.2, 23.3.3.7).
+(case explicitly_named_ports_take_element_types
+  (source "explicit_port_elements.sv" #"
+module Elements(output .low(s[1]));
+  logic signed [3:0] s [0:1];
+  assign s[0] = 4'sd1;
+  assign s[1] = -4'sd2;
+endmodule
+module Top(output logic [7:0] y);
+  Elements elements(.low(y));
+endmodule
+"#)
+  (top Top)
+  (assert_eq y 0xfe))
+
+; The expression of an explicitly named port may name a package variable
+; the header imports (IEEE 1800-2023 23.2.1, 23.2.2.2).
+(case explicitly_named_ports_of_imported_variables
+  (source "explicit_port_imports.sv" #"
+package P;
+  logic [3:0] state = 4'd5;
+endpackage
+module Source import P::*; (output .value(state));
+endmodule
+module Top(output logic [3:0] y);
+  Source source(.value(y));
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq y 5))
+
+; A non-ANSI header port may be a part-select or a concatenation of objects
+; that the body declares as ports, named or not, or be empty (IEEE
+; 1800-2023 23.2.2.1); such a port is connected by position or by its name.
+(case non_ansi_port_expressions_connect_their_objects
+  (source "non_ansi_port_expressions.sv" #"
+module Split(a[7:4], a[3:0], , {c, d}, .e(f[1]));
+  input [7:0] a;
+  output [3:0] c;
+  output [1:0] d;
+  output [2:0] f;
+  assign {c, d} = a[5:0];
+  assign f = {a[0], a[1], a[2]};
+endmodule
+module Top(input logic [3:0] hi, lo, output logic [5:0] cd, output logic e);
+  Split split(hi, lo, , cd, e);
+endmodule
+"#)
+  (top Top)
+  (modify (set hi 0xa) (set lo 0x7))
+  (assert_eq cd 0x27) (assert_eq e 1))
+
+; The first header port that is a simple identifier keeps the name, by
+; which it connects, also when another port expression references the same
+; object; ports of expressions get names no other port of the header has
+; (IEEE 1800-2023 23.2.2.1).
+(case non_ansi_simple_ports_beside_their_selects
+  (source "non_ansi_simple_ports.sv" #"
+module Child(a, y, y[1], port1$);
+  input [1:0] a;
+  output [1:0] y;
+  input port1$;
+  localparam port3$$ = 0;
+  logic port3$;
+  assign port3$ = port1$;
+  assign y = a ^ {port3$, port3$};
+endmodule
+module Top(input logic [1:0] v, input logic w, output logic [1:0] y);
+  Child child(.a(v), .y(y), .port1$(w));
+endmodule
+"#)
+  (top Top)
+  (modify (set v 2) (set w 1))
+  (assert_eq y 1))

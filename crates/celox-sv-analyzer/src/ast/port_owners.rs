@@ -126,7 +126,7 @@ mod tests {
         assert!(matches!(&ports[0].kind, PortKind::Named(name) if name.spelling == "a"));
     }
     #[test]
-    fn explicit_port_without_a_new_header_keeps_native_inherited_type() {
+    fn explicit_port_without_a_new_header_keeps_native_inherited_direction() {
         let session = &mut Session::default();
         let tree = parse("module M(input wire[7:0] a,.b(a));endmodule");
         let tree = AnalysisContext::unspecialized(&tree);
@@ -141,13 +141,9 @@ mod tests {
         assert_eq!(ports.len(), 2);
         assert_eq!(ports[1].name(), "b");
         assert_eq!(ports[1].direction(), PortDirection::Input);
-        assert_eq!(
-            typecheck::eval_const_expr(
-                &ports[1].r#type().packed_ranges()[0].left().clone().into(),
-                &ConstEnv::default()
-            ),
-            Some(7)
-        );
+        // Its type is its expression's, given once the module's declarations
+        // are known (IEEE 1800-2023 23.2.2.2).
+        assert!(ports[1].expression().is_some());
     }
     #[test]
     fn a_structural_header_projection_carries_explicit_native_membership() {

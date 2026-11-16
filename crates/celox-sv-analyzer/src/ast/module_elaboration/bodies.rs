@@ -62,6 +62,19 @@ impl ScopeElaboration<'_> {
                 )
             })
             .collect::<Vec<_>>();
+            comb_processes.extend(
+                port_connections(&self.ports, syntax_tree, session, &self.packed_dimensions)?
+                    .into_iter()
+                    .map(|process| {
+                        substitute_process_constants_with_parameter_literals(
+                            syntax_tree,
+                            session,
+                            process,
+                            &self.const_env,
+                            &self.parameter_values,
+                        )
+                    }),
+            );
             let mut ff_processes = ff_processes_from_scope(
                 syntax_tree,
                 session,

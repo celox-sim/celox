@@ -566,8 +566,28 @@ fn rejects_malformed_non_ansi_port_declarations() {
             "initializer of non-ANSI port `q` that is not an output",
         ),
         (
-            "module Top({y, z}); output y, z; assign y = 1'b1; assign z = 1'b0; endmodule",
+            "module Top(a, a); inout a; endmodule",
             "non-ANSI port expressions",
+        ),
+        (
+            "module Top(.p({a, y})); input a; output y; assign y = a; endmodule",
+            "non-ANSI port expressions",
+        ),
+        (
+            "module Top(a[1:0]); input [3:0] a; input b; endmodule",
+            "port declaration `b` names no port",
+        ),
+        (
+            "module Top(a[1:0]); input [3:0] a; wire [7:0] a; endmodule",
+            "written differently in its port and its net or variable declaration",
+        ),
+        (
+            "module Top(output .p(h)); chandle h; endmodule",
+            "port `p` of chandle type",
+        ),
+        (
+            "module Top(a[1:0]); input a; wire [3:0] a; endmodule",
+            "its net or variable declaration differ",
         ),
     ] {
         let error = Simulator::from_sv_sources(vec![(source, Path::new("ports.sv"))], "Top")
