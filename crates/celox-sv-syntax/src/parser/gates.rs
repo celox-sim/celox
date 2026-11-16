@@ -1,12 +1,23 @@
-//! Native n-input and n-output gate declarations (IEEE 1800-2023 28.4,
-//! 28.5) retain terminals and unsupported modifiers.
+//! Native n-input, n-output and three-state gate declarations (IEEE
+//! 1800-2023 28.4, 28.5, 28.6) retain terminals and unsupported modifiers.
 use super::*;
 
 impl Parser<'_> {
     pub(super) fn logic_gate_start(&self) -> bool {
         matches!(
             self.peek(),
-            "and" | "nand" | "or" | "nor" | "xor" | "xnor" | "buf" | "not"
+            "and"
+                | "nand"
+                | "or"
+                | "nor"
+                | "xor"
+                | "xnor"
+                | "buf"
+                | "not"
+                | "bufif0"
+                | "bufif1"
+                | "notif0"
+                | "notif1"
         )
     }
 
@@ -52,8 +63,18 @@ impl Parser<'_> {
         } else {
             self.assignment_delay()?
         };
-        if delay.as_ref().is_some_and(|delay| delay.values.len() > 2) {
-            return Err(self.error(format!("{kind} gate delay has more than two values")));
+        // A three-state gate also has a delay of transitions to z (28.6).
+        let three_state = matches!(kind.as_str(), "bufif0" | "bufif1" | "notif0" | "notif1");
+        let (most, words) = if three_state {
+            (3, "three")
+        } else {
+            (2, "two")
+        };
+        if delay
+            .as_ref()
+            .is_some_and(|delay| delay.values.len() > most)
+        {
+            return Err(self.error(format!("{kind} gate delay has more than {words} values")));
         }
         // An n-output gate's terminals are its outputs and then one input.
         let outputs = matches!(kind.as_str(), "buf" | "not");
@@ -93,6 +114,14 @@ impl Parser<'_> {
                     break;
                 }
                 self.expect(",")?;
+            }
+            // A three-state gate has one output, one data input and one
+            // control input (28.6).
+            if three_state && terminals.len() != 3 {
+                return Err(self.error_at(
+                    self.range(start),
+                    format!("{kind} gate needs an output, a data and a control terminal"),
+                ));
             }
             instances.push(LogicGateInstance {
                 name,
@@ -175,6 +204,22 @@ mod tests {
             assert_eq!(gate.instances[0].terminals.len(), 3);
             assert!(!gate.delay.as_ref().unwrap().parenthesized);
         }
+    }
+    #[test]
+    fn three_state_gates_have_three_terminals_and_up_to_three_delays() {
+        let parse = |gate: &str| {
+            Declarations::parse(
+                &format!("module M(input d,c, output y); {gate}; endmodule"),
+                Path::new("three_state.sv"),
+            )
+        };
+        for kind in ["bufif0", "bufif1", "notif0", "notif1"] {
+            assert!(parse(&format!("{kind} #(1,2,3) g(y,d,c)")).is_ok());
+            assert!(parse(&format!("{kind} g(y,d)")).is_err());
+            assert!(parse(&format!("{kind} g(y,d,c,d)")).is_err());
+            assert!(parse(&format!("{kind} #(1,2,3,4) g(y,d,c)")).is_err());
+        }
+        assert!(parse("and #(1,2,3) g(y,d,c)").is_err());
     }
     #[test]
     fn gate_terminals_declare_implicit_nets_and_honor_default_nettype() {
