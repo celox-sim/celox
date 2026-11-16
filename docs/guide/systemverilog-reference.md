@@ -405,12 +405,18 @@ blocks in programs. Two region deviations are listed under
   included, the latter naming the member. A guard of state values, as of `if` or `->`, is
   evaluated before solving, so a constraint it leaves out reads no member of
   a null handle (18.5.13).
-- Inline `with` constraints: aggregate caller-scope inputs other than an
-  element at a position a caller-scope name or a literal gives (as
-  `buffer[i]`, read as the call starts), typed parameter inputs, a `local::` name of a property of the caller's
-  class, and a member of a caller-scope variable (18.7) other than the one
-  that holds the object being randomized, as `h` of
-  `h.randomize() with { h.x > 0; }`, which names that object, also in
+- Inline `with` constraints: aggregate caller-scope inputs, typed parameter
+  inputs, a `local::` name of a property of the caller's class, and a value
+  the caller computes from a random variable (18.7). An integral value the
+  caller computes from its variables and from properties of the object that
+  are neither `rand` nor `randc` is an input the call reads as it starts,
+  after `pre_randomize()`: an element at a position a caller-scope name or a
+  literal gives (as `buffer[i]`), a member of a caller-scope variable (as
+  `req.rw`), an element at a position such a value gives (as
+  `memory[rsp.addr]`), and a method call on an object (as
+  `m.get_size()`). `memory[h.addr]` with a `rand addr` stays unsupported.
+  The variable that holds the object being randomized, as `h` of
+  `h.randomize() with { h.x > 0; }`, names that object, also in
   `foreach (h.a[i])`, `h.a[i]` and guards. That variable is read once as
   the call starts: a `pre_randomize()` that assigns it does not change the
   object its names refer to.

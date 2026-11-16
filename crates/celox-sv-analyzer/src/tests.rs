@@ -6986,6 +6986,39 @@ fn class_randomize_rejects_unsupported_semantics() {
     }
 }
 
+/// A random variable of the object, read through a receiver of any form,
+/// is no value the caller computes (IEEE 1800-2023 18.7): `items[i].addr` of
+/// `items[i].randomize() with` is the object's rand `addr`, which the
+/// constraints do not read through a select, so the call is rejected rather
+/// than sampling it before solving.
+#[test]
+fn inline_constraints_keep_random_members_of_selected_receivers() {
+    for constraint in [
+        "rdata == memory[items[i].addr];",
+        "rdata == items[i].addr + 1;",
+    ] {
+        let source = format!(
+            "module Top;
+                class item; rand bit [7:0] addr; rand bit [7:0] rdata; endclass
+                item items[2];
+                int i;
+                bit [7:0] memory [bit [7:0]];
+                initial begin
+                    items[0] = new;
+                    void'(items[i].randomize() with {{ {constraint} }});
+                end
+            endmodule"
+        );
+        let error = analyze_source(&source, Path::new("receiver.sv"))
+            .expect_err("a rand member through the receiver is not sampled")
+            .to_string();
+        assert!(
+            error.contains("inline constraints"),
+            "{constraint}: {error}"
+        );
+    }
+}
+
 #[test]
 fn rand_mode_setter_cannot_be_used_as_a_value() {
     let source = "module Top; class C; rand int x; endclass C c; int result; initial begin c = new; result = c.x.rand_mode(1); end endmodule";

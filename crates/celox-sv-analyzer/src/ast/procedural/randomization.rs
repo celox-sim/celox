@@ -112,6 +112,30 @@ fn lower_methods(
             }
             None => String::new(),
         };
+        // The prepare of an inline randomization captures the object as it
+        // runs the pre-hook, or with `$capture` off returns the object it
+        // captured: the caller's values that read the object read it so,
+        // whatever the hook assigns the variable that named it (18.6.2).
+        let capture = prepare.then(|| {
+            let name = builder.declare("$capture", int.clone());
+            params.push(SubroutineParam {
+                name: name.clone(),
+                source_name: name.clone(),
+                direction: ParamDirection::Input,
+                r#type: convert_type(builder.session, int.clone()),
+                default: None,
+                leaves: Vec::new(),
+            });
+            name
+        });
+        // The static that holds the object the prepare captured.
+        let captured = capture.as_ref().map(|_| {
+            format!(
+                "$inline_receiver%{:016x}",
+                fxhash::hash64(&method_name(&class.name, method))
+            )
+        });
+        let mut persistent_locals = Vec::new();
         let mut input_values = Vec::new();
         // The masks of the X and Z bits of the 4-state ones, by their
         // positions among them (see `Program::unknown_inputs`).
@@ -383,8 +407,31 @@ fn lower_methods(
                     });
                     body.extend(hook("pre_randomize"));
                 }
-                if prepare {
-                    body.push(Stmt::Return(Some(Expr::Ident(this.clone()))));
+                if let (Some(capture), Some(captured)) = (&capture, &captured) {
+                    if !builder
+                        .state
+                        .statics
+                        .iter()
+                        .any(|(name, _)| name == captured)
+                    {
+                        builder
+                            .state
+                            .statics
+                            .push((captured.clone(), handle.clone()));
+                    }
+                    let mut prepared = std::mem::take(&mut body);
+                    prepared.push(Stmt::Assign {
+                        lhs: LValue::Ident(captured.clone()),
+                        rhs: Expr::Ident(this.clone()),
+                        nonblocking: false,
+                    });
+                    prepared.push(Stmt::Return(Some(Expr::Ident(this.clone()))));
+                    body.push(Stmt::If {
+                        condition: Expr::Ident(capture.clone()),
+                        then_body: prepared,
+                        else_body: vec![Stmt::Return(Some(Expr::Ident(captured.clone())))],
+                    });
+                    persistent_locals.push(captured.clone());
                     Some(builder.declare("$prepared", handle.clone()))
                 } else {
                     // A static rand property is solved in the object's slot
@@ -804,14 +851,33 @@ fn lower_methods(
                     Some(Expr::Ident(this.clone())),
                     Some(Expr::Ident(argument.clone())),
                 ];
+                args.extend(
+                    capture
+                        .iter()
+                        .cloned()
+                        .map(|capture| Some(Expr::Ident(capture))),
+                );
                 args.extend(input_values.iter().cloned().map(Some));
                 let name = method_name(&name, method);
                 let call = if method == "randomize" {
-                    vec![Stmt::Return(Some(Expr::Call {
+                    let call = Expr::Call {
                         callee: Callee::Subroutine(name),
                         args,
                         arg_order: Vec::new(),
-                    }))]
+                    };
+                    match &captured {
+                        // The object the override captured is the one this
+                        // method returns without capturing.
+                        Some(captured) => vec![
+                            Stmt::Assign {
+                                lhs: LValue::Ident(captured.clone()),
+                                rhs: call,
+                                nonblocking: false,
+                            },
+                            Stmt::Return(Some(Expr::Ident(captured.clone()))),
+                        ],
+                        None => vec![Stmt::Return(Some(call))],
+                    }
                 } else {
                     vec![
                         Stmt::Call {
@@ -830,16 +896,23 @@ fn lower_methods(
                     body: call,
                 });
             }
+            let dispatch = Stmt::Case {
+                kind: CaseKind::Exact,
+                selector: classes::object_call(ObjectOp::ClassOf, vec![Expr::Ident(this.clone())]),
+                items,
+                default: None,
+            };
+            // Without capturing, the prepare returns the object it captured,
+            // whatever object its first argument now names.
             body.insert(
                 0,
-                Stmt::Case {
-                    kind: CaseKind::Exact,
-                    selector: classes::object_call(
-                        ObjectOp::ClassOf,
-                        vec![Expr::Ident(this.clone())],
-                    ),
-                    items,
-                    default: None,
+                match &capture {
+                    Some(capture) => Stmt::If {
+                        condition: Expr::Ident(capture.clone()),
+                        then_body: vec![dispatch],
+                        else_body: Vec::new(),
+                    },
+                    None => dispatch,
                 },
             );
         }
@@ -856,7 +929,7 @@ fn lower_methods(
                 .iter()
                 .map(|local| local.name.clone())
                 .collect(),
-            persistent_locals: Vec::new(),
+            persistent_locals,
             return_type: return_var.as_ref().map(|_| {
                 convert_type(
                     builder.session,
