@@ -4065,3 +4065,23 @@ module Top;
 endmodule
 "#)
   (four_state) (top Top) (run_to_finish))
+
+; IEEE 1800-2023 21.2.3: a monitor reports when the value of an argument
+; changes, including an argument that is a select or an expression, and not
+; when an operand changes without changing it.
+(case monitor_reports_changes_of_expression_arguments
+  (source "monitor_expressions.sv" #"
+module Top(output bit done);
+  bit [3:0] a;
+  int v;
+  initial begin
+    $monitor("%0d %b %0d", v + 1, a[1], v[0]);
+    #1 a = 4'b0001;
+    #1 a = 4'b0011;
+    #1 v = 2;
+    #1 done = 1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 4) (assert_eq done 1)
+  (expect_output "1 0 0\n1 1 0\n3 1 0\n"))

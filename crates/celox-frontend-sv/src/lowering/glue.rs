@@ -407,23 +407,49 @@ pub(crate) fn attach_instance_glue(
     candidates.retain(|signal| !probe_results.contains(signal));
     // Monitors observe the entire time slot, not just the interval between
     // process suspensions. Even single writes therefore require counters.
-    candidates.extend(
-        module
-            .host_request_sites
-            .iter()
-            .filter(|site| {
-                site.kind == celox_design::HostRequestKind::FileIo
-                    && matches!(site.operation, 17 | 18)
-            })
-            .flat_map(|site| {
-                site.args
-                    .iter()
-                    .skip(usize::from(site.operation == 18))
-                    .map(|arg| arg.id)
-            }),
-    );
+    let monitored: Vec<_> = module
+        .host_request_sites
+        .iter()
+        .filter(|site| {
+            site.kind == celox_design::HostRequestKind::FileIo && matches!(site.operation, 17 | 18)
+        })
+        .flat_map(|site| {
+            site.args
+                .iter()
+                .skip(usize::from(site.operation == 18))
+                .map(|arg| arg.id)
+        })
+        .collect();
+    // The buffer of an expression argument is hidden, but the monitor still
+    // counts its changes (IEEE 1800-2023 21.2.3).
+    let monitored_buffers: Vec<_> = monitored
+        .iter()
+        .copied()
+        .filter(|id| {
+            module
+                .variables
+                .get(id)
+                .is_some_and(|var| !var.module_affiliated)
+        })
+        .collect();
+    candidates.extend(monitored);
     module.counter_slots =
         celox_frontend_core::watch::declare_counter_slots(&mut module.variables, candidates);
+    let declared: HashSet<_> = module
+        .counter_slots
+        .iter()
+        .map(|slots| slots.signal)
+        .collect();
+    let buffers: Vec<_> = monitored_buffers
+        .into_iter()
+        .filter(|id| !declared.contains(id))
+        .collect();
+    module
+        .counter_slots
+        .extend(celox_frontend_core::watch::declare_hidden_counter_slots(
+            &mut module.variables,
+            buffers,
+        ));
     if waits {
         module.pending_slots = celox_frontend_core::watch::declare_pending_slots(
             &mut module.variables,
