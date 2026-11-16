@@ -1888,3 +1888,54 @@ endmodule
   (assert_eq y 1) (assert_eq z 2)
   (set stop 0)
   (assert_eq y 12) (assert_eq z 13))
+
+; A port declaration of a task or function that gives no data type may be
+; completed by a variable declaration of the same name in the body (IEEE
+; 1800-2023 13.3 `mytask2`); its packed range and signing carry over to a
+; type that has neither (23.2.2.1).
+(case non_ansi_subroutine_ports_take_variable_declarations
+  (source "non_ansi_subroutine_ports_take_variable_declarations.sv" #"
+module Top(output bit ok);
+  typedef struct packed { logic [3:0] hi, lo; } pair_t;
+  task mytask2;
+    output x;
+    input y;
+    int x;
+    logic y;
+    x = y ? -5 : 7;
+  endtask
+  function real half;
+    input v;
+    real v;
+    half = v / 2;
+  endfunction
+  function [7:0] swap;
+    input p;
+    pair_t p;
+    swap = {p.lo, p.hi};
+  endfunction
+  localparam W = 8;
+  function [7:0] pass;
+    input [W-1:0] w;
+    reg [7:0] w;
+    pass = w;
+  endfunction
+  function integer widen;
+    input signed [3:0] n;
+    reg [3:0] other, n;
+    integer scratch;
+    scratch = n;
+    widen = scratch;
+  endfunction
+  int got;
+  initial begin
+    mytask2(got, 1'b1);
+    ok = got == -5 && $bits(got) == 32
+      && half(3.0) == 1.5
+      && swap(8'h12) == 8'h21
+      && widen(4'b1110) == -2
+      && pass(8'hA5) == 8'hA5;
+  end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq ok 1))

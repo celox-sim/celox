@@ -1173,6 +1173,10 @@ pub struct SubroutinePort {
     pub data_type: TypeId,
     pub dimensions: Vec<Dimension>,
     pub default: Option<ExprId>,
+    /// The type of the port declaration of a non-ANSI formal whose variable
+    /// declaration repeats its range in other words (see
+    /// [`Port::declared_type`]).
+    pub declared_type: Option<TypeId>,
     pub tokens: TokenRange,
 }
 

@@ -163,6 +163,7 @@ impl Parser<'_> {
                 data_type,
                 dimensions,
                 default,
+                declared_type: None,
                 tokens: self.range(start),
             });
             if self.eat(")") {
@@ -205,6 +206,7 @@ impl Parser<'_> {
                 data_type,
                 dimensions,
                 default,
+                declared_type: None,
                 tokens: self.range(start),
             });
             if !self.eat(",") {
@@ -216,6 +218,89 @@ impl Parser<'_> {
             ports,
             tokens: self.range(start),
         })
+    }
+
+    /// Complete the ports of non-ANSI port declarations that give no data
+    /// type with the variable declarations of the same names in the body
+    /// (IEEE 1800-2023 13.3 `mytask2`), under the rules of non-ANSI module
+    /// ports (23.2.2.1): the port declaration's signing carries over, and
+    /// so does its packed range to a type without a keyword or range; a
+    /// range of both must be the same. The declarator leaves the body, so
+    /// the port is declared once.
+    fn adopt_port_objects(
+        &mut self,
+        port_declarations: &mut [SubroutinePortDeclaration],
+        items: &mut Vec<StatementId>,
+    ) -> Result<()> {
+        let resume = self.at;
+        for port in port_declarations
+            .iter_mut()
+            .flat_map(|declaration| &mut declaration.ports)
+        {
+            if port.variable || !matches!(self.types[port.data_type.0].kind, DataTypeKind::Implicit)
+            {
+                continue;
+            }
+            let Some(name) = port.name.as_ref().map(|name| name.value().to_string()) else {
+                continue;
+            };
+            let found = items.iter().enumerate().find_map(|(position, &item)| {
+                let StatementKind::Declaration(LocalDeclaration::Variables(declaration)) =
+                    &self.statements[item.0].kind
+                else {
+                    return None;
+                };
+                if declaration.constant || declaration.lifetime.is_some() {
+                    return None;
+                }
+                let index = declaration
+                    .variables
+                    .iter()
+                    .position(|declarator| declarator.name.value() == name)?;
+                Some((
+                    position,
+                    item,
+                    index,
+                    declaration.data_type,
+                    declaration.variables[index].clone(),
+                    declaration.variables.len() == 1,
+                ))
+            });
+            let Some((position, item, index, object_type, declarator, last)) = found else {
+                continue;
+            };
+            self.at = self
+                .indices
+                .partition_point(|&index| index < declarator.tokens.start);
+            if !declarator.dimensions.is_empty() || declarator.value.is_some() {
+                return Err(self.error(format!(
+                    "variable declaration of non-ANSI subroutine port `{name}` with an \
+                     initializer or unpacked dimensions"
+                )));
+            }
+            // A variable declaration that gives no range declares no vector of
+            // the port declaration's range (23.2.2.1).
+            if !self.types[port.data_type.0].packed_dimensions.is_empty()
+                && self.types[object_type.0].packed_dimensions.is_empty()
+                && !matches!(self.types[object_type.0].kind, DataTypeKind::Implicit)
+            {
+                return Err(self.error(format!(
+                    "non-ANSI subroutine port `{name}` with a range declared again without one"
+                )));
+            }
+            let (data_type, declared) = self.merge_port_type(port.data_type, object_type)?;
+            port.declared_type = declared;
+            port.data_type = data_type;
+            if last {
+                items.remove(position);
+            } else if let StatementKind::Declaration(LocalDeclaration::Variables(declaration)) =
+                &mut self.statements[item.0].kind
+            {
+                declaration.variables.remove(index);
+            }
+        }
+        self.at = resume;
+        Ok(())
     }
 
     pub(super) fn subroutine(&mut self, prototype: bool) -> Result<SubroutineId> {
@@ -311,6 +396,7 @@ impl Parser<'_> {
                 }
             }
             body_tokens = self.range(body_start);
+            self.adopt_port_objects(&mut port_declarations, &mut items)?;
             self.at += 1;
             if self.eat(":") {
                 end_label = Some(if kind == SubroutineKind::Constructor {
