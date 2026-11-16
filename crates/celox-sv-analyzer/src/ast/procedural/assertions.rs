@@ -164,6 +164,7 @@ impl DisableHistory {
                         signed: false,
                         array_slice_width: None,
                         array_slice_reversed: false,
+                        window: None,
                         is_2state: true,
                     },
                     rhs: Expr::Literal("1'b1".into()),
