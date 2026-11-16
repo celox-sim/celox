@@ -1076,6 +1076,14 @@ pub(in crate::ast) fn caller_key(
     }
 }
 
+/// The key of the caller's value that constraint expression `id` computes
+/// as a whole, as a randomize call supplies it when the expression reads no
+/// random variable (see `objects::caller_expression`): its source range.
+pub(in crate::ast) fn expression_key(id: ExprId, native: &celox_sv_syntax::Declarations) -> String {
+    let tokens = native.expression(id).tokens;
+    format!("({}..{})", tokens.start, tokens.end)
+}
+
 /// The names of the array and the position of element `a[i]` that
 /// constraint expression `id` selects (see [`caller_key`]), the position's
 /// only when a name gives it.
@@ -1687,6 +1695,17 @@ pub(in crate::ast) fn bind_inputs(
             )
         };
         let native = tree.declarations();
+        // A value the call computes and supplies (18.7), such as `req.rw`.
+        if let Some(input) = inputs.get(&expression_key(id, native)) {
+            return Ok(Typed {
+                kind: Kind::Leaf(ConstraintExpr::Input {
+                    index: input.index,
+                    width: input.width,
+                }),
+                width: input.width,
+                signed: input.signed,
+            });
+        }
         if let Some(element) = element_at(id, tree, session, properties, names, env, inputs, loops)?
         {
             return Ok(element);

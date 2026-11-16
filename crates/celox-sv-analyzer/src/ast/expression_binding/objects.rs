@@ -2120,8 +2120,10 @@ fn scope_randomize_with(
         dimensions,
         constraint_ids,
         &|_| false,
+        None,
         true,
         None,
+        &|_| false,
         &mut inputs,
         0,
         &mut input_types,
@@ -2210,8 +2212,10 @@ fn caller_inputs(
     dimensions: &PackedDimensions,
     constraint_ids: &[ExprId],
     owned: &dyn Fn(&str) -> bool,
+    fixed: Option<&dyn Fn(&str, bool) -> bool>,
     this_is_caller: bool,
     receiver: Option<&str>,
+    is_receiver: &dyn Fn(ExprId) -> bool,
     inputs: &mut HashMap<String, classes::constraints::CallerInput>,
     first_input: usize,
     input_types: &mut Vec<Type>,
@@ -2222,7 +2226,52 @@ fn caller_inputs(
     // node kind is listed, so that a new one has to say what it holds.
     let mut pending: Vec<(ExprId, Vec<String>)> =
         constraint_ids.iter().map(|&id| (id, Vec::new())).collect();
+    // The names the caller's scope declares, which a value it computes
+    // reads: its variables and constants, and the members of the class of
+    // its method.
+    let caller_class = match scope_class(dimensions) {
+        Some(scope) if fixed.is_some() && !classes::builtin(&scope) => {
+            Some(class(tree, session, dimensions, &scope)?)
+        }
+        _ => None,
+    };
+    let declared = |name: &str| {
+        dimensions.get(name).is_some()
+            || dimensions.const_env.contains_key(name)
+            || caller_class
+                .as_ref()
+                .is_some_and(|class| class.member(name).is_some())
+    };
+    // The guards of each constraint expression below a guard (18.5.12).
+    let mut guarded: HashMap<ExprId, Vec<Guard>> = HashMap::default();
     while let Some((id, loops)) = pending.pop() {
+        let first_child = pending.len();
+        let around = guarded.get(&id).cloned().unwrap_or_default();
+        // Whether a subexpression is one of state the caller reads, or of
+        // state only the object's methods read by its names.
+        let kind = |id: ExprId| {
+            let fixed = fixed?;
+            let reads = |fixed: &dyn Fn(&str, bool) -> bool| {
+                caller_reads(
+                    id,
+                    native,
+                    &CallerReads {
+                        loops: &loops,
+                        owned,
+                        fixed,
+                        declared: &declared,
+                        receiver: is_receiver,
+                        calls: false,
+                    },
+                    &mut false,
+                )
+            };
+            if reads(fixed) {
+                Some(true)
+            } else {
+                reads(&|name, _| fixed(name, false)).then_some(false)
+            }
+        };
         let candidate = match &native.expression(id).kind {
             // `$`, an open bound of a range (11.4.13), names no variable.
             ExprKind::Name(name) if name.spelling == "$" => None,
@@ -2247,6 +2296,43 @@ fn caller_inputs(
             // in the caller's scope (IEEE 1800-2023 18.7), whose members
             // constraints do not read, unless it is the variable that holds
             // the object the call randomizes (see `Names::receiver`).
+            // A value the caller computes from its own variables and the
+            // properties of the object no randomization changes, such as
+            // `req.rw`, `memory[rsp.addr]` or `h.size()`: the call supplies
+            // it (18.7).
+            ExprKind::Member { .. } | ExprKind::Select { .. } | ExprKind::Call { .. }
+                if fixed.is_some_and(|fixed| {
+                    caller_expression(id, native, &loops, owned, fixed, &declared, is_receiver)
+                }) =>
+            {
+                Some((
+                    classes::constraints::expression_key(id, native),
+                    String::new(),
+                ))
+            }
+            // A comparison of handles the caller holds, as the guard
+            // `h != null` (18.5.12): the call supplies its truth, as
+            // constraints read no handle.
+            ExprKind::Binary {
+                left,
+                operator,
+                right,
+            } if matches!(operator.as_str(), "==" | "!=" | "===" | "!==")
+                && fixed.is_some_and(|fixed| {
+                    caller_expression(id, native, &loops, owned, fixed, &declared, is_receiver)
+                })
+                && [*left, *right].into_iter().any(|operand| {
+                    matches!(
+                        &native.expression(ungroup(operand, native)).kind,
+                        ExprKind::Literal(value) if value == "null"
+                    ) || native_class(tree, session, operand, native, dimensions).is_some()
+                }) =>
+            {
+                Some((
+                    classes::constraints::expression_key(id, native),
+                    String::new(),
+                ))
+            }
             ExprKind::Member {
                 expression,
                 separator,
@@ -2256,7 +2342,7 @@ fn caller_inputs(
                     &native.expression(ungroup(*expression, native)).kind,
                     ExprKind::Name(root) if !matches!(root.spelling.as_str(), "this" | "super") && {
                         let root = instances::normalize_identifier(&root.spelling);
-                        !loops.contains(&root) && !owned(&root) && receiver != Some(root.as_str())
+                        !loops.contains(&root) && !owned(&root) && !is_receiver(ungroup(*expression, native))
                     }
                 ) =>
             {
@@ -2291,7 +2377,19 @@ fn caller_inputs(
                 pending.push((*id, loops));
                 None
             }
-            ExprKind::Binary { left, right, .. } => {
+            ExprKind::Binary {
+                left,
+                operator,
+                right,
+            } => {
+                // A guarded constraint `!guard || constraint` (18.5.12), as
+                // `if` and `->` are written: its values are read only when
+                // the guard holds.
+                if operator == "||" {
+                    let mut inner = around.clone();
+                    guards(*left, false, native, &kind, &mut inner);
+                    guarded.insert(*right, inner);
+                }
                 pending.extend([(*right, loops.clone()), (*left, loops)]);
                 None
             }
@@ -2392,13 +2490,17 @@ fn caller_inputs(
             | ExprKind::Streaming { .. }
             | ExprKind::StreamSelect { .. } => None,
         };
+        for (child, _) in &pending[first_child..] {
+            guarded.entry(*child).or_insert_with(|| around.clone());
+        }
         let Some((key, name)) = candidate else {
             continue;
         };
         if inputs.contains_key(&key) {
             continue;
         }
-        let through_this = key.starts_with("this.") || key.starts_with("super.");
+        let computed = key == classes::constraints::expression_key(id, native);
+        let through_this = computed || key.starts_with("this.") || key.starts_with("super.");
         // An element is read as the caller reads it, whose type gives the
         // input's.
         let element = matches!(native.expression(id).kind, ExprKind::Select { .. });
@@ -2443,7 +2545,42 @@ fn caller_inputs(
                         "inline inputs require integral scalar variables of at most 64 bits",
                     )
                 })?;
-            let value = bind_value(id, native, tree, session, dimensions, None)?;
+            let mut value = bind_value(id, native, tree, session, dimensions, None)?;
+            // A value the caller computes under guards is read only when
+            // they hold, after them: one the guards exclude is not needed,
+            // and reading it may fail or have effects (18.5.12, 18.5.11).
+            if computed && !around.is_empty() {
+                if around.iter().any(|guard| !guard.readable) {
+                    return Err(unsupported(
+                        "a value the caller computes under a guard that names a property \
+                         of the object outside its methods in inline constraints",
+                    ));
+                }
+                let mut condition = None;
+                for guard in &around {
+                    let mut holds =
+                        bind_value(guard.condition, native, tree, session, dimensions, None)?;
+                    if !guard.truth {
+                        holds = Expr::Unary {
+                            op: UnaryOp::LogicNot,
+                            expr: Box::new(holds),
+                        };
+                    }
+                    condition = Some(match condition {
+                        None => holds,
+                        Some(before) => Expr::Binary {
+                            left: Box::new(before),
+                            op: BinaryOp::LogicAnd,
+                            right: Box::new(holds),
+                        },
+                    });
+                }
+                value = Expr::Mux {
+                    condition: Box::new(condition.expect("a guard")),
+                    then_expr: Box::new(value),
+                    else_expr: Box::new(Expr::Literal(format!("{width}'d0"))),
+                };
+            }
             let input_type = input_type(width as usize, signed, four_state);
             inputs.insert(
                 key,
@@ -2591,6 +2728,44 @@ pub(super) fn randomize_with(
         Receiver::This | Receiver::Static => None,
     }
     .filter(|name| !owned(name));
+    // A property that no randomization of the object changes: neither rand
+    // nor randc, nor reached through a rand handle (18.4). The caller reads
+    // the object's properties by their names only in a method of the object,
+    // as `this.randomize() with`.
+    let this_receiver = match receiver {
+        Receiver::This => true,
+        Receiver::Handle(handle) => matches!(
+            &native.expression(ungroup(handle, native)).kind,
+            ExprKind::Name(name) if name.spelling == "this"
+        ),
+        Receiver::Static => false,
+    };
+    let fixed = |name: &str, bare: bool| {
+        (this_receiver || !bare)
+            && match class.member(name) {
+                Some(classes::Member::Instance(index)) => {
+                    !class.properties[index].rand && !class.properties[index].randc
+                }
+                Some(classes::Member::Static(index)) => !class.statics[index].rand,
+                _ => false,
+            }
+    };
+    // The expression through which the call names its object, of any form:
+    // wherever the constraints spell it, it names that object, whose
+    // properties it reads as `fixed` says.
+    let receiver_expression = match receiver {
+        Receiver::Handle(handle) if !this_receiver => {
+            let handle = ungroup(handle, native);
+            (!matches!(native.expression(handle).kind, ExprKind::Name(_))
+                || receiver_name.is_some())
+            .then_some(handle)
+        }
+        _ => None,
+    };
+    let is_receiver = |id: ExprId| {
+        receiver_expression
+            .is_some_and(|handle| same_expression(handle, ungroup(id, native), native))
+    };
     caller_inputs(
         tree,
         session,
@@ -2598,8 +2773,10 @@ pub(super) fn randomize_with(
         dimensions,
         constraint_ids,
         &owned,
+        Some(&fixed),
         false,
         receiver_name.as_deref(),
+        &is_receiver,
         &mut inputs,
         first_input,
         &mut input_types,
@@ -2669,14 +2846,35 @@ pub(super) fn randomize_with(
     let name = inline.name(owner);
     // Argument evaluation is left-to-right. Prepare the receiver and run its
     // pre-hook before sampling any caller-scope input. Evaluate the receiver once.
+    let prepare = |capture: &str, handle: Expr| Expr::Call {
+        callee: Callee::Subroutine(inline.prepare_name(owner)),
+        args: vec![
+            Some(handle),
+            Some(selection.clone()),
+            Some(Expr::Literal(capture.into())),
+        ],
+        arg_order: Vec::new(),
+    };
+    // A value the caller computes reads the object through the object the
+    // call captured, not through the expression that named it, whose
+    // variables the pre-hook may assign (18.6.2, see `caller_expression`):
+    // the receiver, wherever the value reads it, is that object. Returning
+    // it, the prepare reads no other argument.
+    if matches!(receiver, Receiver::Handle(_)) && !this_receiver {
+        let captured = prepare("0", Expr::Literal(format!("{}'d0", classes::HANDLE_WIDTH)));
+        for (key, input) in &inputs {
+            if key.starts_with('(') {
+                let value = &mut input_values[input.index - first_input];
+                *value = value
+                    .take()
+                    .map(|value| virtual_interfaces::replace(value, &handle, &captured));
+            }
+        }
+    }
     let handle = if input_values.is_empty() {
         handle
     } else {
-        Expr::Call {
-            callee: Callee::Subroutine(inline.prepare_name(owner)),
-            args: vec![Some(handle), Some(selection.clone())],
-            arg_order: Vec::new(),
-        }
+        prepare("1", handle)
     };
     session.inline_randomizations.push(inline);
     Ok(Expr::Call {
@@ -2733,6 +2931,207 @@ pub(in crate::ast) fn method_result(
     Ok(class(tree, session, dimensions, &class_name)?
         .method(&instances::normalize_identifier(&name.spelling))
         .and_then(|method| method.result.clone().flatten()))
+}
+
+/// Whether constraint expression `id`, a member select, element select or
+/// call, is a value the caller computes before the call (IEEE 1800-2023
+/// 18.7): one that reads no random variable of the object, nor a variable
+/// of a constraint loop, and that the constraints do not read themselves.
+/// It reads a variable of the caller, which `declared` names, or calls a
+/// method; a property of the object, by its name or through the call's
+/// receiver, which `receiver` recognizes, it reads only when `fixed` (see
+/// `randomize_with`).
+fn caller_expression(
+    id: ExprId,
+    native: &Declarations,
+    loops: &[String],
+    owned: &dyn Fn(&str) -> bool,
+    fixed: &dyn Fn(&str, bool) -> bool,
+    declared: &dyn Fn(&str) -> bool,
+    receiver: &dyn Fn(ExprId) -> bool,
+) -> bool {
+    let mut caller = false;
+    caller_reads(
+        id,
+        native,
+        &CallerReads {
+            loops,
+            owned,
+            fixed,
+            declared,
+            receiver,
+            calls: true,
+        },
+        &mut caller,
+    ) && caller
+}
+
+/// What [`caller_reads`] accepts (see [`caller_expression`]).
+struct CallerReads<'a> {
+    loops: &'a [String],
+    owned: &'a dyn Fn(&str) -> bool,
+    fixed: &'a dyn Fn(&str, bool) -> bool,
+    declared: &'a dyn Fn(&str) -> bool,
+    receiver: &'a dyn Fn(ExprId) -> bool,
+    /// Calls of methods are read.
+    calls: bool,
+}
+
+/// Whether constraint expression `id` reads no random variable, only what
+/// `reads` accepts, and sets `caller` if it reads a variable of the caller.
+fn caller_reads(
+    id: ExprId,
+    native: &Declarations,
+    reads: &CallerReads<'_>,
+    caller: &mut bool,
+) -> bool {
+    let mut recurse = |id| caller_reads(id, native, reads, caller);
+    match &native.expression(id).kind {
+        ExprKind::Literal(_) => true,
+        ExprKind::Name(name) => {
+            let name = instances::normalize_identifier(&name.spelling);
+            if name == "$"
+                || name == "this"
+                || name == "super"
+                || reads.loops.contains(&name)
+                || (reads.receiver)(id)
+            {
+                false
+            } else if (reads.owned)(&name) {
+                (reads.fixed)(&name, true)
+            } else {
+                *caller = true;
+                (reads.declared)(&name)
+            }
+        }
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "." => {
+            // A property of the object the call randomizes, through the
+            // receiver, whatever expression names it.
+            if (reads.receiver)(ungroup(*expression, native)) {
+                (reads.fixed)(&instances::normalize_identifier(&name.spelling), false)
+            } else {
+                recurse(*expression)
+            }
+        }
+        ExprKind::Select {
+            expression,
+            dimension,
+        } => {
+            recurse(*expression)
+                && match dimension.kind {
+                    celox_sv_syntax::DimensionKind::Index(index) => recurse(index),
+                    celox_sv_syntax::DimensionKind::Range { left, right } => {
+                        recurse(left) && recurse(right)
+                    }
+                    _ => false,
+                }
+        }
+        // A method of an object, whose arguments read no random variable
+        // either; a function of the class, or a method of an array the
+        // object holds, the constraints call themselves (18.5.11,
+        // 18.5.8.2).
+        ExprKind::Call {
+            expression,
+            arguments,
+        } if reads.calls => {
+            let method = matches!(
+                &native.expression(ungroup(*expression, native)).kind,
+                ExprKind::Member { separator, expression, .. } if separator == "."
+                    && !matches!(
+                        &native.expression(ungroup(*expression, native)).kind,
+                        ExprKind::Name(root)
+                            if (reads.owned)(&instances::normalize_identifier(&root.spelling))
+                    )
+            );
+            method && {
+                let ExprKind::Member { expression, .. } =
+                    &native.expression(ungroup(*expression, native)).kind
+                else {
+                    unreachable!("a method callee")
+                };
+                let read = recurse(*expression)
+                    && arguments
+                        .iter()
+                        .all(|argument| argument.value.is_some_and(&mut recurse));
+                *caller = true;
+                read
+            }
+        }
+        ExprKind::Group(id) | ExprKind::Unary { expression: id, .. } => recurse(*id),
+        ExprKind::Binary { left, right, .. } => recurse(*left) && recurse(*right),
+        _ => false,
+    }
+}
+
+/// Whether native expressions `left` and `right` are spelled alike, which in
+/// one scope makes them the same expression.
+fn same_expression(left: ExprId, right: ExprId, native: &Declarations) -> bool {
+    let spelling = |id: ExprId| {
+        let tokens = native.expression(id).tokens;
+        native
+            .tokens
+            .get(tokens.start..tokens.end)
+            .into_iter()
+            .flatten()
+            .filter(|token| !token.is_trivia())
+            .map(|token| token.text.as_str())
+            .collect::<Vec<_>>()
+    };
+    spelling(left) == spelling(right)
+}
+
+/// A guard of a constraint (IEEE 1800-2023 18.5.12): an expression of the
+/// caller's state, and the truth it must have for the constraints it guards
+/// to be created.
+#[derive(Clone, Copy)]
+struct Guard {
+    condition: ExprId,
+    truth: bool,
+    /// The caller reads it; otherwise it names a property of the object by
+    /// its name, which only the object's methods read.
+    readable: bool,
+}
+
+/// The guards without which constraint expression `id` has truth `truth`
+/// whatever the random variables are: the subexpressions of state that
+/// conjunctions to be true and disjunctions to be false need (18.5.12).
+/// `kind` tells whether a subexpression is one of state, and readable.
+fn guards(
+    id: ExprId,
+    truth: bool,
+    native: &Declarations,
+    kind: &dyn Fn(ExprId) -> Option<bool>,
+    found: &mut Vec<Guard>,
+) {
+    let id = ungroup(id, native);
+    if let Some(readable) = kind(id) {
+        found.push(Guard {
+            condition: id,
+            truth,
+            readable,
+        });
+        return;
+    }
+    match &native.expression(id).kind {
+        ExprKind::Unary {
+            operator,
+            expression,
+            ..
+        } if operator == "!" => guards(*expression, !truth, native, kind, found),
+        ExprKind::Binary {
+            left,
+            operator,
+            right,
+        } if (operator == "&&" && truth) || (operator == "||" && !truth) => {
+            guards(*left, truth, native, kind, found);
+            guards(*right, truth, native, kind, found);
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
