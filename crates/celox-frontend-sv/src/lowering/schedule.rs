@@ -363,6 +363,7 @@ fn schedule_sources_collecting(
                 bound_pattern: None,
             })
             .collect(),
+        interconnect_descriptor: Vec::new(),
     };
     if !analyzed.contains_key(&top) {
         return Err(sv_top_not_found(top).into());
@@ -715,6 +716,7 @@ fn schedule_sources_collecting(
         }
         checkpoint!("specialize_modules");
         resolve_inout_drivers(&module_ids, &mut lowered_modules);
+        resolve_interconnects(&mut module_ids, &mut lowered_modules)?;
         validate_specialized_instance_net_drivers(&module_ids, &lowered_modules, four_state)?;
         let root = &lowered_modules[&root_id];
         if let Some(port) = root

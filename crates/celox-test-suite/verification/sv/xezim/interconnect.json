@@ -1,0 +1,346 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interconnect::generic_interconnect_connects_implicit_ports",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_xezim_interconnect_arrays_and_resolution",
+        "observed_version": "xezim version 0.11.4",
+        "phase": "execute",
+        "reason": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_elements_may_carry_real_and_logic",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_xezim_interconnect_arrays_and_resolution",
+        "observed_version": "xezim version 0.11.4",
+        "phase": "execute",
+        "reason": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_elements_merge_resolutions_separately",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_xezim_interconnect_arrays_and_resolution",
+        "observed_version": "xezim version 0.11.4",
+        "phase": "execute",
+        "reason": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_elements_of_equal_width",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_xezim_interconnect_arrays_and_resolution",
+        "observed_version": "xezim version 0.11.4",
+        "phase": "execute",
+        "reason": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_elements_resolve_independently",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_xezim_interconnect_arrays_and_resolution",
+        "observed_version": "xezim version 0.11.4",
+        "phase": "execute",
+        "reason": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_passes_whole_through_a_module",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_xezim_interconnect_arrays_and_resolution",
+        "observed_version": "xezim version 0.11.4",
+        "phase": "execute",
+        "reason": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_port_chains_through_a_module",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_xezim_interconnect_arrays_and_resolution",
+        "observed_version": "xezim version 0.11.4",
+        "phase": "execute",
+        "reason": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_uwire_element_does_not_block_resolved_drivers",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_xezim_interconnect_arrays_and_resolution",
+        "observed_version": "xezim version 0.11.4",
+        "phase": "execute",
+        "reason": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_with_one_connected_element",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_xezim_interconnect_arrays_and_resolution",
+        "observed_version": "xezim version 0.11.4",
+        "phase": "execute",
+        "reason": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_authored_signing_is_preserved",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interconnect::interconnect_concatenation_operands_keep_their_widths",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_xezim_interconnect_arrays_and_resolution",
+        "observed_version": "xezim version 0.11.4",
+        "phase": "execute",
+        "reason": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_instances_merge_their_ports_separately",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_xezim_interconnect_arrays_and_resolution",
+        "observed_version": "xezim version 0.11.4",
+        "phase": "execute",
+        "reason": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_merges_to_wand_from_connected_ports",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_xezim_interconnect_arrays_and_resolution",
+        "observed_version": "xezim version 0.11.4",
+        "phase": "execute",
+        "reason": "xezim 0.11.4 accepts generic interconnect nets but does not resolve each element of an interconnect array to its own net type as IEEE 1800-2023 6.6.8 requires (its iBus example carries logic on one element and real on another), and it does not merge the dominating net type of connected ports as 23.3.3.7.1 requires (a wand port merged with a wire port yields wand). Celox follows the standard in both cases; scalar interconnect chains agree.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_merges_to_wand_from_connected_ports_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interconnect::interconnect_port_chains_through_a_module",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interconnect::interconnect_takes_signedness_from_connected_ports",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interconnect::interconnect_takes_width_and_value_from_connected_ports",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "interconnect::interconnect_wire_drivers_conflict_to_x_four_state",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

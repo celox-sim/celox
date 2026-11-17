@@ -1014,6 +1014,18 @@ cases ([diagnostics](verification/repros/sv_randc_icarus.json)). Verilator
 values for an enum typedef alias ([evidence](verification/repros/sv_randc_verilator.json)).
 The original cycle, mode and domain assertions remain unchanged.
 
+Generic interconnect nets (IEEE 1800-2023 6.6.8) have no external
+corroboration: Verilator 5.054 reports `%Error-UNSUPPORTED: interconnect`
+for every declaration and Icarus 13.0 rejects the syntax, so all
+`interconnect::*` cases are excluded for both tools
+(`sv_interconnect_external_simulator_support`). xezim 0.11.4 accepts the
+syntax and passes the scalar chains, but does not resolve each element
+of an interconnect array to its own net type (6.6.8) and does not merge
+the dominating net type of connected ports (23.3.3.7.1), so the array
+and `wand` cases are excluded for xezim only
+(`sv_xezim_interconnect_arrays_and_resolution`). Celox implements the
+merged-net semantics and runs every assertion.
+
 ## SystemVerilog packed unions
 
 The `unions` shared group covers hard and soft packed untagged unions. With

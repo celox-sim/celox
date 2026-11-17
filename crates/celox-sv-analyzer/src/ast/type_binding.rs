@@ -261,8 +261,27 @@ pub(super) fn net_signals(
     declarations: Option<&Arc<types::TypeDeclarations>>,
     selected_name: Option<&str>,
 ) -> Converted<Vec<Signal>> {
+    // A generic interconnect net (6.6.8) has no data type of its own: the
+    // authored implicit type only states signing and packed dimensions, and
+    // the connections determine the rest at elaboration (23.3.3.7.1). Its
+    // `NetResolution::Interconnect` marker carries that through the IR.
     if declaration.net_type == "interconnect" {
-        return Err(unsupported("interconnect net declaration"));
+        // An interconnect net has no data type: only the signing and
+        // packed dimensions of an implicit data type may be authored
+        // (6.6.8, Syntax 6-2).
+        if !matches!(
+            tree.declarations().data_type(declaration.data_type).kind,
+            DataTypeKind::Implicit
+        ) {
+            return Err(unsupported("interconnect net with a data type"));
+        }
+        if declaration
+            .variables
+            .iter()
+            .any(|variable| variable.value.is_some())
+        {
+            return Err(unsupported("interconnect net declaration assignment"));
+        }
     }
     if matches!(
         tree.declarations().data_type(declaration.data_type).kind,

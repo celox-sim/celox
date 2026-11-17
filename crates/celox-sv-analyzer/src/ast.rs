@@ -377,6 +377,9 @@ pub enum NetResolution {
     /// A net whose drivers Celox does not combine: `uwire`, the pull and
     /// supply nets, `trireg`.
     Single,
+    /// A generic interconnect net or port (6.6.8), whose type and driver
+    /// resolution the connections determine at elaboration (23.3.3.7.1).
+    Interconnect,
 }
 
 impl NetResolution {
@@ -385,6 +388,7 @@ impl NetResolution {
             "wire" | "tri" => Self::Wire,
             "wand" | "triand" => Self::And,
             "wor" | "trior" => Self::Or,
+            "interconnect" => Self::Interconnect,
             _ => Self::Single,
         }
     }

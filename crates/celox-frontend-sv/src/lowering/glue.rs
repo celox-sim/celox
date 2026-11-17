@@ -363,6 +363,11 @@ pub(crate) fn attach_instance_glue(
         .collect();
     initial_copies.sort_by_key(|&(variable, copy)| (variable.0, copy.0));
     module.initial_copies = initial_copies;
+    let interconnect_ids: HashSet<SourceVarId> = lowered
+        .interconnect_names
+        .iter()
+        .filter_map(|name| signal_names.get(name).copied())
+        .collect();
     for (instance, child_id, child, connections) in resolved_instances {
         let glue = build_instance_glue(
             &parent_variables,
@@ -372,6 +377,7 @@ pub(crate) fn attach_instance_glue(
             child,
             &connections,
             four_state,
+            &interconnect_ids,
         )?;
         module
             .glue_blocks
@@ -385,6 +391,13 @@ pub(crate) fn attach_instance_glue(
             });
     }
     add_forced_net_drivers(module, &parent_variables)?;
+    join_interconnect_drivers(
+        module,
+        lowered,
+        &mut parent_variables,
+        &signal_names,
+        four_state,
+    )?;
     if waits {
         candidates.extend(lowered.repeated_ff_writes.iter().map(|&(signal, _)| signal));
         for alternative in &comb_alternatives {
@@ -455,6 +468,159 @@ pub(crate) fn attach_instance_glue(
             &mut module.variables,
             lowered.repeated_ff_writes.iter().copied(),
         );
+    }
+    Ok(())
+}
+
+/// Join the drivers that several instances drive on one interconnect
+/// net (23.3.3.7.1): each glue output path that targeted the net is
+/// redirected to a hidden driver variable, and one joined path with
+/// the merged resolution (Table 23-1) drives the net itself, as
+/// `net_resolution::join` does for continuous assignments.
+fn join_interconnect_drivers(
+    module: &mut SimModule,
+    lowered: &LoweredSvModule,
+    parent_variables: &mut HashMap<SourceVarId, SvVariable>,
+    signal_names: &HashMap<String, SourceVarId>,
+    four_state: bool,
+) -> Result<(), ParserError> {
+    if lowered.interconnect_resolutions.is_empty() {
+        return Ok(());
+    }
+    let mut next_id = parent_variables
+        .keys()
+        .map(|id| id.0)
+        .max()
+        .unwrap_or_default()
+        + 1;
+    for (name, whole_resolution) in &lowered.interconnect_resolutions {
+        let Some(&var_id) = signal_names.get(name) else {
+            continue;
+        };
+        let Some(variable) = parent_variables.get(&var_id).cloned() else {
+            continue;
+        };
+        // Each element of an interconnect array merges its own driver
+        // resolution (6.6.8); drivers are joined per element.
+        let elements: usize = variable.array_dims.iter().product::<usize>().max(1);
+        let element_width = if elements > 1 {
+            variable.width / elements
+        } else {
+            0
+        };
+        let resolution_of = |access: BitAccess| {
+            if element_width > 0
+                && let Some(per_element) = lowered.interconnect_element_resolutions.get(name)
+                && let Some(resolution) = per_element.get(&(access.lsb / element_width))
+            {
+                *resolution
+            } else {
+                *whole_resolution
+            }
+        };
+        let mut groups: Vec<(sv::ast::NetResolution, Vec<BitAccess>)> = Vec::new();
+        for block in module.glue_blocks.values().flatten() {
+            for (_, path) in &block.output_ports {
+                let LogicPathTarget::Var(target) = &path.target else {
+                    continue;
+                };
+                if target.id != GlueAddr::Parent(var_id) {
+                    continue;
+                }
+                let resolution = resolution_of(target.access);
+                if matches!(
+                    resolution,
+                    sv::ast::NetResolution::Single | sv::ast::NetResolution::Interconnect
+                ) {
+                    continue;
+                }
+                match groups
+                    .iter_mut()
+                    .find(|(group_resolution, _)| *group_resolution == resolution)
+                {
+                    Some((_, accesses)) => accesses.push(target.access),
+                    None => groups.push((resolution, vec![target.access])),
+                }
+            }
+        }
+        for (resolution, accesses) in groups {
+            if accesses.len() < 2 {
+                continue;
+            }
+            let mut joined = Vec::new();
+            let mut index = 0;
+            for block in module.glue_blocks.values_mut().flatten() {
+                for (_, path) in &mut block.output_ports {
+                    let LogicPathTarget::Var(target) = &path.target else {
+                        continue;
+                    };
+                    if target.id != GlueAddr::Parent(var_id)
+                        || !accesses.contains(&target.access)
+                        || resolution_of(target.access) != resolution
+                    {
+                        continue;
+                    }
+                    let access = target.access;
+                    let driver_id = SourceVarId(next_id);
+                    next_id += 1;
+                    let mut hidden = variable.clone();
+                    hidden.hidden = true;
+                    hidden.path =
+                        vec!["$interconnect".to_string(), name.clone(), index.to_string()];
+                    index += 1;
+                    parent_variables.insert(driver_id, hidden.clone());
+                    module
+                        .variables
+                        .insert(driver_id, hidden.to_symbolic_variable());
+                    path.target = LogicPathTarget::Var(VarAtomBase::new(
+                        GlueAddr::Parent(driver_id),
+                        access.lsb,
+                        access.msb,
+                    ));
+                    let input = module.arena.alloc(SLTNode::Input {
+                        variable: driver_id,
+                        signed: variable.signed,
+                        index: Vec::new(),
+                        access,
+                    })?;
+                    joined.push(LogicPath {
+                        target: LogicPathTarget::Var(VarAtomBase::new(
+                            var_id, access.lsb, access.msb,
+                        )),
+                        transparent_copy: false,
+                        expr: input,
+                        sources: [VarAtomBase::new(driver_id, access.lsb, access.msb)]
+                            .into_iter()
+                            .collect(),
+                        previous_sources: HashSet::default(),
+                        address_sources: HashSet::default(),
+                        local_inputs: Vec::new(),
+                        order_before: HashSet::default(),
+                        comb_capture_enable_sites: Vec::new(),
+                        comb_capture_enable_always: false,
+                        pre_lower_nodes: Vec::new(),
+                    });
+                }
+            }
+            let joined = net_resolution::join(
+                &mut module.arena,
+                var_id,
+                resolution,
+                joined,
+                four_state,
+                !variable.is_4state,
+            )
+            .map_err(|error| {
+                ParserError::unsupported(
+                    sv::SV_FRONTEND_TRACKING_ISSUE,
+                    LoweringPhase::SimulatorParser,
+                    "systemverilog interconnect driver resolution",
+                    error.to_string(),
+                    None,
+                )
+            })?;
+            module.comb_blocks.extend(joined);
+        }
     }
     Ok(())
 }
@@ -698,6 +864,30 @@ fn check_unpacked_port_connection(
     ))
 }
 
+/// Whether `expr` reads a generic interconnect variable of the parent
+/// (6.6.8): its bits already carry the connected port's type, so a real
+/// port connected through it exchanges raw bits, not a converted value.
+fn reads_interconnect(
+    expr: &sv::ir::Expr,
+    parent_signal_names: &HashMap<String, SourceVarId>,
+    interconnect_ids: &HashSet<SourceVarId>,
+) -> bool {
+    match expr {
+        sv::ir::Expr::Ident(name) => parent_signal_names
+            .get(name)
+            .is_some_and(|id| interconnect_ids.contains(id)),
+        sv::ir::Expr::Select { expr, .. }
+        | sv::ir::Expr::Resize { expr, .. }
+        | sv::ir::Expr::Unary { expr, .. } => {
+            reads_interconnect(expr, parent_signal_names, interconnect_ids)
+        }
+        sv::ir::Expr::Concat(parts) => parts
+            .iter()
+            .any(|part| reads_interconnect(part, parent_signal_names, interconnect_ids)),
+        _ => false,
+    }
+}
+
 fn build_instance_glue(
     parent_variables: &HashMap<SourceVarId, SvVariable>,
     parent_signal_names: &HashMap<String, SourceVarId>,
@@ -706,6 +896,7 @@ fn build_instance_glue(
     child: &LoweredSvModule,
     connections: &[LoweredSvPortConnection],
     four_state: bool,
+    interconnect_ids: &HashSet<SourceVarId>,
 ) -> Result<SvGlue, ParserError> {
     let mut input_ports = Vec::new();
     let mut output_ports = Vec::new();
@@ -751,9 +942,15 @@ fn build_instance_glue(
                 {
                     let actual_expr = expr_for_state_mode(actual_expr, four_state);
                     let actual = connection.map_or("", |item| item.actual.as_str());
-                    let from =
-                        floating::precision(&actual_expr, parent_variables, parent_signal_names);
                     let to = child_var.float;
+                    let from = if to.is_some()
+                        && reads_interconnect(&actual_expr, parent_signal_names, interconnect_ids)
+                    {
+                        // The interconnect carries the port's own bits.
+                        to
+                    } else {
+                        floating::precision(&actual_expr, parent_variables, parent_signal_names)
+                    };
                     let (expr, sources, source_ids) = lower_glue_parent_expr(
                         &actual_expr,
                         parent_variables,
@@ -948,7 +1145,13 @@ fn build_instance_glue(
                     access: BitAccess::new(0, width - 1),
                 })?;
                 let target_float = if let [target] = accesses.as_slice() {
-                    parent_variables[&target.signal].float
+                    // An interconnect target carries the port's own
+                    // bits, without a value conversion (6.6.8).
+                    if interconnect_ids.contains(&target.signal) && child_var.float.is_some() {
+                        child_var.float
+                    } else {
+                        parent_variables[&target.signal].float
+                    }
                 } else {
                     None
                 };
