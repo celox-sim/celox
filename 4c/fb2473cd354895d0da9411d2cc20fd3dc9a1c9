@@ -1,0 +1,1 @@
+Address fourth review: short-circuit guards for pattern values under &&/||; wait clauses substitute earlier bindings so each wait test recomputes them; a pattern wait with no reads still waits; several patterns per case item compile as alternatives; for and do-while conditions re-evaluate pattern predicates per test; nested filter setup stays under its case arm.
