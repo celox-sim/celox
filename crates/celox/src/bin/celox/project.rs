@@ -66,6 +66,10 @@ pub(super) struct DesignArgs {
     /// Require UTF-8 even in SV comments (legacy comment bytes are accepted by default).
     #[arg(long)]
     strict_source_encoding: bool,
+    /// Promote recoverable diagnostics (inferred latches and other
+    /// compatibility fallbacks) from warnings to errors.
+    #[arg(long)]
+    strict: bool,
     /// Treat each SV file as a separate compilation unit, isolating source macros.
     #[arg(long)]
     separate_units: bool,
@@ -124,6 +128,7 @@ struct Manifest {
     dpi_libs: Vec<PathBuf>,
     single_unit: Option<bool>,
     strict_source_encoding: Option<bool>,
+    strict: Option<bool>,
     parameters: BTreeMap<String, ParameterValue>,
     top: Option<String>,
     opt_level: Option<String>,
@@ -161,6 +166,7 @@ struct Target {
     dpi_libs: Vec<PathBuf>,
     single_unit: Option<bool>,
     strict_source_encoding: Option<bool>,
+    strict: Option<bool>,
     parameters: BTreeMap<String, ParameterValue>,
     top: Option<String>,
     opt_level: Option<String>,
@@ -357,6 +363,9 @@ impl DesignArgs {
                 design.extend_dpi_libraries(base, &config.dpi_libs);
                 design.extend_parameters(&config.parameters)?;
                 design.diagnostics = config.diagnostics.clone();
+                if let Some(strict) = config.strict {
+                    design.diagnostics.strict = strict;
+                }
                 design.top = config.top.clone().unwrap_or_default();
                 let mut opt_level = config.opt_level.as_deref();
                 let mut timescale = config.timescale.as_deref();
@@ -369,7 +378,10 @@ impl DesignArgs {
                 design.strict_source_encoding = config.strict_source_encoding;
                 if let Some(target) = selected {
                     design.extend_parameters(&target.parameters)?;
-                    design.diagnostics.0.extend(target.diagnostics.0.clone());
+                    design.diagnostics.merge(&target.diagnostics);
+                    if let Some(strict) = target.strict {
+                        design.diagnostics.strict = strict;
+                    }
                     design.extend(
                         base,
                         &target.sources,
@@ -427,6 +439,9 @@ impl DesignArgs {
         }
         if self.strict_source_encoding {
             design.strict_source_encoding = Some(true);
+        }
+        if self.strict {
+            design.diagnostics.strict = true;
         }
         if self.single_unit {
             design.single_unit = Some(true);

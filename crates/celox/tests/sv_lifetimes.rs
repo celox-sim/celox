@@ -315,11 +315,27 @@ fn automatic_subroutines_may_read_their_locals_first() {
 /// write it, so it is a latch; one written on every path is not.
 #[test]
 fn static_comb_locals_written_on_some_paths_are_latches() {
-    let detail = error(
-        "module Top(input logic a, output logic [7:0] y);
+    let source = "module Top(input logic a, output logic [7:0] y);
            always_comb begin int t; if (a) t = 5; y = a ? t : 0; end
-         endmodule",
+         endmodule";
+    // By default the latch compiles with a warning; strict mode rejects it.
+    let sim = build(source).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
+    assert!(
+        format!("{:?}", sim.warnings()[0]).contains("InferredLatch"),
+        "{:?}",
+        sim.warnings()
     );
+    let detail = match Simulator::from_sv_sources(
+        vec![(source, std::path::Path::new("lifetimes.sv"))],
+        "Top",
+    )
+    .strict(true)
+    .build()
+    {
+        Ok(_) => panic!("the design must be rejected in strict mode"),
+        Err(error) => format!("{error:?}"),
+    };
     assert!(detail.contains("InferredLatch"), "{detail}");
     assert_eq!(
         output(

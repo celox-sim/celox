@@ -12,7 +12,7 @@ module Latch(en: input logic, d: input logic<8>, q: output logic<8>) {
 `;
 
 describe("inferred latch policy through the native addon", () => {
-	test("requires opt-in even after a permissive compilation is cached", () => {
+	test("warns by default even after a permissive compilation is cached, and strict rejects", () => {
 		for (const tier of [false, true]) {
 			const sim = Simulator.fromSource<{
 				en: bigint;
@@ -36,13 +36,19 @@ describe("inferred latch policy through the native addon", () => {
 				sim.dispose();
 			}
 			for (const allowInferredLatches of [undefined, false]) {
-				expect(() =>
-					Simulator.fromSource(LATCH, "Latch", {
-						allowInferredLatches,
-						tier,
-					}),
-				).toThrow();
+				const sim = Simulator.fromSource(LATCH, "Latch", {
+					allowInferredLatches,
+					tier,
+				});
+				try {
+					expect(sim.warnings).toHaveLength(1);
+				} finally {
+					sim.dispose();
+				}
 			}
+			expect(() =>
+				Simulator.fromSource(LATCH, "Latch", { strict: true, tier }),
+			).toThrow(/inferred_latch/);
 		}
 	});
 
@@ -102,13 +108,15 @@ describe("project inferred_latch diagnostics", () => {
 								d: bigint;
 								readonly q: bigint;
 							}>(project, "Latch", { tier, allowInferredLatches: flag });
-						if (level === "error" || (level === undefined && !flag)) {
+						if (level === "error") {
 							expect(create).toThrow(/inferred_latch/);
 							continue;
 						}
 						const sim = create();
 						try {
-							expect(sim.warnings).toHaveLength(level === "warn" ? 1 : 0);
+							expect(sim.warnings).toHaveLength(
+								level === "warn" || (level === undefined && !flag) ? 1 : 0,
+							);
 							if (level === "warn")
 								expect(sim.warnings[0]).toContain("inferred_latch");
 							sim.dut.en = 1n;

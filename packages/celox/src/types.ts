@@ -377,6 +377,12 @@ export interface SimulatorOptions {
 	 * diagnostic level is set. Project diagnostics take precedence. Default: false.
 	 */
 	allowInferredLatches?: boolean;
+	/**
+	 * Promote recoverable diagnostics (inferred latches and other
+	 * compatibility fallbacks) from warnings to errors. Explicit per-code
+	 * project diagnostics take precedence. Default: false.
+	 */
+	strict?: boolean;
 	/** Path to write VCD waveform output. Mutually exclusive with `fst`. */
 	vcd?: string;
 	/**

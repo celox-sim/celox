@@ -385,7 +385,8 @@ impl NativeSimulatorHandle {
     ) -> Result<Self> {
         let mut opts = parse_options(&options)?;
         let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
-        opts.common.diagnostic_policy = celox_cfg.diagnostics.clone();
+        opts.common.diagnostic_policy =
+            celox_cfg.diagnostic_policy(opts.common.diagnostic_policy.strict);
         append_extra_source(&mut sources, &opts.extra_source);
 
         let source_refs: Vec<(&str, &std::path::Path)> = sources
@@ -428,7 +429,8 @@ impl NativeSimulatorHandle {
     ) -> Result<Self> {
         let mut opts = parse_options(&options)?;
         let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
-        opts.common.diagnostic_policy = celox_cfg.diagnostics.clone();
+        opts.common.diagnostic_policy =
+            celox_cfg.diagnostic_policy(opts.common.diagnostic_policy.strict);
         append_extra_source(&mut sources, &opts.extra_source);
 
         let cache_key = build_cache_key(&sources, &top, &opts, Some(&metadata));

@@ -1,7 +1,10 @@
 use super::*;
 
+// Strict mode restores the rejection these regressions assert; by
+// default the same diagnostics are warnings and the design compiles.
 fn cranelift_build_error(source: &str) -> String {
     match Simulator::from_sv_sources(vec![(source, Path::new("review.sv"))], "Top")
+        .strict(true)
         .build_cranelift()
     {
         Ok(_) => panic!("unsupported SystemVerilog unexpectedly compiled:\n{source}"),
@@ -11,6 +14,7 @@ fn cranelift_build_error(source: &str) -> String {
 
 fn four_state_cranelift_build_error(source: &str) -> String {
     match Simulator::from_sv_sources(vec![(source, Path::new("review.sv"))], "Top")
+        .strict(true)
         .four_state(true)
         .build_cranelift()
     {
@@ -6506,7 +6510,8 @@ fn rejects_invalid_systemverilog_hierarchy_when_mixed_design_reaches_it() {
 fn rejects_duplicate_modules_across_source_files() {
     let first = "module Top(output logic y); assign y = 1'b0; endmodule";
     let second = "module Top(output logic y); assign y = 1'b1; endmodule";
-    let error = match Simulator::from_sv_sources(
+    // By default the first declaration wins, with a warning.
+    let mut sim = Simulator::from_sv_sources(
         vec![
             (first, Path::new("first.sv")),
             (second, Path::new("second.sv")),
@@ -6514,8 +6519,20 @@ fn rejects_duplicate_modules_across_source_files() {
         "Top",
     )
     .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
+    let error = match Simulator::from_sv_sources(
+        vec![
+            (first, Path::new("first.sv")),
+            (second, Path::new("second.sv")),
+        ],
+        "Top",
+    )
+    .strict(true)
+    .build_cranelift()
     {
-        Ok(_) => panic!("duplicate module unexpectedly compiled"),
+        Ok(_) => panic!("duplicate module unexpectedly compiled in strict mode"),
         Err(error) => error.to_string(),
     };
     assert!(

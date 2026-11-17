@@ -328,6 +328,7 @@ fn keeps_four_state_generate_function_guards_nonexhaustive() {
         vec![(source, Path::new("generate_four_state_function_guard.sv"))],
         "Top",
     )
+    .strict(true)
     .four_state(true)
     .build_cranelift();
     let error = match result {
