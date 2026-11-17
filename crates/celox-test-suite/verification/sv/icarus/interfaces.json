@@ -603,6 +603,56 @@
           "LIMITATIONS.md#systemverilog-suite"
         ]
       }
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 does not re-evaluate a continuous assignment in an element of an interface instance array that calls a function reading a member when the member changes after time zero; the scalar interface form is re-evaluated. Verilator passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_interface_array_member_function",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 does not re-evaluate a continuous assignment in an element of an interface instance array that calls a function reading a member when the member changes after time zero; the scalar interface form is re-evaluated. Verilator passes the case.",
+        "upstream": []
+      },
+      "name": "interfaces::calls_member_functions_from_interface_array_logic",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
+          "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_interfaces",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+        "upstream": []
+      },
+      "name": "interfaces::calls_writing_imported_functions_from_generate_functions_and_tasks",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }
