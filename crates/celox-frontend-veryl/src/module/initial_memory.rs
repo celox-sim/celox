@@ -155,6 +155,8 @@ pub(crate) fn memory_file_load(
         element_width,
         addressing: celox_design::MemoryFileAddressing::Offset { start, depth },
         location,
+        index_members: None,
+        word_members: None,
     })
 }
 

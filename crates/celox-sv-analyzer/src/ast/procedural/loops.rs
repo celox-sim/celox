@@ -266,7 +266,11 @@ impl BodyBuilder<'_, '_, '_> {
                     let index_expr = Expr::Ident(index.clone());
                     let (init, condition, step) = if let Some(status) = status {
                         let call = |op| {
-                            containers::call(op, layout, vec![array.clone(), index_expr.clone()])
+                            containers::call(
+                                op,
+                                layout.clone(),
+                                vec![array.clone(), index_expr.clone()],
+                            )
                         };
                         (
                             vec![

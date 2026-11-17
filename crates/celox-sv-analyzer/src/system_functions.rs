@@ -862,7 +862,7 @@ impl fmt::Display for SystemTask {
 /// The analyzer rewrites string operators, methods and conversions into
 /// calls of these, so the frontend dispatches on them instead of on the
 /// integral operators that a string handle would otherwise reach.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StringOp {
     /// A string holding the bytes of an integral operand, most significant
     /// first, without NUL bytes: a cast to `string` (6.24.1), or a string
@@ -903,7 +903,7 @@ pub enum StringOp {
     Format { ticks_per_unit: u64 },
     /// The text `%p` prints for a class handle, or with a layout for a
     /// container (21.2.1.6).
-    Pattern(Option<ContainerLayout>),
+    Pattern(Option<Box<ContainerLayout>>),
     /// Interpret the bits of a selected fixed string-array element as its
     /// existing heap handle, without converting or allocating string bytes.
     FromHandle,
@@ -911,7 +911,7 @@ pub enum StringOp {
 
 impl StringOp {
     /// Whether the result is a string rather than an integral value.
-    pub fn returns_string(self) -> bool {
+    pub fn returns_string(&self) -> bool {
         matches!(
             self,
             Self::FromBits
@@ -931,7 +931,7 @@ impl StringOp {
 
     /// The width and signedness of the result; a string is a 32-bit handle.
     /// A character is a `byte`, which is signed (6.16, 6.11).
-    pub fn result_type(self) -> (usize, bool) {
+    pub fn result_type(&self) -> (usize, bool) {
         match self {
             Self::Compare | Self::ICompare | Self::Len | Self::Atoi(_) => (32, true),
             Self::Getc => (8, true),
@@ -969,7 +969,7 @@ impl StringOp {
 
     /// Whether the method updates the string it is called on instead of
     /// returning a value (`putc` and the `itoa` family).
-    pub fn updates_receiver(self) -> bool {
+    pub fn updates_receiver(&self) -> bool {
         matches!(self, Self::Putc | Self::Itoa(_) | Self::Realtoa)
     }
 }
@@ -1083,13 +1083,36 @@ impl ObjectField {
 }
 
 /// Storage and conversion contract for a one-dimensional value container.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ContainerLayout {
     pub kind: ContainerKind,
     pub width: u32,
     pub signed: bool,
     pub two_state: bool,
     pub handle: Option<HandleProperty>,
+    /// The bit patterns an element of enumerated type may hold (6.19),
+    /// when the element is of one.
+    pub enum_values: Option<EnumValues>,
+    /// The bit patterns an index of enumerated type may hold (6.19),
+    /// when the index is of one.
+    pub key_enum_values: Option<EnumValues>,
+}
+
+/// The bit patterns of a set of enum members (6.19), held by the layouts
+/// that use them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EnumValues(std::sync::Arc<[u128]>);
+
+impl EnumValues {
+    /// A set holding `values`.
+    pub fn new(values: Vec<u128>) -> Self {
+        Self(values.into())
+    }
+
+    /// The values of the set.
+    pub fn values(&self) -> &[u128] {
+        &self.0
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContainerKind {
@@ -1170,7 +1193,7 @@ impl LocatorMethod {
     }
 }
 /// The array a locator method searches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LocatorSource {
     /// A dynamic array, queue or associative array, in the first argument.
     Container(ContainerLayout),
@@ -1188,7 +1211,7 @@ pub enum LocatorKey {
 /// the array (see [`LocatorSource`]), the `with` expression, and the locals
 /// through which it reads the element and its index (7.12.4). The result is
 /// a queue with the `result` layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Locator {
     pub method: LocatorMethod,
     pub source: LocatorSource,
@@ -1300,7 +1323,7 @@ impl ContainerOp {
                 | Self::PopBack
         )
     }
-    pub fn result_type(self, layout: ContainerLayout) -> (usize, bool) {
+    pub fn result_type(self, layout: &ContainerLayout) -> (usize, bool) {
         match self {
             Self::Equal | Self::CaseEqual => (1, false),
             Self::Get
@@ -1432,7 +1455,7 @@ pub enum ObjectOp {
 /// collects the text, and the string expressions that start it, append the
 /// first element, append each later one, and finish it, which read those
 /// locals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AggregatePattern {
     pub source: LocatorSource,
 }
@@ -1515,7 +1538,7 @@ pub enum StreamRange {
 }
 
 /// An item of a [`StreamPack`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StreamItem {
     /// A fixed-size value.
     Bits(StreamArg),
@@ -1571,7 +1594,7 @@ impl ObjectOp {
     /// The width and signedness of the result.
     pub fn result_type(&self) -> (usize, bool) {
         match self {
-            Self::Container { op, layout } => op.result_type(*layout),
+            Self::Container { op, layout } => op.result_type(layout),
             Self::Random | Self::RandomCyclic { .. } => (64, false),
             Self::ProgramRegistered(_) => (1, false),
             Self::ArgumentValue(_) => (64, false),

@@ -246,7 +246,7 @@ impl Type {
                     Some(key) => Some(key.with_resolved_container_bounds(eval)?),
                     None => None,
                 },
-                layout: container.layout,
+                layout: container.layout.clone(),
                 element: container.element.with_resolved_container_bounds(eval)?,
                 record: container.record.clone(),
                 fixed: container.fixed,

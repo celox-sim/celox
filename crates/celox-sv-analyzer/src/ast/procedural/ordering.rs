@@ -76,7 +76,7 @@ impl BodyBuilder<'_, '_, '_> {
         self.native_lvalue(*base, false)?;
         let target =
             containers::fixed_storage(&declared, &self.session.types, &self.tree, &self.dims)?;
-        let layout = target.layout;
+        let layout = target.layout.clone();
         if matches!(op, ContainerOp::Sort | ContainerOp::Rsort) {
             // Chandles have no relational operators (6.14, 7.12.2).
             if target.element.is_chandle() {
@@ -117,7 +117,7 @@ impl BodyBuilder<'_, '_, '_> {
                 rhs: elements,
                 nonblocking: false,
             },
-            Stmt::Eval(containers::call(op, layout, vec![ident()])),
+            Stmt::Eval(containers::call(op, layout.clone(), vec![ident()])),
         ];
         let (left, right) = target.fixed.expect("the range of a fixed-size array");
         let indices: Vec<i128> = if left <= right {
@@ -130,7 +130,7 @@ impl BodyBuilder<'_, '_, '_> {
         for (position, index) in indices.into_iter().enumerate() {
             let get = containers::call(
                 ContainerOp::Get,
-                layout,
+                layout.clone(),
                 vec![ident(), Expr::Literal(position.to_string())],
             );
             let mut lhs = selects::lvalue_from_indices(
@@ -215,7 +215,7 @@ impl BodyBuilder<'_, '_, '_> {
             _ => return Err(unsupported("ordering method arguments")),
         };
         let element = target.element.clone();
-        let layout = target.layout;
+        let layout = target.layout.clone();
         // An element held in a record (see `unpacked_structs::record`) is
         // moved by its record's handle, which is immutable, and the key
         // reads the members of the record the iterator holds.
@@ -256,6 +256,8 @@ impl BodyBuilder<'_, '_, '_> {
             // (11.4.4).
             two_state: key_type.kind() == TypeKind::String,
             handle: (key_type.kind() == TypeKind::String).then_some(HandleProperty::String),
+            enum_values: None,
+            key_enum_values: None,
         };
         // A container is held by its handle (see `containers::with_dimensions`).
         let mut keys_type = Type::new(TypeKind::Object);
@@ -265,7 +267,7 @@ impl BodyBuilder<'_, '_, '_> {
         ));
         keys_type.container = Some(Arc::new(ContainerType {
             key: None,
-            layout: key_layout,
+            layout: key_layout.clone(),
             element: key_type.clone(),
             record: None,
             fixed: None,
@@ -289,23 +291,28 @@ impl BodyBuilder<'_, '_, '_> {
             rhs,
             nonblocking: false,
         };
-        let size = || containers::call(ContainerOp::Size, layout, vec![array.clone()]);
+        let size = || containers::call(ContainerOp::Size, layout.clone(), vec![array.clone()]);
         let get = |name: &str| {
-            containers::call(ContainerOp::Get, layout, vec![array.clone(), ident(name)])
+            containers::call(
+                ContainerOp::Get,
+                layout.clone(),
+                vec![array.clone(), ident(name)],
+            )
         };
-        let key_at =
-            |at: Expr| containers::call(ContainerOp::Get, key_layout, vec![ident(&keys), at]);
+        let key_at = |at: Expr| {
+            containers::call(ContainerOp::Get, key_layout.clone(), vec![ident(&keys), at])
+        };
         let set = |at: Expr, value| {
             Stmt::Eval(containers::call(
                 ContainerOp::Set,
-                layout,
+                layout.clone(),
                 vec![array.clone(), at, value],
             ))
         };
         let set_key = |at: Expr, value| {
             Stmt::Eval(containers::call(
                 ContainerOp::Set,
-                key_layout,
+                key_layout.clone(),
                 vec![ident(&keys), at, value],
             ))
         };
@@ -349,7 +356,7 @@ impl BodyBuilder<'_, '_, '_> {
             local(&slot),
             assign(
                 &keys,
-                containers::call(ContainerOp::Literal, key_layout, Vec::new()),
+                containers::call(ContainerOp::Literal, key_layout.clone(), Vec::new()),
             ),
             for_loop(
                 &index,
@@ -358,7 +365,7 @@ impl BodyBuilder<'_, '_, '_> {
                     assign(&item, get(&index)),
                     Stmt::Eval(containers::call(
                         ContainerOp::PushBack,
-                        key_layout,
+                        key_layout.clone(),
                         vec![ident(&keys), key],
                     )),
                 ],
