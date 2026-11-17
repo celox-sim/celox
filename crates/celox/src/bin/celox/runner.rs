@@ -444,6 +444,7 @@ pub(super) fn run(
         .optimize_options(optimize_options)
         .x86_slp(opts.x86_slp)
         .diagnostic_policy(opts.design.diagnostics.clone())
+        .legacy_empty_reductions(opts.design.legacy_empty_reductions)
         .signal_access(opts.design.signal_access.clone())
         .four_state(opts.four_state)
         .hotspot_jit(opts.hotspot_jit)

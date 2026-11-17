@@ -154,16 +154,9 @@ module top;
 endmodule
 "#;
 
-fn shared_index(
-    source: &str,
-    level: Option<celox::DiagnosticLevel>,
-) -> Result<celox::Simulation, celox::SimulatorError> {
-    let mut policy = celox::DiagnosticPolicy::default();
-    if let Some(level) = level {
-        policy.set("shared_always_temporary", level);
-    }
+fn shared_index(source: &str, temporary: bool) -> Result<celox::Simulation, celox::SimulatorError> {
     celox::Simulation::from_sv_sources(vec![(source, Path::new("shared.sv"))], "top")
-        .diagnostic_policy(policy)
+        .shared_always_temporary(temporary)
         .build()
 }
 
@@ -274,19 +267,18 @@ fn shared_always_active_continuations_survive_stop() {
 fn shared_always_temporary_runs_each_block_with_its_own_index() {
     // Icarus 13 prints `1 1`: it does not wake a block on the other's writes.
     for four_state in [false, true] {
-        let mut policy = celox::DiagnosticPolicy::default();
-        policy.set("shared_always_temporary", celox::DiagnosticLevel::Allow);
         let mut sim =
             celox::Simulation::from_sv_sources(vec![(SHARED_INDEX, Path::new("shared.sv"))], "top")
                 .four_state(four_state)
-                .diagnostic_policy(policy)
+                .shared_always_temporary(true)
                 .build()
                 .unwrap();
-        assert!(sim.warnings().is_empty());
+        // The deviation is always reported when it applies.
+        assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
         sim.run_until(10).unwrap();
         assert_eq!(display_lines(&mut sim), ["1 1"], "four_state={four_state}");
     }
-    let sim = shared_index(SHARED_INDEX, Some(celox::DiagnosticLevel::Warn)).unwrap();
+    let sim = shared_index(SHARED_INDEX, true).unwrap();
     let warnings: Vec<String> = sim.warnings().iter().map(ToString::to_string).collect();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains("`j`"), "{warnings:?}");
@@ -296,7 +288,7 @@ fn shared_always_temporary_runs_each_block_with_its_own_index() {
 
 #[test]
 fn shared_always_temporary_keeps_the_standard_when_it_would_show() {
-    let allow = Some(celox::DiagnosticLevel::Allow);
+    let allow = true;
     for (what, source) in [
         (
             "another reader",
@@ -326,7 +318,7 @@ fn shared_always_temporary_keeps_the_standard_when_it_would_show() {
 #[test]
 fn always_comb_blocks_may_not_share_a_variable() {
     let source = SHARED_INDEX.replace("always @(*)", "always_comb");
-    let error = match shared_index(&source, Some(celox::DiagnosticLevel::Allow)) {
+    let error = match shared_index(&source, true) {
         Ok(_) => panic!("always_comb restricts a variable to one process"),
         Err(error) => error.to_string(),
     };

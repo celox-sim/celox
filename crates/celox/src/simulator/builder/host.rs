@@ -673,12 +673,28 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
 
     /// Override recoverable compilation diagnostic severities.
     ///
-    /// The strict setting is kept, whichever order the setters are
-    /// called in: this replaces the per-code overrides only. Use
-    /// [`strict`](Self::strict) to change strict mode itself.
+    /// The strict and shared-temporary settings are kept, whichever
+    /// order the setters are called in: this replaces the per-code
+    /// overrides only. Use [`strict`](Self::strict) and
+    /// [`shared_always_temporary`](Self::shared_always_temporary) to
+    /// change those themselves.
     pub fn diagnostic_policy(mut self, policy: crate::DiagnosticPolicy) -> Self {
         let strict = self.options.diagnostic_policy.strict || policy.strict;
-        self.options.diagnostic_policy = policy.strict(strict);
+        let shared = self.options.diagnostic_policy.shared_always_temporary
+            || policy.shared_always_temporary;
+        self.options.diagnostic_policy = policy.strict(strict).with_shared_always_temporary(shared);
+        self
+    }
+
+    /// Compatibility: treat a variable written by several `always @*`
+    /// blocks as a temporary of each block, so its writes do not wake
+    /// the other blocks. This changes simulation behavior (it deviates
+    /// from IEEE 1800-2023 9.4.2.2), so it is off by default and always
+    /// reported as a warning when it applies. It is not a diagnostic
+    /// level and cannot be set through
+    /// [`diagnostic_policy`](Self::diagnostic_policy).
+    pub fn shared_always_temporary(mut self, enable: bool) -> Self {
+        self.options.diagnostic_policy.shared_always_temporary = enable;
         self
     }
 

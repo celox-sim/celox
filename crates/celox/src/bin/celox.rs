@@ -261,6 +261,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .threads(arguments.execution.threads as usize)
         .opt_level(arguments.opt_level)
         .diagnostic_policy(arguments.design.diagnostics.clone())
+        .legacy_empty_reductions(arguments.design.legacy_empty_reductions)
         .sv_timescale(arguments.design.timescale)
         .signal_access(arguments.design.signal_access.clone())
         .plusargs(arguments.plusargs.iter().cloned())
@@ -1065,6 +1066,7 @@ fn configure_sv<'a, T>(
     let builder = builder
         .four_state(design.four_state.unwrap_or(false))
         .diagnostic_policy(design.diagnostics.clone())
+        .legacy_empty_reductions(design.legacy_empty_reductions)
         .sv_timescale(design.timescale)
         .signal_access(design.signal_access.clone())
         .opt_level(design.opt_level.unwrap_or(celox::OptLevel::O1));
@@ -1103,6 +1105,7 @@ fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> 
         &design.sources[0],
         &design.top,
         design.diagnostics.clone(),
+        design.legacy_empty_reductions,
         design.opt_level.unwrap_or(celox::OptLevel::O1),
         design.signal_access.clone(),
         &design.parameters,
