@@ -1,0 +1,1 @@
+Address third review: pattern constants compare at the common width; casez/casex also mask selector unknowns (definite-zero rejection); pattern conditional arms resize with the common signedness; wait conditions test the compiled pattern directly and while conditions re-evaluate via a per-iteration prologue.
