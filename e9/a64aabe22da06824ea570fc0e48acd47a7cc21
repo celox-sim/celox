@@ -1,0 +1,1 @@
+Address Codex review: preserve per-element types/resolutions across whole-array and per-instance interconnect merging, keep concatenation operand widths, and reject explicit data types on interconnect nets and ports
