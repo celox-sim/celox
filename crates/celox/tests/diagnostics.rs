@@ -193,6 +193,111 @@ fn cli_strict_flag_and_project_strict_setting_promote_latch_warnings() {
 }
 
 #[test]
+fn compatibility_settings_flow_through_toml_target_and_cli() {
+    let project = tempfile::tempdir().unwrap();
+    let config = project.path().join("celox.toml");
+    fs::write(
+        project.path().join("top.sv"),
+        "module Top; int q[$]; initial begin $display(\"%0d %0d\", q.product(), q.and()); $finish; end endmodule",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_celox"))
+            .current_dir(project.path())
+            .arg("run")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    fs::write(&config, "sources = ['top.sv']\ntop = 'Top'\n").unwrap();
+    let default = run(&[]);
+    assert!(default.status.success(), "{default:?}");
+    assert_eq!(default.stdout, b"1 -1\n");
+    let flagged = run(&["--legacy-empty-reductions"]);
+    assert!(flagged.status.success(), "{flagged:?}");
+    assert_eq!(flagged.stdout, b"0 0\n");
+    fs::write(
+        &config,
+        "sources = ['top.sv']\ntop = 'Top'\n[compatibility]\nlegacy_empty_reductions = true\n[targets.standard.compatibility]\nlegacy_empty_reductions = false\n",
+    )
+    .unwrap();
+    let configured = run(&[]);
+    assert!(configured.status.success(), "{configured:?}");
+    assert_eq!(configured.stdout, b"0 0\n");
+    let overridden = run(&["--target", "standard"]);
+    assert!(overridden.status.success(), "{overridden:?}");
+    assert_eq!(overridden.stdout, b"1 -1\n");
+}
+
+#[test]
+fn shared_always_temporary_is_a_compatibility_opt_in_not_a_diagnostic() {
+    let project = tempfile::tempdir().unwrap();
+    let config = project.path().join("celox.toml");
+    fs::write(
+        project.path().join("top.sv"),
+        "module Top; reg [3:0] a = 4'b0100, b = 4'b0010; reg any_a, any_b; integer j; always @(*) begin any_a = 0; for (j = 0; j < 4; j = j + 1) any_a = any_a | a[j]; end always @(*) begin any_b = 0; for (j = 0; j < 4; j = j + 1) any_b = any_b | b[j]; end initial begin #1; $display(\"%0d %0d\", any_a, any_b); $finish; end endmodule",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_celox"))
+            .current_dir(project.path())
+            .arg("run")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    fs::write(&config, "sources = ['top.sv']\ntop = 'Top'\n").unwrap();
+    let standard = run(&[]);
+    assert!(standard.status.success(), "{standard:?}");
+    // The shared index wakes the other block mid-loop under the standard
+    // semantics, so neither reduction completes; the compatibility
+    // temporary semantics below completes both.
+    assert_eq!(standard.stdout, b"0 0\n");
+    assert!(
+        !String::from_utf8_lossy(&standard.stderr).contains("shared_always_temporary"),
+        "{standard:?}"
+    );
+    fs::write(
+        &config,
+        "sources = ['top.sv']\ntop = 'Top'\n[compatibility]\nshared_always_temporary = true\n",
+    )
+    .unwrap();
+    let compatible = run(&[]);
+    assert!(compatible.status.success(), "{compatible:?}");
+    assert_eq!(compatible.stdout, b"1 1\n");
+    assert!(
+        String::from_utf8_lossy(&compatible.stderr).contains("shared_always_temporary"),
+        "{compatible:?}"
+    );
+    // `shared_always_temporary` is not a diagnostic code: a level for it
+    // under [diagnostics] has no effect, with or without the opt-in.
+    fs::write(
+        &config,
+        "sources = ['top.sv']\ntop = 'Top'\n[diagnostics]\nshared_always_temporary = 'allow'\n",
+    )
+    .unwrap();
+    let ignored = run(&[]);
+    assert!(ignored.status.success(), "{ignored:?}");
+    assert_eq!(ignored.stdout, b"0 0\n");
+    assert!(
+        !String::from_utf8_lossy(&ignored.stderr).contains("shared_always_temporary"),
+        "{ignored:?}"
+    );
+    fs::write(
+        &config,
+        "sources = ['top.sv']\ntop = 'Top'\n[compatibility]\nshared_always_temporary = true\n[diagnostics]\nshared_always_temporary = 'error'\n",
+    )
+    .unwrap();
+    let still_compatible = run(&[]);
+    assert!(still_compatible.status.success(), "{still_compatible:?}");
+    assert_eq!(still_compatible.stdout, b"1 1\n");
+    assert!(
+        String::from_utf8_lossy(&still_compatible.stderr).contains("shared_always_temporary"),
+        "{still_compatible:?}"
+    );
+}
+
+#[test]
 fn inferred_latch_uses_common_diagnostics_for_run_and_build() {
     let project = tempfile::tempdir().unwrap();
     let config = project.path().join("celox.toml");

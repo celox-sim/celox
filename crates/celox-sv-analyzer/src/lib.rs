@@ -82,7 +82,7 @@ pub struct AnalysisOptions {
     /// before it reads it, and that nothing else reads, as a temporary of
     /// each block, instead of a variable whose writes wake the other blocks
     /// (IEEE 1800-2023 9.4.2.2). Off by default; see the
-    /// `shared_always_temporary` diagnostic.
+    /// `shared_always_temporary` compatibility opt-in.
     pub shared_always_temporaries: bool,
     /// Default unit/precision exponents; precision also bounds global resolution.
     pub default_timescale: Option<(i32, i32)>,

@@ -387,6 +387,7 @@ impl NativeSimulatorHandle {
         let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
         opts.common.diagnostic_policy =
             celox_cfg.diagnostic_policy(opts.common.diagnostic_policy.strict);
+        opts.common.legacy_empty_reductions = celox_cfg.legacy_empty_reductions();
         append_extra_source(&mut sources, &opts.extra_source);
 
         let source_refs: Vec<(&str, &std::path::Path)> = sources
@@ -431,6 +432,7 @@ impl NativeSimulatorHandle {
         let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
         opts.common.diagnostic_policy =
             celox_cfg.diagnostic_policy(opts.common.diagnostic_policy.strict);
+        opts.common.legacy_empty_reductions = celox_cfg.legacy_empty_reductions();
         append_extra_source(&mut sources, &opts.extra_source);
 
         let cache_key = build_cache_key(&sources, &top, &opts, Some(&metadata));

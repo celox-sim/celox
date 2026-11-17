@@ -118,6 +118,7 @@ pub struct NapiOptions {
 #[allow(dead_code)]
 pub(super) struct ParsedOptionsCommon {
     pub(super) diagnostic_policy: celox::DiagnosticPolicy,
+    pub(super) legacy_empty_reductions: bool,
     pub(super) four_state: bool,
     pub(super) plusargs: Vec<String>,
     pub(super) allow_inferred_latches: bool,
@@ -409,6 +410,7 @@ pub(super) fn parse_options_common(options: &Option<NapiOptions>) -> Result<Pars
             Ok(ParsedOptionsCommon {
                 diagnostic_policy: celox::DiagnosticPolicy::default()
                     .strict(o.strict.unwrap_or(false)),
+                legacy_empty_reductions: false,
                 four_state: o.four_state.unwrap_or(false),
                 plusargs: o.plusargs.clone().unwrap_or_default(),
                 allow_inferred_latches: o.allow_inferred_latches.unwrap_or(false),
@@ -424,6 +426,7 @@ pub(super) fn parse_options_common(options: &Option<NapiOptions>) -> Result<Pars
         }
         None => Ok(ParsedOptionsCommon {
             diagnostic_policy: Default::default(),
+            legacy_empty_reductions: false,
             four_state: false,
             plusargs: Vec::new(),
             allow_inferred_latches: false,
@@ -508,6 +511,7 @@ pub(super) fn apply_options<'a, T>(
             .clone()
             .with_inferred_latches(opts.allow_inferred_latches),
     );
+    builder = builder.legacy_empty_reductions(opts.legacy_empty_reductions);
     builder = builder.four_state(opts.four_state);
     builder = builder.plusargs(opts.plusargs.clone());
     builder = builder.optimize_options(opts.optimize_options.clone());

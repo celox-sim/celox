@@ -22,10 +22,10 @@ pub enum DiagnosticLevel {
 /// IEEE 1800-2023 9.2.2.2 likewise asks tools to warn, not fail, when
 /// latched behavior is inferred in `always_comb`.
 ///
-/// `shared_always_temporary` is deliberately absent: its `error` level
-/// does not reject a design, it selects the standard shared-variable
-/// semantics, so warning by default would silently change simulation
-/// results instead of letting more designs compile.
+/// `shared_always_temporary` is deliberately absent: it is not a
+/// diagnostic severity at all. The `[compatibility]` opt-in of the same
+/// name selects per-block temporaries, which changes simulation
+/// results, so it is controlled by that boolean, never by a level.
 pub(crate) const STRICT_CODES: [&str; 7] = [
     "mixed_timescale",
     "duplicate_module",
@@ -48,6 +48,10 @@ pub(crate) const STRICT_CODES: [&str; 7] = [
 pub struct DiagnosticPolicy {
     /// Promote the recoverable diagnostics to errors by default.
     pub strict: bool,
+    /// Compatibility opt-in: treat a variable written by several
+    /// `always @*` blocks as a temporary of each block. Not a diagnostic
+    /// level; when enabled, the deviation is reported as a warning.
+    pub shared_always_temporary: bool,
     levels: BTreeMap<String, DiagnosticLevel>,
 }
 
@@ -61,6 +65,7 @@ impl<'de> serde::Deserialize<'de> for DiagnosticPolicy {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Ok(Self {
             strict: false,
+            shared_always_temporary: false,
             levels: BTreeMap::deserialize(deserializer)?,
         })
     }
@@ -92,6 +97,13 @@ impl DiagnosticPolicy {
                 .iter()
                 .map(|(code, level)| (code.clone(), *level)),
         );
+    }
+
+    /// Enable or disable shared `always @*` temporaries (the
+    /// `[compatibility]` opt-in), returning the updated policy.
+    pub fn with_shared_always_temporary(mut self, enable: bool) -> Self {
+        self.shared_always_temporary = enable;
+        self
     }
 
     /// Supply the legacy latch opt-in only when no explicit diagnostic setting exists.
@@ -148,13 +160,23 @@ impl DiagnosticPolicy {
     }
 
     pub(crate) fn level(&self, code: &str) -> DiagnosticLevel {
-        self.levels.get(code).copied().unwrap_or(
-            if code == "shared_always_temporary" || (self.strict && STRICT_CODES.contains(&code)) {
+        // `shared_always_temporary` is a compatibility boolean, not a
+        // diagnostic level: a level entry for it has no effect.
+        if code == "shared_always_temporary" {
+            return if self.shared_always_temporary {
+                DiagnosticLevel::Warn
+            } else {
+                DiagnosticLevel::Error
+            };
+        }
+        self.levels
+            .get(code)
+            .copied()
+            .unwrap_or(if self.strict && STRICT_CODES.contains(&code) {
                 DiagnosticLevel::Error
             } else {
                 DiagnosticLevel::Warn
-            },
-        )
+            })
     }
 
     pub(crate) fn sv_options(

@@ -222,6 +222,7 @@ impl NativeSimulatorHandle {
         let mut opts = parse_options_common(&options)?;
         let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
         opts.diagnostic_policy = celox_cfg.diagnostic_policy(opts.diagnostic_policy.strict);
+        opts.legacy_empty_reductions = celox_cfg.legacy_empty_reductions();
         append_extra_source(&mut sources, &opts.extra_source);
 
         let source_refs: Vec<(&str, &std::path::Path)> = sources

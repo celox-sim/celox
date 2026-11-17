@@ -628,11 +628,6 @@ Code that must stay portable should avoid relying on them.
   calls in unused function declarations.
 - **Coverage is not reported.** Immediate `cover` executes its pass
   statement, but coverage counters and reports are not exposed.
-- **Opt-in legacy empty reductions.** By default, empty array reductions
-  return their identities (7.12.3). Rust's
-  `SimulatorBuilder::legacy_empty_reductions(true)` (or the frontend's
-  `AnalysisOptions::legacy_empty_reductions`) instead returns zero for all
-  empty reductions, for compatibility with tools that do so.
 - **Default time scales for elements without one.** IEEE 1800-2023
   3.14.2.3 makes a design an error when some design elements have a time
   unit and precision (declared, inherited or from `` `timescale ``) and

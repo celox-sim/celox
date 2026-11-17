@@ -295,8 +295,11 @@ impl BuildCache {
         field(
             &mut hash,
             format!(
-                "{:?}:{:?}:{:?}",
-                opts.design.parameters, opts.design.diagnostics, opts.design.signal_access
+                "{:?}:{:?}:{:?}:{}",
+                opts.design.parameters,
+                opts.design.diagnostics,
+                opts.design.signal_access,
+                opts.design.legacy_empty_reductions
             )
             .as_bytes(),
         );

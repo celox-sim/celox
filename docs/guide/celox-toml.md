@@ -167,8 +167,6 @@ and the diagnostic stays visible. Set `strict = true` at the manifest root
 (or in a target), pass `--strict` to the CLI, or use the Rust
 `.strict(true)` / JavaScript `strict: true` option to promote all of them
 back to errors. An explicit per-code level always wins over strict mode.
-(`shared_always_temporary` is the exception discussed below: its `error`
-level selects the standard semantics rather than rejecting the design.)
 
 Recoverable errors support relaxation only when the compiler defines a fallback.
 `mixed_timescale` is one such diagnostic: IEEE 1800-2023 §3.14.2.3 requires
@@ -225,23 +223,6 @@ The Rust `.allow_inferred_latches(true)` and JavaScript `allowInferredLatches: t
 options provide `allow` only when this diagnostic has no explicit setting;
 an explicit `error`, `warn` or `allow` takes precedence.
 
-`shared_always_temporary` is the exception: it defaults to `error` in both modes, which keeps IEEE 1800-2023
-semantics for a variable that several `always @*` blocks write, such as a loop
-index they share: each block waits on the variables it reads, the shared one
-included (§9.4.2.2), and writes notify other blocks that are waiting. For an
-isolated index written before reads, Celox may run other Active work after the
-body and before the next implicit wait (§4.7, §4.9.3). Shared storage and event
-notifications remain; sharing alone does not require nonconvergence. Blocks that keep waking
-each other end the run with `time T does not settle`, which names the blocks.
-With `warn` or `allow`, Celox instead makes such a variable a temporary of each
-block, when only `always @*` blocks write it, each writes it before it reads it
-on every path, and nothing else reads it: no other process, continuous
-assignment, subroutine, port, instance connection or hierarchical name. Its
-writes then wake no other block, as in Icarus Verilog, and the variable itself
-keeps its initial value. This deviates from the standard, so it is not the
-default; `warn` reports each variable and its blocks. Declaring the variable
-inside each block keeps the standard semantics without it.
-
 Project simulator constructors load this table alongside `Veryl.toml`. Native
 compilation also supports standalone SystemVerilog projects:
 
@@ -271,6 +252,45 @@ The order is common diagnostics → selected target → CLI overrides. Repeat
 `--diagnostic CODE=LEVEL` to override multiple codes; the last assignment to a
 code wins. `celox run` and `celox vpi build` print retained compilation warnings.
 Diagnostic severity does not change optimizer settings or runtime error handling.
+
+### `[compatibility]`
+
+Opt-ins that change simulation behavior for compatibility with other
+tools, grouped separately from diagnostic severities:
+
+```toml
+[compatibility]
+legacy_empty_reductions = true
+shared_always_temporary = true
+
+[targets.legacy.compatibility]
+legacy_empty_reductions = false
+```
+
+`legacy_empty_reductions` returns zero for every empty SystemVerilog
+array reduction instead of each operator's identity (product one,
+bitwise AND all ones, and so on; IEEE 1800-2023 §7.12.3). The CLI flag
+is `--legacy-empty-reductions`; the Rust spelling is
+`SimulatorBuilder::legacy_empty_reductions(true)`.
+
+`shared_always_temporary` treats a variable written by several
+`always @*` blocks as a temporary of each block. By default Celox keeps
+IEEE 1800-2023 semantics for such a variable, such as a shared loop
+index: each block waits on the variables it reads, the shared one
+included (§9.4.2.2), and writes notify other blocks that are waiting.
+With the opt-in, Celox instead makes the variable a temporary of each
+block when only `always @*` blocks write it, each writes it before it
+reads it on every path, and nothing else reads it. Its writes then wake
+no other block, as in Icarus Verilog, and the variable itself keeps its
+initial value. This deviates from the standard, so it is off by
+default; when it applies, Celox reports each variable and its blocks
+as a warning. It is not a diagnostic code: a level for it under
+`[diagnostics]` has no effect. The CLI flag is
+`--shared-always-temporary`, and the Rust spelling is
+`SimulatorBuilder::shared_always_temporary(true)`.
+
+The order is common compatibility → selected target → CLI flags.
+Project simulator constructors read the same table from `celox.toml`.
 
 ## CLI optimization and signal access
 
