@@ -1,0 +1,1 @@
+Address second review: conditional arm common width, guarded setup for pattern values nested in conditional arms, pattern setup before repeat/while loop construction, explicit rejection of non-integral pattern fields, and matches binding on the right of &&&.
