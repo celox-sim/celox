@@ -1245,8 +1245,8 @@ chapter-6/6.6.7--nettype.sv	2state	pass
 chapter-6/6.6.7--nettype.sv	4state	pass
 chapter-6/6.6.7--nettype_resolution_fn.sv	2state	fail
 chapter-6/6.6.7--nettype_resolution_fn.sv	4state	fail
-chapter-6/6.6.8--interconnect.sv	2state	fail
-chapter-6/6.6.8--interconnect.sv	4state	fail
+chapter-6/6.6.8--interconnect.sv	2state	pass
+chapter-6/6.6.8--interconnect.sv	4state	pass
 chapter-6/6.9.1--logic_vector.sv	2state	pass
 chapter-6/6.9.1--logic_vector.sv	4state	pass
 chapter-6/6.9.2--vector_scalared.sv	2state	pass

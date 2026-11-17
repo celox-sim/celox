@@ -712,6 +712,11 @@ impl Signal {
         self.is_net
     }
 
+    /// Whether this is a generic interconnect net (6.6.8).
+    pub fn is_interconnect(&self) -> bool {
+        self.is_net && self.net_resolution == crate::ast::NetResolution::Interconnect
+    }
+
     /// Whether this is an unresolved, single-driver `uwire` net (6.6.2).
     pub fn is_unresolved_net(&self) -> bool {
         self.unresolved_net
@@ -793,6 +798,11 @@ impl Port {
 
     pub fn is_net(&self) -> bool {
         self.is_net
+    }
+
+    /// Whether this is a generic interconnect port (6.6.8).
+    pub fn is_interconnect(&self) -> bool {
+        self.is_net && self.net_resolution == crate::ast::NetResolution::Interconnect
     }
 
     /// Whether this is an unresolved, single-driver `uwire` net (6.6.2).

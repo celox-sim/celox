@@ -16,6 +16,7 @@
     "verilator/hierarchy.json",
     "verilator/increment_decrement.json",
     "verilator/indexed_select.json",
+    "verilator/interconnect.json",
     "verilator/interfaces.json",
     "verilator/latch.json",
     "verilator/literals.json",

@@ -15,6 +15,7 @@
     "icarus/hierarchy.json",
     "icarus/increment_decrement.json",
     "icarus/indexed_select.json",
+    "icarus/interconnect.json",
     "icarus/interfaces.json",
     "icarus/latch.json",
     "icarus/literals.json",

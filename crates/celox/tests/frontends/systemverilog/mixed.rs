@@ -1934,3 +1934,35 @@ fn mixed_hierarchies_reject_overrides_that_select_module_instances() {
     let error = error.to_string();
     assert!(error.contains("in a mixed-language hierarchy"), "{error}");
 }
+
+#[test]
+fn mixed_hierarchies_resolve_generic_interconnects() {
+    // The external-hierarchy lowering resolves generic interconnects
+    // (IEEE 1800-2023 6.6.8) like the ordinary path: the 8-bit ports
+    // determine the type of the typeless net between them.
+    let veryl =
+        "module Top(a: input logic<8>, y: output logic<8>) { inst sv_top: $sv::SvTop(a, y); }";
+    let sv = r#"
+        module Src(input logic [7:0] a, output logic [7:0] y);
+            assign y = a;
+        endmodule
+        module Sink(input logic [7:0] a, output logic [7:0] y);
+            assign y = a;
+        endmodule
+        module SvTop(input logic [7:0] a, output logic [7:0] y);
+            interconnect bus;
+            Src src(.a(a), .y(bus));
+            Sink sink(.a(bus), .y(y));
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sources(vec![(veryl, Path::new("top.veryl"))], "Top")
+        .with_sv_sources(vec![(sv, Path::new("sv.sv"))])
+        .build()
+        .unwrap();
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(a, 0xa5u8)).unwrap();
+    assert_eq!(sim.get(y), BigUint::from(0xa5u8));
+    sim.modify(|io| io.set(a, 0x3cu8)).unwrap();
+    assert_eq!(sim.get(y), BigUint::from(0x3cu8));
+}

@@ -187,11 +187,51 @@ pub(super) fn validate_specialized_instance_net_drivers(
         };
         for signal_name in net_names {
             let child_driver_ranges = child_output_driver_ranges(module, &children, signal_name);
+            // A generic interconnect that merged into a resolved net
+            // (23.3.3.7.1) takes its drivers from every connected port;
+            // the glue joins them with the merged resolution, which
+            // each array element may merge separately (6.6.8).
+            let resolved_kind = |resolution: &sv::ast::NetResolution| {
+                !matches!(
+                    resolution,
+                    sv::ast::NetResolution::Single | sv::ast::NetResolution::Interconnect
+                )
+            };
+            let interconnect_resolved = module
+                .interconnect_resolutions
+                .get(signal_name)
+                .is_some_and(resolved_kind);
+            let element_width = module
+                .signal_names
+                .get(signal_name)
+                .and_then(|id| module.variables.get(id))
+                .filter(|variable| !variable.array_dims.is_empty())
+                .map(|variable| {
+                    variable.width / variable.array_dims.iter().product::<usize>().max(1)
+                })
+                .unwrap_or(0);
+            // Whether the drivers on one range may join: the merged
+            // resolution of the element that range belongs to.
+            let range_resolved = |range: Option<(i128, i128)>| {
+                if interconnect_resolved {
+                    return true;
+                }
+                let Some((lsb, _)) = range else {
+                    return false;
+                };
+                element_width > 0
+                    && module
+                        .interconnect_element_resolutions
+                        .get(signal_name)
+                        .and_then(|per_element| per_element.get(&((lsb as usize) / element_width)))
+                        .is_some_and(resolved_kind)
+            };
             validate_net_driver_ranges(
                 &drivers,
                 signal_name,
                 &child_driver_ranges,
-                resolved_nets.net(signal_name).is_some(),
+                resolved_nets.net(signal_name).is_some() || interconnect_resolved,
+                &range_resolved,
             )?;
         }
 
@@ -375,6 +415,7 @@ fn validate_net_driver_ranges(
     signal_name: &str,
     child_driver_ranges: &[(usize, Option<(i128, i128)>)],
     resolved: bool,
+    child_resolved: &dyn Fn(Option<(i128, i128)>) -> bool,
 ) -> Result<(), sv::AnalyzerError> {
     let local_drivers = drivers.local(signal_name);
     let overlapping_local_drivers = local_drivers.iter().enumerate().any(|(index, left)| {
@@ -392,7 +433,15 @@ fn validate_net_driver_ranges(
     let overlapping_continuous = driver_ranges_overlap(&drivers.continuous(signal_name));
     // The continuous assignments of a resolved net are joined into one
     // definition; a driver below an instance still needs bits of its own.
-    if driver_ranges_overlap(child_driver_ranges)
+    // Child drivers may overlap only on a range whose merged resolution
+    // joins them, which each array element merges separately (6.6.8).
+    let unresolved_child_overlap = child_driver_ranges.iter().enumerate().any(|(index, left)| {
+        child_driver_ranges[index + 1..].iter().any(|right| {
+            net_driver_ranges_overlap(left.1, right.1)
+                && !(child_resolved(left.1) && child_resolved(right.1))
+        })
+    });
+    if unresolved_child_overlap
         || child_local_overlap
         || (!resolved && (overlapping_local_drivers || overlapping_continuous))
     {

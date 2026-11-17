@@ -53,6 +53,7 @@ mod glue_expr;
 mod hierarchy;
 mod initial_processes;
 mod instances;
+mod interconnect;
 mod interfaces;
 mod masked;
 mod module;
@@ -100,6 +101,7 @@ use glue::*;
 use glue_expr::*;
 use initial_processes::*;
 use instances::*;
+use interconnect::*;
 use interfaces::*;
 use module::*;
 use operators::*;
@@ -246,6 +248,15 @@ pub(crate) struct LoweredSvModule {
     /// The `inout` ports whose net has its driver in this module or below it,
     /// filled in by [`resolve_inout_drivers`].
     inout_driven_inside: HashSet<String>,
+    /// The generic interconnect nets and ports of the module (IEEE
+    /// 1800-2023 6.6.8), by name.
+    interconnect_names: HashSet<String>,
+    /// The net resolution each interconnect name merged to, filled in by
+    /// [`interconnect::resolve_interconnects`] (23.3.3.7.1).
+    interconnect_resolutions: HashMap<String, sv::ast::NetResolution>,
+    /// The merged resolution of each distinctly typed element of an
+    /// interconnect array, by element index.
+    interconnect_element_resolutions: HashMap<String, HashMap<usize, sv::ast::NetResolution>>,
     /// The calls the lowering inlined, when the recursion report is written.
     calls: Option<recursion::CallGraph>,
 }
@@ -269,6 +280,11 @@ pub(crate) struct LoweredSvInstance {
     pub instance_name: String,
     pub force_signals: Vec<String>,
     pub parameter_overrides: Vec<LoweredSvParameterOverride>,
+    /// The merged types of the child's interconnect ports as this
+    /// instance connects them (IEEE 1800-2023 23.3.3.7.1), filled in
+    /// by [`interconnect::resolve_interconnects`] when instances of one
+    /// specialization merge them differently.
+    pub interconnect_descriptor: Vec<(String, String)>,
     pub port_connections: Vec<LoweredSvPortConnection>,
     /// For an element of an instance array: its position in declaration order
     /// and the number of elements.
@@ -299,6 +315,8 @@ pub(crate) struct LoweredSvModuleKey {
     pub name: String,
     pub force_signals: Vec<String>,
     pub parameter_overrides: Vec<LoweredSvParameterOverride>,
+    /// See [`LoweredSvInstance::interconnect_descriptor`].
+    pub interconnect_descriptor: Vec<(String, String)>,
 }
 
 impl LoweredSvModuleKey {
@@ -307,6 +325,7 @@ impl LoweredSvModuleKey {
             name,
             force_signals: Vec::new(),
             parameter_overrides: Vec::new(),
+            interconnect_descriptor: Vec::new(),
         }
     }
 
@@ -317,6 +336,7 @@ impl LoweredSvModuleKey {
             name: instance.module_name.clone(),
             force_signals: instance.force_signals.clone(),
             parameter_overrides,
+            interconnect_descriptor: instance.interconnect_descriptor.clone(),
         }
     }
 }

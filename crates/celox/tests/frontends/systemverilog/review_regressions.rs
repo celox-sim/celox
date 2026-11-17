@@ -5963,8 +5963,22 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(input wire a, output wire y = 1'b1); assign y = a; endmodule
         "#,
         ),
+    ];
+
+    for (expected, source) in cases {
+        let error = cranelift_build_error(source);
+        assert!(error.contains(expected), "{expected}: {error}");
+    }
+}
+
+#[test]
+fn rejects_misused_or_unresolved_interconnect() {
+    // IEEE 1800-2023 6.6.8: an interconnect net may only carry port and
+    // terminal connections; 23.3.3.7.1: a simulated net may not remain an
+    // interconnect at the end of elaboration.
+    let cases: &[(&str, &str)] = &[
         (
-            "interconnect net declaration",
+            "interconnect",
             r#"
             module Top(output wire y);
                 interconnect link;
@@ -5972,8 +5986,87 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             endmodule
         "#,
         ),
+        (
+            "interconnect",
+            r#"
+            module Child(output logic y); assign y = 1'b1; endmodule
+            module Top(output logic y);
+                interconnect link;
+                Child child(.y(link));
+                assign y = link;
+            endmodule
+        "#,
+        ),
+        (
+            "interconnect",
+            r#"
+            module Child(output logic y); assign y = 1'b1; endmodule
+            module Top(output logic y);
+                interconnect link;
+                Child child(.y(link));
+                always_comb y = link;
+            endmodule
+        "#,
+        ),
+        (
+            "interconnect",
+            r#"
+            module Child(output logic [7:0] y); assign y = 8'hff; endmodule
+            module Sink(input real a, output logic y); assign y = (a > 0.0); endmodule
+            module Top(output logic y);
+                interconnect link;
+                Child child(.y(link));
+                Sink sink(.a(link), .y(y));
+            endmodule
+        "#,
+        ),
+        (
+            "interconnect net with a data type",
+            r#"
+            module Child(output logic [3:0] y); assign y = 4'ha; endmodule
+            module Top(output logic [3:0] y);
+                interconnect logic [3:0] link;
+                Child child(.y(link));
+                assign y = 4'b0;
+            endmodule
+        "#,
+        ),
+        (
+            "interconnect net `bus` does not resolve to a net type",
+            r#"
+            module Top(output logic [3:0] y);
+                interconnect [3:0] bus;
+                assign y = 4'b0;
+            endmodule
+        "#,
+        ),
+        (
+            "interconnect net `bus` used outside a port or terminal connection",
+            r#"
+            module Child(output logic y); assign y = 1'b1; endmodule
+            module Top(output logic y);
+                interconnect bus;
+                wire copy = bus;
+                Child child(.y(bus));
+                assign y = copy;
+            endmodule
+        "#,
+        ),
+        (
+            "interconnect port with a data type",
+            r#"
+            module Leaf(input logic [3:0] a, output logic [3:0] y);
+                assign y = a;
+            endmodule
+            module Mid(input interconnect logic [3:0] p, output logic [3:0] y);
+                Leaf leaf(.a(p), .y(y));
+            endmodule
+            module Top(output logic [3:0] y);
+                Mid mid(.p(4'ha), .y(y));
+            endmodule
+        "#,
+        ),
     ];
-
     for (expected, source) in cases {
         let error = cranelift_build_error(source);
         assert!(error.contains(expected), "{expected}: {error}");

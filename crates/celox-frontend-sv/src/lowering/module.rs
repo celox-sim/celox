@@ -738,6 +738,21 @@ fn lower_module_with_overrides(
         event_assignments,
         repeated_ff_writes,
         inout_driven_inside: HashSet::default(),
+        interconnect_names: module
+            .ports()
+            .iter()
+            .filter(|port| port.is_interconnect())
+            .map(|port| port.name().to_string())
+            .chain(
+                module
+                    .signals()
+                    .iter()
+                    .filter(|signal| signal.is_interconnect())
+                    .map(|signal| signal.name().to_string()),
+            )
+            .collect(),
+        interconnect_resolutions: HashMap::default(),
+        interconnect_element_resolutions: HashMap::default(),
         calls: None,
     })
 }
