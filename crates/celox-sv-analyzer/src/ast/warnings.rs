@@ -26,6 +26,12 @@ pub enum AnalyzerWarning {
     },
     /// An ignored `$exit` in a function outside a program (IEEE 1800-2023 24.7).
     ExitOutsideProgram { site: Option<SourceSpan> },
+    /// A static variable whose declaration specifies an initialization value
+    /// without the `static` keyword (IEEE 1800-2023 6.21).
+    ImplicitStaticInitializer {
+        name: String,
+        site: Option<SourceSpan>,
+    },
 }
 
 pub(crate) fn append(
