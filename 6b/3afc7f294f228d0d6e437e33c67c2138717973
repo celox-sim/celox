@@ -1,0 +1,1 @@
+Address fifth review: arm guards run unless definitely false/true so ambiguous conditions merge with both setups; pattern conditionals keep non-integral (string/real) result types without an integral layout or resize.
