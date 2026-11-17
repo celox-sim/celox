@@ -16,24 +16,89 @@ pub enum DiagnosticLevel {
     Error,
 }
 
+/// Diagnostics that strict mode promotes to errors. Each has a defined
+/// fallback, so the default severity is `warn`: the design still compiles
+/// with the fallback semantics and the diagnostic stays visible.
+/// IEEE 1800-2023 9.2.2.2 likewise asks tools to warn, not fail, when
+/// latched behavior is inferred in `always_comb`.
+///
+/// `shared_always_temporary` is deliberately absent: its `error` level
+/// does not reject a design, it selects the standard shared-variable
+/// semantics, so warning by default would silently change simulation
+/// results instead of letting more designs compile.
+pub(crate) const STRICT_CODES: [&str; 7] = [
+    "mixed_timescale",
+    "duplicate_module",
+    "interface_array_query",
+    "interface_array_parameter",
+    "unpacked_port_default",
+    "multiple_always_ff_drivers",
+    "inferred_latch",
+];
+
 /// Overrides keyed by the code shown in a compilation diagnostic.
 /// Unlisted diagnostics retain their default severity. Only explicitly
 /// recoverable errors can be relaxed.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct DiagnosticPolicy(pub BTreeMap<String, DiagnosticLevel>);
+///
+/// By default every recoverable diagnostic is a warning. With
+/// [`strict`](Self::strict) enabled, the codes in `STRICT_CODES` default
+/// to errors, which restores the pre-strict-mode behavior. An explicit
+/// per-code override always wins over strict mode.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct DiagnosticPolicy {
+    /// Promote the recoverable diagnostics to errors by default.
+    pub strict: bool,
+    levels: BTreeMap<String, DiagnosticLevel>,
+}
+
+impl serde::Serialize for DiagnosticPolicy {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.levels.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DiagnosticPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self {
+            strict: false,
+            levels: BTreeMap::deserialize(deserializer)?,
+        })
+    }
+}
 
 impl DiagnosticPolicy {
     /// Set a per-code override. Later assignments replace earlier ones.
     pub fn set(&mut self, code: impl Into<String>, level: DiagnosticLevel) {
-        self.0.insert(code.into(), level);
+        self.levels.insert(code.into(), level);
+    }
+
+    /// The explicit per-code overrides, without the strict-mode default.
+    pub fn overrides(&self) -> &BTreeMap<String, DiagnosticLevel> {
+        &self.levels
+    }
+
+    /// Enable or disable strict mode, returning the updated policy.
+    pub fn strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
+    /// Merge `other` over this policy: its per-code overrides win.
+    /// Strict mode is left unchanged; callers apply it separately.
+    pub fn merge(&mut self, other: &Self) {
+        self.levels.extend(
+            other
+                .levels
+                .iter()
+                .map(|(code, level)| (code.clone(), *level)),
+        );
     }
 
     /// Supply the legacy latch opt-in only when no explicit diagnostic setting exists.
     /// Explicit per-code policy wins regardless of builder setter order.
     pub fn with_inferred_latches(mut self, allow: bool) -> Self {
         if allow {
-            self.0
+            self.levels
                 .entry("inferred_latch".to_string())
                 .or_insert(DiagnosticLevel::Allow);
         }
@@ -67,32 +132,24 @@ impl DiagnosticPolicy {
     }
 
     /// Read the diagnostics table of a celox.toml, ignoring other configuration.
+    /// A root `strict = true` in the same file enables strict mode.
     pub fn from_file(path: &Path) -> Result<Self, String> {
         #[derive(serde::Deserialize, Default)]
         struct Config {
             #[serde(default)]
             diagnostics: DiagnosticPolicy,
+            strict: Option<bool>,
         }
         let text = std::fs::read_to_string(path)
             .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
         toml::from_str::<Config>(&text)
-            .map(|config| config.diagnostics)
+            .map(|config| config.diagnostics.strict(config.strict.unwrap_or(false)))
             .map_err(|error| format!("failed to parse {}: {error}", path.display()))
     }
 
     pub(crate) fn level(&self, code: &str) -> DiagnosticLevel {
-        self.0.get(code).copied().unwrap_or(
-            if matches!(
-                code,
-                "mixed_timescale"
-                    | "duplicate_module"
-                    | "shared_always_temporary"
-                    | "interface_array_query"
-                    | "interface_array_parameter"
-                    | "unpacked_port_default"
-                    | "multiple_always_ff_drivers"
-                    | "inferred_latch"
-            ) {
+        self.levels.get(code).copied().unwrap_or(
+            if code == "shared_always_temporary" || (self.strict && STRICT_CODES.contains(&code)) {
                 DiagnosticLevel::Error
             } else {
                 DiagnosticLevel::Warn

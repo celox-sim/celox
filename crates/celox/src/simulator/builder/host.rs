@@ -218,10 +218,12 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
 
     /// Allow incomplete assignments and retained values in `always_comb`.
     ///
-    /// Disabled by default. When enabled, inferred latches retain their
-    /// value while closed and follow their inputs while open. Explicit
-    /// SystemVerilog `always_latch` and ordinary `always @*` processes do
-    /// not require this option.
+    /// Inferred latches compile with a warning by default; this option
+    /// silences that diagnostic when it has no explicit level. When
+    /// enabled, inferred latches retain their value while closed and
+    /// follow their inputs while open. Explicit SystemVerilog
+    /// `always_latch` and ordinary `always @*` processes do not require
+    /// this option.
     pub fn allow_inferred_latches(mut self, enable: bool) -> Self {
         self.options.allow_inferred_latches = enable;
         self
@@ -670,8 +672,25 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     }
 
     /// Override recoverable compilation diagnostic severities.
+    ///
+    /// The strict setting is kept, whichever order the setters are
+    /// called in: this replaces the per-code overrides only. Use
+    /// [`strict`](Self::strict) to change strict mode itself.
     pub fn diagnostic_policy(mut self, policy: crate::DiagnosticPolicy) -> Self {
-        self.options.diagnostic_policy = policy;
+        let strict = self.options.diagnostic_policy.strict || policy.strict;
+        self.options.diagnostic_policy = policy.strict(strict);
+        self
+    }
+
+    /// Promote recoverable compilation diagnostics to errors.
+    ///
+    /// By default diagnostics such as inferred latches are warnings and
+    /// the design compiles with the documented fallback semantics.
+    /// Strict mode restores the previous error behavior. An explicit
+    /// per-code [`diagnostic_policy`](Self::diagnostic_policy) override
+    /// wins over strict mode for its code.
+    pub fn strict(mut self, enable: bool) -> Self {
+        self.options.diagnostic_policy.strict = enable;
         self
     }
 

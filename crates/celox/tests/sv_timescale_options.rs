@@ -48,8 +48,21 @@ timing!(native, build_native);
 #[test]
 fn configuring_defaults_does_not_relax_mixed_timescale_diagnostics() {
     let source = "module Child; timeunit 1ns/1ps; endmodule module Top; Child child(); endmodule";
+    // Configuring a default timescale does not silence the diagnostic:
+    // it still warns by default, and strict mode still rejects it.
+    let sim = celox::Simulator::from_sv_sources(vec![(source, Path::new("mixed.sv"))], "Top")
+        .sv_timescale(Some("1ns/1fs".parse().unwrap()))
+        .build_interpreter()
+        .unwrap();
+    assert_eq!(sim.warnings().len(), 1, "{:?}", sim.warnings());
+    assert!(
+        format!("{:?}", sim.warnings()[0]).contains("MixedTimescale"),
+        "{:?}",
+        sim.warnings()
+    );
     let error = celox::Simulator::from_sv_sources(vec![(source, Path::new("mixed.sv"))], "Top")
         .sv_timescale(Some("1ns/1fs".parse().unwrap()))
+        .strict(true)
         .build_interpreter()
         .err()
         .unwrap();

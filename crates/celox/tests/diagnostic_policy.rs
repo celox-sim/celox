@@ -83,8 +83,10 @@ mod sv {
     }
 
     #[test]
-    fn mixed_timescales_remain_an_error_by_default() {
-        let error = builder().build().err().unwrap().to_string();
+    fn mixed_timescales_warn_by_default_and_error_in_strict_mode() {
+        let sim = builder().build().unwrap();
+        assert_eq!(sim.warnings().len(), 1);
+        let error = builder().strict(true).build().err().unwrap().to_string();
         assert!(error.contains("mixed explicit and default"), "{error}");
     }
 
@@ -157,7 +159,7 @@ mod sv {
                 "Top",
             )
         };
-        let error = unwrapped(builder().build().err().unwrap().to_string());
+        let error = unwrapped(builder().strict(true).build().err().unwrap().to_string());
         assert!(
             error.contains("mixed explicit and default")
                 && error.contains(
@@ -219,6 +221,7 @@ mod sv {
             )],
             "Top",
         )
+        .strict(true)
         .build()
         .err()
         .unwrap()
@@ -280,6 +283,7 @@ mod sv {
             ]
         };
         let error = Simulator::from_sv_sources(sources(), "Top")
+            .strict(true)
             .build()
             .err()
             .unwrap();
@@ -408,6 +412,107 @@ module Top (
 }
 
 #[test]
+fn strict_mode_promotes_recoverable_diagnostics_and_explicit_overrides_win() {
+    use std::path::Path;
+    const SV: &str = "module Top(input logic en, input logic [7:0] d, output logic [7:0] q); always_comb if(en) q=d; endmodule";
+    let build = || Simulator::from_sv_sources(vec![(SV, Path::new("latch.sv"))], "Top");
+    // Default: warning, and the latch still simulates.
+    let mut sim = build().build_interpreter().unwrap();
+    assert_eq!(sim.warnings().len(), 1);
+    let en = sim.signal("en");
+    let d = sim.signal("d");
+    sim.modify(|io| {
+        io.set(en, 1u8);
+        io.set(d, 7u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 7u8.into());
+    // Strict: the same diagnostic is an error.
+    let error = build().strict(true).build_interpreter().unwrap_err();
+    assert!(error.to_string().contains("inferred_latch"), "{error}");
+    // An explicit per-code level wins over strict mode.
+    for policy_first in [true, false] {
+        let builder = if policy_first {
+            build()
+                .diagnostic_policy(policy("inferred_latch", DiagnosticLevel::Warn))
+                .strict(true)
+        } else {
+            build()
+                .strict(true)
+                .diagnostic_policy(policy("inferred_latch", DiagnosticLevel::Warn))
+        };
+        let sim = builder.build_interpreter().unwrap();
+        assert_eq!(sim.warnings().len(), 1);
+    }
+    // Strict can also come from the policy value itself.
+    let error = build()
+        .diagnostic_policy(DiagnosticPolicy::default().strict(true))
+        .build_interpreter()
+        .unwrap_err();
+    assert!(error.to_string().contains("inferred_latch"), "{error}");
+    // Applying a per-code policy after strict(true) keeps strict mode
+    // for the codes it does not list.
+    let error = build()
+        .strict(true)
+        .diagnostic_policy(policy("mixed_timescale", DiagnosticLevel::Allow))
+        .build_interpreter()
+        .unwrap_err();
+    assert!(error.to_string().contains("inferred_latch"), "{error}");
+}
+
+#[test]
+fn sv_and_mixed_compile_entry_points_apply_the_diagnostic_policy() {
+    use std::path::Path;
+    const SV: &str = "module Top(input logic en, input logic [7:0] d, output logic [7:0] q); always_comb if(en) q=d; endmodule";
+    let compile_sv = |policy: &DiagnosticPolicy| {
+        celox::compile_sv_to_sir_with_diagnostic_policy(
+            &[(SV, Path::new("latch.sv"))],
+            "Top",
+            &[],
+            &[],
+            false,
+            &celox::TraceOptions::default(),
+            None,
+            None,
+            None,
+            None,
+            &[],
+            &celox::OptimizeOptions::default(),
+            policy,
+        )
+    };
+    let (_, warnings) = compile_sv(&DiagnosticPolicy::default()).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let error = compile_sv(&DiagnosticPolicy::default().strict(true)).unwrap_err();
+    assert!(error.to_string().contains("inferred_latch"), "{error}");
+
+    let veryl = "module Top(en: input logic, d: input logic<8>, q: output logic<8>) { inst dut: $sv::Latch(en,d,q); }";
+    let sv_latch = SV.replace("Top", "Latch");
+    let compile_mixed = |policy: &DiagnosticPolicy| {
+        celox::compile_mixed_to_sir_with_diagnostic_policy(
+            &[(veryl, Path::new("top.veryl"))],
+            &[(&sv_latch, Path::new("latch.sv"))],
+            "Top",
+            &[],
+            &[],
+            false,
+            &celox::TraceOptions::default(),
+            None,
+            None,
+            None,
+            None,
+            &[],
+            &celox::OptimizeOptions::default(),
+            policy,
+        )
+    };
+    let (_, warnings) = compile_mixed(&DiagnosticPolicy::default()).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let error = compile_mixed(&DiagnosticPolicy::default().strict(true)).unwrap_err();
+    assert!(error.to_string().contains("inferred_latch"), "{error}");
+}
+
+#[test]
 fn overlapping_always_ff_memories_require_explicit_relaxation() {
     const SOURCE: &str = r#"module Top(input bit a, b, input bit[1:0] x, y,
       output wire[7:0] q);
@@ -433,10 +538,18 @@ fn overlapping_always_ff_memories_require_explicit_relaxation() {
             usize::from(level == DiagnosticLevel::Warn)
         );
     }
+    let sim = celox::Simulation::from_sv_sources(
+        vec![(SOURCE, std::path::Path::new("shared_ff_memory.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.warnings().len(), 1);
     let error = celox::Simulation::from_sv_sources(
         vec![(SOURCE, std::path::Path::new("shared_ff_memory.sv"))],
         "Top",
     )
+    .strict(true)
     .build_cranelift()
     .err()
     .unwrap()
@@ -519,8 +632,11 @@ mod inferred_latch {
 
     #[test]
     fn default_and_explicit_error_report_the_diagnostic_code() {
+        // The default is a warning; strict mode and an explicit error
+        // level both report the diagnostic code as an error.
+        assert_behavior(veryl().build_interpreter().unwrap(), DiagnosticLevel::Warn);
         for level in [None, Some(DiagnosticLevel::Error)] {
-            let mut builder = veryl();
+            let mut builder = veryl().strict(level.is_none());
             if let Some(level) = level {
                 builder = builder.diagnostic_policy(policy("inferred_latch", level));
             }
@@ -623,6 +739,7 @@ mod inferred_latch {
             || Simulator::from_sv_sources(vec![(source, Path::new("state_latch.sv"))], "Top");
         assert!(
             builder()
+                .strict(true)
                 .build_interpreter()
                 .unwrap_err()
                 .to_string()
@@ -638,6 +755,7 @@ mod inferred_latch {
                 usize::from(level == DiagnosticLevel::Warn)
             );
         }
+        assert_eq!(builder().build_interpreter().unwrap().warnings().len(), 1);
         for body in [
             "q=$time;",
             "if(en) q=$time; else q=0;",
@@ -676,10 +794,16 @@ mod inferred_latch {
             };
             assert!(
                 builder()
+                    .strict(true)
                     .build_interpreter()
                     .expect_err(body)
                     .to_string()
                     .contains("inferred_latch"),
+                "{body}"
+            );
+            assert_eq!(
+                builder().build_interpreter().unwrap().warnings().len(),
+                1,
                 "{body}"
             );
             for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
@@ -757,8 +881,16 @@ mod inferred_latch {
         let source = "module Top(input logic en, output logic q); always_comb q=q^en; endmodule";
         let builder =
             || Simulator::from_sv_sources(vec![(source, Path::new("procedural_state.sv"))], "Top");
-        let error = builder().build_interpreter().unwrap_err().to_string();
+        let error = builder()
+            .strict(true)
+            .build_interpreter()
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("inferred_latch"), "{error}");
+        assert_complete_read_before_write_activation(
+            builder().build_interpreter().unwrap(),
+            DiagnosticLevel::Warn,
+        );
         for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
             assert_complete_read_before_write_activation(
                 builder()
@@ -838,7 +970,10 @@ fn interface_array_queries_require_a_recoverable_diagnostic_override() {
     let source = "interface Lane; logic v; endinterface module Top(output wire [7:0] y); Lane lanes[3:2](); assign y=$size(lanes); endmodule";
     let build =
         || Simulator::from_sv_sources(vec![(source, Path::new("size_extension.sv"))], "Top");
-    let error = build().build_cranelift().err().unwrap();
+    let mut sim = build().build_cranelift().unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+    assert_eq!(sim.warnings().len(), 1);
+    let error = build().strict(true).build_cranelift().err().unwrap();
     assert!(
         matches!(error.kind(), SimulatorErrorKind::DiagnosticPolicy(_)),
         "{error}"
@@ -910,6 +1045,7 @@ fn interface_array_query_policy_covers_formals_and_generated_scopes() {
         "interface Lane; logic v; endinterface module Top(output wire [7:0] y); Lane lanes[2](); function automatic int count(); return $size(lanes); endfunction assign y=count(); endmodule",
     ] {
         let error = Simulator::from_sv_sources(vec![(source, Path::new("query_scope.sv"))], "Top")
+            .strict(true)
             .build_cranelift()
             .err()
             .unwrap();
@@ -953,7 +1089,10 @@ fn unindexed_interface_array_parameters_have_a_located_recoverable_diagnostic() 
         module Top(output wire [31:0] q); Bus #(13) bus[5:4](); assign q=bus.WIDTH; endmodule";
     let build =
         || Simulator::from_sv_sources(vec![(source, Path::new("array_parameter.sv"))], "Top");
-    let error = build().build_cranelift().err().unwrap();
+    let mut sim = build().build_cranelift().unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 13u8.into());
+    assert_eq!(sim.warnings().len(), 1);
+    let error = build().strict(true).build_cranelift().err().unwrap();
     assert!(
         matches!(error.kind(), SimulatorErrorKind::DiagnosticPolicy(_)),
         "{error}"

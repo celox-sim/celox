@@ -115,7 +115,8 @@ pub fn strictly_reject(width: usize) {
     let source =
         deep_nested_write(width).replace(&format!("0..{lanes}"), &format!("0..{}", lanes - 1));
     let error = celox::Simulator::builder(&source, "AdcGroupNestedWriteMre")
+        .strict(true)
         .build_interpreter()
-        .expect_err("incomplete writes must infer a latch");
+        .expect_err("incomplete writes must infer a latch in strict mode");
     assert!(error.to_string().contains("inferred_latch"), "{error}");
 }
