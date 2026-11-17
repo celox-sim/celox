@@ -1,0 +1,1 @@
+Address Codex review on PR #4215: keep same-named initialized static locals distinct by declaration site so each is warned.
