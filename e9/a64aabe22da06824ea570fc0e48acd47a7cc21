@@ -1,6 +1,1 @@
-Revision history for #4224:
-
-rev 2 (content) 2026-11-17 06:27 UTC — Address Codex review: preserve per-element types/resolutions across whole-array and per-instance interconnect merging, keep concatenation operand widths, and reject explicit data types on interconnect nets and ports
-rev 1 (initial) 2026-11-17 06:27 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":4224,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"f6c9cb1a8d5fcf34deda93b04402e8a78e2018da","timestamp_iso":"2026-11-17T06:27:48Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"f6c9cb1a8d5fcf34deda93b04402e8a78e2018da","new_sha":"e9a64aabe22da06824ea570fc0e48acd47a7cc21","timestamp_iso":"2026-11-17T06:27:48Z","reason":"Address Codex review: preserve per-element types/resolutions across whole-array and per-instance interconnect merging, keep concatenation operand widths, and reject explicit data types on interconnect nets and ports","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/f6c9cb1a8d5fcf34deda93b04402e8a78e2018da...e9a64aabe22da06824ea570fc0e48acd47a7cc21"}]} -->
+Address second Codex review: per-range driver-overlap validation, interconnect resolution in the external-hierarchy path, authored signing preservation, rejection of shaped-but-unconnected interconnects, and net-initializer use checks
