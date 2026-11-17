@@ -1,0 +1,1 @@
+Dropping: the premise was wrong. Icarus and Verilator both print the leading zero bytes of a packed %s as field spaces ([          Test], [ A]), matching the existing repo tests that CI failed; the LRM examples only appear unpadded because leading spaces are invisible in print. The original behavior stands.
