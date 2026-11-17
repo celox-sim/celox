@@ -1,0 +1,1 @@
+Address Codex review on PR #4215: warn for const static locals too, and promote implicit_static_initializer in strict mode.
