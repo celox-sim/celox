@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794901659272,
+  "lastUpdate": 1794910521324,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -456614,6 +456614,37 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-native-parallel-aarch64/heliodor_suite_smp_linux_boot_4hart_execution",
             "unit": "ms",
             "value": 6557341.591454
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "d8db4d8166f5538bd85b2ffd79ee575d2231be6a",
+          "message": "feat(sv): constrain bit-selects and part-selects of properties (#3905)",
+          "timestamp": "2026-11-15T09:07:04Z",
+          "url": "https://github.com/celox-sim/celox/commit/d8db4d8166f5538bd85b2ffd79ee575d2231be6a"
+        },
+        "date": 1794910521324,
+        "cpu": "Neoverse-N2",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_suite_smp_linux_boot_8hart_compilation",
+            "unit": "ms",
+            "value": 776817.709007
+          },
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_suite_smp_linux_boot_8hart_execution",
+            "unit": "ms",
+            "value": 14449113.533378
           }
         ]
       }
