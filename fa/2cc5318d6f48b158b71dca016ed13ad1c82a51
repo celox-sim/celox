@@ -1,0 +1,1 @@
+Address sixth review: casez compares per bit so only z bits are wildcards (selector and constant), tag bits use the enclosing mode, signed operand pairs sign-extend to the common width, and do-while pattern conditions use one per-test setup instead of loop_condition re-evaluating them.
