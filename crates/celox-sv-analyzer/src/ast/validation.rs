@@ -899,6 +899,9 @@ fn validate_scope(
         .iter()
         .chain(&native.nested_units)
         .collect::<Vec<_>>();
+    // The generic interconnect nets and ports of the scope (6.6.8), whose
+    // uses outside port and terminal connections are rejected below.
+    let mut interconnect_names: Vec<String> = Vec::new();
     for index in facts.port_starts.within(&ranges) {
         let (unit, port) = facts.ports[index];
         let port = &units[unit].ports[port];
@@ -913,6 +916,11 @@ fn validate_scope(
         }
         if let Some(net_type) = &port.net_type {
             validate_net_type(net_type)?;
+            if net_type == "interconnect"
+                && let celox_sv_syntax::PortKind::Named(name) = &port.kind
+            {
+                interconnect_names.push(instances::normalize_identifier(&name.spelling));
+            }
         }
     }
     for index in spans.net_declarations.within(&ranges) {
@@ -921,6 +929,13 @@ fn validate_scope(
             continue;
         }
         validate_net_type(&net.net_type)?;
+        if net.net_type == "interconnect" {
+            interconnect_names.extend(
+                net.variables
+                    .iter()
+                    .map(|variable| instances::normalize_identifier(&variable.name.spelling)),
+            );
+        }
         if net
             .variables
             .iter()
@@ -965,6 +980,61 @@ fn validate_scope(
             };
             if let Some(diagnostic) = diagnostic {
                 return Err(unsupported(diagnostic));
+            }
+        }
+    }
+    // An interconnect net or port may only express port and terminal
+    // connections: it shall not be used in a procedural context, in a
+    // continuous or procedural continuous assignment, or in any expression
+    // other than a net_lvalue of interconnect nets (6.6.8). Instance items
+    // carry the allowed connections; every other authored item that names
+    // one is a forbidden use. Generate wrappers are skipped: their inner
+    // items are visited on their own.
+    if !interconnect_names.is_empty() {
+        let forbidden_use = |tokens: &celox_sv_syntax::TokenRange| {
+            native.tokens[tokens.start..tokens.end]
+                .iter()
+                .filter_map(|token| token.identifier())
+                .map(instances::normalize_identifier)
+                .find(|name| interconnect_names.contains(name))
+        };
+        for index in spans.body_items.within(&ranges) {
+            let item = &native.body_items[index];
+            if !selected(item.tokens) {
+                continue;
+            }
+            // A net declaration is allowed, but its initializer is a
+            // continuous assignment, where an interconnect may not be
+            // used (6.6.8).
+            if let BodyItemKind::Net(id) = item.kind {
+                let declaration = native.net_declaration(id);
+                for variable in &declaration.variables {
+                    if let Some(value) = variable.value
+                        && let Some(name) = forbidden_use(&native.expression(value).tokens)
+                    {
+                        return Err(unsupported(format!(
+                            "interconnect net `{name}` used outside a port or terminal connection"
+                        )));
+                    }
+                }
+                continue;
+            }
+            if matches!(
+                item.kind,
+                BodyItemKind::Instance(_)
+                    | BodyItemKind::Region(_)
+                    | BodyItemKind::Block { .. }
+                    | BodyItemKind::Conditional { .. }
+                    | BodyItemKind::Case { .. }
+                    | BodyItemKind::Loop { .. }
+                    | BodyItemKind::Unconverted { .. }
+            ) {
+                continue;
+            }
+            if let Some(name) = forbidden_use(&item.tokens) {
+                return Err(unsupported(format!(
+                    "interconnect net `{name}` used outside a port or terminal connection"
+                )));
             }
         }
     }

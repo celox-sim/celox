@@ -265,6 +265,9 @@ fn prepare_external_hierarchy_collecting(
             event_assignments: Vec::new(),
             repeated_ff_writes: Vec::new(),
             inout_driven_inside: HashSet::default(),
+            interconnect_names: HashSet::default(),
+            interconnect_resolutions: HashMap::default(),
+            interconnect_element_resolutions: HashMap::default(),
             calls: None,
         }
     };
@@ -505,6 +508,7 @@ fn prepare_external_hierarchy_collecting(
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
     resolve_inout_drivers(&module_ids, &mut lowered_modules);
+    resolve_interconnects(&mut module_ids, &mut lowered_modules)?;
     validate_specialized_instance_net_drivers(&module_ids, &lowered_modules, four_state)?;
     let mut modules = HashMap::default();
     for (key, &module_id) in &module_ids {

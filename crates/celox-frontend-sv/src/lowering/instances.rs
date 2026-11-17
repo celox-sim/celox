@@ -110,6 +110,7 @@ pub(super) fn lower_instances(
                 module_name: instance.module_name().to_string(),
                 instance_name: instance.name().to_string(),
                 force_signals: Vec::new(),
+                interconnect_descriptor: Vec::new(),
                 parameter_overrides: lower_parameter_overrides(
                     instance,
                     constants,

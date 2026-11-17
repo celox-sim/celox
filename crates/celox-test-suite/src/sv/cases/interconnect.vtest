@@ -1,0 +1,451 @@
+(group interconnect (category hierarchy))
+
+(case generic_interconnect_connects_implicit_ports
+  (source "interconnect.sv" #"
+        module mod_i(input in);
+        endmodule
+        module mod_o(output out);
+        endmodule
+        module Top;
+            interconnect bus;
+            mod_i m1(bus);
+            mod_o m2(bus);
+        endmodule
+    "#)
+  (top Top)
+  (eval))
+
+(case interconnect_takes_width_and_value_from_connected_ports
+  (source "interconnect_width.sv" #"
+        module Src(input logic [7:0] a, output logic [7:0] y);
+            assign y = a;
+        endmodule
+        module Sink(input logic [7:0] a, output logic [7:0] y);
+            assign y = a;
+        endmodule
+        module Top(input logic [7:0] a, output logic [7:0] y);
+            interconnect bus;
+            Src src(.a(a), .y(bus));
+            Sink sink(.a(bus), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 0xa5))
+  (assert_eq y 0xa5)
+  (modify (set a 0x3c))
+  (assert_eq y 0x3c))
+
+(case interconnect_takes_signedness_from_connected_ports
+  (source "interconnect_signed.sv" #"
+        module Src(output logic signed [3:0] y);
+            assign y = -1;
+        endmodule
+        module Sink(input logic signed [3:0] a, output logic signed [7:0] y);
+            assign y = a;
+        endmodule
+        module Top(output logic signed [7:0] y);
+            interconnect bus;
+            Src src(.y(bus));
+            Sink sink(.a(bus), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0xff))
+
+(case interconnect_port_chains_through_a_module
+  (source "interconnect_chain.sv" #"
+        module Leaf(input logic [3:0] a, output logic [3:0] y);
+            assign y = a + 1;
+        endmodule
+        module Mid(input interconnect bus_in, output interconnect bus_out);
+            Leaf leaf(.a(bus_in), .y(bus_out));
+        endmodule
+        module Top(input logic [3:0] a, output logic [3:0] y);
+            interconnect in_bus;
+            interconnect out_bus;
+            Leaf first(.a(a), .y(in_bus));
+            Mid mid(.bus_in(in_bus), .bus_out(out_bus));
+            Leaf last(.a(out_bus), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 5))
+  (assert_eq y 8))
+
+(case interconnect_array_elements_resolve_independently
+  (source "interconnect_array.sv" #"
+        module LSrc(output logic [3:0] y);
+            assign y = 4'b1010;
+        endmodule
+        module RSrc(output logic [7:0] y);
+            assign y = 8'hc3;
+        endmodule
+        module LSink(input logic [3:0] a, output logic [3:0] y);
+            assign y = a;
+        endmodule
+        module RSink(input logic [7:0] a, output logic [7:0] y);
+            assign y = a;
+        endmodule
+        module Top(output logic [3:0] lo, output logic [7:0] hi);
+            interconnect bus[0:1];
+            LSrc lsrc(.y(bus[0]));
+            RSrc rsrc(.y(bus[1]));
+            LSink lsink(.a(bus[0]), .y(lo));
+            RSink rsink(.a(bus[1]), .y(hi));
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq lo 0xa)
+  (assert_eq hi 0xc3))
+
+(case interconnect_array_with_one_connected_element
+  (source "debug_single.sv" #"
+        module LSrc(output logic [3:0] y);
+            assign y = 4'b1010;
+        endmodule
+        module LSink(input logic [3:0] a, output logic [3:0] y);
+            assign y = a;
+        endmodule
+        module Top(output logic [3:0] lo);
+            interconnect bus[0:1];
+            LSrc lsrc(.y(bus[0]));
+            LSink lsink(.a(bus[0]), .y(lo));
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq lo 0xa))
+
+(case interconnect_array_elements_of_equal_width
+  (source "debug_two.sv" #"
+        module LSrc(output logic [3:0] y);
+            assign y = 4'b1010;
+        endmodule
+        module LSink(input logic [3:0] a, output logic [3:0] y);
+            assign y = a;
+        endmodule
+        module Top(output logic [3:0] lo, output logic [3:0] hi);
+            interconnect bus[0:1];
+            LSrc lsrc(.y(bus[0]));
+            LSrc rsrc(.y(bus[1]));
+            LSink lsink(.a(bus[0]), .y(lo));
+            LSink rsink(.a(bus[1]), .y(hi));
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq lo 0xa)
+  (assert_eq hi 0xa))
+
+(case interconnect_merges_to_wand_from_connected_ports
+  (source "interconnect_wand.sv" #"
+        module Dut1(inout wire w);
+            assign w = 1'b1;
+        endmodule
+        module Dut2(inout wand w);
+            assign w = 1'b0;
+        endmodule
+        module Sink(input wire w, output logic y);
+            assign y = w;
+        endmodule
+        module Top(output logic y);
+            interconnect iwire;
+            Dut1 child1(iwire);
+            Dut2 child2(iwire);
+            Sink sink(iwire, y);
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0))
+
+(case interconnect_merges_to_wand_from_connected_ports_four_state
+  (four_state)
+  (source "interconnect_wand4.sv" #"
+        module Dut1(inout wire w);
+            assign w = 1'b1;
+        endmodule
+        module Dut2(inout wand w);
+            assign w = 1'b0;
+        endmodule
+        module Sink(input wire w, output logic y);
+            assign y = w;
+        endmodule
+        module Top(output logic y);
+            interconnect iwire;
+            Dut1 child1(iwire);
+            Dut2 child2(iwire);
+            Sink sink(iwire, y);
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0))
+
+(case interconnect_wire_drivers_conflict_to_x_four_state
+  (four_state)
+  (source "interconnect_conflict4.sv" #"
+        module Dut1(inout wire w);
+            assign w = 1'b1;
+        endmodule
+        module Dut2(inout wire w);
+            assign w = 1'b0;
+        endmodule
+        module Sink(input wire w, output logic y);
+            assign y = (w === 1'bx);
+        endmodule
+        module Top(output logic y);
+            interconnect iwire;
+            Dut1 child1(iwire);
+            Dut2 child2(iwire);
+            Sink sink(iwire, y);
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq y 1))
+
+(case interconnect_array_elements_may_carry_real_and_logic
+  (source "interconnect_real.sv" #"
+        module LDriver(output wire logic out);
+            assign out = 1'b1;
+        endmodule
+        module RDriver(output real out);
+            assign out = 2.5;
+        endmodule
+        module LSink(input wire logic a, output logic y);
+            assign y = a;
+        endmodule
+        module RSink(input real a, output logic [63:0] y);
+            assign y = $realtobits(a);
+        endmodule
+        module Top(output logic lo, output logic [63:0] hi);
+            interconnect iBus[0:1];
+            LDriver l1(iBus[0]);
+            RDriver r1(iBus[1]);
+            LSink l2(iBus[0], lo);
+            RSink r2(iBus[1], hi);
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq lo 1)
+  ; 2.5
+  (assert_eq hi 0x4004000000000000))
+
+(case interconnect_authored_signing_is_preserved
+  (source "interconnect_signed_decl.sv" #"
+        module Src(output logic [3:0] y);
+            assign y = 4'b1111;
+        endmodule
+        module Sink(input logic signed [3:0] a, output logic signed [7:0] y);
+            assign y = a;
+        endmodule
+        module Top(output logic signed [7:0] y);
+            interconnect signed link;
+            Src src(.y(link));
+            Sink sink(.a(link), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0xff))
+
+(case interconnect_array_uwire_element_does_not_block_resolved_drivers
+  (four_state)
+  (source "interconnect_uwire_element.sv" #"
+        module WireOne(inout wire w);
+            assign w = 1'b1;
+        endmodule
+        module WireZero(inout wire w);
+            assign w = 1'b0;
+        endmodule
+        module UwireOne(output uwire w);
+            assign w = 1'b1;
+        endmodule
+        module SinkX(input wire w, output logic y);
+            assign y = (w === 1'bx);
+        endmodule
+        module SinkOne(input wire w, output logic y);
+            assign y = (w === 1'b1);
+        endmodule
+        module Top(output logic y0, output logic y1);
+            interconnect bus[0:1];
+            WireOne w1(bus[0]);
+            WireZero w0(bus[0]);
+            UwireOne u1(bus[1]);
+            SinkX s0(bus[0], y0);
+            SinkOne s1(bus[1], y1);
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq y0 1)
+  (assert_eq y1 1))
+
+(case interconnect_array_passes_whole_through_a_module
+  (source "interconnect_array_through.sv" #"
+        module LDriver(output wire logic out);
+            assign out = 1'b1;
+        endmodule
+        module RDriver(output real out);
+            assign out = 2.5;
+        endmodule
+        module LSink(input wire logic a, output logic y);
+            assign y = a;
+        endmodule
+        module RSink(input real a, output logic [63:0] y);
+            assign y = $realtobits(a);
+        endmodule
+        module Mid(input interconnect iBus[0:1], output logic lo, output logic [63:0] hi);
+            LSink l2(iBus[0], lo);
+            RSink r2(iBus[1], hi);
+        endmodule
+        module Top(output logic lo, output logic [63:0] hi);
+            interconnect iBus[0:1];
+            LDriver l1(iBus[0]);
+            RDriver r1(iBus[1]);
+            Mid mid(iBus, lo, hi);
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq lo 1)
+  ; 2.5
+  (assert_eq hi 0x4004000000000000))
+
+(case interconnect_concatenation_operands_keep_their_widths
+  (source "interconnect_concat.sv" #"
+        module Src(output logic [1:0] y);
+            assign y = 2'b10;
+        endmodule
+        module Sink(input logic a, output logic y);
+            assign y = a;
+        endmodule
+        module Top(output logic h, output logic l);
+            interconnect hi;
+            interconnect lo;
+            Src src(.y({hi, lo}));
+            Sink sh(.a(hi), .y(h));
+            Sink sl(.a(lo), .y(l));
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq h 1)
+  (assert_eq l 0))
+
+(case interconnect_instances_merge_their_ports_separately
+  (four_state)
+  (source "interconnect_instances.sv" #"
+        module DOne(inout wire w);
+            assign w = 1'b1;
+        endmodule
+        module DZero(inout wire w);
+            assign w = 1'b0;
+        endmodule
+        module W(inout interconnect p);
+            DOne d1(p);
+            DZero d2(p);
+        endmodule
+        module WandOne(inout wand w);
+            assign w = 1'b1;
+        endmodule
+        module SinkZero(input wire w, output logic y);
+            assign y = (w === 1'b0);
+        endmodule
+        module SinkX(input wire w, output logic y);
+            assign y = (w === 1'bx);
+        endmodule
+        module Top(output logic y0, output logic y1);
+            interconnect a;
+            interconnect b;
+            W w0(a);
+            W w1(b);
+            WandOne wo(a);
+            SinkZero s0(a, y0);
+            SinkX s1(b, y1);
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq y0 1)
+  (assert_eq y1 1))
+
+(case interconnect_array_elements_merge_resolutions_separately
+  (four_state)
+  (source "interconnect_element_resolutions.sv" #"
+        module WandOne(inout wand w);
+            assign w = 1'b1;
+        endmodule
+        module WandZero(inout wand w);
+            assign w = 1'b0;
+        endmodule
+        module WireOne(inout wire w);
+            assign w = 1'b1;
+        endmodule
+        module WireZero(inout wire w);
+            assign w = 1'b0;
+        endmodule
+        module SinkZero(input wire w, output logic y);
+            assign y = (w === 1'b0);
+        endmodule
+        module SinkX(input wire w, output logic y);
+            assign y = (w === 1'bx);
+        endmodule
+        module Top(output logic y0, output logic y1);
+            interconnect bus[0:1];
+            WandOne w1(bus[0]);
+            WandZero w0(bus[0]);
+            WireOne r1(bus[1]);
+            WireZero r0(bus[1]);
+            SinkZero s0(bus[0], y0);
+            SinkX s1(bus[1], y1);
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq y0 1)
+  (assert_eq y1 1))
+
+(case interconnect_array_port_chains_through_a_module
+  (source "interconnect_array_port.sv" #"
+        module LMod(input logic [3:0] a, output logic [3:0] y);
+            assign y = a + 1;
+        endmodule
+        module RMod(input logic [7:0] a, output logic [7:0] y);
+            assign y = a + 1;
+        endmodule
+        module LSrc(output logic [3:0] y);
+            assign y = 4'h3;
+        endmodule
+        module RSrc(output logic [7:0] y);
+            assign y = 8'h10;
+        endmodule
+        module LSink(input logic [3:0] a, output logic [3:0] y);
+            assign y = a;
+        endmodule
+        module RSink(input logic [7:0] a, output logic [7:0] y);
+            assign y = a;
+        endmodule
+        module Mid(input interconnect iBus[0:1], output interconnect oBus[0:1]);
+            LMod l1(iBus[0], oBus[0]);
+            RMod r1(iBus[1], oBus[1]);
+        endmodule
+        module Top(output logic [3:0] lo, output logic [7:0] hi);
+            interconnect inBus[0:1];
+            interconnect outBus[0:1];
+            LSrc lsrc(inBus[0]);
+            RSrc rsrc(inBus[1]);
+            Mid mid(inBus, outBus);
+            LSink lsink(outBus[0], lo);
+            RSink rsink(outBus[1], hi);
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq lo 4)
+  (assert_eq hi 0x11))
+

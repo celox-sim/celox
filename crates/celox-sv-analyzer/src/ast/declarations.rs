@@ -24,6 +24,19 @@ pub(super) fn ports_from_scope(
             .map(type_binding::port_direction)
             .unwrap_or(inherited_direction);
         let explicit = matches!(native.kind, celox_sv_syntax::PortKind::Explicit { .. });
+        // An interconnect port has no data type (23.2.2.3): only the
+        // signing and packed dimensions of an implicit data type may
+        // be authored.
+        if native.net_type.as_deref() == Some("interconnect")
+            && native.data_type.is_some_and(|id| {
+                !matches!(
+                    syntax_tree.declarations().data_type(id).kind,
+                    celox_sv_syntax::DataTypeKind::Implicit
+                )
+            })
+        {
+            return Err(unsupported("interconnect port with a data type"));
+        }
         // An output with an explicit data type defaults to a variable;
         // input/inout and implicitly typed outputs default to nets unless
         // `var` is present (IEEE 1800-2023 23.2.2.3).
