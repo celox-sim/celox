@@ -754,6 +754,7 @@
         "interfaces::binds_interface_array_ports_in_declaration_order",
         "interfaces::binds_positional_connections_and_parameter_values",
         "interfaces::calls_functions_and_reads_parameters_through_instances_and_ports",
+        "interfaces::calls_writing_imported_functions_from_generate_functions_and_tasks",
         "interfaces::clocks_interface_processes_from_member_clocks",
         "interfaces::drives_members_through_child_outputs_and_array_generate_regions",
         "interfaces::elaborates_net_members_typedefs_and_localparams",
@@ -764,6 +765,23 @@
         "interfaces::reads_undriven_interface_members_as_unknown",
         "interfaces::rewrites_nested_references_and_keeps_declaration_functions",
         "interfaces::runs_interface_processes_once_per_array_element"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_interface_array_member_function",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not re-evaluate a continuous assignment in an element of an interface instance array that calls a function reading a member when the member changes after time zero; the scalar interface form is re-evaluated. Verilator passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "interfaces::calls_member_functions_from_interface_array_logic"
       ]
     }
   },

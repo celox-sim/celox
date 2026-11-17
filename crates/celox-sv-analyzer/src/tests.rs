@@ -4923,10 +4923,6 @@ fn rejects_unsupported_interface_uses() {
             "port `p` of `W` drives member `x`, an input of port `p` of `M`",
         ),
         (
-            "module Top(output logic [7:0] o); Bus b [2] (); assign o = b.get(1); endmodule",
-            "call of a function of the unselected interface array `b`",
-        ),
-        (
             "module M(Bus p, output logic [7:0] o); assign o = p.x; endmodule
              module Top(output logic [7:0] o); Bus b(); M u(.p(b.r), .o(o)); endmodule",
             "modport mismatch at `M.p`",
@@ -4972,6 +4968,28 @@ fn rejects_unsupported_interface_uses() {
             "{body}"
         );
     }
+    // An unselected interface array names no element, which 23.6 makes
+    // an error rather than an unsupported construct.
+    let source = format!(
+        "{BUS}module Top(output logic [7:0] o); Bus b [2] (); assign o = b.get(1); endmodule"
+    );
+    assert_eq!(
+        elaborate(&source),
+        Err(AnalyzerError::InvalidInterfaceSelection {
+            detail: "call of a function of the unselected interface array `b`".to_string(),
+        })
+    );
+    // A run-time element selection is no constant instance select (23.6);
+    // it fails when the module body is analyzed, not in the port plan.
+    let source = format!(
+        "{BUS}module Top(input int i, output logic [7:0] o); Bus b [2] (); assign o = b[i].get(1); endmodule"
+    );
+    assert_eq!(
+        native_interface_sources(&[(&source, Path::new("interfaces.sv"))]).map(|_| ()),
+        Err(AnalyzerError::InvalidInterfaceSelection {
+            detail: "nonconstant interface index".to_string(),
+        })
+    );
     for (interface, message) in [
         (
             "interface I; enum {Idle, Busy} state; endinterface",

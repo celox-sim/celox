@@ -301,6 +301,88 @@
     (assert_eq sum (trunc 16 (+ (trunc 8 value) (trunc 12 value))))
     (assert_eq scaled (trunc 8 (* (trunc 8 value) 3)))))
 
+(case calls_member_functions_from_interface_array_logic
+  (source "interface_array_logic_functions.sv" #"
+        interface Cell;
+            logic [7:0] value;
+            logic [7:0] result;
+            function automatic logic [7:0] get();
+                return value + 8'd1;
+            endfunction
+            assign result = get();
+        endinterface
+        module Top(input logic [7:0] x, output logic [7:0] r0, output logic [7:0] r1);
+            Cell cells[2]();
+            assign cells[0].value = x;
+            assign cells[1].value = x + 8'd10;
+            assign r0 = cells[0].result;
+            assign r1 = cells[1].result;
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 0x40 0xf5)
+    (modify (set x value))
+    (assert_eq r0 (trunc 8 (+ value 1)))
+    (assert_eq r1 (trunc 8 (+ value 11)))))
+
+(case calls_writing_imported_functions_from_generate_functions_and_tasks
+  (source "interface_imported_writes.sv" #"
+        interface Reg;
+            logic [7:0] state;
+            function automatic void load(input logic [7:0] v);
+                state = v;
+            endfunction
+            modport loader(import load);
+        endinterface
+        module InGenerate(Reg.loader p, input logic [7:0] v);
+            generate
+                if (1) begin : g
+                    always_comb p.load(v);
+                end
+            endgenerate
+        endmodule
+        module Relay(Reg.loader p, input logic [7:0] v);
+            generate
+                if (1) begin : g
+                    InGenerate u(.p(p), .v(v));
+                end
+            endgenerate
+        endmodule
+        module InFunction(Reg.loader p, input logic [7:0] v);
+            function automatic void wrap(input logic [7:0] x);
+                p.load(x);
+            endfunction
+            always_comb wrap(v);
+        endmodule
+        module InTask(Reg.loader p, input logic clk, input logic [7:0] v);
+            task automatic t(input logic [7:0] x);
+                p.load(x);
+            endtask
+            always_ff @(posedge clk) t(v);
+        endmodule
+        module Top(input logic clk, input logic [7:0] v,
+                   output logic [7:0] gen_out, output logic [7:0] relay_out,
+                   output logic [7:0] fn_out, output logic [7:0] task_out);
+            Reg gen_reg(), relay_reg(), fn_reg(), task_reg();
+            InGenerate gen_u(.p(gen_reg), .v(v));
+            Relay relay_u(.p(relay_reg), .v(v + 8'd1));
+            InFunction fn_u(.p(fn_reg), .v(v + 8'd2));
+            InTask task_u(.p(task_reg), .clk(clk), .v(v + 8'd3));
+            assign gen_out = gen_reg.state;
+            assign relay_out = relay_reg.state;
+            assign fn_out = fn_reg.state;
+            assign task_out = task_reg.state;
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 0x40 0xfc)
+    (modify (set v value))
+    (assert_eq gen_out value)
+    (assert_eq relay_out (trunc 8 (+ value 1)))
+    (assert_eq fn_out (trunc 8 (+ value 2)))
+    (tick clk 1)
+    (assert_eq task_out (trunc 8 (+ value 3)))))
+
 (case rewrites_nested_references_and_keeps_declaration_functions
   (source "interface_nested_references.sv" #"
         interface Cfg #(parameter int N = 2);

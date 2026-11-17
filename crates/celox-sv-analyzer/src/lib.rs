@@ -219,6 +219,13 @@ pub enum AnalyzerError {
     /// value of a parameter (6.20.2).
     #[error("{construct} reads `{name}`, which is not a constant")]
     NonConstantExpression { construct: String, name: String },
+    /// A member of an interface instance array named without an element
+    /// selection, or with a selection that is not a constant expression:
+    /// a hierarchical name selects an instance with a constant expression,
+    /// and the selection is required when the array name is not the last
+    /// component of the name (IEEE 1800-2023 23.6).
+    #[error("{detail}")]
+    InvalidInterfaceSelection { detail: String },
     /// A `$name` call that is not a system task or function Celox knows.
     #[error("unknown system task or function `{name}`")]
     UnknownSystemTf { name: String },

@@ -1045,6 +1045,13 @@ struct Expansion {
     /// modport port also carries the members that imported functions and
     /// declarations use.
     accessible: Option<HashSet<String>>,
+    /// The members whose output direction comes from calling an interface
+    /// function, directly or through a child, rather than from a direct
+    /// write. A call counts wherever it appears, as a call in an
+    /// `always_comb` under a run-time condition already does, so a call
+    /// inside a generate construct, a function or a task drives the member
+    /// (IEEE 1800-2023 25.7).
+    call_driven: HashSet<String>,
 }
 
 impl Expansion {
@@ -1365,8 +1372,9 @@ impl<'a> Design<'a> {
         }
         // The directions do not depend on generate conditions, loop bounds
         // or which subroutines are called, which are not evaluated here, so
-        // a write that depends on them needs a modport, and an imported
-        // function that writes must be called unconditionally.
+        // a direct write that depends on them needs a modport. A write
+        // through a called interface function counts wherever the call is,
+        // as it already does under a run-time condition.
         let through = match &port.modport {
             Some(modport) => format!(" through its port `{port_name}` of modport `{modport}`"),
             None => format!(", whose port `{port_name}` has no modport"),
@@ -1401,15 +1409,9 @@ impl<'a> Design<'a> {
             // lists, but only when the module or a child calls it.
             let imported = interface.captured_members(&interface.function_closure(&imports));
             let mut called = interface.declaration_functions();
-            for (handle, item, context) in &uses.references {
+            for (handle, item, _) in &uses.references {
                 if handle != port_name || !imports.contains(item) {
                     continue;
-                }
-                let closure = interface.function_closure(&HashSet::from_iter([item.clone()]));
-                for (member, direction) in interface.captured_members(&closure) {
-                    if direction == Direction::Output && *context != Context::Module {
-                        return Err(conditional_write(&member, *context));
-                    }
                 }
                 called.insert(item.clone());
             }
@@ -1424,11 +1426,13 @@ impl<'a> Design<'a> {
                 .map(|(_, member, _)| member.clone())
                 .collect();
             let functions = interface.function_closure(&called);
+            let mut call_driven = HashSet::default();
             for (member, direction) in interface.captured_members(&functions) {
                 let listed = listed.entry(member.clone()).or_insert(direction);
                 if direction == Direction::Output {
                     *listed = Direction::Output;
-                    driven.insert(member);
+                    driven.insert(member.clone());
+                    call_driven.insert(member);
                 }
             }
             for child in uses
@@ -1446,6 +1450,9 @@ impl<'a> Design<'a> {
                 for (member, direction) in child_expansion.members {
                     if direction == Direction::Output {
                         driven.insert(member.clone());
+                        if child_expansion.call_driven.contains(&member) {
+                            call_driven.insert(member.clone());
+                        }
                     }
                     let Some(access) = imported.get(&member) else {
                         continue;
@@ -1454,7 +1461,9 @@ impl<'a> Design<'a> {
                         && *access == Direction::Output
                         && listed.get(&member) != Some(&Direction::Output)
                     {
-                        if child.context != Context::Module {
+                        if child.context != Context::Module
+                            && !child_expansion.call_driven.contains(&member)
+                        {
                             return Err(conditional_write(&member, child.context));
                         }
                         listed.insert(member, Direction::Output);
@@ -1481,6 +1490,7 @@ impl<'a> Design<'a> {
                 functions,
                 callable: Some(imports),
                 accessible: Some(accessible),
+                call_driven,
             });
         }
         // Without a modport every member is reachable. A member the module or
@@ -1495,17 +1505,16 @@ impl<'a> Design<'a> {
             }
         }
         let mut called = interface.declaration_functions();
-        for (handle, item, context) in &uses.references {
+        let mut call_driven = HashSet::default();
+        for (handle, item, _) in &uses.references {
             if handle != port_name || interface.function(item).is_none() {
                 continue;
             }
             let closure = interface.function_closure(&HashSet::from_iter([item.clone()]));
             for (member, direction) in interface.captured_members(&closure) {
                 if direction == Direction::Output {
-                    if *context != Context::Module {
-                        return Err(conditional_write(&member, *context));
-                    }
-                    written.insert(member);
+                    written.insert(member.clone());
+                    call_driven.insert(member);
                 }
             }
             called.insert(item.clone());
@@ -1530,10 +1539,15 @@ impl<'a> Design<'a> {
             )?;
             for (member, direction) in child_expansion.members {
                 if direction == Direction::Output {
-                    if child.context != Context::Module {
+                    if child.context != Context::Module
+                        && !child_expansion.call_driven.contains(&member)
+                    {
                         return Err(conditional_write(&member, child.context));
                     }
-                    written.insert(member);
+                    written.insert(member.clone());
+                    if child_expansion.call_driven.contains(&member) {
+                        call_driven.insert(member);
+                    }
                 }
             }
         }
@@ -1552,6 +1566,7 @@ impl<'a> Design<'a> {
             functions,
             callable: None,
             accessible: None,
+            call_driven,
         })
     }
 
@@ -3623,10 +3638,12 @@ pub fn plan_interfaces_of_first_modules(
                 && handle.arrayed
                 && reference.selects.is_none()
             {
-                return Err(unsupported(format!(
-                    "call of a function of the unselected interface array `{}`",
-                    reference.handle
-                )));
+                return Err(AnalyzerError::InvalidInterfaceSelection {
+                    detail: format!(
+                        "call of a function of the unselected interface array `{}`",
+                        reference.handle
+                    ),
+                });
             }
         }
         let mut children = HashMap::default();
