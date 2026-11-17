@@ -98,10 +98,10 @@ pub(super) fn expr_is_two_state(
         Expr::Call {
             callee: Callee::Object(op),
             ..
-        } => match **op {
+        } => match &**op {
             // A 4-state property or member of a record may hold X or Z.
             ObjectOp::Load(field) => !field.four_state,
-            ObjectOp::Unbox(ref record) => !record.fields.iter().any(|field| field.four_state),
+            ObjectOp::Unbox(record) => !record.fields.iter().any(|field| field.four_state),
             ObjectOp::Container { op, layout } => {
                 layout.two_state
                     || !(op.reduction().is_some()

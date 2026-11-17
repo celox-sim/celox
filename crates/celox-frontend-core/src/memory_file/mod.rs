@@ -230,6 +230,142 @@ fn scan_memory_write_runs(
     (ParsedMemoryWrites { runs, words }, error)
 }
 
+/// A word a memory file loads into an associative array: its address,
+/// the index of the element it creates or replaces (IEEE 1800-2023 21.4.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryFileWord {
+    /// The index's bit pattern: a negative signed index is its two's
+    /// complement.
+    pub address: u64,
+    pub value: BigUint,
+    /// The bits of the word that are x or z.
+    pub mask: BigUint,
+}
+
+/// The words a memory file of `radix` (2 or 16) loads into an associative
+/// array whose index has `address_bits` bits (at most 64), signed when
+/// `signed`, in file order, with the word-count warning and the error that
+/// ended the load (IEEE 1800-2023 21.4.1). Loading starts at `start`, or at
+/// address 0, and proceeds towards `finish`, or towards the end of the index
+/// type; an `@` directive gives the address of the next word, the bit
+/// pattern of an index, so `@fffffffe` is the `int` index -2, as Verilator
+/// reads it. Given addresses bound the directives; without them a
+/// directive may name any index. An address the index type cannot
+/// represent is an error of the destination.
+fn scan_memory_words(
+    content: &str,
+    radix: u32,
+    width: usize,
+    address_bits: u32,
+    signed: bool,
+    start: Option<i128>,
+    finish: Option<i128>,
+) -> (Vec<MemoryFileWord>, Option<String>, Option<MemoryFileError>) {
+    let address_bits = address_bits.min(64);
+    let (index_low, index_high): (i128, i128) = match (signed, address_bits) {
+        (_, 0) => (0, 0),
+        (true, bits) => (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1),
+        (false, bits) => (0, (1i128 << bits) - 1),
+    };
+    // A finish address bounds the range, which starts at address 0 when no
+    // start address is given; without one the words run to the end of the
+    // index type.
+    let open_ended = finish.is_none();
+    let first = start.unwrap_or(0);
+    let last = finish.unwrap_or(index_high);
+    let mut words = Vec::new();
+    if first < index_low || first > index_high || last < index_low || last > index_high {
+        let error = MemoryFileError::destination(format!(
+            "address range [{first}:{last}] is outside the index range [{index_low}:{index_high}]"
+        ));
+        return (words, None, Some(error));
+    }
+    let (low, high) = if start.is_some() || finish.is_some() {
+        (first.min(last), first.max(last))
+    } else {
+        (index_low, index_high)
+    };
+    let step = if first <= last { 1 } else { -1 };
+    let mut address = Some(first);
+    let mut directives = false;
+    let mut data_words = 0usize;
+    let mut error = None;
+    for token in memory_tokens(content) {
+        if let Some(text) = token.strip_prefix('@') {
+            directives = true;
+            let Ok(pattern) = u128::from_str_radix(text, 16) else {
+                error = Some(MemoryFileError::syntax(format!(
+                    "invalid address directive {token}"
+                )));
+                break;
+            };
+            if pattern >> address_bits != 0 {
+                error = Some(MemoryFileError::destination(format!(
+                    "address directive {token} is wider than the {address_bits}-bit index"
+                )));
+                break;
+            }
+            let index = if signed && address_bits > 0 && pattern >> (address_bits - 1) & 1 == 1 {
+                pattern as i128 - (1i128 << address_bits)
+            } else {
+                pattern as i128
+            };
+            if index < low || index > high {
+                error = Some(MemoryFileError::destination(format!(
+                    "address {index} is outside the range [{low}:{high}]"
+                )));
+                break;
+            }
+            address = Some(index);
+            continue;
+        }
+        let (value, mask) = match parse_memory_word(&token, radix, width) {
+            Ok(word) => word,
+            Err(word_error) => {
+                error = Some(word_error);
+                break;
+            }
+        };
+        data_words += 1;
+        // Without a finish address the words run to the end of the index
+        // type: an address past it is no index of the destination.
+        if open_ended
+            && let Some(index) = address
+            && (index < index_low || index > index_high)
+        {
+            error = Some(MemoryFileError::destination(format!(
+                "address {index} is outside the index range [{index_low}:{index_high}]"
+            )));
+            break;
+        }
+        // Words past the end of the range are not loaded.
+        if let Some(index) = address.filter(|index| (low..=high).contains(index)) {
+            // The index's bit pattern, of its width.
+            let pattern = (index as u64) & (u64::MAX >> (64 - address_bits.max(1)));
+            words.push(MemoryFileWord {
+                address: pattern,
+                value,
+                mask,
+            });
+            address = index.checked_add(step);
+        }
+    }
+    // With a finish address and no directives, the file gives one word per
+    // address of the range; a different count is a warning, as for a
+    // ranged load.
+    let expected = first.abs_diff(last) + 1;
+    let warning = (error.is_none()
+        && !open_ended
+        && !directives
+        && expected != data_words as u128)
+        .then(|| {
+            format!(
+                "file contains {data_words} words for requested range [{first}:{last}] ({expected} words); excess words are ignored and missing words leave memory unchanged"
+            )
+        });
+    (words, warning, error)
+}
+
 /// The constant parameters of `load` as compiled code passes them to the
 /// heap's memory-file reader (see [`lowering`]).
 ///
@@ -251,6 +387,33 @@ pub fn decode_descriptor(
 ) -> Option<MemoryFileLoad> {
     let mut load: MemoryFileLoad = serde_json::from_slice(descriptor).ok()?;
     load.file = String::from_utf8_lossy(file).into_owned();
+    // The run-time addresses of an associative load replace those the call
+    // gives; an unsigned 64-bit index holds addresses an `i64` holds as
+    // negative ones.
+    if let (
+        Some((start, finish)),
+        MemoryFileAddressing::Associative {
+            address_bits,
+            signed,
+            start: s,
+            finish: f,
+        },
+    ) = (range, &mut load.addressing)
+    {
+        let address = |value: i64| {
+            if !*signed && *address_bits >= 64 {
+                i128::from(value as u64)
+            } else {
+                i128::from(value)
+            }
+        };
+        if s.is_some() {
+            *s = Some(address(start));
+        }
+        if f.is_some() {
+            *f = Some(address(finish));
+        }
+    }
     if let (
         Some((start, finish)),
         MemoryFileAddressing::Range {
@@ -276,6 +439,9 @@ pub struct MemoryLoad {
     /// The error that terminated the load; `runs` holds the words loaded
     /// before it (IEEE 1800-2023 21.4).
     pub error: Option<String>,
+    /// The words of a load into an associative array, by address, in file
+    /// order: such a load has no `runs`.
+    pub keyed: Vec<MemoryFileWord>,
 }
 
 /// The paths `load` looks for its file at, in order: a relative name in
@@ -371,8 +537,67 @@ pub fn load_memory_file(
             let (writes, error) = scan_memory_write_runs(&content, load.radix, width, start, depth);
             (writes.runs, None, error)
         }
+        MemoryFileAddressing::Associative {
+            address_bits,
+            signed,
+            start,
+            finish,
+        } => {
+            let (mut words, warning, mut error) = scan_memory_words(
+                &content,
+                load.radix,
+                width,
+                address_bits,
+                signed,
+                start,
+                finish,
+            );
+            // An address that is not a member of the enumerated index type
+            // names no element, and a word that is not a member of the
+            // enumerated element type is no value of one (6.19): the load
+            // ends before it.
+            let foreign = words.iter().position(|word| {
+                load.index_members
+                    .as_ref()
+                    .is_some_and(|members| !members.contains(&u128::from(word.address)))
+                    || load.word_members.as_ref().is_some_and(|members| {
+                        u128::try_from(&word.value)
+                            .ok()
+                            .filter(|_| word.mask.bits() == 0)
+                            .is_none_or(|value| !members.contains(&value))
+                    })
+            });
+            if let Some(position) = foreign {
+                let word = &words[position];
+                let index_foreign = load
+                    .index_members
+                    .as_ref()
+                    .is_some_and(|members| !members.contains(&u128::from(word.address)));
+                error = Some(MemoryFileError::destination(if index_foreign {
+                    format!(
+                        "address {} is not a member of the enum index type",
+                        word.address
+                    )
+                } else {
+                    format!(
+                        "value {} is not a member of the enum element type",
+                        word.value
+                    )
+                }));
+                words.truncate(position);
+            }
+            return MemoryLoad {
+                warning: warning
+                    .map(|detail| format!("{task} reading {}: {detail}", path.display())),
+                error: error
+                    .map(|error| format!("{task} reading {}: {}", path.display(), error.message)),
+                keyed: words,
+                ..MemoryLoad::default()
+            };
+        }
     };
     MemoryLoad {
+        keyed: Vec::new(),
         runs,
         warning: warning.map(|detail| format!("{task} reading {}: {detail}", path.display())),
         error: error.map(|error| format!("{task} reading {}: {}", path.display(), error.message)),
@@ -516,6 +741,8 @@ mod tests {
             element_width: 8,
             addressing: MemoryFileAddressing::Offset { start: 0, depth: 2 },
             location: None,
+            index_members: None,
+            word_members: None,
         };
         let files = |present: &'static [(&'static str, &'static str)]| {
             move |path: &Path| {
@@ -546,6 +773,47 @@ mod tests {
         assert!(error.contains("failed to read tb/test/boot.hex"), "{error}");
     }
 
+    /// An associative load reads a file address as the index's bit pattern,
+    /// bounds the directives by the addresses the call gives, and ends at
+    /// the first error, keeping the words before it.
+    #[test]
+    fn associative_loads_read_addresses_as_index_patterns() {
+        let addresses = |content: &str, signed, start, finish| {
+            let (words, warning, error) =
+                scan_memory_words(content, 16, 8, 16, signed, start, finish);
+            (
+                words.iter().map(|word| word.address).collect::<Vec<_>>(),
+                warning.is_some(),
+                error.map(|error| error.message),
+            )
+        };
+        assert_eq!(
+            addresses("1 @fffe 2 3", true, None, None),
+            (vec![0, 0xfffe, 0xffff], false, None)
+        );
+        let (words, _, error) = addresses("@7fff 1 2", true, None, None);
+        assert_eq!(words, [0x7fff]);
+        assert!(error.unwrap().contains("outside the index range"));
+        let (words, _, error) = addresses("1 @fffe 2", true, Some(0), Some(3));
+        assert_eq!(words, [0]);
+        assert!(error.unwrap().contains("outside the range [0:3]"));
+        let (_, _, error) = addresses("@10000 1", false, None, None);
+        assert!(error.unwrap().contains("wider than the 16-bit index"));
+        // A finish address alone bounds the range from 0.
+        assert_eq!(
+            addresses("1 2", false, None, Some(3)),
+            (vec![0, 1], true, None)
+        );
+        assert_eq!(
+            addresses("1 2", false, Some(3), None),
+            (vec![3, 4], false, None)
+        );
+        assert_eq!(
+            addresses("1 2 3", false, Some(5), Some(4)),
+            (vec![5, 4], true, None)
+        );
+    }
+
     /// An error terminates a load and keeps the words before it.
     #[test]
     fn errors_keep_the_words_loaded_before_them() {
@@ -562,6 +830,8 @@ mod tests {
                 finish: 3,
             },
             location: None,
+            index_members: None,
+            word_members: None,
         };
         let loaded = load_memory_file(&load, |_| Ok("aa bb g cc".to_string()));
         let words: Vec<_> = loaded
