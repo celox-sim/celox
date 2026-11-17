@@ -401,8 +401,11 @@ fn bind_in_mode(
                         packed,
                         fields,
                     } => {
-                        // Unpacked unions are not supported (IEEE 1800-2023 7.3).
-                        if !packed && !soft && (*union || *tagged) {
+                        // Unpacked untagged unions are not supported
+                        // (IEEE 1800-2023 7.3). An unpacked tagged union is
+                        // laid out as a packed one below (7.3.2): its members
+                        // must have a packed form.
+                        if !packed && !soft && *union && !*tagged {
                             return Ok(None);
                         }
                         let mut names = Vec::new();
@@ -455,7 +458,7 @@ fn bind_in_mode(
                             names,
                             defaults: fields.iter().map(|field| field.default).collect(),
                             ranges,
-                            packed: *packed || *soft,
+                            packed: *packed || *soft || *tagged,
                         });
                         for (field, is_void) in fields.iter().zip(voids).rev() {
                             if is_void {
@@ -593,7 +596,25 @@ fn bind_in_mode(
                     .zip(values.split_off(start))
                     .zip(voids)
                     .map(|((name, ty), is_void)| (name, ty, is_void))
-                    .collect();
+                    .collect::<Vec<_>>();
+                // A member of a tagged union may itself be an unpacked
+                // structure: the union holds its packed form, which has
+                // the same flat layout (7.2, 7.3.2). Other aggregates
+                // keep rejecting such a member.
+                let Some(fields) = fields
+                    .into_iter()
+                    .map(|(name, ty, is_void)| {
+                        let ty = if is_void || !tagged {
+                            Some(ty)
+                        } else {
+                            packed_form(tree, session, &ty, &context.const_env)
+                        };
+                        ty.map(|ty| (name, ty, is_void))
+                    })
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return Ok(None);
+                };
                 let Some(mut ty) = packed_structs::native_type(
                     tree,
                     if tagged {
@@ -640,6 +661,44 @@ fn bind_in_mode(
         }
     }
     Ok(values.pop())
+}
+
+/// The packed form of `ty`: an unpacked structure type becomes the packed
+/// structure of its members in declaration order, which has the same flat
+/// layout (IEEE 1800-2023 7.2); any other type is itself. A member with a
+/// default value has no packed form here, as the union would lose it.
+fn packed_form(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    ty: &Type,
+    env: &ConstEnv,
+) -> Option<Type> {
+    let Some(aggregate) = ty.unpacked_struct_in(&session.types).cloned() else {
+        return Some(ty.clone());
+    };
+    let fields = aggregate
+        .members()
+        .iter()
+        .map(|member| {
+            if member.default.is_some() {
+                return None;
+            }
+            Some((
+                member.name.clone(),
+                packed_form(tree, session, &member.r#type, env)?,
+                false,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    packed_structs::native_type(
+        tree,
+        packed_structs::AggregateKind::Struct,
+        false,
+        Arc::from(aggregate.identity()),
+        fields,
+        Vec::new(),
+        env,
+    )
 }
 
 pub(in crate::ast) fn packed_ranges(

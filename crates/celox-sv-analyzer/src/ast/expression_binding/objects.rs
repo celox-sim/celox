@@ -2487,6 +2487,7 @@ fn caller_inputs(
             | ExprKind::Concatenation(_)
             | ExprKind::Replication { .. }
             | ExprKind::Pattern { .. }
+            | ExprKind::PatternMatch { .. }
             | ExprKind::Streaming { .. }
             | ExprKind::StreamSelect { .. } => None,
         };

@@ -345,6 +345,13 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         statement: &celox_sv_syntax::StatementKind,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
+        self.native_statement_leaf_kind(statement)
+    }
+
+    fn native_statement_leaf_kind(
+        &mut self,
+        statement: &celox_sv_syntax::StatementKind,
+    ) -> Result<Vec<Stmt>, AnalyzerError> {
         use celox_sv_syntax::StatementKind;
         match statement {
             StatementKind::Assignment {
@@ -372,6 +379,12 @@ impl BodyBuilder<'_, '_, '_> {
                     ));
                 }
                 let mut stmts = self.effects(&[*left, *right])?;
+                // A pattern predicate in the value runs here, after the
+                // statement's effects and before its conversion reads
+                // the predicate's result (12.6.3).
+                self.prepare_pattern_values(*left)?;
+                self.prepare_pattern_values(*right)?;
+                stmts.append(&mut self.pattern_prelude);
                 if let Some(assignment) = self.stream_assignment(
                     if *nonblocking { "=" } else { operator },
                     *nonblocking,
@@ -404,6 +417,10 @@ impl BodyBuilder<'_, '_, '_> {
                     return Ok(effects);
                 }
                 let mut stmts = self.effects(&[*id])?;
+                // A pattern predicate in an argument runs here, after
+                // the statement's effects (12.6.3).
+                self.prepare_pattern_values(*id)?;
+                stmts.append(&mut self.pattern_prelude);
                 stmts.extend(self.subroutine_call_statement(*id)?);
                 Ok(stmts)
             }

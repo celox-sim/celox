@@ -135,6 +135,7 @@ impl Declarations {
             next_parameter_id: 0,
             inline_constraint_depth: 0,
             sequence_operands: 0,
+            in_pattern_constant: false,
             sequence_depth: 0,
             timing_operand_start: None,
             coverage_operand: CoverageOperand::None,
@@ -440,6 +441,9 @@ struct Parser<'a> {
     inline_constraint_depth: usize,
     /// The Boolean operands of the property specification being parsed.
     sequence_operands: usize,
+    /// A pattern constant is being read: `&&&` ends it, as it separates
+    /// predicate clauses and case filters (IEEE 1800-2023 12.6).
+    in_pattern_constant: bool,
     /// The groups and clocked subsequences the sequence being parsed is in.
     sequence_depth: usize,
     /// Where the delay value or event name of the timing control being

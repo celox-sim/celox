@@ -174,6 +174,17 @@ pub(in crate::ast) fn validate(
                 push(&mut jobs, *then_expression);
                 push(&mut jobs, *condition);
             }
+            ExprKind::PatternMatch {
+                expression,
+                pattern,
+            } => {
+                let mut constants = Vec::new();
+                pattern.constants(&mut constants);
+                for id in constants {
+                    push(&mut jobs, id);
+                }
+                push(&mut jobs, *expression);
+            }
             ExprKind::Member {
                 expression,
                 separator,

@@ -58,6 +58,7 @@ enum Job {
         state: CaseState,
         start: usize,
         matches: Vec<CaseMatch>,
+        filter: Option<ExprId>,
         default: bool,
     },
     Loop {
@@ -321,37 +322,90 @@ impl Parser<'_> {
         }
     }
 
-    fn pattern_range(&mut self, end: &str) -> Result<TokenRange> {
+    /// A pattern (IEEE 1800-2023 12.6, Syntax 12-4), read where a case
+    /// item, an if predicate or a conditional predicate holds one.
+    pub(super) fn pattern(&mut self, predicate: bool) -> Result<Pattern> {
+        while self.directive()? {}
         let start = self.at;
-        let mut stack = Vec::new();
-        let mut conditional = 0;
-        loop {
-            if self.directive()? {
-                continue;
-            }
-            let word = self.peek();
-            if stack.is_empty() && conditional == 0 && (word == end || word == "&&&") {
-                break;
-            }
-            match word {
-                "" => return Err(self.error("unterminated pattern")),
-                "(" => stack.push(")"),
-                "[" => stack.push("]"),
-                "{" => stack.push("}"),
-                word if stack.last().copied() == Some(word) => {
-                    stack.pop();
+        if self.eat("(") {
+            let inner = self.pattern(false)?;
+            self.expect(")")?;
+            return match inner {
+                Pattern::Constant(inner) => self.constant_pattern(predicate, Some((start, inner))),
+                _ => Ok(Pattern::Group(Box::new(inner))),
+            };
+        }
+        if self.eat(".*") {
+            return Ok(Pattern::Wildcard);
+        }
+        if self.eat(".") {
+            return Ok(Pattern::Variable(self.name()?));
+        }
+        if self.eat("tagged") {
+            let member = self.name()?;
+            // A nested pattern follows unless the pattern ends here: at a
+            // case item's `:` or filter, a field's `,` or `}`, or a
+            // predicate's `)` or `&&&`.
+            let nested = !matches!(self.peek(), ":" | "&&&" | "," | "}" | ")" | ";" | "")
+                && !(predicate && self.peek() == "?");
+            return Ok(Pattern::Tagged {
+                member,
+                pattern: nested
+                    .then(|| self.pattern(predicate))
+                    .transpose()?
+                    .map(Box::new),
+            });
+        }
+        if self.eat("'") {
+            self.expect("{")?;
+            let mut fields = Vec::new();
+            if !self.eat("}") {
+                loop {
+                    // `member : pattern` names its member; a positional
+                    // constant that is a lone identifier is followed by
+                    // `,` or `}` instead.
+                    let named = self.token().is_some_and(|token| {
+                        matches!(
+                            token.kind,
+                            crate::lexer::TokenKind::Identifier
+                                | crate::lexer::TokenKind::EscapedIdentifier
+                        )
+                    }) && self.nth(1) == ":";
+                    if named {
+                        let name = self.name()?;
+                        self.expect(":")?;
+                        let pattern = self.pattern(false)?;
+                        fields.push(PatternField::Named(name, pattern));
+                    } else {
+                        fields.push(PatternField::Positional(self.pattern(false)?));
+                    }
+                    if self.eat("}") {
+                        break;
+                    }
+                    self.expect(",")?;
                 }
-                "?" if stack.is_empty() => conditional += 1,
-                ":" if stack.is_empty() && conditional > 0 => conditional -= 1,
-                ")" | "]" | "}" => return Err(self.error("mismatched pattern delimiter")),
-                _ => {}
             }
-            self.at += 1;
+            return Ok(Pattern::Structure(fields));
         }
-        if self.at == start {
-            return Err(self.error("expected pattern"));
-        }
-        Ok(self.range(start))
+        self.constant_pattern(predicate, None)
+    }
+
+    fn constant_pattern(
+        &mut self,
+        predicate: bool,
+        grouped: Option<(usize, ExprId)>,
+    ) -> Result<Pattern> {
+        // `&&&` after a constant pattern is the item's filter or the next
+        // predicate clause, never part of the constant (12.6).
+        let constant = std::mem::replace(&mut self.in_pattern_constant, true);
+        // Only a top-level predicate pattern can end at the outer `?:`.
+        let minimum = if predicate { 3 } else { 0 };
+        let expression = match grouped {
+            Some((start, inner)) => self.grouped_expression_tail(start, inner, minimum),
+            None => self.expression(minimum),
+        };
+        self.in_pattern_constant = constant;
+        Ok(Pattern::Constant(expression?))
     }
 
     fn predicate(&mut self) -> Result<Predicate> {
@@ -360,14 +414,9 @@ impl Parser<'_> {
         let mut items = Vec::new();
         loop {
             let expression = self.expression(0)?;
-            let pattern = if self.eat("matches") {
-                Some(self.pattern_range(")")?)
-            } else {
-                None
-            };
             items.push(PredicateItem {
                 expression,
-                pattern,
+                pattern: None,
             });
             if self.eat(")") {
                 break;
@@ -778,7 +827,7 @@ impl Parser<'_> {
                 && items[before].iff.is_none()
             {
                 let item = items.pop().unwrap();
-                let expression = self.event_group_expression(start, item.expression)?;
+                let expression = self.grouped_expression_tail(start, item.expression, 0)?;
                 let iff = if self.eat("iff") {
                     Some(self.expression(0)?)
                 } else {
@@ -1719,17 +1768,16 @@ impl Parser<'_> {
                         let start = self.at;
                         let default = self.eat("default");
                         let mut matches = Vec::new();
+                        let mut filter = None;
                         if default {
                             self.eat(":");
                         } else {
                             loop {
                                 if state.mode.as_deref() == Some("matches") {
-                                    let pattern_start = self.at;
-                                    self.pattern_range(":")?;
+                                    matches.push(CaseMatch::Pattern(self.pattern(false)?));
                                     if self.eat("&&&") {
-                                        self.expression(0)?;
+                                        filter = Some(self.expression(0)?);
                                     }
-                                    matches.push(CaseMatch::Pattern(self.range(pattern_start)));
                                 } else if state.mode.as_deref() == Some("inside")
                                     && self.peek() == "["
                                 {
@@ -1752,6 +1800,7 @@ impl Parser<'_> {
                             state,
                             start,
                             matches,
+                            filter,
                             default,
                         });
                         jobs.push(Job::Parse);
@@ -1761,12 +1810,14 @@ impl Parser<'_> {
                     mut state,
                     start,
                     matches,
+                    filter,
                     default,
                 } => {
                     let body = values.pop().unwrap();
                     state.arms.push(CaseArm {
                         matches,
                         default,
+                        filter,
                         body,
                         tokens: self.range(start),
                     });
