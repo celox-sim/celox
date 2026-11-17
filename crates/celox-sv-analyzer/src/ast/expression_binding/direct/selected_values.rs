@@ -597,7 +597,7 @@ fn struct_member_place(
     let element = ObjectPlace::Element {
         container,
         index,
-        layout: target.layout,
+        layout: target.layout.clone(),
         element: target.element.clone(),
         record: target.record.clone(),
     };
@@ -653,7 +653,7 @@ pub(in crate::ast) fn object_place(
             ObjectPlace::Element {
                 container,
                 index,
-                layout: target.layout,
+                layout: target.layout.clone(),
                 element: target.element.clone(),
                 record: target.record.clone(),
             },

@@ -39,7 +39,7 @@ impl ProcModule<'_> {
             } => {
                 matches!(**op, sv::ir::ObjectOp::Load(field)
                 if field.handle == Some(sv::ir::HandleProperty::String))
-                    || matches!(**op, sv::ir::ObjectOp::Container { op: sv::ir::ContainerOp::Get | sv::ir::ContainerOp::PopFront | sv::ir::ContainerOp::PopBack, layout } if layout.handle == Some(sv::ir::HandleProperty::String))
+                    || matches!(**op, sv::ir::ObjectOp::Container { op: sv::ir::ContainerOp::Get | sv::ir::ContainerOp::PopFront | sv::ir::ContainerOp::PopBack, ref layout } if layout.handle == Some(sv::ir::HandleProperty::String))
                     || matches!(
                         **op,
                         sv::ir::ObjectOp::Pattern(_) | sv::ir::ObjectOp::GetRandstate

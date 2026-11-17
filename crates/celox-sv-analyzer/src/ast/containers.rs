@@ -44,6 +44,7 @@ fn dimensioned(
         return Ok(base);
     };
     let mut index_type = None;
+    let mut key_enum_values = None;
     let kind = match first.kind {
         DimensionKind::Unsized => Some(ContainerKind::Dynamic),
         DimensionKind::Queue(bound) => {
@@ -89,6 +90,20 @@ fn dimensioned(
                     let shape =
                         casts::expr_type_from_type(&tree.functions, &ty, &context.const_env)
                             .ok_or_else(|| unsupported("associative index type"))?;
+                    // A member is compared with an index at the index's
+                    // width: a negative member of a signed type is not
+                    // extended past it.
+                    if ty.is_enum && !ty.packed_enum {
+                        key_enum_values = ty.enum_domain.as_ref().map(|domain| {
+                            crate::system_functions::EnumValues::new(
+                                domain
+                                    .values()
+                                    .iter()
+                                    .map(|value| value.bits() & width_mask(shape.width))
+                                    .collect(),
+                            )
+                        });
+                    }
                     // A process handle is an identity that the simulation
                     // keeps until it ends, so it serves as an integral key
                     // whose entry outlives the process (IEEE 1800-2023 7.8.5,
@@ -151,7 +166,7 @@ fn dimensioned(
             "dynamic container of fixed-size unpacked arrays",
         ));
     }
-    container_type(base, kind, index_type, None, tree, context)
+    container_type(base, kind, index_type, key_enum_values, None, tree, context)
 }
 
 /// The type of a container of kind `kind` of `base` elements, indexed by
@@ -161,6 +176,7 @@ fn container_type(
     base: Type,
     kind: ContainerKind,
     index_type: Option<Type>,
+    key_enum_values: Option<crate::system_functions::EnumValues>,
     fixed: Option<(i128, i128)>,
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
@@ -225,6 +241,20 @@ fn container_type(
             TypeKind::Bit | TypeKind::Chandle | TypeKind::Process | TypeKind::Event
         ) || handle.is_some(),
         handle,
+        key_enum_values,
+        enum_values: if base.is_enum && !base.packed_enum {
+            base.enum_domain.as_ref().map(|domain| {
+                crate::system_functions::EnumValues::new(
+                    domain
+                        .values()
+                        .iter()
+                        .map(|value| value.bits() & width_mask(shape.width))
+                        .collect(),
+                )
+            })
+        } else {
+            None
+        },
     };
     Ok(of(ContainerType {
         key: index_type,
@@ -305,6 +335,7 @@ pub(super) fn fixed_storage(
     let storage = container_type(
         element,
         ContainerKind::Dynamic,
+        None,
         None,
         Some(fixed),
         tree,
@@ -408,6 +439,15 @@ impl ContainerType {
     pub(super) fn fixed_size(&self) -> Option<u64> {
         self.fixed
             .map(|(left, right)| left.abs_diff(right) as u64 + 1)
+    }
+}
+
+/// The bits of a value of `width` bits.
+fn width_mask(width: usize) -> u128 {
+    if width >= 128 {
+        u128::MAX
+    } else {
+        (1u128 << width) - 1
     }
 }
 
@@ -666,11 +706,84 @@ pub(super) fn conditional(
                 semantic_types::TyData::Packed(packed) if packed.four_state
             )
         })
-        .then_some(target.layout)
+        .then_some(target.layout.clone())
 }
 
 pub(super) fn call(op: ContainerOp, layout: ContainerLayout, args: Vec<Expr>) -> Expr {
     classes::object_call(ObjectOp::Container { op, layout }, args)
+}
+
+/// The destination of `$readmemh` or `$readmemb` when native expression
+/// `id` is a container: the store of an element of the associative array,
+/// to which each word the file loads adds its index and its value (IEEE
+/// 1800-2023 21.4.1). The indices are of an integral type; a word is a
+/// packed value, here one that an element holds without a record.
+pub(super) fn memory_load(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<Expr>> {
+    let native = tree.declarations();
+    let Some(target) = native_type(id, native, tree, session, dims)? else {
+        return Ok(None);
+    };
+    if !matches!(
+        target.layout.kind,
+        ContainerKind::Associative {
+            string: false,
+            object: false,
+            ..
+        }
+    ) {
+        return Err(unsupported(
+            "memory load into a dynamic array, a queue or an associative array without integral indices",
+        ));
+    }
+    // A file address names an integral index (21.4.1): not a process or a
+    // chandle, which are identities (7.8.5, 9.7, 6.14). The memory-file
+    // reader gives addresses in 64 bits.
+    let integral = |r#type: &Type| {
+        matches!(
+            r#type.kind(),
+            TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+        ) && r#type.container.is_none()
+            && r#type.unpacked_ranges.is_empty()
+    };
+    if let Some(key) = &target.key
+        && (!integral(key)
+            || casts::expr_type_from_type(&tree.functions, key, &dims.const_env)
+                .is_none_or(|key| key.width > 64))
+    {
+        return Err(unsupported(
+            "memory load into an associative array whose index type is not integral of at most 64 bits",
+        ));
+    }
+    // A word is a packed value: not a process, an event or a chandle.
+    if target.record.is_some() || target.layout.handle.is_some() || !integral(&target.element) {
+        return Err(unsupported(
+            "memory load into an associative array whose elements are not integral values of at most 64 bits",
+        ));
+    }
+    // The file loads the array the argument names, not a copy that a call
+    // or an operator gives (21.4).
+    let ungrouped = expression_binding::ungroup(id, native);
+    if !matches!(
+        native.expression(ungrouped).kind,
+        ExprKind::Name(_) | ExprKind::Member { .. } | ExprKind::Select { .. }
+    ) || matches!(native.expression(ungrouped).kind, ExprKind::Member { .. })
+        && returned_container(ungrouped, false, native, tree, session, dims).is_some()
+    {
+        return Err(unsupported(
+            "memory load into an associative array that is not a variable",
+        ));
+    }
+    let container = expression_binding::value(id, native, tree, session, dims)?;
+    Ok(Some(call(
+        ContainerOp::Set,
+        target.layout.clone(),
+        vec![container],
+    )))
 }
 
 /// `new[size]` or `new[size](init)`, which only an assignment or a
@@ -744,7 +857,7 @@ pub(super) fn assignment(
                     && !target.element_is_unpacked_struct(&session.types) =>
             {
                 let value = element_value(value, tree, session, dims, target)?;
-                call(ContainerOp::WithDefault, target.layout, vec![value])
+                call(ContainerOp::WithDefault, target.layout.clone(), vec![value])
             }
             // An assignment pattern is an array of the target's type, as
             // when it is assigned to the array (10.9.1).
@@ -767,7 +880,7 @@ pub(super) fn assignment(
         // The elements copied from `src` are assigned to the elements of
         // the new array (7.5.1), converted as any container value is.
         return Ok(inner_levels(
-            call(ContainerOp::New, target.layout, vec![size, init]),
+            call(ContainerOp::New, target.layout.clone(), vec![size, init]),
             target,
         ));
     }
@@ -804,7 +917,7 @@ pub(super) fn assignment(
         if pairs.is_empty() {
             return Ok(call(
                 ContainerOp::WithDefault,
-                target.layout,
+                target.layout.clone(),
                 default.into_iter().collect(),
             ));
         }
@@ -813,7 +926,7 @@ pub(super) fn assignment(
         };
         return Ok(call(
             keyed,
-            target.layout,
+            target.layout.clone(),
             default.into_iter().chain(pairs).collect(),
         ));
     }
@@ -853,7 +966,7 @@ pub(super) fn assignment(
                         ));
                     }
                     check_compatible(id, native, tree, session, dims, target)?;
-                    parts.push(Some(item.layout));
+                    parts.push(Some(item.layout.clone()));
                     values.push(expression_binding::value(id, native, tree, session, dims)?);
                 }
                 _ => {
@@ -866,7 +979,7 @@ pub(super) fn assignment(
             return Ok(inner_levels(
                 classes::object_call(
                     ObjectOp::Concat(Box::new(ContainerConcat {
-                        result: target.layout,
+                        result: target.layout.clone(),
                         parts,
                     })),
                     values,
@@ -874,7 +987,7 @@ pub(super) fn assignment(
                 target,
             ));
         }
-        return Ok(call(ContainerOp::Literal, target.layout, values));
+        return Ok(call(ContainerOp::Literal, target.layout.clone(), values));
     }
     check_compatible(root, native, tree, session, dims, target)?;
     Ok(convert(
@@ -1039,7 +1152,7 @@ pub(super) fn fixed_array_literal(
         )?;
         values.push(statements::expr_from_lvalue(tree, table, &lvalue, dims));
     }
-    Ok(call(ContainerOp::Literal, target.layout, values))
+    Ok(call(ContainerOp::Literal, target.layout.clone(), values))
 }
 
 /// The container of `target`'s elements that a new object holds for a
@@ -1052,7 +1165,7 @@ pub(super) fn fixed_default(target: &ContainerType) -> Expr {
     inner_levels(
         call(
             ContainerOp::New,
-            target.layout,
+            target.layout.clone(),
             vec![Expr::Literal(size.to_string()), Expr::Literal("0".into())],
         ),
         target,
@@ -1091,7 +1204,7 @@ fn array_item(
 /// [`inner_levels`].
 pub(super) fn convert(value: Expr, target: &ContainerType) -> Expr {
     inner_levels(
-        call(ContainerOp::Convert, target.layout, vec![value]),
+        call(ContainerOp::Convert, target.layout.clone(), vec![value]),
         target,
     )
 }
@@ -1107,7 +1220,11 @@ fn inner_levels(mut value: Expr, target: &ContainerType) -> Expr {
     while let Some(inner) = level.element.container.as_deref() {
         depth += 1;
         if matches!(inner.layout.kind, ContainerKind::Queue { capacity } if capacity != 0) {
-            value = call(ContainerOp::Bound { depth }, inner.layout, vec![value]);
+            value = call(
+                ContainerOp::Bound { depth },
+                inner.layout.clone(),
+                vec![value],
+            );
         }
         level = inner;
     }
@@ -1315,7 +1432,11 @@ fn last_index(target: &ContainerType, receiver: Expr) -> Converted<Expr> {
         ));
     }
     Ok(Expr::Binary {
-        left: Box::new(call(ContainerOp::Size, target.layout, vec![receiver])),
+        left: Box::new(call(
+            ContainerOp::Size,
+            target.layout.clone(),
+            vec![receiver],
+        )),
         op: BinaryOp::Sub,
         right: Box::new(Expr::Literal("1".into())),
     })
@@ -1624,7 +1745,7 @@ pub(super) fn value(
             };
             let value = call(
                 op,
-                target.layout,
+                target.layout.clone(),
                 vec![
                     expression_binding::value(*left, native, tree, session, dims)?,
                     right,
@@ -1672,7 +1793,7 @@ pub(super) fn value(
                     }
                     args.push(bound);
                 }
-                let mut layout = target.layout;
+                let mut layout = target.layout.clone();
                 layout.kind = ContainerKind::Queue { capacity: 0 };
                 return Ok(Some(call(ContainerOp::Slice, layout, args)));
             }
@@ -1687,7 +1808,7 @@ pub(super) fn value(
             };
             let get = call(
                 ContainerOp::Get,
-                target.layout,
+                target.layout.clone(),
                 vec![
                     expression_binding::value(*expression, native, tree, session, dims)?,
                     match index {
@@ -1909,7 +2030,7 @@ pub(super) fn value(
                     args.push(index_value(id, *base, tree, session, dims, &target)?);
                 }
             }
-            let value = call(op, target.layout, args);
+            let value = call(op, target.layout.clone(), args);
             Ok(Some(
                 if matches!(op, ContainerOp::PopFront | ContainerOp::PopBack) {
                     element_read(&target, &session.types, value)
@@ -2034,7 +2155,7 @@ fn query(
     let mut size = || -> Converted<Expr> {
         Ok(call(
             ContainerOp::Size,
-            target.layout,
+            target.layout.clone(),
             vec![expression_binding::value(
                 base, native, tree, session, dims,
             )?],
@@ -2262,7 +2383,7 @@ pub(super) fn set(
             Expr::Binary {
                 left: Box::new(call(
                     ContainerOp::Size,
-                    target.layout,
+                    target.layout.clone(),
                     vec![expression_binding::value(
                         *expression,
                         native,
@@ -2284,7 +2405,7 @@ pub(super) fn set(
     };
     Ok(Some(Stmt::Eval(call(
         ContainerOp::Set,
-        target.layout,
+        target.layout.clone(),
         vec![container, index, value],
     ))))
 }
@@ -2338,7 +2459,7 @@ fn compound_value(
         &session.types,
         call(
             ContainerOp::Get,
-            target.layout,
+            target.layout.clone(),
             vec![container.clone(), index.clone()],
         ),
     );
@@ -2384,6 +2505,8 @@ mod tests {
                 signed: false,
                 two_state: false,
                 handle: None,
+                enum_values: None,
+                key_enum_values: None,
             },
             element,
             record: None,

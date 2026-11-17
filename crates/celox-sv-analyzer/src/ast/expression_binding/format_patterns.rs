@@ -194,7 +194,7 @@ pub(in crate::ast) fn pattern(
                 "%p of an associative array with class handle keys",
             ));
         }
-        return Ok(Pattern::Handle(Some(container.layout)));
+        return Ok(Pattern::Handle(Some(container.layout.clone())));
     }
     if objects::native_class(tree, session, id, native, dimensions).is_some()
         || handle_value(value, &session.types, dimensions)
@@ -616,7 +616,7 @@ fn container_text(
     let source = match container.layout.kind {
         ContainerKind::Dynamic
         | ContainerKind::Queue { .. }
-        | ContainerKind::Associative { .. } => LocatorSource::Container(container.layout),
+        | ContainerKind::Associative { .. } => LocatorSource::Container(container.layout.clone()),
     };
     Ok(classes::object_call(
         ObjectOp::Pattern(AggregatePattern { source }),
@@ -942,7 +942,10 @@ pub(in crate::ast) fn pattern_argument(
             ),
         ),
         Pattern::Enum(domain) => (b"%s", enums::pattern_text(&domain, value)),
-        Pattern::Handle(layout) => (b"%s", strings::call(StringOp::Pattern(layout), vec![value])),
+        Pattern::Handle(layout) => (
+            b"%s",
+            strings::call(StringOp::Pattern(layout.map(Box::new)), vec![value]),
+        ),
     }
 }
 

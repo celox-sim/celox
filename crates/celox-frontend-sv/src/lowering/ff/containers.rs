@@ -5,7 +5,7 @@ use sv::ir::{ContainerKind, ContainerLayout, ContainerOp, HandleProperty};
 
 impl Ff<'_, '_> {
     /// The heap's parameter for a container of `layout`.
-    pub(super) fn container_parameter(&self, layout: ContainerLayout) -> u64 {
+    pub(super) fn container_parameter(&self, layout: &ContainerLayout) -> u64 {
         let (kind, capacity, signed_key, string_key, object_key) = match layout.kind {
             ContainerKind::Dynamic => (0, 0, false, false, false),
             ContainerKind::Queue { capacity } => (1, capacity, false, false, false),
@@ -189,8 +189,8 @@ impl Ff<'_, '_> {
             ContainerKind::Associative { signed, string, .. } => (signed, string),
             ContainerKind::Dynamic | ContainerKind::Queue { .. } => (false, false),
         };
-        let wide = wide_key(layout);
-        let parameter = self.container_parameter(layout);
+        let wide = wide_key(&layout);
+        let parameter = self.container_parameter(&layout);
         let code = |opcode| encode(opcode, parameter);
         if op.reduction().is_some() {
             return self.container_reduction(op, layout, &args[0], parameter);
@@ -222,7 +222,7 @@ impl Ff<'_, '_> {
             None
         };
         let zero = self.constant64(0);
-        let (width, signed) = op.result_type(layout);
+        let (width, signed) = op.result_type(&layout);
         let element_result = matches!(op, Get | PopFront | PopBack);
         // Elements that are handles may be inner containers, whose own
         // elements can make an equality unknown (IEEE 1800-2023 11.4.5).
@@ -286,7 +286,7 @@ impl Ff<'_, '_> {
                 // (IEEE 1800-2023 10.9.1). A key with X or Z bits names no
                 // entry, so its write is ignored (7.8.6).
                 let (pairs, mut handle) = if default {
-                    let (value, mask) = self.container_element(&args[0], layout)?;
+                    let (value, mask) = self.container_element(&args[0], &layout)?;
                     (
                         &args[1..],
                         self.heap_call(code(heap::WITH_DEFAULT), &[zero, value, mask]),
@@ -295,8 +295,8 @@ impl Ff<'_, '_> {
                     (&args[..], zero)
                 };
                 for pair in pairs.chunks(2) {
-                    let (index, index_mask) = self.container_index(&pair[0], layout, Set)?;
-                    let (value, mask) = self.container_element(&pair[1], layout)?;
+                    let (index, index_mask) = self.container_index(&pair[0], &layout, Set)?;
+                    let (value, mask) = self.container_element(&pair[1], &layout)?;
                     let set = self.heap_call(code(heap::SET), &[handle, index, value]);
                     let set = self.heap_call(code(heap::SET_MASK), &[set, index, mask]);
                     let valid = self.b.alloc_bit(1, false);
@@ -333,14 +333,14 @@ impl Ff<'_, '_> {
                 self.heap_call(code(heap::NEW), &[size, source])
             }
             WithDefault => {
-                let (value, mask) = self.container_element(&args[0], layout)?;
+                let (value, mask) = self.container_element(&args[0], &layout)?;
                 self.heap_call(code(heap::WITH_DEFAULT), &[zero, value, mask])
             }
             Literal => {
                 let size = self.constant64(args.len() as u64);
                 let mut handle = self.heap_call(code(heap::NEW), &[size, zero]);
                 for (i, arg) in args.iter().enumerate() {
-                    let (value, mask) = self.container_element(arg, layout)?;
+                    let (value, mask) = self.container_element(arg, &layout)?;
                     let index = self.constant64(i as u64);
                     handle = self.heap_call(code(heap::SET), &[handle, index, value]);
                     handle = self.heap_call(code(heap::SET_MASK), &[handle, index, mask]);
@@ -357,13 +357,13 @@ impl Ff<'_, '_> {
                     }
                     Sort | Rsort => self.constant64(u64::from(layout.signed)),
                     _ => {
-                        let (index, mask) = self.container_index(&args[1], layout, op)?;
+                        let (index, mask) = self.container_index(&args[1], &layout, op)?;
                         index_mask = mask;
                         index
                     }
                 };
                 let (value, mask) = if matches!(op, Set | Insert | PushFront | PushBack) {
-                    self.container_element(args.last().unwrap(), layout)?
+                    self.container_element(args.last().unwrap(), &layout)?
                 } else {
                     (zero, zero)
                 };
@@ -554,7 +554,7 @@ impl Ff<'_, '_> {
         let hoisted = self.hoist(source)?;
         let handle = self.handle(&hoisted)?;
         let count = self.constant64(u64::from(count));
-        let code = encode(heap::SIZED, self.container_parameter(layout));
+        let code = encode(heap::SIZED, self.container_parameter(&layout));
         let checked = self.heap_call(code, &[handle, count]);
         let (temp, name) = self.m.temp("fixed_source", 32, false, false);
         self.m.variables.get_mut(&temp).unwrap().value_kind = celox_design::ValueKind::ObjRef;
@@ -630,7 +630,7 @@ impl Ff<'_, '_> {
                 }
             ) =>
             {
-                let sv::ir::ObjectOp::Container { layout, .. } = **op else {
+                let sv::ir::ObjectOp::Container { ref layout, .. } = **op else {
                     unreachable!("matched a container read")
                 };
                 let [Some(outer), Some(index)] = args.as_slice() else {
@@ -638,7 +638,7 @@ impl Ff<'_, '_> {
                 };
                 self.container_call(
                     ContainerOp::Set,
-                    layout,
+                    layout.clone(),
                     &[Some(outer.clone()), Some(index.clone()), Some(updated)],
                 )?;
                 Ok(())
@@ -812,7 +812,7 @@ impl Ff<'_, '_> {
             .emit(SIRInstruction::Mux(picked, truth, then_handle, else_handle));
         self.store(temp, SIROffset::Static(0), 32, picked);
         if let Some(unknown) = unknown {
-            let code = encode(heap::MERGE, self.container_parameter(layout));
+            let code = encode(heap::MERGE, self.container_parameter(&layout));
             self.when(unknown, |this| {
                 let merged = this.heap_call(code, &[then_handle, else_handle]);
                 this.store(temp, SIROffset::Static(0), 32, merged);
@@ -827,7 +827,7 @@ impl Ff<'_, '_> {
     fn container_index(
         &mut self,
         key: &sv::ir::Expr,
-        layout: ContainerLayout,
+        layout: &ContainerLayout,
         op: ContainerOp,
     ) -> Result<(RegisterId, RegisterId), sv::AnalyzerError> {
         use ContainerOp::*;
@@ -961,7 +961,7 @@ impl Ff<'_, '_> {
     fn container_element(
         &mut self,
         expr: &sv::ir::Expr,
-        layout: ContainerLayout,
+        layout: &ContainerLayout,
     ) -> Result<(RegisterId, RegisterId), sv::AnalyzerError> {
         let expr = self.hoist(expr)?;
         let value = self.eval(&expr, Some((layout.width as usize, layout.signed)))?;
@@ -1198,7 +1198,7 @@ fn replace_expr(expr: &sv::ir::Expr, from: &sv::ir::Expr, to: &sv::ir::Expr) -> 
     }
 }
 
-fn wide_key(layout: ContainerLayout) -> Option<(usize, bool)> {
+fn wide_key(layout: &ContainerLayout) -> Option<(usize, bool)> {
     match layout.kind {
         ContainerKind::Associative {
             key_width,

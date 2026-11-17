@@ -80,7 +80,7 @@ impl BodyBuilder<'_, '_, '_> {
             let mut loops = Vec::new();
             for (position, variable) in header.variables[..=named].iter().enumerate() {
                 if position > 0 {
-                    let outer = container.layout;
+                    let outer = container.layout.clone();
                     let ForeachLoop::Container { index, .. } = loops.last().expect("an outer loop")
                     else {
                         unreachable!("container loops");
@@ -105,7 +105,7 @@ impl BodyBuilder<'_, '_, '_> {
                 loops.push(ForeachLoop::Container {
                     array: array.clone(),
                     index,
-                    layout: container.layout,
+                    layout: container.layout.clone(),
                     status,
                 });
             }
