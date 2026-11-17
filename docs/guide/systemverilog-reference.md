@@ -106,11 +106,6 @@ constructs without a dedicated issue point to the frontend roadmap,
   and clocking modports. A connection cannot name a modport if the receiving
   port declares none. Writes through a port without a modport, and member
   connections from such a port to a non-ANSI module, are unsupported.
-- **Function calls:** calls through an unselected interface array or a
-  run-time element selection; calls from an interface instance array's logic
-  to a function that accesses members; calls through a port to an imported
-  function that writes members inside generate constructs, functions, and
-  tasks.
 - **Static storage of subroutines:** a static function or task called
   through interface ports of several modules keeps its static variables, and
   the static formals of a task that suspends, once per calling module

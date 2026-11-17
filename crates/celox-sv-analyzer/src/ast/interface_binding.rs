@@ -856,7 +856,9 @@ fn connection_array(
     let mut evaluate = |root| -> Converted<i128> {
         constant_binding::bind(root, tree, session, &context)?
             .and_then(|value| eval_ast_const_expr(&tree.functions, &value, env))
-            .ok_or_else(|| unsupported("nonconstant interface array selection"))
+            .ok_or_else(|| AnalyzerError::InvalidInterfaceSelection {
+                detail: "nonconstant interface array selection".to_string(),
+            })
     };
     let selections = selections.into_iter().rev().collect::<Vec<_>>();
     let mut offsets = vec![0];
@@ -1021,7 +1023,9 @@ pub(super) fn actual_handle_key(
             Suffix::Index(root) => {
                 let value = constant_binding::bind(root, tree, session, &context)?
                     .and_then(|value| eval_ast_const_expr(&tree.functions, &value, env))
-                    .ok_or_else(|| unsupported("nonconstant interface index"))?;
+                    .ok_or_else(|| AnalyzerError::InvalidInterfaceSelection {
+                        detail: "nonconstant interface index".to_string(),
+                    })?;
                 handle.push_str(&format!("[{value}]"));
             }
         }
