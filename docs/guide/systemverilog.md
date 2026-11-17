@@ -89,8 +89,6 @@ The areas most likely to require changes when porting a design are:
   `always_ff`.
 - `ref` ports, non-ANSI port expressions, gate primitives with delays or
   strengths, and several interface features.
-- Inferred latches in `always_comb`, which warn by default and are an
-  error in strict mode or with `inferred_latch = "error"`.
 
 The [deviations page](./systemverilog-reference#what-is-not-supported) is
 the complete list, including intentional differences and

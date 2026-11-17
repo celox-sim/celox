@@ -457,11 +457,6 @@ sequence 内のインスタンス、
 
 受理しますが標準どおりではありません。移植性が必要なコードはこれらに依存しないでください。
 
-- **推論ラッチは既定で警告です。** `always_comb` の不完全な代入
-  （一部の経路でしか書かない static ローカルを含む）は、警告付きでラッチとしてシミュレーションし、strict mode（`strict = true` / `--strict`）または
-  [`[diagnostics]` テーブル](./celox-toml.md#diagnostics)で
-  `inferred_latch = "error"` を設定すると拒否します。明示的な
-  `always_latch` と通常の `always @*` には不要です。
 - **固定サイズ unpacked 配列への packed 値と充填。** IEEE 1800-2023 7.6 は
   固定サイズ unpacked 配列に、互換な型の unpacked 配列だけを代入できるとします。
   Celox は配列全体とちょうど同じ幅の packed 値もビットごとに代入し、`'0` のような unbased unsized リテラルでは全要素を埋めます。
@@ -486,16 +481,13 @@ sequence 内のインスタンス、
   Rust の `SimulatorBuilder::legacy_empty_reductions(true)`
   （フロントエンドの `AnalysisOptions::legacy_empty_reductions`）では全ての
   空縮約がゼロを返します。そのようなツールとの互換用です。
-- **時間尺度のない設計要素に既定値を使う（オプトイン）。** IEEE 1800-2023
+- **時間尺度のない設計要素に既定値を使います。** IEEE 1800-2023
   3.14.2.3 は、時間単位と精度（宣言・継承・`` `timescale `` によるもの）を
-  持つ設計要素と持たない設計要素が混在する設計をエラーとします。Celox は既定では
-  警告して持たない設計要素の名前を示し、strict mode では拒否します。
+  持つ設計要素と持たない設計要素が混在する設計をエラーとします。Celox は代わりに
+  警告して持たない設計要素の名前を示し、そうした設計要素は他のシミュレータと
+  同様に既定の時間単位と精度を使います。strict mode（`strict = true` / `--strict`）または
   [`[diagnostics]` テーブル](./celox-toml.md#diagnostics)で
-  `mixed_timescale = "warn"` または `"allow"` を指定すると（JavaScript
-  パッケージもこのテーブルを読みます。コマンドラインの `--diagnostic
-  mixed_timescale=warn` や Rust の `SimulatorBuilder::diagnostic_policy` でも同じ）、
-  そうした設計要素は既定の時間単位と精度を使います。`warn` では他のシミュレータと
-  同様に、設計要素ごとにその名前を示す `mixed_timescale` 警告を出します。
+  `mixed_timescale = "error"` を指定すると拒否し、`"allow"` で警告を消せます。
 - **virtual interface 越しに呼ぶ interface のサブルーチンの記憶域。**
   virtual interface 越しに呼んだ interface の task・関数（`vif.drive(req)`、25.9）は
   ハンドルが指すインスタンスについて実行します。static 変数はそのインスタンスの

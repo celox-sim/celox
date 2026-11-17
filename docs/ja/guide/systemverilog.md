@@ -82,7 +82,6 @@ Veryl と混在する階層では `Simulation::from_sources(veryl).with_sv_sourc
   またがるネットのドライバ（モジュール間のトライステートバス）、`always_ff` の `iff`。
 - `ref` ポート、non-ANSI ポート式、遅延・強度付きゲートプリミティブ、
   interface の一部の機能。
-- `always_comb` の推論ラッチ。既定では警告で、strict mode または `inferred_latch = "error"` でエラーになります。
 
 完全な一覧は[逸脱事項のページ](./systemverilog-reference#what-is-not-supported)です。
 意図的な逸脱や、乱数・時刻の既定値・

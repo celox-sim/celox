@@ -603,13 +603,6 @@ or nonblocking action statements.
 These are accepted by Celox but do not follow the standard exactly.
 Code that must stay portable should avoid relying on them.
 
-- **Inferred latches warn by default.** An incomplete assignment in
-  `always_comb` (including a static local that only some paths write) is
-  simulated as a latch with a warning, and rejected in strict mode
-  (`strict = true` / `--strict`) or unless `inferred_latch = "error"` is set in the
-  [`[diagnostics]` table](./celox-toml.md#diagnostics), or the equivalent
-  Rust / JavaScript option is used. Explicit `always_latch` and ordinary
-  `always @*` do not need the option.
 - **A missing `static` keyword is forgiven in one case.** IEEE 1800-2023
   6.21 requires an explicit `static` when a static variable's declaration
   specifies an initialization value. Celox also accepts the declaration
@@ -640,16 +633,15 @@ Code that must stay portable should avoid relying on them.
   `SimulatorBuilder::legacy_empty_reductions(true)` (or the frontend's
   `AnalysisOptions::legacy_empty_reductions`) instead returns zero for all
   empty reductions, for compatibility with tools that do so.
-- **Opt-in default time scales for elements without one.** IEEE 1800-2023
+- **Default time scales for elements without one.** IEEE 1800-2023
   3.14.2.3 makes a design an error when some design elements have a time
   unit and precision (declared, inherited or from `` `timescale ``) and
-  others do not; Celox warns by default, naming the elements
-  without one, and rejects it in strict mode. With `mixed_timescale = "warn"` or `"allow"` in the
-  [`[diagnostics]` table](./celox-toml.md#diagnostics), which the
-  JavaScript package also reads (or `--diagnostic mixed_timescale=warn` on
-  the command line, or `SimulatorBuilder::diagnostic_policy` in Rust), each such element takes the default time unit and precision
-  instead, and `warn` reports one `mixed_timescale` warning naming each, as
-  other simulators do.
+  others do not. Celox instead warns, naming the elements without one,
+  and each such element takes the default time unit and precision, as
+  other simulators do. Strict mode (`strict = true` / `--strict`) or
+  `mixed_timescale = "error"` in the
+  [`[diagnostics]` table](./celox-toml.md#diagnostics) rejects the
+  design; `mixed_timescale = "allow"` silences the warning.
 - **Storage of interface subroutines called through a virtual interface.**
   A task or function of an interface called through a virtual interface
   (`vif.drive(req)`, 25.9) runs for the instance the handle denotes. Its
