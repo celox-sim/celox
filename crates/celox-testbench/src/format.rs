@@ -395,20 +395,15 @@ pub fn format_sv_display_arg(arg: &DisplayFormatArg<'_>, spec: char, field: Fiel
     };
     if spec == 's' && !has_mask(arg) {
         // Integral %s is right-justified byte data; omit leading zero bytes
-        // and include a partial most-significant byte (21.2.1.7).
+        // and include a partial most-significant byte (21.2.1.7). Unlike the
+        // numeric formats, an absent field width pads nothing: only a given
+        // width does (21.2.1.2).
         let bytes = packed_bytes(arg.value, arg.width);
         let start = bytes
             .iter()
             .position(|byte| *byte != 0)
             .unwrap_or(bytes.len());
-        return pad_veryl_field(
-            bytes[start..].to_vec(),
-            spec,
-            FieldSpec {
-                width: Some(field_width.unwrap_or_else(|| arg.width.div_ceil(8))),
-                ..field
-            },
-        );
+        return pad_veryl_field(bytes[start..].to_vec(), spec, field);
     }
     if spec == 'c' {
         return pad_veryl_field(format_display_arg(arg, Some(spec)), spec, field);
@@ -763,6 +758,86 @@ mod tests {
             format_sized_display_arg(&arg, 's', Some(3)),
             " \u{e9}".as_bytes()
         );
+    }
+
+    #[test]
+    fn string_format_omits_leading_zero_bytes_without_field_padding() {
+        // IEEE 1800-2023 11.10 assigns "Test" to a 112-bit vector with ten
+        // leading zero bytes, and 21.2.1.7 prints %s without them and with
+        // no field padding unless a width is given.
+        let value = BigUint::from(0x5465_7374u32);
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: None,
+            width: 112,
+            signed: false,
+            is_string: false,
+            float_precision: None,
+        };
+        assert_eq!(
+            format_sv_display_arg(&arg, 's', FieldSpec::default()),
+            b"Test"
+        );
+        assert_eq!(
+            format_sv_display_arg(
+                &arg,
+                's',
+                FieldSpec {
+                    width: Some(0),
+                    ..FieldSpec::default()
+                },
+            ),
+            b"Test"
+        );
+        assert_eq!(
+            format_sv_display_arg(
+                &arg,
+                's',
+                FieldSpec {
+                    width: Some(14),
+                    ..FieldSpec::default()
+                },
+            ),
+            b"          Test"
+        );
+        assert_eq!(
+            format_sv_display_arg(
+                &arg,
+                's',
+                FieldSpec {
+                    width: Some(14),
+                    left_justify: true,
+                    ..FieldSpec::default()
+                },
+            ),
+            b"Test          "
+        );
+        // Only leading zero bytes are omitted (11.10.2, 21.2.1.7): the
+        // padding inside a concatenation stays, as NUL bytes.
+        let concat = (BigUint::from(0x5465_7374u32) << 112) | BigUint::from(0x5445_5354u32);
+        let arg = DisplayFormatArg {
+            value: &concat,
+            mask: None,
+            width: 224,
+            signed: false,
+            is_string: false,
+            float_precision: None,
+        };
+        assert_eq!(
+            format_sv_display_arg(&arg, 's', FieldSpec::default()),
+            b"Test\0\0\0\0\0\0\0\0\0\0TEST"
+        );
+        // An all-zero value has no character left to print.
+        let zero = BigUint::from(0u8);
+        let arg = DisplayFormatArg {
+            value: &zero,
+            mask: None,
+            width: 112,
+            signed: false,
+            is_string: false,
+            float_precision: None,
+        };
+        assert!(format_sv_display_arg(&arg, 's', FieldSpec::default()).is_empty());
     }
 
     fn four_state(payload: u32, mask: u32, width: usize, spec: char) -> String {
