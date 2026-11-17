@@ -1,1 +1,7 @@
-Address Codex review on PR #4215: keep same-named initialized static locals distinct by declaration site so each is warned.
+Revision history for #4215:
+
+rev 3 (content) 2026-11-17 03:52 UTC — Address Codex review on PR #4215: keep same-named initialized static locals distinct by declaration site so each is warned.
+rev 2 (content) 2026-11-17 03:37 UTC — Address Codex review on PR #4215: warn for const static locals too, and promote implicit_static_initializer in strict mode.
+rev 1 (initial) 2026-11-17 03:37 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":4215,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"67f252ba197a817a1eb1ea86dd62904e3bcc147d","timestamp_iso":"2026-11-17T03:37:33Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"67f252ba197a817a1eb1ea86dd62904e3bcc147d","new_sha":"5ddfa7267357f669e4e9ba5a0a7d2c691d95f748","timestamp_iso":"2026-11-17T03:37:33Z","reason":"Address Codex review on PR #4215: warn for const static locals too, and promote implicit_static_initializer in strict mode.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/67f252ba197a817a1eb1ea86dd62904e3bcc147d...5ddfa7267357f669e4e9ba5a0a7d2c691d95f748"},{"number":3,"change_type":"content","old_sha":"5ddfa7267357f669e4e9ba5a0a7d2c691d95f748","new_sha":"ed897d4b761cf548ed2f83810fd2133c1cd26de3","timestamp_iso":"2026-11-17T03:52:05Z","reason":"Address Codex review on PR #4215: keep same-named initialized static locals distinct by declaration site so each is warned.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/5ddfa7267357f669e4e9ba5a0a7d2c691d95f748...ed897d4b761cf548ed2f83810fd2133c1cd26de3"}]} -->
