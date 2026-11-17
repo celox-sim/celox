@@ -380,7 +380,7 @@ pub struct SvModuleRequest {
 #[derive(Clone, Copy)]
 struct SharedAlways<'a> {
     /// Make a variable a temporary of each block when that is unobservable
-    /// within the module (the `shared_always_temporary` diagnostic; see
+    /// within the module (the `shared_always_temporary` compatibility opt-in; see
     /// [`share_always_variables`]).
     temporaries: bool,
     /// The module's signals that hierarchical names in other modules denote.

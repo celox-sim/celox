@@ -4,6 +4,7 @@ fn default_opts() -> ParsedOptions {
     ParsedOptions {
         common: ParsedOptionsCommon {
             diagnostic_policy: Default::default(),
+            legacy_empty_reductions: false,
             four_state: false,
             plusargs: Vec::new(),
             allow_inferred_latches: false,
@@ -634,6 +635,18 @@ fn strict_policy_differs() {
     assert_ne!(
         build_cache_key(&src, "Top", &default, None),
         build_cache_key(&src, "Top", &strict, None),
+    );
+}
+
+#[test]
+fn legacy_empty_reductions_differs() {
+    let src = make_sources(&[("module Top {}", "a.veryl")]);
+    let default = default_opts();
+    let mut legacy = default_opts();
+    legacy.common.legacy_empty_reductions = true;
+    assert_ne!(
+        build_cache_key(&src, "Top", &default, None),
+        build_cache_key(&src, "Top", &legacy, None),
     );
 }
 

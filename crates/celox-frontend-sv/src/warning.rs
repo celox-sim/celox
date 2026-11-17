@@ -248,7 +248,7 @@ impl miette::Diagnostic for FrontendWarning {
                 "end the simulation with `$finish`, or remove the call"
             }
             FrontendWarningKind::SharedAlwaysTemporary { .. } => {
-                "a language deviation enabled by shared_always_temporary=warn or allow; declare the variable inside each block to keep IEEE 1800-2023 semantics"
+                "a language deviation enabled by the shared_always_temporary compatibility opt-in; declare the variable inside each block to keep IEEE 1800-2023 semantics"
             }
         }))
     }

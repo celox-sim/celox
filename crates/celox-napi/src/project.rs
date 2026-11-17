@@ -48,6 +48,9 @@ pub(super) struct CeloxConfig {
     /// to errors. A per-call `strict` option also enables it.
     #[serde(default)]
     pub(super) strict: Option<bool>,
+    /// `[compatibility]` opt-ins of celox.toml.
+    #[serde(default)]
+    pub(super) compatibility: CeloxCompatibility,
     /// Glob patterns (relative to project root) for `.veryl` files to exclude
     /// from compilation and type generation.
     #[serde(default)]
@@ -58,13 +61,30 @@ pub(super) struct CeloxConfig {
     pub(super) simulation: CeloxSimulationConfig,
 }
 
+/// Behavior-changing compatibility opt-ins of a celox.toml.
+#[derive(serde::Deserialize, Default, Clone, Copy)]
+#[serde(default)]
+pub(super) struct CeloxCompatibility {
+    pub(super) legacy_empty_reductions: Option<bool>,
+    pub(super) shared_always_temporary: Option<bool>,
+}
+
 impl CeloxConfig {
     /// The project diagnostic policy, with strict mode from the project
-    /// setting or the per-call `strict` option.
+    /// setting or the per-call `strict` option, and the shared-temporary
+    /// compatibility opt-in as a warning unless diagnostics set it.
     pub(super) fn diagnostic_policy(&self, strict_option: bool) -> celox::DiagnosticPolicy {
         self.diagnostics
             .clone()
             .strict(self.strict.unwrap_or(false) || strict_option)
+            .with_shared_always_temporary(
+                self.compatibility.shared_always_temporary.unwrap_or(false),
+            )
+    }
+
+    /// Whether empty SV array reductions return zero (compatibility).
+    pub(super) fn legacy_empty_reductions(&self) -> bool {
+        self.compatibility.legacy_empty_reductions.unwrap_or(false)
     }
 }
 

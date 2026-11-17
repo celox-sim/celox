@@ -13,6 +13,7 @@ pub fn compile_native_image_with_state(
     source: &Path,
     top: &str,
     policy: DiagnosticPolicy,
+    legacy_empty_reductions: bool,
     level: crate::OptLevel,
     access: crate::SignalAccessOptions,
     parameters: &BTreeMap<String, u64>,
@@ -39,6 +40,7 @@ pub fn compile_native_image_with_state(
         let builder = Simulator::from_sources(source_refs, top)
             .with_metadata(metadata)
             .diagnostic_policy(policy.clone())
+            .legacy_empty_reductions(legacy_empty_reductions)
             .four_state(four_state)
             .native_force_support(false)
             .observable_updates(true)
@@ -55,6 +57,7 @@ pub fn compile_native_image_with_state(
             .map_err(|error| format!("failed to read {}: {error}", source.display()))?;
         let builder = Simulator::from_sources(vec![(contents.as_str(), source)], top)
             .diagnostic_policy(policy.clone())
+            .legacy_empty_reductions(legacy_empty_reductions)
             .four_state(four_state)
             .native_force_support(false)
             .observable_updates(true)

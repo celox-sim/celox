@@ -70,6 +70,14 @@ pub(super) struct DesignArgs {
     /// compatibility fallbacks) from warnings to errors.
     #[arg(long)]
     strict: bool,
+    /// Compatibility: return zero for all empty SV array reductions
+    /// instead of each operator's identity.
+    #[arg(long)]
+    legacy_empty_reductions: bool,
+    /// Compatibility: treat a variable written by several `always @*`
+    /// blocks as a temporary of each block.
+    #[arg(long)]
+    shared_always_temporary: bool,
     /// Treat each SV file as a separate compilation unit, isolating source macros.
     #[arg(long)]
     separate_units: bool,
@@ -121,6 +129,8 @@ struct Manifest {
     #[serde(rename = "simulation")]
     _simulation: VerylSimulationConfig,
     diagnostics: celox::DiagnosticPolicy,
+    #[serde(default)]
+    compatibility: Compatibility,
     sources: Vec<PathBuf>,
     filelists: Vec<PathBuf>,
     include_dirs: Vec<PathBuf>,
@@ -141,6 +151,15 @@ struct Manifest {
     targets: BTreeMap<String, Target>,
 }
 
+/// Behavior-changing compatibility opt-ins of a celox.toml.
+/// An unset field inherits the enclosing scope's value.
+#[derive(Default, Deserialize, Clone, Copy)]
+#[serde(default, deny_unknown_fields)]
+struct Compatibility {
+    legacy_empty_reductions: Option<bool>,
+    shared_always_temporary: Option<bool>,
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct VerylTestConfig {
@@ -159,6 +178,8 @@ struct VerylSimulationConfig {
 #[serde(default, deny_unknown_fields)]
 struct Target {
     diagnostics: celox::DiagnosticPolicy,
+    #[serde(default)]
+    compatibility: Compatibility,
     sources: Vec<PathBuf>,
     filelists: Vec<PathBuf>,
     include_dirs: Vec<PathBuf>,
@@ -181,6 +202,10 @@ struct Target {
 pub(super) struct Design {
     pub project_root: Option<PathBuf>,
     pub diagnostics: celox::DiagnosticPolicy,
+    /// Compatibility: zero results for empty SV array reductions.
+    pub legacy_empty_reductions: bool,
+    /// Compatibility: shared `always @*` variables as per-block temporaries.
+    pub shared_always_temporary: bool,
     pub sources: Vec<PathBuf>,
     pub include_dirs: Vec<PathBuf>,
     pub defines: BTreeMap<String, String>,
@@ -366,6 +391,14 @@ impl DesignArgs {
                 if let Some(strict) = config.strict {
                     design.diagnostics.strict = strict;
                 }
+                design.legacy_empty_reductions = config
+                    .compatibility
+                    .legacy_empty_reductions
+                    .unwrap_or(false);
+                design.shared_always_temporary = config
+                    .compatibility
+                    .shared_always_temporary
+                    .unwrap_or(false);
                 design.top = config.top.clone().unwrap_or_default();
                 let mut opt_level = config.opt_level.as_deref();
                 let mut timescale = config.timescale.as_deref();
@@ -381,6 +414,12 @@ impl DesignArgs {
                     design.diagnostics.merge(&target.diagnostics);
                     if let Some(strict) = target.strict {
                         design.diagnostics.strict = strict;
+                    }
+                    if let Some(value) = target.compatibility.legacy_empty_reductions {
+                        design.legacy_empty_reductions = value;
+                    }
+                    if let Some(value) = target.compatibility.shared_always_temporary {
+                        design.shared_always_temporary = value;
                     }
                     design.extend(
                         base,
@@ -443,6 +482,12 @@ impl DesignArgs {
         if self.strict {
             design.diagnostics.strict = true;
         }
+        if self.legacy_empty_reductions {
+            design.legacy_empty_reductions = true;
+        }
+        if self.shared_always_temporary {
+            design.shared_always_temporary = true;
+        }
         if self.single_unit {
             design.single_unit = Some(true);
         }
@@ -483,6 +528,10 @@ impl DesignArgs {
         }
         for diagnostic in &self.diagnostics {
             design.diagnostics.set_override(diagnostic)?;
+        }
+        if design.shared_always_temporary {
+            design.diagnostics =
+                std::mem::take(&mut design.diagnostics).with_shared_always_temporary(true);
         }
         design.include_dirs.extend(self.include_dirs);
         if !self.dpi_libs.is_empty() {

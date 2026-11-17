@@ -154,10 +154,6 @@ exit_outside_program = "error"
 Rust の `.allow_inferred_latches(true)` と JavaScript の `allowInferredLatches: true` は、
 この診断の明示設定がない場合だけ `allow` を補います。明示した `error`・`warn`・`allow` が優先されます。
 
-`shared_always_temporary` は例外で、既定値はどちらのモードでも `error` で、共有するループ変数のように複数の `always @*` ブロックが書き込む変数に IEEE 1800-2023 の意味論を適用します。各ブロックは自身が読む変数（共有変数を含む）の変化を待つため（§9.4.2.2）、書き込みは待機中の他のブロックに通知されます。ほかから読まれず読む前に書かれる添字については、本体終了後、次の暗黙のイベント待ちに入る前に他の Active 領域の処理を実行できます（§4.7、§4.9.3）。共有変数の格納とイベント通知は保持し、共有だけを理由に非収束とはしません。互いに起動し続けるブロックは `time T does not settle` で実行を終了し、そのメッセージに該当ブロックが示されます。
-`warn` または `allow` を選ぶと、Celox はそのような変数を各ブロックの一時変数として扱います。対象は、`always @*` ブロックだけが書き込み、各ブロックがすべての経路で読む前に書き込み、ほかに読むもの（他のプロセス、継続的代入、サブルーチン、ポート、インスタンス接続、階層名）がない変数です。その書き込みは Icarus Verilog と同様に他のブロックを起動せず、変数自体は初期値のままになります。
-これは規格からの逸脱なので既定では無効です。`warn` は対象の変数とブロックを報告します。変数を各ブロックの中で宣言すれば、この緩和なしで規格どおりの意味論を保てます。
-
 `interface_array_query` の既定値は `warn`（strict mode では `error`）です。`warn` または `allow` で、固定長の interface 配列と添字で選択した部分配列に対する `$size` を互換拡張として許可します。IEEE 1800-2023 §20.7 の対象はデータ配列であり、interface インスタンスはデータオブジェクトではありません。省略可能な次元引数は既知の整数定数に限ります。この拡張によって interface ハンドルに packed 幅が付いたり、他の配列クエリが使えるようになったりすることはありません。
 
 ```toml
@@ -192,6 +188,25 @@ mixed_timescale = "warn"
 ```
 
 共通設定→選択したターゲット→CLI の順に優先されます。`--diagnostic CODE=LEVEL` は繰り返し指定でき、同じコードを複数回指定した場合は最後の指定が有効です。`celox run` と `celox vpi build` は抑制していない警告を表示します。診断レベルを変更しても、最適化設定や実行時エラーの扱いは変わりません。
+
+### `[compatibility]`
+
+診断レベルとは分けて、他ツール互換のためにシミュレーション挙動を変えるオプトインをまとめます。
+
+```toml
+[compatibility]
+legacy_empty_reductions = true
+shared_always_temporary = true
+
+[targets.legacy.compatibility]
+legacy_empty_reductions = false
+```
+
+`legacy_empty_reductions` は、空の SystemVerilog 配列縮約について各演算子の恒等元（積なら1、ビットANDなら全1など、IEEE 1800-2023 §7.12.3）ではなくゼロを返します。CLI フラグは `--legacy-empty-reductions`、Rust では `SimulatorBuilder::legacy_empty_reductions(true)` です。
+
+`shared_always_temporary` は、複数の `always @*` ブロックが書く変数を各ブロックの一時変数として扱います。既定では、共有するループ変数のように、そうした変数に IEEE 1800-2023 の意味論を適用します。各ブロックは自身が読む変数（共有変数を含む）の変化を待ち（§9.4.2.2）、書き込みは待機中の他のブロックに通知されます。有効にすると、`always @*` ブロックだけが書き込み、各ブロックがすべての経路で読む前に書き込み、ほかに読むものがない変数を各ブロックの一時変数にします。その書き込みは Icarus Verilog と同様に他のブロックを起動せず、変数自体は初期値のままになります。これは規格からの逸脱なので既定では無効で、適用時は対象の変数とブロックを警告として報告します。診断コードではないため、`[diagnostics]` でのレベル指定は効果がありません。CLI フラグは `--shared-always-temporary`、Rust では `SimulatorBuilder::shared_always_temporary(true)` です。
+
+優先順位は共通設定→選択したターゲット→CLI フラグです。プロジェクトのシミュレータ生成時も同じテーブルを `celox.toml` から読み込みます。
 
 ## CLIの最適化と信号アクセス
 
