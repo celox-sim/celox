@@ -1149,3 +1149,25 @@ fn unindexed_interface_parameters_resolve_inside_indexed_generate_paths() {
     assert_eq!(sim.get(sim.signal("q")), 11u8.into());
     assert_eq!(sim.warnings().len(), 1);
 }
+
+#[test]
+fn implicit_static_initializer_warns_by_default_and_errors_in_strict_mode() {
+    use std::path::Path;
+    let source = "module Top(output int y); initial begin int x = 1; y = x; end endmodule";
+    let build = || {
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("implicit_static.sv"))], "Top")
+    };
+    let sim = build().build().unwrap();
+    assert_eq!(sim.warnings().len(), 1);
+    assert!(celox::render_diagnostic(&sim.warnings()[0]).contains("implicit_static_initializer"));
+    let error = build().strict(true).build().err().unwrap().to_string();
+    assert!(error.contains("implicit_static_initializer"), "{error}");
+    let sim = build()
+        .diagnostic_policy(policy(
+            "implicit_static_initializer",
+            DiagnosticLevel::Allow,
+        ))
+        .build()
+        .unwrap();
+    assert!(sim.warnings().is_empty());
+}

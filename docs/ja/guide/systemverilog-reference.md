@@ -466,7 +466,9 @@ sequence 内のインスタンス、
   定数初期化子ではどの手続きでも、実行時初期化子では `initial` のような
   1度だけ実行する手続きで、キーワード無しの宣言も受け付けます。`always` 内の
   実行時初期化子にキーワードが無い場合は拒否します。`static` または
-  `automatic` を明示してください。
+  `automatic` を明示してください。いずれの受け付ける形でも
+  `implicit_static_initializer` 警告を出し、diagnostics ポリシーで無効化
+  (`allow`) やエラー化 (`error`) ができます。
 - **program の継続代入は Reactive region で実行しません。** program 内の
   継続代入はデザインの組み合わせ論理と評価し、program が書くデザイン論理は
   reactive region セットの実行中に安定します。そのため `#0` の後に再開した

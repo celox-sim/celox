@@ -588,6 +588,73 @@ fn concatenated_targets_select_with_the_entry_value() {
     );
 }
 
+/// An accepted declaration without the keyword still warns that the
+/// `static` keyword is required (IEEE 1800-2023 6.21). An explicitly
+/// declared lifetime does not warn.
+#[test]
+fn initialized_locals_without_static_report_warning() {
+    fn warned(source: &str) -> bool {
+        let sim = Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("lifetimes.sv"))],
+            "Top",
+        )
+        .build()
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        sim.warnings()
+            .iter()
+            .any(|warning| format!("{warning}").contains("is not declared `static`"))
+    }
+    // A constant initializer is forgiven in any procedure but reports that
+    // the `static` keyword is required (6.21).
+    assert!(warned(
+        "module Top(output int y); initial begin int x = 1; y = x; end endmodule"
+    ));
+    assert!(warned(
+        "module Top(output int y); always_comb begin int x = 1; y = x; end endmodule"
+    ));
+    // A run-time initializer that runs once is forgiven in an initial
+    // procedure but reports the same warning.
+    assert!(warned(
+        "module Top(input int a, output int y); initial begin int x = a + 1; y = x; end endmodule"
+    ));
+    // `const` does not change the variable's lifetime; a const local of
+    // static lifetime still requires the keyword, and an explicitly
+    // `static` const does not warn.
+    assert!(warned(
+        "module Top(output int y); initial begin const int x = 1; y = x; end endmodule"
+    ));
+    assert!(!warned(
+        "module Top(output int y); initial begin const static int x = 1; y = x; end endmodule"
+    ));
+    // Same-named declarations in separate blocks are each reported.
+    let sim = Simulation::from_sv_sources(
+        vec![(
+            "module Top(output int y);
+               initial begin int x = 1; y = x; end
+               initial begin int x = 2; y = x; end
+             endmodule",
+            std::path::Path::new("lifetimes.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    assert_eq!(
+        sim.warnings()
+            .iter()
+            .filter(|warning| format!("{warning}").contains("is not declared `static`"))
+            .count(),
+        2
+    );
+    // An explicitly lifetime-specified declaration is conforming, no warning.
+    assert!(!warned(
+        "module Top(output int y); initial begin static int x = 1; y = x; end endmodule"
+    ));
+    assert!(!warned(
+        "module Top(output int y); initial begin automatic int x = 1; y = x; end endmodule"
+    ));
+}
+
 /// Review cases: four-state case selectors, guaranteed `repeat` iterations,
 /// and writes through arguments of functions called in expressions.
 #[test]

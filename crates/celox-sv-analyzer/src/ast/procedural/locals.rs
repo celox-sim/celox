@@ -2,6 +2,33 @@
 use super::*;
 
 impl BodyBuilder<'_, '_, '_> {
+    /// Note a static variable initialized without the `static` keyword
+    /// (IEEE 1800-2023 6.21): it is forgiven, but diagnosed. The site
+    /// distinguishes same-named declarations in different blocks.
+    fn note_implicit_static_initializer(
+        &mut self,
+        name: &str,
+        tokens: celox_sv_syntax::TokenRange,
+    ) {
+        self.note_implicit_static_initializer_at(name, super::source_span(tokens, &self.tree));
+    }
+
+    fn note_implicit_static_initializer_at(
+        &mut self,
+        name: &str,
+        site: Option<crate::procedural::SourceSpan>,
+    ) {
+        super::super::warnings::append(
+            &mut self.session.diagnostics,
+            [
+                super::super::warnings::AnalyzerWarning::ImplicitStaticInitializer {
+                    name: name.to_string(),
+                    site,
+                },
+            ],
+        );
+    }
+
     /// Declare typedef `id` of a block or subroutine body, visible to the
     /// rest of the scope (IEEE 1800-2023 6.18). A forward typedef declares
     /// nothing a body uses.
@@ -215,6 +242,7 @@ impl BodyBuilder<'_, '_, '_> {
                     automatic,
                     explicit,
                     assignment.tokens.start,
+                    super::source_span(assignment.tokens, &self.tree),
                 )?);
                 continue;
             }
@@ -241,6 +269,13 @@ impl BodyBuilder<'_, '_, '_> {
                 let r#type = scoped_type(signal.r#type().clone(), &self.dims.const_env);
                 self.state.statics.push((name.clone(), r#type));
             }
+            if !automatic
+                && assignment.value.is_some()
+                && init.is_some()
+                && native.lifetime.as_deref() != Some("static")
+            {
+                self.note_implicit_static_initializer(signal.name(), assignment.tokens);
+            }
             stmts.push(Stmt::Local { name, init });
         }
         Ok(stmts)
@@ -256,6 +291,7 @@ impl BodyBuilder<'_, '_, '_> {
         automatic: bool,
         explicit: bool,
         declaration: usize,
+        site: Option<crate::procedural::SourceSpan>,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
         if signal.is_const {
             return Err(unsupported("const variable of unpacked structure type"));
@@ -312,6 +348,10 @@ impl BodyBuilder<'_, '_, '_> {
         };
         let mut stmts = Vec::new();
         for ((name, r#type), part) in leaves.iter().zip(parts.drain(..)) {
+            if !automatic && !explicit && root.is_some() && part.is_some() {
+                let leaf_name = name.clone();
+                self.note_implicit_static_initializer_at(&leaf_name, site.clone());
+            }
             if !automatic {
                 // An explicitly static member of a repeating process is
                 // initialized before simulation, like a scalar.

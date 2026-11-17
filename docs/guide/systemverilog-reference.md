@@ -609,7 +609,9 @@ Code that must stay portable should avoid relying on them.
   without the keyword with a constant initializer in any procedure, and
   with a run-time initializer in a procedure that runs once, such as
   `initial`. In an `always` procedure a run-time initializer without the
-  keyword is rejected; declare the local `static` or `automatic`.
+  keyword is rejected; declare the local `static` or `automatic`. Both
+  accepted forms report an `implicit_static_initializer` warning, which the
+  diagnostics policy can silence (`allow`) or escalate (`error`).
 - **Packed values and fills of fixed-size unpacked arrays.** IEEE
   1800-2023 7.6 assigns a fixed-size unpacked array only an unpacked array
   of a compatible type. Celox also assigns it a packed value exactly as
