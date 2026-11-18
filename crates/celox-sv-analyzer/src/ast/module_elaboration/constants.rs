@@ -66,16 +66,18 @@ impl ScopeElaboration<'_> {
         if self.name == self.override_module_name {
             apply_parameter_overrides(&mut self.parameters, self.parameter_overrides)?;
         }
+        // A parameter may take its value from a constant of a package the
+        // scope uses, such as `AllPagesW = rp::W` that sizes a type of the
+        // scope (IEEE 1800-2023 26.3): bind the scope's parameters with the
+        // imported constants, as the second pass below does.
         self.const_env = self.imported.const_env.clone().into();
-        let mut own = ConstEnv::default();
         parameters::extend_const_env_with_imported_parameters(
             syntax_tree,
             session,
-            &mut own,
+            &mut self.const_env,
             &self.parameters,
             &self.imported.parameter_values,
         );
-        self.const_env.extend(own);
         self.declare_class_scopes(syntax_tree, session);
         self.type_aliases =
             type_aliases_from_scope_with_env(syntax_tree, session, &self.const_env)?.into();
