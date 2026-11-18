@@ -77,7 +77,7 @@ constructs without a dedicated issue point to the frontend roadmap,
 - Hierarchical references <a id="hierarchical-references"></a> that drive a net
   through a continuous assignment, or a variable that its own module also
   drives continuously or from `always_comb`, appear in port connections, or
-  name named blocks, parameters, structure members of another scope other
+  name named blocks, structure members of another scope other
   than members of a packed structure variable or of an element of an array
   of packed structures, or `real`, `string` (except
   through the host API name, see below), or class-typed signals; names that
@@ -87,6 +87,15 @@ constructs without a dedicated issue point to the frontend roadmap,
   instance of the calling module, and its formals, result and the variables
   it names must not be `real`, `shortreal`, class or event typed; two
   modules cannot call each other's subroutines.
+  A parameter or local parameter of another instance named by a
+  hierarchical name (23.6), such as `u.N`, is read as its value in that
+  instance; it must be integral, of no packed dimensions other than one
+  `[N-1:0]`, and a value wider than 128 bits must have no unknown or
+  high-impedance bits.
+  It is not a
+  constant expression (A.8.4 `constant_primary` names parameters only by
+  package, class or generate scope), so a declaration's range, a parameter
+  value or a generate condition cannot use one.
   A static variable of a subroutine is named as `f.v` (23.6) only from a
   scope that `f` is visible in by its simple name: a method of the class or
   a base, or a subroutine of the design element; not through an instance,

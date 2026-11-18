@@ -678,3 +678,165 @@ fn members_of_elements_of_arrays_of_other_instances() {
         );
     }
 }
+
+// A hierarchical name of a parameter or local parameter of another
+// instance reads its value in that instance (IEEE 1800-2023 23.6): of each
+// specialization, typed or not, signed, inside a select index and an
+// assertion, and from below. The values are those Verilator 5.054 prints.
+#[test]
+fn parameters_of_other_instances() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Core #(parameter int W = 8, parameter logic [3:0] K = 4'hA, parameter S = -3);
+            localparam N = W / 2;
+            localparam logic [15:0] WIDE = 16'hBEEF;
+            logic [N-1:0][7:0] regs;
+            initial for (int i = 0; i < N; i++) regs[i] = 8'(i * 16 + 1);
+        endmodule
+        module Low;
+            initial #2 $display("up %0d %0d", Top.c1.N, Top.c2.N);
+        endmodule
+        module Top;
+            logic clk = 0;
+            Core #(.W(8)) c1();
+            Core #(.W(12), .K(4'h3)) c2();
+            Low l();
+            always #1 clk = ~clk;
+            int dword = 1;
+            int failures = 0;
+            initial begin
+                #1;
+                $display("params %0d %0d %0d %0d %h", c1.W, c1.N, c2.N, c2.K, c1.WIDE);
+                $display("signed %0d %0d", c1.S, c1.S + 1);
+                $display("index %0d %0d", c1.regs[(c1.N - 1) - dword], Top.c2.regs[c2.N - 1]);
+                $display("width %0d", $bits(c1.K + 1'b0));
+                #4 $display("failures %0d", failures);
+                $finish;
+            end
+            a_n: assert property (@(posedge clk) c2.N == 5) else failures++;
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("hier.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8(message).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "params 8 4 6 3 beef",
+                "signed -3 -2",
+                "index 33 81",
+                "width 4",
+                "up 4 6",
+                "failures 2",
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
+
+// A parameter wider than 128 bits, such as the 384-bit prime of Caliptra's
+// HMAC DRBG, reads its value of each specialization too (IEEE 1800-2023
+// 23.6), with the values Verilator 5.054 prints.
+#[test]
+fn wide_parameters_of_other_instances() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Drbg #(parameter [383:0] PRIME = 384'hFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF581A0DB248B0A77AECEC196ACCC52973,
+                      parameter [191:0] SMALL = 192'h1,
+                      // Of the parameter's signedness, not of its literal's.
+                      parameter logic signed [255:0] NEG = 256'hFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
+                      parameter logic [199:0] POS = 200'sh1);
+            logic [383:0] drbg = 384'h5;
+        endmodule
+        module Wrap;
+            localparam [383:0] ORDER = 384'hABCD;
+            Drbg #(.PRIME(ORDER)) d();
+            Drbg e();
+        endmodule
+        module Top;
+            Wrap w();
+            initial begin
+                #1 $display("%h", w.d.PRIME);
+                $display("%h", w.e.PRIME);
+                $display("%0d %0d", w.d.drbg < w.d.PRIME, w.e.drbg < w.e.PRIME);
+                $display("%h", w.e.SMALL + 1);
+                $display("%0d %0d %0d", w.e.NEG < 0, w.e.NEG + 1 == 0, w.e.POS > 0);
+            end
+        endmodule
+    "#;
+    assert_eq!(
+        displayed(source),
+        [
+            format!("{}abcd", "0".repeat(92)),
+            "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973"
+                .to_string(),
+            "1 1".to_string(),
+            format!("{}2", "0".repeat(47)),
+            "1 1 1".to_string(),
+        ]
+    );
+}
+
+// A parameter wider than 128 bits whose value has unknown or
+// high-impedance bits is rejected: a `bit` parameter's value has them
+// cleared, which the literal of the value would not.
+#[test]
+fn parameters_of_other_instances_with_unknown_bits_are_rejected() {
+    for declaration in ["bit [199:0] P = 200'hx", "logic [199:0] P = 200'bz"] {
+        let error = build_error(&format!(
+            "module Core; parameter {declaration}; endmodule \
+             module Top; Core c(); logic [199:0] v; assign v = c.P; endmodule"
+        ));
+        assert!(
+            error.contains("parameter `P`, whose value has unknown or high-impedance bits"),
+            "{declaration}: {error}"
+        );
+    }
+}
+
+// A hierarchical name of a parameter is no constant expression (IEEE
+// 1800-2023 11.2.1, A.8.4), so a declaration's range cannot use one.
+#[test]
+fn parameters_of_other_instances_are_no_constant_expressions() {
+    let error = build_error(
+        r#"
+        module Core #(parameter int W = 8); endmodule
+        module Top;
+            Core c1();
+            logic [c1.W-1:0] v;
+            initial $display("%0d", $bits(v));
+        endmodule
+    "#,
+    );
+    assert!(error.contains("c1.W"), "{error}");
+}
+
+// A parameter whose packed dimensions are other than one `[N-1:0]` is
+// rejected: a select of its value would not index its declared dimensions.
+#[test]
+fn dimensioned_parameters_of_other_instances_are_rejected() {
+    for declaration in ["logic [7:4] P = 4'b1000", "logic [1:0][3:0] P = 8'hA5"] {
+        let error = build_error(&format!(
+            "module Core; parameter {declaration}; endmodule \
+             module Top; Core c(); initial $display(\"%b\", c.P[1]); endmodule"
+        ));
+        assert!(
+            error.contains("parameter `P`, whose packed dimensions are other than one `[N-1:0]`"),
+            "{declaration}: {error}"
+        );
+    }
+}

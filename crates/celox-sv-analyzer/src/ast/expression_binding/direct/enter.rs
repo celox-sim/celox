@@ -34,6 +34,12 @@ pub(super) fn enter(
         values.push(Expr::Literal(literal));
         return Ok(());
     }
+    // A parameter of another instance that a hierarchical name denotes is
+    // read as its value there (IEEE 1800-2023 23.6).
+    if let Some(literal) = hierarchical_constant(id, native, tree, session, dimensions) {
+        values.push(Expr::Literal(literal));
+        return Ok(());
+    }
     unpacked_structs::check_operands(id, native, tree, session, dimensions)?;
     check_received(id, root, &target, native, tree, session, dimensions)?;
     // A container formal passed by value receives a copy of a
@@ -929,4 +935,30 @@ fn enter_inside(
     }
     let integral = strings.into_iter().map(|string| !string).collect();
     Ok((Finish::Inside(ranges, Some(integral)), children))
+}
+
+/// The typed literal of the value of the parameter of another instance that
+/// native expression `id` names by a hierarchical name, as the caller
+/// resolved it (IEEE 1800-2023 23.6).
+fn hierarchical_constant(
+    id: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    let constants = &scope::imported(tree).hierarchical_constants;
+    let id = ungroup(id, native);
+    if constants.is_empty()
+        || !matches!(
+            &native.expression(id).kind,
+            ExprKind::Member { separator, .. } if separator == "."
+        )
+    {
+        return None;
+    }
+    let (parts, None) = selected_values::path(id, native, tree, session, dimensions).ok()? else {
+        return None;
+    };
+    constants.get(&parts.join(".")).cloned()
 }

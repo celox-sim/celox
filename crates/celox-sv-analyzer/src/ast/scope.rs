@@ -58,6 +58,9 @@ pub(super) struct ScopeSymbols {
     pub aliases: HashMap<String, String>,
     /// Hierarchical interface member paths bound to semantic signal names.
     pub interface_members: HashMap<String, String>,
+    /// The hierarchical names of parameters of other instances, and the
+    /// typed literals of their values (IEEE 1800-2023 23.6).
+    pub hierarchical_constants: HashMap<String, String>,
     /// The hierarchical names of the bodies of the scope's interface
     /// instances that their bodies do not declare, by instance handle, as
     /// the scope resolved them (IEEE 1800-2023 23.8; see
@@ -277,6 +280,10 @@ impl ScopeSymbols {
             &*parameter.name
         });
         extend_missing(&mut self.interface_members, &other.interface_members);
+        extend_missing(
+            &mut self.hierarchical_constants,
+            &other.hierarchical_constants,
+        );
         extend_missing(&mut self.interface_types, &other.interface_types);
         extend_missing(&mut self.interface_arguments, &other.interface_arguments);
         extend_missing(&mut self.interface_blocks, &other.interface_blocks);
@@ -525,6 +532,7 @@ impl ScopeSymbols {
                 .map(|(path, name)| (path.clone(), rename.name(name)))
                 .collect(),
             local_aliases: self.local_aliases.clone(),
+            hierarchical_constants: self.hierarchical_constants.clone(),
             // The names belong to the scope that instantiates the
             // interfaces, which renaming does not move.
             outward_names: self.outward_names.clone(),
