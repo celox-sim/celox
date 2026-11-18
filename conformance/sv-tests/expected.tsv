@@ -2797,8 +2797,8 @@ generated/uvm-examples/uvm_use_models_bidir_get_put.sv	2state	pass
 generated/uvm-examples/uvm_use_models_bidir_get_put.sv	4state	pass
 generated/uvm-examples/uvm_use_models_bidir_item_done.sv	2state	pass
 generated/uvm-examples/uvm_use_models_bidir_item_done.sv	4state	pass
-generated/uvm-examples/uvm_use_models_pipelined_get_put.sv	2state	fail
-generated/uvm-examples/uvm_use_models_pipelined_get_put.sv	4state	fail
+generated/uvm-examples/uvm_use_models_pipelined_get_put.sv	2state	pass
+generated/uvm-examples/uvm_use_models_pipelined_get_put.sv	4state	pass
 generated/uvm-examples/uvm_use_models_pipelined_item_done.sv	2state	pass
 generated/uvm-examples/uvm_use_models_pipelined_item_done.sv	4state	pass
 generated/uvm-examples/uvm_use_models_unidirectional.sv	2state	pass
