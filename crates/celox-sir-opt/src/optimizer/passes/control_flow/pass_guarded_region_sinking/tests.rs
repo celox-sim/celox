@@ -1576,6 +1576,90 @@ fn one_removable_mux_cannot_supply_another_store_offset() {
     assert_unchanged(&before, &eu);
 }
 
+/// A priority chain that selects the same value on its first and its last
+/// arm, `if (c0) a = m; else if (c1) a = y; else a = m;` with `m` itself a
+/// Mux, as OpenTitan's csrng has for two coupled outputs: the spine would
+/// peel `m` as the root of its last level and remove it, although the first
+/// leaf stores it.
+#[test]
+fn a_peeled_mux_cannot_also_be_a_leaf_value() {
+    let mut register_map = HashMap::default();
+    for reg in 0..=2 {
+        register_map.insert(RegisterId(reg), bit(1));
+    }
+    for reg in 3..=40 {
+        register_map.insert(RegisterId(reg), bit(64));
+    }
+    let mut blocks = HashMap::default();
+    let store = |offset, source| {
+        SIRInstruction::Store(
+            address(10),
+            SIROffset::Static(offset),
+            64,
+            RegisterId(source),
+            Vec::new(),
+            Vec::new(),
+        )
+    };
+    let mux = |dst, condition, then_value, else_value| {
+        SIRInstruction::Mux(
+            RegisterId(dst),
+            RegisterId(condition),
+            RegisterId(then_value),
+            RegisterId(else_value),
+        )
+    };
+    // A chain of products from `seed` ending in `last`, which only the arm
+    // of the last level reads: enough work for the region to pay off.
+    let products = |seed: usize, first: usize, last: usize| {
+        let mut previous = seed;
+        (first..=last)
+            .map(|dst| {
+                let instruction = SIRInstruction::Binary(
+                    RegisterId(dst),
+                    RegisterId(previous),
+                    BinaryOp::Mul,
+                    RegisterId(5),
+                );
+                previous = dst;
+                instruction
+            })
+            .collect::<Vec<_>>()
+    };
+    // Parameters: c0 = r0, c1 = r1, c2 = r2, x = r3, y = r4, z = r5, v = r6.
+    let mut instructions = products(3, 20, 27);
+    instructions.extend([
+        mux(8, 2, 27, 3), // m = c2 ? x * z ** 8 : x
+        mux(9, 1, 4, 8),  // c1 ? y : m
+        mux(10, 0, 8, 9), // a = c0 ? m : (c1 ? y : m)
+        store(0, 10),
+    ]);
+    instructions.extend(products(4, 30, 37));
+    instructions.extend([
+        mux(12, 2, 37, 4),  // n = c2 ? y * z ** 8 : y
+        mux(13, 1, 6, 12),  // c1 ? v : n
+        mux(14, 0, 12, 13), // b = c0 ? n : (c1 ? v : n)
+        store(64, 14),
+    ]);
+    insert_block(
+        &mut blocks,
+        0,
+        (0..=6).map(RegisterId).collect(),
+        instructions,
+        SIRTerminator::Return,
+    );
+    let mut eu = ExecutionUnit {
+        entry_block_id: BlockId(0),
+        blocks,
+        register_map,
+    };
+    eu.verify_result().unwrap();
+
+    form_coupled_store_regions_verified_by(&mut eu, |_| {});
+
+    assert_eq!(eu.verify_result(), Ok(()));
+}
+
 #[test]
 fn moves_a_guarded_value_diamond_under_its_selected_use() {
     let mut register_map = HashMap::default();
