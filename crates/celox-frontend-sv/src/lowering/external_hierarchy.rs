@@ -456,7 +456,7 @@ fn prepare_external_hierarchy_collecting(
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
         analyses.insert(
             module_id,
-            analyze_specialization(base, &mut design, key, &[], warnings)?,
+            analyze_specialization(base, &mut design, key, &[], &[], warnings)?,
         );
     }
     let overrides = schedule::exported_overrides(analyses.values())?;
@@ -498,6 +498,7 @@ fn prepare_external_hierarchy_collecting(
                     warnings,
                     LevelLists::Processes,
                     HierarchicalNames {
+                        forced: &[],
                         properties: &properties,
                         time_format,
                         ..HierarchicalNames::lowering(&expansion)

@@ -417,6 +417,9 @@ struct Target {
     /// The `always_comb`, `always_latch` and `always @*` procedures that
     /// assign the target, by position.
     holders: Vec<usize>,
+    /// The hierarchical name of a target of another instance: its controls
+    /// are those of the target there (see [`crate::ir::force_control_name`]).
+    hierarchical: Option<String>,
 }
 
 /// Whether `stmts`, or the subroutines they call, read `name`. An actual
@@ -531,12 +534,9 @@ fn check_target(
     subroutines: &[Subroutine],
 ) -> Converted<Target> {
     let port = ports.iter().find(|port| port.name() == name);
+    let mut hierarchical = None;
     let net = if let Some(signal) = signals.iter().find(|signal| signal.name() == name) {
-        if signal.hierarchical().is_some() {
-            return Err(unsupported(format!(
-                "force or release of `{name}`, a variable or net of another instance"
-            )));
-        }
+        hierarchical = signal.hierarchical().map(str::to_string);
         if signal.package_variable().is_some() {
             return Err(unsupported(format!(
                 "force or release of `{name}`, a variable of a package"
@@ -640,9 +640,21 @@ fn check_target(
             _ => false,
         }
     });
+    // The object a hierarchical name denotes is forced in its own
+    // module, whose writes of it depend on the controls this module shares
+    // with it: a variable takes the forced value from this module, a net
+    // from its drivers there.
+    if let Some(path) = hierarchical {
+        return Ok(Target {
+            stored: !net,
+            holders: Vec::new(),
+            hierarchical: Some(path),
+        });
+    }
     Ok(Target {
         stored: input || (!net && !assigned),
         holders,
+        hierarchical: None,
     })
 }
 
@@ -695,6 +707,7 @@ pub(super) fn lower(
     ff: &[FfProcess],
     initial: &mut Vec<InitialProcess>,
     subroutines: &[Subroutine],
+    external: &[String],
 ) -> Converted<HashMap<String, String>> {
     // A procedure of a generate block whose condition is false never runs
     // (27.5), and assigns nothing.
@@ -736,6 +749,13 @@ pub(super) fn lower(
             });
         }
     }
+    // A target that other modules force through hierarchical names has its
+    // controls here, which their companions denote (see `crate::ir::force_control_name`).
+    for name in external {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
     if names.is_empty() {
         return Ok(HashMap::default());
     }
@@ -744,8 +764,11 @@ pub(super) fn lower(
     // their targets.
     let mut held: Vec<(usize, Vec<String>)> = Vec::new();
     for (serial, name) in names.into_iter().enumerate() {
-        let Target { stored, holders } =
-            check_target(&name, ports, signals, comb, ff, initial, subroutines)?;
+        let Target {
+            stored,
+            holders,
+            hierarchical,
+        } = check_target(&name, ports, signals, comb, ff, initial, subroutines)?;
         // The type of the target tells whether it is integral (6.11.1).
         let integral = dimensions.get(&name).is_some_and(|shape| {
             shape
@@ -757,6 +780,21 @@ pub(super) fn lower(
                 "force or release of `{name}`, which is not of a packed integral type"
             )));
         }
+        // A control of a target of another instance denotes the control of
+        // the target there, as the target denotes the object.
+        let control = |name: String, r#type: Type, role: ForceRole, target: &str| {
+            let mut signal = Signal::force_control(
+                name,
+                r#type,
+                ForceControl {
+                    target: target.to_string(),
+                    role,
+                    stored,
+                },
+            );
+            signal.hierarchical = hierarchical.clone();
+            signal
+        };
         let target_type = signals
             .iter()
             .find(|signal| signal.name() == name)
@@ -815,25 +853,19 @@ pub(super) fn lower(
                 }
             }
         }
-        let enable = fresh("%force_enable", serial, dimensions, signals);
-        signals.push(Signal::force_control(
+        let enable = crate::ir::force_control_name(&ForceRole::Enable, &name);
+        signals.push(control(
             enable.clone(),
             mask_type(&target_type, width),
-            ForceControl {
-                target: name.clone(),
-                role: ForceRole::Enable,
-                stored,
-            },
+            ForceRole::Enable,
+            &name,
         ));
-        let value = fresh("%force_value", serial, dimensions, signals);
-        signals.push(Signal::force_control(
+        let value = crate::ir::force_control_name(&ForceRole::Value, &name);
+        signals.push(control(
             value.clone(),
             target_type.clone(),
-            ForceControl {
-                target: name.clone(),
-                role: ForceRole::Value,
-                stored,
-            },
+            ForceRole::Value,
+            &name,
         ));
         let mut selects = Vec::new();
         for &(bits, _, _, varying) in &named {
@@ -843,16 +875,15 @@ pub(super) fn lower(
                 selects.push((bits, select, 0));
             }
         }
-        let hold = (!holders.is_empty()).then(|| {
-            let hold = fresh("%force_hold", serial, dimensions, signals);
-            signals.push(Signal::force_control(
+        // The target of another instance may be held there: the release sets
+        // the hold of the target (see `crate::ir::force_control_name`).
+        let hold = (!holders.is_empty() || hierarchical.is_some()).then(|| {
+            let hold = crate::ir::force_control_name(&ForceRole::Hold, &name);
+            signals.push(control(
                 hold.clone(),
                 mask_type(&target_type, width),
-                ForceControl {
-                    target: name.clone(),
-                    role: ForceRole::Hold,
-                    stored,
-                },
+                ForceRole::Hold,
+                &name,
             ));
             for holder in holders {
                 match held.iter_mut().find(|(process, _)| *process == holder) {
