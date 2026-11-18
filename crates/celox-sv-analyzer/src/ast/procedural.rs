@@ -487,8 +487,6 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
             chandle: r#type.is_chandle(),
             container: r#type.container.clone(),
             randomizable: r#type.container.is_none() && !r#type.holds_chandle(),
-            enum_domain: r#type.enum_domain.clone(),
-            packed_enum: r#type.packed_enum,
             real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
             string: matches!(r#type.kind(), TypeKind::String),
             packed: dimensions::signal_packed_dimension_widths(r#type.packed_ranges()),
@@ -655,9 +653,6 @@ pub(super) fn rename_expr_idents(
 pub(super) fn int_type() -> Type {
     Type::from(TypeShape {
         container: None,
-        is_enum: false,
-        enum_domain: None,
-        packed_enum: false,
         kind: TypeKind::Bit,
         is_signed: true,
         packed_ranges: vec![PackedRange::new(

@@ -384,14 +384,13 @@ fn bind_in_mode(
                             jobs.push(Job::Enter(*base));
                         } else {
                             let mut ty = builtin_type("int", None).unwrap();
-                            ty.is_enum = true;
                             if matches!(mode, BindingMode::Use) {
                                 validate_enum_initializers(
                                     id, native, tree, session, context, &ty,
                                 )?;
                             }
-                            ty.enum_domain = enum_values(id, native, tree, session, context, &ty);
-                            declare_enum(&mut ty, id, native, tree, session, ranges);
+                            let domain = enum_values(id, native, tree, session, context, &ty);
+                            declare_enum(&mut ty, domain, id, native, tree, session, ranges);
                             values.push(ty);
                         }
                     }
@@ -538,9 +537,8 @@ fn bind_in_mode(
                 if matches!(mode, BindingMode::Use) {
                     validate_enum_initializers(id, native, tree, session, context, &ty)?;
                 }
-                ty.is_enum = true;
-                ty.enum_domain = enum_values(id, native, tree, session, context, &ty);
-                declare_enum(&mut ty, id, native, tree, session, ranges);
+                let domain = enum_values(id, native, tree, session, context, &ty);
+                declare_enum(&mut ty, domain, id, native, tree, session, ranges);
                 values.push(ty);
             }
             Job::Aggregate {
@@ -693,13 +691,15 @@ fn declaration_position(
     ))
 }
 
-/// Record the declaration of enumeration `id` in its type `ty`: a typedef
-/// of it names it later, else it is an anonymous type of its own (6.22.1
-/// c), declared in the elaborated scope around it. The type keeps its
-/// declaration, and `ranges`, the packed dimensions that follow its
-/// members, make a packed array of it (7.4.1) that keeps it too.
+/// Make `ty`, the base type of enumeration `id`, the enumerated type it
+/// declares with members `domain`, if resolved: a typedef of it names it
+/// later, else it is an anonymous type of its own (6.22.1 c), declared in
+/// the elaborated scope around it. The type keeps its declaration, and
+/// `ranges`, the packed dimensions that follow its members, make a packed
+/// array of it (7.4.1) that keeps it too.
 fn declare_enum(
     ty: &mut Type,
+    domain: Option<Arc<enums::EnumDomain>>,
     id: TypeId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
@@ -715,7 +715,6 @@ fn declare_enum(
     );
     let position = declaration_position(tree, native, data);
     let dims = ty.packed_ranges.len();
-    let domain = ty.enum_domain.clone();
     ty.keep_enumeration(semantic_types::EnumBinding::new(
         semantic_types::EnumDeclaration {
             name: Some(position),

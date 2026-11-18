@@ -514,6 +514,14 @@ impl EnumBinding {
     }
 }
 
+/// Hashes what [`PartialEq`] compares but the spelling of the typedef,
+/// which the name and scope tell.
+impl std::hash::Hash for EnumDeclaration {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (&self.name, self.named, &self.scope, &self.domain, self.dims).hash(state);
+    }
+}
+
 impl EnumDeclaration {
     /// The element of a packed type of `dimensions` packed dimensions that
     /// is this enumerated type, or a packed array of it if it has more

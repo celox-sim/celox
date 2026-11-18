@@ -432,9 +432,6 @@ fn array(
             .map(|dimension| PackedRange::new(dimension.left.clone(), dimension.right.clone()))
             .collect();
         ty.members = shape.members.clone();
-        ty.is_enum = shape.enum_domain.is_some();
-        ty.enum_domain = shape.enum_domain.clone();
-        ty.packed_enum = shape.packed_enum;
         ty.signed_element_depth = shape.signed_element_depth;
         ty = ty.with_chandle(shape.chandle);
         // The element keeps the enumerated type of the array's elements,
