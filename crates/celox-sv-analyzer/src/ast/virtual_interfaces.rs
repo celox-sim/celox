@@ -451,6 +451,13 @@ pub(crate) fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> O
     {
         return Some(MemberType::Handle(class.to_owned()));
     }
+    // A named event, the handle of a synchronization object (15.5).
+    if r#type.kind() == crate::ir::TypeKind::Event
+        && r#type.unpacked_ranges().is_empty()
+        && r#type.container().is_none()
+    {
+        return Some(MemberType::Handle(events::CLASS.to_owned()));
+    }
     let kind = match r#type.kind() {
         crate::ir::TypeKind::Bit => TypeKind::Bit,
         crate::ir::TypeKind::Logic => TypeKind::Logic,
@@ -2084,6 +2091,17 @@ pub(super) fn watched(
         };
     }
     Ok(value)
+}
+
+/// Whether member `member` that a virtual interface of type `ty` reaches is
+/// a named event (15.5).
+pub(super) fn is_event_member(
+    state: &Session,
+    ty: &VirtualInterface,
+    member: &str,
+) -> Converted<bool> {
+    let (found, _) = self::member(state, ty, member)?;
+    Ok(matches!(&found.r#type, MemberType::Handle(class) if class == events::CLASS))
 }
 
 /// The member signals that a watched member `handle.member` may be, each
