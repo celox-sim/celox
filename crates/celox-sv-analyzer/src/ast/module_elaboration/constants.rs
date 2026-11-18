@@ -350,6 +350,21 @@ impl ScopeElaboration<'_> {
                 &self.parameters,
             )?;
         }
+        // The array parameters of the generate blocks, whose conditions may
+        // read the elements published above.
+        let local = array_parameters::generate_array_parameters(
+            syntax_tree,
+            session,
+            &self.const_env,
+            &self.type_aliases,
+        )?;
+        for parameter in &local {
+            self.const_env.insert(
+                parameters::unbounded_parameter_marker(&parameter.signal.name),
+                0,
+            );
+        }
+        self.array_parameters.extend(local);
         Ok(())
     }
 
@@ -459,6 +474,13 @@ impl ScopeElaboration<'_> {
                         &self.type_aliases,
                         &self.parameters,
                     )?;
+                    self.array_parameters
+                        .extend(array_parameters::generate_array_parameters(
+                            syntax_tree,
+                            session,
+                            &self.const_env,
+                            &self.type_aliases,
+                        )?);
                     let parameter_values = parameter_value_env_with_imported(
                         syntax_tree,
                         session,

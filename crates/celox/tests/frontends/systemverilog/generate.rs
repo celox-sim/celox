@@ -1246,3 +1246,67 @@ endmodule"#;
         );
     }
 }
+
+/// A generate block may declare an unpacked array parameter, a constant
+/// variable of the block (IEEE 1800-2023 27.2, 6.20.2), such as ibex_alu's
+/// `SHUFFLE_MASK_L [4]` in `gen_alu_rvb_otearlgrey_full`. The generate
+/// conditions of the scope still read the elements of its own array
+/// parameters, and a block's packed structure parameter given by a pattern
+/// stays a value, also in a loop. Verilator 5.054 prints the same line.
+#[test]
+fn generate_blocks_declare_array_parameters() {
+    let source = r#"`timescale 1ns/1ns
+module Top #(parameter bit Full = 1);
+  typedef struct packed { logic [1:0] sel; logic [3:0] addr; } page_t;
+  localparam int Offsets [4] = '{0, 5, 2, 6};
+  localparam page_t Iso = '{sel: 2'd1, addr: 4'd2};
+  logic [31:0] mask;
+  logic [3:0] rot, hit;
+  if (Full) begin : g_full
+    localparam logic [31:0] Masks [2] = '{32'h1111_2222, 32'h3333_4444};
+    assign mask = Masks[1] ^ Masks[0];
+  end else begin : g_none
+    assign mask = '0;
+  end
+  for (genvar x = 0; x < 2; x++) begin : g_x
+    for (genvar y = 0; y < 2; y++) begin : g_y
+      localparam int Offset = Offsets[2*x+y] % 4;
+      if (Offset == 0) begin : g_zero
+        assign rot[2*x+y] = 1'b1;
+      end else begin : g_other
+        assign rot[2*x+y] = 1'b0;
+      end
+    end
+  end
+  for (genvar i = 0; i < 4; i++) begin : g_page
+    localparam page_t Cur = '{sel: 2'd1, addr: 4'(i)};
+    if (Cur == Iso) begin : g_iso
+      assign hit[i] = 1'b1;
+    end else begin : g_no
+      assign hit[i] = 1'b0;
+    end
+  end
+  initial #1 $display("%h %b %b", mask, rot, hit);
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("generate_arrays.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["22226666 0001 0100"], "four_state={four_state}");
+    }
+}
