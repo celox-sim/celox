@@ -613,6 +613,21 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
+    /// Build a design whose DPI-C imports no registered function or library
+    /// provides, for an elaboration that never runs it.
+    ///
+    /// Each call of such an import is a run-time error naming the import,
+    /// which says it was elaborated without its C body; no C function is
+    /// called. Without this, which is the
+    /// default, an import nothing provides fails the build with a `Dpi`
+    /// error. Only a caller that elaborates a design to check it, as the
+    /// elaboration mode of a conformance runner does without linking C code,
+    /// should allow it.
+    pub fn allow_unlinked_dpi_for_elaboration(mut self) -> Self {
+        self.options.dpi.allow_unlinked();
+        self
+    }
+
     /// Set the dead store elimination policy.
     pub fn dead_store_policy(mut self, policy: DeadStorePolicy) -> Self {
         self.options.dead_store_policy = policy;

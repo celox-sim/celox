@@ -539,7 +539,16 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         laid_out.set_settle_check(self.options.settle_check);
 
         // Link DPI-C imports before code generation, so a missing C
-        // function fails the build early; the backends reuse the result.
+        // function fails the build early; the backends reuse the result. An
+        // elaboration that does not run the design calls none it lacks.
+        let unlinked = self
+            .options
+            .dpi
+            .unlinked(&laid_out.runtime().runtime_schema.extern_functions)
+            .map_err(|error| {
+                SimulatorError::from(error).with_warnings(std::mem::take(&mut warnings))
+            })?;
+        laid_out.replace_unlinked_extern_calls(&unlinked);
         self.options
             .dpi
             .resolve_ahead(&laid_out.runtime().runtime_schema.extern_functions)

@@ -2,12 +2,14 @@
 //!
 //! An imported function is called through the C ABI, its arguments and
 //! result as the C types of IEEE 1800-2023 35.5.6 and H.7.4; other argument
-//! types, tasks and `context` imports are rejected.
+//! types and tasks are rejected.
 //!
-//! An export only lets foreign code in a DPI call chain call the subroutine
-//! and does not change it (35.7). Only a `context` import may call an
-//! exported subroutine (35.5.3), so an accepted export is checked and has no
-//! further effect.
+//! A `context` import is called as any other (35.5.3): what sets it apart is
+//! what its C code may do, namely query and set the calling scope and call
+//! exported subroutines, which Celox does not provide to C code. A library
+//! that uses them does not load. An export only lets foreign code in a DPI
+//! call chain call the subroutine and does not change it (35.7), so an
+//! accepted export is checked and has no further effect.
 //!
 //! The functions of UVM's C library (UVM `src/dpi`) are provided by Celox
 //! instead: an import with one of their C names and UVM's prototype binds to
@@ -475,9 +477,10 @@ fn lower_native_dpi(
         return Err(unsupported("\"DPI\" import (only \"DPI-C\" is supported)"));
     }
     let pure = match declaration.property {
-        Some(DpiProperty::Context) => return Err(unsupported("DPI-C context import")),
+        // A context import has side effects through the scope it is called
+        // from (35.5.3), as a non-pure import may.
+        Some(DpiProperty::Context) | None => false,
         Some(DpiProperty::Pure) => true,
-        None => false,
     };
     let name = declaration.name.spelling.clone();
     let c_name = declaration
@@ -741,10 +744,6 @@ mod tests {
     #[test]
     fn native_prototypes_preserve_existing_unsupported_diagnostics() {
         for (declaration, want) in [
-            (
-                "import \"DPI-C\" context function int f();",
-                "DPI-C context import",
-            ),
             ("import \"DPI-C\" task f();", "DPI-C task import"),
             (
                 "export \"DPI\" function f; function int f(); return 1; endfunction",
