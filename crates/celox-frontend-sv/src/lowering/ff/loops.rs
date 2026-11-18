@@ -36,9 +36,7 @@ impl Ff<'_, '_> {
         step: &[sv::ir::Stmt],
         body: &[sv::ir::Stmt],
     ) -> Result<Option<(Vec<(String, i128)>, i128)>, sv::AnalyzerError> {
-        let mut written = HashSet::default();
-        written_names(body, &mut written);
-        if written.contains(&canonical.var) {
+        if body_writes(&*self.m, body, &canonical.var) {
             return Ok(None);
         }
         let id = self.m.id(&canonical.var).expect("loop variable");
