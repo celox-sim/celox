@@ -984,6 +984,9 @@ pub(super) struct ForeignWrites {
     /// `runs_as_process`), whose writes store into the variable as they
     /// execute.
     pub exclusive: bool,
+    /// Whether a continuous assignment or a combinational process drives
+    /// it, which excludes every other writer.
+    pub combinational: bool,
 }
 
 /// Add the signals that the hierarchical names of `module` (`module_id`),
@@ -1011,9 +1014,11 @@ pub(super) fn collect_foreign_writes(
         };
         super::procedural::written_names_with_calls(module, process.body(), written);
     }
+    let mut combinational = HashSet::default();
     for process in module.comb_processes() {
-        super::procedural::written_names_with_calls(module, process.body(), &mut exclusive);
+        super::procedural::written_names_with_calls(module, process.body(), &mut combinational);
     }
+    exclusive.extend(combinational.iter().cloned());
     for process in module.ff_processes() {
         let written = if process.is_always_ff() {
             &mut always_ff
@@ -1039,6 +1044,7 @@ pub(super) fn collect_foreign_writes(
             entry.repeating += usize::from(repeating);
             entry.always_ff |= by_always_ff;
             entry.exclusive |= by_exclusive;
+            entry.combinational |= combinational.contains(name);
         }
     }
 }
@@ -1064,6 +1070,7 @@ pub(super) fn collect_virtual_writes(
             entry.repeating += foreign.repeating.min(1);
             entry.always_ff |= foreign.always_ff;
             entry.exclusive |= foreign.exclusive;
+            entry.combinational |= foreign.combinational;
         }
     }
 }

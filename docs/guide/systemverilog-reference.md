@@ -74,8 +74,9 @@ constructs without a dedicated issue point to the frontend roadmap,
   one-dimensional instance arrays (Clause 28); gate delays and strengths are
   also unsupported ([#457](https://github.com/celox-sim/celox/issues/457)).
 - Instance arrays with a negative bound.
-- Hierarchical references <a id="hierarchical-references"></a> that drive a net or a
-  variable through a continuous assignment, appear in port connections, or
+- Hierarchical references <a id="hierarchical-references"></a> that drive a net
+  through a continuous assignment, or a variable that its own module also
+  drives continuously or from `always_comb`, appear in port connections, or
   name named blocks, parameters, structure members of another scope other
   than members of a packed structure variable (a member of an element of a
   packed array of structures is rejected), or `real`, `string` (except
