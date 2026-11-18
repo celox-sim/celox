@@ -151,7 +151,9 @@ constructs without a dedicated issue point to the frontend roadmap,
   interfaces with type parameters, or with parameter values that are not
   integral constants;
   clocking blocks and nested interface instances reached through a virtual
-  interface; writes to nets through a virtual interface; `$bits` of a call
+  interface; an event control on a named event reached through a virtual
+  interface (`@(v.e)`; triggering it, `->v.e`, and `v.e.triggered` are
+  supported); writes to nets through a virtual interface; `$bits` of a call
   of an interface function through a virtual interface in a package or
   class, whose analysis precedes the interface's subroutines (in a module
   it is the function's width;

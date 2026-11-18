@@ -202,6 +202,13 @@ impl BodyBuilder<'_, '_, '_> {
                 &self.dims,
             ) {
                 Some((handle, ty, member)) => {
+                    // A named event is triggered, not changed (15.5.1): the
+                    // value of the member does not tell when.
+                    if virtual_interfaces::is_event_member(self.session, &ty, &member)? {
+                        return Err(unsupported(
+                            "event control on a named event through a virtual interface",
+                        ));
+                    }
                     let handle = self.native_value(handle)?;
                     if self.reads_reference_formal(&handle) {
                         return Err(unsupported(

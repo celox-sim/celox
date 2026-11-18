@@ -1435,3 +1435,51 @@ endmodule
 "#)
   (top Top) (run_until 1)
   (assert_eq done 1))
+
+; A named event of an interface is a member that a virtual interface reaches
+; (IEEE 1800-2023 25.9): a task of the interface called through one, and
+; class code through one, trigger the event of the instance it denotes, with
+; `->` and `->>` (15.5.1), and `triggered` reads that instance's (15.5.3).
+; The other instance's process does not wake.
+(case named_event_triggers_reach_the_instance
+  (source "vif.sv" #"
+interface bfm(input logic clk);
+    event go;
+    int n;
+    task kick(); ->go; endtask
+    task kick_nb(); ->>go; endtask
+    initial forever begin @go; n++; end
+endinterface
+package p;
+    class h;
+        virtual bfm v;
+        task from_task(); v.kick(); endtask
+        task from_task_nb(); v.kick_nb(); endtask
+        task direct(); ->v.go; endtask
+        task direct_nb(); ->>v.go; endtask
+        function bit fired(); return v.go.triggered; endfunction
+    endclass
+endpackage
+module Top;
+    logic clk;
+    bfm b1(clk);
+    bfm b2(clk);
+    p::h x, y;
+    initial begin
+        x = new; x.v = b1;
+        y = new; y.v = b2;
+        #1 x.from_task();
+        $display("t %0d %0d", x.fired(), y.fired());
+        #1 $display("a %0d %0d", b1.n, b2.n);
+        #1 y.direct();
+        $display("t %0d %0d", x.fired(), y.fired());
+        #1 $display("b %0d %0d", b1.n, b2.n);
+        #1 x.direct_nb();
+        #1 $display("c %0d %0d", b1.n, b2.n);
+        #1 y.from_task_nb();
+        #1 $display("d %0d %0d", b1.n, b2.n);
+    end
+endmodule
+"#)
+  (top Top) (run_until 10)
+  (expect_output "t 1 0\na 1 0\nt 0 1\nb 1 1\nc 2 1\nd 2 2\n"))
