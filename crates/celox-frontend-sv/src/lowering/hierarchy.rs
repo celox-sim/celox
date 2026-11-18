@@ -668,7 +668,86 @@ pub(super) fn resolve(
             let _ = resolve_call(hierarchy, module, &components, &mut calls);
         }
     }
+    // A name indexed by a genvar, which analysis evaluates per element,
+    // stands for its names with each element index the design has, so that
+    // the analysis does not stop at each in turn.
+    for pattern in analyzed
+        .source
+        .hierarchical_name_patterns(&analyzed.name, &analyzed.packages)
+    {
+        for components in expand_pattern(hierarchy, &pattern) {
+            if !matches!(
+                resolve_name(hierarchy, module, &components, &mut references),
+                Ok(true)
+            ) {
+                let _ = resolve_call(hierarchy, module, &components, &mut calls);
+            }
+        }
+    }
     (references, calls)
+}
+
+/// The names that `pattern` (see `ParsedSource::hierarchical_name_patterns`)
+/// stands for: each `name[*]` replaced by `name[k]` for every element index
+/// `k` of an instance array or interface instance array of that name in the
+/// design. At most [`MAX_PATTERN_EXPANSIONS`] names; a pattern of more
+/// stands for none, and the analysis resolves its names one by one.
+fn expand_pattern(hierarchy: &Hierarchy<'_>, pattern: &[String]) -> Vec<Vec<String>> {
+    let mut expanded: Vec<Vec<String>> = vec![Vec::new()];
+    for component in pattern {
+        let Some(base) = component.strip_suffix("[*]") else {
+            for name in &mut expanded {
+                name.push(component.clone());
+            }
+            continue;
+        };
+        let indices = element_indices(hierarchy, base);
+        if indices.is_empty()
+            || expanded.len().saturating_mul(indices.len()) > MAX_PATTERN_EXPANSIONS
+        {
+            return Vec::new();
+        }
+        expanded = expanded
+            .into_iter()
+            .flat_map(|name| {
+                indices.iter().map(move |index| {
+                    let mut name = name.clone();
+                    name.push(format!("{base}[{index}]"));
+                    name
+                })
+            })
+            .collect();
+    }
+    expanded
+}
+
+/// The most names one pattern of hierarchical names stands for.
+const MAX_PATTERN_EXPANSIONS: usize = 4096;
+
+/// The element indices of the instance arrays and interface instance arrays
+/// named `base` in any specialization of the design.
+fn element_indices(hierarchy: &Hierarchy<'_>, base: &str) -> std::collections::BTreeSet<usize> {
+    let mut indices = std::collections::BTreeSet::new();
+    for module in hierarchy.elaborated.values() {
+        for instance in &module.instances {
+            if let Some((index, _)) = instance.array_element
+                && instance.instance_name == base
+            {
+                indices.insert(instance.array_index_base + index);
+            }
+        }
+        for scope in &module.interface_scopes {
+            if let Some(index) = scope
+                .strip_prefix(base)
+                .and_then(|rest| rest.strip_prefix('['))
+                .and_then(|rest| rest.strip_suffix(']'))
+                .and_then(|index| index.parse::<usize>().ok())
+            {
+                indices.insert(index);
+            }
+        }
+    }
+    indices
 }
 
 /// Follow the hierarchical name `components` of `module` to an object
