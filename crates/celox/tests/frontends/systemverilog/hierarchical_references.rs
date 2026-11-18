@@ -507,8 +507,7 @@ fn static_variable_references_resolve_where_they_are_written() {
 /// receives the instance through an interface port, or an interface whose
 /// body instantiates it, is not that scope; the name is rejected there.
 #[test]
-fn outward_names_of_interfaces_through_ports_virtual_interfaces_and_nested_instances_are_unsupported()
- {
+fn outward_names_of_interfaces_through_ports_and_nested_instances_are_unsupported() {
     let interfaces = "interface Ctl; logic clk; endinterface
         interface Counter; int n = 0; always @(posedge CONTROL.clk) n++; endinterface";
     for (design, expected) in [
@@ -522,11 +521,6 @@ fn outward_names_of_interfaces_through_ports_virtual_interfaces_and_nested_insta
              module Top; Ctl CONTROL(); Outer o(); endmodule",
             "hierarchical name `CONTROL.clk` in the body of an interface instance nested in interface instance `o`",
         ),
-        (
-            "interface Driver; task tick(); @(posedge CONTROL.clk); endtask endinterface
-             module Top; Ctl CONTROL(); Driver d(); virtual Driver v; endmodule",
-            "hierarchical name `CONTROL.clk` in a task or function of interface `Driver`, which a virtual interface names",
-        ),
     ] {
         let source = format!("{interfaces}\n{design}");
         let error =
@@ -538,4 +532,34 @@ fn outward_names_of_interfaces_through_ports_virtual_interfaces_and_nested_insta
             };
         assert!(error.contains(expected), "{design}: {error}");
     }
+}
+
+/// A task called through a virtual interface reads and writes, in each
+/// instance, the object its name denotes from that instance's parent (IEEE
+/// 1800-2023 23.8, 25.9). One subroutine serves every instance, so those
+/// objects must have one type; instances whose objects differ are rejected.
+#[test]
+fn outward_names_of_virtual_interface_calls_need_one_type() {
+    let source = "interface Drv; task put(logic [7:0] v); CONTROL.data = v; endtask endinterface
+        interface C8; logic [7:0] data; endinterface
+        interface C16; logic [15:0] data; endinterface
+        package cfg; virtual Drv vs[2]; endpackage
+        module A; C8 CONTROL(); Drv d(); initial cfg::vs[0] = d; endmodule
+        module B; C16 CONTROL(); Drv d(); initial cfg::vs[1] = d; endmodule
+        module Top; A a(); B b(); initial cfg::vs[0].put(8'h11); endmodule";
+    let error = match Simulator::from_sv_sources(vec![(source, Path::new("up.sv"))], "Top")
+        .build_interpreter()
+    {
+        Ok(_) => panic!("objects of different types must be rejected"),
+        Err(error) => error.to_string(),
+    };
+    let error = error
+        .split_whitespace()
+        .filter(|word| *word != "│")
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        error.contains("which denotes objects of different types in different instances"),
+        "{error}"
+    );
 }

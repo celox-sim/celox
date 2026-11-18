@@ -313,6 +313,18 @@ pub(super) fn unresolved_name(
     }
 }
 
+/// Whether `error` stops an analysis that the elaborated hierarchy lets go
+/// on: a hierarchical name, or a call of a task or function through a
+/// virtual interface whose hierarchical names each instance resolves (see
+/// [`sv::AnalyzerError::VirtualInterfaceOutward`]).
+pub(super) fn waits_for_hierarchy(error: &sv::AnalyzerError) -> bool {
+    match error {
+        sv::AnalyzerError::VirtualInterfaceOutward { .. } => true,
+        sv::AnalyzerError::WithWarnings { error, .. } => waits_for_hierarchy(error),
+        error => unresolved_name(error).is_some(),
+    }
+}
+
 /// Hand each instance the force targets of `force_signals` below it.
 pub(super) fn propagate_force_signals(
     instances: &mut [LoweredSvInstance],

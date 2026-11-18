@@ -89,10 +89,12 @@ constructs without a dedicated issue point to the frontend roadmap,
   package or named block, and not when the variable is of unpacked structure
   type.
   A name that the body of an interface instance does not declare is
-  searched for from the scope that instantiates the instance (23.8); it is
-  rejected where the body is reached through an interface port, in the tasks
-  and functions of an interface that a virtual interface names, and in an
-  interface instance that another interface's body declares.
+  searched for from the scope that instantiates the instance (23.8), also in
+  a task or function called through a virtual interface, from the instance
+  the handle denotes; such a name must denote objects of one type in every
+  instance of the interface. It is rejected where the body is reached
+  through an interface port, and in an interface instance that another
+  interface's body declares.
 - Packages: package nets
   ([#1146](https://github.com/celox-sim/celox/issues/1146)); a package
   variable cannot be a clock or reset.
