@@ -180,7 +180,9 @@ pub(super) fn validate_specialized_instance_net_drivers(
                     .filter(|port| port.is_net())
                     .map(|port| port.name()),
             );
-        let resolved_nets = if continuous_targets_repeat(&module.source) {
+        let resolved_nets = if continuous_targets_repeat(&module.source)
+            || high_impedance_drivers(&module.source)
+        {
             net_resolution::ResolvedNets::of(&module.source, &drivers, four_state)
         } else {
             net_resolution::ResolvedNets::default()

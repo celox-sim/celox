@@ -40,7 +40,7 @@ impl CombProcess {
             delay: None,
             delay_initial: None,
             net_delay: false,
-            drive_strength: false,
+            drive_strength: None,
             creation_order: 0,
             site: None,
             process_site: None,
@@ -61,7 +61,7 @@ impl CombProcess {
             delay: None,
             delay_initial: None,
             net_delay: false,
-            drive_strength: false,
+            drive_strength: None,
             creation_order: 0,
             site: None,
             process_site: None,
@@ -73,8 +73,8 @@ impl CombProcess {
         }
     }
 
-    /// Whether the driver states a drive strength.
-    pub(crate) fn has_drive_strength(&self) -> bool {
+    /// The drive strength the driver states.
+    pub(crate) fn drive_strength(&self) -> Option<crate::ir::DriveStrength> {
         self.drive_strength
     }
 

@@ -1520,7 +1520,21 @@ pub struct CombProcess {
     assignments: Vec<Assignment>,
     body: Vec<Stmt>,
     sensitivity_body: Vec<Stmt>,
-    drive_strength: bool,
+    drive_strength: Option<DriveStrength>,
+}
+
+/// The strengths a driver drives its 0 and its 1 with (IEEE 1800-2023
+/// 28.11, Table 28-7): 7 for supply, 6 strong, 5 pull, 3 weak and 0 high
+/// impedance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DriveStrength {
+    pub zero: u8,
+    pub one: u8,
+}
+
+impl DriveStrength {
+    /// The strength of a driver that states none (28.3.2, 10.3.4).
+    pub const STRONG: Self = Self { zero: 6, one: 6 };
 }
 
 impl CombProcess {
@@ -1531,6 +1545,11 @@ impl CombProcess {
     /// Whether the continuous assignment or gate states a drive strength
     /// (IEEE 1800-2023 10.3.4, 28.11).
     pub fn has_drive_strength(&self) -> bool {
+        self.drive_strength.is_some()
+    }
+
+    /// The drive strength the continuous assignment or gate states.
+    pub fn drive_strength(&self) -> Option<DriveStrength> {
         self.drive_strength
     }
 
@@ -1560,7 +1579,7 @@ impl CombProcess {
             site: None,
             process_site: None,
             sensitivity_body: Vec::new(),
-            drive_strength: false,
+            drive_strength: None,
             kind,
             condition,
             assignments,
@@ -2544,7 +2563,7 @@ impl From<ast::CombProcess> for CombProcess {
         result.creation_order = process.creation_order();
         result.site = process.site().cloned();
         result.process_site = process.process_site().cloned();
-        result.drive_strength = process.has_drive_strength();
+        result.drive_strength = process.drive_strength();
         result.sensitivity_body = process
             .sensitivity_body()
             .iter()

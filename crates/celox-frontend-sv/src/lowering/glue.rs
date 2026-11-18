@@ -621,6 +621,7 @@ fn join_interconnect_drivers(
                 var_id,
                 resolution,
                 joined,
+                None,
                 four_state,
                 !variable.is_4state,
             )

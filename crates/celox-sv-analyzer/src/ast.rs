@@ -755,9 +755,9 @@ pub struct CombProcess {
     delay_initial: Option<Expr>,
     /// A declaration's independent net delay, consumed before IR publication.
     net_delay: bool,
-    /// Whether the continuous assignment or gate states a drive strength
-    /// (IEEE 1800-2023 10.3.4, 28.11).
-    drive_strength: bool,
+    /// The drive strength the continuous assignment or gate states (IEEE
+    /// 1800-2023 10.3.4, 28.11).
+    drive_strength: Option<crate::ir::DriveStrength>,
     creation_order: usize,
     site: Option<crate::procedural::SourceSpan>,
     /// Where the procedure is written, for an `always @*` that becomes a

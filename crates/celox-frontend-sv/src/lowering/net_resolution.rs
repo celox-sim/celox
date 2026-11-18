@@ -17,30 +17,24 @@ pub(super) struct ResolvedNets {
     nets: HashMap<String, NetResolution>,
     /// The continuous assignments that drive those nets.
     drivers: HashSet<usize>,
+    /// Those of the nets with a driver that states a drive strength, whose
+    /// drivers combine by strength (28.12).
+    strengths: HashSet<String>,
 }
 
 impl ResolvedNets {
-    /// The nets of `module` whose drivers are joined. A net stays with the
+    /// The nets of `module` whose drivers are joined, and those with a
+    /// driver of high impedance for 0 or 1. A net stays with the
     /// single-driver rule (and its "multiple net drivers" error) when a
-    /// driver is not a plain continuous assignment, states a drive strength
-    /// (10.3.4), or assigns a bit twice by itself. So does, in a two-state
+    /// driver is not a plain continuous assignment or assigns a bit twice
+    /// by itself, or when one of several drivers of a `wand`, `wor`,
+    /// `triand` or `trior` states a drive strength (10.3.4, 28.12.4). So does, in a two-state
     /// build, a net with an X or Z literal in a driver: the values of such
     /// a build cannot carry the high impedance that yields to another
     /// driver.
     pub(super) fn of(module: &sv::ir::Module, drivers: &ModuleDrivers, four_state: bool) -> Self {
         let mut resolved = Self::default();
         let processes = module.comb_processes();
-        // A driver that repeats another one is not among `drivers`; one
-        // with a drive strength still decides against resolving its net.
-        let strong_repeats: HashSet<&str> = redundant_net_drivers(module)
-            .into_iter()
-            .filter(|&process| processes[process].has_drive_strength())
-            .flat_map(|process| processes[process].body())
-            .filter_map(|statement| match statement {
-                sv::ir::Stmt::Assign { lhs, .. } => Some(lhs.name()),
-                _ => None,
-            })
-            .collect();
         let nets = module
             .signals()
             .iter()
@@ -59,7 +53,6 @@ impl ResolvedNets {
             if resolution == NetResolution::Single
                 || resolution == NetResolution::Interconnect
                 || resolved.nets.contains_key(name)
-                || strong_repeats.contains(name)
             {
                 continue;
             }
@@ -71,7 +64,15 @@ impl ResolvedNets {
                     })
                 })
             };
-            if !overlap(false) || overlap(true) {
+            // A driver of high impedance for 0 or 1 drives z for it (28.11),
+            // which its net resolves even when no other driver shares it.
+            let several = overlap(false);
+            let high_impedance = continuous.iter().any(|driver| {
+                processes[driver.0]
+                    .drive_strength()
+                    .is_some_and(|strength| strength.zero == 0 || strength.one == 0)
+            });
+            if overlap(true) || !(several || high_impedance) {
                 continue;
             }
             let participants: HashSet<usize> = continuous.iter().map(|driver| driver.0).collect();
@@ -81,7 +82,7 @@ impl ResolvedNets {
                 .any(|driver| !participants.contains(&driver.0))
                 || participants.iter().any(|&process| {
                     let process = &processes[process];
-                    process.has_drive_strength()
+                    (several && process.has_drive_strength() && resolution != NetResolution::Wire)
                         || (!four_state
                             && process.body().iter().any(|statement| match statement {
                                 sv::ir::Stmt::Assign { rhs, .. }
@@ -93,6 +94,12 @@ impl ResolvedNets {
                 })
             {
                 continue;
+            }
+            if participants
+                .iter()
+                .any(|&process| processes[process].has_drive_strength())
+            {
+                resolved.strengths.insert(name.to_string());
             }
             resolved.nets.insert(name.to_string(), resolution);
             resolved.drivers.extend(participants);
@@ -110,6 +117,11 @@ impl ResolvedNets {
         self.nets.get(name).copied()
     }
 
+    /// Whether the drivers of net `name` combine by strength.
+    pub(super) fn by_strength(&self, name: &str) -> bool {
+        self.strengths.contains(name)
+    }
+
     pub(super) fn names(&self) -> impl Iterator<Item = &str> {
         self.nets.keys().map(String::as_str)
     }
@@ -124,11 +136,14 @@ pub(super) fn multiple_drivers(name: &str) -> sv::AnalyzerError {
 /// same drivers. `planes` resolves four-state values; without it the drivers
 /// hold no X or Z (a two-state build) and the tables reduce to a bitwise AND
 /// or OR. `two_state` stores a four-state resolved value in a two-state net.
+/// With `strengths`, one for each driver, the drivers combine by strength
+/// (28.12) instead.
 pub(super) fn join(
     arena: &mut SLTNodeArena<SourceVarId>,
     id: SourceVarId,
     resolution: NetResolution,
     drivers: Vec<LogicPath<SourceVarId>>,
+    strengths: Option<&[sv::ir::DriveStrength]>,
     planes: bool,
     two_state: bool,
 ) -> Result<Vec<LogicPath<SourceVarId>>, sv::AnalyzerError> {
@@ -147,8 +162,16 @@ pub(super) fn join(
         let (lsb, msb) = (bounds[0], bounds[1] - 1);
         let covering: Vec<_> = drivers
             .iter()
-            .filter(|path| range(path).lsb <= lsb && msb <= range(path).msb)
+            .enumerate()
+            .filter(|(_, path)| range(path).lsb <= lsb && msb <= range(path).msb)
             .collect();
+        let covering_strengths: Option<Vec<_>> = strengths.map(|strengths| {
+            covering
+                .iter()
+                .map(|&(index, _)| strengths[index])
+                .collect()
+        });
+        let covering: Vec<_> = covering.into_iter().map(|(_, path)| path).collect();
         let Some(first) = covering.first() else {
             continue;
         };
@@ -166,8 +189,17 @@ pub(super) fn join(
                     .map_err(slt_error)?
             });
         }
-        let mut expr = match values.as_slice() {
-            [value] => *value,
+        // A driver of high impedance for 0 or 1 drives z for it, also alone.
+        let mut expr = match (values.as_slice(), &covering_strengths) {
+            (_, Some(strengths))
+                if strengths.len() > 1
+                    || strengths
+                        .iter()
+                        .any(|strength| strength.zero == 0 || strength.one == 0) =>
+            {
+                net_strength::resolve(arena, &values, strengths, msb - lsb + 1, planes)?
+            }
+            ([value], _) => *value,
             _ if planes => resolve_planes(arena, resolution, &values, msb - lsb + 1)?,
             _ => {
                 let op = if resolution == NetResolution::Or {
