@@ -81,6 +81,7 @@ mod port_owners;
 mod primitives;
 mod timing;
 mod type_binding;
+pub(crate) use constant_folding::MAX_CONSTANT_VALUE_BITS;
 pub(crate) use parameters::unbounded_parameter_marker;
 mod array_reductions;
 mod containers;
