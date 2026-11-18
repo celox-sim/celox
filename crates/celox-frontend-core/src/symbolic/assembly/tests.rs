@@ -340,3 +340,86 @@ fn copied_probes_match_path_scan() {
     // The cases find copies, beyond the 4 initial probes each.
     assert!(copied > 50 * 4 + 50, "{copied} probes");
 }
+
+/// Following each reached part to the paths that read its variable reaches
+/// the parts the previous fixpoint, which scanned every path against every
+/// reached part until nothing changed, reaches.
+#[test]
+fn affected_by_writes_matches_the_path_scan_fixpoint() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = |bound: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % bound as u64) as usize
+    };
+    let atom = |next: &mut dyn FnMut(usize) -> usize| {
+        let lsb = next(12);
+        VarAtomBase::new(addr(next(8) as u32), lsb, lsb + next(4))
+    };
+    let mut reached_some = false;
+    for _ in 0..200 {
+        let mut arena = SLTNodeArena::<AbsoluteAddr>::new();
+        let zero = arena
+            .alloc(celox_slt::SLTNode::Constant(
+                BigUint::from(0u32),
+                BigUint::from(0u32),
+                1,
+                false,
+            ))
+            .unwrap();
+        let paths: Vec<LogicPath<AbsoluteAddr>> = (0..30)
+            .map(|_| LogicPath {
+                target: LogicPathTarget::Var(atom(&mut next)),
+                transparent_copy: false,
+                sources: (0..1 + next(3)).map(|_| atom(&mut next)).collect(),
+                previous_sources: HashSet::default(),
+                address_sources: HashSet::default(),
+                local_inputs: Vec::new(),
+                order_before: HashSet::default(),
+                comb_capture_enable_sites: Vec::new(),
+                comb_capture_enable_always: false,
+                pre_lower_nodes: Vec::new(),
+                expr: zero,
+            })
+            .collect();
+        let writes: Vec<_> = (0..1 + next(3)).map(|_| atom(&mut next)).collect();
+        // The previous fixpoint over every path.
+        let overlaps_any = |atom: &VarAtomBase<AbsoluteAddr>, set: &HashSet<_>| {
+            set.iter().any(|other: &VarAtomBase<AbsoluteAddr>| {
+                atom.id == other.id && atom.access.overlaps(&other.access)
+            })
+        };
+        let mut expected: HashSet<VarAtomBase<AbsoluteAddr>> = writes.iter().copied().collect();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for path in &paths {
+                let target = *path.target.var().unwrap();
+                if path
+                    .sources
+                    .iter()
+                    .any(|source| overlaps_any(source, &expected))
+                    && expected.insert(target)
+                {
+                    changed = true;
+                }
+            }
+        }
+        reached_some |= expected.len() > writes.len();
+        let affected = affected_by_writes(&Readers::new(&paths), &writes);
+        for var in 0..8 {
+            for lsb in 0..16 {
+                for msb in lsb..16 {
+                    let probe = VarAtomBase::new(addr(var), lsb, msb);
+                    assert_eq!(
+                        affected.overlaps(&probe),
+                        overlaps_any(&probe, &expected),
+                        "{probe:?}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(reached_some, "the paths must carry writes onward");
+}
