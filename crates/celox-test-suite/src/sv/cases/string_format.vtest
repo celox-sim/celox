@@ -54,6 +54,22 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "a b\n  5 x=7\n,   \n05 7\n"))
 
+; IEEE 1800-2023 5.9.1, 21.3.3: the text of a literal is its bytes after its
+; escapes, decoded once: `"\\045d"` is the text `\045d`, no conversion.
+(case swrite_literal_backslashes_are_text
+  (source "swrite_backslashes.sv" #"
+module Top(output bit done);
+    string s;
+    initial begin
+        $swrite(s, "\\045d:", 7);
+        $display("%s", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "\\045d:          7\n"))
+
 ; 21.2.1.5: unknown and high-impedance bits.
 (case sformatf_four_state_values
   (four_state)
