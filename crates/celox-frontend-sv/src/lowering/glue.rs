@@ -1092,6 +1092,7 @@ fn build_instance_glue(
                         GlueAddr::Child,
                         BitAccess::new(0, width - 1),
                         expr,
+                        child_var.is_4state && !collapse_unknown_literal,
                     )?;
                 }
                 input_ports.push((
@@ -1254,6 +1255,7 @@ fn build_instance_glue(
                             GlueAddr::Parent,
                             access,
                             expr,
+                            parent_var.is_4state && !is_2state,
                         )?;
                     }
                     output_ports.push((
@@ -1302,68 +1304,87 @@ fn add_forced_net_drivers(
         .collect();
     targets.sort_by_key(|target| target.0);
     for target in targets {
-        let driven = module
-            .comb_blocks
-            .iter()
-            .any(|path| path.target.var().is_some_and(|var| var.id == target))
-            || module.glue_blocks.values().flatten().any(|block| {
-                block.output_ports.iter().any(|(_, path)| {
-                    path.target
-                        .var()
-                        .is_some_and(|var| var.id == GlueAddr::Parent(target))
-                })
-            });
-        if driven {
-            continue;
-        }
         let Some((enabled, forced)) = procedural_force_controls(variables, target) else {
             continue;
         };
         let variable = &variables[&target];
         let width = variable.width;
-        let mask = if variable.is_4state {
-            (BigUint::from(1u8) << width) - BigUint::from(1u8)
-        } else {
-            BigUint::default()
-        };
-        let arena = &mut module.arena;
-        let high_impedance =
-            arena.alloc(SLTNode::Constant(BigUint::default(), mask, width, false))?;
-        let cond = arena.alloc(SLTNode::Input {
-            variable: enabled,
-            signed: false,
-            index: Vec::new(),
-            access: BitAccess::new(0, 0),
-        })?;
-        let then_expr = arena.alloc(SLTNode::Input {
-            variable: forced,
-            signed: false,
-            index: Vec::new(),
-            access: BitAccess::new(0, width - 1),
-        })?;
-        let expr = arena.alloc(SLTNode::Mux {
-            cond,
-            then_expr,
-            else_expr: high_impedance,
-        })?;
-        module.comb_blocks.push(LogicPath {
-            transparent_copy: false,
-            target: LogicPathTarget::Var(VarAtomBase::new(target, 0, width - 1)),
-            expr,
-            sources: [
-                VarAtomBase::new(enabled, 0, 0),
-                VarAtomBase::new(forced, 0, width - 1),
-            ]
-            .into_iter()
-            .collect(),
-            address_sources: HashSet::default(),
-            previous_sources: HashSet::default(),
-            local_inputs: Vec::new(),
-            order_before: HashSet::default(),
-            comb_capture_enable_sites: Vec::new(),
-            comb_capture_enable_always: false,
-            pre_lower_nodes: Vec::new(),
-        });
+        // The bits its drivers drive take the forced value through their
+        // writes; each range of the others gets a driver of its own.
+        let mut driven: Vec<BitAccess> = module
+            .comb_blocks
+            .iter()
+            .filter_map(|path| path.target.var())
+            .filter(|var| var.id == target)
+            .map(|var| var.access)
+            .chain(module.glue_blocks.values().flatten().flat_map(|block| {
+                block.output_ports.iter().filter_map(|(_, path)| {
+                    path.target
+                        .var()
+                        .filter(|var| var.id == GlueAddr::Parent(target))
+                        .map(|var| var.access)
+                })
+            }))
+            .collect();
+        driven.sort_by_key(|access| access.lsb);
+        let mut undriven = Vec::new();
+        let mut next = 0;
+        for access in driven {
+            if access.lsb > next {
+                undriven.push(BitAccess::new(next, access.lsb - 1));
+            }
+            next = next.max(access.msb + 1);
+        }
+        if next < width {
+            undriven.push(BitAccess::new(next, width - 1));
+        }
+        for access in undriven {
+            let part = access.msb - access.lsb + 1;
+            let mask = if variable.is_4state {
+                (BigUint::from(1u8) << part) - BigUint::from(1u8)
+            } else {
+                BigUint::default()
+            };
+            let arena = &mut module.arena;
+            let high_impedance =
+                arena.alloc(SLTNode::Constant(BigUint::default(), mask, part, false))?;
+            let input = |arena: &mut SLTNodeArena<SourceVarId>, variable| {
+                arena.alloc(SLTNode::Input {
+                    variable,
+                    signed: false,
+                    index: Vec::new(),
+                    access,
+                })
+            };
+            let mask = input(arena, enabled)?;
+            let replacement = input(arena, forced)?;
+            let expr = super::masked::select_masked(
+                arena,
+                mask,
+                replacement,
+                high_impedance,
+                part,
+                variable.is_4state,
+            )?;
+            module.comb_blocks.push(LogicPath {
+                transparent_copy: false,
+                target: LogicPathTarget::Var(VarAtomBase::new(target, access.lsb, access.msb)),
+                expr,
+                sources: [
+                    VarAtomBase::new(enabled, access.lsb, access.msb),
+                    VarAtomBase::new(forced, access.lsb, access.msb),
+                ]
+                .into_iter()
+                .collect(),
+                address_sources: HashSet::default(),
+                previous_sources: HashSet::default(),
+                local_inputs: Vec::new(),
+                order_before: HashSet::default(),
+                comb_capture_enable_sites: Vec::new(),
+                comb_capture_enable_always: false,
+                pre_lower_nodes: Vec::new(),
+            });
+        }
     }
     Ok(())
 }
@@ -1399,26 +1420,29 @@ fn force_select(
     address: fn(SourceVarId) -> GlueAddr,
     access: BitAccess,
     value: NodeId,
+    four_state: bool,
 ) -> Result<NodeId, ParserError> {
-    let cond = arena.alloc(SLTNode::Input {
-        variable: address(enabled),
-        signed: false,
-        index: Vec::new(),
-        access: BitAccess::new(0, 0),
-    })?;
-    let then_expr = arena.alloc(SLTNode::Input {
-        variable: address(forced),
-        signed: false,
-        index: Vec::new(),
-        access,
-    })?;
-    sources.insert(VarAtomBase::new(address(enabled), 0, 0));
-    sources.insert(VarAtomBase::new(address(forced), access.lsb, access.msb));
-    Ok(arena.alloc(SLTNode::Mux {
-        cond,
-        then_expr,
-        else_expr: value,
-    })?)
+    let input = |arena: &mut SLTNodeArena<GlueAddr>, variable| {
+        arena.alloc(SLTNode::Input {
+            variable: address(variable),
+            signed: false,
+            index: Vec::new(),
+            access,
+        })
+    };
+    let mask = input(arena, enabled)?;
+    let replacement = input(arena, forced)?;
+    for control in [enabled, forced] {
+        sources.insert(VarAtomBase::new(address(control), access.lsb, access.msb));
+    }
+    Ok(super::masked::select_masked(
+        arena,
+        mask,
+        replacement,
+        value,
+        access.msb - access.lsb + 1,
+        four_state,
+    )?)
 }
 
 /// The direction in which the connection of `port` carries its value. An
