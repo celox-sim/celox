@@ -971,10 +971,16 @@ Each import is linked by its C name at build time: `dpi_function`
 registrations are searched first, then `dpi_library` libraries in order; an
 unresolved name fails the build with a `Dpi` error. Both methods are
 `unsafe`, because Celox cannot check that a C function matches its import.
+`allow_unlinked_dpi_for_elaboration()` builds a design despite unresolved
+imports, for an elaboration that never runs it (the sv-tests runner's
+elaboration mode, which links no C code as other tools' does not): a call of
+such an import is a run-time error that names the import and says it was
+elaborated without its C body. It is off unless requested; simulation and
+every other build keep the error.
 
 Supported subset; everything else is rejected:
 
-- `function` imports (not tasks, not `context`) declared in a module, in a
+- `function` imports (not tasks), also `context` ones (35.5.3), declared in a module, in a
   package or at compilation-unit scope, called from procedural code:
   `initial` and `always` processes (`always @*` included), `always_ff`, and
   the subroutines they call. Calls in continuous assignments and
@@ -993,8 +999,13 @@ Supported subset; everything else is rejected:
   output is copied when it returns.
 - In two-state simulation, the unknown bits a function writes to a `logic`
   argument read as zero.
+- A `context` import is called as any other. Its C code cannot use the scope
+  API (`svGetScope`, `svSetScope`, `svGetNameFromScope`, `svGetScopeFromName`,
+  user data) or call exported subroutines: Celox does not provide those C
+  symbols, so a library that uses them fails to load with an unresolved-symbol
+  error naming it.
 - `export "DPI-C"` declarations are accepted and checked (35.7) but no C
-  code can call them, because only `context` imports may do so (35.5.3).
+  code can call them (see `context` imports above).
 - UVM's C library functions are provided by Celox and shadow any user
   implementation of the same name. The
   `uvm_re_*` functions use the Rust `regex` crate, whose syntax differs
