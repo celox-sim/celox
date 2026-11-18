@@ -1161,3 +1161,88 @@ endmodule"#;
         assert_eq!(lines, ["1010 0101"], "four_state={four_state}");
     }
 }
+
+/// The ports of the instances of a generate loop take elements of a package
+/// parameter wider than 128 bits, such as OpenTitan otp_ctrl_scrmbl's
+/// `RndCnstKey[k]`: at the loop index, at a constant index, of a copy of the
+/// parameter, through a localparam of the block, and elements wider than 128
+/// bits themselves (IEEE 1800-2023 23.3.2, 26.3, 27.4). Verilator 5.054 prints
+/// the same lines.
+#[test]
+fn instance_ports_take_elements_of_wide_package_parameters() {
+    let source = r#"`timescale 1ns/1ns
+package key_pkg;
+  typedef logic [2:0][127:0] key_array_t;
+  parameter key_array_t Keys = {
+    128'h85A9E830BC059BA9286D6E2856A05CC3,
+    128'hEFFA6D736C5EFF49AE7B70F9C46E5A62,
+    128'h3BA121C5E097DDEB7768B4C666E9C3DA
+  };
+  parameter logic [1:0][191:0] WideKeys = {
+    192'h0123456789ABCDEF_FEDCBA9876543210_0F1E2D3C4B5A6978,
+    192'h8796A5B4C3D2E1F0_1122334455667788_99AABBCCDDEEFF00
+  };
+endpackage
+module Buf #(parameter int Width = 1) (input logic [Width-1:0] i, output logic [Width-1:0] o);
+  assign o = i;
+endmodule
+module Top;
+  import key_pkg::*;
+  localparam key_array_t Copy = Keys;
+  key_array_t at_genvar, at_copy, at_local;
+  logic [127:0] at_constant;
+  logic [1:0][191:0] wide;
+  for (genvar k = 0; k < 3; k++) begin : g
+    localparam logic [127:0] Element = Keys[k];
+    Buf #(.Width(128)) u_genvar(.i(Keys[k]), .o(at_genvar[k]));
+    Buf #(.Width(128)) u_copy(.i(Copy[k]), .o(at_copy[k]));
+    Buf #(.Width(128)) u_local(.i(Element), .o(at_local[k]));
+  end
+  Buf #(.Width(128)) u_constant(.i(key_pkg::Keys[1]), .o(at_constant));
+  for (genvar k = 0; k < 2; k++) begin : w
+    Buf #(.Width(192)) u_wide(.i(WideKeys[k]), .o(wide[k]));
+  end
+  initial begin
+    #1;
+    $display("%h %h %h", at_genvar[0], at_genvar[1], at_genvar[2]);
+    $display("%h %h %h", at_copy[0], at_copy[1], at_copy[2]);
+    $display("%h %h %h", at_local[0], at_local[1], at_local[2]);
+    $display("%h", at_constant);
+    $display("%h %h", wide[0], wide[1]);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("wide_package_parameter_ports.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        let keys = "3ba121c5e097ddeb7768b4c666e9c3da effa6d736c5eff49ae7b70f9c46e5a62 \
+                    85a9e830bc059ba9286d6e2856a05cc3";
+        assert_eq!(
+            lines,
+            [
+                keys,
+                keys,
+                keys,
+                "effa6d736c5eff49ae7b70f9c46e5a62",
+                "8796a5b4c3d2e1f0112233445566778899aabbccddeeff00 \
+                 0123456789abcdeffedcba98765432100f1e2d3c4b5a6978",
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
