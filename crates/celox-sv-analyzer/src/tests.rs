@@ -4377,6 +4377,8 @@ fn rejects_invalid_and_colliding_interface_declarations() {
             name: "m".to_string()
         })
     );
+    // A formal shadows an interface function in its subroutine (IEEE
+    // 1800-2023 23.9).
     assert_eq!(
         elaborate(
             "interface I; logic a;
@@ -4384,10 +4386,7 @@ fn rejects_invalid_and_colliding_interface_declarations() {
                  function automatic logic f(input logic helper); return helper; endfunction
              endinterface"
         ),
-        Err(AnalyzerError::Unsupported(
-            "declaration of `helper` in a nested scope of interface `I`, which shadows an interface item"
-                .to_string()
-        ))
+        Ok(None)
     );
     // Interface typedefs retain their declaration scopes even when their
     // unqualified names collide with another interface or the caller.
@@ -5027,6 +5026,15 @@ fn keeps_qualified_names_comments_and_preceding_imports() {
 
 #[test]
 fn rejects_unsupported_interface_uses() {
+    // A formal or a block declaration shadows an interface variable in its
+    // scope (IEEE 1800-2023 23.9).
+    assert_eq!(
+        elaborate(
+            "interface I; logic k; function automatic logic f(input logic k); return k; endfunction
+             always_comb begin logic k; k = 1'b0; end endinterface"
+        ),
+        Ok(None)
+    );
     const BUS: &str = r#"
         interface Bus;
             logic [7:0] x;
@@ -5135,10 +5143,6 @@ fn rejects_unsupported_interface_uses() {
         (
             "interface I; typedef enum {Idle, Busy} state_t; state_t state; endinterface",
             "enum type in interface `I`",
-        ),
-        (
-            "interface I; logic k; function automatic logic f(input logic k); return k; endfunction endinterface",
-            "declaration of `k` in a nested scope of interface `I`, which shadows an interface item",
         ),
         (
             "interface I; logic a; modport m(inout a); endinterface",

@@ -1857,46 +1857,208 @@ fn declared_names(unit: &native::Unit, file: &File<'_>) -> Converted<Vec<String>
             continue;
         }
         let statement = native.statement(id);
-        match &statement.kind {
-            native::StatementKind::Declaration(declaration) => match declaration {
-                native::LocalDeclaration::Variables(decl)
-                | native::LocalDeclaration::Constructed(decl) => names.extend(
-                    decl.variables
-                        .iter()
-                        .map(|variable| native_name(&variable.name)),
-                ),
-                native::LocalDeclaration::Parameters(id) => names.extend(
-                    native
-                        .parameter_declaration(*id)
-                        .parameters
-                        .iter()
-                        .map(|parameter| native_name(&parameter.name)),
-                ),
-                native::LocalDeclaration::TypeAlias(id) => {
-                    names.push(native_name(&native.type_alias(*id).name))
-                }
-                _ => {}
-            },
-            native::StatementKind::Loop {
-                kind: native::LoopSyntax::For(header),
-                ..
-            } => {
-                if let Some(native::ForInitialization::Declarations(decls)) = &header.initialization
-                {
-                    for decl in decls {
-                        names.extend(
-                            decl.variables
-                                .iter()
-                                .map(|variable| native_name(&variable.name)),
-                        );
-                    }
-                }
-            }
-            _ => {}
-        }
+        names.extend(statement_declarations(&statement.kind, native).map(native_name));
         statements.extend(statement.kind.children());
     }
     Ok(names)
+}
+
+/// The names a statement declares in the scope that holds it, each where
+/// its declarator names it: a local declaration's, or the variables a `for`
+/// loop header declares, which are the loop's.
+fn statement_declarations<'a>(
+    statement: &'a native::StatementKind,
+    native: &'a native::Declarations,
+) -> Box<dyn Iterator<Item = &'a native::Name> + 'a> {
+    match statement {
+        native::StatementKind::Declaration(declaration) => match declaration {
+            native::LocalDeclaration::Variables(decl)
+            | native::LocalDeclaration::Constructed(decl) => {
+                Box::new(decl.variables.iter().map(|variable| &variable.name))
+            }
+            native::LocalDeclaration::Parameters(id) => Box::new(
+                native
+                    .parameter_declaration(*id)
+                    .parameters
+                    .iter()
+                    .map(|parameter| &parameter.name),
+            ),
+            native::LocalDeclaration::TypeAlias(id) => {
+                Box::new(std::iter::once(&native.type_alias(*id).name))
+            }
+            _ => Box::new(std::iter::empty()),
+        },
+        native::StatementKind::Loop {
+            kind: native::LoopSyntax::For(header),
+            ..
+        } => match &header.initialization {
+            Some(native::ForInitialization::Declarations(decls)) => Box::new(
+                decls
+                    .iter()
+                    .flat_map(|decl| &decl.variables)
+                    .map(|variable| &variable.name),
+            ),
+            _ => Box::new(std::iter::empty()),
+        },
+        _ => Box::new(std::iter::empty()),
+    }
+}
+
+/// The procedural scopes of a design element: its subroutines, and the
+/// blocks and loops of their bodies and of its processes, with the names
+/// declared in each.
+struct ProceduralScopes {
+    /// The declarations of each name.
+    declarations: HashMap<String, Vec<ScopedDeclaration>>,
+}
+
+/// A declaration of a name in a procedural scope.
+struct ScopedDeclaration {
+    /// The span of the scope.
+    scope: Span,
+    /// Where the declaration starts: the name hides the interface item from
+    /// there to the end of the scope.
+    from: usize,
+    /// Whether [`declared_names`] lists it; it does not list foreach loop
+    /// variables.
+    listed: bool,
+}
+
+impl ProceduralScopes {
+    fn collect(unit: &native::Unit, file: &File<'_>) -> Converted<Self> {
+        let native = file.syntax_tree.declarations();
+        let mut scopes = Self {
+            declarations: HashMap::default(),
+        };
+        for id in body_items(unit, native)? {
+            match &native.body_item(id).kind {
+                native::BodyItemKind::Subroutine(id) => {
+                    let subroutine = native.subroutine(*id);
+                    let scope = file.span(subroutine.tokens)?;
+                    for name in subroutine
+                        .ports
+                        .iter()
+                        .flatten()
+                        .chain(
+                            subroutine
+                                .port_declarations
+                                .iter()
+                                .flat_map(|group| &group.ports),
+                        )
+                        .filter_map(|port| port.name.as_ref())
+                    {
+                        // A formal hides from its own declaration on: the
+                        // defaults of the formals before it do not see it.
+                        let from = file.name_span(name).0;
+                        scopes.declare(native_name(name), scope, from, true);
+                    }
+                    // The authored statements hold every statement of the
+                    // body; its lexical roots are those no other one holds.
+                    let nested = subroutine
+                        .authored_statements
+                        .iter()
+                        .flat_map(|id| native.statement(*id).kind.children())
+                        .collect::<HashSet<_>>();
+                    for statement in &subroutine.authored_statements {
+                        if !nested.contains(statement) {
+                            scopes.statements(*statement, Some(scope), file)?;
+                        }
+                    }
+                }
+                native::BodyItemKind::Procedure(id) => {
+                    scopes.statements(native.procedure(*id).body, None, file)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(scopes)
+    }
+
+    fn declare(&mut self, name: String, scope: Span, from: usize, listed: bool) {
+        self.declarations
+            .entry(name)
+            .or_default()
+            .push(ScopedDeclaration {
+                scope,
+                from,
+                listed,
+            });
+    }
+
+    /// Record the declarations of statement `root`, which the procedural
+    /// scope `scope` holds, if any, and of the statements in it, each in
+    /// the innermost scope around it. A worklist, since bodies nest
+    /// arbitrarily deep.
+    fn statements(
+        &mut self,
+        root: native::StatementId,
+        scope: Option<Span>,
+        file: &File<'_>,
+    ) -> Converted<()> {
+        let native = file.syntax_tree.declarations();
+        let mut pending = vec![(root, scope)];
+        while let Some((id, scope)) = pending.pop() {
+            let statement = native.statement(id);
+            let span = file.span(statement.tokens)?;
+            let mut scope = scope;
+            match &statement.kind {
+                native::StatementKind::Block { .. } | native::StatementKind::Parallel { .. } => {
+                    scope = Some(span);
+                }
+                native::StatementKind::Loop {
+                    kind: native::LoopSyntax::For(_),
+                    ..
+                } => {
+                    // A loop's variables are its own.
+                    scope = Some(span);
+                    for name in statement_declarations(&statement.kind, native) {
+                        self.declare(native_name(name), span, file.name_span(name).0, true);
+                    }
+                }
+                native::StatementKind::Loop {
+                    kind: native::LoopSyntax::Foreach(header),
+                    ..
+                } => {
+                    scope = Some(span);
+                    for name in header.variables.iter().flatten() {
+                        self.declare(native_name(name), span, file.name_span(name).0, false);
+                    }
+                }
+                kind => {
+                    if let Some(scope) = scope {
+                        // Each declarator hides from its own name on: the
+                        // initializers before it do not see it.
+                        for name in statement_declarations(kind, native) {
+                            self.declare(native_name(name), scope, file.name_span(name).0, true);
+                        }
+                    }
+                }
+            }
+            pending.extend(statement.kind.children().map(|child| (child, scope)));
+        }
+        Ok(())
+    }
+
+    /// How many declarations of `name` procedural scopes make, as
+    /// [`declared_names`] lists them.
+    fn declarations(&self, name: &str) -> usize {
+        self.declarations.get(name).map_or(0, |declarations| {
+            declarations
+                .iter()
+                .filter(|declaration| declaration.listed)
+                .count()
+        })
+    }
+
+    /// Whether a declaration of `name` hides the interface item at source
+    /// offset `at`: inside its scope, after it.
+    fn hides(&self, name: &str, at: usize) -> bool {
+        self.declarations.get(name).is_some_and(|declarations| {
+            declarations.iter().any(|declaration| {
+                declaration.from <= at && declaration.scope.0 <= at && at < declaration.scope.1
+            })
+        })
+    }
 }
 
 fn clone_module_name(module: &str, bindings: &[(String, String)]) -> String {
@@ -2691,8 +2853,15 @@ impl InterfaceDecl {
         for name in declared_names(unit, file)? {
             *declared.entry(name).or_default() += 1;
         }
+        // A formal or a declaration in a subroutine, block or loop shadows an
+        // interface item there (IEEE 1800-2023 23.9); a name it hides is
+        // not a reference to the item.
+        let procedural = ProceduralScopes::collect(unit, file)?;
         for (name, count) in &declared {
-            if *count > 1 && interface.names.contains(name) {
+            if *count > 1
+                && interface.names.contains(name)
+                && count.saturating_sub(procedural.declarations(name)) > 1
+            {
                 return Err(unsupported(format!(
                     "declaration of `{name}` in a nested scope of interface `{interface_name}`, which shadows an interface item"
                 )));
@@ -2740,6 +2909,7 @@ impl InterfaceDecl {
                 }
                 if interface.names.contains(&name_text)
                     && !qualified.contains(&expression.tokens.start)
+                    && !procedural.hides(&name_text, file.name_span(name).0)
                 {
                     interface.references.push((file.name_span(name), name_text));
                 }
@@ -2764,7 +2934,9 @@ impl InterfaceDecl {
                 && let [segment] = path.as_slice()
             {
                 let name = native_name(&segment.name);
-                if interface.names.contains(&name) {
+                if interface.names.contains(&name)
+                    && !procedural.hides(&name, file.name_span(&segment.name).0)
+                {
                     interface
                         .references
                         .push((file.name_span(&segment.name), name));
