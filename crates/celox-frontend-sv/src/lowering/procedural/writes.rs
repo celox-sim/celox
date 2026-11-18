@@ -390,10 +390,7 @@ pub(in crate::lowering) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<s
                 let window = if literal(msb).is_some() && literal(lsb).is_some() {
                     None
                 } else {
-                    Some(sv::ir::SelectWindow {
-                        lsb: literal(base)?,
-                        msb: literal(top)?,
-                    })
+                    Some(sv::ir::SelectWindow::bits(literal(base)?, literal(top)?))
                 };
                 Some(vec![sv::ir::LValue::Select {
                     name: name.clone(),

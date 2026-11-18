@@ -158,6 +158,9 @@ blocks in programs. Two region deviations are listed under
   leaves its declared range
   ([#88](https://github.com/celox-sim/celox/issues/88)). Run-time selects
   follow the standard.
+- Run-time part-selects and element selects of a member of an element of a
+  packed array of structures that is itself a member of a packed structure,
+  such as `s.regs[i].q[j +: 4]`.
 - Reduction operators in parameter expressions
   ([#456](https://github.com/celox-sim/celox/issues/456)).
 - Type operator (6.23): a type reference compared with a value, range items
