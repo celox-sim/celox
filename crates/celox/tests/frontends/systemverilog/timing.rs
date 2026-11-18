@@ -2107,3 +2107,106 @@ fn continuous_delay_net_boundaries_are_explicit() {
         );
     }
 }
+
+/// Forked processes share the description of their kernel, its wait sites
+/// among them, rather than copying it, so the memory a fork holds does not
+/// grow with the kernel: one that `process::self()` names stays held after it
+/// ends (IEEE 1800-2023 9.7), and one no handle names is reused.
+#[test]
+fn forked_processes_share_their_kernel_description() {
+    // Many wait sites make the kernel's description large.
+    let waits = "@(posedge c); ".repeat(200);
+    let source = format!(
+        r#"`timescale 1ns/1ns
+        package p;
+            class Spawner;
+                int named, unnamed;
+                task run();
+                    for (int i = 0; i < 300; i++) begin
+                        fork begin process h = process::self(); named++; end join_none
+                        fork unnamed++; join_none
+                        #2;
+                    end
+                endtask
+            endclass
+        endpackage
+        module Top(output int named);
+            bit c;
+            always #1 c = ~c;
+            initial begin
+                p::Spawner s = new;
+                fork s.run(); join_none
+                #601 named = s.named;
+                {waits}
+            end
+        endmodule
+        "#
+    );
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source.as_str(), std::path::Path::new("fork_footprint.sv"))],
+        "Top",
+    )
+    // The runtime's loop runs the forks, as it does for UVM testbenches.
+    .scheduler_mode(celox::SchedulerMode::Reference)
+    .build()
+    .unwrap();
+    let named = sim.signal("named");
+    sim.run_until(200).unwrap();
+    let early = sim.scheduler_stats();
+    sim.run_until(601).unwrap();
+    let late = sim.scheduler_stats();
+    assert_eq!(sim.get(named), 300u32.into());
+    // Each named process stays held, each unnamed one is reused.
+    let held = late.activations - early.activations;
+    assert!((190..=210).contains(&held), "{held} activations held");
+    // A held activation costs its own state, not a copy of the description
+    // of 200 wait sites.
+    let per_activation = (late.activation_bytes - early.activation_bytes) / held;
+    assert!(
+        per_activation < 1024,
+        "{per_activation} bytes per activation"
+    );
+}
+
+/// An ended fork whose own children ended is reused as well: a nested fork
+/// tree repeated in a loop holds a bounded number of activations.
+#[test]
+fn nested_fork_trees_reuse_their_activations() {
+    let source = r#"`timescale 1ns/1ns
+        package p;
+            class Nester;
+                int n;
+                task run();
+                    for (int i = 0; i < 200; i++) begin
+                        fork
+                            begin
+                                fork begin #1; n++; end join
+                            end
+                        join
+                        #1;
+                    end
+                endtask
+            endclass
+        endpackage
+        module Top(output int n);
+            initial begin
+                p::Nester s = new;
+                fork s.run(); join_none
+                #500 n = s.n;
+            end
+        endmodule
+        "#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("nested_forks.sv"))],
+        "Top",
+    )
+    // The runtime's loop runs the forks, as it does for UVM testbenches.
+    .scheduler_mode(celox::SchedulerMode::Reference)
+    .build()
+    .unwrap();
+    let n = sim.signal("n");
+    sim.run_until(500).unwrap();
+    assert_eq!(sim.get(n), 200u32.into());
+    let activations = sim.scheduler_stats().activations;
+    assert!(activations < 16, "{activations} activations held");
+}

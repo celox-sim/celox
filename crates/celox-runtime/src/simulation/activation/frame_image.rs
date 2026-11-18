@@ -111,6 +111,11 @@ pub struct FrameImage {
 }
 
 impl FrameImage {
+    /// The bytes the image holds.
+    pub fn bytes(&self) -> usize {
+        self.bytes.capacity()
+    }
+
     /// The image of the slots of `layout` as the state memory of `backend`
     /// holds them now.
     pub fn capture<B: SimBackend>(layout: &Arc<ImageLayout>, backend: &B) -> Self {
