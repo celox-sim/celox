@@ -129,18 +129,38 @@ impl BodyBuilder<'_, '_, '_> {
         {
             return body;
         }
-        // The branch is a process of its own: a statement that leaves the
-        // block other than through its own loops, or that asks for the
-        // current process, would see the difference.
+        // The branch is a process of its own. A statement that would see
+        // the difference keeps the block in its process, and a `disable`
+        // from outside it unsupported: one that leaves the block other than
+        // through its own loops, or ends a block around it; one that asks
+        // for the current process; and `wait fork` or `disable fork`, which
+        // concern the children of the process that runs them (9.6.1, 9.6.3).
         let mut asks_for_process = false;
+        let mut defined = HashSet::default();
+        let mut outward = false;
+        let mut children = false;
+        for stmt in &body {
+            stmt.visit(
+                &mut |expr| asks_for_process |= calls_self_handle(expr),
+                &mut |_| {},
+                &mut |_| {},
+            );
+            stmt.walk(&mut |stmt| match stmt {
+                Stmt::Block { id, .. } => {
+                    defined.insert(*id);
+                }
+                Stmt::WaitFork | Stmt::DisableFork => children = true,
+                _ => {}
+            });
+        }
         for stmt in &body {
             stmt.walk(&mut |stmt| {
-                if let Stmt::Eval(expr) | Stmt::Assign { rhs: expr, .. } = stmt {
-                    asks_for_process |= calls_self_handle(expr);
+                if let Stmt::DisableBlock(id) = stmt {
+                    outward |= !defined.contains(id);
                 }
-            })
+            });
         }
-        if leaves_block(&body, false) || asks_for_process {
+        if leaves_block(&body, false) || asks_for_process || outward || children {
             return body;
         }
         if !self.state.disables.blocks.insert(label.clone()) {
@@ -294,6 +314,25 @@ mod tests {
             error.to_string().contains("combinational procedure"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn blocks_that_need_their_own_process_stay_unsupported_targets() {
+        for body in [
+            // A condition that asks for the process.
+            "begin : work if (process::self() != null) #5; end",
+            // The children of the process that runs the block.
+            "begin fork #1; join_none begin : work wait fork; end end",
+            // A block around it.
+            "begin : outer begin : work #5; disable outer; end end",
+        ] {
+            let source = format!("module Top; initial {body} initial #1 disable work; endmodule");
+            let error = analyze(&source).unwrap_err();
+            assert!(
+                error.to_string().contains("disable statement"),
+                "{body}: {error}"
+            );
+        }
     }
 
     #[test]
