@@ -2783,10 +2783,10 @@ generated/uvm-examples/uvm_register_mem_example.sv	2state	fail
 generated/uvm-examples/uvm_register_mem_example.sv	4state	fail
 generated/uvm-examples/uvm_register_spi_bl_tb.sv	2state	fail
 generated/uvm-examples/uvm_register_spi_bl_tb.sv	4state	fail
-generated/uvm-examples/uvm_slave_agent.sv	2state	fail
-generated/uvm-examples/uvm_slave_agent.sv	4state	fail
-generated/uvm-examples/uvm_slave_agent_multi_seq_item.sv	2state	fail
-generated/uvm-examples/uvm_slave_agent_multi_seq_item.sv	4state	fail
+generated/uvm-examples/uvm_slave_agent.sv	2state	pass
+generated/uvm-examples/uvm_slave_agent.sv	4state	pass
+generated/uvm-examples/uvm_slave_agent_multi_seq_item.sv	2state	pass
+generated/uvm-examples/uvm_slave_agent_multi_seq_item.sv	4state	pass
 generated/uvm-examples/uvm_tb_build_bl_tb.sv	2state	fail
 generated/uvm-examples/uvm_tb_build_bl_tb.sv	4state	fail
 generated/uvm-examples/uvm_tb_build_ss_tb.sv	2state	fail
