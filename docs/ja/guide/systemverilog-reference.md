@@ -761,12 +761,16 @@ let mut sim = unsafe {
 各 import は構築時に C 名でリンクします。`dpi_function` 登録を最初に探し、
 次に `dpi_library` のライブラリを順に探します。解決できない名前は `Dpi` エラーで
 構築に失敗します。C 関数と import の一致を Celox は検証できないため、両方とも
-`unsafe` です。
+`unsafe` です。`allow_unlinked_dpi_for_elaboration()` は、実行しない elaboration のために
+（他のツールと同様に C コードをリンクしない sv-tests ランナーの elaboration モード）、
+未解決の import があっても設計を構築します。そうした import の呼び出しは、import 名と
+C 本体なしで elaboration されたことを示す実行時エラーになります。
+明示的に要求しない限り無効で、シミュレーションや他の構築ではエラーのままです。
 
 対応部分集合（他は全て拒否）:
 
 - モジュール、package、またはコンパイル単位スコープで宣言した `function` import
-  （task でも `context` でもない）。手続きコードからの呼び出し: `initial`、
+  （task ではないもの。`context` も含む、35.5.3）。手続きコードからの呼び出し: `initial`、
   `always`（`always @*` を含む）、`always_ff`、およびそれらが呼ぶサブルーチン。
   継続代入と `always_comb` からの呼び出しは拒否します。
 - 引数は最大16個。`input`・`output`・`inout`。
@@ -780,8 +784,12 @@ let mut sim = unsafe {
   ポインタです。関数に渡した string と packed 配列は関数が戻るまで有効です。
   関数が返す、または output に書く string は、関数が戻った時点でコピーします。
 - 2値シミュレーションでは、関数が `logic` 引数に書いた不定ビットは 0 として読みます。
-- `export "DPI-C"` 宣言は受理して検査しますが（35.7）、呼べるのは
-  `context` import だけ（35.5.3）なので、C コードからは呼べません。
+- `context` import は他の import と同じように呼びます。その C コードはスコープ API
+  （`svGetScope`、`svSetScope`、`svGetNameFromScope`、`svGetScopeFromName`、ユーザーデータ）を
+  使えず、export したサブルーチンも呼べません。Celox はそれらの C シンボルを提供しないため、
+  それらを使うライブラリはシンボル名を示す未解決シンボルエラーで読み込みに失敗します。
+- `export "DPI-C"` 宣言は受理して検査しますが（35.7）、C コードからは呼べません
+  （上記の `context` import を参照）。
 - UVM の C ライブラリ関数は Celox が提供し、同名の
   ユーザー実装を覆い隠します。`uvm_re_*` は Rust の `regex` クレートを使うため、
   まれな構文で POSIX 拡張正規表現と異なります。`uvm_dpi_get_next_arg_c` は
