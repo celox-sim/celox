@@ -465,3 +465,55 @@ endmodule
     assert_eq!(sim.get(sim.signal("q")), BigUint::from(1u8));
     sim.save_state().unwrap();
 }
+
+/// A write changes only the probed parts of a variable it overlaps: an event
+/// control on a part (IEEE 1800-2023 9.4.2) waits for a write of its bits,
+/// at a constant or a run-time offset, not for one of the variable's other
+/// bits, nor for one that leaves them unchanged. The line is that of Icarus
+/// Verilog 13.0.
+#[test]
+fn event_controls_on_parts_see_only_overlapping_writes() {
+    let source = r#"`timescale 1ns/1ns
+module top;
+  logic [15:0] v = '0;
+  logic [7:0] mem [4];
+  int lo = 0, mid = 0, hi = 0, m1 = 0;
+  int i;
+  always @(v[3:0]) lo++;
+  always @(v[7:4]) mid++;
+  always @(v[15:12]) hi++;
+  always @(mem[1]) m1++;
+  initial begin
+    for (int k = 0; k < 4; k++) mem[k] = '0;
+    #1 v[11:8] = 4'hf;
+    #1 v[5] = 1'b1;
+    #1 v[1:0] = 2'b11;
+    #1 v[13] = 1'b1;
+    #1 v[13] = 1'b1;
+    #1 i = 6; v[i] = 1'b1;
+    #1 i = 9; v[i] = 1'b0;
+    #1 mem[2] = 8'h5;
+    #1 i = 1; mem[i] = 8'h7;
+    #1 $display("lo=%0d mid=%0d hi=%0d m1=%0d", lo, mid, hi, m1);
+    $finish;
+  end
+endmodule
+"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("parts.sv"))], "top")
+            .four_state(true)
+            .build()
+            .unwrap();
+    sim.run_until(100).unwrap();
+    let lines: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => {
+                Some(String::from_utf8_lossy(&message).into_owned())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines, ["lo=1 mid=2 hi=1 m1=2"]);
+}
