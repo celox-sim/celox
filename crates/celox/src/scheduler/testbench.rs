@@ -131,7 +131,7 @@ fn emit_settle(g: &mut Generator<'_>, m: &Meta, units: &[Unit], finish: BlockId,
     let settled = g.b.new_block();
     branch(g, clean, settled, evaluate);
     g.b.switch_to_block(evaluate);
-    g.observers_before(invalid);
+    let _ = g.observers_before(invalid);
     for unit in units {
         g.inline(unit, finish);
     }

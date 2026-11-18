@@ -111,11 +111,16 @@ impl Generator<'_> {
         if let Some((service, checks, events)) = updates {
             self.report_update(service, checks, events, finish_exit, AfterWrites::Settle);
         }
-        self.observers_before(internal_exit);
+        let observed = self.observers_before(internal_exit);
         if self.settle_reads.is_some() {
             let dirty = self.load(self.slots.dirty, SCHEDULER_FLAG_WIDTH);
             let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
             let changed = self.binary(1, dirty, BinaryOp::Ne, zero);
+            // An observer whose reads changed records in this settle.
+            let changed = match observed {
+                Some(observed) => self.binary(1, changed, BinaryOp::Or, observed),
+                None => changed,
+            };
             let settle = self.b.new_block();
             let settled = self.b.new_block();
             self.b.seal_block(SIRTerminator::Branch {
