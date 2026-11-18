@@ -554,6 +554,7 @@ impl Aliases<'_, '_> {
                 local: false,
                 interface_instance: None,
                 aliased: None,
+                constant: None,
             },
             start,
             path,

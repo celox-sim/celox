@@ -234,6 +234,16 @@ impl Source {
                     // bound to the other instance's object.
                     imported.external_forces = bindings.forced.to_vec();
                     for signal in bindings.hierarchical.signals {
+                        // A parameter of another instance is read as its
+                        // value (23.6).
+                        if let Some(literal) = &signal.constant {
+                            for path in &signal.paths {
+                                imported
+                                    .hierarchical_constants
+                                    .insert(path.clone(), literal.clone());
+                            }
+                            continue;
+                        }
                         // A name of the body of an interface instance binds
                         // there; the module holds the signal of an object
                         // of another instance it denotes.

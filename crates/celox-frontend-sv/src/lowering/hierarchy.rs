@@ -37,6 +37,15 @@ pub(super) struct ElaboratedModule {
     instances: Vec<LoweredSvInstance>,
     constants: HashMap<String, i128>,
     parameter_types: HashMap<String, (usize, bool)>,
+    /// The module's own parameters and local parameters, which hierarchical
+    /// names can denote (IEEE 1800-2023 23.6), not the package parameters
+    /// among `constants`, with the sized literal of the value of each that
+    /// the specialization gives one.
+    parameters: HashMap<String, Option<String>>,
+    /// The parameters among `parameters` whose packed dimensions are other
+    /// than one `[N-1:0]`, whose selects a literal of the value would not
+    /// index as declared.
+    dimensioned: HashSet<String>,
 }
 
 impl ElaboratedModule {
@@ -49,6 +58,27 @@ impl ElaboratedModule {
         let constants = module_constants_with_overrides(source, &[]);
         let mut instances = lower_instances(source, &constants, &parameter_types)?;
         propagate_force_signals(&mut instances, force_signals);
+        // The parameters whose packed dimensions are other than one
+        // `[N-1:0]`, which a select indexes as declared.
+        let dimensioned: HashSet<String> = source
+            .parameters()
+            .iter()
+            .filter(|parameter| match parameter.packed_ranges() {
+                [] => false,
+                [range] => {
+                    let eval = |expr| {
+                        sv::typecheck::eval_const_expr_with_types(
+                            expr,
+                            &constants,
+                            &parameter_types,
+                        )
+                    };
+                    eval(range.right()) != Some(0) || eval(range.left()).is_none_or(|left| left < 0)
+                }
+                _ => true,
+            })
+            .map(|parameter| parameter.name().to_string())
+            .collect();
         Ok(Self {
             name: source.name().to_string(),
             interface_handles: source.interface_handles().to_vec(),
@@ -57,6 +87,18 @@ impl ElaboratedModule {
             instances,
             constants,
             parameter_types,
+            dimensioned,
+            parameters: source
+                .parameters()
+                .iter()
+                .map(|parameter| {
+                    let literal = match parameter.value() {
+                        Some(sv::ir::ConstExpr::Literal(text)) => Some(text.clone()),
+                        _ => None,
+                    };
+                    (parameter.name().to_string(), literal)
+                })
+                .collect(),
         })
     }
 
@@ -196,6 +238,9 @@ struct Found {
     /// followed by a member as part of the component, as it does those of
     /// instance arrays and generate blocks.
     selects: bool,
+    /// The typed literal of the value of the parameter the name denotes,
+    /// which no signal holds.
+    constant: Option<String>,
     target: String,
     r#type: sv::ast::Type,
     is_net: bool,
@@ -247,6 +292,7 @@ impl Found {
             &self.path,
             self.length,
             self.selects,
+            &self.constant,
             &self.target,
             &self.r#type,
             self.is_net,
@@ -256,6 +302,7 @@ impl Found {
             &other.path,
             other.length,
             other.selects,
+            &other.constant,
             &other.target,
             &other.r#type,
             other.is_net,
@@ -355,6 +402,7 @@ impl<'a> Hierarchy<'a> {
                 path,
                 length: components.len(),
                 selects: false,
+                constant: None,
                 target: name.clone(),
                 r#type: subroutine_placeholder_type(),
                 is_net: false,
@@ -374,7 +422,20 @@ impl<'a> Hierarchy<'a> {
                 Some((end, true, target, r#type, is_net))
             })
         else {
-            return Ok(None);
+            return Ok(
+                parameter(elaborated, &components[at..])?.map(|(constant, r#type)| Found {
+                    rooted: false,
+                    levels: 0,
+                    path,
+                    length: components.len(),
+                    selects: false,
+                    constant: Some(constant),
+                    target: components[at].clone(),
+                    r#type,
+                    is_net: false,
+                    modules: vec![module],
+                }),
+            );
         };
         let r#type = resolved_type(elaborated, r#type).ok_or_else(|| {
             sv::AnalyzerError::Unsupported(format!(
@@ -388,6 +449,7 @@ impl<'a> Hierarchy<'a> {
             path,
             length,
             selects,
+            constant: None,
             target,
             r#type,
             is_net,
@@ -705,6 +767,25 @@ pub(super) fn resolve_name(
     {
         return Ok(false);
     }
+    // A parameter is read as its value, which no signal holds (23.6).
+    if let Some(constant) = found.constant {
+        references.push(HierarchicalReference {
+            signal: sv::ast::HierarchicalSignal {
+                paths: vec![written.clone()],
+                name: written,
+                r#type: found.r#type,
+                is_net: false,
+                local: false,
+                interface_instance: None,
+                aliased: None,
+                constant: Some(constant),
+            },
+            start,
+            path: found.path,
+            targets: Vec::new(),
+        });
+        return Ok(true);
+    }
     // A name that starts at the module's own name and names no instance
     // denotes the module's own signal (IEEE 1800-2023 23.8).
     if found.levels == 0 && found.path.is_empty() && start == HierarchicalStart::Ancestor(0) {
@@ -717,6 +798,7 @@ pub(super) fn resolve_name(
                 local: true,
                 interface_instance: None,
                 aliased: None,
+                constant: None,
             },
             start,
             path: Vec::new(),
@@ -733,6 +815,7 @@ pub(super) fn resolve_name(
             local: false,
             interface_instance: None,
             aliased: None,
+            constant: None,
         },
         start,
         path: found.path,
@@ -858,6 +941,7 @@ pub(super) fn resolve_interface_name(
                 local: true,
                 interface_instance: Some(scope.handle.clone()),
                 aliased: Some(found.target),
+                constant: None,
             },
             start,
             path: Vec::new(),
@@ -874,6 +958,7 @@ pub(super) fn resolve_interface_name(
             local: false,
             interface_instance: Some(scope.handle.clone()),
             aliased: None,
+            constant: None,
         },
         start,
         path: found.path,
@@ -1034,7 +1119,7 @@ fn signal_bindings(
 ) -> Result<HashMap<SourceVarId, HierarchicalBinding>, sv::AnalyzerError> {
     references
         .iter()
-        .filter(|reference| !reference.signal.local)
+        .filter(|reference| !reference.signal.local && reference.signal.constant.is_none())
         .map(|reference| {
             let var_id = lowered.signal_names[&reference.signal.name];
             let targets = reference
@@ -1222,6 +1307,92 @@ fn find_instance<'a>(
         }
     }
     None
+}
+
+/// The typed literal of the value of parameter `name` of a module, a lone
+/// remaining component, and its type, when it is integral: the value the
+/// specialization evaluates, or the sized literal it gives a wider one.
+fn parameter(
+    module: &ElaboratedModule,
+    name: &[String],
+) -> Result<Option<(String, sv::ast::Type)>, sv::AnalyzerError> {
+    let [name] = name else {
+        return Ok(None);
+    };
+    let Some(literal) = module.parameters.get(name) else {
+        return Ok(None);
+    };
+    // A select of the parameter indexes its declared dimensions.
+    if module.dimensioned.contains(name) {
+        return Err(sv::AnalyzerError::Unsupported(format!(
+            "hierarchical reference to parameter `{name}`, whose packed dimensions are other \
+             than one `[N-1:0]`"
+        )));
+    }
+    let Some(&(width, signed)) = module.parameter_types.get(name) else {
+        return Ok(None);
+    };
+    // A value read from its literal, not evaluated, keeps unknown or
+    // high-impedance bits that the two-state conversion of a `bit`
+    // parameter would clear.
+    let evaluated = width <= 128 && module.constants.contains_key(name);
+    if !evaluated
+        && literal.as_deref().is_some_and(|literal| {
+            literal
+                .split_once('\'')
+                .is_some_and(|(_, digits)| digits.contains(['x', 'X', 'z', 'Z', '?']))
+        })
+    {
+        return Err(sv::AnalyzerError::Unsupported(format!(
+            "hierarchical reference to parameter `{name}`, whose value has unknown or \
+             high-impedance bits"
+        )));
+    }
+    Ok(typed_literal(
+        module,
+        name,
+        literal.as_deref(),
+        width,
+        signed,
+    ))
+}
+
+/// The literal of the value of parameter `name` of `width` bits, of its
+/// signedness, and its type.
+fn typed_literal(
+    module: &ElaboratedModule,
+    name: &str,
+    literal: Option<&str>,
+    width: usize,
+    signed: bool,
+) -> Option<(String, sv::ast::Type)> {
+    let signing = if signed { "s" } else { "" };
+    let literal = match module.constants.get(name) {
+        Some(&value) if width > 0 && width <= 128 => {
+            let mask = if width == 128 {
+                u128::MAX
+            } else {
+                (1u128 << width) - 1
+            };
+            format!("{width}'{signing}d{}", value as u128 & mask)
+        }
+        // A wider value keeps the digits of the literal the analysis gives
+        // it, of the parameter's width, with the parameter's signedness.
+        _ => {
+            let digits = literal?.strip_prefix(&format!("{width}'"))?;
+            let digits = digits.strip_prefix(['s', 'S']).unwrap_or(digits);
+            format!("{width}'{signing}{digits}")
+        }
+    };
+    let width = i128::try_from(width).ok()?;
+    let r#type = sv::ast::Type::resolved(
+        sv::ast::TypeKind::Logic,
+        signed,
+        None,
+        &[(width - 1, 0)],
+        &[],
+    );
+    Some((literal, r#type))
 }
 
 /// `name` without the constant index `[n]` that ends it, as the name scan

@@ -385,6 +385,7 @@ pub(super) fn resolve_outward(
             local: false,
             interface_instance: None,
             aliased: None,
+            constant: None,
         })
         .collect::<Vec<_>>();
     let (built, outward) = specialization(packages, design, key, &declaration, &overrides, &seeds)?;
@@ -498,6 +499,7 @@ fn provisional(components: &[String]) -> HierarchicalSignal {
         local: false,
         interface_instance: None,
         aliased: None,
+        constant: None,
     }
 }
 
