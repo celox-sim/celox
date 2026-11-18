@@ -210,7 +210,21 @@ pub(super) fn finish_value(
                 None => Err(unsupported("replication count"))?,
             }
         }
-        Finish::Inside(ranges) => {
+        Finish::Inside(ranges, integral) => {
+            // An integral operand of a test on strings becomes a string.
+            if let Some(integral) = integral {
+                operands = operands
+                    .into_iter()
+                    .zip(integral)
+                    .map(|(operand, integral)| {
+                        if integral {
+                            strings::call(StringOp::FromBits, vec![operand])
+                        } else {
+                            operand
+                        }
+                    })
+                    .collect();
+            }
             let mut operands = operands.into_iter();
             let operand = operands.next().ok_or_else(disagreement)?;
             let mut items = Vec::new();

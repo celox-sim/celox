@@ -467,8 +467,8 @@ blocks in programs. Two region deviations are listed under
   string values in VPI, VCD output,
   and the TypeScript API; nonblocking character writes to fixed string
   arrays; method calls on whole string arrays or subarrays; array-valued
-  string arguments or return values; value range items (`["a":"z"]`) of a
-  `case inside` statement on strings.
+  string arguments or return values; value range items (`["a":"z"]`) of an
+  `inside` set or a `case inside` statement on strings.
 - Reference arguments <a id="reference-arguments"></a> (13.5.2): `ref static`;
   elements of dynamic arrays, queues, and associative arrays as actuals;
   elements of class properties; writes to part of a formal bound to a class

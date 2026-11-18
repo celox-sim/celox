@@ -562,7 +562,11 @@ enum Finish {
     Repeat {
         literals: bool,
     },
-    Inside(Vec<bool>),
+    /// A set membership test; each item is a range when its flag is set.
+    /// When an operand is a string, each compares as a string (see
+    /// `enter_inside`): the flags tell, for the left operand and
+    /// then each item operand, which are not strings and become ones.
+    Inside(Vec<bool>, Option<Vec<bool>>),
     /// A string operation on the bound children, see [`strings`].
     StringCall(StringOp),
     /// An enumerated type method; the children are the receiver, then the
