@@ -214,17 +214,21 @@ blocks in programs. Two region deviations are listed under
 - Procedural `force` / `release` (IEEE 1800-2023 10.6.2) outside `initial`
   and `always` procedures: in a subroutine, a `final` procedure, or an
   `always_comb`, `always_latch` or `always_ff` procedure. An `always`
-  procedure with one runs as a process. The target is a whole packed
-  integral variable or net of the module: a bit-select, part-select,
-  member, concatenation or name of another instance, a `real`, `string`,
-  handle or unpacked target (singular ones the standard allows), and a
-  variable that a nonblocking assignment with an intra-assignment delay
-  writes, are rejected, as is a target that the `always_comb`,
-  `always_latch` or `always @*` procedure assigning it also reads, and one
-  that an `always_comb` running as a process (calling a task, for example)
-  assigns whole. So are an expression with side effects or with a
-  call of a subroutine or a system function, and one that reads a variable
-  of a procedural block. A target that the host also forces
+  procedure with one runs as a process. The target is a packed integral
+  variable or net of the module, or a constant bit-select, part-select or
+  member of one: as an extension, a constant select or a member of a
+  variable is a target too, which the standard allows only of a vector net.
+  A concatenation, a select with nonconstant bounds, a name of another
+  instance, a `real`, `string`, handle or unpacked target (singular ones
+  the standard allows), and a variable that a nonblocking assignment with
+  an intra-assignment delay writes are rejected, as are a target that the
+  `always_comb`, `always_latch` or `always @*` procedure assigning it also
+  reads, a target that an `always_comb` running as a process (calling a
+  task, for example) assigns whole, and overlapping parts
+  of one target when a force of one of them has an expression that reads a
+  variable. So are an expression with side effects or with a call of a
+  subroutine or a system function, and one that reads a variable of a
+  procedural block. A target that the host also forces
   (`Simulator::force`) is rejected, as is an input port of the top module,
   which the host writes.
 - Procedural continuous assignments (`assign` / `deassign`, IEEE 1800-2023
