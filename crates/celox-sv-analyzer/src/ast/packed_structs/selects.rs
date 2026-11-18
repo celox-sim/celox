@@ -233,8 +233,8 @@ enum RunTime {
     Structure,
     /// A member of an element of array variable `path[0]`, whose element
     /// the select is then placed in: bit `beyond` of the element, past the
-    /// whole variable wherever the element is. A part-select, whose window
-    /// would move with a run-time element, is not taken.
+    /// whole variable wherever the element is. The window of a part-select
+    /// counts from the element's bit 0.
     Element { beyond: usize },
 }
 
@@ -301,12 +301,12 @@ fn finish_lvalue(
 /// arrives in positions of the member's bits too, those of an index outside
 /// its range at the member's width. It becomes a select at those positions
 /// in the structure, confined to the member's bits by a
-/// [`crate::ir::SelectWindow`].
+/// [`crate::ast::SelectWindow`].
 ///
 /// An indexed part-select arrives in the index coordinates of the member's
 /// declared range, its width a constant. It becomes a select at the
 /// positions of those indices in the structure, confined to the member's
-/// bits by a [`crate::ir::SelectWindow`]: the bits it selects outside the
+/// bits by a [`crate::ast::SelectWindow`]: the bits it selects outside the
 /// member read X and are not written, as those outside a vector are (IEEE
 /// 1800-2023 11.5.1), and never those of a neighboring member.
 #[allow(clippy::too_many_arguments)]
@@ -334,10 +334,10 @@ fn dynamic_member_select(
         window,
         is_2state: matches!(r#type.kind, TypeKind::Bit | TypeKind::Chandle),
     };
-    let window = crate::ir::SelectWindow {
-        lsb: u32::try_from(offset).ok()?,
-        msb: u32::try_from(offset.checked_add(width.checked_sub(1)?)?).ok()?,
-    };
+    let window = crate::ast::SelectWindow::bits(
+        u32::try_from(offset).ok()?,
+        u32::try_from(offset.checked_add(width.checked_sub(1)?)?).ok()?,
+    );
     if msb == lsb {
         let structure = match run_time {
             RunTime::Element { beyond } => beyond,
@@ -353,9 +353,6 @@ fn dynamic_member_select(
             else_expr: Box::new(literal(structure)),
         };
         return Some(select(position.clone(), position, Some(window)));
-    }
-    if let RunTime::Element { .. } = run_time {
-        return None;
     }
     let window = Some(window);
     if r#type.packed_ranges.len() > 1 {
@@ -558,6 +555,7 @@ pub(in crate::ast) fn select_element_member(
         lsb,
         signed,
         is_2state,
+        window,
         ..
     }) = finish_lvalue(tree, &path, offset, ty, relative, run_time, dimensions)
     else {
@@ -566,16 +564,56 @@ pub(in crate::ast) fn select_element_member(
             path.join(".")
         )));
     };
+    // A window counts from the bit 0 of the element, which is at a run-time
+    // position for a run-time index.
+    let window = match window {
+        Some(window) => {
+            let zero = || ConstExpr::Literal("0".into());
+            let LValue::Select { lsb: element, .. } = crate::ast::selects::lvalue_from_range(
+                tree,
+                name.clone(),
+                indices.clone(),
+                zero(),
+                zero(),
+                false,
+                dimensions,
+            )?
+            else {
+                return Err(unsupported("element of a structure array"));
+            };
+            Some(
+                match eval_ast_const_expr(&tree.functions, &element, &dimensions.const_env)
+                    .and_then(|element| u32::try_from(element).ok())
+                {
+                    Some(element) => crate::ast::SelectWindow::bits(
+                        element
+                            .checked_add(window.lsb)
+                            .ok_or_else(|| unsupported("window"))?,
+                        element
+                            .checked_add(window.msb)
+                            .ok_or_else(|| unsupported("window"))?,
+                    ),
+                    None => crate::ast::SelectWindow {
+                        at: Some(Box::new(element)),
+                        ..window
+                    },
+                },
+            )
+        }
+        None => None,
+    };
     let mut lvalue =
         crate::ast::selects::lvalue_from_range(tree, name, indices, msb, lsb, false, dimensions)?;
     if let LValue::Select {
         signed: selected_signed,
         is_2state: selected_2state,
+        window: selected_window,
         ..
     } = &mut lvalue
     {
         *selected_signed = signed;
         *selected_2state = is_2state;
+        *selected_window = window;
     }
     Ok(lvalue)
 }
@@ -614,11 +652,23 @@ pub(in crate::ast) fn select_member_element_member(
         signed,
         array_slice_width: None,
         is_2state,
+        window,
         ..
     } = relative
     else {
         return Err(outside());
     };
+    // A run-time part-select or element select of the member of the
+    // element stays within that member by its window, which this placement
+    // in the enclosing member does not carry over: one that reaches past
+    // the member could write the member next to it.
+    if window.is_some() && msb != lsb {
+        return Err(unsupported(format!(
+            "run-time part-select of member `{}` of an element of packed array member `{}`",
+            members.join("."),
+            path.join(".")
+        )));
+    }
     let width = expr_type_from_type(&tree.functions, &ty, &dimensions.const_env)
         .ok_or_else(outside)?
         .width;
@@ -664,10 +714,7 @@ pub(in crate::ast) fn select_member_element_member(
         signed,
         array_slice_width: None,
         array_slice_reversed: false,
-        window: Some(crate::ir::SelectWindow {
-            lsb: window.0,
-            msb: window.1,
-        }),
+        window: Some(crate::ast::SelectWindow::bits(window.0, window.1)),
         is_2state,
     })
 }
