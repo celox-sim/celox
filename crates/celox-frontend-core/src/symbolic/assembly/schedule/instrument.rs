@@ -127,13 +127,34 @@ pub(super) fn instrument_occurrences(
         for (index, (source, _)) in probes.iter().enumerate() {
             probes_of.entry(source.id).or_default().push(index);
         }
-        // The first probe of `signal` whose `pass` is `after` or later.
-        let first_probe = |signal: AbsoluteAddr, pass: fn(usize) -> usize, after: usize| {
+        // The first probe of `signal` whose `pass` is `after` or later and
+        // whose bits a write of `bits` can change: a write at a constant
+        // offset changes none of a probe's bits it does not overlap, whose
+        // code would only find them unchanged; one at a dynamic offset may
+        // change any.
+        let first_probe = |signal: AbsoluteAddr,
+                           bits: Option<BitAccess>,
+                           pass: fn(usize) -> usize,
+                           after: usize| {
             let indices = probes_of.get(&signal)?;
-            indices
-                .get(indices.partition_point(|&index| pass(index) < after))
+            indices[indices.partition_point(|&index| pass(index) < after)..]
+                .iter()
                 .copied()
+                .find(|&index| {
+                    let probed = probes[index].0.access;
+                    bits.is_none_or(|bits| bits.lsb <= probed.msb && probed.lsb <= bits.msb)
+                })
         };
+        // The bits that `instruction` writes of `address`, when a constant
+        // offset gives them.
+        fn written_bits_of<A: PartialEq>(
+            instruction: &SIRInstruction<A>,
+            address: &A,
+        ) -> Option<BitAccess> {
+            super::super::commits::written_bits(instruction)
+                .find(|(written, _)| *written == address)
+                .and_then(|(_, bits)| bits)
+        }
         fn probe_code<A>(
             probe: &(AbsoluteAddr, usize, bool, celox_sir::SIROffset),
             signal: A,
@@ -156,7 +177,12 @@ pub(super) fn instrument_occurrences(
             if address.region != STABLE_REGION {
                 return None;
             }
-            let index = first_probe(address.absolute_addr(), |index| 2 * index, after)?;
+            let index = first_probe(
+                address.absolute_addr(),
+                written_bits_of(instruction, address),
+                |index| 2 * index,
+                after,
+            )?;
             Some((
                 2 * index,
                 probe_code(
@@ -173,8 +199,12 @@ pub(super) fn instrument_occurrences(
             if let SIRInstruction::Store(address, ..) = instruction
                 && address.region == WORKING_REGION
                 && ff_multi_stored.contains(&address.absolute_addr())
-                && let Some(index) =
-                    first_probe(address.absolute_addr(), |index| 2 * index + 1, after)
+                && let Some(index) = first_probe(
+                    address.absolute_addr(),
+                    written_bits_of(instruction, address),
+                    |index| 2 * index + 1,
+                    after,
+                )
             {
                 return Some((
                     2 * index + 1,
@@ -217,7 +247,12 @@ pub(super) fn instrument_occurrences(
             if let LogicPathTarget::Process { unit, .. } = &mut path.target {
                 crate::watch::instrument_writes_in_passes(unit, |instruction, after| {
                     let &address = crate::watch::write_destination(instruction)?;
-                    let index = first_probe(address, |index| index, after)?;
+                    let index = first_probe(
+                        address,
+                        written_bits_of(instruction, &address),
+                        |index| index,
+                        after,
+                    )?;
                     Some((
                         index,
                         probe_code(&probe_codes[index], address, probe_codes[index].0),
