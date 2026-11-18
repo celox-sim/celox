@@ -350,6 +350,7 @@ fn build_inner(session: &mut Session, name: &str, caller: Option<&ScopeSymbols>)
     session.foreign = scope.foreign;
     session.types = scope.types;
     session.next_call_site = scope.next_call_site;
+    session.virtual_interfaces = scope.virtual_interfaces.take();
     let mut symbols = result?;
     let table = &session.types;
     let registry = &mut session.foreign;

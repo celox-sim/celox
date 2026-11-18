@@ -42,8 +42,112 @@ pub(crate) struct Subroutines {
     pub(super) static_initializer: Option<InitialProcess>,
 }
 
-/// The subroutines of the interfaces in `declarations`, built with the
-/// analyzed `packages` (see the module documentation).
+/// The subroutines of the specializations of parameterized interfaces, by
+/// the key of each specialization (see [`VirtualInterface::key`]).
+pub(crate) type Specializations = Arc<HashMap<String, Arc<Subroutines>>>;
+
+impl Subroutines {
+    fn extend(&mut self, found: Self) {
+        self.subroutines.extend(found.subroutines);
+        self.shapes.extend(found.shapes);
+        self.locals.extend(found.locals);
+        self.function_return_types
+            .extend(found.function_return_types);
+        self.statics.extend(found.statics);
+        if let Some(process) = found.static_initializer {
+            match &mut self.static_initializer {
+                Some(initializer) => initializer.body.extend(process.body),
+                None => self.static_initializer = Some(process),
+            }
+        }
+    }
+}
+
+/// Declare the subroutines `calls` in `symbols`, the symbols of a scope
+/// that may call them, which copies those it calls.
+pub(super) fn import(symbols: &mut scope::ScopeSymbols, calls: &Subroutines) {
+    for subroutine in &calls.subroutines {
+        if symbols
+            .subroutines
+            .iter()
+            .any(|known| known.name == subroutine.name)
+        {
+            continue;
+        }
+        symbols.subroutine_params.insert(
+            subroutine.name.clone(),
+            subroutine
+                .params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect(),
+        );
+        if let Some(shapes) = calls.shapes.get(&subroutine.name) {
+            symbols
+                .subroutine_shapes
+                .insert(subroutine.name.clone(), shapes.clone());
+        }
+        symbols.subroutines.push(subroutine.clone());
+    }
+    for (name, metadata) in &calls.function_return_types {
+        symbols
+            .function_return_types
+            .entry(name.clone())
+            .or_insert_with(|| metadata.clone());
+    }
+    for signal in &calls.statics {
+        if !symbols
+            .state_signals
+            .iter()
+            .any(|known| known.name == signal.name)
+        {
+            symbols.state_signals.push(signal.clone());
+        }
+    }
+    if let Some(initializer) = &calls.static_initializer {
+        symbols.initial_processes.push(initializer.clone());
+    }
+    for local in &calls.locals {
+        if !symbols.locals.iter().any(|known| known.name == local.name) {
+            symbols.locals.push(local.clone());
+        }
+    }
+}
+
+/// Declare the subroutines of the specializations that earlier analyses
+/// built (see [`specializations`]) in `symbols`, if the scope reaches the
+/// instances of virtual interfaces and does not declare them yet.
+pub(super) fn import_specializations(session: &Session, symbols: &mut Arc<scope::ScopeSymbols>) {
+    if session.virtual_interface_calls.is_empty()
+        || !symbols
+            .state_signals
+            .iter()
+            .any(|signal| virtual_interfaces::is_placeholder_signal(&signal.name))
+    {
+        return;
+    }
+    let mut keys: Vec<_> = session.virtual_interface_calls.keys().collect();
+    keys.sort();
+    for key in keys {
+        let calls = &session.virtual_interface_calls[key];
+        let declared = |symbols: &scope::ScopeSymbols| {
+            calls.subroutines.first().is_none_or(|first| {
+                symbols
+                    .subroutines
+                    .iter()
+                    .any(|known| known.name == first.name)
+            })
+        };
+        if !declared(symbols) {
+            import(Arc::make_mut(symbols), calls);
+        }
+    }
+}
+
+/// The subroutines of the interfaces in `declarations` that have no
+/// parameters, built with the analyzed `packages` (see the module
+/// documentation). Those of a parameterized interface belong to each of its
+/// specializations (see [`specializations`]).
 pub(super) fn build(
     packages: &packages::Packages,
     declarations: &virtual_interfaces::VirtualInterfaces,
@@ -52,65 +156,133 @@ pub(super) fn build(
     let mut interfaces: Vec<_> = declarations
         .interfaces
         .iter()
-        .filter(|(_, declaration)| !declaration.subroutines.is_empty())
+        .filter(|(_, declaration)| {
+            !declaration.subroutines.is_empty()
+                && declaration.template.is_none()
+                && declaration.arguments.is_empty()
+        })
         .collect();
     interfaces.sort_by(|left, right| left.0.cmp(right.0));
-    for (interface, declaration) in interfaces {
-        let Some((tree, path)) = packages.interface_sources.get(interface) else {
+    for (key, declaration) in interfaces {
+        built.extend(specialization(
+            packages,
+            &mut packages.design(),
+            key,
+            declaration,
+            &HashMap::default(),
+        )?);
+    }
+    Ok(built)
+}
+
+/// Build the subroutines of each specialization of a parameterized
+/// interface that the analyses of `design` named and that has tasks or
+/// functions, if they are not built yet. Whether any were: an analysis that
+/// named one is repeated, to call them (see
+/// [`crate::ast::source`]).
+pub(super) fn specializations(
+    packages: &packages::Packages,
+    design: &mut packages::Design,
+) -> Converted<bool> {
+    let Some(declarations) = design.virtual_interfaces.clone() else {
+        return Ok(false);
+    };
+    let mut missing: Vec<_> = declarations
+        .interfaces
+        .iter()
+        .filter(|(key, declaration)| {
+            !declaration.arguments.is_empty()
+                && !declaration.subroutines.is_empty()
+                && !design.virtual_interface_calls.contains_key(*key)
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(false);
+    }
+    missing.sort_by(|left, right| left.0.cmp(right.0));
+    for (key, declaration) in missing {
+        let overrides = declarations
+            .interfaces
+            .get(&declaration.interface)
+            .and_then(|base| base.template.as_ref())
+            .map(|template| template.overrides(&declaration.arguments))
+            .unwrap_or_default();
+        let overrides = overrides
+            .into_iter()
+            .map(|(name, value)| (name, parameters::const_expr_from_i128(value)))
+            .collect();
+        // Built in the types of the design, which the analyses that call
+        // them share.
+        let built = specialization(packages, design, key, declaration, &overrides)?;
+        Arc::make_mut(&mut design.virtual_interface_calls).insert(key.clone(), Arc::new(built));
+    }
+    Ok(true)
+}
+
+/// The subroutines of the specialization `key` of the interface `declaration`
+/// declares, whose parameters `overrides` give.
+fn specialization(
+    packages: &packages::Packages,
+    design: &mut packages::Design,
+    key: &str,
+    declaration: &virtual_interfaces::VirtualInterfaceDeclaration,
+    overrides: &HashMap<String, ConstExpr>,
+) -> Converted<Subroutines> {
+    let mut built = Subroutines::default();
+    let interface = &declaration.interface;
+    let Some((tree, path)) = packages.interface_sources.get(interface) else {
+        return Ok(built);
+    };
+    for handle in tree.root_scopes()? {
+        let scoped = tree.scoped(handle)?;
+        if instances::normalize_identifier(&scoped.root_name()?) != *interface {
             continue;
-        };
-        for handle in tree.root_scopes()? {
-            let scoped = tree.scoped(handle)?;
-            if instances::normalize_identifier(&scoped.root_name()?) != *interface {
-                continue;
-            }
-            // An interface whose subroutines cannot be analyzed has none to
-            // call through a virtual interface; a design that calls none
-            // keeps working, and a call names the missing subroutine.
-            let mut found = Subroutines::default();
-            if interface_subroutines(packages, &scoped, path, interface, declaration, &mut found)
-                .is_ok()
-            {
-                built.subroutines.extend(found.subroutines);
-                built.shapes.extend(found.shapes);
-                built.locals.extend(found.locals);
-                built
-                    .function_return_types
-                    .extend(found.function_return_types);
-                built.statics.extend(found.statics);
-                if let Some(process) = found.static_initializer {
-                    match &mut built.static_initializer {
-                        Some(initializer) => initializer.body.extend(process.body),
-                        None => built.static_initializer = Some(process),
-                    }
-                }
-            }
+        }
+        // An interface whose subroutines cannot be analyzed has none to
+        // call through a virtual interface; a design that calls none
+        // keeps working, and a call names the missing subroutine.
+        let mut found = Subroutines::default();
+        let mut session = Session::with_packages(packages, design);
+        let subroutines = interface_subroutines(
+            packages,
+            &mut session,
+            &scoped,
+            path,
+            key,
+            declaration,
+            overrides,
+            &mut found,
+        );
+        session.restore(design);
+        if subroutines.is_ok() {
+            built.extend(found);
         }
     }
     Ok(built)
 }
 
-/// Add the subroutines of interface `interface`, whose declaration `scoped`
-/// is, to `built`.
+/// Add the subroutines of the specialization `interface` (its key) of the
+/// interface whose declaration `scoped` is, with the parameter values
+/// `overrides` give, to `built`.
+#[allow(clippy::too_many_arguments)]
 fn interface_subroutines(
     packages: &packages::Packages,
+    session: &mut Session,
     scoped: &SyntaxTree,
     path: &std::path::Path,
     interface: &str,
     declaration: &virtual_interfaces::VirtualInterfaceDeclaration,
+    overrides: &HashMap<String, ConstExpr>,
     built: &mut Subroutines,
 ) -> Converted<()> {
-    let overrides = HashMap::default();
     let context = AnalysisContext::unspecialized(scoped);
-    let mut design = packages.design();
-    let session = &mut Session::with_packages(packages, &mut design);
     session.shares_static_formals = true;
     let module = interface_ast::analyze(
-        &context.child(scoped, &overrides),
+        &context.child(scoped, overrides),
         session,
         path,
         packages,
-        &overrides,
+        overrides,
         &[],
         &ModuleInterfaces::default(),
         false,
@@ -165,13 +337,22 @@ fn interface_subroutines(
             Some(VirtualInterfaceSignal::StaticPlaceholder { .. })
         )
     };
-    built.statics.extend(
-        bound
-            .signals
-            .iter()
-            .filter(|signal| is_static(&signal.name))
-            .cloned(),
-    );
+    // Their types may be sized by the interface's parameters, which the
+    // scopes that hold them do not declare: they take the values of the
+    // specialization.
+    let constants: ConstEnv = symbols
+        .const_env
+        .iter()
+        .filter_map(|(name, value)| Some((names.get(name)?.clone(), *value)))
+        .collect();
+    let mut statics: Vec<Signal> = bound
+        .signals
+        .iter()
+        .filter(|signal| is_static(&signal.name))
+        .cloned()
+        .collect();
+    declarations::substitute_signal_local_constants(&mut statics, &constants);
+    built.statics.extend(statics);
     for process in bound
         .initial_processes
         .iter()
@@ -203,10 +384,11 @@ fn interface_subroutines(
         .collect();
     let ty = virtual_interfaces::value_type(
         &mut session.types,
-        VirtualInterface {
-            interface: interface.to_string(),
-            modport: None,
-        },
+        VirtualInterface::new(
+            declaration.interface.clone(),
+            None,
+            declaration.arguments.clone(),
+        ),
     );
     let handle_shape = procedural::dimensions_from_type(&ty);
     let ty = type_nodes::ir_type(session, &context.functions, ty, &ConstEnv::default());

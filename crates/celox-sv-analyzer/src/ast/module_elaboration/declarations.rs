@@ -63,6 +63,11 @@ impl ScopeElaboration<'_> {
         self.signals.extend(self.imported.signals.iter().cloned());
         self.signals
             .extend(self.imported.state_signals.iter().cloned());
+        // The specializations of parameterized interfaces that the scope's
+        // declarations name reach their instances like those the packages
+        // name (25.9).
+        let specialized = virtual_interfaces::specialization_signals(session, self.signals.iter());
+        self.signals.extend(specialized);
         // The expressions of explicitly named ports may name the module's
         // variables and those it imports (23.2.1).
         self.explicit_port_types(syntax_tree, session)?;

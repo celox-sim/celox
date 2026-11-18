@@ -521,10 +521,13 @@ fn bind_in_mode(
                         // A virtual interface names an interface (IEEE
                         // 1800-2023 25.9).
                         values.push(super::super::virtual_interfaces::bind_type(
+                            tree,
+                            native,
                             session,
                             name,
                             arguments.as_deref(),
                             modport.as_ref(),
+                            context,
                         )?);
                     }
                     DataTypeKind::Interface { .. } => return Ok(None),

@@ -50,25 +50,78 @@ const UPWARD_PREFIX: &str = "$vifup$";
 pub struct VirtualInterface {
     pub interface: String,
     pub modport: Option<String>,
+    /// The values of the value parameters of a parameterized interface, in
+    /// the order it declares them, defaults included: part of the type
+    /// (25.9). Empty for an interface without parameters.
+    pub arguments: Arc<[i128]>,
 }
 
 impl VirtualInterface {
+    /// The type `virtual interface[.modport]` of an interface without
+    /// parameters, or of a specialization with `arguments`.
+    pub(super) fn new(interface: String, modport: Option<String>, arguments: Arc<[i128]>) -> Self {
+        Self {
+            interface,
+            modport,
+            arguments,
+        }
+    }
+
+    /// The key of the specialization the type names (see
+    /// [`specialization_key`]).
+    pub(crate) fn key(&self) -> String {
+        specialization_key(&self.interface, &self.arguments)
+    }
+
     /// The semantic type of a virtual interface of this type.
     pub(super) fn type_id(&self, table: &mut semantic_types::TyTable) -> semantic_types::TyId {
-        let interface = table.interface(&self.interface);
+        let interface = if self.arguments.is_empty() {
+            table.interface(&self.interface)
+        } else {
+            table.interface_specialization(&self.interface, &self.arguments)
+        };
         table.intern(semantic_types::TyData::VirtualInterface {
             interface,
             modport: self.modport.as_deref().map(Into::into),
         })
     }
 
-    /// How the type is spelled in source.
+    /// How the type is spelled in source, with the values of the
+    /// parameters of a specialization.
     pub(super) fn spelling(&self) -> String {
-        match &self.modport {
-            Some(modport) => format!("virtual {}.{modport}", self.interface),
-            None => format!("virtual {}", self.interface),
+        let mut spelling = format!("virtual {}", self.interface);
+        if !self.arguments.is_empty() {
+            spelling.push_str(&format!(
+                "#({})",
+                self.arguments
+                    .iter()
+                    .map(i128::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
+        if let Some(modport) = &self.modport {
+            spelling.push_str(&format!(".{modport}"));
+        }
+        spelling
     }
+}
+
+/// The key under which the declarations hold the specialization of
+/// interface `interface` with parameter values `arguments`: the interface's
+/// name when it has no parameters, and otherwise the name with a hash of
+/// the values, as module specializations are keyed. Placeholders, the
+/// subroutines called through virtual interfaces and the instances the
+/// frontend numbers are per key, so a handle of one specialization never
+/// selects an instance of another (25.9).
+pub(crate) fn specialization_key(interface: &str, arguments: &[i128]) -> String {
+    if arguments.is_empty() {
+        return interface.to_owned();
+    }
+    use std::hash::{Hash, Hasher};
+    let mut hasher = fxhash::FxHasher64::default();
+    arguments.hash(&mut hasher);
+    format!("{interface}#{:016x}", hasher.finish())
 }
 
 /// The interfaces that virtual interface types of a design name, from the
@@ -78,6 +131,10 @@ impl VirtualInterface {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VirtualInterfaces {
     pub interfaces: HashMap<String, VirtualInterfaceDeclaration>,
+    /// The parameter values of the specialization each parameter value
+    /// assignment of an interface gives, by the interface and the
+    /// assignment (see [`specialization`]).
+    pub(crate) requests: HashMap<String, Arc<[i128]>>,
 }
 
 /// An interface that a virtual interface type names.
@@ -97,6 +154,128 @@ pub struct VirtualInterfaceDeclaration {
     /// The subroutines each modport imports (25.7), which a virtual
     /// interface of its type may call.
     pub modport_imports: HashMap<String, Vec<String>>,
+    /// The name of the interface, which a specialization is keyed apart
+    /// from by its parameter values.
+    pub interface: String,
+    /// The values of the parameters of a specialization, in the order the
+    /// interface declares them; empty for the declaration of an interface
+    /// without parameters.
+    pub arguments: Arc<[i128]>,
+    /// What specializing a parameterized interface needs.
+    pub(crate) template: Option<Arc<DeclarationTemplate>>,
+}
+
+/// What specializing a parameterized interface takes, which each
+/// specialization's signature is analyzed from with its own values (25.9).
+#[derive(Debug, Clone)]
+pub(crate) struct DeclarationTemplate {
+    /// The parameters a parameter value assignment may override, by the
+    /// names the interface declares them by, in declaration order.
+    overridable: Vec<String>,
+    /// The interface's signature, analyzed again for each specialization,
+    /// which evaluates its parameters as any instance's.
+    source: Arc<interface_ast::SignatureSource>,
+}
+
+impl PartialEq for DeclarationTemplate {
+    fn eq(&self, other: &Self) -> bool {
+        self.overridable == other.overridable && Arc::ptr_eq(&self.source, &other.source)
+    }
+}
+
+impl Eq for DeclarationTemplate {}
+
+impl DeclarationTemplate {
+    /// The specialization whose parameter value assignment gives
+    /// `overrides`: the values of its overridable parameters, as their types
+    /// convert them and in declaration order, and its members.
+    pub(crate) fn specialize(
+        &self,
+        interface: &str,
+        overrides: &HashMap<String, ConstExpr>,
+    ) -> Converted<(Arc<[i128]>, Vec<VirtualInterfaceMember>)> {
+        let (module, enumerations) = interface_ast::specialize(&self.source, overrides)?;
+        let values = self
+            .overridable
+            .iter()
+            .map(|name| {
+                module
+                    .parameters()
+                    .iter()
+                    .find(|parameter| declared_name(parameter.name()) == name)?
+                    .resolved_value()
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                unsupported(format!(
+                    "virtual interface type of parameterized interface `{interface}` whose parameters are not integral constants"
+                ))
+            })?;
+        Ok((values.into(), members_of(&module, &enumerations)))
+    }
+
+    /// The overridable parameters of the specialization whose values are
+    /// `values`, by name.
+    pub(crate) fn overrides(&self, values: &[i128]) -> HashMap<String, i128> {
+        self.overridable
+            .iter()
+            .cloned()
+            .zip(values.iter().copied())
+            .collect()
+    }
+}
+
+/// The members of the interface whose signature `module` is: its ports
+/// `<port>$<member>`, typed with its constants, a member of an enumeration
+/// type of `enumerations` with that type (IEEE 1800-2023 6.19.3).
+fn members_of(
+    module: &crate::ir::Module,
+    enumerations: &[(String, Type)],
+) -> Vec<VirtualInterfaceMember> {
+    // Member bounds may name the interface's constants.
+    let constants = module
+        .parameters()
+        .iter()
+        .filter_map(|parameter| Some((parameter.name().to_owned(), parameter.resolved_value()?)))
+        .collect::<ConstEnv>();
+    module
+        .ports()
+        .iter()
+        .filter_map(|port| {
+            let (_, name) = port.name().split_once('$')?;
+            let enumeration = enumerations
+                .iter()
+                .find(|(member, _)| member == name)
+                .map(|(_, r#type)| r#type.clone());
+            Some(VirtualInterfaceMember {
+                name: name.to_string(),
+                r#type: match enumeration {
+                    Some(r#type) => MemberType::Value(r#type),
+                    None => resolved_type(port.r#type(), &constants)?,
+                },
+                is_net: port.is_net(),
+            })
+        })
+        .collect()
+}
+
+/// The name an interface declares the parameter `name` of its signature by:
+/// the signature's port prefixes it (see [`VirtualInterfaces::declarations_of`]).
+fn declared_name(name: &str) -> &str {
+    name.split_once('$').map_or(name, |(_, declared)| declared)
+}
+
+impl VirtualInterfaceDeclaration {
+    /// The declaration of the specialization whose overridable parameters
+    /// have `values` and whose members are `members`.
+    fn specialization(&self, values: &Arc<[i128]>, members: Vec<VirtualInterfaceMember>) -> Self {
+        Self {
+            members,
+            arguments: values.clone(),
+            template: None,
+            ..self.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,43 +345,22 @@ impl VirtualInterfaces {
         for interfaces::Prototype {
             prototype,
             enumerations,
+            source,
         } in prototypes
         {
             let module = &prototype.module;
-            // Member bounds may name the interface's constants.
-            let constants = module
-                .parameters()
-                .iter()
-                .filter_map(|parameter| {
-                    Some((parameter.name().to_owned(), parameter.resolved_value()?))
-                })
-                .collect::<ConstEnv>();
             // The signature is a module with a port of the interface, whose
             // members are its ports `<port>$<member>`.
-            let members = module
-                .ports()
-                .iter()
-                .filter_map(|port| {
-                    let (_, name) = port.name().split_once('$')?;
-                    Some((name, port.r#type(), port.is_net()))
+            let parameterized = !prototype.parameters.is_empty();
+            // A parameterized interface's members are typed for each
+            // specialization (25.9) with the constants of its parameters.
+            let template = parameterized.then(|| {
+                Arc::new(DeclarationTemplate {
+                    overridable: prototype.parameters.clone(),
+                    source: Arc::new(source),
                 })
-                .filter_map(|(name, r#type, is_net)| {
-                    // A member of an enumeration type keeps it (IEEE
-                    // 1800-2023 6.19.3).
-                    let enumeration = enumerations
-                        .iter()
-                        .find(|(member, _)| member == name)
-                        .map(|(_, r#type)| r#type.clone());
-                    Some(VirtualInterfaceMember {
-                        name: name.to_string(),
-                        r#type: match enumeration {
-                            Some(r#type) => MemberType::Value(r#type),
-                            None => resolved_type(r#type, &constants)?,
-                        },
-                        is_net,
-                    })
-                })
-                .collect();
+            });
+            let members = members_of(module, &enumerations);
             let modport_imports = prototype
                 .modports
                 .iter()
@@ -236,10 +394,13 @@ impl VirtualInterfaces {
                 VirtualInterfaceDeclaration {
                     members,
                     modports,
-                    parameterized: !prototype.parameters.is_empty(),
+                    parameterized,
                     subroutines: HashMap::default(),
                     dpi_imports: HashSet::default(),
                     modport_imports,
+                    interface: prototype.name.clone(),
+                    arguments: Arc::new([]),
+                    template,
                 },
             );
         }
@@ -513,12 +674,18 @@ pub(super) fn declarations(state: &Session) -> Option<&VirtualInterfaces> {
     state.virtual_interfaces.as_deref()
 }
 
-/// The type `virtual name[.modport]`, checked against the interface.
+/// The type `virtual name[#(arguments)][.modport]`, checked against the
+/// interface; `context` evaluates the parameter values, which a type of a
+/// parameterized interface holds with the defaults of those it does not
+/// assign (IEEE 1800-2023 25.9).
 pub(super) fn bind_type(
+    tree: &AnalysisContext<'_>,
+    native: &celox_sv_syntax::Declarations,
     state: &mut Session,
     name: &celox_sv_syntax::Name,
     arguments: Option<&[celox_sv_syntax::Argument]>,
     modport: Option<&celox_sv_syntax::Name>,
+    context: &PackedDimensions,
 ) -> Converted<Type> {
     let interface = instances::normalize_identifier(&name.spelling);
     let modport = modport.map(|modport| instances::normalize_identifier(&modport.spelling));
@@ -527,7 +694,7 @@ pub(super) fn bind_type(
     let Some(declarations) = declarations(state) else {
         return Ok(value_type(
             &mut state.types,
-            VirtualInterface { interface, modport },
+            VirtualInterface::new(interface, modport, Arc::new([])),
         ));
     };
     // The declarations hold every interface that a virtual interface type
@@ -539,11 +706,6 @@ pub(super) fn bind_type(
             context: "no interface of this name is declared".into(),
         }
     })?;
-    if arguments.is_some() || declaration.parameterized {
-        return Err(unsupported(format!(
-            "virtual interface type of parameterized interface `{interface}`"
-        )));
-    }
     if let Some(modport) = &modport
         && !declaration.modports.contains_key(modport)
     {
@@ -551,10 +713,138 @@ pub(super) fn bind_type(
             "modport `{modport}` of interface `{interface}`"
         )));
     }
+    let values = match &declaration.template {
+        Some(template) => {
+            let template = template.clone();
+            let overrides = argument_values(
+                tree, native, state, &template, &interface, arguments, context,
+            )?;
+            let overrides = overrides
+                .into_iter()
+                .map(|(name, value)| (name, parameters::const_expr_from_i128(value)))
+                .collect();
+            specialization(state, &interface, &template, &overrides)?
+        }
+        None if declaration.parameterized => {
+            return Err(unsupported(format!(
+                "virtual interface type of parameterized interface `{interface}`"
+            )));
+        }
+        None if arguments.is_some_and(|arguments| !arguments.is_empty()) => {
+            return Err(unsupported(format!(
+                "parameter value assignment in a virtual interface type of interface `{interface}`, which has no parameters"
+            )));
+        }
+        None => Arc::new([]),
+    };
     Ok(value_type(
         &mut state.types,
-        VirtualInterface { interface, modport },
+        VirtualInterface::new(interface, modport, values),
     ))
+}
+
+/// The values that parameter value assignment `arguments` of a virtual
+/// interface type of `interface` gives its parameters, by name.
+fn argument_values(
+    tree: &AnalysisContext<'_>,
+    native: &celox_sv_syntax::Declarations,
+    state: &mut Session,
+    template: &DeclarationTemplate,
+    interface: &str,
+    arguments: Option<&[celox_sv_syntax::Argument]>,
+    context: &PackedDimensions,
+) -> Converted<HashMap<String, i128>> {
+    let mut values = HashMap::default();
+    let Some(arguments) = arguments else {
+        return Ok(values);
+    };
+    let overridable = template
+        .overridable
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let ordered = arguments.iter().all(|argument| argument.name.is_none());
+    if !ordered && arguments.iter().any(|argument| argument.name.is_none()) {
+        return Err(unsupported("mixed named and ordered parameter assignment"));
+    }
+    for (position, argument) in arguments.iter().enumerate() {
+        let parameter = match &argument.name {
+            Some(name) => instances::normalize_identifier(&name.spelling),
+            None => overridable
+                .get(position)
+                .map(|name| (*name).to_owned())
+                .ok_or_else(|| AnalyzerError::UndeclaredIdentifier {
+                    name: format!("#{}", position + 1),
+                    context: format!("interface `{interface}` has fewer parameters"),
+                })?,
+        };
+        if !overridable.contains(&parameter.as_str()) {
+            return Err(AnalyzerError::UndeclaredIdentifier {
+                name: parameter,
+                context: format!("no parameter of interface `{interface}` has this name"),
+            });
+        }
+        // `.name()` keeps the default (23.10.2.2).
+        let Some(id) = argument.value else {
+            continue;
+        };
+        let value = constant_binding::bind_in(id, native, tree, state, context)?
+            .and_then(|expr| {
+                eval_ast_const_expr(&tree.functions, &expr, &context.const_env).or_else(|| {
+                    // A constant of another package, which a type declared
+                    // in a package names (`c::aw`), is one of the scope's
+                    // imported constants, under those of the context.
+                    let env = ConstEnv::clone(&context.const_env)
+                        .union(tree.imported.const_env.clone());
+                    eval_ast_const_expr(&tree.functions, &expr, &env)
+                })
+            })
+            .ok_or_else(|| {
+                unsupported(format!(
+                    "value of parameter `{parameter}` of a virtual interface type of `{interface}` that is not an integral constant"
+                ))
+            })?;
+        if values.insert(parameter.clone(), value).is_some() {
+            return Err(unsupported(format!(
+                "duplicate parameter override `{parameter}`"
+            )));
+        }
+    }
+    Ok(values)
+}
+
+/// The parameter values of the specialization of `interface` whose
+/// parameter value assignment gives `overrides`, as the analysis of its
+/// signature evaluates them, with its declaration added to the design's if
+/// it lacks it, so that the scopes analyzed from now on declare its
+/// placeholders and the frontend numbers its instances (25.9).
+pub(super) fn specialization(
+    state: &mut Session,
+    interface: &str,
+    template: &DeclarationTemplate,
+    overrides: &HashMap<String, ConstExpr>,
+) -> Converted<Arc<[i128]>> {
+    let mut assignment = overrides.iter().collect::<Vec<_>>();
+    assignment.sort_by(|left, right| left.0.cmp(right.0));
+    let request = format!("{interface}#{assignment:?}");
+    if let Some(values) =
+        declarations(state).and_then(|declarations| declarations.requests.get(&request))
+    {
+        return Ok(values.clone());
+    }
+    let (values, members) = template.specialize(interface, overrides)?;
+    let key = specialization_key(interface, &values);
+    if let Some(declarations) = state.virtual_interfaces.as_mut() {
+        let declarations = Arc::make_mut(declarations);
+        if !declarations.interfaces.contains_key(&key)
+            && let Some(base) = declarations.interfaces.get(interface)
+        {
+            let specialized = base.specialization(&values, members);
+            declarations.interfaces.insert(key, specialized);
+        }
+        declarations.requests.insert(request, values.clone());
+    }
+    Ok(values)
 }
 
 /// The member `member` that a virtual interface of type `ty` reaches, with
@@ -567,8 +857,8 @@ pub(super) fn member<'a>(
     member: &str,
 ) -> Converted<(&'a VirtualInterfaceMember, Vec<(Expr, String)>)> {
     let declaration = declarations(state)
-        .and_then(|declarations| declarations.interfaces.get(&ty.interface))
-        .ok_or_else(|| unsupported(format!("virtual interface type of `{}`", ty.interface)))?;
+        .and_then(|declarations| declarations.interfaces.get(&ty.key()))
+        .ok_or_else(|| unsupported(format!("virtual interface type of `{}`", ty.spelling())))?;
     let found = declaration.member(member).ok_or_else(|| {
         unsupported(format!(
             "member `{member}` of virtual interface `{}`",
@@ -586,11 +876,11 @@ pub(super) fn member<'a>(
         )));
     }
     let instance = VirtualInterfaceSignal::Instance {
-        definition: DefinitionId::of(&ty.interface),
+        definition: DefinitionId::of(&ty.key()),
     }
     .name();
     let signal = VirtualInterfaceSignal::Placeholder {
-        definition: DefinitionId::of(&ty.interface),
+        definition: DefinitionId::of(&ty.key()),
         member: member.to_owned(),
     }
     .name();
@@ -609,7 +899,7 @@ pub(super) fn check_write(
         return Ok(());
     };
     let input = declarations(state)
-        .and_then(|declarations| declarations.interfaces.get(&ty.interface))
+        .and_then(|declarations| declarations.interfaces.get(&ty.key()))
         .and_then(|declaration| declaration.modports.get(modport))
         .is_some_and(|members| {
             members
@@ -662,10 +952,11 @@ pub(super) fn member_signals(
             name: instance,
             r#type: value_type(
                 table,
-                VirtualInterface {
-                    interface: interface.clone(),
-                    modport: None,
-                },
+                VirtualInterface::new(
+                    declaration.interface.clone(),
+                    None,
+                    declaration.arguments.clone(),
+                ),
             ),
             is_net: false,
             unresolved_net: false,
@@ -697,6 +988,50 @@ pub(super) fn member_signals(
         }));
     }
     signals
+}
+
+/// The placeholder signals of the specializations of parameterized
+/// interfaces registered so far that a scope with signals `signals` lacks,
+/// if it reaches the instances through virtual interfaces at all: the
+/// packages declare those of the specializations they name, and each
+/// analysis those that it or an earlier one names (25.9).
+pub(super) fn specialization_signals<'a>(
+    state: &mut Session,
+    signals: impl Iterator<Item = &'a Signal>,
+) -> Vec<Signal> {
+    let Some(declarations) = state.virtual_interfaces.clone() else {
+        return Vec::new();
+    };
+    if declarations
+        .interfaces
+        .values()
+        .all(|declaration| declaration.arguments.is_empty())
+    {
+        return Vec::new();
+    }
+    let mut reaches = false;
+    let known = signals
+        .map(|signal| {
+            reaches |= is_placeholder_signal(&signal.name);
+            signal.name.as_str()
+        })
+        .collect::<HashSet<_>>();
+    if !reaches {
+        return Vec::new();
+    }
+    let specialized = VirtualInterfaces {
+        interfaces: declarations
+            .interfaces
+            .iter()
+            .filter(|(_, declaration)| !declaration.arguments.is_empty())
+            .map(|(key, declaration)| (key.clone(), declaration.clone()))
+            .collect(),
+        requests: HashMap::default(),
+    };
+    member_signals(&specialized, &mut state.types)
+        .into_iter()
+        .filter(|signal| !known.contains(signal.name.as_str()))
+        .collect()
 }
 
 /// The signal a select through member `member` of a virtual interface of
@@ -747,7 +1082,7 @@ pub(super) fn selected_read(
         .ok_or_else(|| unsupported(format!("width of a select of `{member}`")))?;
     let signed = dimensions::expression_signedness(&selected, dimensions, &dimensions.const_env)
         .unwrap_or(false);
-    let from = template(&ty.interface, member);
+    let from = template(&ty.key(), member);
     let mut value = null_access(&handle, width, signed);
     for (id, signal) in signals.into_iter().rev() {
         value = Expr::Mux {
@@ -811,7 +1146,7 @@ pub(super) fn method(
         return Ok(None);
     };
     let Some(declaration) =
-        declarations(session).and_then(|declarations| declarations.interfaces.get(&ty.interface))
+        declarations(session).and_then(|declarations| declarations.interfaces.get(&ty.key()))
     else {
         return Ok(None);
     };
@@ -836,7 +1171,7 @@ pub(super) fn method(
         )));
     }
     let formals = formals.iter().cloned().map(Some).collect();
-    Ok(Some((subroutine_name(&ty.interface, name), formals)))
+    Ok(Some((subroutine_name(&ty.key(), name), formals)))
 }
 
 /// The virtual interface type of native expression `id`: a variable, a
@@ -866,10 +1201,21 @@ pub(super) fn of_type(
     else {
         return None;
     };
-    Some(Arc::new(VirtualInterface {
-        interface: types.decl(*interface).name.to_string(),
-        modport: modport.as_deref().map(str::to_owned),
-    }))
+    let decl = types.decl(*interface);
+    let arguments = decl
+        .arguments
+        .iter()
+        .flat_map(|arguments| arguments.iter())
+        .map(|argument| match argument {
+            semantic_types::ClassArgument::Value(Some(value)) => Some(*value),
+            _ => None,
+        })
+        .collect::<Option<Arc<[i128]>>>()?;
+    Some(Arc::new(VirtualInterface::new(
+        decl.name.to_string(),
+        modport.as_deref().map(str::to_owned),
+        arguments,
+    )))
 }
 
 /// Whether declared shape `shape` is a virtual interface or a fixed-size
@@ -1206,6 +1552,7 @@ pub(super) fn identity_signal(
     state: &mut Session,
     handle: &str,
     interface: &str,
+    arguments: &Arc<[i128]>,
 ) -> Option<Signal> {
     declarations(state)?.interfaces.get(interface)?;
     Some(Signal {
@@ -1215,10 +1562,7 @@ pub(super) fn identity_signal(
         .name(),
         r#type: value_type(
             &mut state.types,
-            VirtualInterface {
-                interface: interface.to_owned(),
-                modport: None,
-            },
+            VirtualInterface::new(interface.to_owned(), None, arguments.clone()),
         ),
         is_net: false,
         unresolved_net: false,
@@ -1238,6 +1582,7 @@ pub(super) fn port_identity_signal(
     state: &mut Session,
     handle: &str,
     interface: &str,
+    arguments: &Arc<[i128]>,
 ) -> Option<Signal> {
     if declarations(state)?
         .interfaces
@@ -1247,7 +1592,26 @@ pub(super) fn port_identity_signal(
     {
         return None;
     }
-    identity_signal(state, handle, interface)
+    identity_signal(state, handle, interface, arguments)
+}
+
+/// The values of the parameters of an instance or port of interface
+/// `interface` whose parameter value assignment gives `values`, by which a
+/// virtual interface of the specialization they select may denote it
+/// (25.9), with the specialization registered; empty for an interface
+/// without parameters or that no virtual interface type names.
+pub(super) fn instance_arguments(
+    state: &mut Session,
+    interface: &str,
+    values: &HashMap<String, ConstExpr>,
+) -> Converted<Arc<[i128]>> {
+    let Some(template) = declarations(state)
+        .and_then(|declarations| declarations.interfaces.get(interface))
+        .and_then(|declaration| declaration.template.clone())
+    else {
+        return Ok(Arc::new([]));
+    };
+    specialization(state, interface, &template, values)
 }
 
 /// The interface instance or port `name` of the scope as a virtual
@@ -1292,6 +1656,15 @@ pub(super) fn handles(
         .interface_types
         .iter()
         .filter_map(|(handle, interface)| {
+            // An instance of a specialization is one of the instances that
+            // virtual interfaces of that specialization select among.
+            let interface = &specialization_key(
+                interface,
+                symbols
+                    .interface_arguments
+                    .get(handle)
+                    .map_or(&[][..], |arguments| arguments),
+            );
             let declaration = declarations.interfaces.get(interface)?;
             let members = declaration
                 .members
@@ -1425,10 +1798,15 @@ fn native_value_type(
         if let Some(interface) = imported.interface_types.get(handle) {
             // A port declared with a modport is a view of the instance
             // restricted to it (IEEE 1800-2023 25.5).
-            return Ok(Some(VirtualInterface {
-                interface: interface.clone(),
-                modport: imported.interface_modports.get(handle).cloned(),
-            }));
+            return Ok(Some(VirtualInterface::new(
+                interface.clone(),
+                imported.interface_modports.get(handle).cloned(),
+                imported
+                    .interface_arguments
+                    .get(handle)
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new([])),
+            )));
         }
     }
     Err(match handle {
@@ -1596,7 +1974,7 @@ fn equality_operand(
     }
     match native_value_type(tree, session, id, native, dimensions)? {
         None => Ok(()),
-        Some(source) if source.interface == interface => Ok(()),
+        Some(source) if source.key() == interface => Ok(()),
         Some(source) => Err(format!("a `{}`", source.spelling())),
     }
 }
@@ -1619,7 +1997,7 @@ pub(super) fn check_equality(
         let Some(ty) = native_type(tree, session, one, native, dimensions) else {
             continue;
         };
-        let Err(actual) = equality_operand(tree, session, other, native, dimensions, &ty.interface)
+        let Err(actual) = equality_operand(tree, session, other, native, dimensions, &ty.key())
         else {
             return Ok(());
         };
@@ -2001,10 +2379,7 @@ mod holds_virtual_interface_tests {
         let mut table = semantic_types::TyTable::default();
         let mut ty = value_type(
             &mut table,
-            VirtualInterface {
-                interface: "I".into(),
-                modport: None,
-            },
+            VirtualInterface::new("I".into(), None, Arc::new([])),
         );
         ty.unpacked_ranges_mut().push(symbolic_range());
         let shape = procedural::dimensions_from_type(&ty);
@@ -2035,10 +2410,7 @@ mod holds_virtual_interface_tests {
         let mut table = semantic_types::TyTable::default();
         let functions = const_functions::ConstantFunctions::default();
         let env = ConstEnv::default();
-        let interface = VirtualInterface {
-            interface: "bus_if".into(),
-            modport: Some("mp".into()),
-        };
+        let interface = VirtualInterface::new("bus_if".into(), Some("mp".into()), Arc::new([]));
         let element = interface.type_id(&mut table);
         let mut ty = value_type(&mut table, interface);
         let literal = |value: &str| ConstExpr::Literal(value.into());
@@ -2070,10 +2442,7 @@ mod holds_virtual_interface_tests {
         let mut vif = |interface: &str, modport: Option<&str>| {
             value_type(
                 &mut table,
-                VirtualInterface {
-                    interface: interface.into(),
-                    modport: modport.map(Into::into),
-                },
+                VirtualInterface::new(interface.into(), modport.map(Into::into), Arc::new([])),
             )
         };
         let (bus, again, mp, other) = (

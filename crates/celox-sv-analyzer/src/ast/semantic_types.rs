@@ -270,6 +270,9 @@ pub(super) struct TyTable {
     class_ids: HashMap<Arc<str>, DeclId>,
     /// The interfaces by name.
     interface_ids: HashMap<Arc<str>, DeclId>,
+    /// The specializations of parameterized interfaces by name and the
+    /// values of their parameters (25.9).
+    interface_specializations: HashMap<(Arc<str>, Arc<[i128]>), DeclId>,
     /// How many times a reader resolved a type that was not bound where it
     /// was declared, which tests check producers against.
     #[cfg(test)]
@@ -539,6 +542,33 @@ impl TyTable {
             &mut self.interface_ids,
             name,
         ))
+    }
+
+    /// The declaration of the specialization of parameterized interface
+    /// `name` whose value parameters, in the order the interface declares
+    /// them, have `values`: a virtual interface type of it is another type
+    /// than one of another specialization (IEEE 1800-2023 25.9).
+    pub fn interface_specialization(&mut self, name: &str, values: &Arc<[i128]>) -> Decl {
+        let key = (Arc::<str>::from(name), values.clone());
+        if let Some(&id) = self.interface_specializations.get(&key) {
+            return Decl::Interface(id);
+        }
+        let id = DeclId(self.decls.len() as u32);
+        self.decls.push(DeclData {
+            name: key.0.clone(),
+            scope: None,
+            domain: None,
+            typename: None,
+            aggregate: None,
+            arguments: Some(
+                values
+                    .iter()
+                    .map(|value| ClassArgument::Value(Some(*value)))
+                    .collect(),
+            ),
+        });
+        self.interface_specializations.insert(key, id);
+        Decl::Interface(id)
     }
 
     fn named_decl(

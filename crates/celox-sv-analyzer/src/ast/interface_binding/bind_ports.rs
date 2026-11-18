@@ -100,10 +100,17 @@ impl ModuleBinding<'_> {
                     .interface_arrays
                     .insert(port.name.clone(), array.clone());
             }
+            let arguments =
+                virtual_interfaces::instance_arguments(session, &port.interface, &values)?;
             for (ordinal, handle) in array.elements.iter().enumerate() {
                 self.imported
                     .interface_types
                     .insert(handle.clone(), port.interface.clone());
+                if !arguments.is_empty() {
+                    self.imported
+                        .interface_arguments
+                        .insert(handle.clone(), arguments.clone());
+                }
                 if let Some(modport) = &port.modport {
                     self.imported
                         .interface_modports
@@ -115,6 +122,7 @@ impl ModuleBinding<'_> {
                         session,
                         handle,
                         &port.interface,
+                        &arguments,
                     ));
                 let symbol_prefix = if dimensions.is_empty() {
                     port.name.clone()

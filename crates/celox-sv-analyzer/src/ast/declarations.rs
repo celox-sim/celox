@@ -632,7 +632,7 @@ pub(super) fn signals_from_body_item(
     Ok(())
 }
 
-fn substitute_signal_local_constants(signals: &mut [Signal], const_env: &ConstEnv) {
+pub(super) fn substitute_signal_local_constants(signals: &mut [Signal], const_env: &ConstEnv) {
     for signal in signals {
         // The constants are those of the scope the type was bound in, so
         // their values leave its semantic type as it is.

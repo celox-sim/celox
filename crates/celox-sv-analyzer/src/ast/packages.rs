@@ -98,9 +98,23 @@ pub struct Design {
     /// Source-call identities shared with modules importing these package bodies.
     pub(super) call_sites: usize,
     pub(super) types: semantic_types::TyTable,
+    /// The declarations of the interfaces virtual interface types name,
+    /// with the specializations of parameterized ones the analyses have
+    /// named so far (25.9).
+    pub(super) virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
+    /// The subroutines that call the tasks and functions of those
+    /// specializations through virtual interfaces.
+    pub(super) virtual_interface_calls: virtual_interface_calls::Specializations,
 }
 
 impl Design {
+    /// The declarations of the interfaces virtual interface types name, and
+    /// of the specializations the analyses of the design named, whose
+    /// instances the frontend numbers.
+    pub fn virtual_interfaces(&self) -> Option<&Arc<virtual_interfaces::VirtualInterfaces>> {
+        self.virtual_interfaces.as_ref()
+    }
+
     /// Take back the types that an analysis of the design moved into its
     /// [`Source`](super::Source) and published the IR with.
     pub(crate) fn restore_publication(&mut self, publication: super::Publication) {
@@ -556,11 +570,12 @@ impl Packages {
         };
         let mut packages =
             Self::analyze_packages(trees, timescales, needed.map(|(needed, _)| needed), session)?;
-        if let Some(declarations) = &options.virtual_interfaces {
+        // With the specializations the packages name (25.9).
+        if let Some(declarations) = session.virtual_interfaces.clone() {
             packages.virtual_interface_signals =
-                virtual_interfaces::member_signals(declarations, &mut session.types).into();
+                virtual_interfaces::member_signals(&declarations, &mut session.types).into();
         }
-        packages.virtual_interfaces = options.virtual_interfaces;
+        packages.virtual_interfaces = session.virtual_interfaces.clone();
         if trees
             .iter()
             .any(|(tree, _)| assertion_control::called(tree.declarations()))
@@ -630,6 +645,8 @@ impl Packages {
             call_sites: session.next_call_site,
             foreign: std::mem::take(&mut session.foreign),
             types: std::mem::take(&mut session.types),
+            virtual_interfaces: session.virtual_interfaces.clone(),
+            virtual_interface_calls: session.virtual_interface_calls.clone(),
         };
         Ok(packages)
     }

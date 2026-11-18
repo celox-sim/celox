@@ -128,7 +128,8 @@ constructs without a dedicated issue point to the frontend roadmap,
   through a virtual interface held by an automatic variable or an argument,
   or by a class property of an object one holds (a property of `this` or of
   an object a static variable holds is watched); virtual interfaces of
-  parameterized interfaces;
+  interfaces with type parameters, or with parameter values that are not
+  integral constants;
   clocking blocks and nested interface instances reached through a virtual
   interface; writes to nets through a virtual interface; `$bits` of a call
   of an interface function through a virtual interface in a package or
@@ -170,7 +171,9 @@ blocks in programs. Two region deviations are listed under
   of signed typedefs, classes with non-integral value parameters, and
   operands other than names and data types, such as `$typename(a + b)`.
   A virtual interface type, which 20.6.1 has no rule for, is written as
-  it is declared: `virtual bus_if` or `virtual bus_if.mp`.
+  it is declared: `virtual bus_if` or `virtual bus_if.mp`, and one of a
+  parameterized interface with the values of its parameters in
+  declaration order, `virtual bus_if#(8, 4)`.
 - Parameters of unpacked array type hold their value from the start of the
   simulation. An element of a one-dimensional array parameter is an
   elaboration-time constant when the elements are packed integral values
