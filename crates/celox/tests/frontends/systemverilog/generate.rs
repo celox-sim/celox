@@ -1109,3 +1109,55 @@ fn set_membership_tests_of_calls_and_arrays_beside_fills_are_not_folded() {
         }
     }
 }
+
+/// A generate condition may select an element of a member of a packed
+/// structure parameter wider than 128 bits, such as OpenTitan pinmux's
+/// `TargetCfg.dio_scan_role[k] == ScanClock`: the parameter is known by its
+/// literal, which the select reads (IEEE 1800-2023 11.2.1, 27.5). Verilator
+/// 5.054 prints the same line.
+#[test]
+fn generate_conditions_select_members_of_wide_structure_parameters() {
+    let source = r#"`timescale 1ns/1ns
+package cfg_pkg;
+  typedef struct packed { logic [127:0] pad; logic [3:0][1:0] role; } cfg_t;
+endpackage
+module Child #(parameter cfg_pkg::cfg_t Cfg = '0) (output logic [3:0] o);
+  for (genvar k = 0; k < 4; k++) begin : g
+    if (Cfg.role[k] == 2'h3) begin : s
+      assign o[k] = 1'b1;
+    end else begin : n
+      assign o[k] = 1'b0;
+    end
+  end
+endmodule
+module Top;
+  localparam cfg_pkg::cfg_t A = '{pad: 128'h1234_0000_0000_0000_0000_0000_0000_5678,
+                                  role: {2'h3, 2'h0, 2'h3, 2'h1}};
+  localparam cfg_pkg::cfg_t B = '{pad: '1, role: {2'h0, 2'h3, 2'h2, 2'h3}};
+  logic [3:0] a, b;
+  Child #(.Cfg(A)) u_a(.o(a));
+  Child #(.Cfg(B)) u_b(.o(b));
+  initial #1 $display("%b %b", a, b);
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("wide_generate_condition.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["1010 0101"], "four_state={four_state}");
+    }
+}
