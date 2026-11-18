@@ -37,6 +37,20 @@ impl ScopeElaboration<'_> {
                 .into_iter()
                 .map(Arc::new)
                 .collect(),
+            // A scope that binds an instance of the interface lowers its
+            // code, which handles objects of the classes the interface sees
+            // (IEEE 1800-2023 25.3): a package's importers see those
+            // themselves.
+            object_classes: if self.is_package {
+                Vec::new()
+            } else {
+                self.imported
+                    .classes
+                    .iter()
+                    .chain(&self.imported.object_classes)
+                    .cloned()
+                    .collect()
+            },
             class_member_types: classes::specializations::export_member_types(syntax_tree, session),
             inline_randomizations,
             // A scope exports no other instance's subroutines.
