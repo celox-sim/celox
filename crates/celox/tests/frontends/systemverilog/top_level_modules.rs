@@ -479,3 +479,128 @@ module b; logic [7:0] y = 8'd7; endmodule";
     let y = sim.signal("b.y");
     assert_eq!(sim.get(y), 7u8.into());
 }
+
+/// The packages of the classes the interface instance of the next tests
+/// handles, and the interface, whose file imports them where `hdl_top`'s
+/// file does not (IEEE 1800-2023 26.3).
+const CLASS_PACKAGES: &str = r#"
+package base_pkg;
+  virtual class obj;
+    string m_name;
+    function new(string name); m_name = name; endfunction
+    virtual function string get_name(); return m_name; endfunction
+    virtual function string get_type_name(); return "obj"; endfunction
+  endclass
+  class seq #(type T = int) extends obj;
+    function new(string name); super.new(name); endfunction
+  endclass
+  class sequencer;
+    obj seqs[$];
+    function void report();
+      $display("name '%s' type '%s'", seqs[0].get_name(), seqs[0].get_type_name());
+    endfunction
+  endclass
+endpackage
+package agent_pkg;
+  import base_pkg::*;
+  class item; endclass
+  class my_seq extends seq #(item);
+    function new(string name = "my_seq"); super.new(name); endfunction
+    virtual function string get_type_name(); return "my_seq"; endfunction
+  endclass
+  class driver; sequencer s; function void end_transfer(); s.report(); endfunction endclass
+endpackage
+"#;
+const CLASS_BFM: &str = r#"
+import agent_pkg::*;
+interface bfm(input logic clk);
+  driver proxy;
+  bit start;
+  always @(posedge clk) if (start) begin start = 0; proxy.end_transfer(); end
+endinterface
+package config_pkg; virtual bfm h; endpackage
+package env_pkg;
+  import base_pkg::*;
+  import agent_pkg::*;
+  function automatic void make();
+    my_seq q;
+    driver d;
+    sequencer s;
+    q = new("q1"); d = new; s = new;
+    s.seqs.push_back(q);
+    d.s = s;
+    config_pkg::h.proxy = d;
+  endfunction
+endpackage
+"#;
+
+/// The processes of an interface instance run in the scope that binds it:
+/// a virtual method they call on an object of a class that only the
+/// interface's imports name dispatches to that class's override, also
+/// when the binding scope uses the package of the base class (8.20).
+#[test]
+fn interface_instances_dispatch_to_the_classes_they_see() {
+    let tops = r#"
+module hdl_top;
+  logic clk = 0;
+  base_pkg::obj keep;
+  bfm b(clk);
+  initial forever #10 clk = ~clk;
+  initial config_pkg::h = b;
+endmodule
+module hvl_top;
+  initial begin
+    #1 env_pkg::make();
+    config_pkg::h.start = 1;
+    #50 $finish;
+  end
+endmodule
+"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![
+                (CLASS_PACKAGES, Path::new("packages.sv")),
+                (CLASS_BFM, Path::new("bfm.sv")),
+                (tops, Path::new("tops.sv")),
+            ],
+            "hdl_top",
+        )
+        .tops(["hdl_top", "hvl_top"])
+        .four_state(four_state)
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+        sim.run_until(100_000).unwrap();
+        assert_eq!(
+            displays(&mut sim),
+            ["name 'q1' type 'my_seq'"],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// The classes an interface instance sees are not names of the scope that
+/// binds it (26.3).
+#[test]
+fn classes_an_interface_instance_sees_stay_hidden_from_its_binding_scope() {
+    let tops = r#"
+module hdl_top;
+  logic clk = 0;
+  my_seq hidden;
+  bfm b(clk);
+endmodule
+"#;
+    let built = celox::Simulation::from_sv_sources(
+        vec![
+            (CLASS_PACKAGES, Path::new("packages.sv")),
+            (CLASS_BFM, Path::new("bfm.sv")),
+            (tops, Path::new("tops.sv")),
+        ],
+        "hdl_top",
+    )
+    .build();
+    let error = match built {
+        Ok(_) => panic!("`my_seq` is not a name of `hdl_top`"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("my_seq"), "{error}");
+}
