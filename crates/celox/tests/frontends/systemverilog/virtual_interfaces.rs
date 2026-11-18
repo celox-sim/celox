@@ -639,16 +639,17 @@ fn waits_follow_design_storage_handles() {
     assert_eq!(sim.get(by_variable), num_bigint::BigUint::from(3u8));
 }
 
-/// An event control on a named event through a virtual interface would wait
-/// for its trigger (IEEE 1800-2023 15.5.1), which is not implemented: it is
-/// rejected rather than left waiting for a change of the member's value.
+/// A named event through a virtual interface is waited for as any named
+/// event is (IEEE 1800-2023 15.5.2), so an event control that mixes it with
+/// a value member, which is not supported for named events either, is
+/// rejected with that error.
 #[test]
-fn waits_on_named_events_through_virtual_interfaces_are_unsupported() {
-    let source = "interface bfm(input logic clk); event go; endinterface
+fn waits_mixing_named_events_through_virtual_interfaces_with_values_are_unsupported() {
+    let source = "interface bfm(input logic clk); event go; logic d; endinterface
         package p;
             class h;
                 virtual bfm v;
-                task w(); @(v.go); endtask
+                task w(); @(v.go or v.d); endtask
             endclass
         endpackage
         module top;
@@ -660,12 +661,12 @@ fn waits_on_named_events_through_virtual_interfaces_are_unsupported() {
     let Err(error) = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
         .build_interpreter()
     else {
-        panic!("a wait on a named event through a virtual interface is unsupported");
+        panic!("a wait mixing a named event with a value is unsupported");
     };
     assert!(
         error
             .to_string()
-            .contains("event control on a named event through a virtual interface"),
+            .contains("event control mixing named events with other events"),
         "{error}"
     );
 }

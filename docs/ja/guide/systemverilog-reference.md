@@ -120,8 +120,9 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
   オブジェクトのクラスプロパティに保持した virtual interface 越しの `wait` 文（`this`
   または静的変数が保持するオブジェクトのプロパティは監視します）。型パラメータを持つ interface、または整数定数でないパラメータ値を持つ interface の virtual interface。
   virtual interface 越しに到達する interface の clocking ブロック・入れ子インスタンス。
-  virtual interface 越しに到達する名前付きイベントのイベント制御（`@(v.e)`。トリガ
-  `->v.e` と `v.e.triggered` は対応しています）。
+  virtual interface 越しに到達する名前付きイベントと他の種類のイベントを混ぜたイベント制御
+  （`@(v.e or v.d)`。`@(v.e)` と `@(v.e or other_event)` は、待ち始めにハンドルが指す
+  イベントのトリガを待ちます）。
   virtual interface 越しのネットへの書き込み。package・クラス内での、virtual
   interface 越しの interface 関数呼び出しへの `$bits`（その解析は interface の
   サブルーチンより先に行われます。モジュール内では関数の幅になります。[#4056](https://github.com/celox-sim/celox/issues/4056)）。
