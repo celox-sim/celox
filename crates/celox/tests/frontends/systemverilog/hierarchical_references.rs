@@ -50,16 +50,42 @@ fn root_names_start_at_the_top_instance() {
     assert_eq!(displayed(source), ["2 2"]);
 }
 
+// A continuous assignment may drive a variable of another instance through a
+// hierarchical name when nothing else writes it (IEEE 1800-2023 6.5, 23.6).
+#[test]
+fn continuous_assignments_drive_variables_of_other_instances() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Child; logic [7:0] v; logic [7:0] w; assign w = v + 8'd1; endmodule
+        module Top;
+            logic [7:0] a = 8'h41;
+            Child c();
+            assign c.v = a;
+            initial begin
+                #1 $display("%h", c.w);
+                a = 8'h7f;
+                #1 $display("%h", c.w);
+            end
+        endmodule
+    "#;
+    // Verilator 5.054 prints the same.
+    assert_eq!(displayed(source), ["42", "80"]);
+    // The variable's own module may not drive it as well.
+    for driver in ["assign v = 8'd5;", "always_comb v = 8'd5;"] {
+        let error = build_error(&format!(
+            "module Child; logic [7:0] v; {driver} endmodule \
+             module Top(input logic [7:0] a); Child c(); assign c.v = a; endmodule"
+        ));
+        assert!(
+            error.contains("multiple variable drivers for `v`, which another module writes"),
+            "{driver}: {error}"
+        );
+    }
+}
+
 #[test]
 fn rejects_unsupported_hierarchical_drivers_by_name() {
     let child = "module Child; logic [7:0] v; wire [7:0] n = 8'd3; endmodule";
-    let error = build_error(&format!(
-        "{child} module Top(input logic [7:0] a); Child c(); assign c.v = a; endmodule"
-    ));
-    assert!(
-        error.contains("continuous assignment to a variable through hierarchical name `c.v`"),
-        "{error}"
-    );
     let error = build_error(&format!(
         "{child} module Top; Child c(); initial c.n = 8'd1; endmodule"
     ));
