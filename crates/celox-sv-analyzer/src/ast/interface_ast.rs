@@ -198,15 +198,45 @@ pub(super) fn signature(
     members: &[String],
     names: &HashSet<String>,
 ) -> Converted<(crate::ir::Module, Vec<(String, Type)>, SignatureSource)> {
-    let mut session = Session::with_packages(packages, design);
-    let signature = signature_in(&mut session, tree, path, packages, name, members, names);
-    session.restore(design);
-    signature.map(|(module, enumerations, mut source)| {
-        source.types = design.types.clone();
-        (module, enumerations, source)
-    })
+    let mut attempt = |declarations_only: bool| {
+        let mut session = Session::with_packages(packages, design);
+        let signature = signature_in(
+            &mut session,
+            tree,
+            path,
+            packages,
+            name.clone(),
+            members,
+            names,
+            declarations_only,
+        );
+        session.restore(design);
+        signature.map(|(module, enumerations, mut source)| {
+            source.types = design.types.clone();
+            (module, enumerations, source)
+        })
+    };
+    // A hierarchical name in a body is resolved where the body runs: from
+    // the parent of each instance (IEEE 1800-2023 23.8), or, for a task or
+    // function called through a virtual interface, from that of each
+    // instance once the hierarchy is elaborated. The signature declares no
+    // body, so it takes the declarations alone.
+    match attempt(false) {
+        Err(error) if hierarchical_reference(&error) => attempt(true),
+        signature => signature,
+    }
 }
 
+/// Whether `error` is a hierarchical name that the scope does not resolve.
+pub(super) fn hierarchical_reference(error: &AnalyzerError) -> bool {
+    match error {
+        AnalyzerError::HierarchicalReference { .. } => true,
+        AnalyzerError::WithWarnings { error, .. } => hierarchical_reference(error),
+        _ => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn signature_in(
     session: &mut Session,
     tree: &SyntaxTree,
@@ -215,9 +245,11 @@ fn signature_in(
     name: String,
     members: &[String],
     names: &HashSet<String>,
+    declarations_only: bool,
 ) -> Converted<(crate::ir::Module, Vec<(String, Type)>, SignatureSource)> {
     let source = SignatureSource::new(tree, path, packages, name, members, names)?;
-    let (module, enumerations) = signature_from(session, &source, &HashMap::default(), false)?;
+    let (module, enumerations) =
+        signature_from(session, &source, &HashMap::default(), declarations_only)?;
     Ok((module, enumerations, source))
 }
 

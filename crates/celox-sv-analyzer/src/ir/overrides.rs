@@ -657,6 +657,7 @@ impl Module {
                     .into_keys()
                     .map(|member| (member.clone(), member))
                     .collect(),
+                blocks: Vec::new(),
             });
         }
         self.exported_overrides = exports;

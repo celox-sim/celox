@@ -143,6 +143,9 @@ pub struct InterfaceHandle {
     pub port: bool,
     /// The signal or port of the module that holds each member.
     pub members: Vec<(String, String)>,
+    /// The generate blocks that hold the instance, outermost first, each as
+    /// a hierarchical name spells it (see [`crate::InterfaceBodyScope::blocks`]).
+    pub blocks: Vec<String>,
 }
 
 impl Module {

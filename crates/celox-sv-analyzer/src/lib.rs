@@ -143,6 +143,16 @@ pub enum AnalyzerError {
         /// instance's parent then resolves (23.8).
         interface: Option<Box<InterfaceBodyScope>>,
     },
+    /// A call through a virtual interface of a task or function of
+    /// interface `interface` whose body names objects it does not declare
+    /// (IEEE 1800-2023 23.8): each instance finds them from its parent, so
+    /// the subroutine is built once the hierarchy is elaborated and the
+    /// caller supplies them (see [`Design::resolve_virtual_interface_outward`]).
+    /// The scope that makes the call is analyzed again then.
+    #[error(
+        "call of a task or function of interface `{interface}` through a virtual interface before the hierarchy is elaborated"
+    )]
+    VirtualInterfaceOutward { interface: String },
     /// A delay, event control or wait statement in a function, an
     /// `always_comb` or an `always_ff` body (IEEE 1800-2023 9.2.2.2,
     /// 9.2.2.4, 13.4).

@@ -419,7 +419,7 @@ fn schedule_sources_collecting(
             }
             // Elaborate the hierarchy below the module before resolving its
             // hierarchical names.
-            Err(error) if unresolved_name(&error).is_some() => {
+            Err(error) if super::specialize::waits_for_hierarchy(&error) => {
                 hierarchical_modules.push(module_id);
                 specialize_module_declarations(base, &mut design, &key)?
             }
@@ -457,6 +457,62 @@ fn schedule_sources_collecting(
     // The signals that hierarchical names write gain writers outside their
     // own modules. Collect them from the analyzed modules, independently of
     // the order the modules are lowered in.
+    // The tasks and functions called through virtual interfaces whose
+    // hierarchical names each instance finds from its parent (IEEE 1800-2023
+    // 23.8) are built now, with the object of every instance, before the
+    // analyses that call them.
+    let mut outward = HashMap::default();
+    for (key, names) in design.virtual_interface_outward() {
+        let mut objects: Vec<(Vec<String>, sv::ast::Type, bool)> = Vec::new();
+        let mut holders: Vec<_> = elaborated.keys().copied().collect();
+        holders.sort_by_key(|module| module.0);
+        for module_id in holders {
+            for handle in elaborated[&module_id]
+                .interface_handles
+                .iter()
+                .filter(|handle| handle.interface == key && !handle.port)
+            {
+                let scope = sv::InterfaceBodyScope {
+                    handle: handle.handle.clone(),
+                    blocks: handle.blocks.clone(),
+                    interface: key.clone(),
+                };
+                let mut members = Vec::new();
+                for components in &names {
+                    let object =
+                        hierarchy::outward_object(&hierarchy, module_id, &scope, components)?
+                            .ok_or_else(|| {
+                                sv::AnalyzerError::Unsupported(format!(
+                                    "hierarchical name `{}` of a task or function of interface instance `{}` called through a virtual interface, which names no object",
+                                    components.join("."),
+                                    handle.handle
+                                ))
+                            })?;
+                    match objects.iter().find(|(known, ..)| known == components) {
+                        Some((_, r#type, is_net))
+                            if *r#type != object.r#type || *is_net != object.is_net =>
+                        {
+                            return Err(sv::AnalyzerError::Unsupported(format!(
+                                "hierarchical name `{}` of a task or function of interface `{key}` called through a virtual interface, which denotes objects of different types in different instances",
+                                components.join(".")
+                            ))
+                            .into());
+                        }
+                        Some(_) => {}
+                        None => {
+                            objects.push((components.clone(), object.r#type.clone(), object.is_net))
+                        }
+                    }
+                    members.push((
+                        sv::ast::virtual_interfaces::outward_member(components),
+                        object,
+                    ));
+                }
+                outward.insert((module_id, handle.handle.clone()), members);
+            }
+        }
+        design.resolve_virtual_interface_outward(&analyzed[&top].packages, &key, &objects)?;
+    }
     let mut references = HashMap::default();
     let mut analyses = HashMap::default();
     let mut foreign_references: HashMap<ModuleId, HashSet<String>> = HashMap::default();
@@ -731,6 +787,7 @@ fn schedule_sources_collecting(
     let definitions = virtual_interfaces::Definitions {
         interfaces: virtual_interfaces.as_deref(),
         modules,
+        outward,
     };
     let virtual_instances = (definitions.interfaces.is_some() || !definitions.modules.is_empty())
         .then(|| {

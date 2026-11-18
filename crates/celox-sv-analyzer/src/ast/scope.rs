@@ -76,6 +76,9 @@ pub(super) struct ScopeSymbols {
     /// The parameter values of each interface instance or port handle of a
     /// parameterized interface that virtual interface types name (25.9).
     pub interface_arguments: HashMap<String, Arc<[i128]>>,
+    /// The generate blocks that hold each interface instance of a generate
+    /// scope, outermost first (see [`crate::InterfaceBodyScope::blocks`]).
+    pub interface_blocks: HashMap<String, Arc<[String]>>,
     pub interface_arrays: HashMap<String, interface_binding::ArrayBinding>,
     pub interface_scopes: HashMap<String, interface_binding::ScopeBinding>,
     pub interface_declarations: HashSet<celox_sv_syntax::BodyItemId>,
@@ -275,6 +278,8 @@ impl ScopeSymbols {
         });
         extend_missing(&mut self.interface_members, &other.interface_members);
         extend_missing(&mut self.interface_types, &other.interface_types);
+        extend_missing(&mut self.interface_arguments, &other.interface_arguments);
+        extend_missing(&mut self.interface_blocks, &other.interface_blocks);
         extend_missing(&mut self.interface_arrays, &other.interface_arrays);
         extend_missing(&mut self.interface_scopes, &other.interface_scopes);
         self.interface_declarations
@@ -510,6 +515,7 @@ impl ScopeSymbols {
             interface_types: self.interface_types.clone(),
             interface_modports: self.interface_modports.clone(),
             interface_arguments: self.interface_arguments.clone(),
+            interface_blocks: self.interface_blocks.clone(),
             interface_arrays: self.interface_arrays.clone(),
             interface_scopes: self.interface_scopes.clone(),
             interface_declarations: self.interface_declarations.clone(),

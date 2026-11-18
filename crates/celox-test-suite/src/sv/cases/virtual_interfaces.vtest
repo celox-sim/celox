@@ -1329,3 +1329,109 @@ endmodule
 "#)
   (top Top) (run_until 1)
   (assert_eq address 0x9AB))
+
+(case calls_find_hierarchical_names_from_each_instance
+  ; A task called through a virtual interface waits on and writes the
+  ; objects its hierarchical names denote from the parent of the instance
+  ; the handle denotes (IEEE 1800-2023 23.8, 25.9): each `Mid` its own
+  ; `CONTROL`.
+  (source "virtual_interface_upward.sv" #"
+interface Ctl; logic clk; logic [7:0] data; endinterface
+interface Drv;
+    logic [7:0] last;
+    task put(input logic [7:0] v);
+        @(posedge CONTROL.clk);
+        CONTROL.data = v;
+        last = v;
+    endtask
+endinterface
+package cfg;
+    virtual Drv vs[2];
+endpackage
+module Mid #(parameter int I = 0) (output logic [7:0] data, last);
+    Ctl CONTROL();
+    Drv d();
+    assign data = CONTROL.data;
+    assign last = d.last;
+    initial begin
+        cfg::vs[I] = d;
+        CONTROL.clk = 0;
+        repeat (6) begin #1 CONTROL.clk = 1; #1 CONTROL.clk = 0; end
+    end
+endmodule
+module Top(output wire [7:0] d0, d1, l0, l1);
+    Mid #(0) m0(d0, l0);
+    Mid #(1) m1(d1, l1);
+    initial begin
+        #0;
+        fork
+            cfg::vs[0].put(8'h5a);
+            cfg::vs[1].put(8'ha5);
+        join
+    end
+endmodule
+"#)
+  (top Top) (run_until 12)
+  (assert_eq d0 0x5a) (assert_eq d1 0xa5) (assert_eq l0 0x5a) (assert_eq l1 0xa5))
+
+(case calls_find_names_of_ancestors_and_generate_blocks
+  ; A name of an ancestor's object resolves upward from the instance's
+  ; parent, and one of a generate block's object from the block that holds
+  ; the instance first (IEEE 1800-2023 23.8), also in a function.
+  (source "virtual_interface_upward_scopes.sv" #"
+interface Ctl; logic [7:0] data; endinterface
+interface Drv;
+    logic [7:0] last;
+    function automatic logic [7:0] peek();
+        return Top.k + CONTROL.data;
+    endfunction
+    task put(logic [7:0] v);
+        CONTROL.data = v;
+        last = v;
+    endtask
+endinterface
+module Top(output logic [7:0] p0, p1, b0, b1, outer);
+    logic [7:0] k = 8'h03;
+    Ctl CONTROL();
+    for (genvar i = 0; i < 2; i++) begin : g
+        Ctl CONTROL();
+        Drv d();
+    end
+    virtual Drv v0, v1;
+    assign b0 = g[0].CONTROL.data;
+    assign b1 = g[1].CONTROL.data;
+    assign outer = CONTROL.data;
+    initial begin
+        CONTROL.data = 8'h77;
+        v0 = g[0].d;
+        v1 = g[1].d;
+        v0.put(8'h10);
+        v1.put(8'h20);
+        p0 = v0.peek();
+        p1 = v1.peek();
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq b0 0x10) (assert_eq b1 0x20) (assert_eq outer 0x77)
+  (assert_eq p0 0x13) (assert_eq p1 0x23))
+
+(case calls_of_interfaces_without_instances
+  ; An interface with hierarchical names in its tasks that no instance
+  ; resolves is called through a null virtual interface only (25.9).
+  (source "virtual_interface_upward_none.sv" #"
+interface Drv;
+    task put(logic [7:0] v);
+        CONTROL.data = v;
+    endtask
+endinterface
+module Top(output bit done);
+    virtual Drv v;
+    initial begin
+        if (v != null) v.put(8'h11);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq done 1))

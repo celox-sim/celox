@@ -213,6 +213,13 @@ impl ModuleBinding<'_> {
                         .interface_arguments
                         .insert(handle.clone(), arguments.clone());
                 }
+                if let Some(item) = &generated_item
+                    && !item.blocks().is_empty()
+                {
+                    self.imported
+                        .interface_blocks
+                        .insert(handle.clone(), item.blocks().into());
+                }
                 self.imported
                     .state_signals
                     .extend(virtual_interfaces::identity_signal(
