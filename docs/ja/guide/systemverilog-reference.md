@@ -357,7 +357,8 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
   string 変数、ファイル I/O の string 引数、VPI・VCD 出力・TypeScript API での
   string 値。
   固定長文字列配列へのノンブロッキング文字書き込み。文字列配列全体や
-  部分配列へのメソッド呼び出し。配列値の string 引数・戻り値。
+  部分配列へのメソッド呼び出し。配列値の string 引数・戻り値。文字列に対する
+  `case inside` 文の値範囲項目（`["a":"z"]`）。
 - 参照引数 <a id="reference-arguments"></a>（13.5.2）: `ref static`。動的配列・キュー・
   連想配列の要素の実引数化。クラスプロパティの要素。クラスプロパティやその
   メンバに束縛した仮引数の一部への書き込み。実行時にしか位置が定まらない、

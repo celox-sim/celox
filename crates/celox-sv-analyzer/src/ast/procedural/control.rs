@@ -17,6 +17,8 @@ struct CaseState {
     selector: Expr,
     /// Whether the statement compares chandles (6.14).
     chandles: bool,
+    /// Whether it compares strings (see [`BodyState::case_header`]).
+    strings: bool,
     items: Vec<CaseItemBase<Expr, LValue>>,
     default: Option<Vec<Stmt>>,
 }
@@ -554,8 +556,19 @@ impl BodyBuilder<'_, '_, '_> {
                                 _ => None,
                             })
                             .collect::<Vec<_>>();
-                        let (effects, kind, selector, chandles) =
-                            self.case_header(keyword, mode.as_deref(), *value, &labels)?;
+                        let bounds = arms
+                            .iter()
+                            .flat_map(|arm| &arm.matches)
+                            .filter_map(|case_match| match case_match {
+                                celox_sv_syntax::CaseMatch::Range { left, right } => {
+                                    Some([*left, *right])
+                                }
+                                _ => None,
+                            })
+                            .flatten()
+                            .collect::<Vec<_>>();
+                        let (effects, kind, selector, chandles, strings) =
+                            self.case_header(keyword, mode.as_deref(), *value, &labels, &bounds)?;
                         output.extend(effects);
                         jobs.push(Job::CaseNext(CaseState {
                             id,
@@ -563,6 +576,7 @@ impl BodyBuilder<'_, '_, '_> {
                             kind,
                             selector,
                             chandles,
+                            strings,
                             items: Vec::new(),
                             default: None,
                         }));
@@ -1264,6 +1278,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 &arm.matches,
                                 state.kind == CaseKind::Inside,
                                 state.chandles,
+                                state.strings,
                             )?)
                         };
                         jobs.push(Job::CaseBranch {
@@ -1395,7 +1410,8 @@ impl BodyBuilder<'_, '_, '_> {
         mode: Option<&str>,
         value: celox_sv_syntax::ExprId,
         labels: &[celox_sv_syntax::ExprId],
-    ) -> Converted<(Vec<Stmt>, CaseKind, Expr, bool)> {
+        bounds: &[celox_sv_syntax::ExprId],
+    ) -> Converted<(Vec<Stmt>, CaseKind, Expr, bool, bool)> {
         let native = self.syntax().declarations();
         // A case statement compares with `===` (IEEE 1800-2023 12.5).
         let operator = match (mode, keyword) {
@@ -1441,7 +1457,28 @@ impl BodyBuilder<'_, '_, '_> {
         } else {
             self.native_value(value)?
         };
-        Ok((effects, kind, selector, chandles))
+        // When the selector or an item, a value or a bound of a range, is a
+        // string, each compares as a string, an integral one with its bytes
+        // (IEEE 1800-2023 12.5, 11.4.5), as `==` compares them: equal
+        // strings have equal handles.
+        let selector_string = !chandles && self.string_typed(value);
+        let mut strings = selector_string;
+        for &item in labels.iter().chain(bounds) {
+            strings = strings || !chandles && self.string_typed(item);
+        }
+        let selector = if strings && !selector_string {
+            expression_binding::string_call(StringOp::FromBits, vec![selector])
+        } else {
+            selector
+        };
+        Ok((effects, kind, selector, chandles, strings))
+    }
+
+    /// Whether native expression `id` has type `string`.
+    fn string_typed(&mut self, id: celox_sv_syntax::ExprId) -> bool {
+        let native = self.syntax().declarations();
+        expression_types::type_of(&self.tree, self.session, id, native, &self.dims)
+            .is_ok_and(|ty| matches!(self.session.types.data(ty), semantic_types::TyData::String))
     }
 
     pub(super) fn native_case_labels(
@@ -1449,6 +1486,7 @@ impl BodyBuilder<'_, '_, '_> {
         labels: &[celox_sv_syntax::CaseMatch],
         inside: bool,
         chandles: bool,
+        strings: bool,
     ) -> Result<Vec<CaseLabel<Expr>>, AnalyzerError> {
         if labels.is_empty() {
             return Err(AnalyzerError::Parse("native case arm has no labels".into()));
@@ -1460,8 +1498,18 @@ impl BodyBuilder<'_, '_, '_> {
                     self.native_chandle_value(*id).map(CaseLabel::Value)
                 }
                 celox_sv_syntax::CaseMatch::Expression(id) => {
-                    self.native_value(*id).map(CaseLabel::Value)
+                    let value = self.native_value(*id)?;
+                    Ok(CaseLabel::Value(if strings && !self.string_typed(*id) {
+                        expression_binding::string_call(StringOp::FromBits, vec![value])
+                    } else {
+                        value
+                    }))
                 }
+                // The bounds would compare as handles, not in the order of
+                // the strings (11.4.13).
+                celox_sv_syntax::CaseMatch::Range { .. } if strings => Err(unsupported(
+                    "a value range item of a case inside statement on strings",
+                )),
                 celox_sv_syntax::CaseMatch::Range { left, right } if inside => {
                     Ok(CaseLabel::Range {
                         low: self.native_value(*left)?,
@@ -2530,6 +2578,28 @@ mod tests {
             assert!(builder.names.lookup(name).is_none());
             assert!(builder.dims.get(name).is_none());
             assert!(!builder.names.local_constants.contains_key(name));
+        }
+    }
+
+    // A range item of a `case inside` on a string compares in the order of
+    // the strings (IEEE 1800-2023 11.4.13), which its bounds as handles
+    // would not give.
+    #[test]
+    fn string_case_inside_ranges_are_rejected() {
+        for (selector, item) in [("s", "[\"a\":\"z\"]"), ("8'h6d", "[t:\"z\"]")] {
+            let result = crate::analyze_source(
+                &format!(
+                    "module Top; initial begin string s = \"m\", t = \"a\"; \
+                     case ({selector}) inside {item}: $display(1); endcase end endmodule"
+                ),
+                std::path::Path::new("string_case_inside.sv"),
+            );
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.to_string().contains("value range item")),
+                "{selector}: {result:?}"
+            );
         }
     }
 }
