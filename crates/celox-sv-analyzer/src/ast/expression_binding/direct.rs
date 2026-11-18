@@ -1368,10 +1368,26 @@ fn selected_container_element(
     {
         return Ok(zero_based_vector(&r#type, tree, dimensions).then_some((selected, r#type)));
     }
-    // The selects and members of the variable, innermost first.
+    // The selects and members of the variable or class property, innermost
+    // first, and the container the property holds: a queue, dynamic or
+    // associative array, or the storage of a fixed-size array.
     let mut chain = Vec::new();
     let mut base = ungroup(root, native);
+    let mut property = None;
     loop {
+        let declared = matches!(&native.expression(base).kind, ExprKind::Name(name)
+            if dimensions.get(&instances::normalize_identifier(&name.spelling)).is_some());
+        if !chain.is_empty()
+            && !declared
+            && matches!(
+                native.expression(base).kind,
+                ExprKind::Name(_) | ExprKind::Member { .. }
+            )
+            && let Some((found, _)) = objects::property(tree, session, base, native, dimensions)?
+        {
+            property = Some(found.storage.or_else(|| found.r#type.container.clone()));
+            break;
+        }
         match &native.expression(base).kind {
             ExprKind::Select { expression, .. } => {
                 chain.push((base, false));
@@ -1389,16 +1405,23 @@ fn selected_container_element(
         }
     }
     chain.reverse();
-    let ExprKind::Name(name) = &native.expression(base).kind else {
-        return Ok(None);
+    let (mut container, mut levels) = match &property {
+        Some(Some(container)) => (container.as_ref(), 1),
+        Some(None) => return Ok(None),
+        None => {
+            let ExprKind::Name(name) = &native.expression(base).kind else {
+                return Ok(None);
+            };
+            let Some(shape) = dimensions.get(&instances::normalize_identifier(&name.spelling))
+            else {
+                return Ok(None);
+            };
+            let Some(container) = shape.container.as_deref() else {
+                return Ok(None);
+            };
+            (container, shape.unpacked.len() + 1)
+        }
     };
-    let Some(shape) = dimensions.get(&instances::normalize_identifier(&name.spelling)) else {
-        return Ok(None);
-    };
-    let Some(mut container) = shape.container.as_deref() else {
-        return Ok(None);
-    };
-    let mut levels = shape.unpacked.len() + 1;
     while let Some(inner) = container.element.container.as_deref() {
         container = inner;
         levels += 1;
