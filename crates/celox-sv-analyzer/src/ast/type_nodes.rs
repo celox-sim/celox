@@ -50,7 +50,9 @@ impl Type {
             let (name, typename) = name();
             let mut enumeration = self.enumeration.binding();
             enumeration.name(&name, scope.as_ref(), &typename);
-            self.spelling.name(name.into(), typename, scope);
+            self.reshape_keeping_declarations(|shape| {
+                shape.spelling.name(name.into(), typename, scope);
+            });
             self.keep_enumeration(enumeration);
         }
     }

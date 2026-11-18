@@ -1,10 +1,38 @@
-//! The enumerated type (IEEE 1800-2023 6.19) a [`Type`] or a
-//! [`VariableDimensions`] keeps. Only [`Type::keep_enumeration`],
-//! [`Type::reshape_keeping_enumeration`] and
-//! [`VariableDimensions::keep_enumeration`] set it, together with the
-//! spelling that names it.
+//! The enumerated type (IEEE 1800-2023 6.19) and the unpacked structure
+//! type (7.2) a [`Type`] or a [`VariableDimensions`] keeps. Only
+//! [`Type::keep_enumeration`], [`Type::reshape_keeping_enumeration`] and
+//! [`VariableDimensions::keep_enumeration`] set the enumerated type,
+//! together with the spelling that names it, and only
+//! [`Type::keep_structure`] and [`VariableDimensions::keep_structure`] the
+//! structure, together with the field that tells it.
 use super::*;
 use semantic_types::{EnumBinding, EnumDeclaration};
+use unpacked_structs::UnpackedStruct;
+
+/// The declaration of the unpacked structure type (7.2) a holder is, or
+/// whose elements a fixed-size unpacked array of it has (7.4.2). It is no
+/// `Clone`: a holder clones it with itself, and another holder takes it
+/// only through its own `keep_structure`.
+#[derive(Debug, Default)]
+pub(in crate::ast) struct KeptStructure(Option<Arc<UnpackedStruct>>);
+
+impl KeptStructure {
+    /// The declaration of the kept structure type.
+    pub(in crate::ast) fn declaration(&self) -> Option<&Arc<UnpackedStruct>> {
+        self.0.as_ref()
+    }
+
+    /// The kept structure type, for another holder to keep.
+    pub(in crate::ast) fn binding(&self) -> Option<Arc<UnpackedStruct>> {
+        self.0.clone()
+    }
+
+    /// Forget the structure type, as the shape of its holder changes in a
+    /// way that may change its type. The field stays: it tells the shape.
+    pub(in crate::ast) fn forget(&mut self) {
+        self.0 = None;
+    }
+}
 
 /// The enumerated type a holder keeps. It is no `Clone`: a holder clones
 /// it with itself, and another holder takes it only through its own
@@ -37,6 +65,7 @@ impl Clone for Type {
             binding: self.binding.clone(),
             element: self.element.clone(),
             enumeration: KeptEnumeration(self.enumeration.0.clone()),
+            structure: KeptStructure(self.structure.0.clone()),
         }
     }
 }
@@ -48,6 +77,7 @@ impl Clone for VariableDimensions {
             binding: self.binding.clone(),
             element: self.element.clone(),
             enumeration: KeptEnumeration(self.enumeration.0.clone()),
+            structure: KeptStructure(self.structure.0.clone()),
         }
     }
 }
@@ -132,5 +162,75 @@ impl VariableDimensions {
             self.shape.declared = type_names::Declared::new(&declared);
         }
         self.enumeration = KeptEnumeration(enumeration);
+    }
+}
+
+impl Type {
+    /// Change the shape of the type in a way that keeps the enumerated and
+    /// unpacked structure types it keeps, such as its spelling or the
+    /// storage members of a structure: the type forgets its binding and
+    /// that of its elements.
+    pub(in crate::ast) fn reshape_keeping_declarations(
+        &mut self,
+        change: impl FnOnce(&mut TypeShape),
+    ) {
+        self.binding.forget();
+        self.element.forget();
+        let shape = Arc::make_mut(&mut self.shape);
+        change(shape);
+        debug_assert_eq!(
+            self.structure
+                .declaration()
+                .map(|aggregate| aggregate.identity()),
+            self.structure
+                .declaration()
+                .and(self.shape.unpacked_struct.as_ref())
+                .map(|aggregate| aggregate.identity()),
+            "a change that keeps the structure of a type changed its field"
+        );
+    }
+
+    /// Keep the unpacked structure type `aggregate` declares (7.2), or none,
+    /// with the field that tells it: the type is it or a fixed-size unpacked
+    /// array of it (7.4.2). The field only comes to agree with the semantic
+    /// type, so the type keeps its binding.
+    pub(in crate::ast) fn keep_structure(&mut self, aggregate: Option<Arc<UnpackedStruct>>) {
+        Arc::make_mut(&mut self.shape).unpacked_struct = aggregate.clone();
+        self.structure = KeptStructure(aggregate);
+    }
+}
+
+impl VariableDimensions {
+    /// The unpacked dimensions of the shape, for a change that keeps the
+    /// type of its elements, such as an element or a slice selected from it
+    /// (7.4.6): the shape forgets its binding, but not the type of its
+    /// elements or the enumerated and structure types they are.
+    pub(in crate::ast) fn unpacked_mut(&mut self) -> &mut Vec<UnpackedDimension> {
+        self.binding = None;
+        &mut self.shape.unpacked
+    }
+
+    /// A shape made of `shape`, a changed copy of this one, such as that of
+    /// an element or a subarray (7.4.6): it keeps the structure this shape
+    /// keeps while its field still tells it.
+    pub(in crate::ast) fn derived(&self, shape: VariableShape) -> VariableDimensions {
+        let mut derived = VariableDimensions::new(shape);
+        if let Some(aggregate) = self.structure.declaration()
+            && derived
+                .shape
+                .unpacked_struct
+                .as_ref()
+                .is_some_and(|field| field.identity() == aggregate.identity())
+        {
+            derived.keep_structure(Some(aggregate.clone()));
+        }
+        derived
+    }
+
+    /// Keep the unpacked structure type `aggregate` declares (7.2), or none,
+    /// with the field that tells it, as [`Type::keep_structure`] does.
+    pub(in crate::ast) fn keep_structure(&mut self, aggregate: Option<Arc<UnpackedStruct>>) {
+        self.shape.unpacked_struct = aggregate.clone();
+        self.structure = KeptStructure(aggregate);
     }
 }

@@ -3169,6 +3169,33 @@ fn parameters_of_wide_enumerations_keep_their_type() {
 }
 
 #[test]
+fn subarrays_of_unpacked_structures_keep_their_structure_type() {
+    // Each unpacked structure declaration is a type of its own (IEEE
+    // 1800-2023 6.22.1), which an element, a subarray or a slice selected
+    // from an array of it has (7.4.6): an array of another structure of
+    // the same members is not equivalent to it (6.22.2, 7.6).
+    let declarations = "typedef struct { int a; } s_t; typedef struct { int a; } t_t; \
+        s_t m[2][2]; t_t n[2][2]; s_t r[2]; t_t q[2];";
+    for items in [
+        "initial r = n[0];",
+        "initial m[1] = q;",
+        "initial r = n[1][0:1];",
+        "initial r = '{n[0][0], n[0][1]};",
+    ] {
+        let source = format!("module Top; {declarations} {items} endmodule");
+        analyze_source(&source, Path::new("struct_subarrays.sv")).expect_err(items);
+    }
+    for items in [
+        "initial r = m[0];",
+        "initial m[1] = r;",
+        "initial r = m[1][0:1];",
+    ] {
+        let source = format!("module Top; {declarations} {items} endmodule");
+        analyze_source(&source, Path::new("struct_subarrays.sv")).expect(items);
+    }
+}
+
+#[test]
 fn accepts_unpacked_arrays_of_the_same_named_element_in_every_assignment() {
     // Operands that name the same element type stay equivalent when they are
     // passed, returned, defaulted or selected (IEEE 1800-2023 6.22.2, 7.6).
