@@ -256,10 +256,14 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 Some(ProcessStatus::Exit) => {
                     self.exit_program(executor.backend_mut(), process)?;
+                    // `$exit` kills the program's processes (IEEE 1800-2023
+                    // 24.7): as for kill() and a disable (9.7, 16.4.4), the
+                    // reports still pending in their queues are flushed. One
+                    // that already finished keeps the reports it left.
                     let program = self.model.processes[process].program;
                     for (index, candidate) in self.model.processes.iter().enumerate() {
                         if candidate.program == program {
-                            executor.finish_deferred_assertion_process(index);
+                            executor.cancel_deferred_assertion_process(index);
                         }
                     }
                     self.program_kernel_ended(executor.backend())?;
