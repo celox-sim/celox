@@ -287,6 +287,17 @@ impl Parser<'_> {
         true
     }
 
+    /// Whether `left` is a `.`-member, or a call of one: the shape of an
+    /// array method that a `with` clause may follow (7.12).
+    fn member_method(&self, left: ExprId) -> bool {
+        let callee = match &self.expressions[left.0].kind {
+            ExprKind::Call { expression, .. } => *expression,
+            _ => left,
+        };
+        matches!(&self.expressions[callee.0].kind,
+            ExprKind::Member { separator, .. } if separator == ".")
+    }
+
     pub(super) fn expression(&mut self, minimum: u8) -> Result<ExprId> {
         Ok(self
             .expression_machine(Job::Expression(minimum))?
@@ -883,6 +894,16 @@ impl Parser<'_> {
                             },
                         )?;
                     }
+                    // A `with` after a leaf of a select expression filters
+                    // the selection (19.6.1.2), unless the leaf is a call of
+                    // an array method.
+                    "with"
+                        if self.nth(1) == "("
+                            && self.coverage_operand == CoverageOperand::Select
+                            && !self.member_method(left) =>
+                    {
+                        values.push(Value::Expression(left));
+                    }
                     "with" if self.nth(1) == "(" => {
                         let method = match &self.expressions[left.0].kind {
                             ExprKind::Call {
@@ -921,6 +942,13 @@ impl Parser<'_> {
                             left,
                         });
                         jobs.push(Job::Expression(0));
+                    }
+                    // A repetition after a transition item is not a select
+                    // (19.5.2).
+                    "[" if self.coverage_operand == CoverageOperand::Transition
+                        && matches!(self.nth(1), "*" | "->" | "=") =>
+                    {
+                        values.push(Value::Expression(left));
                     }
                     "[" => {
                         jobs.push(Job::Select {
@@ -1333,6 +1361,9 @@ impl Parser<'_> {
                 }
                 Job::DimensionLeft { start } => {
                     let left = values.pop().unwrap().expression();
+                    if matches!(self.peek(), "+/-" | "+%-") {
+                        return Err(self.unsupported("tolerance range (IEEE 1800-2023 11.4.13)"));
+                    }
                     if matches!(self.peek(), ":" | "+:" | "-:") {
                         let operator = self.peek().to_owned();
                         self.at += 1;
@@ -1772,7 +1803,7 @@ impl Parser<'_> {
         debug_assert_eq!(values.len(), 1);
         Ok(values.pop().unwrap())
     }
-    fn unbounded(&self, id: ExprId) -> bool {
+    pub(super) fn unbounded(&self, id: ExprId) -> bool {
         matches!(&self.expressions[id.0].kind,ExprKind::Name(name) if name.spelling=="$")
     }
 }

@@ -258,9 +258,11 @@ impl Parser<'_> {
                         .for_each(|modport| insert(declared, &modport.name));
                 }
                 // Unconverted declarations (genvars, events, classes, ...)
-                // declare names this pass does not know; any identifier in
-                // them counts as declared.
-                BodyItemKind::Unconverted { .. } => opaque.push(self.body_items[item.0].tokens),
+                // and covergroups declare names this pass does not know;
+                // any identifier in them counts as declared.
+                BodyItemKind::Unconverted { .. } | BodyItemKind::Covergroup(_) => {
+                    opaque.push(self.body_items[item.0].tokens)
+                }
                 // A `defparam` names a parameter of another scope: it
                 // declares nothing and its target is no net (6.10).
                 BodyItemKind::Defparam(_)

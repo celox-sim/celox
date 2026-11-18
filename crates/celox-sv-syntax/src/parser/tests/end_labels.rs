@@ -42,6 +42,14 @@ fn rejects_end_labels_that_differ_from_the_block_name() {
             "module top; task t; endtask : u endmodule",
             "end label `u` differs from the name `t` of its subroutine",
         ),
+        (
+            "module top; covergroup cg; endgroup : other endmodule",
+            "end label `other` differs from the name `cg` of its block",
+        ),
+        (
+            "covergroup cg; endgroup : other module top; endmodule",
+            "end label `other` differs from the name `cg` of its block",
+        ),
     ] {
         let error = parse_error(code);
         assert!(error.contains(message), "{code}: {error}");
@@ -74,6 +82,8 @@ fn accepts_end_labels_that_repeat_the_block_name() {
         "module top; function void f(); endfunction : f task t; endtask : t endmodule : top",
         "package p; endpackage : p interface i; endinterface : i program q; endprogram : q",
         "class C; function new(); endfunction : new endclass : C module m; endmodule",
+        "covergroup cg; endgroup : cg module m; covergroup cg; endgroup : cg endmodule",
+        "class C; covergroup cg; endgroup : cg endclass module m; endmodule",
     ] {
         Declarations::parse(code, Path::new("end_labels.sv"))
             .unwrap_or_else(|error| panic!("{code}: {error}"));

@@ -3081,6 +3081,12 @@ impl InterfaceDecl {
                     )));
                 }
             },
+            native::BodyItemKind::Covergroup(_) => {
+                return Err(unsupported(format!(
+                    "task, class, or verification declaration in interface `{}`",
+                    self.name
+                )));
+            }
             _ => {
                 return Err(unsupported(format!(
                     "nested declaration in interface `{}`",
