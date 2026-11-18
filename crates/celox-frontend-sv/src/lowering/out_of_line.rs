@@ -496,6 +496,35 @@ impl OutOfLine {
         Some((reads, writes))
     }
 
+    /// Whether a call of function `index` hands data or control to the
+    /// host, in its own unit or in one it calls: a heap call or a runtime
+    /// event, say. The calls of the units carry no summary of their callees
+    /// until the program is assembled, so this follows them here. A function
+    /// that is still being lowered may do anything.
+    pub(super) fn interacts_with_host(&self, index: usize) -> bool {
+        let mut seen = HashSet::default();
+        let mut work = vec![index];
+        while let Some(index) = work.pop() {
+            if !seen.insert(index) {
+                continue;
+            }
+            let function = &self.functions[index];
+            let Some(unit) = &function.unit else {
+                return true;
+            };
+            if unit
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .any(|instruction| instruction.host_effects().interacts_with_host())
+            {
+                return true;
+            }
+            work.extend(function.callees.iter().copied());
+        }
+        false
+    }
+
     /// The function units, by the indices their calls name.
     pub(super) fn units(&self) -> Vec<FunctionUnit<Addr>> {
         self.functions
