@@ -293,7 +293,9 @@ fn finish_lvalue(
 ///
 /// A bit-select arrives as a position in the member, which is the member's
 /// width when the index is outside its range; such a select is moved above
-/// the whole structure, where a read gives X and a write is ignored.
+/// the whole structure, where a read gives X and a write is ignored. The
+/// member's bits are its [`crate::ir::SelectWindow`]: they are all a write
+/// of it may drive (IEEE 1800-2023 6.5).
 ///
 /// A select of the elements of a member of several packed dimensions
 /// arrives in positions of the member's bits too, those of an index outside
@@ -332,6 +334,10 @@ fn dynamic_member_select(
         window,
         is_2state: matches!(r#type.kind, TypeKind::Bit | TypeKind::Chandle),
     };
+    let window = crate::ir::SelectWindow {
+        lsb: u32::try_from(offset).ok()?,
+        msb: u32::try_from(offset.checked_add(width.checked_sub(1)?)?).ok()?,
+    };
     if msb == lsb {
         let structure = match run_time {
             RunTime::Element { beyond } => beyond,
@@ -346,15 +352,12 @@ fn dynamic_member_select(
             then_expr: Box::new(add_expr(literal(offset), lsb)),
             else_expr: Box::new(literal(structure)),
         };
-        return Some(select(position.clone(), position, None));
+        return Some(select(position.clone(), position, Some(window)));
     }
     if let RunTime::Element { .. } = run_time {
         return None;
     }
-    let window = Some(crate::ir::SelectWindow {
-        lsb: u32::try_from(offset).ok()?,
-        msb: u32::try_from(offset.checked_add(width.checked_sub(1)?)?).ok()?,
-    });
+    let window = Some(window);
     if r#type.packed_ranges.len() > 1 {
         return Some(select(
             add_expr(literal(offset), msb),
@@ -584,7 +587,8 @@ pub(in crate::ast) fn select_element_member(
 /// selects one of a variable, and placed at the member's offset. A
 /// selection outside the member, of an index outside the array, is placed
 /// past the whole variable, where it reads X and writes nothing, rather
-/// than reach the member next to it.
+/// than reach the member next to it. The member's bits are the select's
+/// window: they are all a write of it may drive (IEEE 1800-2023 6.5).
 pub(in crate::ast) fn select_member_element_member(
     tree: &AnalysisContext<'_>,
     path: Vec<String>,
@@ -648,6 +652,11 @@ pub(in crate::ast) fn select_member_element_member(
         then_expr: Box::new(add_expr(literal(offset), lsb)),
         else_expr: Box::new(literal(whole)),
     };
+    let window = offset
+        .checked_add(width)
+        .and_then(|end| end.checked_sub(1))
+        .and_then(|top| u32::try_from(offset).ok().zip(u32::try_from(top).ok()))
+        .ok_or_else(outside)?;
     Ok(LValue::Select {
         name: path[0].clone(),
         msb: add_expr(placed.clone(), span),
@@ -655,7 +664,10 @@ pub(in crate::ast) fn select_member_element_member(
         signed,
         array_slice_width: None,
         array_slice_reversed: false,
-        window: None,
+        window: Some(crate::ir::SelectWindow {
+            lsb: window.0,
+            msb: window.1,
+        }),
         is_2state,
     })
 }
