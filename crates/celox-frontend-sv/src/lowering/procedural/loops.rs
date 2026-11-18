@@ -185,15 +185,7 @@ pub(in crate::lowering) fn body_writes(
 ) -> bool {
     let mut written = HashSet::default();
     written_names(body, &mut written);
-    kernel_written_names(
-        calls,
-        body,
-        &mut written,
-        &mut HashSet::default(),
-        0,
-        &mut None,
-    );
-    written.contains(name)
+    written.contains(name) || kernel_writes_name(calls, body, name, &mut HashSet::default(), 0)
 }
 
 /// The variables of the `for` loops around a statement, innermost last

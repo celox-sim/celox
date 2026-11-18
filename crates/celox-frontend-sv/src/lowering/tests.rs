@@ -822,3 +822,66 @@ fn select_sources_adds_nested_offsets_and_keeps_computed_dependencies() {
         computed_sources
     );
 }
+
+/// The names the subroutines of a long chain of calls write are kept once
+/// for each subroutine, not once for each subroutine that reaches them, and
+/// a subroutine writes what its callees do.
+#[test]
+fn written_names_of_a_call_chain_grow_with_the_chain() {
+    const LENGTH: usize = 300;
+    let mut source = String::from("module top;\n");
+    for index in 0..LENGTH {
+        source.push_str(&format!("  int g{index};\n"));
+    }
+    for index in (0..LENGTH).rev() {
+        let call = if index + 1 < LENGTH {
+            format!(" f{}();", index + 1)
+        } else {
+            String::new()
+        };
+        source.push_str(&format!(
+            "  function automatic void f{index}(); g{index} = 1;{call} endfunction\n"
+        ));
+    }
+    source.push_str("  initial f0();\nendmodule\n");
+    let ir = sv::analyze_source(&source, Path::new("chain.sv")).unwrap();
+    let module = &ir.modules()[0];
+    let scan = DriverScan::of(module);
+    let names = WrittenNames::of(&scan, module.subroutines());
+    let find = |name: &str| {
+        module
+            .subroutines()
+            .iter()
+            .find(|subroutine| subroutine.name.ends_with(name))
+            .map(|subroutine| subroutine.name.clone())
+            .unwrap_or_else(|| panic!("subroutine {name}"))
+    };
+    let variable = |index: usize| {
+        let mut written = HashSet::default();
+        kernel_written_names(
+            &scan,
+            &module
+                .subroutines()
+                .iter()
+                .find(|subroutine| subroutine.name == find(&format!("f{index}")))
+                .unwrap()
+                .body,
+            &mut written,
+            &mut HashSet::default(),
+            0,
+            &mut None,
+        );
+        written
+            .into_iter()
+            .find(|name| name.ends_with(&format!("g{index}")))
+            .unwrap_or_else(|| panic!("the variable g{index}"))
+    };
+    let (first, last) = (variable(0), variable(LENGTH - 1));
+    assert_eq!(names.writes(&find("f0"), &last), Some(true));
+    assert_eq!(
+        names.writes(&find(&format!("f{}", LENGTH - 1)), &first),
+        Some(false)
+    );
+    // One written name and at most one call for each subroutine.
+    assert!(names.entries() <= 2 * LENGTH, "{} entries", names.entries());
+}

@@ -99,6 +99,72 @@ pub(super) fn kernel_written_names(
     if depth > procedural::MAX_CALL_DEPTH {
         return;
     }
+    body_written_names(
+        scan,
+        body,
+        names,
+        refs,
+        &mut |name, subroutine, names, refs| {
+            if visited.insert(name.to_string()) {
+                kernel_written_names(scan, &subroutine.body, names, visited, depth + 1, refs);
+            }
+        },
+    );
+}
+
+/// Whether [`kernel_written_names`] without `refs` finds that `body` writes
+/// `name`: a callee whose written names were gathered (see [`WrittenNames`])
+/// is asked, not walked again.
+pub(super) fn kernel_writes_name(
+    scan: &(impl CallDefinitions + ?Sized),
+    body: &[sv::ir::Stmt],
+    name: &str,
+    visited: &mut HashSet<String>,
+    depth: usize,
+) -> bool {
+    if depth > procedural::MAX_CALL_DEPTH {
+        return false;
+    }
+    let mut names = HashSet::default();
+    let mut found = false;
+    body_written_names(
+        scan,
+        body,
+        &mut names,
+        &mut None,
+        &mut |callee, subroutine, _, _| {
+            if found {
+                return;
+            }
+            if let Some(writes) = scan.subroutine_writes(callee, name) {
+                found = writes;
+            } else if visited.insert(callee.to_string()) {
+                found = kernel_writes_name(scan, &subroutine.body, name, visited, depth + 1);
+            }
+        },
+    );
+    found || names.contains(name)
+}
+
+/// What a scan of `body` does with a subroutine a call of it enters, after
+/// adding the call's written actuals: the callee's name and definition.
+type EnterCallee<'s, 'f> = dyn FnMut(
+        &str,
+        &'s sv::ir::Subroutine,
+        &mut HashSet<String>,
+        &mut Option<Vec<(String, Vec<String>)>>,
+    ) + 'f;
+
+/// Adds the names `body` itself writes to `names`: by its assignments, and
+/// as the written arguments of its calls. Each subroutine a call enters is
+/// passed to `enter`, in the order the calls are taken.
+fn body_written_names<'s>(
+    scan: &'s (impl CallDefinitions + ?Sized),
+    body: &[sv::ir::Stmt],
+    names: &mut HashSet<String>,
+    refs: &mut Option<Vec<(String, Vec<String>)>>,
+    enter: &mut EnterCallee<'s, '_>,
+) {
     let mut calls = Vec::new();
     for stmt in body {
         stmt.walk(&mut |stmt| {
@@ -169,27 +235,209 @@ pub(super) fn kernel_written_names(
                 }
             }
         }
-        if visited.insert(name) {
-            kernel_written_names(scan, &subroutine.body, names, visited, depth + 1, refs);
+        enter(&name, subroutine, names, refs);
+    }
+}
+
+/// The names the subroutines of a module write, gathered once for the module
+/// so that the scans of its loops do not walk the callees again: for each
+/// strongly connected component of its call graph, the names its
+/// subroutines' own bodies write, and the components their calls enter.
+/// Whether a subroutine writes a name, directly or in the subroutines it
+/// calls, as [`kernel_written_names`] without `refs` finds it, is a search
+/// of the components it reaches: what is kept grows with the module, not
+/// with the length of its call chains.
+#[derive(Default)]
+pub(super) struct WrittenNames {
+    /// The component of each subroutine.
+    component: HashMap<String, usize>,
+    /// The names each component's subroutines write themselves.
+    own: Vec<HashSet<String>>,
+    /// The other components each component's subroutines call into.
+    calls: Vec<Vec<usize>>,
+}
+
+impl WrittenNames {
+    /// The names the subroutines `scan` defines, `subroutines`, write.
+    pub(super) fn of<'s>(
+        scan: &'s (impl CallDefinitions + ?Sized),
+        subroutines: impl IntoIterator<Item = &'s sv::ir::Subroutine>,
+    ) -> Self {
+        // What each subroutine's own body writes, and the subroutines its
+        // calls enter.
+        let mut names: Vec<(&str, HashSet<String>)> = Vec::new();
+        let mut index: HashMap<&str, usize> = HashMap::default();
+        let mut callees: Vec<Vec<&'s str>> = Vec::new();
+        for subroutine in subroutines {
+            if index.contains_key(subroutine.name.as_str()) {
+                continue;
+            }
+            let mut own = HashSet::default();
+            let mut entered = Vec::new();
+            body_written_names(
+                scan,
+                &subroutine.body,
+                &mut own,
+                &mut None,
+                &mut |_, callee, _, _| entered.push(callee.name.as_str()),
+            );
+            index.insert(subroutine.name.as_str(), names.len());
+            names.push((subroutine.name.as_str(), own));
+            callees.push(entered);
+        }
+        let edges: Vec<Vec<usize>> = callees
+            .into_iter()
+            .map(|entered| {
+                entered
+                    .into_iter()
+                    .filter_map(|name| index.get(name).copied())
+                    .collect()
+            })
+            .collect();
+        let edge_slices: Vec<&[usize]> = edges.iter().map(Vec::as_slice).collect();
+        let components = strongly_connected_components(&edge_slices);
+        let mut of_node = vec![0; names.len()];
+        for (component, nodes) in components.iter().enumerate() {
+            for &node in nodes {
+                of_node[node] = component;
+            }
+        }
+        let mut own = Vec::with_capacity(components.len());
+        let mut calls = Vec::with_capacity(components.len());
+        for (component, nodes) in components.iter().enumerate() {
+            let mut written = HashSet::default();
+            let mut entered: Vec<usize> = Vec::new();
+            for &node in nodes {
+                written.extend(std::mem::take(&mut names[node].1));
+                entered.extend(
+                    edges[node]
+                        .iter()
+                        .map(|&callee| of_node[callee])
+                        .filter(|&callee| callee != component),
+                );
+            }
+            entered.sort_unstable();
+            entered.dedup();
+            own.push(written);
+            calls.push(entered);
+        }
+        Self {
+            component: names
+                .iter()
+                .enumerate()
+                .map(|(node, (name, _))| (name.to_string(), of_node[node]))
+                .collect(),
+            own,
+            calls,
         }
     }
+
+    /// Whether subroutine `subroutine` writes `name`, directly or in the
+    /// subroutines it calls; `None` for a subroutine not gathered.
+    pub(super) fn writes(&self, subroutine: &str, name: &str) -> Option<bool> {
+        let start = *self.component.get(subroutine)?;
+        let mut visited = HashSet::default();
+        let mut pending = vec![start];
+        while let Some(component) = pending.pop() {
+            if !visited.insert(component) {
+                continue;
+            }
+            if self.own[component].contains(name) {
+                return Some(true);
+            }
+            pending.extend(&self.calls[component]);
+        }
+        Some(false)
+    }
+
+    /// The names and calls kept, a measure of what the gathering holds.
+    #[cfg(test)]
+    pub(super) fn entries(&self) -> usize {
+        self.own.iter().map(HashSet::len).sum::<usize>()
+            + self.calls.iter().map(Vec::len).sum::<usize>()
+    }
+}
+
+/// The strongly connected components of the graph `edges`, each a list of
+/// its nodes, in reverse topological order: a component comes after every
+/// component it has an edge to (Tarjan's algorithm, without recursion).
+fn strongly_connected_components(edges: &[&[usize]]) -> Vec<Vec<usize>> {
+    const UNVISITED: usize = usize::MAX;
+    let count = edges.len();
+    let mut order = vec![UNVISITED; count];
+    let mut low = vec![0; count];
+    let mut on_stack = vec![false; count];
+    let mut stack = Vec::new();
+    let mut components = Vec::new();
+    let mut next = 0;
+    for root in 0..count {
+        if order[root] != UNVISITED {
+            continue;
+        }
+        // Nodes being visited, with the index of their next edge.
+        let mut frames = vec![(root, 0usize)];
+        order[root] = next;
+        low[root] = next;
+        next += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        while let Some(&mut (node, ref mut edge)) = frames.last_mut() {
+            if let Some(&target) = edges[node].get(*edge) {
+                *edge += 1;
+                if order[target] == UNVISITED {
+                    order[target] = next;
+                    low[target] = next;
+                    next += 1;
+                    stack.push(target);
+                    on_stack[target] = true;
+                    frames.push((target, 0));
+                } else if on_stack[target] {
+                    low[node] = low[node].min(order[target]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] == order[node] {
+                let mut component = Vec::new();
+                while let Some(member) = stack.pop() {
+                    on_stack[member] = false;
+                    component.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                components.push(component);
+            }
+        }
+    }
+    components
 }
 
 /// Where a scan of a body finds the subroutines and DPI-C imports it calls.
 pub(super) trait CallDefinitions {
     fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine>;
     fn dpi_import(&self, name: &str) -> Option<&sv::ir::DpiImport>;
+    /// Whether subroutine `subroutine` writes `name`, directly or in the
+    /// subroutines it calls, when that was gathered (see [`WrittenNames`]).
+    fn subroutine_writes(&self, _subroutine: &str, _name: &str) -> Option<bool> {
+        None
+    }
 }
 
 impl CallDefinitions for DriverScan<'_> {
     fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine> {
-        self.subroutines
-            .iter()
-            .find(|subroutine| subroutine.name == name)
+        self.subroutines.get(name).copied()
     }
 
     fn dpi_import(&self, name: &str) -> Option<&sv::ir::DpiImport> {
-        self.dpi_imports.iter().find(|import| import.name() == name)
+        self.dpi_imports.get(name).copied()
+    }
+
+    fn subroutine_writes(&self, subroutine: &str, name: &str) -> Option<bool> {
+        self.written.writes(subroutine, name)
     }
 }
 
@@ -201,22 +449,51 @@ impl CallDefinitions for procedural::ProcModule<'_> {
     fn dpi_import(&self, name: &str) -> Option<&sv::ir::DpiImport> {
         self.dpi_imports.get(name)
     }
+
+    fn subroutine_writes(&self, subroutine: &str, name: &str) -> Option<bool> {
+        self.written_names.writes(subroutine, name)
+    }
 }
 
 /// Walks a body for the variables it writes: by assignments, and through the
 /// output arguments and bodies of the subroutines it calls, which write for
 /// the calling process (IEEE 1800-2023 9.2.2.2).
 pub(super) struct DriverScan<'a> {
-    subroutines: &'a [sv::ir::Subroutine],
-    dpi_imports: &'a [sv::ir::DpiImport],
+    /// The subroutines and DPI-C imports of the module by name, which the
+    /// scans of calls look up for each call they reach.
+    subroutines: HashMap<&'a str, &'a sv::ir::Subroutine>,
+    dpi_imports: HashMap<&'a str, &'a sv::ir::DpiImport>,
+    /// The names the subroutines write, when a scan of many bodies gathered
+    /// them first (see [`Self::with_written_names`]).
+    written: WrittenNames,
 }
 
 impl<'a> DriverScan<'a> {
     pub(super) fn of(module: &'a sv::ir::Module) -> Self {
-        Self {
-            subroutines: module.subroutines(),
-            dpi_imports: module.dpi_imports(),
+        // The first of each name, as a search in declaration order finds.
+        let mut subroutines = HashMap::default();
+        for subroutine in module.subroutines() {
+            subroutines
+                .entry(subroutine.name.as_str())
+                .or_insert(subroutine);
         }
+        let mut dpi_imports = HashMap::default();
+        for import in module.dpi_imports() {
+            dpi_imports.entry(import.name()).or_insert(import);
+        }
+        Self {
+            subroutines,
+            dpi_imports,
+            written: WrittenNames::default(),
+        }
+    }
+
+    /// [`Self::of`], with the names the subroutines of `module` write
+    /// gathered once, for scans of many bodies.
+    pub(super) fn with_written_names(module: &'a sv::ir::Module) -> Self {
+        let mut scan = Self::of(module);
+        scan.written = WrittenNames::of(&scan, module.subroutines());
+        scan
     }
 
     /// Calls `record` with each assignment target of `body`.
@@ -462,7 +739,7 @@ impl ModuleDrivers {
         // run-time element.
         let mut shapes: HashMap<String, Option<(usize, usize)>> = HashMap::default();
         let mut writes: HashMap<String, Vec<DriverWrite>> = HashMap::default();
-        let scan = DriverScan::of(module);
+        let scan = DriverScan::with_written_names(module);
         // The variables `for` loops declare are locals of the module.
         let locals: HashMap<&str, &sv::ir::Type> = module
             .locals()

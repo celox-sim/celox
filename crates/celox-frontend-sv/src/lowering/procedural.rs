@@ -53,6 +53,8 @@ pub(super) struct ProcModule<'a> {
     pub constants: &'a HashMap<String, i128>,
     pub parameter_types: &'a HashMap<String, (usize, bool)>,
     pub subroutines: Arc<HashMap<String, sv::ir::Subroutine>>,
+    /// The names the subroutines write (see [`super::WrittenNames`]).
+    pub(super) written_names: Arc<super::WrittenNames>,
     pub constant_functions: sv::RuntimeConstantFunctions<'a>,
     /// DPI-C imports of the module, by SystemVerilog name.
     pub dpi_imports: HashMap<String, sv::ir::DpiImport>,
@@ -146,21 +148,50 @@ pub(super) struct FunctionSites {
 /// evaluate.
 pub(super) struct ModuleTables {
     subroutines: Arc<HashMap<String, sv::ir::Subroutine>>,
+    written_names: Arc<super::WrittenNames>,
     constant_functions: sv::RuntimeConstantTable,
 }
 
 impl ModuleTables {
     pub fn new(module: &sv::ir::Module) -> Self {
+        let subroutines: HashMap<String, sv::ir::Subroutine> = module
+            .subroutines()
+            .iter()
+            .map(|subroutine| (subroutine.name.clone(), subroutine.clone()))
+            .collect();
+        // The names the subroutines write, found as a lowering finds the
+        // callees: by these tables.
+        let calls = TableCalls {
+            subroutines: &subroutines,
+            dpi_imports: module
+                .dpi_imports()
+                .iter()
+                .map(|import| (import.name(), import))
+                .collect(),
+        };
+        let written_names = super::WrittenNames::of(&calls, subroutines.values());
         Self {
-            subroutines: Arc::new(
-                module
-                    .subroutines()
-                    .iter()
-                    .map(|subroutine| (subroutine.name.clone(), subroutine.clone()))
-                    .collect(),
-            ),
+            written_names: Arc::new(written_names),
+            subroutines: Arc::new(subroutines),
             constant_functions: sv::RuntimeConstantFunctions::table(module),
         }
+    }
+}
+
+/// The subroutines and DPI-C imports of [`ModuleTables`], as a
+/// [`ProcModule`] finds them by name.
+struct TableCalls<'a> {
+    subroutines: &'a HashMap<String, sv::ir::Subroutine>,
+    dpi_imports: HashMap<&'a str, &'a sv::ir::DpiImport>,
+}
+
+impl super::CallDefinitions for TableCalls<'_> {
+    fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine> {
+        self.subroutines.get(name)
+    }
+
+    fn dpi_import(&self, name: &str) -> Option<&sv::ir::DpiImport> {
+        self.dpi_imports.get(name).copied()
     }
 }
 
@@ -260,6 +291,7 @@ impl<'a> ProcModule<'a> {
             constants,
             parameter_types,
             subroutines: Arc::clone(&tables.subroutines),
+            written_names: Arc::clone(&tables.written_names),
             constant_functions: sv::RuntimeConstantFunctions::with_table(
                 &tables.constant_functions,
                 constants,
