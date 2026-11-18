@@ -1086,7 +1086,7 @@ pub(super) fn parameters_from_native_with_environment(
         parameter.enum_domain = declared_alias
             .as_ref()
             .filter(|_| !alias_has_use_site_dimensions)
-            .and_then(|alias| alias.enum_domain.clone());
+            .and_then(|alias| alias.enum_domain().cloned());
         validate_parameter_materialization_width(
             parameter
                 .resolved_type(&environment.types)

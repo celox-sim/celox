@@ -1186,7 +1186,9 @@ fn finish_specialization(
                     if matches!(
                         native.data_type(target).kind,
                         celox_sv_syntax::DataTypeKind::Enum { .. }
-                    ) && let Some(domain) = ty.enum_domain.clone()
+                    ) && let Some(domain) = ty
+                        .enumeration()
+                        .and_then(|enumeration| enumeration.domain.clone())
                     {
                         for member in &domain.members {
                             for key in crate::ast::parameters::binding_keys(&member.name, &env, 0) {
@@ -1712,7 +1714,7 @@ fn finish(
     // tells it apart from another of the same structure. An anonymous one is
     // not told apart.
     let named = ty.declaration_name().is_some();
-    if ty.is_enum && !named {
+    if ty.enumeration().is_some() && !named {
         return Err(unsupported(
             "enumeration type as a class type parameter value",
         ));
@@ -1900,7 +1902,7 @@ fn spelled(ty: &Type, id: Option<semantic_types::TyId>, table: &semantic_types::
     }
     // The spelling hashes the whole shape of the type, which stays its
     // spelling until specializations are named by their semantic types.
-    if ty.is_enum || !ty.members.is_empty() {
+    if ty.enumeration().is_some() || !ty.members.is_empty() {
         // An aggregate is told apart by its whole structure.
         use std::hash::{Hash, Hasher};
         let mut hasher = fxhash::FxHasher::default();

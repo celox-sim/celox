@@ -671,7 +671,7 @@ impl Text {
             }
             let leaf = leaves.next().expect("a value for each leaf");
             let ty = &member.r#type;
-            if let Some(domain) = &ty.enum_domain
+            if let Some(domain) = ty.enum_domain()
                 && ty.unpacked_ranges.is_empty()
                 && ty.container.is_none()
             {
@@ -683,7 +683,7 @@ impl Text {
                 self.args.push(enums::pattern_text(domain, leaf));
                 continue;
             }
-            if ty.is_enum || ty.packed_enum {
+            if ty.enumeration().is_some() {
                 return Err(unsupported("%p of a structure with an enum member"));
             }
             if !ty.members.is_empty() {
@@ -767,10 +767,10 @@ impl Text {
             };
             if !ty.members.is_empty() && ty.packed_ranges.len() == 1 {
                 self.packed(tree, &ty.members, &select, dimensions)?;
-            } else if let Some(domain) = ty.enum_domain.as_ref().filter(|_| !ty.packed_enum) {
+            } else if let Some(domain) = ty.enum_domain() {
                 self.template.extend_from_slice(b"%s");
                 self.args.push(enums::pattern_text(domain, select));
-            } else if ty.is_enum || ty.packed_enum {
+            } else if ty.enumeration().is_some() {
                 return Err(unsupported("%p of a packed structure with an enum member"));
             } else {
                 self.template.extend_from_slice(b"%0d");

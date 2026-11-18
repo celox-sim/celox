@@ -597,6 +597,37 @@ impl Type {
         &mut Arc::make_mut(&mut self.shape).unpacked_ranges
     }
 
+    /// What declares the enumerated type (IEEE 1800-2023 6.19) the type
+    /// is, or whose elements a packed or unpacked array of the type has.
+    pub(in crate::ast) fn enumeration(&self) -> Option<&semantic_types::EnumDeclaration> {
+        let declaration = self.enumeration.declaration();
+        debug_assert_eq!(
+            declaration.is_some(),
+            self.shape.is_enum || self.shape.packed_enum,
+            "the enumeration a type keeps is not that of its fields: {self:?}"
+        );
+        declaration
+    }
+
+    /// The members of the enumerated type the type is, or whose elements
+    /// an unpacked array of it has, if resolved: none for a packed array of
+    /// it.
+    pub(in crate::ast) fn enum_domain(&self) -> Option<&Arc<enums::EnumDomain>> {
+        let domain = self
+            .enumeration()
+            .filter(|enumeration| self.packed_ranges.len() == enumeration.dims)
+            .and_then(|enumeration| enumeration.domain.as_ref());
+        debug_assert_eq!(
+            domain.map(|domain| &**domain),
+            self.shape
+                .enum_domain
+                .as_deref()
+                .filter(|_| !self.shape.packed_enum),
+            "the enumeration members a type keeps are not those of its fields: {self:?}"
+        );
+        domain
+    }
+
     /// Bind the type to semantic type `id` of `table`, its elements to the
     /// type of an element of its unpacked dimensions, and its enumeration
     /// to that element if it is an enumerated type. A packed array of an

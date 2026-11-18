@@ -167,7 +167,7 @@ pub(super) fn state(
         }
         _ => false,
     };
-    state.then(|| state_type().enum_domain.clone()).flatten()
+    state.then(|| state_type().enum_domain().cloned()).flatten()
 }
 
 pub(super) fn value(

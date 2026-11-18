@@ -497,9 +497,7 @@ impl VariableShape {
 /// Whether every bound of `ty`, and of the types of its members, is a
 /// literal (see [`VariableShape::is_closed`]).
 pub(super) fn type_is_closed(ty: &Type) -> bool {
-    !ty.is_enum
-        && ty.enum_domain.is_none()
-        && !ty.packed_enum
+    ty.enumeration().is_none()
         && ty.container.is_none()
         && ty.unpacked_struct.is_none()
         && ty

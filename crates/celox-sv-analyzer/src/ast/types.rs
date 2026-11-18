@@ -826,7 +826,7 @@ pub(super) fn illegal_enum_base(base: &Type) -> Option<&'static str> {
         // vector of `logic`.
         TypeKind::Implicit => {}
     }
-    if base.is_enum {
+    if base.enumeration().is_some() {
         return Some("its base type is an enumeration");
     }
     if !base.members.is_empty() {
