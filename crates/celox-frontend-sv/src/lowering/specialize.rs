@@ -109,12 +109,13 @@ pub(super) fn analyze_specialization(
     design: &mut sv::Design,
     key: &LoweredSvModuleKey,
     hierarchical: &[sv::ast::HierarchicalSignal],
+    forced: &[String],
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<sv::Ir, sv::AnalyzerError> {
     #[cfg(test)]
     tests::record_analysis(key);
     let (overrides, type_overrides, pattern_overrides) = specialization_overrides(key)?;
-    let analyzed = module.source.analyze_module_with_hierarchy(
+    let analyzed = module.source.analyze_module_with_hierarchy_and_forces(
         &module.name,
         &overrides,
         &type_overrides,
@@ -123,6 +124,7 @@ pub(super) fn analyze_specialization(
         &module.packages,
         design,
         hierarchical,
+        forced,
     );
     if let Err(error) = &analyzed {
         warnings.extend(crate::warning::analyzer_warnings(error.warnings()));
@@ -179,6 +181,7 @@ pub(super) fn specialize_module(
                         design,
                         key,
                         hierarchical.signals,
+                        hierarchical.forced,
                         warnings,
                     )?;
                     match hierarchical.instances {
