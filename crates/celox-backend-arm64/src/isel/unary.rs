@@ -42,6 +42,14 @@ pub(super) fn lower_unary(
                 normalize_wide_value(ctx, block, *dst);
             }
         }
+        // Inverted zeros, a borrow and the excess of a truncated source can
+        // reach the bits above the result width.
+        let truncates = src_width > d_width;
+        if matches!(op, UnaryOp::BitNot | UnaryOp::Minus)
+            || (truncates && matches!(op, UnaryOp::Ident | UnaryOp::ToTwoState))
+        {
+            ctx.clear_wide_padding(block, *dst);
+        }
         ctx.canonicalize_narrow_wide_result(block, *dst);
         return;
     }
