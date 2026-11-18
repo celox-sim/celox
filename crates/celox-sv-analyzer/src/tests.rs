@@ -2668,6 +2668,68 @@ fn permits_redundant_default_nettype_directives_inside_modules() {
     );
 }
 
+/// An identifier of a port connection that nothing visible declares is an
+/// implicit scalar net of the module (IEEE 1800-2023 6.10); a parameter, an
+/// enumeration constant, a variable, an instance, an item a wildcard
+/// import supplies (26.3) and a system function such as `$time` (5.6.3)
+/// are no such identifier.
+#[test]
+fn declares_implicit_nets_of_port_connections() {
+    let ir = analyze_source(
+        r#"
+            package p; localparam logic [3:0] K = 4'd6; endpackage
+            interface bus; logic v; endinterface
+            module Child(input logic [3:0] a, input logic [3:0] b, input logic c,
+                         output logic [3:0] y, bus port);
+                assign y = a ^ b;
+            endmodule
+            module Top #(parameter logic P = 1'b1);
+                import p::*;
+                typedef enum logic [3:0] { E0, E1 } e_t;
+                logic [3:0] declared;
+                bus bus_i();
+                Child first(.a(implicit_in), .b(K), .c(P), .y(implicit_out), .port(bus_i));
+                Child second(.a({E1, implicit_in}), .b(declared), .c(~implicit_out),
+                             .y(), .port(bus_i));
+                Child third(.a($time), .b(4'd0), .c($stime), .y(), .port(bus_i));
+            endmodule
+        "#,
+        Path::new("implicit_port_nets.sv"),
+    )
+    .expect("undeclared port connection identifiers should be implicit nets");
+    let top = ir
+        .modules()
+        .iter()
+        .find(|module| module.name() == "Top")
+        .unwrap();
+    let mut implicit: Vec<_> = top
+        .signals()
+        .iter()
+        .filter(|signal| signal.name().starts_with("implicit_"))
+        .map(|signal| {
+            (
+                signal.name(),
+                signal.is_net(),
+                signal.r#type().resolved_width(),
+            )
+        })
+        .collect();
+    implicit.sort();
+    assert_eq!(
+        implicit,
+        [
+            ("implicit_in", true, Some(1)),
+            ("implicit_out", true, Some(1))
+        ]
+    );
+    for name in ["K", "P", "E1", "bus_i", "$time", "$stime"] {
+        assert!(
+            top.signals().iter().all(|signal| signal.name() != name),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn rejects_unsupported_default_net_types() {
     for net_type in ["tri0", "wand", "wor"] {

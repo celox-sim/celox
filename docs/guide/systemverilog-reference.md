@@ -51,8 +51,11 @@ constructs without a dedicated issue point to the frontend roadmap,
   ports — a header of port names with body declarations — are supported),
   `ref` ports ([#427](https://github.com/celox-sim/celox/issues/427)),
   wildcard `.*` connections to a module defined outside the SystemVerilog
-  sources ([#442](https://github.com/celox-sim/celox/issues/442)), and ANSI
-  port default values.
+  sources ([#442](https://github.com/celox-sim/celox/issues/442)), ANSI
+  port default values, and the implicit nets that the port connections of an
+  instance inside a generate block declare (6.10): an input connection of
+  such an instance that reads one is rejected, and one that only outputs
+  drive is a net of the module rather than of the block.
 - Nets with several drivers, other than the continuous assignments of one
   module to a `wire`, `tri`, `wand`, `triand`, `wor` or `trior` net, which
   are resolved (6.6.1 to 6.6.3). Still rejected are drivers below an

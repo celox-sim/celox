@@ -326,21 +326,30 @@ pub(super) fn net_signals(
         if ty.container.is_some() {
             return Err(unsupported("dynamic container net"));
         }
-        let drive = match declaration.net_type.as_str() {
-            "tri0" => NetDrive::Pull(false),
-            "tri1" => NetDrive::Pull(true),
-            "supply0" => NetDrive::Supply(false),
-            "supply1" => NetDrive::Supply(true),
-            _ => NetDrive::None,
-        };
-        signals.push(
-            Signal::new_net(name, ty)
-                .with_unresolved_net(declaration.net_type == "uwire")
-                .with_net_resolution(NetResolution::of(&declaration.net_type))
-                .with_net_drive(drive),
-        );
+        signals.push(net_signal(name, ty, &declaration.net_type));
     }
     Ok(signals)
+}
+
+/// The net `name` of type `ty` and of net type `net_type`.
+fn net_signal(name: String, ty: Type, net_type: &str) -> Signal {
+    let drive = match net_type {
+        "tri0" => NetDrive::Pull(false),
+        "tri1" => NetDrive::Pull(true),
+        "supply0" => NetDrive::Supply(false),
+        "supply1" => NetDrive::Supply(true),
+        _ => NetDrive::None,
+    };
+    Signal::new_net(name, ty)
+        .with_unresolved_net(net_type == "uwire")
+        .with_net_resolution(NetResolution::of(net_type))
+        .with_net_drive(drive)
+}
+
+/// The implicit scalar net `name` of net type `net_type` (IEEE 1800-2023
+/// 6.10), as a declaration `net_type name;` declares it.
+pub(super) fn implicit_net(name: String, net_type: &str) -> Signal {
+    net_signal(name, Type::implicit(), net_type)
 }
 
 /// Value/type ambiguity is retained in authored parameter syntax. A named
