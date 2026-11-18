@@ -972,6 +972,9 @@ impl<B: SimBackend> Simulation<B> {
     /// Odd periods alternate floor/ceil half periods. Periods below two
     /// time units use a two-unit period so both phases advance time.
     /// `initial_delay` specifies when the first rising edge occurs.
+    ///
+    /// The signal must be an event, as for [`Self::schedule`]; a signal that
+    /// is none is left alone.
     pub fn add_clock(&mut self, port: &str, period: u64, initial_delay: u64) {
         let signal = self.simulator.signal(port);
         let addr = self.simulator.program.get_addr(&[], &[port]).unwrap();
@@ -981,7 +984,16 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     /// Schedule a one-shot event at a specific time.
-    /// The signal must be registered as an event (clock or async reset) in the backend.
+    ///
+    /// The signal must be an event: a clock or asynchronous reset of
+    /// edge-triggered logic, or a one-bit input of a top-level module that
+    /// a process waits for (`@(posedge clk)`, `@(clk)`, `wait (go)`), itself
+    /// or as a whole-signal copy of it through port connections and
+    /// continuous assignments.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeErrorCode::NotAnEvent`] for any other signal.
     pub fn schedule(&mut self, port: &str, time: u64, value: u64) -> Result<(), RuntimeErrorCode> {
         let signal = self.simulator.signal(port);
         let addr = self.simulator.program.get_addr(&[], &[port]).unwrap();
