@@ -589,3 +589,92 @@ fn outward_names_of_virtual_interface_calls_need_one_type() {
         "{error}"
     );
 }
+
+// A hierarchical name may select a member of an element of an array of
+// packed structures of another instance, as `ctrl.kv_read[0].read_entry`
+// (IEEE 1800-2023 7.4.5, 23.6): from above and below, inside the index of
+// another hierarchical name, by a genvar, of an unpacked array, and as the
+// target of a write. The values are those Verilator 5.054 prints.
+#[test]
+fn members_of_elements_of_arrays_of_other_instances() {
+    let source = r#"
+        `timescale 1ns/1ns
+        typedef struct packed { logic [4:0] read_entry; logic [3:0] read_offset; } kv_read_t;
+        typedef struct packed { logic [3:0] last; logic [3:0] first; } ctrl_t;
+        module Ctrl(output kv_read_t [2:0] kv_read);
+            assign kv_read[0] = {5'd7, 4'd1};
+            assign kv_read[1] = {5'd2, 4'd2};
+            assign kv_read[2] = {5'd3, 4'd5};
+        endmodule
+        module Vault;
+            ctrl_t [7:0] key_ctrl;
+            kv_read_t u_arr [3];
+            kv_read_t [1:0][1:0] two;
+            initial begin
+                for (int i = 0; i < 8; i++) key_ctrl[i] = {4'(i + 8), 4'(i)};
+                u_arr[0] = {5'd11, 4'd3};
+                u_arr[1] = {5'd12, 4'd4};
+                u_arr[2] = '0;
+                two = '0;
+            end
+        endmodule
+        module Dut;
+            Ctrl c();
+            Vault v();
+        endmodule
+        module Checker;
+            initial #3 $display("up %0d", Top.d.c.kv_read[2].read_offset);
+        endmodule
+        module Top;
+            Dut d();
+            Checker chk();
+            for (genvar g = 0; g < 3; g++) begin : gen
+                initial #1 $display("gen%0d %0d", g, d.c.kv_read[g].read_entry);
+            end
+            initial begin
+                #1 $display("nested %0d", Top.d.v.key_ctrl[Top.d.c.kv_read[1].read_entry].last);
+                $display("element %0d", d.c.kv_read[0].read_entry);
+                $display("unpacked %0d %0d", Top.d.v.u_arr[1].read_entry, d.v.u_arr[0].read_offset);
+                d.v.u_arr[2].read_entry = 5'd21;
+                Top.d.v.two[1][0].read_offset = 4'd9;
+                #1 $display("written %0d %0d %0d", d.v.u_arr[2].read_entry,
+                    Top.d.v.two[1][0].read_offset, Top.d.v.two[0][1].read_offset);
+                #2 $finish;
+            end
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("hier.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let mut lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8(message).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        // The generate blocks print at the same time as the initial block.
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                "element 7",
+                "gen0 7",
+                "gen1 2",
+                "gen2 3",
+                "nested 10",
+                "unpacked 12 3",
+                "up 5",
+                "written 21 9 0",
+            ],
+            "four_state={four_state}"
+        );
+    }
+}

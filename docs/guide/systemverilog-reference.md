@@ -78,8 +78,8 @@ constructs without a dedicated issue point to the frontend roadmap,
   through a continuous assignment, or a variable that its own module also
   drives continuously or from `always_comb`, appear in port connections, or
   name named blocks, parameters, structure members of another scope other
-  than members of a packed structure variable (a member of an element of a
-  packed array of structures is rejected), or `real`, `string` (except
+  than members of a packed structure variable or of an element of an array
+  of packed structures, or `real`, `string` (except
   through the host API name, see below), or class-typed signals; names that
   start inside a generate block relative to it are also rejected. A task or
   function of another instance called by a hierarchical name (23.8) must be
