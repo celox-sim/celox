@@ -520,3 +520,53 @@ fn members_of_parameters_wider_than_128_bits() {
         );
     }
 }
+
+/// A package parameter of a packed structure given by an assignment
+/// pattern is a constant also when a constant of another package sizes the
+/// structure, by its qualified name or through an import (IEEE 1800-2023
+/// 26.3, 10.9.2), such as OpenTitan's `flash_ctrl_pkg::IsolatedPageSel`,
+/// which a generate condition compares. Verilator 5.054 prints the same
+/// line.
+#[test]
+fn pattern_parameters_sized_by_constants_of_other_packages() {
+    let source = r#"`timescale 1ns/1ns
+package reg_pkg;
+  parameter int Width = 9;
+endpackage
+package flash_pkg;
+  parameter int AllPagesW = reg_pkg::Width;
+  typedef struct packed { logic [1:0] sel; logic [AllPagesW-1:0] addr; } page_addr_t;
+  parameter page_addr_t IsolatedPageSel = '{sel: 2'd1, addr: 9'd3};
+endpackage
+package other_pkg;
+  import reg_pkg::*;
+  parameter int Bits = Width - 4;
+  typedef struct packed { logic [Bits-1:0] lo; logic hi; } pair_t;
+  parameter pair_t Pair = '{lo: 5'd4, hi: 1'b1};
+endpackage
+module Top;
+  import flash_pkg::*;
+  logic [5:0] o, p;
+  for (genvar i = 0; i < 6; i++) begin : g
+    localparam page_addr_t CurAddr = '{sel: 2'd1, addr: 9'(i)};
+    if (CurAddr == IsolatedPageSel) begin : s
+      assign o[i] = 1'b1;
+    end else begin : n
+      assign o[i] = 1'b0;
+    end
+    if (other_pkg::Pair.lo == 5'(i)) begin : t
+      assign p[i] = other_pkg::Pair.hi;
+    end else begin : m
+      assign p[i] = 1'b0;
+    end
+  end
+  initial #1 $display("%b %b %h %0d", o, p, IsolatedPageSel, $bits(page_addr_t));
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            display(source, four_state),
+            ["001000 010000 203 11"],
+            "four-state {four_state}"
+        );
+    }
+}
