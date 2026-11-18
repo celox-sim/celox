@@ -47,6 +47,7 @@ impl ProcModule<'_> {
             constants: _,
             parameter_types: _,
             subroutines: _,
+            written_names: _,
             constant_functions: _,
             dpi_imports: _,
             externs:
