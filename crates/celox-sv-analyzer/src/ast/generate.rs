@@ -795,7 +795,7 @@ impl<'a> Elaborator<'a, '_> {
     ) -> Result<Option<ConstExpr>, AnalyzerError> {
         // A select of a parameter names indices of its declared range,
         // which may be ascending (IEEE 1800-2023 7.4.1, 11.5.1).
-        let parameters = PackedDimensions::new(
+        let mut parameters = PackedDimensions::new(
             scope
                 .parameter_dimensions
                 .iter()
@@ -804,6 +804,10 @@ impl<'a> Elaborator<'a, '_> {
             &scope.env,
             &*self.aliases,
         );
+        // A parameter wider than the numeric environment holds is known by
+        // its literal, which a select of it reads, such as of an element of
+        // a member of a packed structure (IEEE 1800-2023 11.2.1).
+        parameters.parameter_values = scope.literals.clone();
         let Some(expr) = constant_binding::bind(root, &self.tree, self.session, &parameters)?
         else {
             return Ok(None);
