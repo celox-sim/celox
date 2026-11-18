@@ -1831,8 +1831,8 @@ generated/binary_op/11.4.8--binary_op_bit_xnor.sv	2state	pass
 generated/binary_op/11.4.8--binary_op_bit_xnor.sv	4state	pass
 generated/binary_op/11.4.8--binary_op_bit_xor.sv	2state	pass
 generated/binary_op/11.4.8--binary_op_bit_xor.sv	4state	pass
-generated/easyUVM/top.sv	2state	fail
-generated/easyUVM/top.sv	4state	fail
+generated/easyUVM/top.sv	2state	pass
+generated/easyUVM/top.sv	4state	pass
 generated/encapsulation/8.18--inherited_local_from_inside.sv	2state	pass
 generated/encapsulation/8.18--inherited_local_from_inside.sv	4state	pass
 generated/encapsulation/8.18--inherited_local_from_outside.sv	2state	pass
