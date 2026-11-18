@@ -22,6 +22,41 @@ fn lower_expr(
     )
 }
 
+/// The value of `node` when it is computed from constants alone, such as
+/// parameters and enumeration members, and has no unknown bits: a constant,
+/// or the equality, logical connective or negation of such values, the
+/// forms a condition on a parameter is written in (`Pass`,
+/// `Impl == ImplDom`, `!Pass && Mode != ModeOff`).
+fn known_value(arena: &SLTNodeArena<SourceVarId>, node: celox_slt::NodeId) -> Option<BigUint> {
+    let zero = BigUint::from(0u32);
+    let truth = |value: bool| BigUint::from(u32::from(value));
+    match arena.get(node) {
+        SLTNode::Constant(value, unknown, width, _) if *unknown == zero => {
+            Some(value & ((BigUint::from(1u32) << *width) - 1u32))
+        }
+        SLTNode::Unary(UnaryOp::LogicNot, operand) => {
+            Some(truth(known_value(arena, *operand)? == zero))
+        }
+        SLTNode::Binary(left, op, right) => {
+            let left = known_value(arena, *left)?;
+            let right = known_value(arena, *right)?;
+            match op {
+                BinaryOp::Eq | BinaryOp::EqCase => Some(truth(left == right)),
+                BinaryOp::Ne | BinaryOp::NeCase => Some(truth(left != right)),
+                BinaryOp::LogicAnd => Some(truth(left != zero && right != zero)),
+                BinaryOp::LogicOr => Some(truth(left != zero || right != zero)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The truth of `node` when [`known_value`] knows its value.
+fn known_truth(arena: &SLTNodeArena<SourceVarId>, node: celox_slt::NodeId) -> Option<bool> {
+    Some(known_value(arena, node)? != BigUint::from(0u32))
+}
+
 pub(super) fn lower_expr_with_context(
     expr: &sv::ir::Expr,
     variables: &HashMap<SourceVarId, SvVariable>,
@@ -600,6 +635,26 @@ pub(super) fn lower_bits_with_context(
                         )?,
                     ),
                 };
+            // A left operand of a known value that decides `&&` or `||` is the
+            // result, without the right operand, which is not evaluated (IEEE
+            // 1800-2023 11.4.7): a parameter that turns a term off, as in
+            // `Pass && wvalid_i`, leaves the result reading nothing.
+            if let Some(truth) = known_truth(arena, left)
+                && matches!(
+                    (op, truth),
+                    (sv::ir::BinaryOp::LogicAnd, false) | (sv::ir::BinaryOp::LogicOr, true)
+                )
+            {
+                let node = arena
+                    .alloc(SLTNode::Constant(
+                        BigUint::from(u32::from(truth)),
+                        BigUint::from(0u32),
+                        1,
+                        false,
+                    ))
+                    .ok()?;
+                return Some((node, sources));
+            }
             sources.extend(right_sources);
             if context_determined {
                 left = coerce_node_width(
@@ -680,12 +735,23 @@ pub(super) fn lower_bits_with_context(
                 arm_context,
                 Some(arms_signed),
             )?;
-            sources.extend(then_sources);
-            sources.extend(else_sources);
             let width =
                 celox_slt::get_width(then_expr, arena).max(celox_slt::get_width(else_expr, arena));
             then_expr = coerce_node_width(arena, then_expr, Some(width), arms_signed).ok()?;
             else_expr = coerce_node_width(arena, else_expr, Some(width), arms_signed).ok()?;
+            // A condition of a known value selects its arm, without the
+            // other, which is not evaluated (IEEE 1800-2023 11.4.11).
+            if let Some(truth) = known_truth(arena, condition) {
+                let (arm, arm_sources) = if truth {
+                    (then_expr, then_sources)
+                } else {
+                    (else_expr, else_sources)
+                };
+                sources.extend(arm_sources);
+                return Some((arm, sources));
+            }
+            sources.extend(then_sources);
+            sources.extend(else_sources);
             Some((
                 arena
                     .alloc(SLTNode::Mux {
