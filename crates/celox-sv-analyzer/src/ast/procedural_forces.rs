@@ -796,7 +796,14 @@ pub(super) fn lower(
     }
     // A target that other modules force through hierarchical names has its
     // controls here, which their companions denote (see `crate::ir::force_control_name`).
+    // A declarations-only analysis that binds the scope's interface
+    // instances runs before their members are signals of the scope; the
+    // full analysis that follows declares the controls of such a target.
+    let declarations_only = scope::imported(tree).declarations_only;
     for name in external {
+        if declarations_only && !module.contains(name) {
+            continue;
+        }
         if !names.contains(name) {
             names.push(name.clone());
         }
