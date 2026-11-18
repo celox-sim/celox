@@ -2,10 +2,12 @@
 //! instance, with its items, bins and hits, for the type and for each
 //! instance.
 
+use fxhash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use super::shape::bin_name;
-use super::{Registry, compute};
+use super::descriptor::{BinKind, PointDescriptor};
+use super::shape::{BinClass, BinId, NameTag, bin_name};
+use super::{Instance, Registry, compute};
 
 /// The covergroup coverage of a simulation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -86,9 +88,12 @@ pub struct CoverItemReport {
     pub coverage: f64,
     pub covered: u64,
     pub total: u64,
-    /// The bins that have a value.
+    /// The bins that have a value, and of a `default` bin array a bin for
+    /// each value that was sampled.
     pub bins: Vec<BinReport>,
-    /// The bins that are not listed.
+    /// The bins that are not listed. For a `default` bin array, the hits of
+    /// the values beyond those it has a bin for
+    /// ([`MAX_DEFAULT_ARRAY`](super::MAX_DEFAULT_ARRAY)).
     pub omitted_bins: u64,
 }
 
@@ -127,6 +132,67 @@ pub enum BinReportKind {
     Illegal,
 }
 
+/// A bin as a report lists it, before it has its name.
+struct Listed {
+    id: BinId,
+    kind: BinReportKind,
+    hits: u64,
+}
+
+/// The bins of coverpoint `point` of `instance` that a report lists, in the
+/// order of their declarations, the automatic bins first, with the hits a
+/// `default` bin array has no bin for.
+fn listed(registry: &Registry, instance: &Instance, point: usize) -> (Vec<Listed>, u64) {
+    let mut bins = Vec::new();
+    let mut omitted = 0;
+    for bin in compute::bins(registry, instance, point)
+        .iter()
+        .filter(|bin| !bin.empty)
+    {
+        let kind = match (bin.kind, bin.class) {
+            (BinKind::Illegal, _) => BinReportKind::Illegal,
+            (BinKind::Ignore, _) => BinReportKind::Ignore,
+            (BinKind::Bins, BinClass::Value) => BinReportKind::Bins,
+            (BinKind::Bins, BinClass::Default | BinClass::DefaultArray(_)) => {
+                BinReportKind::Default
+            }
+        };
+        match bin.class {
+            BinClass::Value | BinClass::Default => bins.push(Listed {
+                id: bin.id.clone(),
+                kind,
+                hits: instance.counts[bin.counter as usize],
+            }),
+            BinClass::DefaultArray(array) => {
+                let array = &instance.default_arrays[array as usize];
+                omitted += array.overflow;
+                bins.extend(array.hits.iter().map(|(value, &hits)| Listed {
+                    id: BinId {
+                        decl: bin.id.decl,
+                        tag: NameTag::Value(value.clone()),
+                    },
+                    kind,
+                    hits,
+                }));
+            }
+        }
+    }
+    (bins, omitted)
+}
+
+/// The bins as a report has them, where a bin is covered with `at_least`
+/// hits.
+fn bin_reports(point: &PointDescriptor, bins: Vec<Listed>, at_least: i32) -> Vec<BinReport> {
+    bins.into_iter()
+        .map(|bin| BinReport {
+            name: bin_name(point, &bin.id),
+            kind: bin.kind,
+            hits: bin.hits,
+            covered: compute::covered(bin.hits, at_least),
+        })
+        .collect()
+}
+
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -159,8 +225,27 @@ fn covergroup(registry: &Registry, ty: usize) -> CovergroupReport {
         .enumerate()
         .map(|(index, point)| {
             let options = &entry.options.points[index];
-            let merged = compute::merged(registry, entry, index);
+            let at_least = compute::merged_at_least(registry, entry, index);
             let score = compute::of_type(registry, ty, index as u32 + 1);
+            // The union of the bins of the instances by name (19.11.3), in
+            // the order instances first have them.
+            let mut bins: Vec<Listed> = Vec::new();
+            let mut omitted_bins = 0;
+            let mut at: FxHashMap<BinId, usize> = FxHashMap::default();
+            for &instance in &entry.instances {
+                let (listed, omitted) =
+                    listed(registry, &registry.instances[instance as usize], index);
+                omitted_bins += omitted;
+                for bin in listed {
+                    match at.get(&bin.id) {
+                        Some(&at) => bins[at].hits += bin.hits,
+                        None => {
+                            at.insert(bin.id.clone(), bins.len());
+                            bins.push(bin);
+                        }
+                    }
+                }
+            }
             CoverItemReport {
                 name: point.name.clone(),
                 kind: CoverItemKind::Coverpoint,
@@ -168,21 +253,12 @@ fn covergroup(registry: &Registry, ty: usize) -> CovergroupReport {
                 comment: text(&options.comment),
                 weight: options.weight,
                 goal: options.goal,
-                at_least: merged.at_least,
+                at_least,
                 coverage: score.coverage,
                 covered: score.parts.covered,
                 total: score.parts.total,
-                bins: merged
-                    .bins
-                    .iter()
-                    .map(|&(id, hits)| BinReport {
-                        name: bin_name(point, id),
-                        kind: BinReportKind::Bins,
-                        hits,
-                        covered: compute::covered(hits, merged.at_least),
-                    })
-                    .collect(),
-                omitted_bins: 0,
+                bins: bin_reports(point, bins, at_least),
+                omitted_bins,
             }
         })
         .collect();
@@ -217,6 +293,7 @@ fn covergroup_instance(registry: &Registry, index: usize) -> CovergroupInstanceR
             let point_options = &options.points[point_index];
             let at_least = options.at_least(point_index);
             let score = compute::instance(registry, index, point_index as u32 + 1);
+            let (bins, omitted_bins) = listed(registry, instance, point_index);
             CoverItemReport {
                 name: point.name.clone(),
                 kind: CoverItemKind::Coverpoint,
@@ -228,20 +305,8 @@ fn covergroup_instance(registry: &Registry, index: usize) -> CovergroupInstanceR
                 coverage: score.coverage,
                 covered: score.parts.covered,
                 total: score.parts.total,
-                bins: compute::bins(registry, instance, point_index)
-                    .iter()
-                    .filter(|bin| !bin.empty)
-                    .map(|bin| {
-                        let hits = instance.counts[bin.counter as usize];
-                        BinReport {
-                            name: bin_name(point, &bin.id),
-                            kind: BinReportKind::Bins,
-                            hits,
-                            covered: compute::covered(hits, at_least),
-                        }
-                    })
-                    .collect(),
-                omitted_bins: 0,
+                bins: bin_reports(point, bins, at_least),
+                omitted_bins,
             }
         })
         .collect();
