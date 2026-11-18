@@ -171,16 +171,23 @@ impl PlanBuilder<'_> {
             .flat_map(|(_, stores)| stores.iter().copied())
             .collect();
 
-        let opaque_dependencies = rtl_units()
-            .chain(
-                sir.processes
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, unit)| {
-                        (index < fallback.len() && fallback[index].is_none()).then_some(unit)
-                    }),
-            )
-            .any(|unit| opaque(unit, &schema.extern_functions));
+        // Combinational logic counts with every call of a host function, a
+        // coverage helper call too (see `opaque_in_settle`).
+        let opaque_dependencies = sir
+            .updates
+            .observe
+            .iter()
+            .any(|unit| opaque_in_settle(unit, &schema.extern_functions))
+            || rtl_units()
+                .chain(
+                    sir.processes
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, unit)| {
+                            (index < fallback.len() && fallback[index].is_none()).then_some(unit)
+                        }),
+                )
+                .any(|unit| opaque(unit, &schema.extern_functions));
         self.found.kernels = kernels;
         self.found.fallback = fallback;
         self.found.delay_writers = delay_writers;

@@ -119,6 +119,15 @@ pub struct HostEffects {
     pub capture_flags: bool,
     /// It calls an external function, in program order.
     pub extern_calls: bool,
+    /// One of its external calls ([`Self::extern_calls`]) is of a function
+    /// that may read or change simulation state the instruction does not
+    /// name. Every external call is one, except a call of the coverage helper
+    /// ([`extern_abi::COVERAGE_HELPER_ID`]), which reads and writes only the
+    /// heap, and a native memory operation ([`native_memory`]), which a
+    /// backend expands in place and whose state accesses are the
+    /// instruction's [`SIRInstruction::state_reads`] and
+    /// [`SIRInstruction::state_writes`].
+    pub state_calls: bool,
     /// It marks trigger bits.
     pub triggers: bool,
 }
@@ -129,6 +138,7 @@ impl HostEffects {
         runtime_events: true,
         capture_flags: true,
         extern_calls: true,
+        state_calls: true,
         triggers: true,
     };
 
@@ -138,6 +148,7 @@ impl HostEffects {
             runtime_events: self.runtime_events || other.runtime_events,
             capture_flags: self.capture_flags || other.capture_flags,
             extern_calls: self.extern_calls || other.extern_calls,
+            state_calls: self.state_calls || other.state_calls,
             triggers: self.triggers || other.triggers,
         }
     }

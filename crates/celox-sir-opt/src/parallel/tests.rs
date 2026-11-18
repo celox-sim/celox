@@ -460,3 +460,81 @@ fn a_call_to_a_capturing_callee_is_ordered_with_capture_stores() {
     );
     assert_eq!(dependencies[1], vec![0]);
 }
+
+/// A call of the coverage helper is an external call in program order like
+/// any other, although it touches no simulation state: two lanes that make
+/// one are serialized as two lanes with heap calls are, whether a lane
+/// calls the helper itself or a function that does.
+#[test]
+fn coverage_helper_calls_in_two_lanes_are_serialized() {
+    use celox_sir::extern_abi::{COVERAGE_HELPER_ID, HEAP_HELPER_ID};
+    let helper = |func| SIRInstruction::ExternCall {
+        dst: None,
+        func,
+        args: vec![RegisterId(0); celox_sir::extern_abi::HEAP_HELPER_ARGUMENTS],
+    };
+    for (first, second) in [
+        (COVERAGE_HELPER_ID, COVERAGE_HELPER_ID),
+        (HEAP_HELPER_ID, HEAP_HELPER_ID),
+        (COVERAGE_HELPER_ID, HEAP_HELPER_ID),
+    ] {
+        let units = [
+            unit(0, vec![helper(first)]),
+            unit(1, vec![load(2, 0, 16)]),
+            unit(1, vec![helper(second)]),
+        ];
+        let dependencies = unit_dependencies(
+            &units.iter().collect::<Vec<_>>(),
+            &layout(Vec::new()),
+            CodegenFootprint::Native,
+        );
+        assert!(dependencies[1].is_empty());
+        assert_eq!(dependencies[2], vec![0], "{first:#x} then {second:#x}");
+        let tasks = plan_parallel_kernel(
+            &units.iter().collect::<Vec<_>>(),
+            &layout(Vec::new()),
+            2,
+            CodegenFootprint::Native,
+        )
+        .unwrap();
+        assert_eq!(tasks.len(), 3);
+    }
+
+    // A function that only samples: its summary makes extern calls and no
+    // state call, and a call of it shares the extern calls with a lane that
+    // calls the helper itself. A call of a function without extern calls
+    // does not.
+    let sampling = helper(COVERAGE_HELPER_ID).host_effects();
+    assert!(sampling.extern_calls && !sampling.state_calls);
+    let call = |host| SIRInstruction::Call {
+        function: celox_sir::FunctionId(0),
+        frame: RegisterId(0),
+        args: Vec::new(),
+        outputs: Vec::new(),
+        dst: None,
+        effects: std::sync::Arc::new(celox_sir::CallEffects {
+            host,
+            ..Default::default()
+        }),
+    };
+    let mut layout = layout(Vec::new());
+    layout.call_stack = Some(celox_state_layout::CallStackLayout {
+        depth_offset: 4096,
+        base_offset: 4104,
+        size: 64,
+    });
+    let units = [
+        unit(0, vec![helper(COVERAGE_HELPER_ID)]),
+        unit(1, vec![call(Default::default())]),
+        unit(2, vec![load(2, 0, 16)]),
+        unit(2, vec![call(sampling)]),
+    ];
+    let dependencies = unit_dependencies(
+        &units.iter().collect::<Vec<_>>(),
+        &layout,
+        CodegenFootprint::Native,
+    );
+    assert!(dependencies[1].is_empty());
+    // The helper call of unit 0, and the call stack unit 1 shares.
+    assert_eq!(dependencies[3], vec![0, 1]);
+}

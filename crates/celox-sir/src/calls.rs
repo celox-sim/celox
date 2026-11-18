@@ -616,6 +616,16 @@ mod tests {
                 func: 0,
                 args: Vec::new(),
             },
+            SIRInstruction::ExternCall {
+                dst: None,
+                func: crate::extern_abi::HEAP_HELPER_ID,
+                args: Vec::new(),
+            },
+            SIRInstruction::ExternCall {
+                dst: None,
+                func: crate::extern_abi::COVERAGE_HELPER_ID,
+                args: Vec::new(),
+            },
         ];
         for instruction in cases {
             let expected = instruction.host_effects();
@@ -637,5 +647,64 @@ mod tests {
                 expected
             );
         }
+    }
+
+    /// A function that only calls the coverage helper is summarized as one
+    /// that makes extern calls but no state call, and so is every function
+    /// that reaches only such functions; one that also reaches a heap call
+    /// makes a state call.
+    #[test]
+    fn a_summary_tells_coverage_helper_calls_from_state_calls() {
+        let helper = |func| SIRInstruction::ExternCall {
+            dst: None,
+            func,
+            args: Vec::new(),
+        };
+        let coverage = || helper(crate::extern_abi::COVERAGE_HELPER_ID);
+        // fn0 samples; fn1 calls fn0; fn2 makes a heap call; fn3 calls fn0
+        // and fn2; fn4 calls nothing.
+        let mut program = SirProgram::<u32, u32> {
+            updates: crate::StateUpdates::from_groups(
+                vec![unit(vec![call(1)]), unit(vec![call(3)])],
+                None,
+                [],
+            ),
+            parallel: None,
+            processes: Vec::new(),
+            functions: vec![
+                function(vec![coverage(), store(1, Vec::new()), coverage()], 100),
+                function(vec![call(0)], 101),
+                function(vec![helper(crate::extern_abi::HEAP_HELPER_ID)], 102),
+                function(vec![call(0), call(2)], 103),
+                function(vec![store(2, Vec::new())], 104),
+            ],
+        };
+        program.summarize_calls();
+        let host: Vec<(bool, bool)> = program
+            .functions
+            .iter()
+            .map(|function| {
+                let host = function.effects.host;
+                (host.extern_calls, host.state_calls)
+            })
+            .collect();
+        assert_eq!(
+            host,
+            [
+                (true, false),
+                (true, false),
+                (true, true),
+                (true, true),
+                (false, false)
+            ]
+        );
+        // The state the sampling function stores is still listed.
+        assert_eq!(program.functions[1].effects.writes, [1]);
+        let effects = |unit: usize| {
+            program.updates.observe[unit].blocks[&BlockId(0)].instructions[0].host_effects()
+        };
+        assert!(effects(0).extern_calls && !effects(0).state_calls);
+        assert!(effects(1).extern_calls && effects(1).state_calls);
+        program.verify_functions().unwrap();
     }
 }
