@@ -59,6 +59,17 @@ pub(super) fn lower_binary(
                 normalize_wide_value(ctx, block, *dst);
             }
         }
+        // A carry, a borrow, high product bits, bits shifted left or
+        // sign-filled and the excess of an operand wider than the result
+        // can reach the bits above the result width.
+        if lhs_width.max(rhs_width) > d_width
+            || matches!(
+                op,
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Shl | BinaryOp::Sar
+            )
+        {
+            ctx.clear_wide_padding(block, *dst);
+        }
         ctx.canonicalize_narrow_wide_result(block, *dst);
         return;
     }

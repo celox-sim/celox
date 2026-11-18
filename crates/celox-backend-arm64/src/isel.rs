@@ -1071,6 +1071,40 @@ impl<'a> ISelContext<'a> {
         }
     }
 
+    /// Clear the bits above the declared width in the top chunk of a wide
+    /// result, in its value plane and, in four-state code, its mask plane.
+    ///
+    /// Wide values keep those bits zero: reductions, comparisons and shifts
+    /// read whole chunks. The operations whose top chunk can receive a carry,
+    /// a borrow, high product bits, bits shifted left, a sign fill, inverted
+    /// zeros or the excess of a truncated source call this on their result;
+    /// the others keep zero padding zero.
+    fn clear_wide_padding(&mut self, block: &mut MBlock, reg: RegisterId) {
+        let width = self.sir_width(&reg);
+        let top_bits = width % 64;
+        if width <= 64 || top_bits == 0 {
+            return;
+        }
+        let top = width / 64;
+        let valid = mask_for_width(top_bits);
+        if let Some(mut chunks) = self.wide_regs.get(&reg).cloned()
+            && let Some(chunk) = chunks.get_mut(top)
+        {
+            let cleared = self.alloc_vreg(SpillDesc::transient());
+            self.emit_and_imm(block, cleared, chunk.0, valid);
+            chunk.0 = cleared;
+            self.set_wide_chunks(reg, chunks);
+        }
+        if let Some(mut masks) = self.wide_masks.get(&reg).cloned()
+            && let Some(chunk) = masks.get_mut(top)
+        {
+            let cleared = self.alloc_vreg(SpillDesc::transient());
+            self.emit_and_imm(block, cleared, chunk.0, valid);
+            chunk.0 = cleared;
+            self.wide_masks.insert(reg, masks);
+        }
+    }
+
     /// Materialize the declared SIR width after an operation with wide inputs
     /// produced a scalar result.
     ///
