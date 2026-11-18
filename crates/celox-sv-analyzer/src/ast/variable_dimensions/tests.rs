@@ -319,3 +319,45 @@ fn a_shape_bound_to_its_base_type_is_caught() {
     // A change that keeps the binding but adds a dimension.
     procedural::dimensions_from_type(&array).bound(&table);
 }
+
+#[test]
+fn shapes_of_an_enumerated_type_are_not_those_of_its_bits() {
+    // A shape that keeps an enumerated type (IEEE 1800-2023 6.19) is not of
+    // a bit array of the same shape (6.22.2), also where neither its members
+    // nor its declared type tell it, such as for an enumeration too wide
+    // for its members: the closed-shape cache, which keys on the shape, does
+    // not give it the type of a bit array typed before it.
+    let mut ty = Type::new(TypeKind::Bit);
+    ty.packed_ranges.push(PackedRange::new(
+        ConstExpr::Literal("129".into()),
+        ConstExpr::Literal("0".into()),
+    ));
+    ty.unpacked_ranges.push(UnpackedRange::new(
+        ConstExpr::Literal("0".into()),
+        ConstExpr::Literal("1".into()),
+    ));
+    let bits = VariableDimensions::new(VariableShape {
+        declared: type_names::Declared::default(),
+        ..procedural::dimensions_from_type(&ty).clone_shape()
+    });
+    let enumerated = VariableDimensions::new(bits.clone_shape()).with_enumeration(
+        semantic_types::EnumBinding::new(semantic_types::EnumDeclaration {
+            name: Some("w_t".into()),
+            named: true,
+            scope: None,
+            typename: None,
+            domain: None,
+            dims: 1,
+        }),
+    );
+    let mut table = TyTable::default();
+    let functions = const_functions::ConstantFunctions::default();
+    let env = ConstEnv::default();
+    let bits = bits.type_id(&mut table, &functions, &env).unwrap();
+    let enumerated = enumerated.type_id(&mut table, &functions, &env).unwrap();
+    assert_ne!(bits, enumerated);
+    assert_eq!(
+        table.enumeration(table.fixed_element(enumerated)),
+        Some(false)
+    );
+}

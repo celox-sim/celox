@@ -3036,6 +3036,74 @@ fn rejects_unpacked_arrays_of_nonequivalent_named_elements_in_every_assignment()
 }
 
 #[test]
+fn subarrays_of_wide_enumerations_keep_their_element_type() {
+    // A subarray selected from an array of an enumerated type has that
+    // element type (IEEE 1800-2023 7.4.6), also for an enumeration too wide
+    // for its members to be materialized: a `ref` argument of a bit array of
+    // the same shape does not take it (6.22.2, 13.5.2), also after a
+    // subarray of a bit array of that shape was typed first.
+    let function = "typedef enum bit [129:0] {A, B} w_t; \
+        function automatic void f(ref bit [129:0] p[2]); endfunction \
+        function automatic void g(ref w_t p[2]); endfunction";
+    for items in [
+        "w_t m[2][2]; initial f(m[0]);",
+        "w_t m[2][2]; bit [129:0] n[2][2]; initial begin f(n[0]); f(m[1]); end",
+    ] {
+        let source = format!("module Top; {function} {items} endmodule");
+        analyze_source(&source, Path::new("wide_enum_subarray.sv")).expect_err(items);
+    }
+    let source = format!(
+        "module Top; {function} w_t m[2][2]; bit [129:0] n[2][2]; \
+         initial begin f(n[0]); g(m[1]); end endmodule"
+    );
+    analyze_source(&source, Path::new("wide_enum_subarray.sv")).expect("the same element types");
+}
+
+#[test]
+fn typename_of_packed_arrays_of_process_states_stays_unsupported() {
+    // `$typename` of a packed array of an enumerated type is not supported,
+    // also of the built-in `std::process::state` (IEEE 1800-2023 9.7,
+    // 20.6.1): the analysis rejects it instead of failing.
+    let source = "module Top; std::process::state [1:0] states; \
+        initial $display(\"%s\", $typename(states)); endmodule";
+    let error = analyze_source(source, Path::new("process_state_typename.sv"))
+        .expect_err("a packed array of an enumerated type");
+    assert!(
+        error
+            .to_string()
+            .contains("`$typename` of a packed array of an enumerated type"),
+        "{error}"
+    );
+}
+
+#[test]
+fn parameters_of_wide_enumerations_keep_their_type() {
+    // A parameter of an enumerated type is of that type (IEEE 1800-2023
+    // 6.19, 6.20.2), also of one too wide for its members to be
+    // materialized: a formal of that type takes it, which a bit vector of
+    // the same width needs a cast for (6.19.3), and the shape of the
+    // parameter keeps it.
+    let declarations = "typedef enum bit [129:0] {A, B} w_t; parameter w_t P = B; \
+        function automatic void f(w_t x); endfunction";
+    let source = format!("module Top; {declarations} initial f(P); endmodule");
+    analyze_source(&source, Path::new("wide_enum_parameter.sv")).expect("an argument of its type");
+    let source = format!("module Top; {declarations} bit [129:0] v; initial f(v); endmodule");
+    analyze_source(&source, Path::new("wide_enum_parameter.sv")).expect_err("bits need a cast");
+    // Its shape keeps the enumerated type too: `$typename` of it stays
+    // unsupported as that of an enumerated type without known values.
+    let source =
+        format!("module Top; {declarations} initial $display(\"%s\", $typename(P)); endmodule");
+    let error = analyze_source(&source, Path::new("wide_enum_parameter.sv"))
+        .expect_err("an enumerated type without known values");
+    assert!(
+        error
+            .to_string()
+            .contains("`$typename` of an enumerated type with values that are not known"),
+        "{error}"
+    );
+}
+
+#[test]
 fn accepts_unpacked_arrays_of_the_same_named_element_in_every_assignment() {
     // Operands that name the same element type stay equivalent when they are
     // passed, returned, defaulted or selected (IEEE 1800-2023 6.22.2, 7.6).

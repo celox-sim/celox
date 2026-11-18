@@ -455,7 +455,7 @@ pub enum PortDirection {
 /// copies until one changes, and the semantic type it was bound to, which
 /// any change of the shape forgets. It is small, as types are held on
 /// deeply recursive binding frames.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Type {
     shape: Arc<TypeShape>,
     binding: semantic_types::Binding,
@@ -463,6 +463,13 @@ pub struct Type {
     /// (IEEE 1800-2023 7.4), which a change of those dimensions keeps
     /// (see [`Type::unpacked_ranges_mut`]) and any other change forgets.
     element: semantic_types::Binding,
+    /// The enumerated type (IEEE 1800-2023 6.19) the type is, or whose
+    /// elements a packed or unpacked array of the type has, which changes
+    /// of its dimensions keep (see [`Type::reshape_keeping_enumeration`])
+    /// and any other change forgets. Only [`Type::keep_enumeration`] sets
+    /// it, with the fields that tell it (see
+    /// [`variable_dimensions::kept`]).
+    enumeration: variable_dimensions::kept::KeptEnumeration,
 }
 
 /// What a [`Type`] is made of.
@@ -522,6 +529,7 @@ impl std::ops::DerefMut for Type {
     fn deref_mut(&mut self) -> &mut TypeShape {
         self.binding.forget();
         self.element.forget();
+        self.enumeration.forget();
         Arc::make_mut(&mut self.shape)
     }
 }
@@ -542,17 +550,28 @@ impl Type {
         &mut Arc::make_mut(&mut self.shape).unpacked_ranges
     }
 
-    /// Bind the type to semantic type `id` of `table`, and its elements to
-    /// the type of an element of its unpacked dimensions.
+    /// Bind the type to semantic type `id` of `table`, its elements to the
+    /// type of an element of its unpacked dimensions, and its enumeration
+    /// to that element if it is an enumerated type. A packed array of an
+    /// enumerated type keeps the enumeration it has.
     pub(in crate::ast) fn bind(
         &mut self,
         table: &semantic_types::TyTable,
         id: semantic_types::TyId,
     ) {
         self.binding.set(table, id);
-        match table.unpacked_element(id, self.unpacked_ranges.len()) {
+        let element = table.unpacked_element(id, self.unpacked_ranges.len());
+        match element {
             Some(element) => self.element.set(table, element),
             None => self.element.forget(),
+        }
+        match element.map(|element| (element, table.enumeration(element))) {
+            Some((element, Some(false))) => {
+                let enumeration = semantic_types::EnumBinding::of(table, element);
+                self.keep_enumeration(enumeration.unwrap_or_default());
+            }
+            Some((_, Some(true))) => {}
+            _ => self.enumeration.forget(),
         }
     }
 }
@@ -563,6 +582,7 @@ impl From<TypeShape> for Type {
             shape: Arc::new(shape),
             binding: semantic_types::Binding::default(),
             element: semantic_types::Binding::default(),
+            enumeration: variable_dimensions::kept::KeptEnumeration::default(),
         }
     }
 }

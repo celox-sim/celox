@@ -402,6 +402,144 @@ impl RetainedType {
     }
 }
 
+/// The enumerated type (IEEE 1800-2023 6.19) a [`crate::ast::Type`] is,
+/// or whose elements a packed or unpacked array of it has, kept across
+/// changes of its dimensions: the declaration that declares it, which
+/// tells it apart in any table, even before the constants its dimensions
+/// name are known.
+#[derive(Debug, Clone, Default)]
+pub(super) struct EnumBinding(Option<Arc<EnumDeclaration>>);
+
+/// What declares an enumerated type (6.19).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EnumDeclaration {
+    /// The typedef that names the type (6.18), or the source position of
+    /// its declaration if none does (6.22.1 c), if recorded.
+    pub name: Option<Arc<str>>,
+    /// Whether `name` is a typedef.
+    pub named: bool,
+    /// The elaborated scope that declares the type, if not a package or
+    /// compilation unit.
+    pub scope: Option<Arc<str>>,
+    /// How `$typename` writes the typedef (20.6.1).
+    pub typename: Option<super::type_names::TypedefName>,
+    /// The members, if resolved.
+    pub domain: Option<Arc<super::enums::EnumDomain>>,
+    /// How many packed dimensions the enumerated type has itself, inside
+    /// those of a packed array of it (7.4.1).
+    pub dims: usize,
+}
+
+/// A binding never tells two types apart: their shapes do.
+impl PartialEq for EnumBinding {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for EnumBinding {}
+
+impl std::hash::Hash for EnumBinding {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+}
+
+impl EnumBinding {
+    /// Keep the enumerated type `declaration` declares.
+    pub(super) fn new(declaration: EnumDeclaration) -> Self {
+        Self(Some(Arc::new(declaration)))
+    }
+
+    /// Forget the enumerated type, as the type changes.
+    pub(super) fn forget(&mut self) {
+        self.0 = None;
+    }
+
+    /// What declares the kept enumerated type.
+    pub(super) fn declaration(&self) -> Option<&EnumDeclaration> {
+        self.0.as_deref()
+    }
+
+    /// Enumerated type `id` of `table`, if it is one, or none for a packed
+    /// array of one, which keeps the enumerated type it has.
+    pub(super) fn of(table: &TyTable, id: TyId) -> Option<Self> {
+        if table.enumeration(id)? {
+            return None;
+        }
+        let TyData::Packed(Packed {
+            element: PackedElement::Enum { decl, array: false },
+            dims,
+            ..
+        }) = table.data(id)
+        else {
+            unreachable!("an enumerated type is packed");
+        };
+        let (data, domain) = match decl {
+            Decl::Named(decl) => (Some(table.decl(*decl)), table.decl(*decl).domain.clone()),
+            Decl::AnonymousEnum { decl, domain } => {
+                (decl.map(|decl| table.decl(decl)), domain.clone())
+            }
+            _ => unreachable!("an enumerated type is declared by an enumeration"),
+        };
+        Some(Self::new(EnumDeclaration {
+            name: data.map(|data| data.name.clone()),
+            named: matches!(decl, Decl::Named(_)),
+            scope: data.and_then(|data| data.scope.clone()),
+            typename: data.and_then(|data| data.typename.clone()),
+            domain,
+            dims: dims.len(),
+        }))
+    }
+
+    /// The kept enumerated type as typedef `name` of `scope` names it
+    /// (6.18), written `typename` by `$typename`. A named one stays as it
+    /// is, as an earlier typedef named it.
+    pub(super) fn name(
+        &mut self,
+        name: &str,
+        scope: Option<&Arc<str>>,
+        typename: &super::type_names::TypedefName,
+    ) {
+        if let Some(declaration) = &mut self.0
+            && !declaration.named
+        {
+            let declaration = Arc::make_mut(declaration);
+            declaration.name = Some(name.into());
+            declaration.named = true;
+            declaration.scope = scope.cloned();
+            declaration.typename = Some(typename.clone());
+        }
+    }
+}
+
+impl EnumDeclaration {
+    /// The element of a packed type of `dimensions` packed dimensions that
+    /// is this enumerated type, or a packed array of it if it has more
+    /// dimensions than the enumerated type (7.4.1), declared in `table`.
+    /// The members of an anonymous enumeration tell an array of it apart
+    /// from another of its bits by none.
+    pub(super) fn element(&self, table: &mut TyTable, dimensions: usize) -> PackedElement {
+        let array = dimensions > self.dims;
+        let declared = self
+            .name
+            .as_deref()
+            .map(|name| table.declare(name, self.scope.as_deref()));
+        let decl = match declared {
+            Some(decl) if self.named => {
+                table.record_spelling(decl, self.typename.as_ref(), None);
+                if let Some(domain) = &self.domain {
+                    table.record_enum_domain(decl, domain);
+                }
+                Decl::Named(decl)
+            }
+            decl => Decl::AnonymousEnum {
+                decl,
+                domain: self.domain.clone().filter(|_| !array),
+            },
+        };
+        PackedElement::Enum { decl, array }
+    }
+}
+
 impl TyTable {
     /// The type of member `name` of a value of structure type `aggregate`,
     /// packed or unpacked (7.2): a packed structure only when it is one

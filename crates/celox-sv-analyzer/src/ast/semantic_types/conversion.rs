@@ -128,6 +128,7 @@ fn convert(
 ) -> Option<TyId> {
     let parts = Parts {
         bound_element: ty.element.get(table),
+        bound_enumeration: ty.enumeration.declaration(),
         container: ty.container.as_deref(),
         unpacked_struct: ty.unpacked_struct.as_ref(),
         kind: ty.kind,
@@ -178,25 +179,27 @@ pub(in crate::ast) fn of_shape(
     } else {
         TypeKind::Logic
     };
+    let declared = type_names::declared_type(shape);
     let parts = Parts {
         // A shape tells no keyword (see above).
         bound_element: shape
             .element_type(table)
             .map(|element| table.without_keyword(element)),
+        bound_enumeration: shape.enumeration_declaration(),
         container: shape.container.as_deref(),
         unpacked_struct: shape.unpacked_struct.as_ref(),
         kind,
         enumeration: shape.enum_domain.is_some()
             || shape.packed_enum
-            || type_names::declared_type(shape).is_some_and(|ty| ty.is_enum),
+            || declared.is_some_and(|ty| ty.is_enum),
         packed_enum: shape.packed_enum,
         enum_domain: shape.enum_domain.as_ref(),
         members: &shape.members,
-        declaration: type_names::declared_type(shape).and_then(Type::declaration_name),
-        typename: type_names::declared_type(shape).and_then(|ty| ty.spelling.name_of()),
-        aggregate: type_names::declared_type(shape).and_then(|ty| ty.spelling.aggregate_of()),
-        anonymous: type_names::declared_type(shape).and_then(|ty| ty.spelling.anonymous()),
-        scope: type_names::declared_type(shape).and_then(Type::declaration_scope),
+        declaration: declared.and_then(Type::declaration_name),
+        typename: declared.and_then(|ty| ty.spelling.name_of()),
+        aggregate: declared.and_then(|ty| ty.spelling.aggregate_of()),
+        anonymous: declared.and_then(|ty| ty.spelling.anonymous()),
+        scope: declared.and_then(Type::declaration_scope),
         signed: shape.signed,
         signed_element_depth: shape.signed_element_depth,
         packed: shape
@@ -219,6 +222,10 @@ struct Parts<'a> {
     /// The semantic type of an element of the unpacked dimensions, where
     /// the type keeps it: the fields below then only cross-check it.
     bound_element: Option<TyId>,
+    /// The declaration of the enumerated type the type is or has elements
+    /// of, where the type keeps it: the fields below then only cross-check
+    /// it.
+    bound_enumeration: Option<&'a super::EnumDeclaration>,
     container: Option<&'a ContainerType>,
     unpacked_struct: Option<&'a Arc<UnpackedStruct>>,
     kind: TypeKind,
@@ -386,7 +393,41 @@ impl Parts<'_> {
                 table.record_enum_domain(decl, domain);
             }
         }
-        let element = if self.enumeration
+        let element = if let Some(enumeration) = self.bound_enumeration {
+            let element = enumeration.element(table, self.packed.len());
+            #[cfg(debug_assertions)]
+            if let Some(decl) = named.map(Decl::Named).or(anonymous) {
+                // Fields that record the members alone, such as those of
+                // the shape of a parameter, tell no declaration: the kept
+                // type has them.
+                let members_only = match (&decl, &element) {
+                    (
+                        Decl::AnonymousEnum {
+                            decl: None,
+                            domain: Some(domain),
+                        },
+                        PackedElement::Enum { array: false, .. },
+                    ) => enumeration
+                        .domain
+                        .as_ref()
+                        .is_some_and(|kept| kept.members == domain.members),
+                    _ => false,
+                };
+                if !members_only {
+                    assert_eq!(
+                        element,
+                        PackedElement::Enum {
+                            decl,
+                            array: self.packed_enum,
+                        },
+                        "the enumeration a type keeps is not that of its fields"
+                    );
+                }
+            } else {
+                panic!("the fields of a type that keeps an enumeration tell none");
+            }
+            element
+        } else if self.enumeration
             && let Some(decl) = named.map(Decl::Named).or(anonymous)
         {
             PackedElement::Enum {
