@@ -641,7 +641,7 @@ impl<B: SimBackend> SimulationState<B> {
 /// process (IEEE 1800-2023 24.3.1), otherwise in the Active region.
 #[inline]
 pub(super) fn wake_in_region(
-    processes: &[ProcessRefs],
+    processes: &[std::sync::Arc<ProcessRefs>],
     ready: &mut BTreeSet<usize>,
     reactive: &mut BTreeSet<usize>,
     process: usize,

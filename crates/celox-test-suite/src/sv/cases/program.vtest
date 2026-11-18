@@ -241,3 +241,39 @@
   "#)
   (top Top)
   (expect reject))
+
+; `$exit` ends the processes of its program (24.7), also a child waiting in
+; a mailbox `get` that a `put` served but that has not taken the message
+; yet: the activation is reused for a later child, which must not take the
+; message handed to the ended one (15.4). It waits for one of its own, as
+; it does when no ended activation is reused.
+(case exited_mailbox_getters_leave_nothing_to_their_reused_activation
+  (source "exited_mailbox_getter.sv" #"
+    package q;
+      mailbox #(int) mb = new;
+      class A;
+        task run();
+          fork begin int x; mb.get(x); $display("ended child got %0d", x); end join_none
+          #1;
+          mb.put(5);
+          $exit;
+        endtask
+      endclass
+      class B;
+        task run();
+          int z;
+          #3;
+          fork begin int y; mb.get(y); $display("reused child got %0d", y); end join_none
+          #1;
+          if (mb.try_get(z)) $display("got %0d", z); else $display("empty");
+          $display("num %0d", mb.num());
+        endtask
+      endclass
+    endpackage
+    program P1; initial begin static q::A a = new; a.run(); end endprogram
+    program P2; initial begin static q::B b = new; b.run(); #10; end endprogram
+    module Top; P1 p1(); P2 p2(); endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "empty\nnum 0\n"))
