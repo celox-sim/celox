@@ -71,9 +71,20 @@ impl Spelling {
         name: TypedefName,
         scope: Option<Arc<str>>,
     ) {
+        self.name_spelled(declaration, Some(name), scope);
+    }
+
+    /// [`Self::name`] for a typedef whose `$typename` name may not be
+    /// known.
+    pub(super) fn name_spelled(
+        &mut self,
+        declaration: Arc<str>,
+        name: Option<TypedefName>,
+        scope: Option<Arc<str>>,
+    ) {
         let mut parts = self.0.as_deref().cloned().unwrap_or_default();
         parts.declaration = Some(declaration);
-        parts.name = Some(name);
+        parts.name = name;
         parts.scope = scope;
         self.0 = Some(Arc::new(parts));
     }

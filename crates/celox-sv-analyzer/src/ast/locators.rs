@@ -437,6 +437,9 @@ fn array(
         ty.packed_enum = shape.packed_enum;
         ty.signed_element_depth = shape.signed_element_depth;
         ty = ty.with_chandle(shape.chandle);
+        // The element keeps the enumerated type of the array's elements,
+        // even where the shape records no members of it.
+        ty.keep_enumeration(shape.retained_enumeration());
         ty
     };
     let width = casts::expr_type_from_type(&tree.functions, &element, &dims.const_env)

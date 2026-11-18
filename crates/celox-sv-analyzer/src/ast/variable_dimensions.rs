@@ -2,10 +2,11 @@
 //! invalidates the retained ID; declaration-preserving renaming keeps it.
 use super::*;
 
+pub(super) mod kept;
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct VariableDimensions {
     shape: VariableShape,
     /// The semantic type the declaration was bound to where it is declared
@@ -15,6 +16,10 @@ pub(super) struct VariableDimensions {
     /// (IEEE 1800-2023 7.4), which an element selected from the shape keeps
     /// (see [`Type::unpacked_ranges_mut`]).
     element: Option<semantic_types::RetainedType>,
+    /// The enumerated type (6.19) the variable is, or whose elements a
+    /// packed or unpacked array of it has, which only
+    /// [`Self::keep_enumeration`] sets (see [`kept`]).
+    enumeration: kept::KeptEnumeration,
 }
 
 impl VariableDimensions {
@@ -23,17 +28,21 @@ impl VariableDimensions {
             shape,
             binding: None,
             element: None,
+            enumeration: kept::KeptEnumeration::default(),
         }
     }
 
     /// `shape`, of type `ty`: bound to its semantic type and that of its
     /// elements, as `ty` is.
     pub(super) fn bound_to(shape: VariableShape, ty: &Type) -> Self {
-        Self {
+        let mut bound = Self {
             shape,
             binding: ty.binding.retained(),
             element: ty.element.retained(),
-        }
+            enumeration: kept::KeptEnumeration::default(),
+        };
+        bound.keep_enumeration(ty.enumeration.binding());
+        bound
     }
 
     /// The shape of an element of this unpacked array, bound to the element
@@ -47,6 +56,7 @@ impl VariableDimensions {
             unpacked: self.shape.unpacked[1..].to_vec(),
             ..self.clone_shape()
         });
+        element.keep_enumeration(self.enumeration.binding());
         if let Some(id) = self.bound_element(table) {
             element.bind_to(table, id);
         } else {
@@ -67,6 +77,7 @@ impl VariableDimensions {
         // A container's elements are not those of the subarray.
         if self.shape.container.is_none() {
             subarray.element = self.element.clone();
+            subarray.keep_enumeration(self.enumeration.binding());
         }
         subarray
     }
@@ -121,9 +132,35 @@ impl VariableDimensions {
     /// dimensions.
     pub(super) fn bind_to(&mut self, table: &semantic_types::TyTable, id: semantic_types::TyId) {
         self.binding = Some(table.retain(id));
-        self.element = table
-            .unpacked_element(id, self.shape.unpacked.len())
-            .map(|element| table.retain(element));
+        let element = table.unpacked_element(id, self.shape.unpacked.len());
+        self.element = element.map(|element| table.retain(element));
+        match element.map(|element| (element, table.enumeration(element))) {
+            Some((element, Some(false))) => {
+                let enumeration = semantic_types::EnumBinding::of(table, element);
+                self.keep_enumeration(enumeration.unwrap_or_default());
+            }
+            Some((_, Some(true))) => {}
+            _ => self.enumeration.forget(),
+        }
+    }
+
+    /// This shape with the enumerated type `enumeration`, which it was made
+    /// to have, such as that of the constant whose shape it is.
+    pub(super) fn with_enumeration(mut self, enumeration: semantic_types::EnumBinding) -> Self {
+        self.keep_enumeration(enumeration);
+        self
+    }
+
+    /// The enumerated type the variable is, or whose elements it has, as
+    /// it can be given to another shape of the same variable.
+    pub(super) fn retained_enumeration(&self) -> semantic_types::EnumBinding {
+        self.enumeration.binding()
+    }
+
+    /// What declares the enumerated type the variable is, or whose
+    /// elements it has.
+    pub(super) fn enumeration_declaration(&self) -> Option<&semantic_types::EnumDeclaration> {
+        self.enumeration.declaration()
     }
 
     /// The semantic type of an element of the shape's unpacked dimensions,
@@ -232,7 +269,8 @@ impl VariableDimensions {
     }
 
     /// What the variable's type is of an enumeration, as its semantic type
-    /// in `table` tells (see [`enums::Enumeration::of`]).
+    /// in `table` tells (see [`enums::Enumeration::of`]), or the enumerated
+    /// type it keeps while it has none.
     pub(super) fn enumeration_in(&self, table: &semantic_types::TyTable) -> enums::Enumeration {
         let fields = enums::Enumeration {
             enumeration: self.enum_domain.is_some()
@@ -241,7 +279,12 @@ impl VariableDimensions {
             packed: self.packed_enum,
             domain: self.enum_domain.clone(),
         };
-        enums::Enumeration::of(self.bound(table), table, fields)
+        match (self.bound(table), self.enumeration.declaration()) {
+            (None, Some(declaration)) => {
+                enums::Enumeration::kept(declaration, self.packed.len(), fields)
+            }
+            (id, _) => enums::Enumeration::of(id, table, fields),
+        }
     }
 
     /// The class of a variable of object handle type, or of the elements of
@@ -275,8 +318,10 @@ impl VariableDimensions {
         // context: a parameter of a structure type is typed once, not at
         // each access of one of its members.
         // Nor does the shape tell a virtual interface from the number that
-        // holds it: its element type does.
+        // holds it, or an enumerated type from its base type: its element
+        // type and the enumerated type it keeps do.
         if !self.shape.is_closed()
+            || self.enumeration.declaration().is_some()
             || self
                 .element
                 .as_ref()
@@ -356,6 +401,7 @@ impl DerefMut for VariableDimensions {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.binding = None;
         self.element = None;
+        self.enumeration.forget();
         &mut self.shape
     }
 }

@@ -1,9 +1,6 @@
 //! Declaration-bound constant types shared by parameters and enumerators.
 use super::*;
-use crate::ast::{
-    ConstEnv, Type, TypeKind, const_functions::ConstantFunctions, enums::EnumDomain,
-    expr_type_from_type, types,
-};
+use crate::ast::{ConstEnv, Type, const_functions::ConstantFunctions, enums::EnumDomain, types};
 
 /// A frozen declaration type plus an owner-checked interned semantic node.
 #[derive(Debug, Clone)]
@@ -62,15 +59,9 @@ impl ConstantType {
         while let Some(container) = &declaration.container {
             declaration = &container.element;
         }
-        base.is_enum = true;
         base.spelling = declaration.spelling.clone();
-        base.enum_domain = declaration.enum_domain.clone().and_then(|domain| {
-            let mut domain = (*domain).clone();
-            domain.width = expr_type_from_type(functions, &base, env)?.width;
-            domain.signed = base.is_signed;
-            domain.four_state = !matches!(base.kind, TypeKind::Bit | TypeKind::Chandle);
-            Some(Arc::new(domain))
-        });
+        // A member has the enumerated type that declares it (6.19).
+        base.keep_enumeration(declaration.enumeration.binding());
         Self::of_type(base, functions, table, env)
     }
 
@@ -85,6 +76,10 @@ impl ConstantType {
                 &Default::default(),
             )
         })
+    }
+    /// The enumerated type the constant is of, or whose elements it has.
+    pub(in crate::ast) fn enumeration(&self) -> EnumBinding {
+        self.declared.enumeration.binding()
     }
     pub(in crate::ast) fn domain(&self) -> Option<Arc<EnumDomain>> {
         self.declared.enum_domain.clone()
