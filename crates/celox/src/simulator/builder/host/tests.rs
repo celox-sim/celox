@@ -1857,6 +1857,93 @@ fn native_file_calls_reset_the_bound_after_a_wait() {
     }
 }
 
+/// A testbench process that waits every cycle and opens, writes, flushes
+/// and closes a file and reads its plusargs, as RTLMeter's OpenPiton and
+/// VeeR-EL2 testbenches do, runs as a kernel of the compiled scheduler: the
+/// native service serves `$fopen`, `$fclose`, `$fflush`, `$test$plusargs`
+/// and `$value$plusargs` as the reference loop does, so no slot of the
+/// design falls back to it.
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+))]
+#[test]
+fn native_services_keep_file_and_plusargs_testbenches_compiled() {
+    let directory = tempfile::tempdir().unwrap();
+    for four_state in [false, true] {
+        let mut contents = Vec::new();
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let path = directory
+                .path()
+                .join(format!("trace-{four_state}-{mode:?}.txt"));
+            let source = format!(
+                r#"`timescale 1ns/1ns
+                module Top;
+                    bit clk = 0;
+                    int fd, count = 0, n = 0;
+                    bit seen, got, missing;
+                    logic [7:0] h = 0;
+                    always #1 clk = ~clk;
+                    initial begin
+                        fd = $fopen("{}", "w");
+                        repeat (4) begin
+                            @(posedge clk);
+                            seen = $test$plusargs("go");
+                            missing = $test$plusargs("stop");
+                            got = $value$plusargs("n=%d", n);
+                            void'($value$plusargs("h=%h", h));
+                            $fwrite(fd, "%0d %0d %0d %0d %0d %h\n", count, seen, missing, got, n, h);
+                            $fflush(fd);
+                            count = count + 1;
+                        end
+                        $fclose(fd);
+                        forever @(posedge clk) count = count + 1;
+                    end
+                endmodule"#,
+                path.display()
+            );
+            let mut simulation = crate::Simulation::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("services.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(mode)
+            .plusargs(["go", "n=7", "h=1z"])
+            .build_native()
+            .unwrap();
+            simulation.run_until(20).unwrap();
+            assert_eq!(
+                simulation.get(simulation.signal("count")),
+                num_bigint::BigUint::from(10u32)
+            );
+            if mode == crate::SchedulerMode::Compiled {
+                let stats = simulation.scheduler_stats();
+                assert!(
+                    stats.compiled_slots > 0 && stats.reference_steps < stats.compiled_slots,
+                    "{stats:?}"
+                );
+                assert!(
+                    stats
+                        .kernels
+                        .iter()
+                        .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                    "{stats:?}"
+                );
+            }
+            drop(simulation);
+            contents.push(std::fs::read_to_string(&path).unwrap());
+        }
+        assert_eq!(contents[0], contents[1]);
+        // A two-state run reads a plusarg's unknown bits as zero.
+        let h = if four_state { "1x" } else { "10" };
+        let line = |count| format!("{count} 1 0 1 7 {h}\n");
+        assert_eq!(contents[1], (0..4).map(line).collect::<String>());
+    }
+}
+
 #[cfg(any(
     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
     all(target_arch = "aarch64", not(feature = "x86_64-codegen"))

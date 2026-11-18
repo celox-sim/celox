@@ -381,6 +381,7 @@ impl<B: SimBackend> Simulator<B> {
                     comb_before: Vec::new(),
                     observer: None,
                     updates: self.observation.observes_updates,
+                    plusargs: &self.plusargs,
                 };
                 let ((result, error), elapsed) = match prepared {
                     Some(call) => {
