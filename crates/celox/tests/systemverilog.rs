@@ -89,6 +89,8 @@ mod file_lines;
 mod final_procedures;
 #[path = "frontends/systemverilog/generate.rs"]
 mod generate;
+#[path = "frontends/systemverilog/hierarchical_calls.rs"]
+mod hierarchical_calls;
 #[path = "frontends/systemverilog/hierarchical_references.rs"]
 mod hierarchical_references;
 #[path = "frontends/systemverilog/hierarchy.rs"]

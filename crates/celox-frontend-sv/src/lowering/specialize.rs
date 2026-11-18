@@ -108,7 +108,7 @@ pub(super) fn analyze_specialization(
     module: &AnalyzedSvModule,
     design: &mut sv::Design,
     key: &LoweredSvModuleKey,
-    hierarchical: &[sv::ast::HierarchicalSignal],
+    hierarchical: sv::ast::HierarchicalObjects<'_>,
     forced: &[String],
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<sv::Ir, sv::AnalyzerError> {
@@ -180,7 +180,10 @@ pub(super) fn specialize_module(
                         module,
                         design,
                         key,
-                        hierarchical.signals,
+                        sv::ast::HierarchicalObjects {
+                            signals: hierarchical.signals,
+                            subroutines: &[],
+                        },
                         hierarchical.forced,
                         warnings,
                     )?;

@@ -201,6 +201,18 @@ pub(super) fn enter_call(
         }
         // `h.m()` of a class that declares no `m` (8.5).
         objects::check_member_declared(tree, session, *expression, native, dimensions)?;
+        // A dotted name that calls nothing of the scope is a hierarchical
+        // name of a subroutine of another instance (IEEE 1800-2023 23.8),
+        // which the caller resolves.
+        if let Some(components) =
+            hierarchical_callee(tree, session, *expression, native, dimensions)
+        {
+            return Err(AnalyzerError::HierarchicalReference {
+                path: components.join("."),
+                components,
+                interface: None,
+            });
+        }
         return Err(unsupported("method or randomize call"));
     };
     let cast = match name.as_str() {
