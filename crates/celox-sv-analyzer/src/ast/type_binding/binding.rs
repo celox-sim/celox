@@ -391,12 +391,7 @@ fn bind_in_mode(
                                 )?;
                             }
                             ty.enum_domain = enum_values(id, native, tree, session, context, &ty);
-                            ty.packed_enum = !native.data_type(id).packed_dimensions.is_empty();
-                            declare_enum(&mut ty, id, native, tree, session);
-                            ty.packed_ranges = ranges
-                                .into_iter()
-                                .chain(std::mem::take(&mut ty.packed_ranges))
-                                .collect();
+                            declare_enum(&mut ty, id, native, tree, session, ranges);
                             values.push(ty);
                         }
                     }
@@ -540,13 +535,9 @@ fn bind_in_mode(
                 if matches!(mode, BindingMode::Use) {
                     validate_enum_initializers(id, native, tree, session, context, &ty)?;
                 }
-                let mut outer = ranges;
-                outer.extend(std::mem::take(&mut ty.packed_ranges));
-                ty.packed_ranges = outer;
                 ty.is_enum = true;
                 ty.enum_domain = enum_values(id, native, tree, session, context, &ty);
-                ty.packed_enum = !native.data_type(id).packed_dimensions.is_empty();
-                declare_enum(&mut ty, id, native, tree, session);
+                declare_enum(&mut ty, id, native, tree, session, ranges);
                 values.push(ty);
             }
             Job::Aggregate {
@@ -701,13 +692,16 @@ fn declaration_position(
 
 /// Record the declaration of enumeration `id` in its type `ty`: a typedef
 /// of it names it later, else it is an anonymous type of its own (6.22.1
-/// c), declared in the elaborated scope around it.
+/// c), declared in the elaborated scope around it. The type keeps its
+/// declaration, and `ranges`, the packed dimensions that follow its
+/// members, make a packed array of it (7.4.1) that keeps it too.
 fn declare_enum(
     ty: &mut Type,
     id: TypeId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
     session: &Session,
+    ranges: Vec<PackedRange>,
 ) {
     let data = native.data_type(id);
     let scope = types::declaring_scope(
@@ -716,8 +710,27 @@ fn declare_enum(
         data.tokens,
         session,
     );
-    ty.spelling
-        .anonymous_enum(declaration_position(tree, native, data), scope);
+    let position = declaration_position(tree, native, data);
+    let dims = ty.packed_ranges.len();
+    let domain = ty.enum_domain.clone();
+    ty.keep_enumeration(semantic_types::EnumBinding::new(
+        semantic_types::EnumDeclaration {
+            name: Some(position),
+            named: false,
+            scope,
+            typename: None,
+            domain,
+            dims,
+        },
+    ));
+    if !data.packed_dimensions.is_empty() || !ranges.is_empty() {
+        ty.reshape_keeping_enumeration(|shape| {
+            shape.packed_ranges = ranges
+                .into_iter()
+                .chain(std::mem::take(&mut shape.packed_ranges))
+                .collect();
+        });
+    }
 }
 
 fn bind_ranges(

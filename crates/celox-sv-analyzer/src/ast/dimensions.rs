@@ -475,6 +475,7 @@ fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, con
             shape.members = existing.members.clone();
             shape.is_2state = existing.is_2state;
             shape.signed_element_depth = existing.signed_element_depth;
+            shape = shape.with_enumeration(existing.retained_enumeration());
         }
         context.insert(name.to_string(), shape);
     }
@@ -649,9 +650,22 @@ pub(super) fn unshared_discovery() -> bool {
 mod tests;
 
 pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariablePackedDimensions {
+    // The enumerated type a parameter is declared with (6.19), also one too
+    // wide for its members to be materialized.
+    let enumeration = |parameter: &Parameter| {
+        parameter
+            .semantic_type
+            .as_ref()
+            .map(semantic_types::ConstantType::enumeration)
+            .unwrap_or_default()
+    };
     parameters
         .iter()
-        .filter(|parameter| !parameter.packed_ranges.is_empty() || parameter.enum_domain.is_some())
+        .filter(|parameter| {
+            !parameter.packed_ranges.is_empty()
+                || parameter.enum_domain.is_some()
+                || enumeration(parameter).declaration().is_some()
+        })
         .map(|parameter| {
             (
                 parameter.name.clone(),
@@ -671,7 +685,8 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                     members: parameter.members.clone(),
                     signed_element_depth: parameter.signed_element_depth,
                     unpacked_struct: None,
-                }),
+                })
+                .with_enumeration(enumeration(parameter)),
             )
         })
         .collect()

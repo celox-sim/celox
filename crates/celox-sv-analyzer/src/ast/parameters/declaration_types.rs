@@ -145,18 +145,20 @@ impl Prefix<'_> {
             ty.kind = kind;
         } else {
             let inferred = parameter.resolved_type(types)?;
-            ty.is_signed = inferred.signed;
-            ty.packed_ranges = parameter.packed_ranges.clone();
-            if ty.packed_ranges.is_empty() && (inferred.width > 1 || !parameter.has_declared_type) {
-                ty.packed_ranges.push(PackedRange {
+            // The dimensions are those of the declared type, around the
+            // enumerated type it may have.
+            let mut packed_ranges = parameter.packed_ranges.clone();
+            if packed_ranges.is_empty() && (inferred.width > 1 || !parameter.has_declared_type) {
+                packed_ranges.push(PackedRange {
                     left: ConstExpr::Literal((inferred.width.checked_sub(1)?).to_string()),
                     right: ConstExpr::Literal("0".into()),
                 });
             }
-            ty.signed_element_depth = parameter.signed_element_depth;
-            if ty.is_enum && !self.data.packed_dimensions.is_empty() {
-                ty.packed_enum = true;
-            }
+            ty.reshape_keeping_enumeration(|shape| {
+                shape.is_signed = inferred.signed;
+                shape.packed_ranges = packed_ranges;
+                shape.signed_element_depth = parameter.signed_element_depth;
+            });
         }
         semantic_types::ConstantType::of_type(ty, functions, table, env)
     }

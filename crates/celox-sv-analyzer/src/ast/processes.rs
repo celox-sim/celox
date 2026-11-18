@@ -10,8 +10,7 @@ const STATES: [&str; 5] = ["FINISHED", "RUNNING", "WAITING", "SUSPENDED", "KILLE
 
 pub(super) fn state_type() -> Type {
     let mut ty = procedural::int_type();
-    ty.is_enum = true;
-    ty.enum_domain = Some(Arc::new(enums::EnumDomain {
+    let domain = Some(Arc::new(enums::EnumDomain {
         members: STATES
             .into_iter()
             .zip(0..)
@@ -24,6 +23,23 @@ pub(super) fn state_type() -> Type {
         signed: true,
         four_state: false,
     }));
+    // The built-in typedef `state` of class `process` in package `std`
+    // names it, which tells it apart in any table, also as the element of a
+    // packed array of it (7.4.1).
+    let dims = ty.packed_ranges.len();
+    ty.keep_enumeration(semantic_types::EnumBinding::new(
+        semantic_types::EnumDeclaration {
+            name: Some("std::process::state".into()),
+            named: true,
+            scope: None,
+            typename: Some(type_names::TypedefName::Class {
+                class: CLASS.into(),
+                name: "state".into(),
+            }),
+            domain,
+            dims,
+        },
+    ));
     ty
 }
 

@@ -199,6 +199,24 @@ impl Enumeration {
         self.enumeration && self.domain.is_none()
     }
 
+    /// The enumeration of a type that has no semantic type yet but keeps
+    /// the enumerated type `declaration` declares, with `packed` packed
+    /// dimensions, and whose conversion input fields tell `fields`.
+    pub(super) fn kept(
+        declaration: &super::semantic_types::EnumDeclaration,
+        packed: usize,
+        fields: Self,
+    ) -> Self {
+        let array = packed > declaration.dims;
+        let facts = Self {
+            enumeration: true,
+            packed: array,
+            domain: declaration.domain.clone().filter(|_| !array),
+        };
+        debug_assert_eq!(facts, fields, "the enumeration a type keeps");
+        facts
+    }
+
     /// The enumeration of a type, or of the elements of a fixed-size
     /// unpacked array of it, whose semantic type in `table` is `id`, and
     /// whose conversion input fields tell `fields`.
