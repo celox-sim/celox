@@ -456,7 +456,14 @@ fn prepare_external_hierarchy_collecting(
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
         analyses.insert(
             module_id,
-            analyze_specialization(base, &mut design, key, &[], &[], warnings)?,
+            analyze_specialization(
+                base,
+                &mut design,
+                key,
+                sv::ast::HierarchicalObjects::default(),
+                &[],
+                warnings,
+            )?,
         );
     }
     let overrides = schedule::exported_overrides(analyses.values())?;
