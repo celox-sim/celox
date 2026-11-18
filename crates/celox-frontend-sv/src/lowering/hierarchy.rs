@@ -1002,6 +1002,8 @@ pub(super) fn collect_foreign_writes(
     let mut always_ff = HashSet::default();
     let mut exclusive = HashSet::default();
     for process in module.initial_processes() {
+        // An `always_ff` that runs as a process is still one (IEEE
+        // 1800-2023 9.2.2.4): its variables are those of an `always_ff`.
         let ordinary = process
             .site()
             .is_none_or(|site| site.construct != "always_ff");
@@ -1010,7 +1012,7 @@ pub(super) fn collect_foreign_writes(
         } else if ordinary {
             &mut repeatedly
         } else {
-            &mut exclusive
+            &mut always_ff
         };
         super::procedural::written_names_with_calls(module, process.body(), written);
     }
