@@ -508,3 +508,64 @@ endmodule"#;
         );
     }
 }
+
+/// A constant function may take an unpacked array parameter as an argument,
+/// by value (IEEE 1800-2023 13.4.3), such as OpenTitan's
+/// `InfosPerBank = max_info_pages(InfoTypeSize)`: the call is a constant
+/// that sizes a declaration, its elements in the order of the formal's
+/// range. Verilator 5.054 prints the same line.
+#[test]
+fn constant_functions_take_array_parameters_as_arguments() {
+    let source = r#"`timescale 1ns/1ns
+package fp;
+  parameter int InfoTypes = 3;
+  parameter int InfoTypeSize [InfoTypes] = '{10, 1, 2};
+  parameter int InfosPerBank = max_info_pages(InfoTypeSize);
+  function automatic integer max_info_pages(int infos[InfoTypes]);
+    int current_max = 0;
+    for (int i = 0; i < InfoTypes; i++) begin
+      if (infos[i] > current_max) begin
+        current_max = infos[i];
+      end
+    end
+    return current_max;
+  endfunction
+endpackage
+module Top;
+  localparam logic [7:0] Down [2:0] = '{8'd5, 8'd6, 8'd7};
+  function automatic int first(int infos[3]);
+    return infos[0] * 100 + infos[1] * 10 + infos[2];
+  endfunction
+  function automatic int down(logic [7:0] a [2:0]);
+    return a[2] * 100 + a[1] * 10 + a[0];
+  endfunction
+  localparam int F = first(fp::InfoTypeSize);
+  localparam int D = down(Down);
+  localparam int Bits = 4 * fp::InfosPerBank;
+  logic [Bits-1:0] w;
+  logic [F-1:0] f;
+  logic [D-1:0] d;
+  initial #1 $display("%0d %0d %0d %0d %0d", fp::InfosPerBank, $bits(w), F, $bits(f), $bits(d));
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("array_arguments.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["10 40 1012 1012 567"], "four_state={four_state}");
+    }
+}
