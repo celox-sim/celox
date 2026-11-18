@@ -54,6 +54,96 @@ impl ProcModule<'_> {
     }
 }
 
+impl ProcModule<'_> {
+    /// The width and signedness of integral variable `name`, such as the
+    /// variable of a `for` loop (see [`LoopBounds`]).
+    pub fn integral_variable_type(&self, name: &str) -> Option<(usize, bool)> {
+        let variable = self.var(self.id(name)?);
+        (variable.float.is_none() && variable.array_dims.is_empty())
+            .then_some((variable.width, variable.signed))
+    }
+
+    /// The bits of its variable that `lvalue`, a select at run-time
+    /// positions, may write: the written value keeps the other bits, so it
+    /// defines the whole vector, or the array element or structure member
+    /// the select stays within (see `dynamic_packed_write`).
+    pub fn dynamic_select_access(&self, lvalue: &sv::ir::LValue) -> Option<BitAccess> {
+        let variable = self.var(self.id(lvalue.name())?);
+        let element = dynamic_array_element_lvalue(
+            lvalue,
+            self.variables,
+            self.name_to_id,
+            self.constants,
+            self.parameter_types,
+        );
+        Some(
+            element
+                .is_none()
+                .then(|| {
+                    dynamic_packed_write(
+                        lvalue,
+                        self.variables,
+                        self.name_to_id,
+                        self.constants,
+                        self.parameter_types,
+                    )
+                })
+                .flatten()
+                .and_then(|write| write.window)
+                .unwrap_or(BitAccess::new(0, variable.width - 1)),
+        )
+    }
+
+    /// The bits of its variable that `lvalue`, a select whose positions
+    /// read the variables of the `for` loops `loops` around it and no other
+    /// run-time value, writes in their iterations, as the loops unrolled
+    /// write them (IEEE 1800-2023 6.5, 12.7.1): in each iteration the bits
+    /// it selects there, or, where those leave the array element or
+    /// structure member the select stays within, that element or member,
+    /// which its run-time form writes (see `keep_element_window`). `None`
+    /// for another select.
+    pub fn unrolled_select_writes(
+        &self,
+        lvalue: &sv::ir::LValue,
+        loops: &LoopValues,
+    ) -> Option<Vec<BitAccess>> {
+        let sv::ir::LValue::Select { msb, lsb, .. } = lvalue else {
+            return None;
+        };
+        let variable = self.var(self.id(lvalue.name())?);
+        let bounds = unrolled_select_bounds(msb, lsb, loops, self.constants, self.parameter_types)?;
+        let mut accesses = Vec::with_capacity(bounds.len());
+        for (msb, lsb) in bounds {
+            let mut folded = lvalue.clone();
+            if let sv::ir::LValue::Select {
+                msb: folded_msb,
+                lsb: folded_lsb,
+                ..
+            } = &mut folded
+            {
+                *folded_msb = const_expr_from_i128(msb);
+                *folded_lsb = const_expr_from_i128(lsb);
+            }
+            let folded = keep_element_window(
+                lvalue,
+                folded,
+                self.variables,
+                self.name_to_id,
+                self.constants,
+                self.parameter_types,
+            );
+            if folded == *lvalue {
+                accesses.extend(self.dynamic_select_access(lvalue));
+                continue;
+            }
+            // A select entirely outside the vector writes nothing.
+            let (access, _) = constant_select_write(variable, msb, lsb)?;
+            accesses.extend(access);
+        }
+        Some(accesses)
+    }
+}
+
 /// The names written by the assignments (and through call arguments) of a
 /// Whether a run of `stmts` may store a variable twice, given the variables
 /// `written` on some path before them. Locals are not variables of the

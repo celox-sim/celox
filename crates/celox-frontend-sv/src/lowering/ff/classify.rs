@@ -39,6 +39,18 @@ pub(super) struct Writes {
 impl Ff<'_, '_> {
     /// Record a written lvalue: its constant bit range, or the whole variable.
     pub(super) fn record_target(&mut self, lvalue: &sv::ir::LValue, blocking: bool) {
+        self.record_target_bits(lvalue, blocking, None);
+    }
+
+    /// Record a written lvalue as [`Self::record_target`] does, the bits
+    /// `unrolled` of a select in loops it writes in their iterations (see
+    /// `ProcModule::unrolled_select_writes`) its targets.
+    fn record_target_bits(
+        &mut self,
+        lvalue: &sv::ir::LValue,
+        blocking: bool,
+        unrolled: Option<Vec<BitAccess>>,
+    ) {
         let Some(id) = self.m.id(lvalue.name()) else {
             return;
         };
@@ -103,6 +115,12 @@ impl Ff<'_, '_> {
                 self.writes.other_writes.insert(id);
             }
         }
+        if let Some(unrolled) = unrolled.filter(|_| constant.is_none()) {
+            self.writes
+                .targets
+                .extend(unrolled.into_iter().map(|access| (id, access)));
+            return;
+        }
         let access = match lvalue {
             sv::ir::LValue::Ident(_) => BitAccess::new(0, variable.width - 1),
             sv::ir::LValue::Select { .. } => constant.unwrap_or(whole),
@@ -158,32 +176,54 @@ impl Ff<'_, '_> {
 
     /// Collect the variables a body writes, following calls into subroutines.
     pub(super) fn scan(&mut self, stmts: &[sv::ir::Stmt], visited: &mut HashSet<String>) {
-        let mut writes: Vec<(sv::ir::LValue, bool)> = Vec::new();
-        for stmt in stmts {
-            stmt.walk(&mut |stmt| match stmt {
+        // Each target, whether a blocking assignment writes it, and the
+        // bits it writes in the iterations of the loops around it.
+        let mut writes: Vec<(sv::ir::LValue, bool, Option<Vec<BitAccess>>)> = Vec::new();
+        let m = &*self.m;
+        let variable_type = |name: &str| m.integral_variable_type(name);
+        let bounds = LoopBounds {
+            constants: m.constants,
+            parameter_types: m.parameter_types,
+            variable_type: &variable_type,
+            calls: m,
+        };
+        bounds.walk(
+            stmts,
+            &mut LoopValues::new(),
+            &mut |stmt, loops| match stmt {
                 sv::ir::Stmt::Assign {
                     lhs, nonblocking, ..
-                } => writes.push((lhs.clone(), !nonblocking)),
+                } => writes.push((
+                    lhs.clone(),
+                    !nonblocking,
+                    m.unrolled_select_writes(lhs, loops),
+                )),
                 sv::ir::Stmt::AssignConcat {
                     parts, nonblocking, ..
                 } => {
-                    writes.extend(parts.iter().map(|part| (part.clone(), !nonblocking)));
+                    writes.extend(parts.iter().map(|part| {
+                        (
+                            part.clone(),
+                            !nonblocking,
+                            m.unrolled_select_writes(part, loops),
+                        )
+                    }));
                 }
                 // `$readmemh` writes its destination immediately, and
                 // `$timeformat` the design's format of `%t`.
                 sv::ir::Stmt::SystemTask { task, args, .. } => {
                     if let Some(destination) = readmem_destination(*task, args) {
-                        writes.push((sv::ir::LValue::Ident(destination.to_string()), true));
+                        writes.push((sv::ir::LValue::Ident(destination.to_string()), true, None));
                     }
                     if *task == sv::ir::SystemTask::Timeformat {
-                        writes.push((sv::ir::LValue::Ident(TIME_FORMAT.to_string()), true));
+                        writes.push((sv::ir::LValue::Ident(TIME_FORMAT.to_string()), true, None));
                     }
                 }
                 _ => {}
-            });
-        }
-        for (lvalue, blocking) in writes {
-            self.record_target(&lvalue, blocking);
+            },
+        );
+        for (lvalue, blocking, unrolled) in writes {
+            self.record_target_bits(&lvalue, blocking, unrolled);
         }
         // Calls: output arguments and the subroutine bodies, including the
         // calls in the select positions of assignment targets.

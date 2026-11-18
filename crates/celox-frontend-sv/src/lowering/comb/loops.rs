@@ -364,9 +364,7 @@ impl Comb<'_, '_> {
         canonical: &CanonicalLoop,
         body: &[sv::ir::Stmt],
     ) -> Result<bool, sv::AnalyzerError> {
-        let mut written = HashSet::default();
-        written_names(body, &mut written);
-        if written.contains(&canonical.var) {
+        if body_writes(&*self.m, body, &canonical.var) {
             return Ok(false);
         }
         // Only inspect the bounds: their runtime events belong to the

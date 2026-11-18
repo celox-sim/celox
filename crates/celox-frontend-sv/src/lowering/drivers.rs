@@ -89,7 +89,7 @@ pub(super) fn stmt_may_suspend(subroutines: &[sv::ir::Subroutine], stmt: &sv::ir
 /// recorded there with the formal: it is written when the formal is (see
 /// `ProcModule::written_names`).
 pub(super) fn kernel_written_names(
-    scan: &impl CallDefinitions,
+    scan: &(impl CallDefinitions + ?Sized),
     body: &[sv::ir::Stmt],
     names: &mut HashSet<String>,
     visited: &mut HashSet<String>,
@@ -221,13 +221,32 @@ impl<'a> DriverScan<'a> {
 
     /// Calls `record` with each assignment target of `body`.
     pub(super) fn body(&self, record: &mut dyn FnMut(&sv::ir::LValue), body: &[sv::ir::Stmt]) {
-        self.body_at(record, body, &mut HashSet::default(), 0);
+        self.body_at(
+            &mut |lvalue, _| record(lvalue),
+            body,
+            None,
+            &mut HashSet::default(),
+            0,
+        );
+    }
+
+    /// Calls `record` with each assignment target of `body` and the values
+    /// that the variables of the `for` loops around it take, which `bounds`
+    /// finds (see [`procedural::LoopBounds::walk`]).
+    pub(super) fn body_in_loops(
+        &self,
+        record: &mut dyn FnMut(&sv::ir::LValue, &procedural::LoopValues),
+        body: &[sv::ir::Stmt],
+        bounds: &procedural::LoopBounds<'_>,
+    ) {
+        self.body_at(record, body, Some(bounds), &mut HashSet::default(), 0);
     }
 
     fn body_at(
         &self,
-        record: &mut dyn FnMut(&sv::ir::LValue),
+        record: &mut dyn FnMut(&sv::ir::LValue, &procedural::LoopValues),
         body: &[sv::ir::Stmt],
+        bounds: Option<&procedural::LoopBounds<'_>>,
         visited: &mut HashSet<String>,
         depth: usize,
     ) {
@@ -236,27 +255,38 @@ impl<'a> DriverScan<'a> {
             return;
         }
         let mut calls = Vec::new();
-        for stmt in body {
-            stmt.walk(&mut |stmt| {
-                match stmt {
-                    sv::ir::Stmt::Assign { lhs, .. } => record(lhs),
-                    sv::ir::Stmt::AssignConcat { parts, .. } => parts.iter().for_each(&mut *record),
-                    _ => {}
+        let outside = procedural::LoopValues::new();
+        let mut visit = |stmt: &sv::ir::Stmt, loops: &procedural::LoopValues| {
+            match stmt {
+                sv::ir::Stmt::Assign { lhs, .. } => record(lhs, loops),
+                sv::ir::Stmt::AssignConcat { parts, .. } => {
+                    for part in parts {
+                        record(part, loops);
+                    }
                 }
-                procedural::stmt_calls(stmt, &mut calls);
-            });
+                _ => {}
+            }
+            procedural::stmt_calls(stmt, &mut calls);
+        };
+        match bounds {
+            Some(bounds) => bounds.walk(body, &mut procedural::LoopValues::new(), &mut visit),
+            None => {
+                for stmt in body {
+                    stmt.walk(&mut |stmt| visit(stmt, &outside));
+                }
+            }
         }
         let mut seen_defaults = procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             if let sv::ir::Callee::Object(op) = &callee {
                 for lhs in procedural::written_object_arguments(op, &args) {
-                    record(&lhs);
+                    record(&lhs, &outside);
                 }
             }
             let name = match callee {
                 sv::ir::Callee::System(function) => {
                     for lvalue in procedural::written_system_arguments(function, &args) {
-                        record(&lvalue);
+                        record(&lvalue, &outside);
                     }
                     continue;
                 }
@@ -269,7 +299,7 @@ impl<'a> DriverScan<'a> {
             };
             if let Some(import) = self.dpi_import(&name) {
                 for lvalue in procedural::written_dpi_arguments(import, &args) {
-                    record(&lvalue);
+                    record(&lvalue, &outside);
                 }
                 continue;
             }
@@ -281,13 +311,15 @@ impl<'a> DriverScan<'a> {
                 if param.direction.is_written()
                     && let Some(lvalues) = arg.as_ref().and_then(procedural::lvalue_from_expr)
                 {
-                    lvalues.iter().for_each(&mut *record);
+                    for lvalue in &lvalues {
+                        record(lvalue, &outside);
+                    }
                 }
             }
             // A subroutine body writes a module variable for each caller;
             // its own formals and locals have module-unique names.
             if visited.insert(name) {
-                self.body_at(record, &subroutine.body, visited, depth + 1);
+                self.body_at(record, &subroutine.body, bounds, visited, depth + 1);
             }
         }
     }
@@ -431,6 +463,23 @@ impl ModuleDrivers {
         let mut shapes: HashMap<String, Option<(usize, usize)>> = HashMap::default();
         let mut writes: HashMap<String, Vec<DriverWrite>> = HashMap::default();
         let scan = DriverScan::of(module);
+        // The variables `for` loops declare are locals of the module.
+        let locals: HashMap<&str, &sv::ir::Type> = module
+            .locals()
+            .iter()
+            .map(|local| (local.name.as_str(), &local.r#type))
+            .collect();
+        let local_type = |name: &str| {
+            let info = signal_type_from_sv(locals.get(name)?, constants, parameter_types).ok()?;
+            (info.float.is_none() && info.array_dims.is_empty())
+                .then_some((info.width, info.signed))
+        };
+        let bounds = procedural::LoopBounds {
+            constants,
+            parameter_types,
+            variable_type: &local_type,
+            calls: &scan,
+        };
         let mut walk = |body: &[sv::ir::Stmt],
                         local: Option<usize>,
                         continuous: Option<usize>,
@@ -439,8 +488,8 @@ impl ModuleDrivers {
             if local.is_none() && continuous.is_none() && initial.is_none() {
                 return;
             }
-            scan.body(
-                &mut |lvalue| {
+            scan.body_in_loops(
+                &mut |lvalue, loops| {
                     let name = lvalue.name();
                     // The assertion control state of `$assertoff` and
                     // `$asserton` is simulator state, not a variable of the
@@ -479,18 +528,30 @@ impl ModuleDrivers {
                         }
                         _ => None,
                     };
-                    writes
-                        .entry(name.to_string())
-                        .or_default()
-                        .push(DriverWrite {
-                            local,
-                            continuous,
-                            initial,
-                            range,
-                            element,
-                        });
+                    let entry = writes.entry(name.to_string()).or_default();
+                    let write = |range, element| DriverWrite {
+                        local,
+                        continuous,
+                        initial,
+                        range,
+                        element,
+                    };
+                    match unrolled_select_bits(
+                        lvalue,
+                        range,
+                        element,
+                        loops,
+                        constants,
+                        parameter_types,
+                    ) {
+                        Some(bits) => {
+                            entry.extend(bits.into_iter().map(|bits| write(Some(bits), None)));
+                        }
+                        None => entry.push(write(range, element)),
+                    }
                 },
                 body,
+                &bounds,
             );
         };
         let comb = module.comb_processes();
@@ -665,6 +726,59 @@ pub(super) fn net_lvalue_range(
     let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
     let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
     Some((msb.min(lsb), msb.max(lsb)))
+}
+
+/// The bits a select at run-time positions writes in the iterations of
+/// the `for` loops `loops` around it whose variables are all its positions
+/// read (IEEE 1800-2023 6.5, 12.7.1): those it selects in each iteration,
+/// as a constant select does, or the bits of its member or array element,
+/// `window`, in one that selects bits outside them, as the run-time form
+/// writes within those only (see `keep_element_window`). Overlapping bits
+/// are merged. `None` if the select is constant, or its positions read
+/// other run-time values.
+fn unrolled_select_bits(
+    lvalue: &sv::ir::LValue,
+    range: Option<(i128, i128)>,
+    window: Option<(i128, i128)>,
+    loops: &procedural::LoopValues,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<Vec<(i128, i128)>> {
+    let sv::ir::LValue::Select {
+        msb,
+        lsb,
+        window: member,
+        ..
+    } = lvalue
+    else {
+        return None;
+    };
+    if range.is_some() || loops.is_empty() {
+        return None;
+    }
+    let window = member
+        .map(|member| (i128::from(member.lsb), i128::from(member.msb)))
+        .or(window);
+    let mut bits: Vec<_> =
+        procedural::unrolled_select_bounds(msb, lsb, loops, constants, parameter_types)?
+            .into_iter()
+            .map(|(msb, lsb)| {
+                let (low, high) = (msb.min(lsb), msb.max(lsb));
+                match window {
+                    Some((bottom, top)) if low < bottom || high > top => (bottom, top),
+                    _ => (low, high),
+                }
+            })
+            .collect();
+    bits.sort_unstable();
+    let mut merged: Vec<(i128, i128)> = Vec::with_capacity(bits.len());
+    for (low, high) in bits {
+        match merged.last_mut() {
+            Some((_, top)) if low <= top.saturating_add(1) => *top = (*top).max(high),
+            _ => merged.push((low, high)),
+        }
+    }
+    Some(merged)
 }
 
 pub(super) fn net_driver_ranges_overlap(
