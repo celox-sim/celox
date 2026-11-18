@@ -1495,3 +1495,206 @@ fn forced_arrays_report_the_size_of_their_controls() {
         );
     }
 }
+
+/// Forces through hierarchical names of members of interface instances: of
+/// an element of an interface instance array and of a single instance, of a
+/// member that an `assign` of the holding module drives, of one that an
+/// `assign` of another instance drives through an interface port, to a
+/// varying expression, and of one that an `always_comb` of the holding
+/// module assigns from another element, which keeps its forced value after
+/// the release until the procedure runs again (Caliptra's
+/// `responder_inst[N].hreadyout`). The lines are those of Icarus Verilog
+/// 13.0, and of Verilator 5.054 where Icarus has no modports.
+#[test]
+fn forces_of_members_of_interface_instances() {
+    for (source, expected) in [
+        (
+            r#"`timescale 1ns/1ns
+interface ahb_if;
+  logic hreadyout;
+  logic hwrite;
+endinterface
+module dut;
+  ahb_if resp[0:3]();
+  ahb_if single();
+  for (genvar i = 0; i < 4; i++) begin : g
+    assign resp[i].hreadyout = 1'b1;
+  end
+  assign single.hreadyout = 1'b1;
+endmodule
+module top;
+  dut d();
+  initial begin
+    #1 $display("a %b %b %b", d.resp[2].hreadyout, d.resp[3].hreadyout, d.single.hreadyout);
+    force d.resp[2].hreadyout = 1'b0;
+    force d.single.hreadyout = 1'b0;
+    #1 $display("b %b %b %b", d.resp[2].hreadyout, d.resp[3].hreadyout, d.single.hreadyout);
+    release d.resp[2].hreadyout;
+    release d.single.hreadyout;
+    #1 $display("c %b %b %b", d.resp[2].hreadyout, d.resp[3].hreadyout, d.single.hreadyout);
+    $finish;
+  end
+endmodule
+"#,
+            &["a 1 1 1", "b 0 1 0", "c 1 1 1"][..],
+        ),
+        (
+            r#"`timescale 1ns/1ns
+interface ahb_if;
+  logic hreadyout;
+  logic [3:0] hrdata;
+  modport resp(output hreadyout, output hrdata);
+endinterface
+module responder(ahb_if.resp port, input logic [3:0] v);
+  assign port.hreadyout = 1'b1;
+  always_comb port.hrdata = v;
+endmodule
+module dut(input logic [3:0] v);
+  ahb_if resp[0:3]();
+  for (genvar i = 0; i < 4; i++) begin : g
+    responder r(.port(resp[i]), .v(v + 4'(i)));
+  end
+  logic seen;
+  assign seen = resp[2].hreadyout;
+endmodule
+module top;
+  logic [3:0] v = 4'd1;
+  logic alt = 1'b0;
+  dut d(.v);
+  initial begin
+    #1 $display("a %b %b %0d %b", d.resp[2].hreadyout, d.resp[1].hreadyout, d.resp[2].hrdata, d.seen);
+    force d.resp[2].hreadyout = alt;
+    #1 $display("b %b %b %0d %b", d.resp[2].hreadyout, d.resp[1].hreadyout, d.resp[2].hrdata, d.seen);
+    alt = 1'b1; v = 4'd5;
+    #1 $display("c %b %0d %0d %b", d.resp[2].hreadyout, d.resp[1].hrdata, d.resp[2].hrdata, d.seen);
+    release d.resp[2].hreadyout;
+    #1 $display("d %b %0d %b", d.resp[2].hreadyout, d.resp[2].hrdata, d.seen);
+    $finish;
+  end
+endmodule
+"#,
+            &["a 1 1 3 1", "b 0 1 3 0", "c 1 6 7 1", "d 1 7 1"][..],
+        ),
+        (
+            r#"`timescale 1ns/1ns
+interface ahb_if;
+  logic hreadyout;
+endinterface
+module top_dut(input logic src);
+  ahb_if resp[0:9]();
+  assign resp[8].hreadyout = src;
+  always_comb resp[9].hreadyout = resp[8].hreadyout;
+endmodule
+module top;
+  logic src = 1'b1, alt = 1'b0;
+  top_dut d(.src);
+  initial begin
+    #1 force d.resp[9].hreadyout = 1'b0;
+    #1 $display("a %b", d.resp[9].hreadyout);
+    force d.resp[9].hreadyout = alt;
+    alt = 1'b1;
+    #1 $display("b %b", d.resp[9].hreadyout);
+    release d.resp[9].hreadyout;
+    #1 $display("c %b", d.resp[9].hreadyout);
+    src = 1'b0;
+    #1 $display("d %b", d.resp[9].hreadyout);
+    $finish;
+  end
+endmodule
+"#,
+            &["a 0", "b 1", "c 1", "d 0"][..],
+        ),
+    ] {
+        for four_state in [false, true] {
+            let mut sim = simulation(source, four_state).build().unwrap();
+            sim.run_until(100).unwrap();
+            assert_eq!(display_lines(&mut sim), expected, "four_state={four_state}");
+        }
+    }
+}
+
+/// A member of an interface instance that a procedure of another instance
+/// writes through an interface port is rejected as a force target: the
+/// write reaches it as an output port connection does, so after a release
+/// it would not keep the forced value until the next write.
+#[test]
+fn forces_of_interface_members_written_through_interface_ports_are_rejected() {
+    // A procedure of an instance below the one the member is passed to, as
+    // through a relay, writes it as well.
+    for source in [
+        r#"`timescale 1ns/1ns
+interface bus_if;
+  logic [3:0] c, k, s, f;
+endinterface
+module writer(bus_if port, input logic clk, input logic [3:0] v);
+  assign port.c = v;
+  always_comb port.k = v;
+  always @* port.s = v;
+  always_ff @(posedge clk) port.f <= v;
+endmodule
+module dut(input logic clk, input logic [3:0] v);
+  bus_if b();
+  writer w(.port(b), .clk, .v);
+endmodule
+module top;
+  logic clk = 0; logic [3:0] v = 4'd1;
+  dut d(.clk, .v);
+  always #5 clk = ~clk;
+  initial begin
+    #7 force d.b.c = 4'd9; force d.b.k = 4'd9; force d.b.s = 4'd9; force d.b.f = 4'd9;
+    #1 v = 4'd5;
+    #10 $display("forced %0d %0d %0d %0d", d.b.c, d.b.k, d.b.s, d.b.f);
+    release d.b.c; release d.b.k; release d.b.s; release d.b.f;
+    #1 $display("released %0d %0d %0d %0d", d.b.c, d.b.k, d.b.s, d.b.f);
+    $finish;
+  end
+endmodule
+"#,
+        r#"`timescale 1ns/1ns
+interface bus_if;
+  logic [3:0] c, k, s, f;
+endinterface
+module writer(bus_if port, input logic clk, input logic [3:0] v);
+  assign port.c = v;
+  always_comb port.k = v;
+  always @* port.s = v;
+  always_ff @(posedge clk) port.f <= v;
+endmodule
+module relay(bus_if port, input logic clk, input logic [3:0] v);
+  writer inner(.port(port), .clk, .v);
+endmodule
+module dut(input logic clk, input logic [3:0] v);
+  bus_if b();
+  relay w(.port(b), .clk, .v);
+endmodule
+module top;
+  logic clk = 0; logic [3:0] v = 4'd1;
+  dut d(.clk, .v);
+  always #5 clk = ~clk;
+  initial begin
+    #7 force d.b.c = 4'd9; force d.b.k = 4'd9; force d.b.s = 4'd9; force d.b.f = 4'd9;
+    #1 v = 4'd5;
+    #10 $display("forced %0d %0d %0d %0d", d.b.c, d.b.k, d.b.s, d.b.f);
+    release d.b.c; release d.b.k; release d.b.s; release d.b.f;
+    #1 $display("released %0d %0d %0d %0d", d.b.c, d.b.k, d.b.s, d.b.f);
+    $finish;
+  end
+endmodule
+"#,
+    ] {
+        let error = simulation(source, false)
+            .build()
+            .expect_err("the force must be rejected")
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            error.contains(
+                "of `dut`, which a procedure of instance `w` or of one below it writes through an interface port"
+            ) && !error.contains("`b.c`"),
+            "{error}"
+        );
+    }
+}

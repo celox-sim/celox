@@ -1003,6 +1003,7 @@ fn schedule_sources_collecting(
         resolve_inout_drivers(&module_ids, &mut lowered_modules);
         resolve_interconnects(&mut module_ids, &mut lowered_modules)?;
         validate_specialized_instance_net_drivers(&module_ids, &lowered_modules, four_state)?;
+        validate_forced_interface_members(&module_ids, &lowered_modules, &forced)?;
         let root = &lowered_modules[&root_id];
         if let Some(port) = root
             .port_order
