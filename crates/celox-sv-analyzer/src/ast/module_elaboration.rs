@@ -6,6 +6,7 @@ mod bodies;
 mod constants;
 mod declarations;
 mod finish;
+mod implicit_nets;
 mod reachable_imports;
 
 /// The state [`Module::from_selected_scope_once`] elaborates a scope in: what
@@ -266,6 +267,9 @@ impl Module {
             scope.reject_ignored_constructs(syntax_tree, session)?;
             scope.ports_and_signals(syntax_tree, session)?;
             scope.declared_shapes(syntax_tree, session);
+            if scope.implicit_port_nets(syntax_tree)? {
+                scope.declared_shapes(syntax_tree, session);
+            }
             scope.subroutine_arguments(syntax_tree, session)?;
             let (array_initial_processes, packed_pattern_values) =
                 scope.array_parameter_values(syntax_tree, session)?;

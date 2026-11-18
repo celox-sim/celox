@@ -32,6 +32,9 @@ struct ScopeItems<'p> {
 impl Parser<'_> {
     /// Declare the implicit nets of the continuous assignments of `unit`.
     pub(super) fn declare_implicit_nets(&mut self, unit: &mut Unit) -> Result<()> {
+        // The implicit nets the semantic analysis declares, such as those
+        // of port connections, have the net type in effect here.
+        unit.default_nettype = self.default_nettype.clone();
         // Implicit nets of interfaces stay unsupported.
         if unit.external || !matches!(unit.kind, UnitKind::Module | UnitKind::Program) {
             return Ok(());

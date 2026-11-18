@@ -723,6 +723,10 @@ pub struct Unit {
     pub package_bindings: Vec<PackageBindingId>,
     pub type_aliases: Vec<TypeAliasId>,
     pub time_declarations: Vec<TimeDeclarationId>,
+    /// The net type of the unit's implicit nets (IEEE 1800-2023 6.10,
+    /// 22.8): the `default_nettype` in effect at the end of the unit, `None`
+    /// under `default_nettype none`.
+    pub default_nettype: Option<String>,
     pub end_label: Option<Name>,
     pub tokens: TokenRange,
 }

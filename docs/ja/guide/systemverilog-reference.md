@@ -43,7 +43,10 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
   本体の宣言による素の non-ANSI ポートは対応）、`ref` ポート
   （[#427](https://github.com/celox-sim/celox/issues/427)）、SystemVerilog ソースの外で
   定義されたモジュールへのワイルドカード `.*` 接続
-  （[#442](https://github.com/celox-sim/celox/issues/442)）、ANSI ポートの既定値。
+  （[#442](https://github.com/celox-sim/celox/issues/442)）、ANSI ポートの既定値、
+  generate ブロック内のインスタンスのポート接続が宣言する暗黙のネット（6.10）:
+  それを読む入力接続は拒否し、出力だけが駆動するものはブロックではなく
+  モジュールのネットになります。
 - 複数ドライバのネット。ただし 1 つのモジュール内の継続代入が `wire`、`tri`、`wand`、
   `triand`、`wor`、`trior` のネットを駆動する場合は解決します（6.6.1〜6.6.3）。
   インスタンスの下にあるドライバ（モジュールをまたぐトライステートバス）、
