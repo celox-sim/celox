@@ -30,7 +30,8 @@ impl Generator<'_> {
             self.inline_with_exit(unit, finish_exit);
             // The instrumentation marks after a call's writes as well, and
             // after the wide commits it makes itself.
-            if instructions(unit).any(makes_host_calls) {
+            let functions = &self.program.runtime.runtime_schema.extern_functions;
+            if instructions(unit).any(|inst| makes_opaque_calls(inst, functions)) {
                 self.mark_dirty();
             }
             return;
@@ -74,7 +75,7 @@ impl Generator<'_> {
                 self.store(self.slots.dirty, SCHEDULER_FLAG_WIDTH, dirty);
             }
         } else if instructions(unit).any(|inst| {
-            makes_host_calls(inst)
+            makes_opaque_calls(inst, &self.program.runtime.runtime_schema.extern_functions)
                 || written_storage(inst).any(|target| self.settle_reads(target.absolute_addr()))
         }) {
             self.mark_dirty();
@@ -90,7 +91,10 @@ impl Generator<'_> {
         let mut bits = 0;
         for instruction in instructions(unit) {
             // An opaque call can change state outside explicit Stores.
-            if makes_host_calls(instruction) {
+            if makes_opaque_calls(
+                instruction,
+                &self.program.runtime.runtime_schema.extern_functions,
+            ) {
                 return None;
             }
             let (target, offset, width) = match instruction.state_writes() {

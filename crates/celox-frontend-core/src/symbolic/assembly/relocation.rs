@@ -520,18 +520,23 @@ fn number_instance<'a>(
         },
     );
     // Extern functions are shared by C symbol name across instances, and
-    // every import of one name must declare the same prototype.
+    // every import of one name must declare the same prototype. A name is
+    // isolated only if every import of it is.
     let mut extern_function_map = HashMap::default();
     for (local, function) in sim_module.extern_functions.iter().enumerate() {
         let global = match extern_function_indices.get(&function.name).copied() {
-            Some(global) if extern_functions[global] != *function => {
+            Some(global) if extern_functions[global].signature != function.signature => {
                 return Err(ParserError::ExternSignatureMismatch {
                     name: function.name.clone(),
                     first: extern_functions[global].to_string(),
                     second: function.to_string(),
                 });
             }
-            Some(global) => global,
+            Some(global) => {
+                let shared: &mut celox_design::ExternFunction = &mut extern_functions[global];
+                shared.isolated &= function.isolated;
+                global
+            }
             None => {
                 extern_function_indices.insert(function.name.clone(), extern_functions.len());
                 extern_functions.push(function.clone());

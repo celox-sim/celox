@@ -429,6 +429,23 @@ impl<'a> ProcModule<'a> {
                     })
                     .collect(),
             },
+            // Celox's own reporting functions stay opaque, and so does an
+            // argument the C code reaches through a pointer, which may be
+            // the design's storage (35.5.6).
+            isolated: !import.is_context()
+                && import.builtin().is_none()
+                && import.arguments().iter().all(|argument| {
+                    argument.direction() == sv::ir::DpiDirection::Input
+                        && match argument.r#type() {
+                            sv::ir::DpiType::Bit
+                            | sv::ir::DpiType::Logic
+                            | sv::ir::DpiType::Integer { .. }
+                            | sv::ir::DpiType::Chandle => true,
+                            sv::ir::DpiType::String
+                            | sv::ir::DpiType::BitVector { .. }
+                            | sv::ir::DpiType::LogicVector { .. } => false,
+                        }
+                }),
         };
         let index = self
             .externs

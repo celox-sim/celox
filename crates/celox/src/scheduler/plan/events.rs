@@ -132,7 +132,10 @@ impl<'a> PlanBuilder<'a> {
         // scheduler's slots change, and only those (checked below).
         let rtl_written: BTreeSet<usize> = rtl_units().flat_map(written).collect();
         let rtl_stores: HashSet<AbsoluteAddr> = rtl_units().flat_map(stores).collect();
-        let opaque_comb = sir.eval_comb.iter().any(opaque);
+        let opaque_comb = sir
+            .eval_comb
+            .iter()
+            .any(|unit| opaque(unit, &schema.extern_functions));
         let kernel_stores: Vec<HashSet<AbsoluteAddr>> = sir
             .processes
             .iter()
@@ -226,7 +229,7 @@ impl<'a> PlanBuilder<'a> {
                 unknown_gate
                     || event.eval_only.as_ref().is_none_or(|units| {
                         units.iter().flat_map(instructions).any(|inst| {
-                            makes_host_calls(inst)
+                            makes_opaque_calls(inst, &schema.extern_functions)
                                 || written_storage(inst).any(|target| {
                                     target.region == STABLE_REGION
                                         && active_observers

@@ -188,7 +188,7 @@ impl PlanBuilder<'_> {
                         (index < fallback.len() && fallback[index].is_none()).then_some(unit)
                     }),
             )
-            .any(opaque);
+            .any(|unit| opaque(unit, &schema.extern_functions));
         self.found.kernels = kernels;
         self.found.fallback = fallback;
         self.found.delay_writers = delay_writers;

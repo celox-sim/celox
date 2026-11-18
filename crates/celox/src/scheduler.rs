@@ -241,6 +241,7 @@ pub(crate) fn require_native_services(program: &mut LaidOutProgram) {
     schema.extern_functions.push(celox_design::ExternFunction {
         name: name.into(),
         signature: crate::simulator::native_io::signature(),
+        isolated: false,
     });
 }
 
