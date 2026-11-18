@@ -747,6 +747,7 @@ fn build_instance_glue(
                         )),
                     )
                     .ok_or_else(|| {
+                        eprintln!("PROBE inport formal={formal} width={width} actual_expr={}", format!("{actual_expr:?}").chars().take(1500).collect::<String>());
                         ParserError::unsupported(
                             sv::SV_FRONTEND_TRACKING_ISSUE,
                             LoweringPhase::SimulatorParser,
