@@ -230,7 +230,7 @@ pub(super) fn native_unpacked_shape(
     }
     if let Some(count) = slice {
         let count = ConstExpr::Literal(count.to_string());
-        shape.unpacked[0] = UnpackedDimension {
+        shape.unpacked_mut()[0] = UnpackedDimension {
             left: ConstExpr::Literal("0".into()),
             right: ConstExpr::Binary {
                 left: Box::new(count.clone()),

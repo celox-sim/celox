@@ -20,6 +20,10 @@ pub(super) struct VariableDimensions {
     /// packed or unpacked array of it has, which only
     /// [`Self::keep_enumeration`] sets (see [`kept`]).
     enumeration: kept::KeptEnumeration,
+    /// The unpacked structure type (7.2) the variable is, or whose elements
+    /// a fixed-size unpacked array of it has, which only
+    /// [`Self::keep_structure`] sets (see [`kept`]).
+    structure: kept::KeptStructure,
 }
 
 impl VariableDimensions {
@@ -29,6 +33,7 @@ impl VariableDimensions {
             binding: None,
             element: None,
             enumeration: kept::KeptEnumeration::default(),
+            structure: kept::KeptStructure::default(),
         }
     }
 
@@ -40,8 +45,12 @@ impl VariableDimensions {
             binding: ty.binding.retained(),
             element: ty.element.retained(),
             enumeration: kept::KeptEnumeration::default(),
+            structure: kept::KeptStructure::default(),
         };
         bound.keep_enumeration(ty.enumeration.binding());
+        if let Some(aggregate) = ty.structure.binding() {
+            bound.keep_structure(Some(aggregate));
+        }
         bound
     }
 
@@ -50,7 +59,7 @@ impl VariableDimensions {
     /// declaration of its element type, including the nominal structure
     /// identity and the class of a handle element.
     pub(super) fn unpacked_element(&self, table: &semantic_types::TyTable) -> VariableDimensions {
-        let mut element = VariableDimensions::new(VariableShape {
+        let mut element = self.derived(VariableShape {
             container: None,
             real: false,
             unpacked: self.shape.unpacked[1..].to_vec(),
@@ -69,7 +78,7 @@ impl VariableDimensions {
     /// The shape of a subarray of this unpacked array with the slowest
     /// varying dimensions `unpacked` (7.4.6), which has its element type.
     pub(super) fn subarray(&self, unpacked: Vec<UnpackedDimension>) -> VariableDimensions {
-        let mut subarray = VariableDimensions::new(VariableShape {
+        let mut subarray = self.derived(VariableShape {
             container: None,
             unpacked,
             ..self.clone_shape()
@@ -142,6 +151,10 @@ impl VariableDimensions {
             Some((_, Some(true))) => {}
             _ => self.enumeration.forget(),
         }
+        match table.unpacked_struct(id) {
+            Some(aggregate) => self.keep_structure(Some(aggregate.clone())),
+            None => self.structure.forget(),
+        }
     }
 
     /// This shape with the enumerated type `enumeration`, which it was made
@@ -155,6 +168,12 @@ impl VariableDimensions {
     /// it can be given to another shape of the same variable.
     pub(super) fn retained_enumeration(&self) -> semantic_types::EnumBinding {
         self.enumeration.binding()
+    }
+
+    /// The declaration of the unpacked structure type the variable is, or
+    /// whose elements it has, as the variable keeps it.
+    pub(super) fn structure_declaration(&self) -> Option<&Arc<unpacked_structs::UnpackedStruct>> {
+        self.structure.declaration()
     }
 
     /// What declares the enumerated type the variable is, or whose
@@ -185,7 +204,7 @@ impl VariableDimensions {
     /// This shape with the bits of its type but no enumeration: the place
     /// a member of a union is, which takes any value of them (6.19.3).
     pub(super) fn without_enum(&self) -> VariableDimensions {
-        VariableDimensions::new(VariableShape {
+        self.derived(VariableShape {
             declared: type_names::Declared::default(),
             ..self.clone_shape()
         })
@@ -307,10 +326,12 @@ impl VariableDimensions {
         // context: a parameter of a structure type is typed once, not at
         // each access of one of its members.
         // Nor does the shape tell a virtual interface from the number that
-        // holds it, or an enumerated type from its base type: its element
-        // type and the enumerated type it keeps do.
+        // holds it, an enumerated type from its base type or an unpacked
+        // structure from its bits: its element type and the enumerated and
+        // structure types it keeps do.
         if !self.shape.is_closed()
             || self.enumeration.declaration().is_some()
+            || self.structure.declaration().is_some()
             || self
                 .element
                 .as_ref()
@@ -393,6 +414,7 @@ impl DerefMut for VariableDimensions {
         self.binding = None;
         self.element = None;
         self.enumeration.forget();
+        self.structure.forget();
         &mut self.shape
     }
 }
