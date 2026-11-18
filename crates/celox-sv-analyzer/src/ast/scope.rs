@@ -73,6 +73,9 @@ pub(super) struct ScopeSymbols {
     pub interface_types: HashMap<String, String>,
     /// The modport of each interface port handle declared with one.
     pub interface_modports: HashMap<String, String>,
+    /// The parameter values of each interface instance or port handle of a
+    /// parameterized interface that virtual interface types name (25.9).
+    pub interface_arguments: HashMap<String, Arc<[i128]>>,
     pub interface_arrays: HashMap<String, interface_binding::ArrayBinding>,
     pub interface_scopes: HashMap<String, interface_binding::ScopeBinding>,
     pub interface_declarations: HashSet<celox_sv_syntax::BodyItemId>,
@@ -506,6 +509,7 @@ impl ScopeSymbols {
             interface_instances: self.interface_instances.clone(),
             interface_types: self.interface_types.clone(),
             interface_modports: self.interface_modports.clone(),
+            interface_arguments: self.interface_arguments.clone(),
             interface_arrays: self.interface_arrays.clone(),
             interface_scopes: self.interface_scopes.clone(),
             interface_declarations: self.interface_declarations.clone(),

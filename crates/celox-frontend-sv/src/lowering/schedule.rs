@@ -377,9 +377,8 @@ fn schedule_sources_collecting(
     let mut index = 0;
     let mut elaborated = HashMap::default();
     let mut hierarchical_modules = Vec::new();
-    // The virtual interfaces of the design, and the analyses of the modules
-    // that may refer to their instances (see `virtual_interfaces`).
-    let virtual_interfaces = analyzed[&top].packages.virtual_interfaces().cloned();
+    // The analyses of the modules that may refer to the instances of virtual
+    // interfaces (see `virtual_interfaces`).
     let mut virtual_sources = HashMap::default();
     // These analyses have no unresolved hierarchical names. Retain them until
     // their first final lowering, whose scheduling and foreign-writer context
@@ -726,6 +725,9 @@ fn schedule_sources_collecting(
             }
         }
     }
+    // The virtual interfaces of the design, with every specialization of a
+    // parameterized interface that the analyses above named (25.9).
+    let virtual_interfaces = design.virtual_interfaces().cloned();
     let definitions = virtual_interfaces::Definitions {
         interfaces: virtual_interfaces.as_deref(),
         modules,

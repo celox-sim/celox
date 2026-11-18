@@ -534,10 +534,18 @@ fn element_name(
         TyData::VirtualInterface {
             interface: Decl::Interface(interface),
             modport,
-        } => Ok(match (&session.types.decl(interface).name, modport) {
-            (interface, Some(modport)) => format!("virtual {interface}.{modport}"),
-            (interface, None) => format!("virtual {interface}"),
-        }),
+        } => Ok(
+            match (
+                virtual_interfaces::of_type(&session.types, id).map(|ty| ty.spelling()),
+                modport,
+            ) {
+                (Some(spelling), _) => spelling,
+                (None, Some(modport)) => {
+                    format!("virtual {}.{modport}", session.types.decl(interface).name)
+                }
+                (None, None) => format!("virtual {}", session.types.decl(interface).name),
+            },
+        ),
         TyData::Null
         | TyData::Class(_)
         | TyData::VirtualInterface { .. }

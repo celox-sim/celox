@@ -243,6 +243,7 @@ pub(crate) struct ModuleBodies {
 }
 
 /// Overrides supplied by one instantiation. Types have been resolved in its scope.
+#[derive(Clone, Copy)]
 pub(crate) struct ModuleParameterBindings<'a> {
     pub declarations_only: bool,
     pub values: &'a HashMap<String, ConstExpr>,

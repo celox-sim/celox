@@ -77,7 +77,28 @@ impl TyTable {
     fn spell_decl(&self, decl: &Decl) -> String {
         match decl {
             Decl::Named(decl) | Decl::Aggregate { decl, .. } => self.decl(*decl).name.to_string(),
-            Decl::Class(decl) | Decl::Interface(decl) => self.decl(*decl).name.to_string(),
+            Decl::Class(decl) => self.decl(*decl).name.to_string(),
+            // A specialization of a parameterized interface is written with
+            // the values of its parameters (25.9).
+            Decl::Interface(decl) => {
+                let data = self.decl(*decl);
+                match data.arguments.as_deref() {
+                    Some(arguments) => format!(
+                        "{}#({})",
+                        data.name,
+                        arguments
+                            .iter()
+                            .map(|argument| match argument {
+                                ClassArgument::Value(Some(value)) => value.to_string(),
+                                ClassArgument::Value(None) => "?".into(),
+                                ClassArgument::Type(ty) => self.spell(*ty),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    None => data.name.to_string(),
+                }
+            }
             Decl::AnonymousEnum {
                 domain: Some(domain),
                 ..

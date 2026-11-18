@@ -863,7 +863,7 @@ impl BodyBuilder<'_, '_, '_> {
             expression_binding::value(handle, native, &self.tree, self.session, &self.dims)?;
         self.rename_expr(&mut handle);
         self.rename_expr(&mut value);
-        let template = virtual_interfaces::template(&ty.interface, &member);
+        let template = virtual_interfaces::template(&ty.key(), &member);
         let stmt =
             virtual_interfaces::dispatch(self.session, handle, &ty, &member, |session, signal| {
                 let lhs = match &selected {

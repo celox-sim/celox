@@ -207,6 +207,18 @@ impl Module {
         } else {
             &empty_parameter_overrides
         };
+        // The specializations of parameterized interfaces that earlier
+        // analyses named reach their instances from this scope too (25.9).
+        let mut imported = imported;
+        let specialized =
+            virtual_interfaces::specialization_signals(session, imported.state_signals.iter());
+        if !specialized.is_empty() {
+            Arc::make_mut(&mut imported)
+                .state_signals
+                .extend(specialized);
+        }
+        // So do the subroutines that call their tasks and functions.
+        virtual_interface_calls::import_specializations(session, &mut imported);
         let specialization =
             syntax_tree.child(syntax_tree.syntax_tree, applicable_parameter_overrides);
         let specialization = specialization.importing(imported.clone());

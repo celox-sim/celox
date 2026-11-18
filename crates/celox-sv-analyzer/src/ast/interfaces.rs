@@ -40,6 +40,8 @@ pub(super) struct Prototype {
     /// The types of the members of an enumeration type, by name, which the
     /// ports of the prototype's `module` do not keep.
     pub(super) enumerations: Vec<(String, super::Type)>,
+    /// What analyzing the signature of a specialization takes.
+    pub(super) source: super::interface_ast::SignatureSource,
 }
 
 pub fn interface_prototypes(
@@ -235,7 +237,7 @@ fn prototypes(
                     .collect::<HashSet<_>>();
                 let behavior_captures =
                     interface.captured_members(&interface.function_closure(&behavior_functions));
-                let (module, enumerations) = {
+                let (module, enumerations, source) = {
                     let file = &files[interface.file];
                     let scoped = file.syntax_tree.scoped(interface.scope)?;
                     let members = interface
@@ -316,6 +318,7 @@ fn prototypes(
                 Ok(Prototype {
                     prototype,
                     enumerations,
+                    source,
                 })
             })();
             prototype

@@ -2773,8 +2773,8 @@ generated/uvm-examples/uvm_messaging_example.sv	2state	pass
 generated/uvm-examples/uvm_messaging_example.sv	4state	pass
 generated/uvm-examples/uvm_overriding.sv	2state	pass
 generated/uvm-examples/uvm_overriding.sv	4state	pass
-generated/uvm-examples/uvm_param_vif_config_db.sv	2state	fail
-generated/uvm-examples/uvm_param_vif_config_db.sv	4state	fail
+generated/uvm-examples/uvm_param_vif_config_db.sv	2state	pass
+generated/uvm-examples/uvm_param_vif_config_db.sv	4state	pass
 generated/uvm-examples/uvm_priority_arbitration.sv	2state	pass
 generated/uvm-examples/uvm_priority_arbitration.sv	4state	pass
 generated/uvm-examples/uvm_priority_grab_lock.sv	2state	pass

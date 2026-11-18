@@ -109,7 +109,7 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 - interface 配列のメンバに対する変数宣言初期化子。
 - virtual interface <a id="virtual-interfaces"></a>: 自動変数・引数、またはそれらが保持する
   オブジェクトのクラスプロパティに保持した virtual interface 越しの `wait` 文（`this`
-  または静的変数が保持するオブジェクトのプロパティは監視します）。パラメータ付き interface の virtual interface。
+  または静的変数が保持するオブジェクトのプロパティは監視します）。型パラメータを持つ interface、または整数定数でないパラメータ値を持つ interface の virtual interface。
   virtual interface 越しに到達する interface の clocking ブロック・入れ子インスタンス。
   virtual interface 越しのネットへの書き込み。package・クラス内での、virtual
   interface 越しの interface 関数呼び出しへの `$bits`（その解析は interface の
@@ -146,7 +146,8 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
   typedef の packed 配列、整数でない値パラメータを持つクラス、
   `$typename(a + b)` のような名前やデータ型でない被演算子が該当します。
   20.6.1 に規則のない virtual interface 型は、宣言どおり `virtual bus_if` や
-  `virtual bus_if.mp` と書きます。
+  `virtual bus_if.mp` と書き、パラメータ付き interface のものはパラメータの値を
+  宣言順に添えて `virtual bus_if#(8, 4)` と書きます。
 - unpacked 配列型のパラメータは開始時から値を持ちます。1 次元の配列パラメータの要素は、
   要素が 127 ビット以下で X・Z ビットを持たない packed 整数値であり、要素数が 4096
   以下の場合に展開時定数になり、その要素の packed 次元の選択も、要素型が符号付きの名前付き型の

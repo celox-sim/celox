@@ -2464,18 +2464,18 @@ mod tests {
     #[test]
     fn virtual_interface_type_arguments_are_spelled_by_their_semantic_types() {
         let mut table = semantic_types::TyTable::default();
-        let mut spelled = |modport: Option<&str>| {
+        let mut spelled = |modport: Option<&str>, arguments: &[i128]| {
             let ty = value_type(
                 &mut table,
-                VirtualInterface {
-                    interface: "bus_if".into(),
-                    modport: modport.map(Into::into),
-                },
+                VirtualInterface::new("bus_if".into(), modport.map(Into::into), arguments.into()),
             );
             spelling(&ty, &table)
         };
-        assert_eq!(spelled(None), "virtual bus_if");
-        assert_eq!(spelled(Some("m")), "virtual bus_if.m");
+        assert_eq!(spelled(None, &[]), "virtual bus_if");
+        assert_eq!(spelled(Some("m"), &[]), "virtual bus_if.m");
+        // The parameter values of a specialization are part of the type.
+        assert_eq!(spelled(None, &[8, 4]), "virtual bus_if#(8, 4)");
+        assert_ne!(spelled(None, &[8]), spelled(None, &[16]));
     }
 
     #[test]

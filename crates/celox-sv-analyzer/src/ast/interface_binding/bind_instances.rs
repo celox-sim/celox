@@ -160,6 +160,9 @@ impl ModuleBinding<'_> {
                 values.insert(binding.name, value);
             }
         }
+        // The specialization the parameter values select, which a virtual
+        // interface type must name to denote these instances (25.9).
+        let arguments = virtual_interfaces::instance_arguments(session, &interface_name, &values)?;
         for (index, authored) in native.instances.iter().enumerate() {
             let handle = instances::normalize_identifier(&authored.name.spelling);
             let elements = instance_elements(
@@ -205,12 +208,18 @@ impl ModuleBinding<'_> {
                 self.imported
                     .interface_types
                     .insert(handle.clone(), interface_name.clone());
+                if !arguments.is_empty() {
+                    self.imported
+                        .interface_arguments
+                        .insert(handle.clone(), arguments.clone());
+                }
                 self.imported
                     .state_signals
                     .extend(virtual_interfaces::identity_signal(
                         session,
                         &handle,
                         &interface_name,
+                        &arguments,
                     ));
                 let connections = instances::port_connections(
                     (id, index),
