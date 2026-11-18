@@ -1227,16 +1227,28 @@ impl<'a> Elaborator<'a, '_> {
                             &HashMap::default(),
                             &mut environment,
                         )?;
-                        let parameter = scope
+                        let Some(parameter) = scope
                             .parameters
                             .get(inherited_count)
                             .filter(|parameter| parameter.name() == name)
                             .cloned()
-                            .ok_or_else(|| {
-                                AnalyzerError::Unsupported(format!(
-                                    "generate-local parameter `{name}`"
-                                ))
-                            })?;
+                        else {
+                            self.local_array_parameter(scope, &name, id)?;
+                            order.complete(next);
+                            let Some(ready) = order.peek_ready().filter(|ready| {
+                                *ready >= signal_count
+                                    && pending[*ready - signal_count]
+                                        .as_ref()
+                                        .is_some_and(|(_, _, _, single)| *single)
+                            }) else {
+                                break;
+                            };
+                            next = order
+                                .pop_ready()
+                                .expect("the ready frontier was just inspected");
+                            debug_assert_eq!(next, ready);
+                            continue;
+                        };
                         constants::bind_generate_parameter_with_types(
                             &self.tree,
                             self.session,
@@ -1278,13 +1290,15 @@ impl<'a> Elaborator<'a, '_> {
                     &self.aliases,
                     &HashMap::default(),
                 )?;
-                let parameter = scope
+                let Some(parameter) = scope
                     .parameters
                     .drain(inherited_count..)
                     .find(|parameter| parameter.name() == name)
-                    .ok_or_else(|| {
-                        AnalyzerError::Unsupported(format!("generate-local parameter `{name}`"))
-                    })?;
+                else {
+                    self.local_array_parameter(scope, &name, id)?;
+                    order.complete(index);
+                    continue;
+                };
                 scope.parameters.push(parameter.clone());
                 bind_generate_parameter(
                     &self.tree,
@@ -1313,6 +1327,34 @@ impl<'a> Elaborator<'a, '_> {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// Name the unpacked array parameter `name` that declaration `id` of the
+    /// block declares, which is a constant variable of the block rather than
+    /// a parameter value (see [`array_parameters`]): its name in the block is
+    /// that of the variable, qualified by the block.
+    fn local_array_parameter(
+        &mut self,
+        scope: &mut Scope,
+        name: &str,
+        id: celox_sv_syntax::BodyItemId,
+    ) -> Result<(), AnalyzerError> {
+        let is_array = parameters::ownership::body(id, &self.tree)?
+            .iter()
+            .any(|parameter| {
+                instances::normalize_identifier(&parameter.name.spelling) == name
+                    && array_parameters::is_array_parameter(parameter, self.tree.declarations())
+            });
+        if !is_array {
+            return Err(AnalyzerError::Unsupported(format!(
+                "generate-local parameter `{name}`"
+            )));
+        }
+        scope.names.insert(
+            name.to_string(),
+            format!("{}.{}", scope.path, scope_component(name)),
+        );
         Ok(())
     }
 
