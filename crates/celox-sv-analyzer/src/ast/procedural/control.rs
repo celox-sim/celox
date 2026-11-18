@@ -1477,8 +1477,7 @@ impl BodyBuilder<'_, '_, '_> {
     /// Whether native expression `id` has type `string`.
     fn string_typed(&mut self, id: celox_sv_syntax::ExprId) -> bool {
         let native = self.syntax().declarations();
-        expression_types::type_of(&self.tree, self.session, id, native, &self.dims)
-            .is_ok_and(|ty| matches!(self.session.types.data(ty), semantic_types::TyData::String))
+        expression_binding::typed_string(&self.tree, self.session, id, native, &self.dims)
     }
 
     pub(super) fn native_case_labels(

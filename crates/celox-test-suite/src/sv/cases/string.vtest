@@ -556,3 +556,29 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "s WO/RW\nm RW\nf RW\nf item\nliteral item\ndefault\ncast item\ninside WO\nrs WO\n"))
+
+; An inside set on strings compares its values as strings, an integral one
+; with its bytes, as `==` does (IEEE 1800-2023 11.4.13, 11.4.5): a local, a
+; module variable, a function result and a cast are members. An integral
+; member or case item becomes a string without its NUL bytes, as a cast
+; makes it (6.16): 109 is "m", 32'h6d00_006e is "mn".
+(case string_inside_sets
+  (source "string_inside_sets.sv" #"
+module Top(output bit done);
+  string m = "m";
+  function automatic string f();
+    return "q";
+  endfunction
+  initial begin
+    string s = "m", t = "x", mn = "mn";
+    int c = 109, e = 32'h6d00_006e;
+    $display("%0d %0d %0d", s inside {"m", "q"}, s inside {"a", "b"}, m inside {t, "m"});
+    $display("%0d %0d %0d", f() inside {"m", "q"}, 8'h71 inside {f()}, s inside {string'(8'h6d)});
+    $display("%0d %0d", s inside {c}, mn inside {e});
+    case (mn) e: $display("case nul"); default: $display("case none"); endcase
+    done = 1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 0 1\n1 1 1\n1 1\ncase nul\n"))
