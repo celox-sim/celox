@@ -382,7 +382,7 @@ impl ContainerType {
         unpacked_structs::is_struct(
             self.element_id(table),
             table,
-            self.element.unpacked_struct.is_some(),
+            self.element.unpacked_struct().is_some(),
         )
     }
 
@@ -395,7 +395,7 @@ impl ContainerType {
         unpacked_structs::declaration_of(
             self.element_id(table),
             table,
-            self.element.unpacked_struct.as_ref(),
+            self.element.unpacked_struct(),
         )
     }
 
