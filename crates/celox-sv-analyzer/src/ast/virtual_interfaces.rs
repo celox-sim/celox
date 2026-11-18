@@ -1671,14 +1671,26 @@ pub(super) fn identity(
     if dimensions.get(&signal).is_some() {
         return Ok(Some(Expr::Ident(signal)));
     }
-    // A port of an interface without members has no connection the
-    // instance it denotes could be found by (see [`port_identity_signal`]).
-    match scope::imported(tree).interface_types.get(name) {
-        Some(interface) => Err(unsupported(format!(
+    let Some(interface) = scope::imported(tree).interface_types.get(name).cloned() else {
+        return Ok(None);
+    };
+    let members = declarations(session)
+        .and_then(|declarations| declarations.interfaces.get(&interface))
+        .is_some_and(|declaration| !declaration.members.is_empty());
+    if !members {
+        // A port of an interface without members has no connection the
+        // instance it denotes could be found by (see
+        // [`port_identity_signal`]).
+        return Err(unsupported(format!(
             "virtual interface value of port `{name}` of interface `{interface}`, which declares no members"
-        ))),
-        None => Ok(None),
+        )));
     }
+    // Every other port and instance has an identity signal under its own
+    // name, but the one of an instance in a generate block is named by its
+    // hierarchical name (#4266).
+    Err(unsupported(format!(
+        "virtual interface value of `{name}`, an instance of interface `{interface}` named by its simple name inside the generate block that declares it"
+    )))
 }
 
 /// The interface instances and ports of a scope with symbols `symbols` and
