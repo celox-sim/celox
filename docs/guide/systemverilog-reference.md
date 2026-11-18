@@ -73,21 +73,26 @@ constructs without a dedicated issue point to the frontend roadmap,
 - Instance arrays with a negative bound.
 - Hierarchical references <a id="hierarchical-references"></a> that drive a net or a
   variable through a continuous assignment, appear in port connections, or
-  name tasks, functions, named blocks, parameters, structure members of
-  another scope other than members of a packed structure variable (a member
-  of an element of a packed array of structures is rejected), or `real`,
-  `string` (except through the host API name, see below), or class-typed
-  signals; names that start inside a generate block relative to it are also
-  rejected. A static variable of a subroutine is named as `f.v` (23.6) only
-  from a scope that `f` is visible in by its simple name: a method of the
-  class or a base, or a subroutine of the design element; not through an
-  instance, package or named block, and not when the variable is of
-  unpacked structure type. A name that the body of an interface instance
-  does not declare is searched for from the scope that instantiates the
-  instance (23.8); it is rejected where the body is reached through an
-  interface port, in the tasks and functions of an interface that a virtual
-  interface names, and in an interface instance that another interface's
-  body declares.
+  name named blocks, parameters, structure members of another scope other
+  than members of a packed structure variable (a member of an element of a
+  packed array of structures is rejected), or `real`, `string` (except
+  through the host API name, see below), or class-typed signals; names that
+  start inside a generate block relative to it are also rejected. A task or
+  function of another instance called by a hierarchical name (23.8) must be
+  declared in the scope of a module, of one specialization for every
+  instance of the calling module, and its formals, result and the variables
+  it names must not be `real`, `shortreal`, class or event typed; two
+  modules cannot call each other's subroutines.
+  A static variable of a subroutine is named as `f.v` (23.6) only from a
+  scope that `f` is visible in by its simple name: a method of the class or
+  a base, or a subroutine of the design element; not through an instance,
+  package or named block, and not when the variable is of unpacked structure
+  type.
+  A name that the body of an interface instance does not declare is
+  searched for from the scope that instantiates the instance (23.8); it is
+  rejected where the body is reached through an interface port, in the tasks
+  and functions of an interface that a virtual interface names, and in an
+  interface instance that another interface's body declares.
 - Packages: package nets
   ([#1146](https://github.com/celox-sim/celox/issues/1146)); a package
   variable cannot be a clock or reset.

@@ -274,6 +274,22 @@ impl Type {
         self
     }
 
+    /// Whether the type is an enumeration or a packed array of them.
+    pub(crate) fn has_enumeration(&self) -> bool {
+        self.is_enum || self.packed_enum
+    }
+
+    /// The type with the enumeration of `other`, its named values and its
+    /// typedef name: a name of a variable or a subroutine of another scope,
+    /// whose type is resolved there, has them (IEEE 1800-2023 6.19, 23.6).
+    pub fn with_enumeration_of(mut self, other: &Type) -> Self {
+        self.is_enum = other.is_enum;
+        self.enum_domain = other.enum_domain.clone();
+        self.packed_enum = other.packed_enum;
+        self.spelling = other.spelling.clone();
+        self
+    }
+
     pub fn with_chandle(mut self, chandle: bool) -> Self {
         if chandle {
             self.kind = TypeKind::Chandle;

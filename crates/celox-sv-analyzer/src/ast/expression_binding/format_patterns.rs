@@ -152,7 +152,7 @@ pub(in crate::ast) fn pattern(
     // A call of a function of an enumerated type whose members are not
     // known.
     if matches!(expression, ExprKind::Call { expression, .. }
-        if direct::call_name(tree, *expression, native)
+        if direct::function_name(tree, session, *expression, native, dimensions)
             .is_some_and(|name| returns_enum(&name, dimensions)))
     {
         return Err(unsupported("%p of an enum value"));
@@ -199,7 +199,7 @@ pub(in crate::ast) fn pattern(
     if objects::native_class(tree, session, id, native, dimensions).is_some()
         || handle_value(value, &session.types, dimensions)
         || matches!(expression, ExprKind::Call { expression, .. }
-            if direct::call_name(tree, *expression, native)
+            if direct::function_name(tree, session, *expression, native, dimensions)
                 .is_some_and(|name| returns_handle(&name, dimensions)))
     {
         return Ok(Pattern::Handle(None));
@@ -268,8 +268,10 @@ pub(in crate::ast) fn pattern(
             enums::cast_type(tree, session, *target, native, dimensions)?
                 .is_some_and(|ty| aggregate(&ty))
         }
-        ExprKind::Call { expression, .. } => direct::call_name(tree, *expression, native)
-            .is_some_and(|name| returns_aggregate(&name, dimensions, aggregate)),
+        ExprKind::Call { expression, .. } => {
+            direct::function_name(tree, session, *expression, native, dimensions)
+                .is_some_and(|name| returns_aggregate(&name, dimensions, aggregate))
+        }
         _ => false,
     };
     // A value of unpacked structure type: a variable, member or property.
@@ -431,7 +433,7 @@ fn packed_members(
         // A call of a function binds as bits: the declared return type has
         // the members.
         ExprKind::Call { expression, .. } => {
-            if let Some(ty) = direct::call_name(tree, *expression, native)
+            if let Some(ty) = direct::function_name(tree, session, *expression, native, dimensions)
                 .and_then(|name| {
                     dimensions
                         .functions
