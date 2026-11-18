@@ -201,6 +201,114 @@
     (assert_eq narrow (trunc 8 (+ value 1)))
     (assert_eq wide (trunc 16 (+ value 1)))))
 
+; An interface with ports bound to a generic interface port: no port type
+; names it, the connection does (IEEE 1800-2023 25.3.3).
+(case binds_generic_interface_ports_to_interfaces_with_ports
+  (source "interface_generic_ported.sv" #"
+        interface Bus(input logic [7:0] base);
+            logic [7:0] sum;
+            assign sum = base + 8'd3;
+        endinterface
+        module Read(interface b, output logic [7:0] y);
+            assign y = b.sum;
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] y);
+            Bus bus(x);
+            Read r(.b(bus), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq y (trunc 8 (+ value 3)))))
+
+; The same next to a typed port of another interface, which plans the
+; module's interfaces: the generic port's interface is planned too.
+(case binds_generic_interface_ports_beside_typed_ports
+  (source "interface_generic_ported_typed.sv" #"
+        interface Bus(input logic [7:0] base);
+            logic [7:0] sum;
+            assign sum = base + 8'd3;
+        endinterface
+        interface Side;
+            logic [7:0] value;
+        endinterface
+        module Read(interface b, Side s, output logic [7:0] y);
+            assign y = b.sum ^ s.value;
+        endmodule
+        module Top(input logic [7:0] x, input logic [7:0] k, output logic [7:0] y);
+            Bus bus(x);
+            Side side();
+            assign side.value = k;
+            Read r(.b(bus), .s(side), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (for (value key) (list (0 0) (1 0xf0) (0x7f 0x55) (0xfe 0xff))
+    (modify (set x value) (set k key))
+    (assert_eq y (^ (trunc 8 (+ value 3)) key))))
+
+; Same-named instances of different interfaces in two generate blocks: each
+; generic port takes the interface of the instance its own block declares.
+(case binds_generic_interface_ports_per_generate_scope
+  (source "interface_generic_ported_scopes.sv" #"
+        interface Plus1(input logic [7:0] base);
+            logic [7:0] v;
+            assign v = base + 8'd1;
+        endinterface
+        interface Plus2(input logic [7:0] base);
+            logic [7:0] v;
+            assign v = base + 8'd2;
+        endinterface
+        module Read(interface b, output logic [7:0] y);
+            assign y = b.v;
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] one, output logic [7:0] two);
+            if (1) begin : first
+                Plus1 bus(x);
+                Read r(.b(bus), .y(one));
+            end
+            if (1) begin : second
+                Plus2 bus(x);
+                Read r(.b(bus), .y(two));
+            end
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq one (trunc 8 (+ value 1)))
+    (assert_eq two (trunc 8 (+ value 2)))))
+
+; Implicit named connections bind generic interface ports as named ones do
+; (IEEE 1800-2023 23.3.2.3, 23.3.2.4): `.b` to the instance `b`, and `.*`
+; the ports a generic port is named beside.
+(case binds_generic_interface_ports_by_implicit_connections
+  (source "interface_generic_ported_implicit.sv" #"
+        interface Plus1(input logic [7:0] base);
+            logic [7:0] v;
+            assign v = base + 8'd1;
+        endinterface
+        interface Plus2(input logic [7:0] base);
+            logic [7:0] v;
+            assign v = base + 8'd2;
+        endinterface
+        module Read(interface b, output logic [7:0] y);
+            assign y = b.v;
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] one, output logic [7:0] y);
+            Plus1 b(x);
+            Plus2 bus(x);
+            Read named(.b, .y(one));
+            Read wild(.b(bus), .*);
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq one (trunc 8 (+ value 1)))
+    (assert_eq y (trunc 8 (+ value 2)))))
+
 (case clocks_interface_processes_from_member_clocks
   (source "interface_clocking.sv" #"
         interface Counter;
