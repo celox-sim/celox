@@ -40,12 +40,7 @@ impl UnitFrame {
             !self.scopes[checker.depth..].iter().any(|scope| {
                 matches!(
                     *scope,
-                    "endclass"
-                        | "endgroup"
-                        | "endclocking"
-                        | "endproperty"
-                        | "endsequence"
-                        | "endspecify"
+                    "endclass" | "endclocking" | "endproperty" | "endsequence" | "endspecify"
                 )
             })
         })
@@ -91,7 +86,6 @@ impl UnitFrame {
                 "endclass"
                     | "endchecker"
                     | "endclocking"
-                    | "endgroup"
                     | "endproperty"
                     | "endsequence"
                     | "endspecify"
@@ -233,15 +227,6 @@ impl Parser<'_> {
                 self.attributes()?;
                 continue;
             }
-            if scopes.last() == Some(&"endgroup")
-                && delimiters.is_empty()
-                && self.peek() != "endgroup"
-            {
-                if self.coverage_item_prefix()? {
-                    delimiters.push("}");
-                }
-                continue;
-            }
             let root = scopes.is_empty() && delimiters.is_empty();
             let start = pending.as_ref().map_or(self.at, |value| value.0);
             if root && self.peek() == "primitive" {
@@ -280,6 +265,11 @@ impl Parser<'_> {
                 Some(BodyItemKind::LogicGate(Box::new(self.logic_gate()?)))
             } else if delimiters.is_empty() && self.peek() == "assign" {
                 Some(BodyItemKind::Assign(self.assign_statement()?))
+            } else if delimiters.is_empty() && self.peek() == "covergroup" {
+                let in_class = scopes.last() == Some(&"endclass");
+                Some(BodyItemKind::Covergroup(
+                    self.covergroup_declaration(in_class, false)?,
+                ))
             } else if delimiters.is_empty()
                 && blocked_subroutines == 0
                 && matches!(self.peek(), "function" | "task")
@@ -361,10 +351,7 @@ impl Parser<'_> {
             let mut closed = false;
             let mut completed_children = Vec::new();
             let opening = delimiters.is_empty()
-                && matches!(
-                    word,
-                    "class" | "checker" | "clocking" | "covergroup" | "sequence"
-                )
+                && matches!(word, "class" | "checker" | "clocking" | "sequence")
                 || delimiters.is_empty()
                     && word == "property"
                     && (self.at == 0
@@ -386,12 +373,6 @@ impl Parser<'_> {
                     scopes.push("endchecker");
                     continue;
                 }
-                if word == "covergroup" {
-                    self.coverage_header()?;
-                    scopes.push("endgroup");
-                    blocked_subroutines += 1;
-                    continue;
-                }
             }
             let closing = delimiters.is_empty() && scopes.last().copied() == Some(word);
             match word {
@@ -403,10 +384,6 @@ impl Parser<'_> {
                 "class" if delimiters.is_empty() => scopes.push("endclass"),
                 "checker" if delimiters.is_empty() => scopes.push("endchecker"),
                 "clocking" if delimiters.is_empty() => scopes.push("endclocking"),
-                "covergroup" if delimiters.is_empty() => {
-                    scopes.push("endgroup");
-                    blocked_subroutines += 1;
-                }
                 "property"
                     if delimiters.is_empty()
                         && (self.at == 0
@@ -424,7 +401,7 @@ impl Parser<'_> {
                 }
                 word if delimiters.is_empty() && scopes.last().copied() == Some(word) => {
                     let ended = scopes.pop().unwrap();
-                    if matches!(ended, "endgroup" | "endproperty" | "endsequence") {
+                    if matches!(ended, "endproperty" | "endsequence") {
                         blocked_subroutines -= 1;
                     }
                     closed = scopes.is_empty();
@@ -630,17 +607,6 @@ impl Parser<'_> {
                 frames.push(frame);
                 continue;
             }
-            if frame.scopes.last() == Some(&"endgroup")
-                && frame.delimiters.is_empty()
-                && self.peek() != "endgroup"
-            {
-                if self.coverage_item_prefix()? {
-                    frame.delimiters.push("}");
-                }
-                frame.item_start = true;
-                frames.push(frame);
-                continue;
-            }
             if frame.parses_items() && frame.delimiters.is_empty() && self.peek() == "checker" {
                 if frame.checkers.len() >= 1_000_000 {
                     return Err(self.unsupported(
@@ -769,6 +735,19 @@ impl Parser<'_> {
                 frames.push(frame);
                 continue;
             }
+            // A covergroup is one item, whose parser reads it through its
+            // `endgroup` (IEEE 1800-2023 19.3).
+            if frame.delimiters.is_empty() && self.peek() == "covergroup" {
+                let start = self.at;
+                let in_class = frame.scopes.last() == Some(&"endclass");
+                let id = self.covergroup_declaration(in_class, true)?;
+                frame.record(self, start, BodyItemKind::Covergroup(id))?;
+                frame.conditional = frame.builder.active();
+                frame.prototype = false;
+                frame.item_start = true;
+                frames.push(frame);
+                continue;
+            }
             if frame.delimiters.is_empty() && self.package_binding_start() {
                 let start = self.at;
                 let id = self.package_binding()?;
@@ -850,7 +829,7 @@ impl Parser<'_> {
                 && !frame
                     .scopes
                     .iter()
-                    .any(|scope| matches!(*scope, "endgroup" | "endproperty" | "endsequence"))
+                    .any(|scope| matches!(*scope, "endproperty" | "endsequence"))
                 && matches!(self.peek(), "function" | "task")
             {
                 let parameters = self.parameter_declarations.len();
@@ -1043,7 +1022,6 @@ impl Parser<'_> {
                         "endclass"
                             | "endchecker"
                             | "endclocking"
-                            | "endgroup"
                             | "endproperty"
                             | "endsequence"
                             | "endspecify"
@@ -1114,9 +1092,9 @@ impl Parser<'_> {
                 "function" | "task"
                     if delimiters.is_empty()
                         && !frame.prototype
-                        && !scopes.iter().any(|scope| {
-                            matches!(*scope, "endgroup" | "endproperty" | "endsequence")
-                        }) =>
+                        && !scopes
+                            .iter()
+                            .any(|scope| matches!(*scope, "endproperty" | "endsequence")) =>
                 {
                     scopes.push(if word == "function" {
                         "endfunction"
@@ -1153,13 +1131,6 @@ impl Parser<'_> {
                     scopes.push("endproperty")
                 }
                 "sequence" => scopes.push("endsequence"),
-                "covergroup" if delimiters.is_empty() => {
-                    scopes.push("endgroup");
-                    self.coverage_header()?;
-                    frame.item_start = true;
-                    frames.push(frame);
-                    continue;
-                }
                 "specify" => scopes.push("endspecify"),
                 "if" | "for" | "else" if scopes.is_empty() && delimiters.is_empty() => {
                     frame.conditional = true
@@ -1181,7 +1152,6 @@ impl Parser<'_> {
                         "end"
                             | "endclass"
                             | "endchecker"
-                            | "endgroup"
                             | "endclocking"
                             | "endproperty"
                             | "endsequence"

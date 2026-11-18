@@ -2867,21 +2867,92 @@ fn checker_formal_prefixes_validate_names_types_dimensions_and_directions() {
     }
 }
 
+/// The items of a covergroup are typed nodes of its declaration (IEEE
+/// 1800-2023 19.3); a function of a cross body is no subroutine of the
+/// scope around the covergroup.
 #[test]
-fn covergroup_headers_and_item_prefixes_validate_without_leaking_sampling_functions() {
-    for coverage in [
-        "covergroup cg; coverpoint x; endgroup",
-        "covergroup cg; option: coverpoint x; type_option: cross a,b; endgroup",
-        "covergroup cg(input int x) @(posedge clk or negedge rst); option.per_instance=1; type_option.weight=2; cp: coverpoint x iff(enable) { bins b[]={0,[1:3]}; bins transition=(1=>2[*3]); } cx: cross cp,other iff(enable) { bins all=binsof(cp) intersect {0}; function int helper(); typedef int T; return 1; endfunction } endgroup:cg",
-        "covergroup cg with function sample(input int x); logic[3:0] cp: coverpoint x; endgroup",
-        "covergroup cg @P::cb; cross a,b; endgroup",
-        "covergroup cg @@(begin M.task_name or end P::C::f); coverpoint x; endgroup",
+fn covergroup_headers_and_items_parse_without_leaking_cross_body_functions() {
+    for (coverage, items) in [
+        ("covergroup cg; coverpoint x; endgroup", vec!["coverpoint"]),
+        (
+            "covergroup cg; option: coverpoint x; type_option: cross a,b; endgroup",
+            vec!["coverpoint option", "cross type_option"],
+        ),
+        (
+            "covergroup cg(input int x) @(posedge clk or negedge rst); option.per_instance=1; type_option.weight=2; cp: coverpoint x iff(enable) { bins b[]={0,[1:3]}; bins transition=(1=>2[*3]); } cx: cross cp,other iff(enable) { bins all=binsof(cp) intersect {0}; function int helper(); typedef int T; return 1; endfunction } endgroup:cg",
+            vec![
+                "option per_instance",
+                "type_option weight",
+                "coverpoint cp",
+                "cross cx",
+            ],
+        ),
+        (
+            "covergroup cg with function sample(input int x); logic[3:0] cp: coverpoint x; endgroup",
+            vec!["coverpoint cp"],
+        ),
+        ("covergroup cg @P::cb; cross a,b; endgroup", vec!["cross"]),
+        (
+            "covergroup cg @@(begin M.task_name or end P::C::f); coverpoint x; endgroup",
+            vec!["coverpoint"],
+        ),
     ] {
+        let label = |label: &Option<Name>| {
+            label
+                .as_ref()
+                .map_or(String::new(), |label| format!(" {}", label.value()))
+        };
+        for source in [
+            format!(
+                "class C; {coverage} endclass function int global_f(); return 1; endfunction module M; endmodule"
+            ),
+            format!("module M; class C; {coverage} endclass endmodule"),
+        ] {
+            let source = parse(&source);
+            let [covergroup] = source.covergroups.as_slice() else {
+                panic!("{coverage}")
+            };
+            assert_eq!(covergroup.name.value(), "cg", "{coverage}");
+            assert_eq!(
+                source.classes[0].covergroups,
+                [CovergroupId(0)],
+                "{coverage}"
+            );
+            let parsed = covergroup
+                .items
+                .iter()
+                .map(|item| match item {
+                    CoverageItem::Option(option) => format!(
+                        "{} {}",
+                        if option.type_option {
+                            "type_option"
+                        } else {
+                            "option"
+                        },
+                        option.member.value()
+                    ),
+                    CoverageItem::Coverpoint(point) => {
+                        format!("coverpoint{}", label(&point.label))
+                    }
+                    CoverageItem::Cross(cross) => format!("cross{}", label(&cross.label)),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(parsed, items, "{coverage}");
+            // The function of the cross body is none of the scope's.
+            let subroutines = source
+                .subroutines
+                .iter()
+                .map(|subroutine| subroutine.name.value())
+                .collect::<Vec<_>>();
+            assert!(
+                subroutines.is_empty() || subroutines == ["global_f"],
+                "{coverage}"
+            );
+        }
         let source = parse(&format!(
             "class C; {coverage} endclass function int global_f(); return 1; endfunction module M; endmodule"
         ));
         assert_eq!(source.subroutines.len(), 1, "{coverage}");
-        parse(&format!("module M; class C; {coverage} endclass endmodule"));
     }
     for coverage in [
         "covergroup ; endgroup",
@@ -4349,10 +4420,10 @@ fn external_constraints_resolve_unqualified_names_in_their_lexical_scope() {
 }
 
 /// The parser records the names that covergroups (IEEE 1800-2023 19.3) and
-/// user-defined nettypes (6.6.7) declare, whose declarations stay
-/// unconverted.
+/// user-defined nettypes (6.6.7) declare: a covergroup is a body item of
+/// its own kind, a nettype declaration stays unconverted.
 #[test]
-fn unconverted_type_declarations_record_their_names() {
+fn covergroup_and_nettype_declarations_record_their_names() {
     let syntax = parse(
         "module M; bit x; covergroup cg @(posedge x); Label: coverpoint x; endgroup \
          nettype logic [3:0] wide with resolve; nettype wide alias_t; endmodule",
@@ -4363,6 +4434,16 @@ fn unconverted_type_declarations_record_their_names() {
         .map(|declaration| declaration.name.value())
         .collect::<Vec<_>>();
     assert_eq!(covergroups, ["cg"]);
+    let items = syntax.units[0]
+        .items
+        .iter()
+        .map(|item| match &syntax.body_item(*item).kind {
+            BodyItemKind::Covergroup(id) => syntax.covergroup(*id).name.value(),
+            BodyItemKind::Unconverted { category, .. } => category.as_str(),
+            _ => "",
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(items, ["", "cg", "nettype", "nettype"]);
     let nettypes = syntax
         .nettypes
         .iter()

@@ -800,6 +800,9 @@ pub enum BodyItemKind {
     Time(TimeDeclarationId),
     Unit(UnitId),
     Assertion(AssertionDeclarationId),
+    /// A covergroup declaration (IEEE 1800-2023 19.3) of a design element,
+    /// generate block, checker, class or the compilation unit.
+    Covergroup(CovergroupId),
     Region(Vec<BodyItemId>),
     Block {
         leading_label: Option<Name>,
@@ -1139,6 +1142,9 @@ pub struct ClassDeclaration {
     pub type_aliases: Vec<TypeAliasId>,
     pub properties: Vec<ClassProperty>,
     pub methods: Vec<ClassMethod>,
+    /// The embedded covergroups the class itself declares, not those of
+    /// nested classes (19.4).
+    pub covergroups: Vec<CovergroupId>,
     pub tokens: TokenRange,
 }
 
@@ -1447,13 +1453,306 @@ pub enum AssertionDeclarationKind {
     Property,
 }
 
-/// The header of a covergroup declaration (IEEE 1800-2023 19.3), which
-/// declares a covergroup type of its name; its body stays unconverted.
+/// Stable covergroup handle in [`crate::Declarations::covergroups`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct CovergroupId(pub(crate) usize);
+
+/// A covergroup declaration (IEEE 1800-2023 19.3, A.2.11
+/// `covergroup_declaration`), which declares a covergroup type of its name,
+/// or in a class an embedded covergroup (19.4).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CovergroupDeclaration {
     pub name: Name,
-    /// From `covergroup` through the name.
+    pub kind: CovergroupKind,
+    /// The `coverage_spec_or_option` items in authored order.
+    pub items: Vec<CoverageItem>,
+    /// The name after `endgroup :`, which is that of the covergroup
+    /// (9.3.4).
+    pub end_label: Option<Name>,
+    /// From `covergroup` through the name: the type is visible after it.
+    pub header: TokenRange,
+    /// From `covergroup` through `endgroup` and its label.
     pub tokens: TokenRange,
+}
+
+/// The two forms of a covergroup declaration (A.2.11).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CovergroupKind {
+    /// `covergroup name [ ( [ tf_port_list ] ) ] [ coverage_event ] ;`
+    Declared {
+        /// `None` without a list; an empty list for `()` (19.3).
+        ports: Option<Vec<SubroutinePort>>,
+        event: Option<CoverageEvent>,
+    },
+    /// `covergroup extends name ;` (19.4.1): the name is that of a
+    /// covergroup of a base class. Only in a class (A.2.11 footnote 29).
+    Extends,
+}
+
+/// A `coverage_event` (19.3).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CoverageEvent {
+    /// A `clocking_event` (A.6.5): `@name`, `@a.b`, `@(event_expression)`.
+    /// Never a wildcard event.
+    Clocking(TimingControlId),
+    /// `with function sample ( [ tf_port_list ] )` (19.8.1).
+    Sample(Vec<SubroutinePort>),
+    /// `@@ ( block_event_expression )`, the alternatives of its `or`.
+    Block(Vec<BlockEvent>),
+}
+
+/// `begin target` or `end target` of a block event expression (19.3).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockEvent {
+    /// `end` rather than `begin`.
+    pub end: bool,
+    /// A `hierarchical_btf_identifier`: a name, member, select or
+    /// parameterized chain.
+    pub target: ExprId,
+    pub tokens: TokenRange,
+}
+
+/// A `coverage_spec_or_option` (A.2.11).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CoverageItem {
+    Option(CoverageOption),
+    Coverpoint(Coverpoint),
+    Cross(Cross),
+}
+
+/// `option.member = expression` or `type_option.member =
+/// constant_expression` (19.7), in a covergroup, coverpoint or cross.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoverageOption {
+    pub type_option: bool,
+    pub member: Name,
+    pub value: ExprId,
+    /// From the attributes through the `;`.
+    pub tokens: TokenRange,
+}
+
+/// A `cover_point` (19.5).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Coverpoint {
+    pub label: Option<Name>,
+    /// The `data_type_or_implicit` before the label; only with a label.
+    pub data_type: Option<TypeId>,
+    pub expression: ExprId,
+    /// The guard `iff ( expression )`.
+    pub iff: Option<ExprId>,
+    pub items: Vec<CoverpointItem>,
+    /// `{` through `}`; `None` for the `;` form.
+    pub body: Option<TokenRange>,
+    /// From the attributes through the `;` or the `}`.
+    pub tokens: TokenRange,
+}
+
+/// A `bins_or_options` (A.2.11).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CoverpointItem {
+    Option(CoverageOption),
+    Bins(Bins),
+}
+
+/// The `bins_keyword` of a bin declaration (19.5).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BinsKind {
+    Bins,
+    IllegalBins,
+    IgnoreBins,
+}
+
+/// The array form of a bin declaration (19.5.1): `[]` or `[N]`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BinsArray {
+    Unsized,
+    Sized(ExprId),
+}
+
+/// A bin declaration of a coverpoint (19.5, Syntax 19-2).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Bins {
+    pub wildcard: bool,
+    pub kind: BinsKind,
+    pub name: Name,
+    pub array: Option<BinsArray>,
+    pub value: BinsValue,
+    /// The guard `iff ( expression )` of the bin.
+    pub iff: Option<ExprId>,
+    /// From the attributes through the `;`.
+    pub tokens: TokenRange,
+}
+
+/// What a bin declaration of a coverpoint assigns to its name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BinsValue {
+    /// `{ covergroup_range_list } [ with ( expression ) ]` (19.5.1,
+    /// 19.5.1.1).
+    Ranges {
+        ranges: Vec<CoverageRange>,
+        with: Option<ExprId>,
+    },
+    /// `cover_point_identifier with ( expression )` (19.5.1.1).
+    CoverpointWith { coverpoint: Name, with: ExprId },
+    /// A `set_covergroup_expression` (19.5.1.2).
+    Set(ExprId),
+    /// A `trans_list` (19.5.2), one entry per `( trans_set )`.
+    Transitions(Vec<TransitionSet>),
+    /// `default` (19.5).
+    Default,
+    /// `default sequence` (19.5.2).
+    DefaultSequence,
+}
+
+/// A `covergroup_value_range` (A.2.11; 11.4.13 for the tolerance forms).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoverageRange {
+    pub kind: CoverageRangeKind,
+    pub tokens: TokenRange,
+}
+
+/// The forms of a `covergroup_value_range`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CoverageRangeKind {
+    Value(ExprId),
+    /// `[low : high]`; `None` is `$` (6.20.6). Never both `None`.
+    Range {
+        low: Option<ExprId>,
+        high: Option<ExprId>,
+    },
+    /// `[center +/- tolerance]`, or `[center +%- tolerance]` when
+    /// `relative`.
+    Tolerance {
+        center: ExprId,
+        tolerance: ExprId,
+        relative: bool,
+    },
+}
+
+/// A `trans_set`: `trans_range_list { => trans_range_list }` (19.5.2).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransitionSet {
+    pub steps: Vec<TransitionStep>,
+    /// From `(` through `)`.
+    pub tokens: TokenRange,
+}
+
+/// A `trans_range_list`: a range list and its repetition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransitionStep {
+    pub ranges: Vec<CoverageRange>,
+    pub repeat: Option<TransitionRepeat>,
+    pub tokens: TokenRange,
+}
+
+/// The repetition a `trans_range_list` is written with (19.5.2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransitionRepeatKind {
+    /// `[* ... ]`
+    Consecutive,
+    /// `[-> ... ]`
+    Goto,
+    /// `[= ... ]`
+    NonConsecutive,
+}
+
+/// `[* n]`, `[* a:b]`, `[-> ...]` or `[= ...]` (19.5.2).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransitionRepeat {
+    pub kind: TransitionRepeatKind,
+    pub low: ExprId,
+    pub high: Option<ExprId>,
+    pub tokens: TokenRange,
+}
+
+/// A `cover_cross` (19.6).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Cross {
+    pub label: Option<Name>,
+    /// The `cross_item`s, two or more.
+    pub items: Vec<Name>,
+    /// The guard `iff ( expression )`.
+    pub iff: Option<ExprId>,
+    pub body_items: Vec<CrossItem>,
+    /// `{` through `}`; `None` for the `;` form.
+    pub body: Option<TokenRange>,
+    /// From the attributes through the `;` or the `}`.
+    pub tokens: TokenRange,
+}
+
+/// A `cross_body_item` (A.2.11).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CrossItem {
+    Option(CoverageOption),
+    Bins(CrossBins),
+    /// A function of the cross body (19.6.1.4), visible only in it
+    /// (19.6). It is in no subroutine arena and no unit list.
+    Function(Box<Subroutine>),
+}
+
+/// A `bins_selection` (19.6.1): no array form and no `wildcard`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CrossBins {
+    pub kind: BinsKind,
+    pub name: Name,
+    pub select: SelectId,
+    /// The guard `iff ( expression )` of the bin.
+    pub iff: Option<ExprId>,
+    /// From the attributes through the `;`.
+    pub tokens: TokenRange,
+}
+
+/// Stable select-expression handle in
+/// [`crate::Declarations::coverage_selects`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct SelectId(pub(crate) usize);
+
+/// A `select_expression` (19.6.1, Syntax 19-4).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectExpr {
+    pub kind: SelectKind,
+    pub tokens: TokenRange,
+}
+
+/// The forms of a `select_expression`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SelectKind {
+    /// `[!] binsof ( target [ . bin ] ) [ intersect { ranges } ]`
+    /// (19.6.1.1). `!` applies to a select condition only.
+    Binsof {
+        negated: bool,
+        target: Name,
+        bin: Option<Name>,
+        intersect: Option<Vec<CoverageRange>>,
+    },
+    And {
+        left: SelectId,
+        right: SelectId,
+    },
+    Or {
+        left: SelectId,
+        right: SelectId,
+    },
+    Group(SelectId),
+    /// `select with ( expression ) [ matches count ]` (19.6.1.2).
+    With {
+        select: SelectId,
+        with: ExprId,
+        matches: Option<MatchCount>,
+    },
+    /// A `cross_identifier` or a `cross_set_expression [ matches count ]`
+    /// (19.6.1.2, 19.6.1.4); they are the same syntax.
+    Expression {
+        value: ExprId,
+        matches: Option<MatchCount>,
+    },
+}
+
+/// An `integer_covergroup_expression`: `$` or an expression (19.6.1.2).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MatchCount {
+    All,
+    Value(ExprId),
 }
 
 /// A user-defined nettype declaration (IEEE 1800-2023 6.6.7), `nettype

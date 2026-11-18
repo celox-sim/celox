@@ -7457,6 +7457,211 @@ fn covergroups_of_classes_are_declared_members() {
 }
 
 #[test]
+fn covergroups_that_extend_a_base_covergroup_are_rejected_where_used() {
+    // `covergroup extends` (IEEE 1800-2023 19.4.1) is a covergroup of its
+    // class like any other: its declaration alone makes no instance and is
+    // accepted, and what uses it is rejected as a covergroup of the class.
+    let classes = |method: &str| {
+        format!(
+            "class B; int v; covergroup cg; coverpoint v; endgroup endclass \
+             class D extends B; int w; \
+             covergroup extends cg; option.weight = 2; coverpoint w; endgroup {method} endclass"
+        )
+    };
+    let top = "D d; initial begin d = new; d.w = 1; end";
+    for source in [
+        format!("module Top; {} {top} endmodule", classes("")),
+        format!("{} module Top; {top} endmodule", classes("")),
+    ] {
+        analyze_source(&source, Path::new("extends.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+    for method in [
+        "function new(); cg = new(); endfunction",
+        "function void s(); cg.sample(); endfunction",
+        "function real c(); return this.cg.get_coverage(); endfunction",
+    ] {
+        for source in [
+            format!("module Top; {} {top} endmodule", classes(method)),
+            format!("{} module Top; {top} endmodule", classes(method)),
+        ] {
+            let error = analyze_source(&source, Path::new("extends.sv"))
+                .expect_err(method)
+                .to_string();
+            assert!(
+                error.contains("covergroup `cg` of class `D` (IEEE 1800-2023 19.4)"),
+                "{source}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unconstructed_covergroups_keep_their_bodies_to_themselves() {
+    // What follows the name of a covergroup names its formals, `item`, the
+    // cross items and `CrossQueueType` (IEEE 1800-2023 19.3, 19.5.1.1,
+    // 19.6.1): the scope that declares the covergroup binds none of it, so
+    // a covergroup that nothing constructs analyzes whatever its formals
+    // shadow. `v` names nothing of the scopes below, and `s` a signal of
+    // another width.
+    let covergroup = "covergroup cg(int v, bit [3:0] s, int w = $bits(v)) @(posedge clk); \
+        option.per_instance = 1; \
+        type_option.weight = 2; \
+        cv: coverpoint v[$bits(v)-1:4] iff (v != 0) { \
+            option.weight = w; \
+            bins few = {[0:7]} with (item < 4); \
+            bins cast[] = {[0:15]} with (int'(item) % 2 == 0); \
+            bins width[2] = {[0:$bits(item)]}; \
+            bins near = {[8 +/- 2], [8 +%- 25]}; \
+            wildcard bins wild = {4'b1??0}; \
+            bins others[] = cv with (item > s); \
+            bins steps = (0 => 1 [* 2:3] => 2), ([3:4] [-> 2]); \
+            illegal_bins rest = default; \
+        } \
+        logic [$bits(s)-1:0] cs: coverpoint s[$bits(s)-1:0] iff (s != 0); \
+        cc: coverpoint ($bits(v))'(s); \
+        cx: cross cv, cs iff (v != s) { \
+            function CrossQueueType pairs(int limit); \
+                for (int i = 0; i < limit; i++) pairs.push_back('{i, i}); \
+            endfunction \
+            bins made = pairs(4); \
+            bins some = binsof(cv) intersect {[0:3]} && binsof(cs.low) || cx with (cv + cs < 8); \
+            ignore_bins more = binsof(cv) with (cv > cs) matches $; \
+        } \
+        endgroup : cg";
+    let mut rejected = Vec::new();
+    for (scope, source) in [
+        (
+            "module",
+            format!("module Top; logic clk; logic [15:0] s; {covergroup} endmodule"),
+        ),
+        (
+            "generate block",
+            format!(
+                "module Top; logic clk; logic [15:0] s; \
+                 if (1) begin : g {covergroup} end endmodule"
+            ),
+        ),
+        (
+            "class of a module",
+            format!(
+                "module Top; class C; logic clk; logic [15:0] s; {covergroup} endclass \
+                 C c; initial c = new; endmodule"
+            ),
+        ),
+        (
+            "class of the compilation unit",
+            format!(
+                "class C; logic clk; logic [15:0] s; {covergroup} endclass \
+                 module Top; C c; initial c = new; endmodule"
+            ),
+        ),
+        (
+            "compilation unit",
+            format!("logic clk; logic [15:0] s; {covergroup} module Top; endmodule"),
+        ),
+        (
+            "package of the source",
+            format!(
+                "package p; logic clk; logic [15:0] s; {covergroup} endpackage \
+                 module Top; import p::*; logic [15:0] t; assign t = s; endmodule"
+            ),
+        ),
+    ] {
+        if let Err(error) = analyze_source(&source, Path::new("covergroup-body.sv")) {
+            rejected.push(format!("{scope}: {error}"));
+        }
+    }
+    let package = format!(
+        "package p; logic clk; logic [15:0] s; {covergroup} \
+         class C; logic [15:0] s; {covergroup} endclass endpackage"
+    );
+    match analyze_packages(&[(&package, Path::new("covergroup-body-p.sv"))]) {
+        Ok(packages) => {
+            if let Err(error) = analyze_source_module_with_packages(
+                "module Top; import p::*; logic [15:0] t; C c; \
+                 initial begin c = new; t = s; end endmodule",
+                Path::new("covergroup-body-top.sv"),
+                "Top",
+                &HashMap::default(),
+                &packages,
+                &mut packages.design(),
+            ) {
+                rejected.push(format!("module that imports the package: {error}"));
+            }
+        }
+        Err(error) => rejected.push(format!("package: {error}")),
+    }
+    assert!(rejected.is_empty(), "{rejected:#?}");
+    // Nor is a bound inside a covergroup a constant value of the module,
+    // which a specparam may not be an operand of (6.20.5).
+    let source = "module Top; specparam SP = 3; logic [7:0] x; \
+                  covergroup cg; coverpoint x[SP:0] { bins low = {x[SP:0], {SP{1'b1}}}; } \
+                  endgroup endmodule";
+    analyze_source(source, Path::new("covergroup-specparam.sv"))
+        .unwrap_or_else(|error| panic!("{source}: {error}"));
+    // Nor is a formal or a coverpoint a call of the `let` of its name that
+    // the module declares, before or after the covergroup (11.12).
+    for source in [
+        "module Top; logic clk = 0; logic [3:0] a = 1, b = 2, t; \
+         let max(x, y) = x + y; assign t = max(a, b); \
+         covergroup cg(int max) @(posedge clk); coverpoint a { bins lo = {[0:max]}; } endgroup \
+         endmodule",
+        "module Top; logic clk = 0; logic [3:0] a = 1, b = 2, t; \
+         covergroup cg @(posedge clk); low: coverpoint a; hi: coverpoint b; \
+         x: cross low, hi { bins s = x with (low + hi < 4); } endgroup \
+         let low = a + b; assign t = low; endmodule",
+        "module Top; logic [3:0] a = 1, b = 2, t; let lim = a + b; assign t = lim; \
+         covergroup cg(int lim); coverpoint a iff (a < lim) { bins lo = {[0:lim]}; } endgroup \
+         endmodule",
+    ] {
+        analyze_source(source, Path::new("covergroup-let.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+    // The plan of an interface that declares a covergroup, also in a
+    // class, stays rejected as before.
+    for items in [
+        covergroup.to_string(),
+        format!("class C; {covergroup} endclass"),
+    ] {
+        let source = format!(
+            "interface I; logic clk; logic [15:0] s; {items} endinterface \
+             module Top; I i(); endmodule"
+        );
+        let error = match plan_interfaces(&[(&source, Path::new("covergroup-body-if.sv"))], &[]) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("{source}: a covergroup in an interface"),
+        };
+        assert!(
+            error.contains("task, class, or verification declaration in interface `I`"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn covergroups_stay_declarations_of_the_scopes_that_bind_around_them() {
+    // A covergroup is a declaration of its scope like the unconverted item
+    // it was. A module with an interface instance declares the type as
+    // before; that the declarations it binds before the instance still
+    // hold the covergroup shows in nothing yet, as nothing binds one. The
+    // uses of an interconnect net that the module checks (IEEE 1800-2023
+    // 6.6.8) are none of the formals a covergroup declares itself.
+    for source in [
+        "interface I; logic x; endinterface \
+         module Top; I h(); bit x; \
+         covergroup cg @(posedge x); coverpoint x; endgroup cg c; endmodule",
+        "module Src(output logic o); assign o = 1'b1; endmodule \
+         module Dst(input logic a); endmodule \
+         module Top; interconnect link; Src s(.o(link)); Dst d(.a(link)); logic x; \
+         covergroup cg(int link); coverpoint x iff (link != 0); endgroup endmodule",
+    ] {
+        analyze_source(source, Path::new("covergroup-declaration.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+}
+
+#[test]
 fn undeclared_members_of_classes_of_other_files_are_errors() {
     let base = r#"
         package base_pkg;

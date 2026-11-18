@@ -8,6 +8,8 @@ mod body;
 mod classes;
 mod constraints;
 mod coverage;
+#[cfg(test)]
+mod coverage_tests;
 mod declarations;
 mod dpi;
 mod expressions;
@@ -72,9 +74,12 @@ pub struct Declarations {
     pub package_bindings: Vec<PackageBinding>,
     pub modport_declarations: Vec<ModportDeclaration>,
     pub assertion_declarations: Vec<AssertionDeclaration>,
-    /// The headers of every covergroup declaration, whose bodies stay
-    /// unconverted.
+    /// Every covergroup declaration (IEEE 1800-2023 19.3), by
+    /// [`CovergroupId`].
     pub covergroups: Vec<CovergroupDeclaration>,
+    /// The select expressions of the cross bins of every covergroup
+    /// (19.6.1), by [`SelectId`].
+    pub coverage_selects: Vec<SelectExpr>,
     /// Every user-defined nettype declaration, which stays unconverted.
     pub nettypes: Vec<NettypeDeclaration>,
     /// Every `let` declaration, whose item stays unconverted.
@@ -132,6 +137,7 @@ impl Declarations {
             sequence_operands: 0,
             sequence_depth: 0,
             timing_operand_start: None,
+            coverage_operand: CoverageOperand::None,
             source_items: Vec::new(),
             expressions: Vec::new(),
             types: Vec::new(),
@@ -141,6 +147,7 @@ impl Declarations {
             modport_declarations: Vec::new(),
             assertion_declarations: Vec::new(),
             covergroups: Vec::new(),
+            coverage_selects: Vec::new(),
             nettypes: Vec::new(),
             sequences: Vec::new(),
             type_aliases: Vec::new(),
@@ -177,6 +184,7 @@ impl Declarations {
         let modport_declarations = parser.modport_declarations;
         let assertion_declarations = parser.assertion_declarations;
         let covergroups = parser.covergroups;
+        let coverage_selects = parser.coverage_selects;
         let nettypes = parser.nettypes;
         let lets = parser.lets;
         let sequences = parser.sequences;
@@ -207,6 +215,7 @@ impl Declarations {
             modport_declarations,
             assertion_declarations,
             covergroups,
+            coverage_selects,
             nettypes,
             lets,
             sequences,
@@ -300,6 +309,16 @@ impl Declarations {
 
     pub fn assertion_declaration(&self, id: AssertionDeclarationId) -> &AssertionDeclaration {
         &self.assertion_declarations[id.0]
+    }
+
+    /// Resolve a covergroup declaration handle.
+    pub fn covergroup(&self, id: CovergroupId) -> &CovergroupDeclaration {
+        &self.covergroups[id.0]
+    }
+
+    /// Resolve a select-expression handle of a cross bin.
+    pub fn coverage_select(&self, id: SelectId) -> &SelectExpr {
+        &self.coverage_selects[id.0]
     }
 
     pub fn sequence(&self, id: SequenceId) -> &Sequence {
@@ -398,6 +417,20 @@ impl Declarations {
 
 type Result<T> = std::result::Result<T, ParseError>;
 
+/// The covergroup operand an expression is parsed as (IEEE 1800-2023
+/// A.2.11), which decides where the expression ends.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CoverageOperand {
+    /// An ordinary expression.
+    None,
+    /// A value of a `trans_range_list` (19.5.2): `[*`, `[->` and `[=` after
+    /// it begin the repetition, not a select.
+    Transition,
+    /// A leaf of a `select_expression` (19.6.1.2): `with (` after it filters
+    /// the selection, unless it follows an array method.
+    Select,
+}
+
 struct Parser<'a> {
     sources: &'a SourceMap,
     tokens: &'a [Token],
@@ -413,6 +446,9 @@ struct Parser<'a> {
     /// parsed starts. A parenthesis after it begins the controlled
     /// expression or statement, not call arguments.
     timing_operand_start: Option<usize>,
+    /// Where an operand of the covergroup grammar being parsed ends
+    /// (A.2.11).
+    coverage_operand: CoverageOperand,
     source_items: Vec<SourceItem>,
     expressions: Vec<Expr>,
     types: Vec<DataType>,
@@ -422,6 +458,7 @@ struct Parser<'a> {
     modport_declarations: Vec<ModportDeclaration>,
     assertion_declarations: Vec<AssertionDeclaration>,
     covergroups: Vec<CovergroupDeclaration>,
+    coverage_selects: Vec<SelectExpr>,
     nettypes: Vec<NettypeDeclaration>,
     sequences: Vec<Sequence>,
     type_aliases: Vec<TypeAlias>,

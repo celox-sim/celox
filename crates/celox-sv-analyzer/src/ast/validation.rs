@@ -539,7 +539,8 @@ pub(crate) struct Facts {
     /// Unit and port positions of every header port, in arena order.
     ports: Vec<(usize, usize)>,
     port_starts: Starts,
-    /// Type and dimension positions of every packed dimension.
+    /// Type and dimension positions of every packed dimension a scope
+    /// binds: none of what follows the name of a covergroup.
     packed_dimensions: Vec<(usize, usize)>,
     packed_dimension_starts: Starts,
     /// Dimensions of type arguments naming an alias, with that name.
@@ -559,7 +560,8 @@ pub(crate) struct Facts {
     pub(super) callee_spans: HashSet<(usize, usize)>,
     /// Expressions that are expression statements.
     pub(super) expression_statements: HashSet<ExprId>,
-    /// Expressions that are constant values, and the roots they are under.
+    /// Expressions that are constant values of a scope, and the roots they
+    /// are under: none of what follows the name of a covergroup.
     constant_roots: Vec<ExprId>,
     constant_nodes: HashSet<ExprId>,
     /// Callee and first argument of every call with one.
@@ -568,7 +570,10 @@ pub(crate) struct Facts {
 }
 
 impl Facts {
-    pub(crate) fn new(native: &celox_sv_syntax::Declarations) -> Self {
+    pub(crate) fn new(
+        native: &celox_sv_syntax::Declarations,
+        covergroups: &crate::source_tree::CovergroupInteriors,
+    ) -> Self {
         use celox_sv_syntax::{BodyItemKind, ExprKind, ParameterKind, StatementKind};
         let controls = Ranges::new(native.body_items.iter().filter_map(|item| {
             matches!(
@@ -596,6 +601,8 @@ impl Facts {
                 .map(|port| port.tokens)
                 .enumerate(),
         );
+        // The dimension of a covergroup formal or of a coverpoint's type may
+        // name a formal, which only the covergroup binds (19.3).
         let packed_dimensions = native
             .types
             .iter()
@@ -603,13 +610,14 @@ impl Facts {
             .flat_map(|(ty, data)| {
                 (0..data.packed_dimensions.len()).map(move |dimension| (ty, dimension))
             })
+            .filter(|(ty, dimension)| {
+                !covergroups.contain(native.types[*ty].packed_dimensions[*dimension].tokens)
+            })
             .collect::<Vec<_>>();
         let packed_dimension_starts = Starts::new(
-            native
-                .types
+            packed_dimensions
                 .iter()
-                .flat_map(|data| &data.packed_dimensions)
-                .map(|dimension| dimension.tokens)
+                .map(|(ty, dimension)| native.types[*ty].packed_dimensions[*dimension].tokens)
                 .enumerate(),
         );
         let override_dimensions = native
@@ -788,6 +796,9 @@ impl Facts {
                 _ => {}
             }
         }
+        // What follows the name of a covergroup is no constant value of
+        // the scope that declares it.
+        constant_roots.retain(|id| !covergroups.contain(native.expression(*id).tokens));
         let mut constant = constant_roots.clone();
         let mut constant_nodes = HashSet::default();
         while let Some(id) = constant.pop() {
@@ -1003,7 +1014,8 @@ fn validate_scope(
     // other than a net_lvalue of interconnect nets (6.6.8). Instance items
     // carry the allowed connections; every other authored item that names
     // one is a forbidden use. Generate wrappers are skipped: their inner
-    // items are visited on their own.
+    // items are visited on their own. So is a covergroup, whose formals
+    // and labels the scope does not bind.
     if !interconnect_names.is_empty() {
         let forbidden_use = |tokens: &celox_sv_syntax::TokenRange| {
             native.tokens[tokens.start..tokens.end]
@@ -1041,6 +1053,7 @@ fn validate_scope(
                     | BodyItemKind::Conditional { .. }
                     | BodyItemKind::Case { .. }
                     | BodyItemKind::Loop { .. }
+                    | BodyItemKind::Covergroup(_)
                     | BodyItemKind::Unconverted { .. }
             ) {
                 continue;

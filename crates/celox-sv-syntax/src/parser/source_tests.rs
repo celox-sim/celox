@@ -110,9 +110,55 @@ fn deep_source_scopes_and_global_expression_clone_and_drop_on_the_default_stack(
 }
 
 #[test]
-fn opaque_covergroup_sampling_header_does_not_consume_the_next_global_function() {
+fn covergroup_sampling_header_does_not_consume_the_next_global_function() {
     let tree=Declarations::parse("covergroup cg with function sample(int x);coverpoint x;endgroup function int f();return 1;endfunction",Path::new("source-sampling.sv")).unwrap();
     assert_eq!(tree.source_items.len(), 2);
+    let SourceItemKind::Declaration(covergroup) = tree.source_items[0].kind else {
+        panic!()
+    };
+    let BodyItemKind::Covergroup(covergroup) = tree.body_item(covergroup).kind else {
+        panic!()
+    };
+    assert!(matches!(
+        &tree.covergroup(covergroup).kind,
+        CovergroupKind::Declared { ports: None, event: Some(CoverageEvent::Sample(formals)) }
+            if formals.len() == 1
+    ));
     assert_eq!(tree.subroutines.len(), 1);
     assert_eq!(tree.subroutines[0].name.spelling, "f");
+}
+
+/// Select expressions and bins nest and repeat without native recursion:
+/// 10,000 nested select groups, a 10,000-term `&&` chain and 10,000 bins
+/// parse, clone and drop on the default stack.
+#[test]
+fn deep_and_long_covergroup_bodies_clone_and_drop_on_the_default_stack() {
+    let cross = |select: String| {
+        format!("covergroup cg;cross a,b{{bins s={select};}}endgroup module M;endmodule")
+    };
+    let nested = cross(format!(
+        "{}binsof(a){}",
+        "(".repeat(10_000),
+        ")".repeat(10_000)
+    ));
+    let chain = cross(format!("{}binsof(b)", "binsof(a)&&".repeat(10_000)));
+    let bins = format!(
+        "covergroup cg;coverpoint x{{{}}}endgroup module M;endmodule",
+        (0..10_000)
+            .map(|index| format!("bins b{index}={{{index}}};"))
+            .collect::<String>()
+    );
+    for (source, selects, items) in [(nested, 10_001, 1), (chain, 20_001, 1), (bins, 0, 10_000)] {
+        let tree = Declarations::parse(&source, Path::new("deep-coverage.sv")).unwrap();
+        assert_eq!(tree.coverage_selects.len(), selects);
+        let count = match &tree.covergroups[0].items[0] {
+            CoverageItem::Coverpoint(point) => point.items.len(),
+            CoverageItem::Cross(cross) => cross.body_items.len(),
+            CoverageItem::Option(_) => panic!(),
+        };
+        assert_eq!(count, items);
+        let copy = tree.clone();
+        drop(tree);
+        drop(copy);
+    }
 }
