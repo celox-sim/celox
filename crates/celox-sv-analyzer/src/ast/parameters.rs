@@ -2734,6 +2734,103 @@ pub(super) fn substitute_typed_parameter_literals_with_lookup(
     }
 }
 
+/// The value of unpacked array parameter `name` whose elements are
+/// constants of `constants` (see [`element_markers`]), as one literal of
+/// its elements with the element of the left bound least significant: how
+/// a constant function holds such an array when it receives it.
+fn array_parameter_literal(name: &str, constants: &ConstEnv) -> Option<String> {
+    let count =
+        usize::try_from(*constants.get(&dimensions::parameter_elements_marker(name))?).ok()?;
+    let r#type = *constants.get(&dimensions::parameter_element_marker(name, "type"))?;
+    let width = usize::try_from(r#type >> 2).ok()?;
+    if count == 0 || width == 0 {
+        return None;
+    }
+    let mut value = num_bigint::BigUint::default();
+    let window = (num_bigint::BigUint::from(1u8) << width) - 1u8;
+    for position in (0..count).rev() {
+        let element = *constants.get(&dimensions::parameter_element_marker(name, position))?;
+        value = (value << width) | (num_bigint::BigUint::from(element as u128) & &window);
+    }
+    Some(typecheck::format_integral_literal_binary(
+        &typecheck::IntegralLiteral {
+            width: width.checked_mul(count)?,
+            signed: false,
+            value,
+            mask: num_bigint::BigUint::default(),
+        },
+    ))
+}
+
+/// `value` with each argument of a constant function call that names an
+/// unpacked array parameter with constant elements replaced by the literal
+/// of the array (IEEE 1800-2023 13.4.3): the function receives the array by
+/// value, such as OpenTitan's `max_info_pages(InfoTypeSize)`.
+pub(super) fn substitute_array_parameter_arguments(
+    value: ConstExpr,
+    constants: &ConstEnv,
+) -> ConstExpr {
+    let recurse =
+        |expr: Box<ConstExpr>| Box::new(substitute_array_parameter_arguments(*expr, constants));
+    match value {
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee,
+            args: args
+                .into_iter()
+                .map(|arg| match arg {
+                    ConstExpr::Ident(name) => array_parameter_literal(&name, constants)
+                        .map_or(ConstExpr::Ident(name), ConstExpr::Literal),
+                    arg => substitute_array_parameter_arguments(arg, constants),
+                })
+                .collect(),
+            site,
+        },
+        ConstExpr::Ident(_) | ConstExpr::Literal(_) => value,
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: recurse(expr),
+            bit: recurse(bit),
+        },
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: recurse(expr),
+            msb: recurse(msb),
+            lsb: recurse(lsb),
+            signed,
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: recurse(expr),
+            width,
+            signed,
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op,
+            expr: recurse(expr),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: recurse(left),
+            op,
+            right: recurse(right),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: recurse(condition),
+            then_expr: recurse(then_expr),
+            else_expr: recurse(else_expr),
+        },
+    }
+}
+
 pub(super) fn infer_const_expr_type(
     expr: &ConstExpr,
     parameter_types: &HashMap<String, ExprType>,

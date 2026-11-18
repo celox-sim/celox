@@ -46,9 +46,11 @@ impl Parameter {
         if self.floating.is_some() {
             return None;
         }
-        let value: crate::ir::ConstExpr =
-            substitute_typed_parameter_literals(self.value()?.clone(), constants, parameter_types)
-                .into();
+        let value: crate::ir::ConstExpr = parameters::substitute_array_parameter_arguments(
+            substitute_typed_parameter_literals(self.value()?.clone(), constants, parameter_types),
+            constants,
+        )
+        .into();
         let environment = const_functions::Environment {
             constants,
             functions,
