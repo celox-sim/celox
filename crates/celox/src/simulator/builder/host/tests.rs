@@ -2833,3 +2833,60 @@ endmodule"#;
         );
     }
 }
+
+/// A one-bit input of the top that only a process waits for is an event,
+/// so that a host can clock it. It takes a host clock slot only when no
+/// event derives from it: a slot would make the reset computed from a
+/// waited reset input, or the clock gated by a waited enable, a derived
+/// clock that every slot of the run evaluates, where a design that never
+/// clocks the input holds them stable.
+#[test]
+fn waited_inputs_other_events_derive_from_take_no_clock_slot() {
+    let plan = |ports: &str, body: &str| {
+        let source = format!(
+            "`timescale 1ns/1ns\nmodule Top(input logic clk, {ports}, output logic [7:0] q, \
+             output int done);\n{body}\nendmodule"
+        );
+        let (program, ..) = crate::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("waited-slots.sv"))],
+            "Top",
+        )
+        .four_state(false)
+        .emit_triggers()
+        .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+        .unwrap();
+        let summary = crate::scheduler::plan_for_test(&program).unwrap();
+        let names = |events: &[crate::ir::AbsoluteAddr]| -> Vec<String> {
+            events.iter().map(|event| program.get_path(event)).collect()
+        };
+        (names(&summary.clocks), names(&summary.derived))
+    };
+    // The reset the flip-flops sense is computed from the waited input.
+    let reset = "wire rst = ~rst_n;
+        always_ff @(posedge clk or posedge rst) if (rst) q <= '0; else q <= q + 8'd1;";
+    let (clocks, derived) = plan("input logic rst_n", reset);
+    assert_eq!(clocks, ["clk"]);
+    assert_eq!(derived, [""; 0]);
+    let waited = format!("{reset}\ninitial begin wait (rst_n); done = 1; end");
+    assert_eq!(
+        plan("input logic rst_n", &waited),
+        (clocks.clone(), derived.clone())
+    );
+    // The same for the enable of a gated clock.
+    let gate = "wire gated = clk & en;
+        always_ff @(posedge clk) done <= done + 1;
+        always_ff @(posedge gated) q <= q + 8'd1;";
+    let unwaited = plan("input logic en", gate);
+    assert_eq!(unwaited.0, ["clk"]);
+    let waited = format!("{gate}\nlogic seen; initial begin @(posedge en); seen = 1; end");
+    assert_eq!(plan("input logic en", &waited), unwaited);
+    // An input nothing derives from has its slot, in which a host clock on
+    // it runs.
+    let (clocks, derived) = plan(
+        "input logic go",
+        "always_ff @(posedge clk) q <= q + 8'd1;
+        initial forever begin @(posedge go); done++; end",
+    );
+    assert_eq!(clocks, ["clk", "go"]);
+    assert_eq!(derived, [""; 0]);
+}

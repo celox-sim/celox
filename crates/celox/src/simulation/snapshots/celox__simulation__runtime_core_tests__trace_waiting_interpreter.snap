@@ -8,7 +8,7 @@ run_until 0
   time 0 finished false: wakes=0
 modify [("go", 37)]
 run_until 2
-  step -> Some(0): host_writes(1) process(0) comb finish_step(0)
+  step -> Some(0): host_writes(1) process(0) comb stage(e0@0) eval_apply(e0) fire(e0@0) comb finish_step(0)
   time 2 finished false: wakes=1
 modify [("go", 74)]
 run_until 4
@@ -16,7 +16,7 @@ run_until 4
   time 4 finished false: wakes=1
 modify [("go", 111)]
 run_until 6
-  step -> Some(4): host_writes(1) process(0) comb finish_step(4)
+  step -> Some(4): host_writes(1) process(0) comb stage(e0@4) eval_apply(e0) fire(e0@4) comb finish_step(4)
   time 6 finished false: wakes=2
 modify [("go", 148)]
 run_until 8
@@ -24,7 +24,7 @@ run_until 8
   time 8 finished false: wakes=2
 modify [("go", 185)]
 run_until 10
-  step -> Some(8): host_writes(1) process(0) comb finish_step(8)
+  step -> Some(8): host_writes(1) process(0) comb stage(e0@8) eval_apply(e0) fire(e0@8) comb finish_step(8)
   time 10 finished false: wakes=3
 modify [("go", 222)]
 run_until 12

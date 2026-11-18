@@ -60,22 +60,27 @@ impl Design {
     /// instances below a root generated for several of them (IEEE 1800-2023
     /// 23.3.1), whose ports `PreserveTopPorts` keeps.
     fn top_instances(&self) -> HashSet<InstanceId> {
-        let root = InstancePath(Vec::new());
-        if !self.hidden_root {
-            return self.expanded.get(&root).copied().into_iter().collect();
-        }
-        self.expanded
-            .iter()
-            .filter(|(path, id)| {
-                path.0.len() == 1
-                    && !self
-                        .package_instances
-                        .values()
-                        .any(|package| package == *id)
-            })
-            .map(|(_, id)| *id)
-            .collect()
+        top_instances(&self.expanded, self.hidden_root, &self.package_instances)
     }
+}
+
+/// See [`Design::top_instances`].
+fn top_instances(
+    expanded: &HashMap<InstancePath, InstanceId>,
+    hidden_root: bool,
+    package_instances: &HashMap<ModuleId, InstanceId>,
+) -> HashSet<InstanceId> {
+    let root = InstancePath(Vec::new());
+    if !hidden_root {
+        return expanded.get(&root).copied().into_iter().collect();
+    }
+    expanded
+        .iter()
+        .filter(|(path, id)| {
+            path.0.len() == 1 && !package_instances.values().any(|package| package == *id)
+        })
+        .map(|(_, id)| *id)
+        .collect()
 }
 
 /// The combinational logic of the relocated design while it is symbolic.
