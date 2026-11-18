@@ -1,0 +1,129 @@
+(group net_strengths (category combinational))
+
+; IEEE 1800-2023 28.12: drivers of different strengths combine by strength.
+; The stronger one decides, equal strengths of opposite values give x, and a
+; highz strength drives z for its value (28.11); every bit has its own
+; drivers, and a weak driver drives all of them.
+(case drivers_of_different_strengths
+  (four_state)
+  (source "strengths.sv" #"
+module Top(input logic a,b,c, output wire [7:0] w);
+  assign (weak1, weak0) w = {8{c}};
+  assign (strong1, pull0) w[0] = a;
+  assign (supply1, weak0) w[1] = a;
+  assign (highz1, supply0) w[1] = b;
+  assign (pull1, supply0) w[2] = a;
+  assign (supply1, highz0) w[2] = b;
+  assign (strong1, highz0) w[3] = a;
+  assign (supply1, supply0) w[4] = a;
+  assign (weak1, weak0) w[4] = b;
+  assign (strong1, supply0) w[5] = a;
+  assign (highz1, supply0) w[5] = b;
+  assign (supply1, weak0) w[6] = a;
+  assign (supply1, highz0) w[7] = a;
+  assign (highz1, strong0) w[7] = b;
+endmodule
+"#)
+  (top Top)
+  (for (av am bv bm cv cm wv wm)
+    (list
+      (0 0 0 0 0 0 0 0)
+      (0 0 0 0 1 0 72 64)
+      (0 0 0 0 1 1 72 72)
+      (0 0 0 0 0 1 0 8)
+      (0 0 1 0 0 0 4 4)
+      (0 0 1 0 1 0 206 70)
+      (0 0 1 0 1 1 206 206)
+      (0 0 1 0 0 1 4 140)
+      (0 0 1 1 0 0 4 4)
+      (0 0 1 1 1 0 206 198)
+      (0 0 1 1 1 1 206 206)
+      (0 0 1 1 0 1 132 140)
+      (0 0 0 1 0 0 0 0)
+      (0 0 0 1 1 0 202 66)
+      (0 0 0 1 1 1 202 202)
+      (0 0 0 1 0 1 0 136)
+      (1 0 0 0 0 0 223 2)
+      (1 0 0 0 1 0 223 2)
+      (1 0 0 0 1 1 223 2)
+      (1 0 0 0 0 1 223 2)
+      (1 0 1 0 0 0 255 0)
+      (1 0 1 0 1 0 255 0)
+      (1 0 1 0 1 1 255 0)
+      (1 0 1 0 0 1 255 0)
+      (1 0 1 1 0 0 255 34)
+      (1 0 1 1 1 0 255 34)
+      (1 0 1 1 1 1 255 34)
+      (1 0 1 1 0 1 255 34)
+      (1 0 0 1 0 0 255 0)
+      (1 0 0 1 1 0 255 0)
+      (1 0 0 1 1 1 255 0)
+      (1 0 0 1 0 1 255 0)
+      (1 1 0 0 0 0 223 223)
+      (1 1 0 0 1 0 223 215)
+      (1 1 0 0 1 1 223 223)
+      (1 1 0 0 0 1 223 223)
+      (1 1 1 0 0 0 255 255)
+      (1 1 1 0 1 0 255 119)
+      (1 1 1 0 1 1 255 255)
+      (1 1 1 0 0 1 255 255)
+      (1 1 1 1 0 0 255 255)
+      (1 1 1 1 1 0 255 247)
+      (1 1 1 1 1 1 255 255)
+      (1 1 1 1 0 1 255 255)
+      (1 1 0 1 0 0 255 255)
+      (1 1 0 1 1 0 255 119)
+      (1 1 0 1 1 1 255 255)
+      (1 1 0 1 0 1 255 255)
+      (0 1 0 0 0 0 0 0)
+      (0 1 0 0 1 0 93 16)
+      (0 1 0 0 1 1 93 93)
+      (0 1 0 0 0 1 0 77)
+      (0 1 1 0 0 0 20 16)
+      (0 1 1 0 1 0 255 0)
+      (0 1 1 0 1 1 255 251)
+      (0 1 1 0 0 1 20 235)
+      (0 1 1 1 0 0 20 20)
+      (0 1 1 1 1 0 255 178)
+      (0 1 1 1 1 1 255 255)
+      (0 1 1 1 0 1 182 255)
+      (0 1 0 1 0 0 0 0)
+      (0 1 0 1 1 0 255 0)
+      (0 1 0 1 1 1 255 255)
+      (0 1 0 1 0 1 0 255)
+    )
+    (modify (set a (fourstate av am)) (set b (fourstate bv bm)) (set c (fourstate cv cm)))
+    (assert_eq w (fourstate wv wm))))
+
+; A two-state variable stores a resolved x as 0 (6.11.2).
+(case two_state_drivers_of_different_strengths
+  (source "strengths.sv" #"
+module Top(input logic a,b,c, output bit [7:0] o);
+  wire w0,w1,w2,w3,w4,w5,w6,w7;
+  assign (weak1, weak0) w0 = c;
+  assign (weak1, weak0) w0 = a;
+  assign (weak1, weak0) w1 = c;
+  assign (strong1, weak0) w1 = a;
+  assign (weak1, strong0) w1 = b;
+  assign (weak1, weak0) w2 = c;
+  assign (supply1, strong0) w2 = a;
+  assign (pull1, weak0) w2 = b;
+  assign (weak1, weak0) w3 = c;
+  assign (supply1, strong0) w3 = a;
+  assign (weak1, weak0) w4 = c;
+  assign (weak1, supply0) w4 = a;
+  assign (strong1, weak0) w4 = b;
+  assign (weak1, weak0) w5 = c;
+  assign (supply1, supply0) w5 = a;
+  assign (supply1, supply0) w5 = b;
+  assign (weak1, weak0) w6 = c;
+  assign (strong1, strong0) w6 = a;
+  assign (weak1, weak0) w7 = c;
+  assign (weak1, supply0) w7 = a;
+  assign (weak1, pull0) w7 = b;
+  assign o = {w7,w6,w5,w4,w3,w2,w1,w0};
+endmodule
+"#)
+  (top Top)
+  (for (va vb vc vo) (list (0 0 0 0) (0 0 1 0) (0 1 0 0) (0 1 1 0) (1 0 0 76) (1 0 1 77) (1 1 0 126) (1 1 1 255))
+    (modify (set a va) (set b vb) (set c vc)) (assert_eq o vo)))

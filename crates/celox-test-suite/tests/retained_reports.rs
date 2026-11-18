@@ -1397,6 +1397,14 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "verilator",
                             "string_format::display_empty_arguments_and_later_formats",
                         ) => ("compile_error", "compile", "syntax error, unexpected ')'"),
+                        (
+                            "verilator",
+                            "net_strengths::two_state_drivers_of_different_strengths",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Unable to resolve unequal strength specifier",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
