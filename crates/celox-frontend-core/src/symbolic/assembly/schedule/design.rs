@@ -57,8 +57,6 @@ pub(super) fn expand_design(
                 .len()
         })
         .sum::<usize>();
-    let scheduler_slots =
-        declare_scheduler_slots(&mut modules, root_id, process_count, expected_events);
     // Each package with variables is one instance outside the hierarchy,
     // named by a path segment no instance name can take.
     let mut package_instances = HashMap::default();
@@ -103,6 +101,21 @@ pub(super) fn expand_design(
         flatten_timing,
         "unify_clock_domains",
         unify_clock_domains(bindings, &expanded, &instance_modules, &modules)
+    );
+    // An input of a top-level module that only waiting processes sense is
+    // an event as well, of none of the domains counted above.
+    let waited_inputs = declare_waited_inputs(
+        bindings,
+        &instance_modules,
+        &mut modules,
+        &clock_domains,
+        &top_instances(&expanded, hidden_root, &package_instances),
+    );
+    let scheduler_slots = declare_scheduler_slots(
+        &mut modules,
+        root_id,
+        process_count,
+        expected_events + waited_inputs,
     );
     // Whether every automatically started process has reached its first
     // suspension: one combinational path computes it from their statuses,

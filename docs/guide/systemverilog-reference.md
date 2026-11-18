@@ -857,6 +857,23 @@ which designs need the timed `Simulation` API and what the host can observe.
   edge-sensitive `always`. `Simulator::tick` drives the rising edge of its
   event only; a `Simulation` runs every edge. A `Simulator` call is one
   time slot for `$sampled` and deferred assertions, and `$time` returns 0.
+- **Host clocks.** `Simulation::add_clock` and `Simulation::schedule` move
+  an event signal: a clock or asynchronous reset of an edge-sensitive
+  `always`, or a one-bit input of a top-level module that a process waits
+  for. A process waits for the input its event control names
+  (`@(posedge clk)`, `@(clk)`) or its `wait` condition reads: in the top
+  module itself, by a hierarchical name, or through port connections and
+  continuous assignments that copy the whole signal unchanged. For any other
+  signal `schedule` returns `NotAnEvent` and `add_clock` does nothing: an
+  input read only as data, an `iff` condition, a multi-bit input, and the
+  operands of an event expression such as `@(posedge (clk & en))` are driven
+  with `modify` between the runs. With several top-level modules,
+  `named_events()` names the events of each top from it (`hdl_top.clk`), and
+  `add_clock_by_id` and `schedule_by_id` move them. An event signal cannot
+  be forced from the host: `force_signals` rejects a waited input as it
+  rejects a clock. A clock on a waited input that another event is computed
+  from (a gated clock, an inverted reset) is not compiled into the
+  scheduler's time slots, so each of its edges is a step of the host.
 - **Termination.** `final` procedures run once on `$finish`, `$fatal`, or an
   explicit `Simulation::finish()`; an idle `step()` or the end of
   `run_until()` does not terminate the reusable Rust simulation. No

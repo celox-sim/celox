@@ -95,6 +95,8 @@ mod hierarchical_calls;
 mod hierarchical_references;
 #[path = "frontends/systemverilog/hierarchy.rs"]
 mod hierarchy;
+#[path = "frontends/systemverilog/host_clocks.rs"]
+mod host_clocks;
 #[path = "frontends/systemverilog/indexed_select.rs"]
 mod indexed_select;
 #[path = "frontends/systemverilog/interfaces.rs"]
