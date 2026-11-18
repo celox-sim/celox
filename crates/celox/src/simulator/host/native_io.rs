@@ -62,6 +62,11 @@ pub(super) struct Metadata {
     /// Per process, the FileIo sites of the function units it calls, by
     /// their index among those (see [`celox_design::SiteProcess`]).
     pub function_sites: Vec<Vec<Option<WriteSite>>>,
+    /// Per process, its and its function units' file I/O and plusargs
+    /// requests, in their declaration order, which
+    /// [`celox_design::host_request_site`] numbers: the native service
+    /// serves those [`supported`] passes other than formatted writes.
+    pub requests: Vec<Vec<HostRequestSite<SignalRef>>>,
     pub runtime_sites: Vec<RuntimeEventSite>,
     pub process_names: Vec<String>,
     pub nbas: Vec<Vec<celox_design::NbaSite<SignalRef>>>,
@@ -72,10 +77,27 @@ pub(super) struct Metadata {
 }
 
 pub(crate) fn supported<A>(site: &HostRequestSite<A>) -> bool {
-    site.kind == HostRequestKind::FileIo
-        && matches!(site.operation, 2 | 3)
-        && site.results.is_empty()
-        && !site.args.is_empty()
+    match (site.kind, site.operation) {
+        // `$fwrite`, `$fdisplay` and their relatives.
+        (HostRequestKind::FileIo, 2 | 3) => site.results.is_empty() && !site.args.is_empty(),
+        // `$fopen`, which returns the descriptor.
+        (HostRequestKind::FileIo, 0) => site.results.len() == 1 && !site.args.is_empty(),
+        // `$fclose`.
+        (HostRequestKind::FileIo, 1) => site.results.is_empty() && site.args.len() == 1,
+        // `$fflush`, of one file or of all.
+        (HostRequestKind::FileIo, 6) => site.results.is_empty() && site.args.len() <= 1,
+        // `$test$plusargs` and `$value$plusargs`, whose arguments the run
+        // fixes.
+        (HostRequestKind::Plusargs, 0) => site.args.len() == 1 && site.results.len() == 1,
+        (HostRequestKind::Plusargs, 1) => site.args.len() == 1 && site.results.len() == 2,
+        _ => false,
+    }
+}
+
+/// Whether the native service writes `site`'s output with a format
+/// ([`WriteSite`]) rather than serving it as [`Metadata::requests`] holds it.
+fn formatted(site: &HostRequestSite<SignalRef>) -> bool {
+    site.kind == HostRequestKind::FileIo && matches!(site.operation, 2 | 3)
 }
 
 impl Metadata {
@@ -96,12 +118,22 @@ impl Metadata {
             .collect();
         let mut function_sites: Vec<Vec<Option<WriteSite>>> =
             sites.iter().map(|_| Vec::new()).collect();
+        let mut requests: Vec<Vec<HostRequestSite<SignalRef>>> =
+            sites.iter().map(|_| Vec::new()).collect();
         for request in &program.runtime_schema.host_request_sites {
-            if request.kind != HostRequestKind::FileIo {
+            if !matches!(
+                request.kind,
+                HostRequestKind::FileIo | HostRequestKind::Plusargs
+            ) {
                 continue;
             }
             let resolved = request.map(&mut |address| backend.resolve_signal(&address));
+            requests[request.process.index()].push(resolved.clone());
+            if request.kind != HostRequestKind::FileIo {
+                continue;
+            }
             let supported = supported(&resolved)
+                && formatted(&resolved)
                 && resolved
                     .args
                     .iter()
@@ -230,6 +262,7 @@ impl Metadata {
             events: backend.resolve_signal(&scheduler.slots.events),
             sites,
             function_sites,
+            requests,
             runtime_sites: program.runtime_schema.runtime_event_sites.clone(),
             process_names: program
                 .runtime_schema
@@ -403,6 +436,8 @@ pub(super) struct Scope<'a> {
     pub observer: Option<&'a mut dyn ObserverService>,
     /// The observer watches every update (`AFTER_UPDATE`).
     pub updates: bool,
+    /// The run's plusargs, which `$test$plusargs` and `$value$plusargs` read.
+    pub plusargs: &'a celox_runtime::plusargs::Plusargs,
 }
 
 impl Scope<'_> {
@@ -945,6 +980,19 @@ impl Scope<'_> {
             .ok_or_else(|| Self::fault("native state has no file I/O"))
     }
 
+    /// [`Self::heap`], for interning a string result.
+    fn heap_mut(&mut self) -> Result<&mut celox_heap::Heap, RuntimeErrorCode> {
+        // SAFETY: as in `files`.
+        unsafe {
+            self.state
+                .add(celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET)
+                .cast::<*mut celox_heap::Heap>()
+                .read_unaligned()
+                .as_mut()
+        }
+        .ok_or_else(|| Self::fault("native state has no active heap"))
+    }
+
     fn heap(&self) -> Result<&celox_heap::Heap, RuntimeErrorCode> {
         // SAFETY: the backend keeps the heap it installs in this state
         // image alive while the image runs.
@@ -1005,23 +1053,24 @@ impl Scope<'_> {
         encoded: u64,
         timestamp: u64,
     ) -> Result<(), RuntimeErrorCode> {
-        let (HostRequestKind::FileIo, index) = HostRequestKind::decode(encoded)
-            .ok_or_else(|| Self::fault("invalid native file-write request"))?
-        else {
-            return Err(Self::fault(
-                "native file-write request has another service kind",
-            ));
-        };
+        let (kind, index) = HostRequestKind::decode(encoded)
+            .ok_or_else(|| Self::fault("invalid native host request"))?;
+        if kind != HostRequestKind::FileIo {
+            return self.serve_request(process, kind, index);
+        }
         let listed = if index & celox_design::FUNCTION_SITE_NUMBER != 0 {
             &self.metadata.function_sites
         } else {
             &self.metadata.sites
         };
-        let site = listed
+        let Some(site) = listed
             .get(usize::try_from(process).unwrap_or(usize::MAX))
             .and_then(|sites| sites.get((index & !celox_design::FUNCTION_SITE_NUMBER) as usize))
             .and_then(Option::as_ref)
-            .ok_or_else(|| Self::fault("native file-write request is not registered"))?;
+        else {
+            // Another file request than a formatted write.
+            return self.serve_request(process, kind, index);
+        };
         let values = site
             .request
             .args
@@ -1053,6 +1102,141 @@ impl Scope<'_> {
             self.queue_output(format, args)?;
         }
         result.map_err(|error| Self::fault(format!("file output: {error}")))
+    }
+
+    /// Serve host request `index` of `kind` of `process` other than a
+    /// formatted write, as the reference loop's file I/O and plusargs
+    /// services do (`run_file_io_request`, `run_plusargs_request`).
+    fn serve_request(
+        &mut self,
+        process: u64,
+        kind: HostRequestKind,
+        index: u32,
+    ) -> Result<(), RuntimeErrorCode> {
+        let site = self
+            .metadata
+            .requests
+            .get(usize::try_from(process).unwrap_or(usize::MAX))
+            .and_then(|requests| celox_design::host_request_site(requests, kind, index))
+            .filter(|site| supported(site))
+            .cloned()
+            .ok_or_else(|| Self::fault("native host request is not registered"))?;
+        let values = site
+            .args
+            .iter()
+            .map(|arg| self.value(arg.id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let known = |index: usize, what: &str| -> Result<&BigUint, RuntimeErrorCode> {
+            let (value, mask) = &values[index];
+            if *mask != BigUint::default() {
+                return Err(Self::fault(format!("{what} contains X or Z")));
+            }
+            Ok(value)
+        };
+        let number = |index: usize| -> Result<u32, RuntimeErrorCode> {
+            Ok(known(index, "file I/O descriptor")?
+                .to_u32_digits()
+                .first()
+                .copied()
+                .unwrap_or(0))
+        };
+        // A string's bytes without the leading zeros of its packed form.
+        let bytes = |this: &Self, index: usize, what: &str| -> Result<Vec<u8>, RuntimeErrorCode> {
+            let value = known(index, what)?;
+            let bytes = if site.args[index].value_kind == celox_design::ValueKind::StrRef {
+                let handle = value.to_u64_digits().first().copied().unwrap_or(0);
+                this.heap()?.string(handle as celox_heap::Handle).to_vec()
+            } else {
+                value.to_bytes_be()
+            };
+            Ok(bytes.into_iter().skip_while(|byte| *byte == 0).collect())
+        };
+        let text = |this: &Self, index: usize| -> Result<String, RuntimeErrorCode> {
+            String::from_utf8(bytes(this, index, "file I/O string")?)
+                .map_err(|_| Self::fault("file I/O path or mode is not UTF-8"))
+        };
+        let zero = BigUint::default();
+        match (kind, site.operation) {
+            (HostRequestKind::FileIo, 0) => {
+                let path = text(self, 0)?;
+                let mode = if site.args.len() > 1 {
+                    Some(text(self, 1)?)
+                } else {
+                    None
+                };
+                let descriptor = self.files()?.open(path, mode.as_deref());
+                self.store_value(site.results[0].id, &(BigUint::from(descriptor), zero))
+            }
+            (HostRequestKind::FileIo, 1) => {
+                let descriptor = number(0)?;
+                self.files()?
+                    .close(descriptor)
+                    .map_err(|error| Self::fault(format!("$fclose: {error}")))?;
+                // What a closed file would still receive is dropped, as in
+                // `cancel_file_strobes`.
+                let mut pending = self.pending.lock().unwrap();
+                pending
+                    .strobes
+                    .retain_mut(|call| call.cancel_file(descriptor));
+                pending
+                    .monitors
+                    .files
+                    .retain_mut(|monitor| monitor.call.cancel_file(descriptor));
+                Ok(())
+            }
+            (HostRequestKind::FileIo, 6) => {
+                let descriptor = if site.args.is_empty() {
+                    None
+                } else {
+                    Some(number(0)?)
+                };
+                self.files()?
+                    .flush(descriptor)
+                    .map_err(|error| Self::fault(format!("$fflush: {error}")))
+            }
+            (HostRequestKind::Plusargs, operation) => {
+                let query = bytes(self, 0, "plusargs query")?;
+                let plusargs = self.plusargs;
+                let matched = if operation == 0 {
+                    plusargs.test(&query)
+                } else if site.results[1].value_kind == celox_design::ValueKind::StrRef {
+                    match plusargs.text(&query).map_err(Self::fault)? {
+                        Some(found) => {
+                            let found = found.to_vec();
+                            let handle = self.heap_mut()?.intern(&found);
+                            self.store_value(
+                                site.results[1].id,
+                                &(BigUint::from(handle), zero.clone()),
+                            )?;
+                            true
+                        }
+                        None => false,
+                    }
+                } else {
+                    let target = site.results[1].id;
+                    match plusargs.value(&query, target.width).map_err(Self::fault)? {
+                        Some((value, mask)) => {
+                            // A two-state run reads the unknown bits as zero,
+                            // as the reference loop's `set_wide` does.
+                            let value = if self.metadata.layout.four_state && target.is_4state {
+                                (value, mask)
+                            } else {
+                                let width = (BigUint::from(1u8) << target.width) - 1u8;
+                                (value & (&width ^ (mask & &width)), zero.clone())
+                            };
+                            self.store_value(target, &value)?;
+                            true
+                        }
+                        None => false,
+                    }
+                };
+                self.store_value(
+                    site.results[0].id,
+                    &(BigUint::from(u8::from(matched)), zero),
+                )
+            }
+            _ => Err(Self::fault("native host request is not served")),
+        }
     }
 
     fn queue_output(
@@ -1220,6 +1404,7 @@ mod tests {
             events: signal(0, 64, false),
             sites: vec![],
             function_sites: vec![],
+            requests: vec![],
             runtime_sites: vec![],
             process_names: vec![],
             flagged: vec![(0, 0), (0, 1)],
@@ -1266,6 +1451,7 @@ mod tests {
             comb_before: Vec::new(),
             observer: None,
             updates: false,
+            plusargs: &celox_runtime::plusargs::Plusargs::default(),
         };
         let value = |bits: u8, mask: u8| (BigUint::from(bits), BigUint::from(mask));
         let update = |target, lsb, width, bits, mask| celox_runtime::NbaUpdate {
