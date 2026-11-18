@@ -1483,3 +1483,53 @@ endmodule
 "#)
   (top Top) (run_until 10)
   (expect_output "t 1 0\na 1 0\nt 0 1\nb 1 1\nc 2 1\nd 2 2\n"))
+
+; An event control on a named event through a virtual interface waits for a
+; trigger of the event of the instance the handle denotes when the wait
+; begins (IEEE 1800-2023 15.5.2, 15.5.5.1), from a module and from class
+; code, alone or with other events; `wait(v.go.triggered)` too (15.5.3). A
+; trigger of the other instance's event wakes none of them, and a handle
+; retargeted during the wait keeps the event it began with. Each waiter
+; records when it woke.
+(case waits_on_named_events_through_virtual_interfaces
+  (source "vif_waits.sv" #"
+interface bfm;
+    event go;
+    event stop;
+endinterface
+package p;
+    class h;
+        virtual bfm v;
+        task on_go(output int at); @(v.go); at = $time; endtask
+        task on_level(output int at); wait(v.go.triggered); at = $time; endtask
+    endclass
+endpackage
+module Top(output int class_x, output int class_y, output int level_x, output int level_y,
+           output int module_1, output int module_2, output int moved_at);
+    bfm b1();
+    bfm b2();
+    virtual bfm v1, v2, moved;
+    event other;
+    p::h x, y;
+    initial begin
+        v1 = b1; v2 = b2; moved = b1;
+        x = new; x.v = b1;
+        y = new; y.v = b2;
+        fork
+            x.on_go(class_x); y.on_go(class_y);
+            x.on_level(level_x); y.on_level(level_y);
+        join_none
+    end
+    initial begin #1 @(v1.go); module_1 = $time; end
+    initial begin #1 @(v2.go or v2.stop or other); module_2 = $time; end
+    initial begin #1 @(moved.go); moved_at = $time; end
+    initial begin
+        #2 moved = b2;
+        #1 ->b2.go;
+        #2 ->>v1.go;
+    end
+endmodule
+"#)
+  (top Top) (run_until 10)
+  (assert_eq class_x 5) (assert_eq class_y 3) (assert_eq level_x 5) (assert_eq level_y 3)
+  (assert_eq module_1 5) (assert_eq module_2 3) (assert_eq moved_at 5))
