@@ -368,6 +368,7 @@ pub(super) fn declaration_view(tree: &SyntaxTree) -> Converted<SyntaxTree> {
                 | Subroutine(_)
                 | TypeAlias(_)
                 | PackageBinding(_)
+                | Covergroup(_)
                 | Unconverted { .. }
         ))
     })

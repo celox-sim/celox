@@ -304,6 +304,15 @@ impl Parser<'_> {
     }
 
     pub(super) fn subroutine(&mut self, prototype: bool) -> Result<SubroutineId> {
+        let subroutine = self.subroutine_node(prototype)?;
+        let id = SubroutineId(self.subroutines.len());
+        self.subroutines.push(subroutine);
+        Ok(id)
+    }
+
+    /// A function or task declaration, which the caller stores: in the
+    /// subroutine arena, or with the cross body that declares it.
+    pub(super) fn subroutine_node(&mut self, prototype: bool) -> Result<Subroutine> {
         let start = self.at;
         let task = self.eat("task");
         if !task {
@@ -444,9 +453,8 @@ impl Parser<'_> {
                 }
             }
         }
-        let id = SubroutineId(self.subroutines.len());
         let authored_statements = self.body_membership(&items);
-        self.subroutines.push(Subroutine {
+        Ok(Subroutine {
             kind,
             name,
             scope,
@@ -460,7 +468,6 @@ impl Parser<'_> {
             end_label,
             body_tokens,
             tokens: self.range(start),
-        });
-        Ok(id)
+        })
     }
 }

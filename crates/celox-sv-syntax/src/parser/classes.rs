@@ -178,8 +178,8 @@ impl Parser<'_> {
         Ok(())
     }
 
-    /// Record a parameter or type declaration that is an item of the
-    /// innermost open class.
+    /// Record a parameter or type declaration or a covergroup that is an
+    /// item of the innermost open class.
     pub(super) fn class_item(&mut self, kind: &BodyItemKind) {
         let Some(class) = self.class_stack.last_mut() else {
             return;
@@ -187,6 +187,7 @@ impl Parser<'_> {
         match kind {
             BodyItemKind::Parameter(id) => class.parameters.push(*id),
             BodyItemKind::TypeAlias(id) => class.type_aliases.push(*id),
+            BodyItemKind::Covergroup(id) => class.covergroups.push(*id),
             _ => {}
         }
     }
@@ -350,6 +351,7 @@ impl Parser<'_> {
             type_aliases: Vec::new(),
             properties: Vec::new(),
             methods: Vec::new(),
+            covergroups: Vec::new(),
             tokens: TokenRange { start, end: start },
         });
         Ok(items)

@@ -1395,10 +1395,11 @@ pub(in crate::ast) fn nearest_block_variable(
             BodyItemKind::Loop { variable, .. } => named(variable),
             // An import may declare any name (26.3).
             BodyItemKind::PackageBinding(_) => true,
-            BodyItemKind::Modport(_) | BodyItemKind::Unconverted { .. } => native.tokens
-                [item.tokens.range()]
-            .iter()
-            .any(|token| instances::normalize_identifier(&token.text) == wanted),
+            BodyItemKind::Modport(_)
+            | BodyItemKind::Covergroup(_)
+            | BodyItemKind::Unconverted { .. } => native.tokens[item.tokens.range()]
+                .iter()
+                .any(|token| instances::normalize_identifier(&token.text) == wanted),
             _ => imports::item_names(id, tree).contains(wanted),
         };
         if !declares {
@@ -1538,7 +1539,9 @@ fn hides(
                 }
                 BodyItemKind::Loop { variable, .. } => named(variable),
                 BodyItemKind::PackageBinding(_) => import(item.tokens),
-                BodyItemKind::Modport(_) | BodyItemKind::Unconverted { .. } => spelled(item.tokens),
+                BodyItemKind::Modport(_)
+                | BodyItemKind::Covergroup(_)
+                | BodyItemKind::Unconverted { .. } => spelled(item.tokens),
                 BodyItemKind::Assign(_)
                 | BodyItemKind::Defparam(_)
                 | BodyItemKind::LogicGate(_)

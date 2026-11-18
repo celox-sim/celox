@@ -948,10 +948,8 @@ pub(super) fn declares_covergroup(
     declaration: &celox_sv_syntax::ClassDeclaration,
     member: &str,
 ) -> bool {
-    let within = declaration.tokens.range();
-    native.covergroups.iter().any(|covergroup| {
-        within.contains(&covergroup.tokens.start)
-            && instances::normalize_identifier(&covergroup.name.spelling) == member
+    declaration.covergroups.iter().any(|covergroup| {
+        instances::normalize_identifier(&native.covergroup(*covergroup).name.spelling) == member
     })
 }
 

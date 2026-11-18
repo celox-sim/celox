@@ -310,9 +310,9 @@ pub(super) fn declare_parameters<'a>(
 
 /// Record the types that `items` of one scope declare, each visible after
 /// its declaration, not those of the scopes nested in it: typedefs, also
-/// forward ones, type parameters, and covergroups and user-defined
-/// nettypes, which Celox keeps unconverted (IEEE 1800-2023 6.18, 6.20.3,
-/// 19.3, 6.6.7).
+/// forward ones, type parameters, covergroups, and user-defined nettypes,
+/// which Celox keeps unconverted (IEEE 1800-2023 6.18, 6.20.3, 19.3,
+/// 6.6.7).
 fn declare_items(
     native: &celox_sv_syntax::Declarations,
     items: &[celox_sv_syntax::BodyItemId],
@@ -333,23 +333,23 @@ fn declare_items(
                 false,
                 declarations,
             ),
-            BodyItemKind::Unconverted { category, .. }
-                if matches!(category.as_str(), "covergroup" | "nettype") =>
-            {
+            // The type is visible after the name of the covergroup.
+            BodyItemKind::Covergroup(covergroup) => {
+                let covergroup = native.covergroup(*covergroup);
+                declare(
+                    declarations,
+                    name(&covergroup.name),
+                    Some(covergroup.header.end),
+                );
+            }
+            BodyItemKind::Unconverted { category, .. } if category == "nettype" => {
                 let tokens = item.tokens.range();
-                for (declared, range) in native
-                    .covergroups
+                for nettype in native
+                    .nettypes
                     .iter()
-                    .map(|covergroup| (&covergroup.name, covergroup.tokens))
-                    .chain(
-                        native
-                            .nettypes
-                            .iter()
-                            .map(|nettype| (&nettype.name, nettype.tokens)),
-                    )
-                    .filter(|(_, declared)| tokens.contains(&declared.start))
+                    .filter(|nettype| tokens.contains(&nettype.tokens.start))
                 {
-                    declare(declarations, name(declared), Some(range.end));
+                    declare(declarations, name(&nettype.name), Some(nettype.tokens.end));
                 }
             }
             _ => {}
@@ -965,7 +965,7 @@ mod tests {
         // A name declared only in a nested block, or only in another design
         // element, is not visible.
         // Nor is another design element's name, or a label inside a
-        // covergroup, which Celox keeps unconverted.
+        // covergroup, which names a coverpoint and no type.
         for source in [
             "module A; int Missing; endmodule\nmodule B; typedef Missing Alias; endmodule\n",
             "module B; initial begin int Missing; end typedef Missing Alias; endmodule\n",
