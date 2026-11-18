@@ -314,10 +314,14 @@ pub(super) fn lower_ff_processes(
             .lower_process(process.body())?;
         all_delayed_sites.extend(delayed_sites);
         repeated_writes.extend(repeated_ff_writes(&eval_only, &staged));
-        // A process without writes still runs for its runtime events and
-        // extern calls.
-        let has_effects =
-            pm.runtime.event_sites.len() > sites_before || pm.externs.calls > extern_calls_before;
+        // A process without writes still runs for what it hands to the host:
+        // its runtime events and its extern calls, those of the heap among
+        // them, such as a method call that updates a property.
+        let has_effects = pm.runtime.event_sites.len() > sites_before
+            || pm.externs.calls > extern_calls_before
+            || [&eval_only, &apply, &active, &nba]
+                .into_iter()
+                .any(|unit| interacts_with_host(pm, unit));
         if trigger_set.resets.is_empty() && targets.is_empty() && !has_effects {
             continue;
         }
@@ -369,6 +373,26 @@ pub(super) fn lower_ff_processes(
         event_vars,
         all_delayed_sites,
     ))
+}
+
+/// Whether `unit` hands data or control to the host: in an instruction of
+/// its own, such as a heap call or a runtime event, or in a function unit
+/// it calls. A call is answered from the callee's unit, since calls carry
+/// their callees' effects only once the program is assembled.
+fn interacts_with_host(
+    pm: &mut procedural::ProcModule<'_>,
+    unit: &ExecutionUnit<RegionedVarAddr>,
+) -> bool {
+    let functions = pm.out_of_line();
+    unit.blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .any(|instruction| match instruction {
+            SIRInstruction::Call { function, .. } => functions
+                .as_deref()
+                .is_none_or(|functions| functions.interacts_with_host(function.0 as usize)),
+            instruction => instruction.host_effects().interacts_with_host(),
+        })
 }
 
 fn insert_or_merge_ff_unit(
