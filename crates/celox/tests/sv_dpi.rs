@@ -1406,3 +1406,162 @@ dpi_backends! {
         assert_eq!(sim.get(sim.signal("z")), BigUint::from(40u32));
     }
 }
+
+fn dpi_count_calls(x: i32) -> i32 {
+    x + 1
+}
+
+extern "C" fn dpi_increment(x: i32) -> i32 {
+    dpi_count_calls(x)
+}
+
+dpi_backends! {
+    // A recursive function that calls a C function goes out of line, as
+    // any recursive function does: inlining cannot expand the recursion.
+    fn recursive_functions_call_c_functions(sim) {
+        @build unsafe {
+            builder(r#"
+                module Top(input logic clk, input int a, output int y);
+                    import "DPI-C" function int dpi_increment(input int x);
+                    function automatic int climb(int n, int x);
+                        if (n == 0) return x;
+                        return climb(n - 1, dpi_increment(x));
+                    endfunction
+                    always_ff @(posedge clk) y <= climb(a, 0);
+                endmodule
+            "#)
+            .dpi_function("dpi_increment", dpi_increment as *const ())
+        };
+        let clk = sim.event("clk");
+        let (a, y) = (sim.signal("a"), sim.signal("y"));
+        sim.modify(|io| io.set(a, 5u32)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(y), BigUint::from(5u32));
+    }
+}
+
+recorder!(record_unit_native, "unit_native");
+recorder!(record_unit_cranelift, "unit_cranelift");
+recorder!(record_unit_interpreter, "unit_interpreter");
+recorder!(record_unit_wasm, "unit_wasm");
+recorder!(record_unit_cranelift_parallel, "unit_cranelift_parallel");
+
+// The C calls of a function that goes out of line keep their order with the
+// function's writes, as an inlined body's do: each call sees the value the
+// write before it made.
+macro_rules! unit_call_order_test {
+    ($name:ident, $tag:literal, $record:ident, $build:ident $(, $method:ident($($arg:expr),*))*) => {
+        #[test]
+        fn $name() {
+            let source = r#"
+                module Top(input logic clk, input int a, output int y);
+                    import "DPI-C" function void record(input int value);
+                    function automatic int walk(int n, int c);
+                        record(c);
+                        c = c + 10;
+                        record(c);
+                        if (n == 0) return c;
+                        return walk(n - 1, c);
+                    endfunction
+                    always_ff @(posedge clk) y <= walk(2, a);
+                endmodule
+            "#;
+            let mut sim = unsafe { builder(source).dpi_function("record", $record as *const ()) }
+                $(.$method($($arg),*))*
+                .$build()
+                .unwrap();
+            let clk = sim.event("clk");
+            let a = sim.signal("a");
+            sim.modify(|io| io.set(a, 1u32)).unwrap();
+            sim.tick(clk).unwrap();
+            assert_eq!(recorded($tag), vec![1, 11, 11, 21, 21, 31]);
+            assert_eq!(sim.get(sim.signal("y")), BigUint::from(31u32));
+        }
+    };
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+unit_call_order_test!(
+    unit_call_order_native,
+    "unit_native",
+    record_unit_native,
+    build_native
+);
+unit_call_order_test!(
+    unit_call_order_cranelift,
+    "unit_cranelift",
+    record_unit_cranelift,
+    build_cranelift
+);
+unit_call_order_test!(
+    unit_call_order_interpreter,
+    "unit_interpreter",
+    record_unit_interpreter,
+    build_interpreter
+);
+unit_call_order_test!(
+    unit_call_order_wasm,
+    "unit_wasm",
+    record_unit_wasm,
+    build_wasm
+);
+unit_call_order_test!(
+    unit_call_order_cranelift_parallel,
+    "unit_cranelift_parallel",
+    record_unit_cranelift_parallel,
+    build_cranelift,
+    threads(4),
+    parallel_partition(celox::ParallelPartition::Always)
+);
+
+static EXCLUSIVE_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static EXCLUSIVE_MOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts the calls in flight at once, each held for a moment.
+extern "C" fn dpi_exclusive(x: i32) -> i32 {
+    use std::sync::atomic::Ordering;
+    let now = EXCLUSIVE_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+    EXCLUSIVE_MOST.fetch_max(now, Ordering::SeqCst);
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    EXCLUSIVE_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    x + 1
+}
+
+/// C code need not be thread-safe: C calls that out-of-line functions make
+/// from independent combinational processes never run at once, also when
+/// the settle runs on parallel lanes.
+#[test]
+fn c_calls_in_functions_never_run_concurrently() {
+    let mut source = String::from(
+        "module Top(input int a, output int y0, y1, y2, y3, y4, y5, y6, y7);\n\
+         import \"DPI-C\" function int dpi_exclusive(input int x);\n\
+         function automatic int climb(int n, int x);\n\
+             if (n == 0) return x;\n\
+             return climb(n - 1, dpi_exclusive(x));\n\
+         endfunction\n",
+    );
+    for index in 0..8 {
+        source.push_str(&format!("always @* y{index} = climb({index}, a);\n"));
+    }
+    source.push_str("endmodule\n");
+    let source: &'static str = Box::leak(source.into_boxed_str());
+    let mut sim =
+        unsafe { builder(source).dpi_function("dpi_exclusive", dpi_exclusive as *const ()) }
+            .threads(4)
+            .parallel_partition(celox::ParallelPartition::Always)
+            .build_cranelift()
+            .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 100u32)).unwrap();
+    for index in 0..8u32 {
+        assert_eq!(
+            sim.get(sim.signal(&format!("y{index}"))),
+            BigUint::from(100 + index)
+        );
+    }
+    assert_eq!(
+        EXCLUSIVE_MOST.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "C calls ran at once"
+    );
+}
