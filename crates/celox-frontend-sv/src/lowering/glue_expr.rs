@@ -443,6 +443,51 @@ pub(super) fn lower_glue_parent_expr(
             let operation_context = context_width
                 .map(|width| width.max(natural_width.unwrap_or(width)))
                 .or(natural_width);
+            if matches!(op, sv::ir::BinaryOp::Pow) {
+                // As in `lower_expr_with_context`: the base is
+                // context-determined and gives the result its type, which an
+                // unsigned context makes unsigned; the exponent is
+                // self-determined (IEEE 1800-2023 11.6.1, 11.8.2).
+                let base_signed = left_signed && context_signed != Some(false);
+                let (base, mut sources, mut source_ids) = lower_glue_parent_expr(
+                    left,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    operation_context,
+                    Some(base_signed),
+                )?;
+                let base = coerce_node_width(arena, base, operation_context, base_signed).ok()?;
+                let exponent_signed =
+                    sv_glue_expr_is_signed(right, variables, name_to_id, parameter_types);
+                let (exponent, exponent_sources, exponent_source_ids) = lower_glue_parent_expr(
+                    right,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                    arena,
+                    None,
+                    Some(exponent_signed),
+                )?;
+                sources.extend(exponent_sources);
+                source_ids.extend(exponent_source_ids);
+                source_ids.sort();
+                source_ids.dedup();
+                let width = celox_slt::get_width(base, arena);
+                let node = celox_frontend_core::symbolic::pow::lower_runtime_pow(
+                    arena,
+                    base,
+                    exponent,
+                    width,
+                    exponent_signed,
+                    base_signed,
+                )
+                .ok()?;
+                return Some((node, sources, source_ids));
+            }
             let comparison_context = comparison
                 .then(|| {
                     sv_comparison_operand_width(
