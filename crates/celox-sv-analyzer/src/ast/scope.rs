@@ -104,6 +104,13 @@ pub(super) struct ScopeSymbols {
     /// (IEEE 1800-2023 26.3): a scope that uses them may be analyzed from
     /// another source, without their declarations.
     pub classes: Vec<Arc<classes::Class>>,
+    /// The classes whose objects code the scope lowers for another scope
+    /// may handle, beyond those it uses: those an interface instance bound
+    /// into it sees, through its own imports, whose processes and
+    /// subroutines the scope lowers. Their objects reach the dispatchers and
+    /// casts lowered here (see [`classes::visible_classes`]), but the
+    /// scope's own source does not see their names.
+    pub object_classes: Vec<Arc<classes::Class>>,
     /// Class-declared types, frozen in each specialization's declaration
     /// environment before another source imports them (8.23, 8.25).
     pub class_member_types: HashMap<String, HashMap<String, Type>>,
@@ -267,6 +274,9 @@ impl ScopeSymbols {
             |request| &request.key,
         );
         extend_unnamed(&mut self.classes, &other.classes, |class| &*class.name);
+        extend_unnamed(&mut self.object_classes, &other.object_classes, |class| {
+            &*class.name
+        });
         extend_missing(&mut self.class_member_types, &other.class_member_types);
         for (name, value) in &other.const_env {
             self.const_env.entry(name.clone()).or_insert(*value);
@@ -514,6 +524,7 @@ impl ScopeSymbols {
             design_subroutines: self.design_subroutines.clone(),
             // Classes have their qualified names already.
             classes: self.classes.clone(),
+            object_classes: self.object_classes.clone(),
             class_member_types: self.class_member_types.clone(),
             inline_randomizations: self.inline_randomizations.clone(),
             hierarchical_subroutines: self.hierarchical_subroutines.clone(),

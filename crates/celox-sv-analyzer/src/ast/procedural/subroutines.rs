@@ -625,14 +625,14 @@ pub(in crate::ast) fn subroutines_with_symbolic_parameters(
     let imported = scope::imported(tree);
     // The first subroutine of each name the scope imports.
     let mut imported_subroutines: HashMap<&str, &Subroutine> = HashMap::default();
-    if !imported.classes.is_empty() {
+    if !imported.classes.is_empty() || !imported.object_classes.is_empty() {
         for subroutine in &imported.subroutines {
             imported_subroutines
                 .entry(subroutine.name.as_str())
                 .or_insert(subroutine);
         }
     }
-    for class in &imported.classes {
+    for class in imported.classes.iter().chain(&imported.object_classes) {
         for method in class.dispatched_methods() {
             let name = classes::Class::dispatcher_name(&class.name, &method.name);
             if names.contains(&name) {

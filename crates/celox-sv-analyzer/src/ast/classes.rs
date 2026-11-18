@@ -1329,13 +1329,15 @@ fn imported(tree: &AnalysisContext<'_>, name: &str) -> Option<Rc<Class>> {
         .map(|class| Rc::new((**class).clone()))
 }
 
-/// The classes whose objects the current scope may see: those it declares
-/// and those of the scopes it uses.
+/// The classes whose objects the current scope may see: those it declares,
+/// those of the scopes it uses, and those of the interface instances it
+/// binds (see `scope::ScopeSymbols::object_classes`).
 pub(super) fn visible_classes(tree: &AnalysisContext<'_>, session: &mut Session) -> Vec<String> {
     let mut names = scope_declarations(tree)
         .flat_map(|declaration| specializations_of(tree, session, declaration))
         .collect::<Vec<_>>();
-    for class in &scope::imported(tree).classes {
+    let imported = scope::imported(tree);
+    for class in imported.classes.iter().chain(&imported.object_classes) {
         if !names.contains(&class.name) {
             names.push(class.name.clone());
         }
