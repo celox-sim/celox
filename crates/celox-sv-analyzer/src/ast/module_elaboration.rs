@@ -168,6 +168,11 @@ impl Module {
             {
                 classes::foreign::finish(syntax_tree, session, symbols)?;
             }
+            if let Ok(module) = &result
+                && !declarations_only
+            {
+                virtual_interface_calls::check_outward(session, module)?;
+            }
             if session.foreign.revision() == revision {
                 return result;
             }

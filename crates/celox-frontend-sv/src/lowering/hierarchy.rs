@@ -881,6 +881,69 @@ pub(super) fn resolve_call(
     Ok(true)
 }
 
+/// The object that hierarchical name `components` of a task or function of
+/// interface instance `scope` of `module` denotes, called through a virtual
+/// interface: the one the body of the instance would name (IEEE 1800-2023
+/// 23.8), from the instance's parent.
+pub(super) struct OutwardObject {
+    pub(super) r#type: sv::ast::Type,
+    pub(super) is_net: bool,
+    start: HierarchicalStart,
+    path: Vec<(String, usize)>,
+    /// The specializations that hold it, and its name in each.
+    pub(super) targets: Vec<(ModuleId, String)>,
+}
+
+impl OutwardObject {
+    /// The path from the top instance of the instance that holds the object,
+    /// for the instance of `module` at `instance`.
+    pub(super) fn rooted(&self, instance: &[(String, usize)]) -> Option<Vec<(String, usize)>> {
+        let mut rooted = match self.start {
+            HierarchicalStart::Root => Vec::new(),
+            HierarchicalStart::Ancestor(levels) => {
+                instance[..instance.len().checked_sub(levels)?].to_vec()
+            }
+        };
+        rooted.extend(self.path.iter().cloned());
+        Some(rooted)
+    }
+}
+
+/// The [`OutwardObject`] of name `components` of interface instance `scope`
+/// of `module`, if the hierarchy has one.
+pub(super) fn outward_object(
+    hierarchy: &Hierarchy<'_>,
+    module: ModuleId,
+    scope: &sv::InterfaceBodyScope,
+    components: &[String],
+) -> Result<Option<OutwardObject>, sv::AnalyzerError> {
+    let mut found = Vec::new();
+    if !resolve_interface_name(hierarchy, module, scope, components, &mut found)? {
+        return Ok(None);
+    }
+    let Some(reference) = found.pop() else {
+        return Ok(None);
+    };
+    let signal = reference.signal;
+    Ok(Some(match signal.aliased {
+        // The parent's own signal.
+        Some(own) => OutwardObject {
+            r#type: signal.r#type,
+            is_net: signal.is_net,
+            start: HierarchicalStart::Ancestor(0),
+            path: Vec::new(),
+            targets: vec![(module, own)],
+        },
+        None => OutwardObject {
+            r#type: signal.r#type,
+            is_net: signal.is_net,
+            start: reference.start,
+            path: reference.path,
+            targets: reference.targets,
+        },
+    }))
+}
+
 /// The bindings of the local signals of `references` in `lowered`.
 pub(super) fn bindings(
     references: &[HierarchicalReference],

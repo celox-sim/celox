@@ -343,6 +343,7 @@ fn build_inner(session: &mut Session, name: &str, caller: Option<&ScopeSymbols>)
         foreign: std::mem::take(&mut session.foreign),
         types: std::mem::take(&mut session.types),
         virtual_interfaces: session.virtual_interfaces.clone(),
+        virtual_interface_calls: session.virtual_interface_calls.clone(),
         next_call_site: session.next_call_site,
         ..Session::default()
     };
@@ -485,6 +486,12 @@ fn specialize(
             }
         }
     }
+    // So may it call their tasks and functions, also those built for the
+    // design: of a specialization of a parameterized interface, or whose
+    // hierarchical names each instance resolves.
+    let mut imports = Arc::new(imports);
+    crate::ast::virtual_interface_calls::import_specializations(session, &mut imports);
+    let imports = Arc::unwrap_or_clone(imports);
     // The classes whose specializations may extend a class of the scopes
     // that ask for them, when nothing else hides a name the package
     // qualifies with its own.

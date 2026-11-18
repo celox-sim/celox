@@ -163,6 +163,12 @@ pub struct VirtualInterfaceDeclaration {
     pub arguments: Arc<[i128]>,
     /// What specializing a parameterized interface needs.
     pub(crate) template: Option<Arc<DeclarationTemplate>>,
+    /// The hierarchical names, by their components, that the tasks and
+    /// functions of the interface use and it does not declare, which each
+    /// instance finds from its parent (IEEE 1800-2023 23.8). Until they are
+    /// resolved, the subroutines are not built, and a call of one is an
+    /// error ([`crate::AnalyzerError::VirtualInterfaceOutward`]).
+    pub outward: Vec<Vec<String>>,
 }
 
 /// What specializing a parameterized interface takes, which each
@@ -266,6 +272,15 @@ fn declared_name(name: &str) -> &str {
 }
 
 impl VirtualInterfaceDeclaration {
+    /// Whether some members are objects that the subroutines' hierarchical
+    /// names denote (see [`outward_member`]), which the packages do not
+    /// declare placeholders for.
+    pub(crate) fn has_outward_members(&self) -> bool {
+        self.members
+            .iter()
+            .any(|member| member.name.starts_with(OUTWARD_MEMBER_PREFIX))
+    }
+
     /// The declaration of the specialization whose overridable parameters
     /// have `values` and whose members are `members`.
     fn specialization(&self, values: &Arc<[i128]>, members: Vec<VirtualInterfaceMember>) -> Self {
@@ -401,6 +416,7 @@ impl VirtualInterfaces {
                     interface: prototype.name.clone(),
                     arguments: Arc::new([]),
                     template,
+                    outward: Vec::new(),
                 },
             );
         }
@@ -642,6 +658,20 @@ impl VirtualInterfaceSignal {
         }
     }
 }
+
+/// The member of an interface's declaration that hierarchical name
+/// `components` of its tasks and functions denotes, once the hierarchy
+/// tells each instance's object (see
+/// [`VirtualInterfaceDeclaration::outward`]).
+pub fn outward_member(components: &[String]) -> String {
+    format!(
+        "{OUTWARD_MEMBER_PREFIX}{}",
+        DefinitionId::of_name("", components)
+    )
+}
+
+/// The start of the name of an [`outward_member`].
+const OUTWARD_MEMBER_PREFIX: &str = "$up$";
 
 /// The signal that hierarchical name `components` of the body of instance
 /// `handle` of interface `interface` denotes in the scope that instantiates
@@ -1005,7 +1035,7 @@ pub(super) fn specialization_signals<'a>(
     if declarations
         .interfaces
         .values()
-        .all(|declaration| declaration.arguments.is_empty())
+        .all(|declaration| declaration.arguments.is_empty() && !declaration.has_outward_members())
     {
         return Vec::new();
     }
@@ -1023,7 +1053,9 @@ pub(super) fn specialization_signals<'a>(
         interfaces: declarations
             .interfaces
             .iter()
-            .filter(|(_, declaration)| !declaration.arguments.is_empty())
+            .filter(|(_, declaration)| {
+                !declaration.arguments.is_empty() || declaration.has_outward_members()
+            })
             .map(|(key, declaration)| (key.clone(), declaration.clone()))
             .collect(),
         requests: HashMap::default(),
@@ -1159,6 +1191,13 @@ pub(super) fn method(
     let Some(formals) = declaration.subroutines.get(name) else {
         return Ok(None);
     };
+    // The interface's subroutines are built once each instance's objects of
+    // their names are known (see `VirtualInterfaceDeclaration::outward`).
+    if !declaration.outward.is_empty() {
+        return Err(AnalyzerError::VirtualInterfaceOutward {
+            interface: ty.key(),
+        });
+    }
     if let Some(modport) = &ty.modport
         && !declaration
             .modport_imports
@@ -1684,6 +1723,10 @@ pub(super) fn handles(
                 interface: interface.clone(),
                 port,
                 members,
+                blocks: symbols
+                    .interface_blocks
+                    .get(handle)
+                    .map_or_else(Vec::new, |blocks| blocks.to_vec()),
             })
         })
         .collect::<Vec<_>>();
