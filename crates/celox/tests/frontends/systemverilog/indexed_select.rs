@@ -386,3 +386,78 @@ fn loops_over_module_variables_keep_sampled_values() {
         .collect();
     assert_eq!(displayed, ["21 3"]);
 }
+
+// Port actuals that select an element of a packed array whose bound is a
+// power, as OpenTitan's `prim_generic_otp` connects `wdata_q[cnt_q]` of a
+// `logic [2**SizeWidth-1:0][Width-1:0]`, at a run-time or a constant index,
+// and port actuals that raise to a run-time power (IEEE 1800-2023 11.4.3,
+// 11.5.1, 23.3.3). Verilator 5.054 gives the same values.
+#[test]
+fn port_actuals_select_elements_of_power_bounded_arrays() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module enc(input [15:0] data_i, output logic [21:0] data_o);
+            assign data_o = {6'h2a, data_i};
+        endmodule
+        module pass #(parameter int W = 8) (input [W-1:0] d, output logic [W-1:0] q);
+            assign q = d;
+        endmodule
+        module otp #(parameter int Width = 16, parameter int SizeWidth = 2) (
+            input logic [SizeWidth-1:0] cnt_q, output logic [21:0] o, k, output logic [7:0] s, p
+        );
+            localparam int Depth = 2**SizeWidth;
+            logic [2**SizeWidth-1:0][Width-1:0] wdata_q;
+            logic [SizeWidth**2-1:0][3:0] sq;
+            logic [Depth-1:0][7:0] dq;
+            assign wdata_q = 64'h1111_2222_3333_4444;
+            assign sq = 16'hdcba;
+            assign dq = 32'h4433_2211;
+            enc u_enc(.data_i(wdata_q[cnt_q]), .data_o(o));
+            enc u_const(.data_i(wdata_q[2]), .data_o(k));
+            pass u_sq(.d({sq[cnt_q], sq[0]}), .q(s));
+            pass u_dq(.d(dq[cnt_q]), .q(p));
+        endmodule
+        module Top;
+            logic [1:0] c = 2'd1;
+            logic signed [7:0] b = -8'sd3;
+            logic [21:0] o, k;
+            logic [7:0] s, p, e, f;
+            logic [15:0] g;
+            otp u(.cnt_q(c), .o, .k, .s, .p);
+            pass u_e(.d(c ** 2), .q(e));
+            pass u_f(.d(8'd2 ** c), .q(f));
+            pass #(16) u_g(.d(b ** c), .q(g));
+            initial begin
+                #1 $display("%h %h %h %h %h %h %h", o, k, s, p, e, f, g);
+                c = 2'd3;
+                #1 $display("%h %h %h %h %h %h %h", o, k, s, p, e, f, g);
+            end
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("power_bounds.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let displayed: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8(message).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            displayed,
+            [
+                "2a3333 2a2222 ba 22 01 02 fffd",
+                "2a1111 2a2222 da 44 09 08 ffe5",
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
