@@ -569,3 +569,71 @@ endmodule"#;
         assert_eq!(lines, ["10 40 1012 1012 567"], "four_state={four_state}");
     }
 }
+
+/// A package parameter whose value calls a constant function with an array
+/// parameter of the package, such as OpenTitan flash_ctrl_pkg's
+/// `InfosPerBank = max_info_pages(InfoTypeSize)`, sizes the ports of the
+/// modules that use it, also for the output connections of their children
+/// that drive elements of such a port (IEEE 1800-2023 13.4.3, 23.3.3).
+/// Verilator 5.054 prints the same lines.
+#[test]
+fn package_parameters_of_array_argument_calls_size_ports() {
+    let source = r#"`timescale 1ns/1ns
+package fp;
+  parameter int Types = 3;
+  parameter int Sizes [Types] = '{10, 1, 2};
+  parameter int PerBank = max_size(Sizes);
+  function automatic integer max_size(int s[Types]);
+    int m = 0;
+    for (int i = 0; i < Types; i++) if (s[i] > m) m = s[i];
+    return m;
+  endfunction
+endpackage
+module child import fp::*; (output logic [PerBank-1:0][3:0] o);
+  assign o = {PerBank{4'h5}};
+  initial #1 $display("child %0d", $bits(o));
+endmodule
+module region import fp::*; (output logic [1:0][PerBank-1:0][3:0] r);
+  for (genvar i = 0; i < 2; i++) begin : g
+    child u(.o(r[i]));
+  end
+  initial #1 $display("region %0d", $bits(r));
+endmodule
+module tb;
+  import fp::*;
+  logic [1:0][PerBank-1:0][3:0] o;
+  region u(.r(o));
+  initial #2 $display("%0d %0d %h", PerBank, $bits(o), o);
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("package_array_arguments.sv"))],
+            "tb",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let mut lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                "10 80 55555555555555555555",
+                "child 40",
+                "child 40",
+                "region 80"
+            ],
+            "four_state={four_state}"
+        );
+    }
+}

@@ -11,6 +11,18 @@ impl ScopeElaboration<'_> {
         session: &mut Session,
         inline_randomizations: Vec<classes::constraints::InlineRequest>,
     ) -> Option<scope::ScopeSymbols> {
+        // A package parameter whose value calls a constant function with an
+        // array parameter of the package is published with the literal of
+        // that array as the argument (IEEE 1800-2023 13.4.3): a scope that
+        // uses the parameter has the package's constants, not its arrays'
+        // elements. A package has no overrides, so the value is fixed.
+        if self.is_package {
+            for parameter in &mut self.parameters {
+                parameter.value = parameter.value.take().map(|value| {
+                    parameters::substitute_array_parameter_arguments(value, &self.const_env)
+                });
+            }
+        }
         if self.is_package || self.export_symbols {
             Arc::make_mut(&mut self.packed_dimensions.constant_types).extend(
                 classes::specializations::export_constant_types(syntax_tree, session),
