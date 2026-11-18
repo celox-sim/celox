@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794986709508,
+  "lastUpdate": 1794996224574,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -457758,6 +457758,32 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-celox-jit/heliodor_suite_smp_linux_boot_8hart_execution",
             "unit": "ms",
             "value": 16867272.402101
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "093306ba7ef7df352faf16ee0752a311795231e9",
+          "message": "fix(sv): evaluate a repeat count once (#3925)",
+          "timestamp": "2026-11-17T04:57:11Z",
+          "url": "https://github.com/celox-sim/celox/commit/093306ba7ef7df352faf16ee0752a311795231e9"
+        },
+        "date": 1794996224574,
+        "cpu": "AMD EPYC 7763",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-tiered-x86_64/heliodor_suite_smp_linux_boot_8hart_end_to_end",
+            "unit": "ms",
+            "value": 10410637.852359
           }
         ]
       }
