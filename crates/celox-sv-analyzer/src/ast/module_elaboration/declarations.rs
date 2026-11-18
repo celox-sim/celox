@@ -622,6 +622,25 @@ impl ScopeElaboration<'_> {
         dimensions::all_class_signatures(syntax_tree, session, &mut self.packed_dimensions);
         self.packed_dimensions.functions = Arc::new(self.functions.clone());
         self.packed_dimensions.expression_signedness = expression_signedness.clone().into();
+        // A connection takes the values of the parameters that the numeric
+        // environment cannot hold, as the bodies do: among them those wider
+        // than 128 bits, also of a package, whose elements the generate scopes
+        // of the instances leave as names. The other parameters stay names
+        // that the frontend resolves through the numeric environment.
+        let mut connection_literals: HashMap<String, Expr> = HashMap::default();
+        if self
+            .instances
+            .iter()
+            .any(|instance| !instance.port_connections.is_empty())
+        {
+            connection_literals.extend(
+                self.parameter_values
+                    .iter()
+                    .filter(|(name, _)| !self.const_env.contains_key(*name))
+                    .chain(&self.enum_constants.exprs)
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
+        }
         for instance in &mut self.instances {
             for connection in &mut instance.port_connections {
                 if let Some(pattern) = &mut connection.bound_pattern {
@@ -635,7 +654,7 @@ impl ScopeElaboration<'_> {
                         session,
                         expr,
                         &self.const_env,
-                        &self.enum_constants.exprs,
+                        &connection_literals,
                     )
                 });
             }
