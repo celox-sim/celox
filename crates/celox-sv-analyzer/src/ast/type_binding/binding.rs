@@ -634,7 +634,7 @@ fn bind_in_mode(
     if let Some(ty) = values.last()
         && ty.is_chandle()
     {
-        if ty.is_enum {
+        if ty.enumeration().is_some() {
             return types::chandle_enum();
         }
         if ty.packed_ranges.len() > 1 {

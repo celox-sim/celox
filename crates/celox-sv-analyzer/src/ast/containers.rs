@@ -93,16 +93,14 @@ fn dimensioned(
                     // A member is compared with an index at the index's
                     // width: a negative member of a signed type is not
                     // extended past it.
-                    if ty.is_enum && !ty.packed_enum {
-                        key_enum_values = ty.enum_domain.as_ref().map(|domain| {
-                            crate::system_functions::EnumValues::new(
-                                domain
-                                    .values()
-                                    .iter()
-                                    .map(|value| value.bits() & width_mask(shape.width))
-                                    .collect(),
-                            )
-                        });
+                    if let Some(domain) = ty.enum_domain() {
+                        key_enum_values = Some(crate::system_functions::EnumValues::new(
+                            domain
+                                .values()
+                                .iter()
+                                .map(|value| value.bits() & width_mask(shape.width))
+                                .collect(),
+                        ));
                     }
                     // A process handle is an identity that the simulation
                     // keeps until it ends, so it serves as an integral key
@@ -242,19 +240,15 @@ fn container_type(
         ) || handle.is_some(),
         handle,
         key_enum_values,
-        enum_values: if base.is_enum && !base.packed_enum {
-            base.enum_domain.as_ref().map(|domain| {
-                crate::system_functions::EnumValues::new(
-                    domain
-                        .values()
-                        .iter()
-                        .map(|value| value.bits() & width_mask(shape.width))
-                        .collect(),
-                )
-            })
-        } else {
-            None
-        },
+        enum_values: base.enum_domain().map(|domain| {
+            crate::system_functions::EnumValues::new(
+                domain
+                    .values()
+                    .iter()
+                    .map(|value| value.bits() & width_mask(shape.width))
+                    .collect(),
+            )
+        }),
     };
     Ok(of(ContainerType {
         key: index_type,

@@ -82,7 +82,7 @@ impl ConstantType {
         self.declared.enumeration.binding()
     }
     pub(in crate::ast) fn domain(&self) -> Option<Arc<EnumDomain>> {
-        self.declared.enum_domain.clone()
+        self.declared.enum_domain().cloned()
     }
 }
 impl PartialEq for ConstantType {
