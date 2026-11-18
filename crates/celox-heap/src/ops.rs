@@ -245,7 +245,8 @@ const _: () = assert!(
         && UVM_TOOL_VERSION <= 0xff
         && UVM_DUMP_RE_CACHE <= 0xff
         && OBJECT_ARGUMENT_VALUE < MEMORY_FILE_RANGE
-        && MEMORY_FILE_MESSAGE <= 0xff
+        && MEMORY_FILE_MESSAGE < crate::coverage::COVERAGE
+        && crate::coverage::COVERAGE <= 0xff
 );
 
 /// `range(start, finish, flags)`: the addresses the next
@@ -300,6 +301,7 @@ impl Heap {
             op @ MEMORY_FILE_RANGE..=MEMORY_FILE_MESSAGE => {
                 self.memory_file_call(op, parameter, a, b, c)
             }
+            crate::coverage::COVERAGE => self.coverage_call(parameter, a, b, c),
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {
                 let lower = |handle| {

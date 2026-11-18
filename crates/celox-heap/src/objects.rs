@@ -135,6 +135,10 @@ pub enum Fault {
     /// `set_randstate` with a string that `get_randstate` did not return
     /// (IEEE 1800-2023 18.13.5).
     InvalidRandomState,
+    /// A covergroup operation that cannot be performed (IEEE 1800-2023
+    /// clause 19), such as a construction that needs more bins than
+    /// [`crate::coverage::MAX_BINS_PER_ITEM`] or a negative weight.
+    Coverage(String),
 }
 
 impl std::fmt::Display for Fault {
@@ -159,6 +163,7 @@ impl std::fmt::Display for Fault {
             Self::InvalidRandomState => {
                 f.write_str("set_randstate with a state that get_randstate did not return")
             }
+            Self::Coverage(reason) => write!(f, "covergroup: {reason}"),
         }
     }
 }
@@ -596,11 +601,26 @@ impl Heap {
 
     /// A new object of the class of `object` with a copy of its properties:
     /// the handles it holds are copied, not the objects they refer to (IEEE
-    /// 1800-2023 8.12). Copying `null` is a fault and gives `null`.
+    /// 1800-2023 8.12). An embedded covergroup is not copied: its handle is
+    /// `null` in the copy. Copying `null` is a fault and gives `null`.
     pub fn copy_object(&mut self, object: Handle) -> Handle {
-        let Some(copy) = self.object_mut(object).map(|object| object.clone()) else {
+        let Some(mut copy) = self.object_mut(object).map(|object| object.clone()) else {
             return NULL;
         };
+        if self.coverage.has_instances() {
+            // The type of an embedded covergroup has no name (19.4), so
+            // only the variable of its declaration holds such a handle.
+            for &(offset, kind) in &copy.handles {
+                let offset = offset as usize;
+                if kind == HandleKind::Object
+                    && let Some(bytes) = copy.bytes.get_mut(offset..offset + crate::HANDLE_BYTES)
+                    && let Ok(handle) = <[u8; crate::HANDLE_BYTES]>::try_from(&*bytes)
+                    && self.coverage.embedded(Handle::from_le_bytes(handle))
+                {
+                    bytes.fill(0);
+                }
+            }
+        }
         let handle = self.new_object(copy.class, 0);
         self.objects.insert(handle, copy);
         handle

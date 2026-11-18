@@ -11,7 +11,9 @@ const MAGIC: &[u8; 8] = b"CELOXCP1";
 // its entries, those left first, with the position of each and how many are
 // left, and the entries its constraints last allowed. Version 9 keys the
 // heap's container lookup by the digest of each container's contents.
-const VERSION: u32 = 9;
+// Version 10 keeps the covergroup types, bins, options and hits of a heap
+// after its other fields.
+const VERSION: u32 = 10;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointFileError {
