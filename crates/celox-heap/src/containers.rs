@@ -281,7 +281,103 @@ pub(crate) struct Container {
     default: Option<Element>,
     pub(crate) contents: Contents,
 }
+/// A key of the heap's container lookup: a published container with the
+/// hash of its layout, default and contents. Its hash is the digest, which
+/// stores keep up to date (see [`contents_digest`]), so that looking a
+/// container up does not visit every element; equality still compares the
+/// contents, so containers that are equal have one handle.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Interned {
+    digest: u64,
+    container: Arc<Container>,
+}
+impl PartialEq for Interned {
+    fn eq(&self, other: &Self) -> bool {
+        self.digest == other.digest
+            && (Arc::ptr_eq(&self.container, &other.container) || self.container == other.container)
+    }
+}
+impl Eq for Interned {}
+impl std::hash::Hash for Interned {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u64(self.digest);
+    }
+}
+
+/// SplitMix64's finalizer, which spreads the bits of `word`.
+const fn mix(word: u64) -> u64 {
+    let word = (word ^ (word >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    let word = (word ^ (word >> 27)).wrapping_mul(0x94d049bb133111eb);
+    word ^ (word >> 31)
+}
+fn element_hash(element: Element) -> u64 {
+    mix(element.value ^ mix(element.mask ^ 0x243f6a8885a308d3))
+}
+fn entry_hash(key: &Key, element: Element) -> u64 {
+    let key = match key {
+        Key::Integer(key) => mix(*key ^ 0x13198a2e03707344),
+        Key::String(key) => mix(fxhash::hash64(&**key) ^ 0xa4093822299f31d0),
+    };
+    mix(key.wrapping_add(element_hash(element).rotate_left(29)))
+}
+/// The base of the polynomial digest of a sequence, odd so that it has an
+/// inverse modulo 2^64, [`BASE_INVERSE`].
+const BASE: u64 = 0x9e3779b97f4a7c15;
+const BASE_INVERSE: u64 = {
+    // Newton's iteration doubles the correct low bits each step.
+    let mut inverse = BASE;
+    let mut step = 0;
+    while step < 6 {
+        inverse = inverse.wrapping_mul(2u64.wrapping_sub(BASE.wrapping_mul(inverse)));
+        step += 1;
+    }
+    inverse
+};
+/// `BASE` to the power `index`, the weight of element `index` of a sequence.
+fn weight(index: usize) -> u64 {
+    let (mut result, mut base, mut exponent) = (1u64, BASE, index as u64);
+    while exponent != 0 {
+        if exponent & 1 != 0 {
+            result = result.wrapping_mul(base);
+        }
+        base = base.wrapping_mul(base);
+        exponent >>= 1;
+    }
+    result
+}
+/// The digest of `contents` that a store updates without visiting the
+/// other elements: of a sequence, the sum of the hash of each element
+/// times [`weight`] of its index; of an associative array, the sum of the
+/// hashes of its entries.
+pub(crate) fn contents_digest(contents: &Contents) -> u64 {
+    match contents {
+        Contents::Sequence(v) => v.iter().rev().fold(0u64, |digest, &element| {
+            digest
+                .wrapping_mul(BASE)
+                .wrapping_add(element_hash(element))
+        }),
+        Contents::Associative(v) => v.iter().fold(0u64, |digest, (key, &element)| {
+            digest.wrapping_add(entry_hash(key, element))
+        }),
+    }
+}
+/// The change of the digest of a sequence whose element `index` changes
+/// from `before` to `after`.
+fn sequence_change(index: usize, before: Element, after: Element) -> u64 {
+    element_hash(after)
+        .wrapping_sub(element_hash(before))
+        .wrapping_mul(weight(index))
+}
+
 impl Container {
+    /// The hash of the lookup key of the container with contents digest
+    /// `digest`.
+    fn key_digest(&self, digest: u64) -> u64 {
+        let default = self.default.map_or(0x452821e638d01377, |default| {
+            mix(element_hash(default) ^ 0xbe5466cf34e90c6c)
+        });
+        mix(digest ^ mix(self.layout ^ mix(default ^ self.len() as u64)))
+    }
     pub(crate) fn empty(layout: Layout) -> Self {
         Self {
             layout: layout.0,
@@ -363,6 +459,16 @@ impl Heap {
     }
 
     pub(crate) fn publish_container(&mut self, container: Container, complete: bool) -> Handle {
+        self.publish_container_with_digest(container, complete, None)
+    }
+    /// [`Heap::publish_container`] of a container whose
+    /// [`contents_digest`] is `digest`, when it is known.
+    fn publish_container_with_digest(
+        &mut self,
+        container: Container,
+        complete: bool,
+        digest: Option<u64>,
+    ) -> Handle {
         if container.len() == 0 && container.default.is_none() {
             return 0;
         }
@@ -371,6 +477,9 @@ impl Heap {
             .checked_add(1)
             .expect("heap container handle space exhausted");
         self.containers.insert(handle, Arc::new(container));
+        if let Some(digest) = digest {
+            self.container_digests.insert(handle, digest);
+        }
         self.created += 1;
         if complete {
             self.finish_container(handle)
@@ -378,17 +487,44 @@ impl Heap {
             handle
         }
     }
+    /// The [`contents_digest`] of container `handle`, 0 for none (the
+    /// digest of no elements).
+    fn container_digest(&mut self, handle: Handle) -> u64 {
+        if let Some(&digest) = self.container_digests.get(&handle) {
+            return digest;
+        }
+        let Some(container) = self.containers.get(&handle) else {
+            return 0;
+        };
+        let digest = contents_digest(&container.contents);
+        self.container_digests.insert(handle, digest);
+        digest
+    }
+    /// The handle of container `handle`: of the published container with
+    /// the same contents, if there is one (the container is then dropped).
     fn finish_container(&mut self, handle: Handle) -> Handle {
+        let digest = self.container_digest(handle);
         let Some(container) = self.containers.get(&handle) else {
             return handle;
         };
-        if let Some(&canonical) = self.container_lookup.get(container) {
+        #[cfg(test)]
+        assert_eq!(
+            digest,
+            contents_digest(&container.contents),
+            "the digest a store kept is that of the contents"
+        );
+        let key = Interned {
+            digest: container.key_digest(digest),
+            container: container.clone(),
+        };
+        if let Some(&canonical) = self.container_lookup.get(&key) {
             if canonical != handle {
                 self.containers.remove(&handle);
+                self.container_digests.remove(&handle);
             }
             canonical
         } else {
-            self.container_lookup.insert(container.clone(), handle);
+            self.container_lookup.insert(key, handle);
             handle
         }
     }
@@ -742,17 +878,49 @@ impl Heap {
                 };
             }
             SET_MASK => {
-                if let Some(entry) = self.containers.get_mut(&(a as Handle)) {
+                let handle = a as Handle;
+                let source = self.last_set.take().and_then(|(result, source, index)| {
+                    (result == handle && index == b).then_some(source)
+                });
+                let digest = self.container_digest(handle);
+                let mut stored = None;
+                if let Some(entry) = self.containers.get_mut(&handle) {
                     let entry = Arc::make_mut(entry);
                     let element = match &mut entry.contents {
                         Contents::Sequence(v) => v.get_mut(b as usize),
                         Contents::Associative(v) => v.get_mut(&key),
                     };
                     if let Some(element) = element {
+                        let before = *element;
                         element.mask = c & layout.bits();
+                        let after = *element;
+                        let change = match &entry.contents {
+                            Contents::Sequence(_) => sequence_change(b as usize, before, after),
+                            Contents::Associative(_) => {
+                                entry_hash(&key, after).wrapping_sub(entry_hash(&key, before))
+                            }
+                        };
+                        self.container_digests
+                            .insert(handle, digest.wrapping_add(change));
+                        stored = Some((after, entry.len()));
                     }
                 }
-                return self.finish_container(a as Handle) as u64;
+                // A store that leaves its element as it was leaves the
+                // container it was made from: the rest of its contents,
+                // layout and default are that container's.
+                if let (Some(source), Some((after, len))) = (source, stored)
+                    && let Some(original) = self.containers.get(&source)
+                    && original.len() == len
+                    && match &original.contents {
+                        Contents::Sequence(v) => v.get(b as usize),
+                        Contents::Associative(v) => v.get(&key),
+                    } == Some(&after)
+                {
+                    self.containers.remove(&handle);
+                    self.container_digests.remove(&handle);
+                    return self.finish_container(source) as u64;
+                }
+                return self.finish_container(handle) as u64;
             }
             SLICE => {
                 let mut result = Container::empty(layout);
@@ -846,6 +1014,14 @@ impl Heap {
             value: c & layout.bits(),
             mask: 0,
         };
+        // A store keeps the digest of the contents up to date from the
+        // source's; the other operations visit every element anyway, and
+        // the digest is computed when the result is finished.
+        let mut digest =
+            matches!(op, SET | INSERT | DELETE).then(|| self.container_digest(a as Handle));
+        let mut update = |change: &dyn Fn(u64) -> Option<u64>| {
+            digest = digest.and_then(change);
+        };
         match &mut result.contents {
             Contents::Sequence(v) => {
                 let Ok(index) = usize::try_from(b) else {
@@ -902,35 +1078,93 @@ impl Heap {
                         }
                         *v = values.into_iter().collect();
                     }
-                    SET if index < v.len() => v[index] = value,
+                    SET if index < v.len() => {
+                        let before = std::mem::replace(&mut v[index], value);
+                        update(&|d| Some(d.wrapping_add(sequence_change(index, before, value))));
+                    }
                     SET if layout.kind() == 1 && index == v.len() && index < layout.capacity() => {
-                        v.push_back(value)
+                        v.push_back(value);
+                        update(&|d| {
+                            Some(d.wrapping_add(element_hash(value).wrapping_mul(weight(index))))
+                        });
                     }
                     INSERT if index <= v.len() && index < layout.capacity() => {
+                        let len = v.len();
                         v.insert(index, value);
+                        // At the end the others keep their indices; at the
+                        // front each moves one up. Elsewhere the digest is
+                        // computed again.
+                        if index == len {
+                            update(&|d| {
+                                Some(
+                                    d.wrapping_add(element_hash(value).wrapping_mul(weight(index))),
+                                )
+                            });
+                        } else if index == 0 {
+                            update(&|d| {
+                                Some(d.wrapping_mul(BASE).wrapping_add(element_hash(value)))
+                            });
+                        } else {
+                            update(&|_| None);
+                        }
                         if v.len() > layout.capacity() {
-                            v.pop_back();
+                            let last = v.len() - 1;
+                            if let Some(dropped) = v.pop_back() {
+                                update(&|d| {
+                                    Some(d.wrapping_sub(
+                                        element_hash(dropped).wrapping_mul(weight(last)),
+                                    ))
+                                });
+                            }
                         }
                     }
                     DELETE if index < v.len() => {
-                        v.remove(index);
+                        let last = v.len() - 1;
+                        let removed = v.remove(index);
+                        if index == last {
+                            update(&|d| {
+                                Some(d.wrapping_sub(
+                                    element_hash(removed).wrapping_mul(weight(index)),
+                                ))
+                            });
+                        } else if index == 0 {
+                            update(&|d| {
+                                Some(
+                                    d.wrapping_sub(element_hash(removed))
+                                        .wrapping_mul(BASE_INVERSE),
+                                )
+                            });
+                        } else {
+                            update(&|_| None);
+                        }
                     }
                     _ => return a,
                 }
             }
             Contents::Associative(v) => match op {
                 SET => {
-                    v.insert(key, value);
+                    let added = entry_hash(&key, value);
+                    let replaced = v
+                        .insert(key.clone(), value)
+                        .map(|before| entry_hash(&key, before));
+                    update(&|d| Some(d.wrapping_add(added).wrapping_sub(replaced.unwrap_or(0))));
                 }
                 DELETE => {
-                    if v.remove(&key).is_none() {
+                    let Some(removed) = v.remove(&key) else {
                         return a;
-                    }
+                    };
+                    let removed = entry_hash(&key, removed);
+                    update(&|d| Some(d.wrapping_sub(removed)));
                 }
                 _ => return a,
             },
         }
-        self.publish_container(result, !matches!(op, SET | INSERT)) as u64
+        let complete = !matches!(op, SET | INSERT);
+        let handle = self.publish_container_with_digest(result, complete, digest);
+        if op == SET && handle != 0 {
+            self.last_set = Some((handle, a as Handle, b));
+        }
+        handle as u64
     }
 }
 
@@ -1203,6 +1437,182 @@ mod tests {
             heap.collect([Root::object(handle as Handle)]);
             assert_eq!(heap.containers.len(), 1);
         }
+    }
+
+    /// Stores, inserts and deletes keep the digest of the contents up to
+    /// date (each finish checks it against the contents), and equal
+    /// contents still have one handle: two results have the same handle
+    /// exactly when their elements are the same.
+    #[test]
+    fn stores_keep_digests_and_equal_contents_one_handle() {
+        use fxhash::FxHashMap as HashMap;
+        use std::collections::BTreeMap;
+        let mut heap = Heap::new();
+        let mut seed = 0x2545f4914f6cdd1du64;
+        let mut next = move |bound: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % bound
+        };
+        // Two results with the same model have one handle, and different
+        // models different handles.
+        fn check<M: Eq + std::hash::Hash + Clone>(
+            seen: &mut HashMap<M, u64>,
+            handles: &mut HashMap<u64, M>,
+            model: &M,
+            handle: u64,
+        ) {
+            if let Some(&earlier) = seen.get(model) {
+                assert_eq!(handle, earlier, "equal contents have one handle");
+            }
+            if let Some(earlier) = handles.get(&handle) {
+                assert!(earlier == model, "one handle has one contents");
+            }
+            seen.insert(model.clone(), handle);
+            handles.insert(handle, model.clone());
+        }
+        let store = |heap: &mut Heap, p: u64, handle: u64, index: u64, value: u64, mask: u64| {
+            let set = call(heap, SET, p, handle, index, value);
+            call(heap, SET_MASK, p, set, index, mask)
+        };
+
+        for string_key in [false, true] {
+            let p = parameter(8, false, 0, 2, 0, false, string_key, false);
+            let keys: Vec<u64> = (0..64)
+                .map(|k| {
+                    if string_key {
+                        heap.intern(format!("key{k}").as_bytes()) as u64
+                    } else {
+                        k * 977
+                    }
+                })
+                .collect();
+            let mut model: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
+            let (mut seen, mut handles) = (HashMap::default(), HashMap::default());
+            let mut handle = 0;
+            for _ in 0..3000 {
+                let key = keys[next(keys.len() as u64) as usize];
+                if next(5) == 0 {
+                    handle = call(&mut heap, DELETE, p, handle, key, 0);
+                    model.remove(&key);
+                } else {
+                    // Few values, so that stores often leave an element as
+                    // it was and contents recur.
+                    let value = next(3);
+                    let mask = if next(4) == 0 { 1 } else { 0 };
+                    handle = store(&mut heap, p, handle, key, value, mask);
+                    model.insert(key, (value, mask));
+                }
+                let entries: Vec<_> = model.iter().map(|(k, v)| (*k, *v)).collect();
+                check(&mut seen, &mut handles, &entries, handle);
+                assert_eq!(call(&mut heap, LEN, p, handle, 0, 0), model.len() as u64);
+            }
+            for (&key, &(value, mask)) in &model {
+                assert_eq!(call(&mut heap, GET, p, handle, key, 0), value);
+                assert_eq!(call(&mut heap, GET_MASK, p, handle, key, 0), mask);
+            }
+            // The same entries stored in another order have the handle.
+            let mut rebuilt = 0;
+            for (&key, &(value, mask)) in model.iter().rev() {
+                rebuilt = store(&mut heap, p, rebuilt, key, value, mask);
+            }
+            assert_eq!(rebuilt, handle);
+        }
+
+        // Queues, one of them bounded, and a dynamic array.
+        for (kind, capacity) in [(1, 0), (1, 5), (0, 0)] {
+            let p = parameter(8, false, 0, kind, capacity, false, false, false);
+            let bound = if capacity == 0 {
+                usize::MAX
+            } else {
+                capacity as usize
+            };
+            let mut model: Vec<(u64, u64)> = vec![(0, 0); 4];
+            let mut handle = call(&mut heap, NEW, p, 4, 0, 0);
+            for index in 0..4 {
+                handle = store(&mut heap, p, handle, index, 0, 0);
+            }
+            let (mut seen, mut handles) = (HashMap::default(), HashMap::default());
+            for _ in 0..3000 {
+                let value = next(3);
+                let mask = if next(4) == 0 { 1 } else { 0 };
+                let len = model.len() as u64;
+                match next(if kind == 1 { 6 } else { 1 }) {
+                    // An element, or past the end of a queue.
+                    0 => {
+                        let index = next(len + 1);
+                        let set = call(&mut heap, SET, p, handle, index, value);
+                        handle = call(&mut heap, SET_MASK, p, set, index, mask);
+                        if (index as usize) < model.len() {
+                            model[index as usize] = (value, mask);
+                        } else if kind == 1 && model.len() < bound {
+                            model.push((value, mask));
+                        }
+                    }
+                    // Insertion at the front, the end, or within.
+                    1..=3 => {
+                        let index = match next(3) {
+                            0 => 0,
+                            1 => len,
+                            _ => next(len + 1),
+                        };
+                        if (index as usize) < bound {
+                            let inserted = call(&mut heap, INSERT, p, handle, index, value);
+                            handle = call(&mut heap, SET_MASK, p, inserted, index, mask);
+                            model.insert(index as usize, (value, mask));
+                            model.truncate(bound);
+                        }
+                    }
+                    _ if len > 0 => {
+                        let index = match next(3) {
+                            0 => 0,
+                            1 => len - 1,
+                            _ => next(len),
+                        };
+                        handle = call(&mut heap, DELETE, p, handle, index, 0);
+                        model.remove(index as usize);
+                    }
+                    _ => {}
+                }
+                if model.len() > 40 {
+                    handle = call(&mut heap, DELETE, p, handle, model.len() as u64 - 1, 0);
+                    model.pop();
+                }
+                check(&mut seen, &mut handles, &model, handle);
+                assert_eq!(call(&mut heap, LEN, p, handle, 0, 0), model.len() as u64);
+                for (index, &(value, mask)) in model.iter().enumerate() {
+                    assert_eq!(call(&mut heap, GET, p, handle, index as u64, 0), value);
+                    assert_eq!(call(&mut heap, GET_MASK, p, handle, index as u64, 0), mask);
+                }
+            }
+        }
+    }
+
+    /// A store of many elements of an associative array, as `$readmemh`
+    /// loads one, takes each element without visiting the others: the
+    /// heap's digest of the contents is the one of all of them.
+    #[test]
+    fn many_stores_into_an_associative_array_keep_its_digest() {
+        let mut heap = Heap::new();
+        let p = parameter(8, true, 0, 2, 0, false, false, false);
+        let mut handle = 0;
+        for key in 0..2000u64 {
+            let set = call(&mut heap, SET, p, handle, key, key & 0xff);
+            handle = call(&mut heap, SET_MASK, p, set, key, 0);
+        }
+        assert_eq!(call(&mut heap, LEN, p, handle, 0, 0), 2000);
+        for key in [0, 1, 999, 1999] {
+            assert_eq!(call(&mut heap, GET, p, handle, key, 0), key & 0xff);
+        }
+        let digest = heap.container_digests[&(handle as Handle)];
+        assert_eq!(
+            digest,
+            contents_digest(&heap.containers[&(handle as Handle)].contents)
+        );
+        // Storing an element's value again keeps the array.
+        let set = call(&mut heap, SET, p, handle, 7, 7);
+        assert_eq!(call(&mut heap, SET_MASK, p, set, 7, 0), handle);
     }
 
     #[test]
