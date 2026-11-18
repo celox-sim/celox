@@ -49,6 +49,118 @@ pub(super) fn resolve_inout_drivers(
     }
 }
 
+/// Reject a member of an interface instance that a hierarchical name forces
+/// (IEEE 1800-2023 10.6.2) and that a procedure of another instance, or of
+/// one below it that the interface port is passed on to, writes through an
+/// interface port. The write reaches the member as an output
+/// port connection does, so after a release the member would take the last
+/// value written there instead of keeping the forced value until the next
+/// write.
+pub(super) fn validate_forced_interface_members(
+    module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
+    modules: &HashMap<ModuleId, LoweredSvModule>,
+    forced: &HashMap<ModuleId, Vec<String>>,
+) -> Result<(), sv::AnalyzerError> {
+    let mut written: HashMap<ModuleId, HashSet<String>> = HashMap::default();
+    for (module_id, names) in forced {
+        let Some(module) = modules.get(module_id) else {
+            continue;
+        };
+        for instance in &module.instances {
+            let Some(&child_id) = module_ids.get(&LoweredSvModuleKey::instance_key(instance))
+            else {
+                continue;
+            };
+            for connection in &instance.port_connections {
+                if !connection.formal.contains('$') || !names.contains(&connection.actual) {
+                    continue;
+                }
+                let writes = interface_port_writes(
+                    child_id,
+                    module_ids,
+                    modules,
+                    &mut written,
+                    &mut Vec::new(),
+                );
+                if writes.contains(&connection.formal) {
+                    return Err(sv::AnalyzerError::Unsupported(format!(
+                        "force or release of interface member `{}` of `{}`, which a procedure \
+                         of instance `{}` or of one below it writes through an interface port",
+                        connection.actual.replace('$', "."),
+                        module.source.name(),
+                        instance.instance_name,
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The names that procedures of module `module_id` write, with the members
+/// of its interface ports that procedures of the instances below it write
+/// through interface ports they are passed on to.
+fn interface_port_writes<'a>(
+    module_id: ModuleId,
+    module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
+    modules: &HashMap<ModuleId, LoweredSvModule>,
+    written: &'a mut HashMap<ModuleId, HashSet<String>>,
+    visiting: &mut Vec<ModuleId>,
+) -> &'a HashSet<String> {
+    if !written.contains_key(&module_id) {
+        let mut writes = HashSet::default();
+        // A cycle of instances, which the module graph validation reports,
+        // forwards nothing.
+        if let Some(module) = modules.get(&module_id)
+            && !visiting.contains(&module_id)
+        {
+            visiting.push(module_id);
+            for body in module
+                .source
+                .comb_processes()
+                .iter()
+                .filter(|process| process.kind() != sv::ir::CombProcessKind::ContinuousAssign)
+                .map(sv::ir::CombProcess::body)
+                .chain(
+                    module
+                        .source
+                        .ff_processes()
+                        .iter()
+                        .map(sv::ir::FfProcess::body),
+                )
+                .chain(
+                    module
+                        .source
+                        .initial_processes()
+                        .iter()
+                        .map(|process| process.body()),
+                )
+            {
+                procedural::written_names_with_calls(&module.source, body, &mut writes);
+            }
+            for instance in &module.instances {
+                let Some(&child_id) = module_ids.get(&LoweredSvModuleKey::instance_key(instance))
+                else {
+                    continue;
+                };
+                let child = interface_port_writes(child_id, module_ids, modules, written, visiting);
+                writes.extend(
+                    instance
+                        .port_connections
+                        .iter()
+                        .filter(|connection| {
+                            connection.formal.contains('$') && child.contains(&connection.formal)
+                        })
+                        .map(|connection| connection.actual.clone()),
+                );
+            }
+            visiting.pop();
+        }
+        written.insert(module_id, writes);
+    }
+    &written[&module_id]
+}
+
 pub(super) fn validate_specialized_instance_net_drivers(
     module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
     modules: &HashMap<ModuleId, LoweredSvModule>,

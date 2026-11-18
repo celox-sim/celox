@@ -256,7 +256,10 @@ blocks in programs. Two region deviations are listed under
   carries the force controls, which the warning `forced_specialization`
   reports when several instances share them. A write of a forced target
   through a hierarchical name from a module that does not force it is not
-  overridden. A concatenation, a select
+  overridden. A member of an interface instance can be forced through a
+  hierarchical name, also of an element of an interface instance array
+  (`u.bus[2].ready`), except one that a procedure of another instance
+  writes through an interface port, which is rejected. A concatenation, a select
   with nonconstant bounds, a slice of an unpacked array, a `real`, `string`,
   handle or unpacked structure target (singular ones the standard allows),
   an unpacked array that several edge-triggered processes write, and a
