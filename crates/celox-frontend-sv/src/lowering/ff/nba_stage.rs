@@ -139,7 +139,7 @@ pub(super) fn stage_nonblocking(
             lsb: lsb.clone(),
             array_slice_width: array_slice_width.clone(),
             array_slice_reversed: *array_slice_reversed,
-            window: *window,
+            window: window.clone(),
         },
     };
     let mark = |lvalue: &sv::ir::LValue, stage: &NbaStage| sv::ir::Stmt::Assign {
