@@ -28,8 +28,9 @@ pub struct ParsedSource {
 /// What a module analysis lowers.
 #[derive(Clone, Copy)]
 enum ModuleAnalysis<'a> {
-    /// The whole module, with the signals its hierarchical names denote.
-    Full(&'a [ast::HierarchicalSignal]),
+    /// The whole module, with the signals its hierarchical names denote,
+    /// and its variables and nets that other modules force through theirs.
+    Full(&'a [ast::HierarchicalSignal], &'a [String]),
     DeclarationsOnly,
 }
 
@@ -342,7 +343,7 @@ impl ParsedSource {
             pattern_overrides,
             interfaces,
             packages,
-            ModuleAnalysis::Full(&[]),
+            ModuleAnalysis::Full(&[], &[]),
             design,
         )
     }
@@ -361,6 +362,35 @@ impl ParsedSource {
         design: &mut Design,
         hierarchical: &[ast::HierarchicalSignal],
     ) -> Result<Ir, AnalyzerError> {
+        self.analyze_module_with_hierarchy_and_forces(
+            module_name,
+            overrides,
+            type_overrides,
+            pattern_overrides,
+            interfaces,
+            packages,
+            design,
+            hierarchical,
+            &[],
+        )
+    }
+
+    /// [`Self::analyze_module_with_hierarchy`] for a module whose variables
+    /// and nets `forced` other modules force through hierarchical names
+    /// (IEEE 1800-2023 10.6.2): the module declares their force controls.
+    #[allow(clippy::too_many_arguments)]
+    pub fn analyze_module_with_hierarchy_and_forces(
+        &self,
+        module_name: &str,
+        overrides: &HashMap<String, ir::ConstExpr>,
+        type_overrides: &[(String, ast::Type)],
+        pattern_overrides: &[(String, ast::BoundPattern)],
+        interfaces: &ModuleInterfaces,
+        packages: &Packages,
+        design: &mut Design,
+        hierarchical: &[ast::HierarchicalSignal],
+        forced: &[String],
+    ) -> Result<Ir, AnalyzerError> {
         self.analyze_module_with_packages(
             module_name,
             overrides,
@@ -368,7 +398,7 @@ impl ParsedSource {
             pattern_overrides,
             interfaces,
             packages,
-            ModuleAnalysis::Full(hierarchical),
+            ModuleAnalysis::Full(hierarchical, forced),
             design,
         )
     }
@@ -511,6 +541,7 @@ impl ParsedSource {
                 types: &[],
                 patterns: &[],
                 hierarchical: &[],
+                forced: &[],
             },
             interfaces,
             packages,
@@ -535,7 +566,7 @@ impl ParsedSource {
             &[],
             interfaces,
             &packages,
-            ModuleAnalysis::Full(&[]),
+            ModuleAnalysis::Full(&[], &[]),
             &mut packages.design(),
         )
     }
@@ -592,7 +623,11 @@ impl ParsedSource {
                     types: type_overrides,
                     patterns: pattern_overrides,
                     hierarchical: match analysis {
-                        ModuleAnalysis::Full(hierarchical) => hierarchical,
+                        ModuleAnalysis::Full(hierarchical, _) => hierarchical,
+                        ModuleAnalysis::DeclarationsOnly => &[],
+                    },
+                    forced: match analysis {
+                        ModuleAnalysis::Full(_, forced) => forced,
                         ModuleAnalysis::DeclarationsOnly => &[],
                     },
                 },
