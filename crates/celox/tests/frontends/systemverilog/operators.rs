@@ -475,3 +475,93 @@ mod reductions_of_transposed_rows_read_their_row {
     transposed_row_reductions_backend!(wasm, build_wasm);
     transposed_row_reductions_backend!(interpreter, build_interpreter);
 }
+
+/// A left operand of `&&` or `||` whose known value decides the result, and
+/// a known condition of `?:`, leave the other operand unevaluated (IEEE
+/// 1800-2023 11.4.7, 11.4.11), so the result does not depend on it. A
+/// pass-through FIFO turned off by a parameter, as OpenTitan's
+/// `prim_fifo_sync` with `.Pass(0)` is, has no combinational path from its
+/// input to its output, and a design that feeds the output back to the input
+/// has no loop. Values agree with Verilator 5.054.
+#[test]
+fn known_operands_of_logical_and_conditional_operators_leave_the_others_unread() {
+    for (form, valid, data) in [
+        (
+            "logical",
+            "full_q || (Pass && wvalid_i)",
+            "(Pass && !full_q) ? wdata_i : storage",
+        ),
+        (
+            "conditional",
+            "full_q || (Pass ? wvalid_i : 1'b0)",
+            "Pass ? (full_q ? storage : wdata_i) : storage",
+        ),
+    ] {
+        let source = format!(
+            r#"`timescale 1ns/1ns
+module fifo1 #(parameter bit Pass = 1'b1) (input logic clk, input logic wvalid_i,
+    input logic [7:0] wdata_i, output logic rvalid_o, output logic [7:0] rdata_o);
+  logic full_q = 1'b0;
+  logic [7:0] storage = 8'h00;
+  assign rvalid_o = {valid};
+  assign rdata_o = {data};
+  always_ff @(posedge clk) begin full_q <= wvalid_i; if (wvalid_i) storage <= wdata_i; end
+endmodule
+module top;
+  logic clk = 0, rv;
+  logic [7:0] rd;
+  fifo1 #(.Pass(1'b0)) u(.clk, .wvalid_i(!rv), .wdata_i(rd + 8'd1), .rvalid_o(rv), .rdata_o(rd));
+  always #1 clk = ~clk;
+  initial begin #9 $display("%b %h", rv, rd); $finish; end
+endmodule"#
+        );
+        for four_state in [false, true] {
+            assert_eq!(
+                display_lines(&source, four_state),
+                ["0 02"],
+                "{form} four_state={four_state}"
+            );
+        }
+    }
+}
+
+/// A condition comparing an enumeration parameter with a member is known as
+/// well, also in an `always_comb`: the counter that OpenTitan's
+/// `aes_cipher_control_fsm` keeps only for one S-box implementation reads
+/// nothing in the others, where its register is a wire back to its input.
+/// Values agree with Verilator 5.054.
+#[test]
+fn known_conditions_comparing_parameters_leave_the_other_arm_unread() {
+    let source = r#"`timescale 1ns/1ns
+package impl_pkg;
+  typedef enum logic [1:0] {ImplLut, ImplDom} impl_e;
+endpackage
+module ctr import impl_pkg::*; #(parameter impl_e Impl = ImplLut) (input logic clk, output logic [2:0] q_o);
+  logic [2:0] cyc_ctr_d, cyc_ctr_q;
+  always_comb cyc_ctr_d = (Impl == ImplDom) ? cyc_ctr_q + 3'd1 : 3'd0;
+  if (Impl == ImplDom) begin : g_ctr
+    initial cyc_ctr_q = '0;
+    always_ff @(posedge clk) cyc_ctr_q <= cyc_ctr_d;
+  end else begin : g_no_ctr
+    assign cyc_ctr_q = cyc_ctr_d;
+  end
+  assign q_o = cyc_ctr_q;
+endmodule
+module top;
+  import impl_pkg::*;
+  logic clk = 0;
+  logic [2:0] lut, dom;
+  ctr #(.Impl(ImplLut)) u_lut(.clk, .q_o(lut));
+  ctr #(.Impl(ImplDom)) u_dom(.clk, .q_o(dom));
+  always #1 clk = ~clk;
+  initial begin #9 $display("%h %h", lut, dom); $finish; end
+endmodule
+"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            display_lines(source, four_state),
+            ["0 4"],
+            "four_state={four_state}"
+        );
+    }
+}
