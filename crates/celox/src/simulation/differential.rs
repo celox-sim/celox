@@ -38,10 +38,13 @@ impl<B: SimBackend> Simulation<B> {
     /// process kernel is scheduled.
     #[doc(hidden)]
     pub fn scheduler_stats(&self) -> crate::SchedulerStats {
+        let (activations, activation_bytes) = self.state.activation_footprint();
         crate::SchedulerStats {
             native_service_calls: self.simulator.native.service_calls,
             checked_steps: self.checked_steps,
             unchecked: self.unchecked,
+            activations,
+            activation_bytes,
             ..self.state.scheduler_stats().clone()
         }
     }

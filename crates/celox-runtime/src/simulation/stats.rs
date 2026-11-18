@@ -59,4 +59,9 @@ pub struct SchedulerStats {
     pub call_stack_saves: u64,
     pub call_stack_saved_bytes: u64,
     pub call_stack_restored_bytes: u64,
+    /// The activations of processes held, those of the kernels and those
+    /// forks spawned, and the bytes they hold with the process descriptions
+    /// they refer to (see [`crate::SimulationState::activation_footprint`]).
+    pub activations: u64,
+    pub activation_bytes: u64,
 }
