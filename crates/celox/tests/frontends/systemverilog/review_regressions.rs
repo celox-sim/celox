@@ -2276,6 +2276,8 @@ fn rejects_child_outputs_connected_to_parameters() {
     );
 }
 
+/// The implicit net `w` is a `wire` (IEEE 1800-2023 6.10), whose drivers
+/// below instances stay rejected as those of a declared one are.
 #[test]
 fn rejects_multiple_child_outputs_driving_an_implicit_net() {
     let error = cranelift_build_error(
@@ -2290,7 +2292,7 @@ fn rejects_multiple_child_outputs_driving_an_implicit_net() {
         "#,
     );
     assert!(
-        error.contains("multiple child outputs drive implicit net `w`"),
+        error.contains("multiple net drivers for `w`"),
         "unexpected error: {error}"
     );
 }
@@ -5951,7 +5953,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "implicit net `missing` disabled",
+            "`missing` is not declared",
             r#"
             `default_nettype none
             module Child(output logic y); assign y = 1'b1; endmodule

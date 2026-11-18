@@ -566,6 +566,7 @@ impl Parser<'_> {
                 package_bindings,
                 type_aliases: Vec::new(),
                 time_declarations: Vec::new(),
+                default_nettype: self.default_nettype.clone(),
                 end_label: None,
                 tokens: header,
             },
