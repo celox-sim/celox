@@ -5,9 +5,6 @@ use super::*;
 impl Type {
     pub(super) fn implicit() -> Self {
         Self::from(TypeShape {
-            is_enum: false,
-            enum_domain: None,
-            packed_enum: false,
             kind: TypeKind::Implicit,
             is_signed: false,
             packed_ranges: Vec::new(),
@@ -23,9 +20,6 @@ impl Type {
     pub(super) fn new(kind: TypeKind) -> Self {
         Self::from(TypeShape {
             kind,
-            is_enum: false,
-            enum_domain: None,
-            packed_enum: false,
             is_signed: false,
             packed_ranges: Vec::new(),
             unpacked_ranges: Vec::new(),
@@ -155,21 +149,11 @@ impl Type {
         &self,
         table: &semantic_types::TyTable,
     ) -> enums::Enumeration {
-        let fields = self.enumeration_fields();
         match (self.binding.get(table), self.enumeration.declaration()) {
             (None, Some(declaration)) => {
-                enums::Enumeration::kept(declaration, self.packed_ranges.len(), fields)
+                enums::Enumeration::kept(declaration, self.packed_ranges.len())
             }
-            (id, _) => enums::Enumeration::of(id, table, fields),
-        }
-    }
-
-    /// The enumeration the conversion input fields of the type tell.
-    pub(in crate::ast) fn enumeration_fields(&self) -> enums::Enumeration {
-        enums::Enumeration {
-            enumeration: self.is_enum || self.packed_enum,
-            packed: self.packed_enum,
-            domain: self.enum_domain.clone(),
+            (id, _) => enums::Enumeration::of(id, table),
         }
     }
 
@@ -296,11 +280,8 @@ impl Type {
     /// typedef name: a name of a variable or a subroutine of another scope,
     /// whose type is resolved there, has them (IEEE 1800-2023 6.19, 23.6).
     pub fn with_enumeration_of(mut self, other: &Type) -> Self {
-        self.is_enum = other.is_enum;
-        self.enum_domain = other.enum_domain.clone();
-        self.packed_enum = other.packed_enum;
         self.spelling = other.spelling.clone();
-        // The type keeps the enumerated type `other` keeps too.
+        // The type keeps the enumerated type `other` keeps.
         self.keep_enumeration(other.enumeration.binding());
         self
     }

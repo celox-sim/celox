@@ -203,7 +203,6 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
                     string: f.return_string,
                     chandle: false,
                     pattern_type: f.return_type.clone(),
-                    enum_domain: None,
                     container: None,
                 },
             )

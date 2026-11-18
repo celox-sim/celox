@@ -1301,7 +1301,6 @@ mod tests {
                 string: false,
                 chandle: false,
                 pattern_type: None,
-                enum_domain: None,
                 container: None,
             },
         );

@@ -25,7 +25,6 @@ impl Parameter {
             has_declared_type,
             is_local,
             signed_element_depth: None,
-            enum_domain: None,
         }
     }
 

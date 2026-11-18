@@ -149,9 +149,6 @@ impl CallSites for InsideItem {
 impl CallSites for Type {
     fn call_sites(&self, visit: &mut dyn FnMut(usize)) {
         let TypeShape {
-            is_enum: _,
-            enum_domain: _,
-            packed_enum: _,
             kind: _,
             is_signed: _,
             packed_ranges,
@@ -191,8 +188,6 @@ impl CallSites for VariableDimensions {
             declared: _,
             container: _,
             randomizable: _,
-            enum_domain: _,
-            packed_enum: _,
             real: _,
             string: _,
             packed,

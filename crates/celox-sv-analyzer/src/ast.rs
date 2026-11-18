@@ -386,8 +386,6 @@ pub struct Parameter {
     is_local: bool,
     /// See [`Type::signed_element_depth`].
     signed_element_depth: Option<usize>,
-    /// The enumerated type the parameter is declared with.
-    enum_domain: Option<Arc<enums::EnumDomain>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -527,12 +525,6 @@ pub struct Type {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeShape {
     container: Option<Arc<ContainerType>>,
-    is_enum: bool,
-    /// Resolved members of a scalar enum; None if its domain is unsupported.
-    enum_domain: Option<Arc<enums::EnumDomain>>,
-    /// A packed array whose elements are of an enumerated type, whose
-    /// methods are not supported on its elements.
-    packed_enum: bool,
     kind: TypeKind,
     is_signed: bool,
     packed_ranges: Vec<PackedRange>,
@@ -549,12 +541,16 @@ pub struct TypeShape {
     spelling: type_names::Spelling,
 }
 
-/// Two types are equal if their shapes and the identities of their elements
-/// are: a virtual interface type has the shape of the number that holds its
-/// value, and its element type tells its interface (IEEE 1800-2023 25.9).
+/// Two types are equal if their shapes, the identities of their elements
+/// and their enumerated types are: a virtual interface type has the shape
+/// of the number that holds its value, and its element type tells its
+/// interface (IEEE 1800-2023 25.9); an enumerated type, or an array of one,
+/// has the shape of its base type, and its declaration tells it (6.19).
 impl PartialEq for Type {
     fn eq(&self, other: &Self) -> bool {
-        self.shape == other.shape && self.element.identity() == other.element.identity()
+        self.shape == other.shape
+            && self.element.identity() == other.element.identity()
+            && self.enumeration.declaration() == other.enumeration.declaration()
     }
 }
 
@@ -564,6 +560,7 @@ impl std::hash::Hash for Type {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.shape.hash(state);
         self.element.identity().hash(state);
+        self.enumeration.declaration().hash(state);
     }
 }
 
@@ -604,32 +601,16 @@ impl Type {
     /// What declares the enumerated type (IEEE 1800-2023 6.19) the type
     /// is, or whose elements a packed or unpacked array of the type has.
     pub(in crate::ast) fn enumeration(&self) -> Option<&semantic_types::EnumDeclaration> {
-        let declaration = self.enumeration.declaration();
-        debug_assert_eq!(
-            declaration.is_some(),
-            self.shape.is_enum || self.shape.packed_enum,
-            "the enumeration a type keeps is not that of its fields: {self:?}"
-        );
-        declaration
+        self.enumeration.declaration()
     }
 
     /// The members of the enumerated type the type is, or whose elements
     /// an unpacked array of it has, if resolved: none for a packed array of
     /// it.
     pub(in crate::ast) fn enum_domain(&self) -> Option<&Arc<enums::EnumDomain>> {
-        let domain = self
-            .enumeration()
+        self.enumeration()
             .filter(|enumeration| self.packed_ranges.len() == enumeration.dims)
-            .and_then(|enumeration| enumeration.domain.as_ref());
-        debug_assert_eq!(
-            domain.map(|domain| &**domain),
-            self.shape
-                .enum_domain
-                .as_deref()
-                .filter(|_| !self.shape.packed_enum),
-            "the enumeration members a type keeps are not those of its fields: {self:?}"
-        );
-        domain
+            .and_then(|enumeration| enumeration.domain.as_ref())
     }
 
     /// Bind the type to semantic type `id` of `table`, its elements to the
@@ -972,8 +953,6 @@ struct Function {
     return_dimensions: Option<usize>,
     return_signed: bool,
     return_is_2state: bool,
-    /// The members of an enumerated return type, for its methods.
-    return_enum_domain: Option<Arc<enums::EnumDomain>>,
     /// The container type of a dynamic array, associative array or queue
     /// result (IEEE 1800-2023 7.5, 7.8, 7.10).
     return_container: Option<Arc<ContainerType>>,
@@ -1170,8 +1149,6 @@ struct FunctionReturnMetadata {
     chandle: bool,
     /// Declared aggregate type, available before function bodies are inlined.
     pattern_type: Option<Type>,
-    /// The members of an enumerated return type, for its methods.
-    enum_domain: Option<Arc<enums::EnumDomain>>,
     /// The function returns a dynamic array, associative array or queue of
     /// this type (IEEE 1800-2023 7.5, 7.8, 7.10).
     container: Option<Arc<ContainerType>>,

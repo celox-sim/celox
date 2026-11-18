@@ -605,8 +605,6 @@ fn pattern_items(
                     container: None,
                     chandle: false,
                     randomizable: true,
-                    enum_domain: None,
-                    packed_enum: false,
                     real: false,
                     string: false,
                     packed: Vec::new(),

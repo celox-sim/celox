@@ -514,12 +514,17 @@ mod scope_tests {
             ConstExpr::Literal("1".into()),
             ConstExpr::Literal("0".into()),
         ));
-        ty.is_enum = true;
-        ty.spelling.name(
-            name.into(),
-            type_names::TypedefName::Scope(name.into()),
-            None,
-        );
+        let typename = type_names::TypedefName::Scope(name.into());
+        ty.keep_enumeration(semantic_types::EnumBinding::new(
+            semantic_types::EnumDeclaration {
+                name: Some(name.into()),
+                named: true,
+                scope: None,
+                typename: Some(typename),
+                domain: None,
+                dims: 1,
+            },
+        ));
         ty
     }
 
@@ -542,7 +547,8 @@ mod scope_tests {
         let table = &mut semantic_types::TyTable::default();
         let first = enumeration("P::a_t");
         let second = enumeration("P::b_t");
-        assert_eq!(first, second, "the fields do not tell them apart");
+        assert_eq!(*first, *second, "their shapes do not tell them apart");
+        assert_ne!(first, second, "their declarations tell them apart");
         assert_ne!(
             scope_with(table, &[], &[("T".into(), first.clone())]),
             scope_with(table, &[], &[("T".into(), second)])

@@ -186,8 +186,6 @@ impl VariableDimensions {
     /// a member of a union is, which takes any value of them (6.19.3).
     pub(super) fn without_enum(&self) -> VariableDimensions {
         VariableDimensions::new(VariableShape {
-            enum_domain: None,
-            packed_enum: false,
             declared: type_names::Declared::default(),
             ..self.clone_shape()
         })
@@ -272,18 +270,9 @@ impl VariableDimensions {
     /// in `table` tells (see [`enums::Enumeration::of`]), or the enumerated
     /// type it keeps while it has none.
     pub(super) fn enumeration_in(&self, table: &semantic_types::TyTable) -> enums::Enumeration {
-        let fields = enums::Enumeration {
-            enumeration: self.enum_domain.is_some()
-                || self.packed_enum
-                || type_names::declared_type(self).is_some_and(|ty| ty.is_enum),
-            packed: self.packed_enum,
-            domain: self.enum_domain.clone(),
-        };
         match (self.bound(table), self.enumeration.declaration()) {
-            (None, Some(declaration)) => {
-                enums::Enumeration::kept(declaration, self.packed.len(), fields)
-            }
-            (id, _) => enums::Enumeration::of(id, table, fields),
+            (None, Some(declaration)) => enums::Enumeration::kept(declaration, self.packed.len()),
+            (id, _) => enums::Enumeration::of(id, table),
         }
     }
 
@@ -381,13 +370,15 @@ impl PartialEq for VariableDimensions {
     fn eq(&self, other: &Self) -> bool {
         // Enriching a shape is not a lexical edit. Signature publishers use
         // same_declaration when a newly resolved binding must be published.
-        // A virtual interface is told by its element type (see `Type`).
+        // A virtual interface is told by its element type, and an
+        // enumerated type by its declaration (see `Type`).
         self.shape == other.shape
             && self.element.as_ref().and_then(|element| element.identity())
                 == other
                     .element
                     .as_ref()
                     .and_then(|element| element.identity())
+            && self.enumeration.declaration() == other.enumeration.declaration()
     }
 }
 impl Eq for VariableDimensions {}
@@ -414,9 +405,6 @@ pub(super) struct VariableShape {
     /// enumeration whose members are not resolved its semantic type tells
     /// (see [`VariableDimensions::enumeration_in`]).
     pub(super) randomizable: bool,
-    pub(super) enum_domain: Option<Arc<enums::EnumDomain>>,
-    /// See [`Type::packed_enum`].
-    pub(super) packed_enum: bool,
     pub(super) real: bool,
     /// A `string`: each element is a heap handle, not packed bits.
     pub(super) string: bool,
@@ -442,9 +430,7 @@ impl VariableShape {
     pub(super) fn is_closed(&self) -> bool {
         // An enumeration is named by its declaration, which a shape of a
         // class specialization shares with the other specializations.
-        self.enum_domain.is_none()
-            && !self.packed_enum
-            && type_names::Declared::of_shape(self).is_none_or(|ty| !ty.is_enum)
+        type_names::Declared::of_shape(self).is_none_or(|ty| ty.enumeration().is_none())
             && self.container.is_none()
             && self.unpacked_struct.is_none()
             // The width of a dimension is computed from its bounds.
@@ -473,9 +459,7 @@ impl VariableShape {
             (&dimension.left, &dimension.right).hash(&mut state);
         }
         self.members.hash(&mut state);
-        self.enum_domain.hash(&mut state);
         (
-            self.packed_enum,
             self.real,
             self.string,
             self.signed,
