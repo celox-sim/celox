@@ -145,27 +145,29 @@ pub(super) fn path_has_capture<Addr: Clone + Eq + Hash>(
 
 /// Whether a path does more than store its value: comb capture events,
 /// activation of capture sites, and process units with runtime events or
-/// extern calls. A partition holding one runs on every settle.
+/// extern calls, also those of the functions they call. A partition holding
+/// one runs on every settle.
 pub(super) fn path_has_effects<Addr: Clone + Eq + Hash>(path: &LogicPath<Addr>) -> bool {
     if !path.comb_capture_enable_sites.is_empty() || path.comb_capture_enable_always {
         return true;
     }
+    matches!(&path.target, LogicPathTarget::CombCaptureEvent { .. })
+        || process_interacts_with_host(path)
+}
+
+/// Whether a path is a process whose unit records runtime events, uses comb
+/// captures or calls an external function, also through a function it
+/// calls. External functions need not be thread-safe and run in program
+/// order: such a process stays on the lane that runs in program order.
+pub(super) fn process_interacts_with_host<Addr: Clone + Eq + Hash>(path: &LogicPath<Addr>) -> bool {
     match &path.target {
-        LogicPathTarget::CombCaptureEvent { .. } => true,
         LogicPathTarget::Process { unit, .. } => unit.blocks.values().any(|block| {
             block
                 .instructions
                 .iter()
-                .any(|instruction| match instruction {
-                    SIRInstruction::RuntimeEvent { .. }
-                    | SIRInstruction::CombCaptureEvent { .. }
-                    | SIRInstruction::CombCaptureEnableIfChanged { .. }
-                    | SIRInstruction::ExternCall { .. } => true,
-                    SIRInstruction::Store(.., capture_sites) => !capture_sites.is_empty(),
-                    _ => false,
-                })
+                .any(|instruction| instruction.host_effects().interacts_with_host())
         }),
-        LogicPathTarget::Var(_) => false,
+        _ => false,
     }
 }
 
@@ -644,5 +646,74 @@ pub(super) fn whole_variable_copy<Addr: Clone + Eq + Hash + Copy>(
             Some((target.id, *variable))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A process path whose unit calls a function, with what the callee may
+    /// do outside the state.
+    fn calling(host: celox_sir::HostEffects) -> LogicPath<usize> {
+        let mut blocks = HashMap::default();
+        blocks.insert(
+            BlockId(0),
+            celox_sir::BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                instructions: vec![SIRInstruction::Call {
+                    function: celox_sir::FunctionId(0),
+                    frame: RegisterId(0),
+                    args: Vec::new(),
+                    outputs: Vec::new(),
+                    dst: None,
+                    effects: std::sync::Arc::new(celox_sir::CallEffects {
+                        host,
+                        ..Default::default()
+                    }),
+                }],
+                terminator: SIRTerminator::Return,
+            },
+        );
+        LogicPath {
+            transparent_copy: false,
+            target: LogicPathTarget::Process {
+                process: 1,
+                after_initials: false,
+                sensitivity_counters: Vec::new(),
+                startup: None,
+                target: VarAtomBase::new(2, 0, 7),
+                unit: Box::new(ExecutionUnit {
+                    entry_block_id: BlockId(0),
+                    blocks,
+                    register_map: HashMap::default(),
+                }),
+            },
+            sources: HashSet::default(),
+            previous_sources: HashSet::default(),
+            address_sources: HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
+            pre_lower_nodes: Vec::new(),
+            expr: NodeId(0),
+        }
+    }
+
+    /// A process that reaches an external function only through a function
+    /// it calls has that effect too: C code need not be thread-safe and runs
+    /// in program order.
+    #[test]
+    fn calls_of_functions_that_call_c_have_effects() {
+        let c_call = celox_sir::HostEffects {
+            extern_calls: true,
+            ..Default::default()
+        };
+        assert!(process_interacts_with_host(&calling(c_call)));
+        assert!(path_has_effects(&calling(c_call)));
+        assert!(!process_interacts_with_host(&calling(Default::default())));
+        assert!(!path_has_effects(&calling(Default::default())));
     }
 }
