@@ -840,3 +840,68 @@ fn dimensioned_parameters_of_other_instances_are_rejected() {
         );
     }
 }
+
+// Hierarchical names indexed by a genvar of a loop generate construct, into
+// an interface instance array, read and written, resolve to each element
+// (IEEE 1800-2023 23.6, 27.4). The values are those Verilator 5.054 prints.
+#[test]
+fn genvar_indexed_names_of_instance_arrays() {
+    let source = r#"`timescale 1ns/1ns
+interface bus_if;
+  logic [7:0] addr;
+  logic [7:0] data;
+endinterface
+module leaf #(parameter int K = 0);
+  logic [7:0] v;
+  initial v = 8'(K * 3);
+endmodule
+module Dut;
+  bus_if bus[0:3]();
+  leaf #(.K(1)) u0();
+  leaf #(.K(2)) u1();
+  for (genvar i = 0; i < 4; i++) begin : g
+    assign bus[i].addr = 8'(i + 10);
+  end
+endmodule
+module Top;
+  Dut d();
+  for (genvar i = 0; i < 4; i++) begin : chk
+    initial begin
+      #1 d.bus[i].data = d.bus[i].addr + 8'(i);
+      #1 $display("bus%0d %0d %0d", i, d.bus[i].addr, d.bus[i].data);
+    end
+  end
+  initial #3 $display("leaf %0d %0d", d.u0.v, d.u1.v);
+endmodule
+"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("hier.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let mut lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8(message).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                "bus0 10 10",
+                "bus1 11 12",
+                "bus2 12 14",
+                "bus3 13 16",
+                "leaf 3 6"
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
