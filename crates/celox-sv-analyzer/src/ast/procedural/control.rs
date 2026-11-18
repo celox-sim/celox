@@ -1867,17 +1867,12 @@ impl BodyBuilder<'_, '_, '_> {
             }
         };
         if consequent.len() > 1 {
-            if sequence.antecedent.is_some() {
-                return Err(unsupported(
-                    "implication whose consequent sequence has more than one way to match",
-                ));
-            }
             if !sequence.locals.is_empty() {
                 return Err(unsupported(
                     "local variable of a sequence with more than one way to match",
                 ));
             }
-            let monitor = self.sequence_alternatives(consequent, MAX_SEQUENCE_TICKS);
+            let monitor = self.sequence_alternatives(consequent, antecedent, MAX_SEQUENCE_TICKS);
             self.pop_scope();
             return monitor;
         }

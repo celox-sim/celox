@@ -579,6 +579,99 @@ endmodule"#,
     }
 }
 
+/// An implication whose consequent has several ways to match, as Caliptra's
+/// VeeR writes `a |-> ##[1:2] b`: an attempt whose antecedent misses at any
+/// of its steps succeeds vacuously at that tick, and the consequent starts
+/// at the tick the antecedent ends, one tick later with `|=>`
+/// (IEEE 1800-2023 16.12.7).
+#[test]
+fn implications_with_consequents_of_several_ways_to_match() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit clk;
+ int cnt;
+ int a_passed, a_failed, b_passed, b_failed, c_passed, c_failed, d_passed, d_failed;
+ always @(posedge clk) cnt <= cnt + 1;
+ // The consequent matches two ticks after the antecedent.
+ assert property (@(posedge clk) cnt % 4 == 1 |-> ##[1:2] cnt % 4 == 3) a_passed++; else a_failed++;
+ // Neither tick matches: the attempt fails at the second.
+ assert property (@(posedge clk) cnt % 4 == 1 |-> ##[1:2] cnt % 4 == 0) b_passed++; else b_failed++;
+ // An antecedent of two steps, `|=>`, and `or`: the shorter way misses,
+ // the longer one at its second tick.
+ assert property (@(posedge clk) cnt % 4 == 0 ##1 cnt % 4 == 1 |=> (cnt % 4 == 3) or (cnt % 4 == 2 ##1 cnt % 4 == 0)) c_passed++; else c_failed++;
+ // The antecedent misses at its second step: vacuous then.
+ assert property (@(posedge clk) cnt % 4 == 0 ##1 cnt % 4 == 2 |-> ##[0:1] cnt < 0) d_passed++; else d_failed++;
+ initial repeat (20) begin #1 clk = 1; #1 clk = 0; end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("implications.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(41).unwrap();
+        // Ticks 0 to 19 sample `cnt` 0 to 19; the attempts of ticks 1, 5,
+        // 9, 13 and 17 reach their consequent, the others are vacuous.
+        for (name, expected) in [
+            ("a_passed", 20u32),
+            ("a_failed", 0),
+            ("b_passed", 15),
+            ("b_failed", 5),
+            // Those of ticks 0, 4, 8, 12 and 16 fail at their fourth tick.
+            ("c_passed", 15),
+            ("c_failed", 5),
+            ("d_passed", 20),
+            ("d_failed", 0),
+        ] {
+            assert_eq!(
+                sim.get(sim.signal(name)),
+                expected.into(),
+                "{name} four_state={four_state}"
+            );
+        }
+    }
+    // With `disable iff`: the attempt of tick 5 fails at 25, that of 45 is
+    // disabled at 55, that of 65 passes at 85; every other one is vacuous.
+    let source = r#"`timescale 1ns/1ns
+module top;
+  logic clk = 0, rst = 0, a = 0, b = 0;
+  always #5 clk = ~clk;
+  assert property (@(posedge clk) disable iff (rst) a |-> ##[1:2] b)
+    $display("%0t pass", $time); else $display("%0t fail", $time);
+  initial begin
+    a = 1; #10 a = 0;          // attempt at 5: b at 15 or 25? none -> fail at 25
+    #30;                        // t=40
+    a = 1; #10 a = 0;           // attempt at 45; t=50
+    rst = 1; #10 rst = 0;       // rst at edge 55 -> disabled; t=60
+    a = 1; #10 a = 0;           // attempt at 65; t=70
+    #10 b = 1; #10 b = 0;       // b at 85 -> pass at 85
+    #20 $finish;
+  end
+endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("disable.sv"))], "top")
+            .build()
+            .unwrap();
+    sim.run_until(200).unwrap();
+    let lines: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => {
+                Some(String::from_utf8_lossy(&message).into_owned())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "15 pass", "25 fail", "25 pass", "35 pass", "75 pass", "85 pass", "85 pass", "95 pass",
+            "105 pass"
+        ]
+    );
+}
+
 #[test]
 fn sequences_with_several_ways_to_match_name_what_they_do_not_support() {
     let long = vec!["a"; 1025].join(" ##0 ");
@@ -592,10 +685,6 @@ fn sequences_with_several_ways_to_match_name_what_they_do_not_support() {
         (
             "@(posedge clk) (a, note()) or b",
             "match item in a sequence with more than one way to match",
-        ),
-        (
-            "@(posedge clk) a |-> (a ##1 b) or b",
-            "implication whose consequent sequence has more than one way to match",
         ),
         (
             "@(posedge clk) (a or b) ##1 b |-> b",

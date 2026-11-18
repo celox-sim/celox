@@ -542,9 +542,11 @@ concurrent assertions is unsupported:
   match items in their operands: an attempt passes at the first tick one of
   its ways to
   match matches, and fails at the first tick none can match any more. At
-  most 1024 ways to match, and only in a sequence that is the whole
-  property: not in an implication, an `expect` statement, or one with local
-  variables or match items.
+  most 1024 ways to match, in a sequence that is the whole property or the
+  consequent of an implication whose antecedent has one way to match (an
+  attempt whose antecedent misses succeeds vacuously at that tick): not in
+  the antecedent of an implication, an `expect` statement, or one with
+  local variables or match items.
 - `disable iff` of a sequence over cycles: an attempt is disabled, and
   neither passes nor fails, when the condition is true at any time from
   its start to its end, also between the ticks of the clock, over the
