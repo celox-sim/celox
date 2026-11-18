@@ -508,7 +508,7 @@ impl ModuleDrivers {
                         sv::ir::LValue::Select {
                             window: Some(window),
                             ..
-                        } if range.is_none() => {
+                        } if range.is_none() && window.at.is_none() => {
                             Some((i128::from(window.lsb), i128::from(window.msb)))
                         }
                         sv::ir::LValue::Select { lsb, .. } if range.is_none() => {
@@ -753,10 +753,21 @@ fn unrolled_select_bits(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<Vec<(i128, i128)>> {
-    let sv::ir::LValue::Select { msb, lsb, .. } = lvalue else {
+    let sv::ir::LValue::Select {
+        msb,
+        lsb,
+        window: member,
+        ..
+    } = lvalue
+    else {
         return None;
     };
-    if range.is_some() || loops.is_empty() {
+    // The window of an element at a run-time index has no fixed bits: its
+    // bits count from the element's run-time position.
+    if range.is_some()
+        || loops.is_empty()
+        || member.as_ref().is_some_and(|member| member.at.is_some())
+    {
         return None;
     }
     let mut bits: Vec<_> =
