@@ -315,6 +315,10 @@ pub struct HierarchicalSignal {
     /// The module's own signal that the names of an interface body alias,
     /// when `local`.
     pub aliased: Option<String>,
+    /// The typed literal of the value of the parameter of another instance
+    /// that the names denote (IEEE 1800-2023 23.6), such as `32'sd12`:
+    /// they read that value, and no signal stands for them.
+    pub constant: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
