@@ -95,6 +95,16 @@ point it can use target facts that would be inappropriate in SIR, including:
   extraction;
 - pressure-aware scheduling, spilling, and register allocation.
 
+The compiled scheduler of a native image calls the larger bodies it runs, the
+settle and the FF domains, as functions of their own instead of inlining them
+into one function with the whole schedule: compiling one function takes time
+and memory that grow faster than its size, and the bodies compile in parallel.
+A body that is a unit of the settle calls the settle's own code. Bodies below
+256 SIR instructions stay inline, where a call costs more than the body. A
+design with a testbench scheduler keeps them inline, as does
+`-sir:scheduler_callees` (`SirPass::SchedulerCallees`), which is on at every
+level.
+
 Cranelift performs the corresponding target optimization through its own IR and
 pass pipeline. WebAssembly generation likewise remains backend-private. No
 machine-level result is written back into SIR.

@@ -45,7 +45,6 @@ pub(super) fn compile_program_with_outlining_threshold(
         function_options = with_functions;
         &function_options
     };
-    let kernel_slots = extern_count + sir.sir.functions.len();
     let function_jits = compile_function_units(sir, layout, options, cancel)?;
     let force_bindings =
         build_force_bindings(sir.runtime(), layout, &options.signal_access.force_signals)?;
@@ -67,6 +66,65 @@ pub(super) fn compile_program_with_outlining_threshold(
         )
     };
     let comb_size = size(&sir.sir.eval_comb.iter().collect::<Vec<_>>());
+    // Execution units already communicate through state. Keep large units
+    // separate instead of rebuilding a single allocator problem, and dispatch
+    // them through the same bounded pool as the FF functions.
+    let split_comb = cfg!(any(
+        feature = "x86_64-codegen",
+        all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+    )) && !capture_trace
+        && sir.sir.eval_comb.len() > 1
+        && comb_size.1 >= outline_threshold;
+    // The compiled scheduler's callees take the slots after the function
+    // units, before the generated kernels. A callee that is a unit of the
+    // settle calls the settle's own code instead: the whole settle, or its
+    // chunk when the settle compiles in chunks.
+    let callee_base = extern_count + sir.sir.functions.len();
+    let settle_callees: Vec<Option<usize>> = sir
+        .scheduler_callees
+        .iter()
+        .map(|callee| match &sir.sir.eval_comb[..] {
+            [comb] if comb == callee => Some(0),
+            units if split_comb => units
+                .iter()
+                .position(|unit| unit == callee)
+                .map(|chunk| chunk + 1),
+            _ => None,
+        })
+        .collect();
+    let settle_called = settle_callees.iter().any(Option::is_some);
+    let callee_jits =
+        compile_scheduler_callees(sir, &settle_callees, layout, options, capture_trace, cancel)?;
+    let kernel_slots = callee_base + callee_jits.len();
+    let mut next_compiled = callee_base;
+    let callee_slots: Vec<usize> = settle_callees
+        .iter()
+        .map(|settle| match settle {
+            Some(offset) => kernel_slots + offset,
+            None => {
+                next_compiled += 1;
+                next_compiled - 1
+            }
+        })
+        .collect();
+    // The compiled scheduler calls them, and so does a testbench unit that
+    // inlines it.
+    let bound_callers: HashMap<usize, ExecutionUnit<RegionedAbsoluteAddr>> =
+        if callee_slots.is_empty() {
+            HashMap::default()
+        } else {
+            sir.sir
+                .processes
+                .iter()
+                .enumerate()
+                .filter(|(_, unit)| calls_scheduler_callees(unit))
+                .map(|(index, unit)| Ok((index, bind_scheduler_callees(unit, &callee_slots)?)))
+                .collect::<Result<_, SimulatorError>>()?
+        };
+    let callee_sizes: Vec<usize> = callee_jits
+        .iter()
+        .map(|code| code.required_state_size)
+        .collect();
     let task_sizes = compile_tasks
         .iter()
         .map(|task| size(&task.units))
@@ -116,7 +174,7 @@ pub(super) fn compile_program_with_outlining_threshold(
     process_order.sort_by_key(|&index| std::cmp::Reverse(process_sizes[index]));
     // Without an outlined comb the process units depend on no other compiled
     // code: they join the first parallel phase instead of waiting for it.
-    let pool_processes = !outline_comb;
+    let pool_processes = !outline_comb && !settle_called;
     let compile_process = |index: usize, process_options: &crate::backend::X86BackendOptions| {
         let unit = &sir.sir.processes[index];
         if cancelled(cancel) {
@@ -138,6 +196,17 @@ pub(super) fn compile_program_with_outlining_threshold(
             })
             .transpose()?;
         let unit = generated.as_ref().unwrap_or(unit);
+        // The compiled scheduler calls its callees, compiled before it.
+        let scheduler_options;
+        let (unit, process_options) = match bound_callers.get(&index) {
+            Some(bound) => {
+                scheduler_options = process_options
+                    .clone()
+                    .with_native_callees(callee_sizes.iter().copied());
+                (bound, &scheduler_options)
+            }
+            None => (unit, process_options),
+        };
         compile_unit_refs(
             &[unit],
             layout,
@@ -201,15 +270,6 @@ pub(super) fn compile_program_with_outlining_threshold(
             layout.settle_check(),
         );
     }
-    // Execution units already communicate through state. Keep large units
-    // separate instead of rebuilding a single allocator problem, and dispatch
-    // them through the same bounded pool as the FF functions.
-    let split_comb = cfg!(any(
-        feature = "x86_64-codegen",
-        all(target_arch = "x86_64", not(feature = "arm64-codegen"))
-    )) && !capture_trace
-        && sir.sir.eval_comb.len() > 1
-        && comb_size.1 >= outline_threshold;
     let mut comb_chunk_jits = Vec::new();
     #[expect(
         clippy::disallowed_types,
@@ -291,8 +351,9 @@ pub(super) fn compile_program_with_outlining_threshold(
         Some(jits) => jits,
         None => compile_remaining_processes(
             options,
-            outline_comb,
+            outline_comb || settle_called,
             &comb_jit,
+            &comb_chunk_jits,
             max_process_blocks,
             max_process_instructions,
             &process_sizes,
@@ -313,6 +374,7 @@ pub(super) fn compile_program_with_outlining_threshold(
         task_bindings,
         force_bindings,
         function_jits,
+        callee_jits,
         comb_chunk_jits,
         comb_unit_jits,
         process_jits,
@@ -320,7 +382,123 @@ pub(super) fn compile_program_with_outlining_threshold(
         lane_kernels,
         outline_comb,
         split_comb,
+        settle_called,
     )
+}
+
+/// Compile the bodies the compiled scheduler calls
+/// ([`LaidOutProgram::scheduler_callees`]) in parallel, in the order of
+/// their slots.
+fn compile_scheduler_callees(
+    sir: &LaidOutProgram,
+    settle_callees: &[Option<usize>],
+    layout: &MemoryLayout,
+    options: &SimulatorOptions,
+    capture_trace: bool,
+    cancel: Option<&CompileCancel>,
+) -> Result<Vec<CompiledNativeFunction>, SimulatorError> {
+    let callees: Vec<_> = sir
+        .scheduler_callees
+        .iter()
+        .zip(settle_callees)
+        .filter(|(_, settle)| settle.is_none())
+        .map(|(callee, _)| callee)
+        .collect();
+    if callees.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sizes = callees
+        .iter()
+        .map(|unit| {
+            (
+                unit.blocks.len(),
+                unit.blocks
+                    .values()
+                    .map(|block| block.instructions.len())
+                    .sum::<usize>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let max_blocks = sizes.iter().map(|size| size.0).max().unwrap_or(0);
+    let max_instructions = sizes.iter().map(|size| size.1).max().unwrap_or(0);
+    let workers = super::super::compile_resources::workers_with_state(
+        max_blocks,
+        max_instructions,
+        callees.len(),
+        0,
+    );
+    if options.x86_options.diagnostics.phase_timing {
+        tracing::debug!(
+            "[native-timing] scheduler_callees workers={workers} units={} max_blocks={max_blocks} max_instructions={max_instructions}",
+            callees.len()
+        );
+    }
+    let mut order = (0..callees.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&index| {
+        let (blocks, instructions) = sizes[index];
+        std::cmp::Reverse(super::super::compile_resources::compile_cost(
+            blocks,
+            instructions,
+        ))
+    });
+    super::super::compile_resources::compile_tasks_with(
+        &order,
+        workers,
+        || (),
+        |_, index| {
+            compile_unit_refs(
+                &[callees[index]],
+                layout,
+                options.four_state,
+                &format!("scheduler_callee[{index}]"),
+                NativeMergeKind::Complete,
+                None,
+                &options.x86_options,
+                capture_trace,
+                &options.optimize_options.diagnostics,
+                cancel,
+            )
+        },
+    )
+    .map_err(|_| codegen_message("native scheduler callee compile thread panicked"))?
+}
+
+/// Whether `unit` calls a callee of the compiled scheduler
+/// ([`crate::scheduler::CALLEE_PLACEHOLDER`]).
+fn calls_scheduler_callees(unit: &ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
+    unit.blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .any(|instruction| {
+            matches!(instruction, SIRInstruction::ExternCall { func, .. }
+                if celox_sir::extern_abi::native_kernel_index(*func)
+                    .is_some_and(|index| index >= crate::scheduler::CALLEE_PLACEHOLDER))
+        })
+}
+
+/// The compiled scheduler `unit` with its calls of callee `i`
+/// ([`crate::scheduler::CALLEE_PLACEHOLDER`]` + i`) bound to `slots[i]`.
+fn bind_scheduler_callees(
+    unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+    slots: &[usize],
+) -> Result<ExecutionUnit<RegionedAbsoluteAddr>, SimulatorError> {
+    let mut bound = unit.clone();
+    for block in bound.blocks.values_mut() {
+        for instruction in &mut block.instructions {
+            if let SIRInstruction::ExternCall { func, .. } = instruction
+                && let Some(index) = celox_sir::extern_abi::native_kernel_index(*func)
+                && let Some(callee) = index.checked_sub(crate::scheduler::CALLEE_PLACEHOLDER)
+            {
+                let slot = slots
+                    .get(callee as usize)
+                    .and_then(|&slot| u32::try_from(slot).ok())
+                    .filter(|&slot| slot < crate::scheduler::CALLEE_PLACEHOLDER)
+                    .ok_or_else(|| codegen_message("too many native extern functions"))?;
+                *func = celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG | slot;
+            }
+        }
+    }
+    Ok(bound)
 }
 
 /// Compile the function units of a program, in the order of their slots.
@@ -775,6 +953,7 @@ fn compile_remaining_processes(
     options: &SimulatorOptions,
     outline_comb: bool,
     comb_jit: &CompiledNativeFunction,
+    comb_chunk_jits: &[CompiledNativeFunction],
     max_process_blocks: usize,
     max_process_instructions: usize,
     process_sizes: &[(usize, usize)],
@@ -791,7 +970,10 @@ fn compile_remaining_processes(
     if outline_comb {
         // Nested functions must not overwrite the caller's spills, saved
         // registers, scratch values, or extern call area.
-        process_options = process_options.with_native_callees([comb_jit.required_state_size]);
+        process_options = process_options.with_native_callees(
+            std::iter::once(comb_jit.required_state_size)
+                .chain(comb_chunk_jits.iter().map(|code| code.required_state_size)),
+        );
     }
     let process_workers = super::super::compile_resources::workers(
         max_process_blocks,
@@ -854,6 +1036,7 @@ fn assemble_program_image(
     task_bindings: NativeTaskBindings,
     force_bindings: Vec<NativeForceBinding>,
     function_jits: Vec<CompiledNativeFunction>,
+    callee_jits: Vec<CompiledNativeFunction>,
     comb_chunk_jits: Vec<CompiledNativeFunction>,
     comb_unit_jits: Vec<CompiledNativeFunction>,
     process_jits: Vec<CompiledNativeFunction>,
@@ -861,6 +1044,7 @@ fn assemble_program_image(
     lane_kernels: Option<super::super::lanes::CompiledLaneKernels>,
     outline_comb: bool,
     split_comb: bool,
+    settle_called: bool,
 ) -> Result<(NativeProgramImage, Option<NativeCodegenTrace>), SimulatorError> {
     let codegen_trace = capture_trace.then(|| {
         format_native_codegen_trace(&comb_jit, &compiled_ff_codes, &compile_tasks, &process_jits)
@@ -870,7 +1054,12 @@ fn assemble_program_image(
         .checked_add(layout.triggered_bits_total_size)
         .expect("native semantic-memory size overflow");
     let native_memory_size = std::iter::once(comb_jit.required_state_size)
-        .chain(function_jits.iter().map(|code| code.required_state_size))
+        .chain(
+            function_jits
+                .iter()
+                .chain(&callee_jits)
+                .map(|code| code.required_state_size),
+        )
         .chain(
             clock_alias_jits
                 .iter()
@@ -899,6 +1088,7 @@ fn assemble_program_image(
         .chain(
             function_jits
                 .iter()
+                .chain(&callee_jits)
                 .map(|code| code.required_native_features),
         )
         .chain(
@@ -950,7 +1140,16 @@ fn assemble_program_image(
             code,
         )?);
     }
-    if outline_comb || split_comb {
+    for (index, code) in callee_jits.iter().enumerate() {
+        native_kernel_offsets.push(append_native_code(
+            &mut packed_image,
+            &mut code_entries,
+            &mut image_symbols,
+            format!("scheduler_callee[{index}]"),
+            code,
+        )?);
+    }
+    if outline_comb || split_comb || settle_called {
         native_kernel_offsets.push(comb_offset);
     }
     for (index, code) in comb_chunk_jits.iter().enumerate() {

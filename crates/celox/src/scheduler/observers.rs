@@ -405,7 +405,7 @@ endmodule"#
                 let mut program = program.into_laid_out(four_state);
                 if mode == SchedulerMode::Compiled {
                     super::super::enable_native_services(&mut program);
-                    super::super::attach(&mut program, true);
+                    super::super::attach(&mut program, true, false);
                     assert!(
                         program
                             .runtime

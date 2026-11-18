@@ -2977,3 +2977,70 @@ fn waited_inputs_other_events_derive_from_take_no_clock_slot() {
     assert_eq!(clocks, ["clk", "go"]);
     assert_eq!(derived, [""; 0]);
 }
+
+/// A native image's compiled scheduler calls its larger bodies as callees
+/// (`SirPass::SchedulerCallees`), so its own unit holds less than the
+/// bodies; without the pass it inlines them all.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn native_scheduler_calls_its_larger_bodies() {
+    let mut source =
+        String::from("`timescale 1ns/1ns\nmodule Top; bit clk = 0; always #1 clk = ~clk;\n");
+    for index in 0..72 {
+        source += &format!("logic [31:0] r{index} = {index}; logic [31:0] w{index};\n");
+    }
+    for index in 0..72 {
+        source += &format!(
+            "assign w{index} = (r{index} ^ (r{} << 3)) + (r{} >> 2);\n",
+            (index + 1) % 72,
+            (index + 7) % 72
+        );
+    }
+    source += "always_ff @(posedge clk) begin\n";
+    for index in 0..72 {
+        source += &format!("  r{index} <= w{index} ^ {{w{index}[15:0], w{index}[31:16]}};\n");
+    }
+    source += "end\ninitial begin #20 $display(\"%h\", w0); $finish; end\nendmodule\n";
+    let program = |outline: bool| {
+        let mut builder = crate::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("callees.sv"))],
+            "Top",
+        )
+        .emit_triggers();
+        if !outline {
+            builder = builder.disable_pass(crate::SirPass::SchedulerCallees);
+        }
+        builder.native_file_calls = true;
+        builder
+            .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, false)
+            .unwrap()
+            .0
+    };
+    let size = |unit: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>| {
+        unit.blocks
+            .values()
+            .map(|block| block.instructions.len())
+            .sum::<usize>()
+    };
+    let scheduler = |program: &crate::ir::LaidOutProgram| {
+        let index = program
+            .runtime
+            .runtime_schema
+            .scheduler
+            .as_ref()
+            .and_then(|scheduler| scheduler.unit)
+            .expect("a compiled scheduler");
+        size(&program.sir.processes[index])
+    };
+    let outlined = program(true);
+    let inlined = program(false);
+    assert!(!outlined.scheduler_callees.is_empty());
+    assert!(inlined.scheduler_callees.is_empty());
+    let callees: usize = outlined.scheduler_callees.iter().map(size).sum();
+    assert!(
+        scheduler(&outlined) < scheduler(&inlined) && callees > 0,
+        "outlined {} + callees {callees}, inlined {}",
+        scheduler(&outlined),
+        scheduler(&inlined)
+    );
+}
