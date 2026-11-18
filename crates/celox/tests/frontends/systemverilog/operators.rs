@@ -364,3 +364,114 @@ mod wide_results_clear_bits_above_their_width {
     wide_padding_backend!(wasm, build_wasm);
     wide_padding_backend!(interpreter, build_interpreter);
 }
+
+const TRANSPOSED_ROW_REDUCTIONS_SOURCE: &str = r#"`timescale 1ns/1ns
+module tp (input [2:0][2:0] i, output [2:0][2:0] o);
+  for (genvar x = 0; x < 3; x++) begin : rof
+    for (genvar y = 0; y < 3; y++) begin : rof2
+      assign o[y][x] = i[x][y];
+    end
+  end
+endmodule
+module top;
+  logic [1:0][2:0][2:0] s;
+  for (genvar e = 0; e < 2; e++) begin : u
+    wire [2:0][2:0] yt;
+    tp t (.i(s[e]), .o(yt));
+    wire [1:0] any, par;
+    for (genvar i = 0; i < 2; i++) begin : ch
+      wire [2:0] li;
+      for (genvar j = 0; j < 3; j++) begin : cc
+        assign li[j] = yt[i][j];
+      end
+      assign any[i] = |li;
+      assign par[i] = ^li;
+    end
+  end
+  initial begin
+    for (int k = 0; k < 512; k++) begin
+      s = {9'(k * 37 + 5), 9'(k)};
+      #1 $display("%0d %b %b %b %b", k, u[0].any, u[1].any, u[0].par, u[1].par);
+    end
+  end
+endmodule"#;
+
+/// The reductions `|li` and `^li` of the rows of a transposed array that a
+/// bit-by-bit copy takes into three-bit nets, as `bsg_wormhole_router` does
+/// after `bsg_transpose` and `bsg_concentrate_static`, for every value of
+/// one of two instances. The optimizer (VectorizeConcat) turns the copy of
+/// row 0 into a copy of the whole nine-bit array into the three-bit net,
+/// which takes its low bits; the native code generators used to keep all
+/// nine, and `|li` reduced the whole array (in the RTLMeter design
+/// BlackParrot a router dequeued an empty FIFO). Values agree with
+/// Verilator 5.054.
+fn check_transposed_row_reductions(lines: Vec<String>, context: &str) {
+    // Bit `j` of row `i` of the transposed array is bit `3 * j + i` of `s[e]`.
+    let rows = |value: u32, reduce: fn(u32, u32) -> u32| {
+        let row = |i: u32| {
+            (0..3)
+                .map(|j| (value >> (3 * j + i)) & 1)
+                .reduce(reduce)
+                .unwrap()
+        };
+        format!("{}{}", row(1), row(0))
+    };
+    let expected: Vec<String> = (0..512u32)
+        .map(|k| {
+            let s = [k, (k * 37 + 5) & 0x1ff];
+            let (or, xor): (fn(u32, u32) -> u32, fn(u32, u32) -> u32) =
+                (|a, b| a | b, |a, b| a ^ b);
+            format!(
+                "{k} {} {} {} {}",
+                rows(s[0], or),
+                rows(s[1], or),
+                rows(s[0], xor),
+                rows(s[1], xor)
+            )
+        })
+        .collect();
+    assert_eq!(lines, expected, "{context}");
+}
+
+macro_rules! transposed_row_reductions_backend {
+    ($name:ident, $build:ident) => {
+        #[test]
+        fn $name() {
+            for level in [celox::OptLevel::O1, celox::OptLevel::O2] {
+                for four_state in [false, true] {
+                    let mut sim = celox::Simulation::from_sv_sources(
+                        vec![(TRANSPOSED_ROW_REDUCTIONS_SOURCE, Path::new("transpose.sv"))],
+                        "top",
+                    )
+                    .opt_level(level)
+                    .four_state(four_state)
+                    .$build()
+                    .unwrap();
+                    sim.run_until(1000).unwrap();
+                    let lines = sim
+                        .drain_runtime_events()
+                        .into_iter()
+                        .filter_map(|event| match event {
+                            celox::RuntimeEvent::Display { message } => {
+                                Some(String::from_utf8_lossy(&message).into_owned())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let context = format!("{level:?} four_state={four_state}");
+                    check_transposed_row_reductions(lines, &context);
+                }
+            }
+        }
+    };
+}
+
+mod reductions_of_transposed_rows_read_their_row {
+    use super::*;
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    transposed_row_reductions_backend!(native, build_native);
+    transposed_row_reductions_backend!(cranelift, build_cranelift);
+    transposed_row_reductions_backend!(wasm, build_wasm);
+    transposed_row_reductions_backend!(interpreter, build_interpreter);
+}
