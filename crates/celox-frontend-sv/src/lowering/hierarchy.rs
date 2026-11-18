@@ -191,6 +191,11 @@ struct Found {
     path: Vec<(String, usize)>,
     /// How many leading components name the signal.
     length: usize,
+    /// Whether the last of them also selects an element of the signal, as
+    /// `r[0]` of `top.u.r[0].f` does: the name scan spells a constant index
+    /// followed by a member as part of the component, as it does those of
+    /// instance arrays and generate blocks.
+    selects: bool,
     target: String,
     r#type: sv::ast::Type,
     is_net: bool,
@@ -215,6 +220,24 @@ impl HierarchicalReference {
 }
 
 impl Found {
+    /// The leading components of `components` that name the signal,
+    /// without the index of an element of it that the last one selects.
+    fn named(&self, components: &[String]) -> Vec<String> {
+        let mut named = components[..self.length.min(components.len())].to_vec();
+        if self.selects
+            && let Some(last) = named.last_mut()
+            && let Some(name) = without_index(last)
+        {
+            *last = name.to_string();
+        }
+        named
+    }
+
+    /// The name of the signal, as [`Self::named`] spells it.
+    fn written(&self, components: &[String]) -> String {
+        self.named(components).join(".")
+    }
+
     /// Whether two followings reach the same relative object, if from
     /// different specializations.
     fn same_object(&self, other: &Found) -> bool {
@@ -223,6 +246,7 @@ impl Found {
             self.levels,
             &self.path,
             self.length,
+            self.selects,
             &self.target,
             &self.r#type,
             self.is_net,
@@ -231,6 +255,7 @@ impl Found {
             other.levels,
             &other.path,
             other.length,
+            other.selects,
             &other.target,
             &other.r#type,
             other.is_net,
@@ -329,17 +354,24 @@ impl<'a> Hierarchy<'a> {
                 levels: 0,
                 path,
                 length: components.len(),
+                selects: false,
                 target: name.clone(),
                 r#type: subroutine_placeholder_type(),
                 is_net: false,
                 modules: vec![module],
             }));
         }
-        let Some((length, target, r#type, is_net)) =
+        let Some((length, selects, target, r#type, is_net)) =
             (at + 1..=components.len()).rev().find_map(|end| {
                 let name = components[at..end].join(".");
-                let (target, r#type, is_net) = find_signal(elaborated, analyzed, &name)?;
-                Some((end, target, r#type, is_net))
+                if let Some((target, r#type, is_net)) = find_signal(elaborated, analyzed, &name) {
+                    return Some((end, false, target, r#type, is_net));
+                }
+                // An element of the signal, whose members the rest of the
+                // name selects (IEEE 1800-2023 7.4.5, 23.6).
+                let name = without_index(&name)?;
+                let (target, r#type, is_net) = find_signal(elaborated, analyzed, name)?;
+                Some((end, true, target, r#type, is_net))
             })
         else {
             return Ok(None);
@@ -355,6 +387,7 @@ impl<'a> Hierarchy<'a> {
             levels: 0,
             path,
             length,
+            selects,
             target,
             r#type,
             is_net,
@@ -665,7 +698,7 @@ pub(super) fn resolve_name(
     else {
         return Ok(false);
     };
-    let written = components[..found.length].join(".");
+    let written = found.written(components);
     if references
         .iter()
         .any(|reference| reference.signal.paths.contains(&written))
@@ -770,7 +803,7 @@ pub(super) fn resolve_interface_name(
         return Ok(false);
     };
     // The components that name the signal; the rest select in it.
-    let named = &components[..found.length.min(components.len())];
+    let named = found.named(components);
     let written = named.join(".");
     let body = |reference: &&mut HierarchicalReference| {
         reference.signal.interface_instance.as_deref() == Some(scope.handle.as_str())
@@ -813,7 +846,7 @@ pub(super) fn resolve_interface_name(
     }
     // The body names every object of the scope by its placeholder, apart
     // from its own members.
-    let name = sv::ast::virtual_interfaces::upward_signal(&scope.interface, &scope.handle, named);
+    let name = sv::ast::virtual_interfaces::upward_signal(&scope.interface, &scope.handle, &named);
     // The module's own signal, which the body reads as the module does.
     if own {
         references.push(HierarchicalReference {
@@ -1189,6 +1222,13 @@ fn find_instance<'a>(
         }
     }
     None
+}
+
+/// `name` without the constant index `[n]` that ends it, as the name scan
+/// spells an element of an array that a member select follows.
+fn without_index(name: &str) -> Option<&str> {
+    let (name, index) = name.strip_suffix(']')?.rsplit_once('[')?;
+    (!index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())).then_some(name)
 }
 
 /// The local name, type and net kind of signal `name` of a module.
