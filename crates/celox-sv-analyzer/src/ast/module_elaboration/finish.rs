@@ -76,6 +76,7 @@ impl ScopeElaboration<'_> {
             external_forces: Vec::new(),
             interface_types: self.imported.interface_types.clone(),
             interface_modports: self.imported.interface_modports.clone(),
+            interface_arguments: self.imported.interface_arguments.clone(),
             interface_arrays: self.imported.interface_arrays.clone(),
             interface_scopes: self.imported.interface_scopes.clone(),
             interface_declarations: self.imported.interface_declarations.clone(),

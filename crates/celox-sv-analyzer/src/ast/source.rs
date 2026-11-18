@@ -142,23 +142,44 @@ impl Source {
         packages: &packages::Packages,
         design: &mut packages::Design,
     ) -> Result<Self, AnalyzerError> {
-        let mut session = Session::with_packages(packages, design);
-        // A type argument of the module is a type of the analysis, whether
-        // or not a source names it: interning it interns the types it is
-        // made of, a chandle element of a container included.
-        session.scope = Some(module_scope(module_name, &bindings, &mut session.types));
-        let source = Self::from_indexed_syntax_module_in(
-            syntax_tree,
-            path,
-            index,
-            module_name,
-            bindings,
-            extra_interfaces,
-            packages,
-            &mut session,
-        );
-        session.restore(design);
-        source
+        // The specializations that the packages and earlier analyses named
+        // have their subroutines before the analysis starts.
+        virtual_interface_calls::specializations(packages, design)?;
+        loop {
+            let mut session = Session::with_packages(packages, design);
+            // A type argument of the module is a type of the analysis, whether
+            // or not a source names it: interning it interns the types it is
+            // made of, a chandle element of a container included.
+            session.scope = Some(module_scope(module_name, &bindings, &mut session.types));
+            let source = Self::from_indexed_syntax_module_in(
+                syntax_tree,
+                path,
+                index,
+                module_name,
+                bindings,
+                extra_interfaces,
+                packages,
+                &mut session,
+            );
+            session.restore(design);
+            // The analysis moved the design's types into its source, which
+            // publishes its IR with them (see [`Publication`]): the
+            // subroutines below, and an analysis repeated in place of this
+            // one, are bound in them too.
+            let mut source = source;
+            if let Ok(source) = &mut source {
+                design.types = std::mem::take(&mut source.types);
+            }
+            // An analysis that named a specialization of a parameterized
+            // interface with tasks or functions is repeated with the
+            // subroutines that call them through virtual interfaces (25.9).
+            if !virtual_interface_calls::specializations(packages, design)? {
+                if let Ok(source) = &mut source {
+                    source.types = std::mem::take(&mut design.types);
+                }
+                return source;
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

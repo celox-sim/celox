@@ -121,6 +121,71 @@ pub(super) fn analyze(
     Ok(module)
 }
 
+/// What analyzing the signature of an interface again takes, for a
+/// specialization of it: the interface's declarations and the symbols it
+/// imports, without the packages they came from (see [`specialize`]).
+pub(super) struct SignatureSource {
+    tree: SyntaxTree,
+    /// The types the signature was analyzed in, which the imported symbols
+    /// are bound in: a specialization is analyzed in a copy of them, apart
+    /// from the analysis that names it.
+    types: semantic_types::TyTable,
+    imported: scope::ScopeSymbols,
+    timescale: Arc<timescales::QueryContext>,
+    name: String,
+    members: Vec<String>,
+    names: HashSet<String>,
+}
+
+impl std::fmt::Debug for SignatureSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignatureSource")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SignatureSource {
+    fn new(
+        tree: &SyntaxTree,
+        path: &Path,
+        packages: &packages::Packages,
+        name: String,
+        members: &[String],
+        names: &HashSet<String>,
+    ) -> Converted<Self> {
+        let tree = interface_binding::declaration_view(tree)?;
+        let context = AnalysisContext::unspecialized(&tree);
+        let imported = imports::imported_symbols(&context, packages, packages.unit(path))?;
+        let timescale = timescales::for_tree(packages.timescales.clone(), &context)?;
+        Ok(Self {
+            tree,
+            types: semantic_types::TyTable::default(),
+            imported,
+            timescale,
+            name,
+            members: members.to_vec(),
+            names: names.clone(),
+        })
+    }
+}
+
+/// The signature of the specialization of the interface `source` declares
+/// whose parameter value assignment `overrides` gives, its parameters
+/// evaluated as any instance's are (IEEE 1800-2023 23.10, 25.9): its
+/// declarations alone, which the members are, without the bodies of its
+/// processes and subroutines.
+pub(super) fn specialize(
+    source: &SignatureSource,
+    overrides: &HashMap<String, ConstExpr>,
+) -> Converted<(crate::ir::Module, Vec<(String, Type)>)> {
+    let mut session = Session {
+        types: source.types.clone(),
+        ..Session::default()
+    };
+    signature_from(&mut session, source, overrides, true)
+}
+
 /// The signature of the interface `tree` declares, analyzed with the types,
 /// specializations and call sites of `design`, the design of `packages`,
 /// which the declarations it imports refer to.
@@ -132,11 +197,14 @@ pub(super) fn signature(
     name: String,
     members: &[String],
     names: &HashSet<String>,
-) -> Converted<(crate::ir::Module, Vec<(String, Type)>)> {
+) -> Converted<(crate::ir::Module, Vec<(String, Type)>, SignatureSource)> {
     let mut session = Session::with_packages(packages, design);
     let signature = signature_in(&mut session, tree, path, packages, name, members, names);
     session.restore(design);
-    signature
+    signature.map(|(module, enumerations, mut source)| {
+        source.types = design.types.clone();
+        (module, enumerations, source)
+    })
 }
 
 fn signature_in(
@@ -147,16 +215,30 @@ fn signature_in(
     name: String,
     members: &[String],
     names: &HashSet<String>,
+) -> Converted<(crate::ir::Module, Vec<(String, Type)>, SignatureSource)> {
+    let source = SignatureSource::new(tree, path, packages, name, members, names)?;
+    let (module, enumerations) = signature_from(session, &source, &HashMap::default(), false)?;
+    Ok((module, enumerations, source))
+}
+
+fn signature_from(
+    session: &mut Session,
+    source: &SignatureSource,
+    overrides: &HashMap<String, ConstExpr>,
+    declarations_only: bool,
 ) -> Converted<(crate::ir::Module, Vec<(String, Type)>)> {
-    let projected_tree = interface_binding::declaration_view(tree)?;
-    let context = AnalysisContext::unspecialized(&projected_tree);
+    let (name, members, names) = (source.name.clone(), &source.members, &source.names);
+    let context = AnalysisContext::unspecialized(&source.tree);
+    let context = context.child(&source.tree, overrides);
     let tree = &context;
-    let imported = imports::imported_symbols(tree, packages, packages.unit(path))?;
+    let mut imported = source.imported.clone();
+    imported.declarations_only = declarations_only;
     let timed = AnalysisContext {
-        timescale: timescales::for_tree(packages.timescales.clone(), tree)?,
+        timescale: source.timescale.clone(),
         ..tree.clone()
     };
     let tree = &timed;
+    let interface = instances::normalize_identifier(&tree.root_name()?);
     let empty = ModuleInterfaces::default();
     let interfaces = InterfaceLookup {
         local: &empty,
@@ -165,8 +247,8 @@ fn signature_in(
     let mut module = Module::from_scope_with_parameter_overrides(
         tree,
         session,
-        "",
-        &HashMap::default(),
+        &interface,
+        overrides,
         &interfaces,
         Arc::new(imported.clone()),
     )?;

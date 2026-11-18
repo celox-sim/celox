@@ -1145,3 +1145,187 @@ endmodule
 "#)
   (top Top) (run_until 20)
   (expect_output "seen 11 5 flags 0100 0010\n"))
+
+(case specializations_of_parameterized_interfaces
+  ; The parameter values of an interface are part of a virtual interface
+  ; type of it (IEEE 1800-2023 25.9): a handle of `virtual bus #(8)` denotes
+  ; only instances whose `W` is 8, with members of their widths, and an
+  ; instance with the default values is one of them.
+  (source "virtual_interfaces.sv" #"
+interface bus #(parameter int W = 8) ();
+    logic [W-1:0] data;
+    function automatic int width();
+        return $bits(data);
+    endfunction
+endinterface
+package drivers;
+    class Drv #(int W = 8);
+        virtual bus #(W) v;
+        function new(virtual bus #(W) v);
+            this.v = v;
+        endfunction
+        function void put(logic [W-1:0] x);
+            v.data = x;
+        endfunction
+    endclass
+endpackage
+module Top(output logic [7:0] a, output logic [15:0] b, output logic [7:0] c,
+           output int wa, output int wb, output int fa, output int fb);
+    bus #(8) n();
+    bus #(.W(16)) w();
+    bus d();
+    assign a = n.data;
+    assign b = w.data;
+    assign c = d.data;
+    drivers::Drv #(8) x;
+    drivers::Drv #(16) y;
+    drivers::Drv #(8) z;
+    virtual bus #(8) h;
+    initial begin
+        x = new(n);
+        y = new(w);
+        z = new(d);
+        x.put(8'hA5);
+        y.put(16'h1234);
+        z.put(8'h3C);
+        h = d;
+        h.data += 1;
+        wa = $bits(x.v.data);
+        wb = $bits(y.v.data);
+        fa = h.width();
+        fb = y.v.width();
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq a 0xA5) (assert_eq b 0x1234) (assert_eq c 0x3D)
+  (assert_eq wa 8) (assert_eq wb 16) (assert_eq fa 8) (assert_eq fb 16))
+
+(case rejects_instances_of_other_specializations
+  ; An instance is assignable only to a virtual interface of the same
+  ; interface with the same parameter values (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus #(parameter int W = 8) ();
+    logic [W-1:0] data;
+endinterface
+module Top;
+    bus #(16) w();
+    virtual bus #(8) v;
+    initial v = w;
+endmodule
+"#)
+  (top Top)
+  (expect reject))
+
+(case package_types_of_parameterized_interfaces
+  ; A virtual interface type that a package declares with package constants
+  ; is the type of the instance with those values, which a class keyed by
+  ; the type stores and returns, and through which a task of that
+  ; specialization runs (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bfm #(ADDR_WIDTH = 8, DATA_WIDTH = 8) (input logic clk);
+    logic [ADDR_WIDTH-1:0] address;
+    task drive(logic [ADDR_WIDTH-1:0] a);
+        @(posedge clk);
+        address <= a;
+    endtask
+endinterface
+package c;
+    parameter int aw = 12;
+    parameter int dw = 4;
+endpackage
+package p;
+    typedef virtual bfm #(c::aw, c::dw) bfm_t;
+    class db #(type T = int);
+        static T value;
+        static function void set(T v);
+            value = v;
+        endfunction
+        static function T get();
+            return value;
+        endfunction
+    endclass
+endpackage
+module Top(output logic [11:0] address, output int width);
+    logic clk = 0;
+    always #5 clk = ~clk;
+    bfm #(.ADDR_WIDTH(c::aw), .DATA_WIDTH(c::dw)) u(clk);
+    assign address = u.address;
+    initial begin
+        p::bfm_t h;
+        p::db #(virtual bfm #(.ADDR_WIDTH(12), .DATA_WIDTH(4)))::set(u);
+        h = p::db #(p::bfm_t)::get();
+        width = $bits(h.address);
+        h.drive(12'h9AB);
+    end
+endmodule
+"#)
+  (top Top) (run_until 20)
+  (assert_eq address 0x9AB) (assert_eq width 12))
+
+(case specializations_of_interfaces_with_class_formals
+  ; The task of a specialization reads the members of an object of a class
+  ; its interface imports, which a call through a virtual interface of the
+  ; specialization passes (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+package items;
+    class item;
+        logic [11:0] address;
+    endclass
+endpackage
+interface bfm #(ADDR_WIDTH = 8) ();
+    import items::*;
+    logic [ADDR_WIDTH-1:0] address;
+    task execute(item i);
+        address = i.address;
+    endtask
+endinterface
+module Top(output logic [11:0] address);
+    bfm #(12) u();
+    virtual bfm #(12) h;
+    assign address = u.address;
+    initial begin
+        items::item i = new;
+        i.address = 12'h9ab;
+        h = u;
+        h.execute(i);
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq address 0x9AB))
+
+(case package_types_of_interfaces_with_class_formals
+  ; A package type names the specialization before the modules are
+  ; analyzed; its task takes an object of a class the interface imports
+  ; (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+package items;
+    class item;
+        logic [11:0] address;
+    endclass
+endpackage
+interface bfm #(ADDR_WIDTH = 8) ();
+    import items::*;
+    logic [ADDR_WIDTH-1:0] address;
+    task execute(item i);
+        address = i.address;
+    endtask
+endinterface
+package types;
+    typedef virtual bfm #(12) bfm_t;
+endpackage
+module Top(output logic [11:0] address);
+    bfm #(12) u();
+    types::bfm_t h;
+    assign address = u.address;
+    initial begin
+        items::item i = new;
+        i.address = 12'h9ab;
+        h = u;
+        h.execute(i);
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq address 0x9AB))

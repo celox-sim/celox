@@ -65,10 +65,7 @@ pub(in crate::ast::expression_binding) fn path(
         virtual_interfaces::native_member(tree, session, root, native, dimensions)
     {
         virtual_interfaces::member(session, &ty, &member)?;
-        return Ok((
-            vec![virtual_interfaces::template(&ty.interface, &member)],
-            None,
-        ));
+        return Ok((vec![virtual_interfaces::template(&ty.key(), &member)], None));
     }
     // A static class property is a variable of the module.
     if let Some(variable) = objects::static_property(tree, session, root, native, dimensions)? {

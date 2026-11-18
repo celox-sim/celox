@@ -83,6 +83,12 @@ pub(crate) struct Session {
     /// The virtual interfaces of the design, if it has any (IEEE 1800-2023
     /// 25.9).
     pub(super) virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
+    /// The subroutines that call the tasks and functions of each
+    /// specialization of a parameterized interface through virtual
+    /// interfaces, by the specialization's key, built for the
+    /// specializations earlier analyses named (see
+    /// [`virtual_interface_calls::specializations`]).
+    pub(super) virtual_interface_calls: virtual_interface_calls::Specializations,
     /// The semantic types of the design.
     pub(super) types: semantic_types::TyTable,
     /// The elaborated scope the session analyzes: a module, interface or
@@ -114,7 +120,12 @@ impl Session {
         Self {
             next_call_site: design.call_sites,
             foreign: std::mem::take(&mut design.foreign),
-            virtual_interfaces: packages.virtual_interfaces.clone(),
+            // With the specializations earlier analyses named (25.9).
+            virtual_interfaces: design
+                .virtual_interfaces
+                .clone()
+                .or_else(|| packages.virtual_interfaces.clone()),
+            virtual_interface_calls: design.virtual_interface_calls.clone(),
             types: std::mem::take(&mut design.types),
             controls_assertions: packages.controls_assertions(),
             ..Self::default()
@@ -127,5 +138,7 @@ impl Session {
         design.call_sites = self.next_call_site;
         design.foreign = self.foreign;
         design.types = self.types;
+        design.virtual_interfaces = self.virtual_interfaces;
+        design.virtual_interface_calls = self.virtual_interface_calls;
     }
 }
