@@ -499,6 +499,7 @@ impl<B: SimBackend> SimulationState<B> {
             .program
             .ok_or(SimulatorErrorCode::InternalError)?;
         let mut ended = Vec::new();
+        let mut exited = Vec::new();
         for index in 0..self.model.processes.len() {
             let refs = &self.model.processes[index];
             if refs.program != Some(program) {
@@ -513,7 +514,6 @@ impl<B: SimBackend> SimulationState<B> {
                 activation.control.suspended = None;
                 activation.control.awaiting = None;
                 activation.control.observes.clear();
-                activation.control.observed_events.clear();
                 activation.control.level_wait = false;
                 activation.pending.clear();
                 activation.join = None;
@@ -524,7 +524,11 @@ impl<B: SimBackend> SimulationState<B> {
             state.deferred_ready.remove(&index);
             state.reactive.remove(&index);
             state.re_inactive.remove(&index);
+            exited.push(index);
         }
+        // Its processes are queued and waiting nowhere any more, also not
+        // for the Observed region (16.4) or a mailbox (15.4).
+        self.release_for_reuse(&exited, true);
         let model = &self.model;
         self.process_wakeups
             .retain(|std::cmp::Reverse((_, index))| {

@@ -23,7 +23,9 @@ pub struct ResolvedSchedule<B: SimBackend> {
     pub(crate) event_info: Vec<EventInfo<B>>,
     pub(crate) signal_to_id: FxHashMap<SignalRef, usize>,
     pub(crate) signal_index_by_id: Vec<usize>,
-    pub(crate) processes: Vec<ProcessRefs>,
+    /// The description of each process by activation: a kernel's, which
+    /// the activations it spawns share.
+    pub(crate) processes: Vec<std::sync::Arc<ProcessRefs>>,
     /// The kernels of program instances, in declaration order.
     pub(crate) program_processes: Vec<usize>,
     /// The `iff` gate of each term by process, wait site and term; empty
@@ -350,7 +352,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
         } else {
             Vec::new()
         };
-        let processes: Vec<ProcessRefs> = model
+        let processes: Vec<std::sync::Arc<ProcessRefs>> = model
             .processes
             .iter()
             .map(|process| ProcessRefs {
@@ -416,6 +418,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                     })
                     .collect(),
             })
+            .map(std::sync::Arc::new)
             .collect();
 
         let combinational_derived = if events.combinational_derived.is_empty() {
