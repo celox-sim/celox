@@ -179,8 +179,10 @@ fn output_arrays_of_virtual_interfaces_need_compatible_actuals() {
 }
 
 /// A member access compares the handle with each instance, so a handle
-/// expression whose evaluation may have effects is rejected; and the
-/// instance a port of an interface without members denotes is unknown.
+/// expression whose evaluation may have effects is rejected; the instance a
+/// port of an interface without members denotes is unknown; and an instance
+/// of a generate block is not yet a value by its simple name inside the
+/// block (#4266), which is not reported as a port.
 #[test]
 fn unsupported_handle_forms_are_diagnosed() {
     for (source, want) in [
@@ -204,6 +206,17 @@ fn unsupported_handle_forms_are_diagnosed() {
              endmodule
              module Top; empty_if e(); Child c(e); endmodule",
             "which declares no members",
+        ),
+        (
+            "interface Drv; logic [7:0] last; endinterface
+             package cfg; virtual Drv vs[2]; endpackage
+             module Top;
+                 for (genvar i = 0; i < 2; i++) begin : g
+                     Drv d();
+                     initial cfg::vs[i] = d;
+                 end
+             endmodule",
+            "an instance of interface `Drv` named",
         ),
     ] {
         let Err(error) =
