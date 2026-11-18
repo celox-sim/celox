@@ -290,18 +290,35 @@ pub(super) fn member_literal(name: &str, path: &str, env: &ConstEnv) -> Option<S
     let value = *env.get(&parameter_member_value_marker(name, path))?;
     let r#type = *env.get(&parameter_member_type_marker(name, path))?;
     let width = usize::try_from(r#type >> 1).ok()?;
-    Some(format_typed_parameter_literal(
-        value,
-        width,
-        r#type & 1 != 0,
+    let signed = r#type & 1 != 0;
+    if width <= 128 {
+        return Some(format_typed_parameter_literal(value, width, signed));
+    }
+    // A wider member is held 128 bits at a time.
+    let mut bits = num_bigint::BigUint::from(value as u128);
+    for chunk in 1..width.div_ceil(128) {
+        let value = *env.get(&parameter_member_chunk_marker(name, path, chunk))?;
+        bits |= num_bigint::BigUint::from(value as u128) << (128 * chunk);
+    }
+    Some(typecheck::format_integral_literal_binary(
+        &typecheck::IntegralLiteral {
+            width,
+            signed,
+            value: bits,
+            mask: num_bigint::BigUint::default(),
+        },
     ))
 }
+
+/// The widest member of a packed structure parameter that is published as a
+/// constant; a wider one is left to the contexts that have the whole value.
+const MAX_CONSTANT_MEMBER_BITS: usize = 4096;
 
 /// Publish the members of a parameter of packed structure type as constants:
 /// a member select of a parameter is a constant expression (IEEE 1800-2023
 /// 11.2.1, A.8.4 `constant_select`), of the member's declared width and sign
-/// (7.2.1). A member with unknown bits or wider than the numeric
-/// environment holds is left to the contexts that have the whole value.
+/// (7.2.1). A member with unknown bits is left to the contexts that have
+/// the whole value.
 fn insert_parameter_member_markers(
     functions: &const_functions::ConstantFunctions,
     env: &mut ConstEnv,
@@ -337,17 +354,27 @@ fn insert_parameter_member_markers(
     for (path, offset, r#type) in
         packed_structs::constant_members(functions, &parameter.members, env)
     {
-        if r#type.width > 127 {
+        if r#type.width > MAX_CONSTANT_MEMBER_BITS {
             continue;
         }
         let window = (num_bigint::BigUint::from(1u8) << r#type.width) - 1u8;
         if (&unknown >> offset) & &window != num_bigint::BigUint::default() {
             continue;
         }
-        let Ok(member) = u128::try_from((&bits >> offset) & &window) else {
-            continue;
-        };
-        env.insert(parameter_member_value_marker(name, &path), member as i128);
+        // The environment holds numbers of 128 bits; a wider member is held
+        // 128 bits at a time, from its least significant bits.
+        let member = (&bits >> offset) & &window;
+        let chunk_window = num_bigint::BigUint::from(u128::MAX);
+        for chunk in 0..r#type.width.div_ceil(128) {
+            let value =
+                u128::try_from((&member >> (128 * chunk)) & &chunk_window).unwrap_or_default();
+            let key = if chunk == 0 {
+                parameter_member_value_marker(name, &path)
+            } else {
+                parameter_member_chunk_marker(name, &path, chunk)
+            };
+            env.insert(key, value as i128);
+        }
         env.insert(
             parameter_member_type_marker(name, &path),
             ((r#type.width as i128) << 1) | i128::from(r#type.signed),
@@ -1235,6 +1262,7 @@ fn normalize_unbased_unsized_parameter_value(
     }
 }
 
+#[cfg(test)]
 pub(super) fn const_env_from_parameters(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -1289,6 +1317,160 @@ fn unresolved_parameters(
         pending.extend(skipped::children(id, native));
     }
     names
+}
+
+/// [`extend_const_env_with_parameters`] for parameters that may name the
+/// constants of the scopes they import, whose literals `imported` holds:
+/// one wider than the numeric environment holds, such as a structure of
+/// 256 bits, is known only by its literal, which a parameter it initializes
+/// takes, with its members (IEEE 1800-2023 26.3).
+pub(super) fn extend_const_env_with_imported_parameters(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &mut ConstEnv,
+    parameters: &[Parameter],
+    imported: &HashMap<String, Expr>,
+) {
+    let mut parameter_types = parameter_types_from_const_env(env);
+    let mut literals = HashMap::default();
+    let own: HashSet<&str> = parameters.iter().map(Parameter::name).collect();
+    for parameter in parameters {
+        if let Some(value) = parameter.value() {
+            let mut names = Vec::new();
+            const_expr_identifiers(value, &mut names);
+            for name in names {
+                if !own.contains(name.as_str())
+                    && !literals.contains_key(&name)
+                    && let Some(literal @ Expr::Literal(_)) = imported.get(&name)
+                {
+                    literals.insert(name, literal.clone());
+                }
+            }
+        }
+        bind_parameter(
+            tree,
+            session,
+            env,
+            &mut parameter_types,
+            &mut literals,
+            parameter,
+        );
+    }
+}
+
+/// `value` with each name of an imported constant wider than the numeric
+/// environment holds, which `imported` knows only by its literal, replaced by
+/// that literal (IEEE 1800-2023 26.3): a parameter it initializes, such as
+/// OpenTitan's `LpgMap = alert_handler_reg_pkg::LpgMap` of 325 bits, then has
+/// that value wherever it is read, not only in the constants of the scope.
+pub(super) fn substitute_wide_imported_literals(
+    value: ConstExpr,
+    own: &HashSet<&str>,
+    imported: &HashMap<String, Expr>,
+) -> ConstExpr {
+    let recurse =
+        |expr: Box<ConstExpr>| Box::new(substitute_wide_imported_literals(*expr, own, imported));
+    match value {
+        ConstExpr::Ident(name) => match imported.get(&name) {
+            Some(Expr::Literal(text))
+                if !own.contains(name.as_str())
+                    && typecheck::parse_integral_literal(text)
+                        .is_some_and(|literal| literal.width > 128) =>
+            {
+                ConstExpr::Literal(text.clone())
+            }
+            _ => ConstExpr::Ident(name),
+        },
+        ConstExpr::Literal(_) => value,
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: recurse(expr),
+            bit: recurse(bit),
+        },
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: recurse(expr),
+            msb: recurse(msb),
+            lsb: recurse(lsb),
+            signed,
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: recurse(expr),
+            width,
+            signed,
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op,
+            expr: recurse(expr),
+        },
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee,
+            args: args
+                .into_iter()
+                .map(|arg| substitute_wide_imported_literals(arg, own, imported))
+                .collect(),
+            site,
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: recurse(left),
+            op,
+            right: recurse(right),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: recurse(condition),
+            then_expr: recurse(then_expr),
+            else_expr: recurse(else_expr),
+        },
+    }
+}
+
+/// The identifiers `expr` names.
+fn const_expr_identifiers(expr: &ConstExpr, names: &mut Vec<String>) {
+    match expr {
+        ConstExpr::Ident(name) => names.push(name.clone()),
+        ConstExpr::Literal(_) => {}
+        ConstExpr::Select { expr, bit } => {
+            const_expr_identifiers(expr, names);
+            const_expr_identifiers(bit, names);
+        }
+        ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            const_expr_identifiers(expr, names);
+            const_expr_identifiers(msb, names);
+            const_expr_identifiers(lsb, names);
+        }
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            const_expr_identifiers(expr, names);
+        }
+        ConstExpr::Function { args, .. } => {
+            for arg in args {
+                const_expr_identifiers(arg, names);
+            }
+        }
+        ConstExpr::Binary { left, right, .. } => {
+            const_expr_identifiers(left, names);
+            const_expr_identifiers(right, names);
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            const_expr_identifiers(condition, names);
+            const_expr_identifiers(then_expr, names);
+            const_expr_identifiers(else_expr, names);
+        }
+    }
 }
 
 pub(super) fn bind_parameter(
