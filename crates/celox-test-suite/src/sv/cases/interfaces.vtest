@@ -1197,3 +1197,193 @@
     (assert_eq result (^ value 0x5a))
     (tick clk 1)
     (assert_eq sampled value)))
+
+; A formal of an interface function and a declaration in a block of an
+; interface process shadow interface items there (IEEE 1800-2023 23.9). The
+; shadowed names are not the items: neither write drives the item `pkt`,
+; which the module drives through the port.
+(case shadows_interface_items_in_nested_scopes
+  (source "interface_shadowing.sv" #"
+        interface Box;
+            logic [7:0] base;
+            logic [7:0] pkt;
+            logic [7:0] sum;
+            function automatic logic [7:0] bump(logic [7:0] pkt);
+                pkt = pkt + 8'd1;
+                return pkt;
+            endfunction
+            always_comb begin
+                logic [7:0] pkt;
+                pkt = base + 8'd2;
+                sum = pkt;
+            end
+        endinterface
+        module Use(Box b, input logic [7:0] x, output logic [7:0] y, output logic [7:0] z,
+                   output logic [7:0] w);
+            assign b.base = x;
+            assign b.pkt = x ^ 8'hff;
+            assign y = b.bump(x);
+            assign z = b.sum;
+            assign w = b.pkt;
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] y, output logic [7:0] z,
+                   output logic [7:0] w);
+            Box box();
+            Use u(.b(box), .x(x), .y(y), .z(z), .w(w));
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq y (trunc 8 (+ value 1)))
+    (assert_eq z (trunc 8 (+ value 2)))
+    (assert_eq w (^ value 0xff))))
+
+; The same through a virtual interface: a task formal named as an interface
+; variable is the formal inside the task.
+(case shadows_interface_items_in_tasks_called_through_virtual_interfaces
+  (source "interface_shadowing_virtual.sv" #"
+        interface Bfm(input logic clk);
+            int pkt;
+            int last;
+            task send(int pkt);
+                @(posedge clk);
+                last = pkt;
+            endtask
+        endinterface
+        module Top(output int item, output int sent);
+            logic clk = 0;
+            Bfm bfm(clk);
+            virtual Bfm v;
+            always #1 clk = ~clk;
+            assign item = bfm.pkt;
+            assign sent = bfm.last;
+            initial begin
+                v = bfm;
+                bfm.pkt = 7;
+                v.send(5);
+            end
+        endmodule
+    "#)
+  (top Top) (run_until 4)
+  (assert_eq item 7) (assert_eq sent 5))
+
+; A block declaration hides an interface function only inside the block:
+; the call after it is of the interface's `helper`, which the modport's
+; import brings along.
+(case shadows_interface_functions_only_inside_their_blocks
+  (source "interface_shadowing_functions.sv" #"
+        interface Box;
+            logic [7:0] pkt;
+            function automatic logic [7:0] helper();
+                return pkt + 8'd1;
+            endfunction
+            function automatic logic [7:0] get();
+                begin
+                    logic [7:0] helper;
+                    helper = 8'd0;
+                end
+                return helper();
+            endfunction
+            modport use_get(input pkt, import get);
+        endinterface
+        module Use(Box.use_get b, output logic [7:0] y);
+            assign y = b.get();
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] y);
+            Box box();
+            assign box.pkt = x;
+            Use u(.b(box), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq y (trunc 8 (+ value 1)))))
+
+; A block declaration hides the interface item only inside the block: the
+; write after it is to the interface's `pkt`, which the function captures
+; as an output of the port.
+(case shadows_interface_items_only_inside_their_blocks
+  (source "interface_shadowing_blocks.sv" #"
+        interface Box;
+            logic [7:0] pkt;
+            function automatic void put(logic [7:0] v);
+                begin
+                    logic [7:0] pkt;
+                    pkt = 8'd0;
+                end
+                pkt = v;
+            endfunction
+        endinterface
+        module Use(Box b, input logic [7:0] x);
+            always_comb b.put(x);
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] y);
+            Box box();
+            Use u(.b(box), .x(x));
+            assign y = box.pkt;
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq y value)))
+
+; A formal hides an interface item from its own declaration on: the
+; default of an earlier formal calls the interface's `helper`.
+(case shadows_interface_items_from_the_formal_on
+  (source "interface_shadowing_formals.sv" #"
+        interface Box;
+            logic [7:0] pkt;
+            function automatic logic [7:0] helper();
+                return pkt + 8'd1;
+            endfunction
+            function automatic logic [7:0] get(input logic [7:0] x = helper(),
+                                               input logic [7:0] helper = 8'd0);
+                return x + helper;
+            endfunction
+            modport use_get(input pkt, import get);
+        endinterface
+        module Use(Box.use_get b, output logic [7:0] y);
+            assign y = b.get();
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] y);
+            Box box();
+            assign box.pkt = x;
+            Use u(.b(box), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq y (trunc 8 (+ value 1)))))
+
+; Each declarator of a declaration hides from its own name on: the
+; initializer of `tmp` calls the interface's `helper`.
+(case shadows_interface_items_from_each_declarator_on
+  (source "interface_shadowing_declarators.sv" #"
+        interface Box;
+            logic [7:0] pkt;
+            function automatic logic [7:0] helper();
+                return pkt + 8'd1;
+            endfunction
+            function automatic logic [7:0] get();
+                logic [7:0] tmp = helper(), helper = 8'd0;
+                return tmp + helper;
+            endfunction
+            modport use_get(input pkt, import get);
+        endinterface
+        module Use(Box.use_get b, output logic [7:0] y);
+            assign y = b.get();
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] y);
+            Box box();
+            assign box.pkt = x;
+            Use u(.b(box), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq y (trunc 8 (+ value 1)))))
