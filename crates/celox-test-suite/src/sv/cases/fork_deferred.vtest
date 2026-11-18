@@ -136,3 +136,25 @@ program Driver(output bit go);
 endprogram"#)
  (top Top) (run_until 1)
  (expect_output "observed\n"))
+
+; `$exit` kills the program's processes: the reports pending in the queue of
+; the caller and of its live child are flushed (IEEE 1800-2023 24.7, 9.7,
+; 16.4.4), while a process of the program that finished keeps its own.
+; Program Q keeps the simulation going past the `$exit`.
+(case program_exit_flushes_killed_processes_only
+ (source "exit.sv" #"program P;
+ initial begin
+  assert #0 (0) else $display("caller observed");
+  assert final (0) else $display("caller final");
+  fork begin assert #0 (0) else $display("child"); #5; end join_none
+  #0; $exit;
+ end
+ initial begin
+  assert #0 (1) $display("finished observed");
+  assert final (1) $display("finished final");
+ end
+endprogram
+program Q; initial #2; endprogram
+module Top; P p(); Q q(); endmodule"#)
+ (top Top) (run_to_finish)
+ (expect_output "finished observed\nfinished final\n"))
