@@ -48,9 +48,22 @@ impl Ff<'_, '_> {
                     && !self.writes.working.contains(id)
                     && !self.writes.other_writes.contains(id)
                     && !self.m.is_hidden(*id)
+                    // A forced array commits through the force controls.
+                    && !self.m.procedurally_forced.contains(id)
             })
             .collect();
         self.writes.sparse_memories.extend(sparse);
+        if let Some(&forced) = self
+            .writes
+            .sparse_memories
+            .iter()
+            .find(|id| self.m.procedurally_forced.contains(id))
+        {
+            return Err(unsupported(format!(
+                "force or release of `{}`, an unpacked array several edge-triggered processes write",
+                self.m.var(forced).path.join(".")
+            )));
+        }
         if self
             .writes
             .nonblocking

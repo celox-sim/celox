@@ -700,15 +700,21 @@ fn fresh(prefix: &str, serial: usize, dimensions: &PackedDimensions, signals: &[
     }
 }
 
-/// The type of a mask of the bits of a target of type `target`, `width`
-/// bits wide: a select of the target selects the same bits of it, by the
-/// target's own packed ranges, or by offsets for a structure.
-fn mask_type(target: &Type, width: usize) -> Type {
-    if target.packed_ranges.is_empty() || !target.members.is_empty() {
-        return bit_type(width);
-    }
-    let mut mask = Type::new(TypeKind::Bit);
-    mask.packed_ranges = target.packed_ranges.clone();
+/// The type of a mask of the bits of a target of type `target`, whose
+/// elements are `element_width` bits wide: a select of the target selects
+/// the same bits of it, by the target's own packed ranges, or by offsets
+/// for a structure. The mask of an unpacked array is an array of the same
+/// shape, of masks of its elements, so that a write of an element at a
+/// run-time index takes the mask of the element at that index.
+fn mask_type(target: &Type, element_width: usize) -> Type {
+    let mut mask = if target.packed_ranges.is_empty() || !target.members.is_empty() {
+        bit_type(element_width)
+    } else {
+        let mut mask = Type::new(TypeKind::Bit);
+        mask.packed_ranges = target.packed_ranges.clone();
+        mask
+    };
+    mask.unpacked_ranges = target.unpacked_ranges.clone();
     mask
 }
 
@@ -808,15 +814,25 @@ pub(super) fn lower(
             holders,
             hierarchical,
         } = check_target(&name, ports, signals, comb, ff, initial, subroutines)?;
-        // The type of the target tells whether it is integral (6.11.1).
+        // The type of the target tells whether it is integral (6.11.1); as
+        // an extension, a fixed-size unpacked array of an integral type is a
+        // target too, of which a force names an element or a select of one.
         let integral = dimensions.get(&name).is_some_and(|shape| {
-            shape
-                .type_id(types, functions, &dimensions.const_env)
-                .is_some_and(|id| types.is_integral(id))
+            let Some(mut id) = shape.type_id(types, functions, &dimensions.const_env) else {
+                return false;
+            };
+            while let semantic_types::TyData::Array {
+                kind: semantic_types::ArrayKind::Fixed(_),
+                element,
+            } = types.data(id)
+            {
+                id = *element;
+            }
+            types.is_integral(id)
         });
         if !integral {
             return Err(unsupported(format!(
-                "force or release of `{name}`, which is not of a packed integral type"
+                "force or release of `{name}`, which is not of a packed integral type or a fixed-size unpacked array of one"
             )));
         }
         // A control of a target of another instance denotes the control of
@@ -845,14 +861,20 @@ pub(super) fn lower(
                     .map(|port| port.r#type().clone())
             })
             .expect("a checked target is a signal or a port");
-        let width = dimensions
-            .get(&name)
-            .and_then(|shape| patterns::shape_width(&tree.functions, shape, dimensions))
-            .ok_or_else(|| {
-                unsupported(format!(
-                    "force or release of `{name}`, whose width is not a constant"
-                ))
-            })?;
+        let constant_width = || {
+            unsupported(format!(
+                "force or release of `{name}`, whose width is not a constant"
+            ))
+        };
+        let shape = dimensions.get(&name).ok_or_else(constant_width)?;
+        let width =
+            patterns::shape_width(&tree.functions, shape, dimensions).ok_or_else(constant_width)?;
+        let element_width = {
+            let mut element = shape.clone();
+            element.unpacked.clear();
+            patterns::shape_width(&tree.functions, &element, dimensions)
+                .ok_or_else(constant_width)?
+        };
         // The range of all bits, in the indices a select names: the
         // declared ones of a vector of one packed dimension, offsets
         // otherwise (see `selects::lvalue_from_range`).
@@ -895,7 +917,7 @@ pub(super) fn lower(
         let enable = crate::ir::force_control_name(&ForceRole::Enable, &name);
         signals.push(control(
             enable.clone(),
-            mask_type(&target_type, width),
+            mask_type(&target_type, element_width),
             ForceRole::Enable,
             &name,
         ));
@@ -920,7 +942,7 @@ pub(super) fn lower(
             let hold = crate::ir::force_control_name(&ForceRole::Hold, &name);
             signals.push(control(
                 hold.clone(),
-                mask_type(&target_type, width),
+                mask_type(&target_type, element_width),
                 ForceRole::Hold,
                 &name,
             ));
