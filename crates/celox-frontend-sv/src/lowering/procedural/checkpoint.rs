@@ -58,6 +58,7 @@ impl ProcModule<'_> {
             program: _,
             forceable: _,
             procedurally_forced: _,
+            force_holds: _,
             created,
             temp_counter,
             capture_counter,

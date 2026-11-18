@@ -278,6 +278,271 @@ module top;
   end
 endmodule"#;
 
+/// A released target of an `always_comb`, `always_latch` or `always @*`
+/// procedure keeps the forced value until the procedure executes again
+/// (9.2.2.2), also when its input changes in the time step of the release,
+/// and when it changes twice.
+const HOLD: &str = r#"`timescale 1ns/1ns
+module top;
+  logic a = 0, b = 0, en = 0, c = 0;
+  logic v, l, s;
+  always_comb v = a & b;
+  always_latch if (en) l = a;
+  always @* s = a | b;
+  initial begin
+    #1 $display("A %b", v);
+    force v = 1'b1; force l = 1'b1; force s = 1'b0;
+    #1 $display("B %b %b %b", v, l, s);
+    release v; release l; release s;
+    #1 $display("C %b %b %b", v, l, s);
+    c = 1;
+    #1 $display("D %b %b %b", v, l, s);
+    b = 1;
+    #1 $display("E %b %b %b", v, l, s);
+    en = 1;
+    #1 $display("F %b %b %b", v, l, s);
+    force v = 1'b0;
+    #1 release v; a = 1;
+    #1 $display("G %b %b %b", v, l, s);
+    force v = 1'b0;
+    #1 release v;
+    #1 $display("H %b %b %b", v, l, s);
+    release v;
+    b = 0; b = 1;
+    #1 $display("I %b %b %b", v, l, s);
+    $finish;
+  end
+endmodule"#;
+
+/// A force and a release at time zero, before the time-zero execution of
+/// an `always_comb` and an `always_latch` (9.2.2.2.2), which ends their
+/// holds. The lines are those of Icarus Verilog 13.0.
+const TIME_ZERO_HOLD: &str = r#"`timescale 1ns/1ns
+module top;
+  logic a = 0, v, l, en = 1;
+  always_comb v = a;
+  always_latch if (en) l = a;
+  initial begin
+    force v = 1'b1; force l = 1'b1;
+    release v; release l;
+    #1 $display("A %b %b", v, l);
+    $finish;
+  end
+endmodule"#;
+
+/// A force of a target an `always_comb` assigns whole to an expression of
+/// a variable the procedure does not read: the target follows the
+/// expression while the force lasts. The lines are those of Verilator 5.054
+/// (Icarus Verilog 13.0 evaluates the expression only once).
+const VARYING_COMB: &str = r#"`timescale 1ns/1ns
+module top;
+  logic a = 0, b = 0, v;
+  always_comb v = a;
+  initial begin
+    #1 force v = b;
+    #1 $display("A %b", v);
+    b = 1;
+    #1 $display("B %b", v);
+    b = 0;
+    #1 $display("C %b", v);
+    $finish;
+  end
+endmodule"#;
+
+/// A force and a release of a target an `always @*` assigns, at time zero:
+/// the procedure waits for a change (9.2.2.2) and holds the target, as
+/// Icarus Verilog 13.0 does, in four-state mode; in two-state mode it runs at
+/// time zero (see the reference), which ends the hold.
+const STAR_TIME_ZERO: &str = r#"`timescale 1ns/1ns
+module top;
+  logic a = 0, v;
+  always @* v = a;
+  initial begin
+    force v = 1'b1;
+    release v;
+    #1 $display("A %b", v);
+    a = 1;
+    #1 $display("B %b", v);
+    $finish;
+  end
+endmodule"#;
+
+/// An assignment of another procedure to a released target that an
+/// `always @*` holds takes effect at once and ends the hold (10.6.2). The
+/// lines are those of Icarus Verilog 13.0.
+const OTHER_WRITER: &str = r#"`timescale 1ns/1ns
+module top;
+  logic a = 0, q;
+  always @* q = a;
+  initial begin
+    #1 force q = 1'b1;
+    #1 release q;
+    q = 1'b0;
+    #1 $display("A %b", q);
+    a = 1;
+    #1 $display("B %b", q);
+    $finish;
+  end
+endmodule"#;
+
+/// A force and a release of a target an `always_latch` assigns do not run
+/// the procedure again: its other effects happen only when it executes.
+/// The lines are those of Icarus Verilog 13.0.
+const COUNTED_RUNS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic en = 1, d = 0, q;
+  int n = 0;
+  always_latch if (en) begin q = d; n = n + 1; end
+  initial begin
+    #1 $display("A %b %0d", q, n);
+    force q = 1'b1;
+    #1 $display("B %b %0d", q, n);
+    release q;
+    #1 $display("C %b %0d", q, n);
+    d = 1;
+    #1 $display("D %b %0d", q, n);
+    $finish;
+  end
+endmodule"#;
+
+/// A target an `always_comb` assigns through the `output` actual of a
+/// function in an expression, which the procedure does not read.
+const OUTPUT_ACTUALS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic d = 0, q, dummy;
+  function automatic logic write_q(output logic o);
+    o = d;
+    return 1'b1;
+  endfunction
+  always_comb dummy = write_q(q);
+  initial begin
+    #1 force q = 1'b1;
+    #1 $display("A %b", q);
+    $finish;
+  end
+endmodule"#;
+
+/// A force of a variable whose only writer is an `always_comb` of a
+/// generate block with a false condition, which never runs: the force stores
+/// its value. The line is that of Icarus Verilog 13.0.
+const INACTIVE_WRITER: &str = r#"`timescale 1ns/1ns
+module top;
+  localparam bit P = 1'b0;
+  logic a = 0, v;
+  if (P) begin : g
+    always_comb v = a;
+  end
+  initial begin
+    #1 force v = 1'b1;
+    #1 $display("A %b", v);
+    $finish;
+  end
+endmodule"#;
+
+/// The hold of a target an `always_comb` with a loop over the members of a
+/// packed array assigns.
+const HOLD_LOOP: &str = r#"`timescale 1ns/1ns
+module top;
+  typedef struct packed { logic en; logic [1:0] e; } w_t;
+  w_t [1:0] w;
+  logic [3:0] q;
+  logic [3:0] tmp;
+  always_comb begin
+    tmp = '0;
+    for (int i = 0; i < 2; i++)
+      tmp |= w[i].en ? 4'(w[i].e) << i : '0;
+    q = tmp;
+  end
+  initial begin
+    w = '0;
+    #1 $display("A %0d", q);
+    force q = 4'd9;
+    #1 $display("B %0d", q);
+    release q;
+    #1 $display("C %0d", q);
+    w[1] = '{en: 1, e: 2};
+    #1 $display("D %0d", q);
+    $finish;
+  end
+endmodule"#;
+
+/// Targets an `always_comb` assigns through a called function and through
+/// the output of a called task are held after the release too: the one
+/// the function assigns until a change of what the function reads runs
+/// the procedure again (9.2.2.2.1), the other until the procedure runs
+/// again. The lines are those of Icarus Verilog 13.0.
+const HOLD_CALLS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic [3:0] a = 4'd1, v, w;
+  function void set(); v = a; endfunction
+  task automatic get(output logic [3:0] o); o = a + 4'd1; endtask
+  always_comb set();
+  always_comb get(w);
+  initial begin
+    #1 force v = 4'd9; force w = 4'd9;
+    #1 $display("A %0d %0d", v, w);
+    release v; release w;
+    #1 $display("B %0d %0d", v, w);
+    a = 4'd3;
+    #1 $display("C %0d %0d", v, w);
+    $finish;
+  end
+endmodule"#;
+
+/// A force of a clock an `always_comb` assigns on each branch of an `if`
+/// gives the edge it makes. The lines are those of Icarus Verilog 13.0.
+const COMB_BRANCH_CLOCKS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic clk = 0, sel = 1;
+  int m = 0;
+  logic gclk;
+  always_comb
+    if (sel) gclk = clk;
+    else gclk = 1'b0;
+  always @(posedge gclk) m++;
+  initial begin
+    #1 clk = 1; #1 clk = 0;
+    #1 $display("A %0d %b", m, gclk);
+    force gclk = 1'b1;
+    #1 $display("B %0d %b", m, gclk);
+    release gclk;
+    #1 $display("C %0d %b", m, gclk);
+    clk = 1;
+    #1 $display("D %0d %b", m, gclk);
+    $finish;
+  end
+endmodule"#;
+
+/// [`CLOCKS`] with the derived clock an `always_comb` assigns, which holds
+/// the forced value after the release until the clock changes.
+const COMB_CLOCKS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic clk = 0;
+  int n = 0, m = 0;
+  logic gclk;
+  always_comb gclk = clk;
+  always @(posedge clk) n++;
+  always @(posedge gclk) m++;
+  initial begin
+    #1 clk = 1; #1 clk = 0;
+    #1 $display("A %0d %0d", n, m);
+    force clk = 1'b1;
+    #1 $display("B %0d %0d", n, m);
+    clk = 0; #1 clk = 1;
+    #1 $display("C %0d %0d", n, m);
+    release clk;
+    #1 $display("D %0d %0d %b", n, m, clk);
+    clk = 0; #1 clk = 1;
+    #1 $display("E %0d %0d", n, m);
+    force gclk = 1'b0;
+    clk = 0; #1 clk = 1;
+    #1 $display("F %0d %0d", n, m);
+    release gclk;
+    #1 $display("G %0d %0d %b", n, m, gclk);
+    $finish;
+  end
+endmodule"#;
+
 sv_backends! {
     fn delayed_drivers_drive_again_after_the_release(sim) {
         @setup {}
@@ -302,6 +567,150 @@ sv_backends! {
         @build simulation(TIME_ZERO, true);
         sim.run_until(100).unwrap();
         assert_eq!(display_lines(&mut sim), ["A 1 1 3 0", "B 1 1 6 0"]);
+    }
+    fn procedures_hold_released_targets(sim) {
+        @setup {}
+        @build simulation(HOLD, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1 1 0", "C 1 1 0", "D 1 1 0", "E 0 1 1", "F 0 0 1", "G 1 1 1", "H 0 1 1", "I 1 1 1"]);
+    }
+    fn procedures_hold_released_targets_four_state(sim) {
+        @setup {}
+        @build simulation(HOLD, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1 1 0", "C 1 1 0", "D 1 1 0", "E 0 1 1", "F 0 0 1", "G 1 1 1", "H 0 1 1", "I 1 1 1"]);
+    }
+    fn time_zero_executions_end_holds(sim) {
+        @setup {}
+        @build simulation(TIME_ZERO_HOLD, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0 0"]);
+    }
+    fn time_zero_executions_end_holds_four_state(sim) {
+        @setup {}
+        @build simulation(TIME_ZERO_HOLD, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0 0"]);
+    }
+    fn comb_targets_follow_varying_forces(sim) {
+        @setup {}
+        @build simulation(VARYING_COMB, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1", "C 0"]);
+    }
+    fn comb_targets_follow_varying_forces_four_state(sim) {
+        @setup {}
+        @build simulation(VARYING_COMB, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1", "C 0"]);
+    }
+    fn always_star_time_zero_holds(sim) {
+        @setup {}
+        @build simulation(STAR_TIME_ZERO, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1"]);
+    }
+    fn always_star_time_zero_holds_four_state(sim) {
+        @setup {}
+        @build simulation(STAR_TIME_ZERO, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1", "B 1"]);
+    }
+    fn other_writers_end_holds(sim) {
+        @setup {}
+        @build simulation(OTHER_WRITER, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1"]);
+    }
+    fn other_writers_end_holds_four_state(sim) {
+        @setup {}
+        @build simulation(OTHER_WRITER, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1"]);
+    }
+    fn forces_do_not_run_procedures(sim) {
+        @setup {}
+        @build simulation(COUNTED_RUNS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0 1", "B 1 1", "C 1 1", "D 1 2"]);
+    }
+    fn forces_do_not_run_procedures_four_state(sim) {
+        @setup {}
+        @build simulation(COUNTED_RUNS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0 1", "B 1 1", "C 1 1", "D 1 2"]);
+    }
+    fn targets_of_output_actuals_are_forced(sim) {
+        @setup {}
+        @build simulation(OUTPUT_ACTUALS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1"]);
+    }
+    fn targets_of_output_actuals_are_forced_four_state(sim) {
+        @setup {}
+        @build simulation(OUTPUT_ACTUALS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1"]);
+    }
+    fn forces_of_targets_of_inactive_procedures(sim) {
+        @setup {}
+        @build simulation(INACTIVE_WRITER, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1"]);
+    }
+    fn forces_of_targets_of_inactive_procedures_four_state(sim) {
+        @setup {}
+        @build simulation(INACTIVE_WRITER, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1"]);
+    }
+    fn procedures_with_loops_hold_released_targets(sim) {
+        @setup {}
+        @build simulation(HOLD_LOOP, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 9", "C 9", "D 4"]);
+    }
+    fn procedures_with_loops_hold_released_targets_four_state(sim) {
+        @setup {}
+        @build simulation(HOLD_LOOP, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 9", "C 9", "D 4"]);
+    }
+    fn procedures_hold_targets_their_calls_assign(sim) {
+        @setup {}
+        @build simulation(HOLD_CALLS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 9 9", "B 9 9", "C 3 9"]);
+    }
+    fn procedures_hold_targets_their_calls_assign_four_state(sim) {
+        @setup {}
+        @build simulation(HOLD_CALLS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 9 9", "B 9 9", "C 3 9"]);
+    }
+    fn forced_clocks_of_comb_branches_give_edges(sim) {
+        @setup {}
+        @build simulation(COMB_BRANCH_CLOCKS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 0", "B 2 1", "C 2 1", "D 2 1"]);
+    }
+    fn forced_clocks_of_comb_branches_give_edges_four_state(sim) {
+        @setup {}
+        @build simulation(COMB_BRANCH_CLOCKS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 0", "B 2 1", "C 2 1", "D 2 1"]);
+    }
+    fn forced_procedure_clocks_give_edges(sim) {
+        @setup {}
+        @build simulation(COMB_CLOCKS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 1", "B 2 2", "C 2 2", "D 2 2 1", "E 3 3", "F 4 3", "G 4 3 0"]);
+    }
+    fn forced_procedure_clocks_give_edges_four_state(sim) {
+        @setup {}
+        @build simulation(COMB_CLOCKS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 1", "B 2 2", "C 2 2", "D 2 2 1", "E 3 3", "F 4 3", "G 4 3 0"]);
     }
     fn lrm_example_forces_and_releases(sim) {
         @setup {}
@@ -401,8 +810,9 @@ sv_backends! {
     }
 }
 
-/// [`CLOCKS`] on the interpreter and on the tiered backend, whose derived
-/// clocks follow the forced net as the native image's do (see #3755).
+/// [`CLOCKS`] and [`COMB_CLOCKS`] on the interpreter and on the tiered
+/// backend, whose derived clocks follow the forced net or variable as the
+/// native image's do (see #3755).
 #[test]
 fn forced_clocks_give_edges_on_interpreter_and_tiered() {
     let expected = [
@@ -442,22 +852,39 @@ fn rejected_forces_name_their_reason() {
             "of a member or an element",
         ),
         (
-            "logic v, a; always_comb v = a; initial force v = 1'b1;",
-            "which an `always_comb` procedure assigns",
+            "logic d, q, r; always_comb begin q = d; r = q; end initial force q = 1'b1;",
+            "which the `always_comb` procedure that assigns it also reads",
         ),
         (
-            "logic v, a; always @* v = a; initial release v;",
-            "which an `always @*` procedure assigns",
+            "logic d, q, r; function automatic logic f(input logic x = q); return x; endfunction \
+             always_comb begin q = d; r = f(); end initial force q = 1'b1;",
+            "which the `always_comb` procedure that assigns it also reads",
         ),
         (
-            "logic v, a; function void set(); v = a; endfunction always_comb set(); \
+            "logic d, q, r; function automatic logic read_q(); return q; endfunction \
+             function automatic logic f(input logic x = read_q()); return x; endfunction \
+             always_comb begin q = d; r = f(); end initial force q = 1'b1;",
+            "which the `always_comb` procedure that assigns it also reads",
+        ),
+        (
+            "logic a, v; task automatic t(); endtask always_comb begin v = a; t(); end \
              initial force v = 1'b1;",
-            "which an `always_comb` procedure assigns",
+            "which an `always_comb` that runs as a process assigns whole",
         ),
         (
-            "logic v, a; task automatic t(output logic o); o = a; endtask always @* t(v); \
-             initial force v = 1'b1;",
-            "which an `always @*` procedure assigns",
+            "logic d; logic [1:0] v; task automatic set(output logic o); o = d; endtask \
+             always @* set(v[v[0]]); initial force v = 2'b01;",
+            "which the `always @*` procedure that assigns it also reads",
+        ),
+        (
+            "logic d, q, r; function void update(); q = d; r = q; endfunction \
+             always_comb update(); initial force q = 1'b1;",
+            "which the `always_comb` procedure that assigns it also reads",
+        ),
+        (
+            "logic d, v; task automatic t(inout logic o); o = o ^ d; endtask \
+             always @* t(v); initial force v = 1'b1;",
+            "which the `always @*` procedure that assigns it also reads",
         ),
         (
             "logic q, d, c; always @(posedge c) q <= #1 d; initial force q = 1'b1;",

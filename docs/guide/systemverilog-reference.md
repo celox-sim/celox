@@ -218,9 +218,11 @@ blocks in programs. Two region deviations are listed under
   integral variable or net of the module: a bit-select, part-select,
   member, concatenation or name of another instance, a `real`, `string`,
   handle or unpacked target (singular ones the standard allows), and a
-  variable that an `always_comb`, `always_latch` or `always @*` procedure
-  assigns, or that a nonblocking assignment with an intra-assignment delay
-  writes, are rejected. So are an expression with side effects or with a
+  variable that a nonblocking assignment with an intra-assignment delay
+  writes, are rejected, as is a target that the `always_comb`,
+  `always_latch` or `always @*` procedure assigning it also reads, and one
+  that an `always_comb` running as a process (calling a task, for example)
+  assigns whole. So are an expression with side effects or with a
   call of a subroutine or a system function, and one that reads a variable
   of a procedural block. A target that the host also forces
   (`Simulator::force`) is rejected, as is an input port of the top module,

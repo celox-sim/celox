@@ -68,13 +68,45 @@ impl Ff<'_, '_> {
             self.observation.unobserved_function_writes.insert(id);
         }
         let value = if let Some((enabled, forced)) = self.m.force_controls(id) {
-            let condition = self.b.alloc_bit(1, false);
+            let mut condition = self.b.alloc_bit(1, false);
             self.b.emit(SIRInstruction::Load(
                 condition,
                 stable(enabled),
                 SIROffset::Static(0),
                 1,
             ));
+            // A released target holds the forced value until the procedure
+            // writing it executes again (IEEE 1800-2023 10.6.2): a write of
+            // that procedure before the hold ends keeps it. Any other
+            // procedure's assignment takes effect at once, and ends the hold.
+            let hold = self.m.force_holds.get(&id).copied();
+            if !self.holds_targets
+                && let Some(hold) = hold
+            {
+                let cleared = self.b.alloc_bit(1, false);
+                self.b
+                    .emit(SIRInstruction::Imm(cleared, SIRValue::new(0u8)));
+                self.store(hold, SIROffset::Static(0), 1, cleared);
+            }
+            if self.holds_targets
+                && let Some(hold) = hold
+            {
+                let held = self.b.alloc_bit(1, false);
+                self.b.emit(SIRInstruction::Load(
+                    held,
+                    stable(hold),
+                    SIROffset::Static(0),
+                    1,
+                ));
+                let either = self.b.alloc_bit(1, false);
+                self.b.emit(SIRInstruction::Binary(
+                    either,
+                    condition,
+                    BinaryOp::Or,
+                    held,
+                ));
+                condition = either;
+            }
             let replacement = self.b.alloc_reg(self.b.register(&value).clone());
             self.b.emit(SIRInstruction::Load(
                 replacement,
