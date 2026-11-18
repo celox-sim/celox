@@ -626,6 +626,37 @@ fn waits_follow_design_storage_handles() {
     assert_eq!(sim.get(by_variable), num_bigint::BigUint::from(3u8));
 }
 
+/// An event control on a named event through a virtual interface would wait
+/// for its trigger (IEEE 1800-2023 15.5.1), which is not implemented: it is
+/// rejected rather than left waiting for a change of the member's value.
+#[test]
+fn waits_on_named_events_through_virtual_interfaces_are_unsupported() {
+    let source = "interface bfm(input logic clk); event go; endinterface
+        package p;
+            class h;
+                virtual bfm v;
+                task w(); @(v.go); endtask
+            endclass
+        endpackage
+        module top;
+            logic clk = 0;
+            bfm b(clk);
+            p::h x;
+            initial begin x = new; x.v = b; x.w(); end
+        endmodule";
+    let Err(error) = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build_interpreter()
+    else {
+        panic!("a wait on a named event through a virtual interface is unsupported");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("event control on a named event through a virtual interface"),
+        "{error}"
+    );
+}
+
 /// A wait through a virtual interface that a ref formal names would follow
 /// the actual's storage, which is not implemented: it is rejected rather
 /// than sampled or left without events.
