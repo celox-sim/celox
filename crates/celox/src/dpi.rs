@@ -21,6 +21,11 @@ use thiserror::Error;
 pub struct DpiSymbols {
     functions: Vec<(String, usize)>,
     libraries: Vec<PathBuf>,
+    /// An import nothing provides is not linked: its calls are a run-time
+    /// error, which only an elaboration that never runs the design may
+    /// accept (see
+    /// [`crate::SimulatorBuilder::allow_unlinked_dpi_for_elaboration`]).
+    allow_unlinked: bool,
     /// The table resolved by [`Self::resolve_ahead`], for these functions.
     resolved: Option<(Vec<ExternFunction>, ExternFunctionTable)>,
 }
@@ -71,6 +76,11 @@ impl DpiSymbols {
         self.libraries.push(path);
     }
 
+    pub(crate) fn allow_unlinked(&mut self) {
+        self.resolved = None;
+        self.allow_unlinked = true;
+    }
+
     /// The addresses of `functions`, in order.
     pub(crate) fn resolve(
         &self,
@@ -96,13 +106,36 @@ impl DpiSymbols {
                             name: function.name.clone(),
                         });
                     }
-                    self.address(&function.name)
+                    match self.address(&function.name) {
+                        // Its calls were replaced by a run-time error (see
+                        // `Self::unlinked`): the slot is never called.
+                        Err(DpiError::UnresolvedFunction { .. }) if self.allow_unlinked => Ok(0),
+                        address => address,
+                    }
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         );
         Ok(ExternFunctionTable {
             addresses: addresses.into(),
         })
+    }
+
+    /// The indices of `functions` that nothing provides, when the design may
+    /// be built without them (see [`Self::allow_unlinked`]); empty otherwise,
+    /// as [`Self::resolve`] then fails for them.
+    pub(crate) fn unlinked(&self, functions: &[ExternFunction]) -> Result<Vec<usize>, DpiError> {
+        if !self.allow_unlinked {
+            return Ok(Vec::new());
+        }
+        let mut unlinked = Vec::new();
+        for (index, function) in functions.iter().enumerate() {
+            match self.address(&function.name) {
+                Ok(_) => {}
+                Err(DpiError::UnresolvedFunction { .. }) => unlinked.push(index),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(unlinked)
     }
 
     /// Resolve `functions` now and keep the table for later [`Self::resolve`]
@@ -130,6 +163,29 @@ impl DpiSymbols {
         Err(DpiError::UnresolvedFunction {
             name: name.to_string(),
         })
+    }
+}
+
+/// Load the shared library at `path`, binding every symbol it refers to now:
+/// one Celox does not provide, such as `svGetScope` of a context import's C
+/// code (IEEE 1800-2023 35.5.3), fails the load instead of the first call.
+///
+/// # Safety
+///
+/// Loading a library runs its initializers.
+#[cfg(feature = "host-runtime")]
+unsafe fn open_library(path: &std::path::Path) -> Result<libloading::Library, libloading::Error> {
+    #[cfg(unix)]
+    {
+        use libloading::os::unix::{Library, RTLD_LOCAL, RTLD_NOW};
+        // SAFETY: forwarded from the caller.
+        unsafe { Library::open(Some(path), RTLD_NOW | RTLD_LOCAL) }.map(Into::into)
+    }
+    // Windows binds a library's imports when it loads it.
+    #[cfg(not(unix))]
+    // SAFETY: forwarded from the caller.
+    unsafe {
+        libloading::Library::new(path)
     }
 }
 
@@ -161,10 +217,18 @@ fn library_symbol(path: &std::path::Path, name: &str) -> Result<Option<usize>, D
             None => {
                 // SAFETY: loading a library runs its initializers; the caller
                 // chose to link it into the simulation.
-                let library = unsafe { libloading::Library::new(path) }.map_err(|error| {
+                let library = unsafe { open_library(path) }.map_err(|error| {
+                    // The loader's own reason, such as the symbol it could not
+                    // bind, is the error's source.
+                    let mut reason = error.to_string();
+                    let mut source = std::error::Error::source(&error);
+                    while let Some(cause) = source {
+                        reason.push_str(&format!(": {cause}"));
+                        source = cause.source();
+                    }
                     DpiError::LibraryLoad {
                         path: path.to_path_buf(),
-                        reason: error.to_string(),
+                        reason,
                     }
                 })?;
                 let library: &'static libloading::Library = Box::leak(Box::new(library));

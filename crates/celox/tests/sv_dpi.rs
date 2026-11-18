@@ -521,6 +521,46 @@ fn links_functions_from_a_shared_library() {
     assert_eq!(sim.get(y), BigUint::from(12u32));
 }
 
+/// C code that uses a facility of context imports Celox does not provide
+/// (IEEE 1800-2023 35.5.3), here `svGetScope`, is rejected when its library
+/// loads, naming the symbol, not at the first call.
+#[cfg(target_os = "linux")]
+#[test]
+fn libraries_that_need_the_scope_api_fail_to_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let c_source = dir.path().join("scope.c");
+    let library = dir.path().join("libscope.so");
+    std::fs::write(
+        &c_source,
+        "void *svGetScope(void);\nint scoped(int x) { return svGetScope() ? x : -x; }\n",
+    )
+    .unwrap();
+    let compiled = std::process::Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&library)
+        .arg(&c_source)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let source = r#"
+        module Top(input logic clk, input int a, output int y);
+            import "DPI-C" context function int scoped(input int x);
+            always_ff @(posedge clk) y <= scoped(a);
+        endmodule
+    "#;
+    // SAFETY: `scoped` is `int scoped(int)`.
+    let Err(error) = unsafe { builder(source).dpi_library(&library) }.build_cranelift() else {
+        panic!("a library that needs svGetScope must not load");
+    };
+    let error = error.to_string();
+    assert!(error.contains("cannot load DPI-C library"), "{error}");
+    assert!(error.contains("svGetScope"), "{error}");
+}
+
 extern "C" fn dpi_sub(x: i32, y: i32) -> i32 {
     x.wrapping_sub(y)
 }
@@ -591,6 +631,104 @@ fn unresolved_function_is_a_build_error() {
 
 extern "C" fn dpi_twice(x: i32) -> i32 {
     x.wrapping_mul(2)
+}
+
+dpi_backends! {
+    // A context import is called as any other (IEEE 1800-2023 35.5.3); its
+    // C code may not use the scope API or call exports, which Celox does not
+    // provide to C.
+    fn context_function_imports(sim) {
+        @build unsafe {
+            builder(r#"
+                module Top(input logic clk, input int a, input int b, output int y);
+                    import "DPI-C" context function int dpi_add(input int x, input int y);
+                    always_ff @(posedge clk) y <= dpi_add(a, b);
+                endmodule
+            "#)
+            .dpi_function("dpi_add", dpi_add as *const ())
+        };
+        let clk = sim.event("clk");
+        let (a, b, y) = (sim.signal("a"), sim.signal("b"), sim.signal("y"));
+        sim.modify(|io| {
+            io.set(a, 40u32);
+            io.set(b, 2u32);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(y), BigUint::from(42u32));
+    }
+}
+
+const UNLINKED: &str = r#"
+    module Top(input logic clk, input int a, output int y);
+        import "DPI-C" context function int unlinked_sum(input int x, input int y);
+        always_ff @(posedge clk) y <= unlinked_sum(a, a);
+    endmodule
+"#;
+
+/// An import that no registered function or library provides fails the
+/// build, unless the design is only elaborated.
+#[test]
+fn unlinked_imports_fail_the_build_by_default() {
+    let Err(error) = builder(UNLINKED).build_interpreter() else {
+        panic!("an unlinked import must fail the build");
+    };
+    assert!(
+        error.to_string().contains(
+            "DPI-C import `unlinked_sum` is not provided by any registered function or library"
+        ),
+        "{error}"
+    );
+}
+
+/// An elaboration that does not run the design builds without the C
+/// function of an import.
+#[test]
+fn unlinked_imports_build_for_elaboration() {
+    builder(UNLINKED)
+        .allow_unlinked_dpi_for_elaboration()
+        .build_interpreter()
+        .unwrap();
+}
+
+dpi_backends! {
+    // Calling an import the design was built without is a run-time error
+    // naming it, on every backend; the call's arguments are not evaluated
+    // into a C call.
+    fn unlinked_import_calls_are_runtime_errors(sim) {
+        @build builder(UNLINKED).allow_unlinked_dpi_for_elaboration();
+        let clk = sim.event("clk");
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 3u32)).unwrap();
+        let error = sim.tick(clk).expect_err("the call of an unlinked import fails");
+        assert!(
+            error.to_string().contains(
+                "DPI-C import `unlinked_sum` was elaborated without its C body (allow_unlinked_dpi_for_elaboration) and cannot be called"
+            ),
+            "{error}"
+        );
+    }
+}
+
+/// Any number of imports may be unlinked, also in one design.
+#[test]
+fn many_unlinked_imports_build_for_elaboration() {
+    let mut source = String::from("module Top(input logic clk, input int a, output int y);\n");
+    for index in 0..80 {
+        source.push_str(&format!(
+            "    import \"DPI-C\" function int unlinked_{index}(input int x);\n"
+        ));
+    }
+    source.push_str("    always_ff @(posedge clk) begin\n");
+    for index in 0..80 {
+        source.push_str(&format!("        y <= unlinked_{index}(a);\n"));
+    }
+    source.push_str("    end\nendmodule\n");
+    let source: &'static str = Box::leak(source.into_boxed_str());
+    builder(source)
+        .allow_unlinked_dpi_for_elaboration()
+        .build_interpreter()
+        .unwrap();
 }
 
 dpi_backends! {
@@ -750,13 +888,6 @@ fn rejects_unsupported_imports_and_calls() {
                 always_ff @(posedge clk) y <= f(a, y);
             endmodule"#,
             "DPI-C pure import with an output or inout argument",
-        ),
-        (
-            r#"module Top(input logic clk, input int a, output int y);
-                import "DPI-C" context function int f(input int x);
-                always_ff @(posedge clk) y <= f(a);
-            endmodule"#,
-            "DPI-C context import",
         ),
         (
             r#"module Top(input logic clk, input int a);
