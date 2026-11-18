@@ -520,15 +520,13 @@ pub(super) fn bind_alias(
     // The base type's bounds are those of `const_env`, and the declared
     // type is named before container dimensions hold it as their element.
     freeze_bounds(&mut base, &syntax_tree.functions, const_env);
-    base.name_declaration(
-        declaring_scope(
-            classes::enclosing_unit(syntax_tree.declarations(), alias.tokens),
-            syntax_tree.declarations(),
-            alias.tokens,
-            session,
-        ),
-        name,
+    let scope = declaring_scope(
+        classes::enclosing_unit(syntax_tree.declarations(), alias.tokens),
+        syntax_tree.declarations(),
+        alias.tokens,
+        session,
     );
+    base.name_declaration(scope, name);
     let context = PackedDimensions::new(HashMap::default(), dimension_env, aliases);
     let mut ty =
         containers::with_dimensions(base, &alias.dimensions, syntax_tree, session, &context)?;
@@ -761,20 +759,21 @@ pub(super) fn enclose_aliased_packed_type(
     }
     // Use-site dimensions enclose the aliased packed type. The packed
     // array they form is unsigned, whatever its elements (IEEE 1800-2023
-    // 7.4.1); a type name takes no signing of its own.
-    r#type.packed_enum |= r#type.is_enum;
-    r#type.enum_domain = None;
-    r#type.signed_element_depth = if r#type.is_signed {
-        Some(direct_ranges.len())
-    } else {
-        r#type
-            .signed_element_depth
-            .map(|depth| depth + direct_ranges.len())
-    };
-    r#type.is_signed = false;
-    let mut ranges = direct_ranges;
-    ranges.extend(std::mem::take(&mut r#type.packed_ranges));
-    r#type.packed_ranges = ranges;
+    // 7.4.1); a type name takes no signing of its own. Its elements keep
+    // their enumerated type.
+    r#type.reshape_keeping_enumeration(|shape| {
+        shape.signed_element_depth = if shape.is_signed {
+            Some(direct_ranges.len())
+        } else {
+            shape
+                .signed_element_depth
+                .map(|depth| depth + direct_ranges.len())
+        };
+        shape.is_signed = false;
+        let mut ranges = direct_ranges;
+        ranges.extend(std::mem::take(&mut shape.packed_ranges));
+        shape.packed_ranges = ranges;
+    });
     r#type
 }
 

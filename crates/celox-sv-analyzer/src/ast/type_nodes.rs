@@ -41,7 +41,8 @@ impl Type {
     /// unless an earlier typedef already named it (`typedef A B` names the
     /// type of `A`). `typename` is how `$typename` writes the name.
     /// `scope` is the elaborated scope that declares the typedef (see
-    /// [`types::unit_scope`]).
+    /// [`types::unit_scope`]). An enumerated type the type keeps is named
+    /// too.
     pub(super) fn name_declaration(
         &mut self,
         scope: Option<Arc<str>>,
@@ -51,7 +52,10 @@ impl Type {
             && self.spelling.declaration().is_none()
         {
             let (name, typename) = name();
+            let mut enumeration = self.enumeration.binding();
+            enumeration.name(&name, scope.as_ref(), &typename);
             self.spelling.name(name.into(), typename, scope);
+            self.keep_enumeration(enumeration);
         }
     }
 
@@ -143,12 +147,19 @@ impl Type {
     }
 
     /// What the type is of an enumeration, as its semantic type in `table`
-    /// tells (see [`enums::Enumeration::of`]).
+    /// tells (see [`enums::Enumeration::of`]), or the enumerated type it
+    /// keeps while it has none.
     pub(in crate::ast) fn enumeration_in(
         &self,
         table: &semantic_types::TyTable,
     ) -> enums::Enumeration {
-        enums::Enumeration::of(self.binding.get(table), table, self.enumeration_fields())
+        let fields = self.enumeration_fields();
+        match (self.binding.get(table), self.enumeration.declaration()) {
+            (None, Some(declaration)) => {
+                enums::Enumeration::kept(declaration, self.packed_ranges.len(), fields)
+            }
+            (id, _) => enums::Enumeration::of(id, table, fields),
+        }
     }
 
     /// The enumeration the conversion input fields of the type tell.
