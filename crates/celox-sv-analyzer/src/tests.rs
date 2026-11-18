@@ -5074,6 +5074,12 @@ fn rejects_unsupported_interface_uses() {
             "call of `p.peek`, which the modport of port `p` does not import",
         ),
         (
+            "interface Ported(input logic c); logic v; endinterface
+             module R(interface p); endmodule
+             module Top; logic c; Ported p(c); R r(.*); endmodule",
+            "wildcard connection of generic interface port `p`",
+        ),
+        (
             "module F(Bus p); function automatic void h(); p.x = 1; endfunction endmodule",
             "write of `p.x` inside a function or task of module `F`, whose port `p` has no modport",
         ),

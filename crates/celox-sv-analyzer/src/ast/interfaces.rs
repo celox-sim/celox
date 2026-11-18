@@ -1199,7 +1199,9 @@ impl<'a> Design<'a> {
                     if unit.kind == native::UnitKind::Module
                         && unit.port_style == native::PortStyle::Ansi
                     {
-                        let module = ModuleDecl::collect(handle, index, file, &interfaces)?;
+                        let module = ModuleDecl::collect(handle, index, file, &|name| {
+                            interfaces.contains_key(name)
+                        })?;
                         if interfaces.contains_key(&module.name) {
                             return Err(AnalyzerError::DuplicateModule { name: module.name });
                         }
@@ -3194,7 +3196,7 @@ impl ModuleDecl {
         handle: ScopeHandle,
         file_index: usize,
         file: &File<'_>,
-        interfaces: &HashMap<String, InterfaceDecl>,
+        is_interface: &dyn Fn(&str) -> bool,
     ) -> Converted<Self> {
         let tree = file.syntax_tree.scoped(handle)?;
         let unit = tree.root_unit()?;
@@ -3225,8 +3227,7 @@ impl ModuleDecl {
                             modport.as_ref().map(native_name),
                         )),
                         native::DataTypeKind::Named(path)
-                            if path.len() == 1
-                                && interfaces.contains_key(&native_name(&path[0].name)) =>
+                            if path.len() == 1 && is_interface(&native_name(&path[0].name)) =>
                         {
                             Some((Some(native_name(&path[0].name)), None))
                         }
@@ -3346,6 +3347,82 @@ pub fn plan_interfaces_with_member_paths(
     plan_interfaces_of_first_modules(sources, bindings, false)
 }
 
+/// The interfaces of the interface instances that the modules of `file`
+/// connect to generic interface ports of their children, `generic` holding
+/// the children with such ports. The connections are those elaboration
+/// sees ([`connections`]), and an actual names the instance of the innermost
+/// generate scope around it that declares one by that name, as the plan
+/// resolves handles.
+fn generic_actual_interfaces(
+    file: &File<'_>,
+    interface_names: &HashSet<String>,
+    generic: &HashMap<String, ModuleDecl>,
+) -> Converted<HashSet<String>> {
+    let native = file.syntax_tree.declarations();
+    let mut interfaces = HashSet::default();
+    for (_, unit) in roots(&file.syntax_tree)? {
+        if unit.kind != native::UnitKind::Module {
+            continue;
+        }
+        let module = file.span(unit.tokens)?;
+        let blocks = block_spans(unit, file)?;
+        let mut handles = Handles::default();
+        let mut actuals = Vec::new();
+        for id in body_items(unit, native)? {
+            let native::BodyItemKind::Instance(instance) = native.body_item(id).kind else {
+                continue;
+            };
+            let instantiation = native.instantiation(instance);
+            let child = native_name(&instantiation.name);
+            if interface_names.contains(&child) {
+                let span = file.span(instantiation.tokens)?;
+                let scope = blocks
+                    .iter()
+                    .filter(|block| block.0 <= span.0 && span.1 <= block.1)
+                    .min_by_key(|block| block.1 - block.0)
+                    .copied()
+                    .unwrap_or(module);
+                for instance in &instantiation.instances {
+                    handles.insert(
+                        native_name(&instance.name),
+                        scope,
+                        Handle {
+                            interface: child.clone(),
+                            port: None,
+                            arrayed: !instance.dimensions.is_empty(),
+                        },
+                    );
+                }
+                continue;
+            }
+            let Some(child) = generic.get(&child) else {
+                continue;
+            };
+            for instance in &instantiation.instances {
+                for (formal, connection) in connections(instance, child, file, true)? {
+                    let generic_port = child
+                        .port(&formal)
+                        .and_then(|port| port.interface.as_ref())
+                        .is_some_and(|port| port.interface.is_none());
+                    if !generic_port {
+                        continue;
+                    }
+                    if let Some((actual, span)) = connection.interface_actual(&formal, file)? {
+                        actuals.push((actual.handle, span));
+                    }
+                }
+            }
+        }
+        interfaces.extend(
+            actuals
+                .iter()
+                .filter_map(|(name, span)| handles.at(name, *span))
+                .map(|handle| handle.interface.clone()),
+        );
+    }
+    Ok(interfaces)
+}
+
 /// [`plan_interfaces_with_member_paths`], with only the first declaration
 /// of a module declared twice when `first_modules`
 /// ([`crate::AnalysisOptions::first_duplicate_module`]).
@@ -3371,9 +3448,11 @@ pub fn plan_interfaces_of_first_modules(
     let mut interface_names = HashSet::default();
     let mut contract_names = HashSet::default();
     let mut module_names = HashSet::default();
-    for file in &files {
+    // The modules with generic interface ports.
+    let mut generic_modules = Vec::new();
+    for (index, file) in files.iter().enumerate() {
         let native = file.syntax_tree.declarations();
-        for (_, unit) in roots(&file.syntax_tree)? {
+        for (handle, unit) in roots(&file.syntax_tree)? {
             let name = native_name(&unit.name);
             match unit.kind {
                 native::UnitKind::Interface => {
@@ -3388,7 +3467,7 @@ pub fn plan_interfaces_of_first_modules(
                     if interface_names.contains(&name) {
                         return Err(AnalyzerError::DuplicateModule { name });
                     }
-                    module_names.insert(name);
+                    module_names.insert(name.clone());
                     for port in &unit.ports {
                         if port.direction.is_some() || port.net_type.is_some() || port.variable {
                             continue;
@@ -3399,6 +3478,9 @@ pub fn plan_interfaces_of_first_modules(
                                     name: Some(name), ..
                                 } => {
                                     contract_names.insert(native_name(name));
+                                }
+                                native::DataTypeKind::Interface { name: None, .. } => {
+                                    generic_modules.push((index, handle));
                                 }
                                 native::DataTypeKind::Named(path) if path.len() == 1 => {
                                     contract_names.insert(native_name(&path[0].name));
@@ -3414,6 +3496,20 @@ pub fn plan_interfaces_of_first_modules(
     }
     for (_, _, supplied) in bindings {
         contract_names.extend(supplied.iter().map(|(_, interface)| interface.clone()));
+    }
+    // A generic interface port takes the interface of the instance connected
+    // to it (IEEE 1800-2023 25.3.3), which no port type names.
+    if !generic_modules.is_empty() {
+        let mut generic = HashMap::default();
+        for (index, handle) in generic_modules {
+            let module = ModuleDecl::collect(handle, index, &files[index], &|name| {
+                interface_names.contains(name)
+            })?;
+            generic.insert(module.name.clone(), module);
+        }
+        for file in &files {
+            contract_names.extend(generic_actual_interfaces(file, &interface_names, &generic)?);
+        }
     }
     let design = if !module_names.is_empty() {
         // Ordinary module contracts still need planning when local interfaces
