@@ -122,8 +122,9 @@ pub(super) fn validate_specialized_instance_net_drivers(
         }
 
         // A hierarchical name denotes another instance's object, which its
-        // own instance checks; only procedural writes of variables may
-        // reach it through the name.
+        // own instance checks with the writes that reach it through the
+        // name (`validate_foreign_drivers`). A net is not driven through
+        // one, nor is a variable by the output of a child instance.
         let mut written = None;
         for signal in module.source.signals() {
             let Some(name) = signal.hierarchical() else {
@@ -152,7 +153,7 @@ pub(super) fn validate_specialized_instance_net_drivers(
                     })
                     .contains(signal.name())
             } else {
-                !drivers.continuous(signal.name()).is_empty()
+                false
             };
             if driven || !child_output_driver_ranges(module, &children, signal.name()).is_empty() {
                 return Err(sv::AnalyzerError::Unsupported(format!(
@@ -160,7 +161,7 @@ pub(super) fn validate_specialized_instance_net_drivers(
                     if signal.is_net() {
                         "driver of a net"
                     } else {
-                        "continuous assignment to a variable"
+                        "connection of an output port to a variable"
                     }
                 )));
             }
@@ -643,6 +644,10 @@ pub(super) fn validate_foreign_drivers(
             .contains(name);
         let reason = if continuous {
             Some("its module drives it continuously or from always_comb")
+        } else if writes.combinational
+            && (!drivers.is_empty() || local_once || writes.repeating > 1)
+        {
+            Some("another module drives it continuously or from always_comb")
         } else if writes.always_ff && (!drivers.is_empty() || local_once || writes.repeating > 1) {
             Some("an always_ff process writes it")
         } else if local_always_ff {
