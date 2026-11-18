@@ -199,8 +199,28 @@ impl BodyBuilder<'_, '_, '_> {
         let rhs = rhs.clone();
         // The forced value follows the variables of the expression, which
         // no call may be part of but one that only reads a string, an
-        // object or a container.
-        if inlining::effectful(&rhs) {
+        // object or a container, or that draws a random number with
+        // constant arguments: the statement draws it, and so does each
+        // evaluation of the expression when one of its variables changes.
+        let mut calls = 0usize;
+        let mut randoms = 0usize;
+        lifetimes::visit_calls(&rhs, &mut |callee, args| {
+            calls += 1;
+            let constant = args.iter().flatten().all(|arg| {
+                let mut reads = false;
+                procedural_assigns::reads(arg, &mut |_| reads = true);
+                !reads
+            });
+            if constant
+                && matches!(
+                    callee,
+                    Callee::System(SystemFunction::Urandom | SystemFunction::UrandomRange)
+                )
+            {
+                randoms += 1;
+            }
+        });
+        if (calls == 0 || calls != randoms) && inlining::effectful(&rhs) {
             return Err(unsupported(
                 "force of an expression that calls a subroutine or a system function",
             ));
@@ -209,11 +229,13 @@ impl BodyBuilder<'_, '_, '_> {
         // statement has executed, which a variable of a block or of a
         // subroutine call does not outlive; an automatic one is illegal
         // here (6.21).
+        // A static variable of a task, such as its argument, is read when
+        // the force executes (see `procedural_forces`).
         let mut local = false;
         procedural_assigns::reads(&rhs, &mut |name| local |= self.is_local(name));
-        if local {
+        if local && !(self.subroutine && self.task_timing && !self.automatic) {
             return Err(unsupported(
-                "force of an expression that reads a variable of a procedural block",
+                "force of an expression that reads a variable of a procedural block or of an automatic task",
             ));
         }
         Ok(vec![Stmt::Force { lhs, rhs }])
@@ -225,13 +247,16 @@ impl BodyBuilder<'_, '_, '_> {
     pub(super) fn force_target(&mut self, target: celox_sv_syntax::ExprId) -> Converted<LValue> {
         // An `always` procedure with one runs as a process (see
         // `validation::always_kind`), whose body is a process body.
-        if !matches!(
+        // A task may force too: the statements of its calls execute in the
+        // processes that call it.
+        if !(matches!(
             self.body,
             system_functions::Body::Initial | system_functions::Body::Process
-        ) || self.subroutine
+        ) && !self.subroutine
+            || self.subroutine && self.task_timing)
         {
             return Err(unsupported(
-                "force or release in a subroutine, a final procedure, or an `always_comb`, `always_latch` or `always_ff` procedure",
+                "force or release in a function, a final procedure, or an `always_comb`, `always_latch` or `always_ff` procedure",
             ));
         }
         let native = self.tree.declarations();
