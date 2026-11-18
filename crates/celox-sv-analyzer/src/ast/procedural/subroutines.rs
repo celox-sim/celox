@@ -658,6 +658,8 @@ pub(in crate::ast) fn subroutines_with_symbolic_parameters(
             }
             let mut dispatcher = dispatcher.clone();
             dispatcher.body = vec![dispatch_body(
+                tree,
+                &name,
                 &targets,
                 &dispatcher.params,
                 dispatcher.return_var.as_deref(),
@@ -1127,6 +1129,8 @@ pub(in crate::ast) fn lower_subroutine(
     let mut body = prologue;
     match dispatch {
         Some(targets) => body.push(dispatch_body(
+            tree,
+            &qualified_name,
             targets,
             &lowered_params,
             return_var.as_deref(),

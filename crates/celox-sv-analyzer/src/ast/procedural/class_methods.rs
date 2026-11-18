@@ -1,12 +1,15 @@
 //! The subroutines of a class: dispatchers, constructors, methods and `$cast` helpers.
 use super::*;
 
-/// The body of a dispatcher of a virtual method: a call of the override in
-/// `targets` for the class of `this`, the first of `params`, passing the
-/// formals on (IEEE 1800-2023 8.20). Every class an object can have is in
-/// `targets`, so any other class is that of `null`, whose dereference is an
-/// error (8.4).
+/// The body of a dispatcher `dispatcher` of a virtual method, lowered in
+/// scope `tree`: a call of the override in `targets` for the class of
+/// `this`, the first of `params`, passing the formals on (IEEE 1800-2023
+/// 8.20). `targets` holds the classes the scope sees: `null` dereferenced
+/// is an error (8.4), and so is an object of another class, which the
+/// dispatcher has no override for, rather than a call of none.
 pub(super) fn dispatch_body(
+    tree: &AnalysisContext<'_>,
+    dispatcher: &str,
     targets: &[(String, Vec<u32>)],
     params: &[SubroutineParam],
     result: Option<&str>,
@@ -65,11 +68,38 @@ pub(super) fn dispatch_body(
         }),
         vec![this.clone()],
     );
+    let class_of = classes::object_call(system_functions::ObjectOp::ClassOf, vec![this]);
+    let method = dispatcher.strip_suffix("$virtual").unwrap_or(dispatcher);
+    let scope = tree
+        .root_unit()
+        .map_or_else(|_| "$unit".to_owned(), |unit| unit.name.spelling.clone());
+    let unknown_class = Stmt::SystemTask {
+        task: system_functions::SystemTask::Fatal,
+        args: vec![
+            SystemTaskArg::Expr(Expr::Literal("1".into())),
+            SystemTaskArg::Str(format!(
+                "virtual method `{method}`, as `{scope}` dispatches it, has no override \
+                 for an object of class %0d"
+            )),
+            SystemTaskArg::Expr(class_of.clone()),
+        ],
+        site: None,
+        assertion: None,
+    };
     Stmt::Case {
         kind: CaseKind::Exact,
-        selector: classes::object_call(system_functions::ObjectOp::ClassOf, vec![this]),
+        selector: class_of.clone(),
         items,
-        default: Some(vec![Stmt::Eval(null_dereference)]),
+        // The class of `null` is 0 (see `ObjectOp::ClassOf`).
+        default: Some(vec![Stmt::If {
+            condition: Expr::Binary {
+                left: Box::new(class_of),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Literal("32'd0".into())),
+            },
+            then_body: vec![Stmt::Eval(null_dereference)],
+            else_body: vec![unknown_class],
+        }]),
     }
 }
 
