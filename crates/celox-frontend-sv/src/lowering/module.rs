@@ -476,7 +476,11 @@ fn lower_module_with_overrides(
         let variable = variables.get_mut(&id).expect("a signal has a variable");
         variable.force_control = Some(ForceSlot {
             target,
-            enable: control.role == sv::ir::ForceRole::Enable,
+            role: match control.role {
+                sv::ir::ForceRole::Enable => ForceSlotRole::Enable,
+                sv::ir::ForceRole::Value => ForceSlotRole::Value,
+                sv::ir::ForceRole::Hold => ForceSlotRole::Hold,
+            },
             procedural: true,
             stored: control.stored,
         });
@@ -522,7 +526,11 @@ fn lower_module_with_overrides(
             let mut control = target.clone();
             control.force_control = Some(ForceSlot {
                 target: id,
-                enable: prefix == FORCE_ENABLE,
+                role: if prefix == FORCE_ENABLE {
+                    ForceSlotRole::Enable
+                } else {
+                    ForceSlotRole::Value
+                },
                 procedural: false,
                 stored: false,
             });

@@ -63,6 +63,9 @@ pub(super) struct ProcModule<'a> {
     /// `$exit` (24.7).
     pub program: bool,
     pub forceable: HashMap<SourceVarId, (SourceVarId, SourceVarId)>,
+    /// The hold of each procedurally forced target that procedures of the
+    /// settle assign (see `sv::ir::ForceRole::Hold`).
+    pub force_holds: HashMap<SourceVarId, SourceVarId>,
     /// The targets of `forceable` a procedural force controls (see
     /// [`super::ForceSlot`]): their reads are not redirected.
     pub procedurally_forced: HashSet<SourceVarId>,
@@ -220,15 +223,25 @@ impl<'a> ProcModule<'a> {
             .iter()
             .filter_map(|(&enabled, var)| {
                 let slot = var.force_control?;
-                if !slot.enable {
+                if slot.role != super::ForceSlotRole::Enable {
                     return None;
                 }
                 let value = variables.iter().find_map(|(&id, var)| {
                     var.force_control
-                        .is_some_and(|other| other.target == slot.target && !other.enable)
+                        .is_some_and(|other| {
+                            other.target == slot.target && other.role == super::ForceSlotRole::Value
+                        })
                         .then_some(id)
                 })?;
                 Some((slot.target, (enabled, value)))
+            })
+            .collect();
+        let force_holds = variables
+            .iter()
+            .filter_map(|(&id, var)| {
+                var.force_control
+                    .filter(|slot| slot.role == super::ForceSlotRole::Hold)
+                    .map(|slot| (slot.target, id))
             })
             .collect();
         let procedurally_forced = variables
@@ -238,6 +251,7 @@ impl<'a> ProcModule<'a> {
             .collect();
         Self {
             forceable,
+            force_holds,
             procedurally_forced,
             variables,
             name_to_id,
