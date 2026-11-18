@@ -452,6 +452,10 @@ pub(super) struct Class {
     /// The constraint program of the class, or why it has none, built once
     /// for each class when it is laid out.
     pub program: Converted<celox_heap::randomization::Program>,
+    /// The covergroups embedded in the class and in its bases, bases first
+    /// (IEEE 1800-2023 19.4): each is a property of its identifier that
+    /// holds the handle of its instance.
+    pub covergroups: Vec<Arc<covergroups::Covergroup>>,
 }
 
 /// 4-state value `value` that constraints read as the solver takes it (see
@@ -941,18 +945,6 @@ pub(super) fn declaration<'a>(
     index.by_name.get(&name).map(|index| &classes[*index])
 }
 
-/// Whether class declaration `declaration` of `native` declares a
-/// covergroup `member` (IEEE 1800-2023 19.4).
-pub(super) fn declares_covergroup(
-    native: &celox_sv_syntax::Declarations,
-    declaration: &celox_sv_syntax::ClassDeclaration,
-    member: &str,
-) -> bool {
-    declaration.covergroups.iter().any(|covergroup| {
-        instances::normalize_identifier(&native.covergroup(*covergroup).name.spelling) == member
-    })
-}
-
 /// The class declarations of a file, the first of each name, indexed when
 /// its arenas are built: by [`declared_name`], and those of the compilation
 /// unit, whose declared names tell the compilation path too, by their
@@ -1290,14 +1282,16 @@ pub(super) fn base_arguments<'a>(
         .as_deref()
 }
 
-/// Whether class `name` is a built-in class whose objects the scheduler owns:
-/// `process` (IEEE 1800-2023 9.7), `semaphore` (15.3), `mailbox` (15.4) or
-/// the type of named events (15.5).
+/// Whether class `name` is a class the analysis does not lay out: a
+/// built-in class whose objects the scheduler owns, `process` (IEEE
+/// 1800-2023 9.7), `semaphore` (15.3), `mailbox` (15.4) or the type of named
+/// events (15.5), or a covergroup type (19.3).
 pub(super) fn builtin(name: &str) -> bool {
     matches!(
         name,
         super::processes::CLASS | super::events::CLASS | super::semaphores::CLASS
     ) || super::mailboxes::is_class(name)
+        || super::covergroups::is_class(name)
 }
 
 /// The semantic type of a handle of class `name`.
@@ -1540,6 +1534,13 @@ fn lay_out_shared_class(
             .collect::<Converted<Vec<_>>>()?,
     };
     if declaration.interface {
+        // An interface class has no covergroup (IEEE 1800-2023 8.26.9).
+        if let Some(&id) = declaration.covergroups.first() {
+            return Err(AnalyzerError::InvalidCovergroup(format!(
+                "covergroup `{}` declared in interface class `{name}` (IEEE 1800-2023 8.26.9)",
+                covergroups::identifier(native, id)
+            )));
+        }
         return interface_class(tree, session, name, declaration, interfaces, env, &context);
     }
     let base = match &declaration.base {
@@ -1806,6 +1807,37 @@ fn lay_out_shared_class(
             });
         }
     }
+    // An embedded covergroup is a variable of its identifier, whose type no
+    // name declares (IEEE 1800-2023 19.4): a handle property, `null` until
+    // the constructor assigns it.
+    let mut embedded = base
+        .as_ref()
+        .map(|base| base.covergroups.clone())
+        .unwrap_or_default();
+    for &id in &declaration.covergroups {
+        let names = covergroups::embedded_names(tree, session, id, name);
+        let model = covergroups::build(tree, session, id, names, Some(name.to_owned()), &context)?;
+        let ty = handle(&mut session.types, &model.name);
+        let mut field = field(&tree.functions, &ty, env, size)?;
+        size = field.offset + field.storage();
+        field.key =
+            crate::system_functions::ChangeKey::Property(property_key(name, &model.identifier));
+        properties.push(Property {
+            name: model.identifier.clone(),
+            owner: name.to_owned(),
+            constant: false,
+            local: false,
+            protected: false,
+            r#type: ty,
+            field,
+            rand: false,
+            randc: false,
+            initializer: None,
+            storage: None,
+            hidden: false,
+        });
+        embedded.push(Arc::new(model));
+    }
     // A constructor is not inherited: a class without one has an implicit
     // constructor (IEEE 1800-2023 8.7).
     let mut methods = base
@@ -2019,6 +2051,7 @@ fn lay_out_shared_class(
     let mut class = Class {
         name: name.to_owned(),
         id: class_id(name),
+        covergroups: embedded,
         program: Ok(Default::default()),
         constraints,
         has_constraints: declaration.has_constraints
@@ -2148,6 +2181,7 @@ fn interface_class(
     let class = Rc::new(Class {
         name: name.to_owned(),
         id: class_id(name),
+        covergroups: Vec::new(),
         base: None,
         interfaces,
         is_abstract: true,
@@ -2347,7 +2381,7 @@ fn property_key(owner: &str, property: &str) -> u32 {
 /// A run-time identifier of class `name`: an FNV-1a hash, never 0, which
 /// `null` reads as, nor a class the heap reserves (see
 /// `celox_heap::class_identifier`).
-fn class_id(name: &str) -> u32 {
+pub(super) fn class_id(name: &str) -> u32 {
     // Compilation-unit declaration names already contain their source identity.
     let hash = name.bytes().fold(0x811c_9dc5u32, |hash, byte| {
         (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)

@@ -1002,9 +1002,6 @@ impl<'a> Elaborator<'a, '_> {
                         value
                             .variables
                             .iter()
-                            .filter(|variable| {
-                                type_binding::ordinary_variable(variable, value.data_type, native)
-                            })
                             .map(|variable| (&variable.name, variable.dimensions.as_slice()))
                             .collect(),
                     ),
@@ -1399,16 +1396,23 @@ impl<'a> Elaborator<'a, '_> {
         // bindings with every item rather than leaking a sibling's typedefs.
         let type_names = children
             .iter()
-            .filter_map(|id| {
-                if let celox_sv_syntax::BodyItemKind::TypeAlias(alias) =
-                    self.tree.declarations().body_item(*id).kind
-                {
+            .filter_map(|id| match self.tree.declarations().body_item(*id).kind {
+                celox_sv_syntax::BodyItemKind::TypeAlias(alias) => {
                     Some(instances::normalize_identifier(
                         &self.tree.declarations().type_alias(alias).name.spelling,
                     ))
-                } else {
-                    None
                 }
+                // A covergroup declares a type of the block too (IEEE
+                // 1800-2023 19.3), unless the analysis does not model it.
+                celox_sv_syntax::BodyItemKind::Covergroup(covergroup)
+                    if covergroups::place(&self.tree, covergroup) == covergroups::Place::Scope =>
+                {
+                    Some(covergroups::identifier(
+                        self.tree.declarations(),
+                        covergroup,
+                    ))
+                }
+                _ => None,
             })
             .collect::<Vec<_>>();
         // Enumeration types this block declares, by typedef or inline in a

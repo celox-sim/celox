@@ -26,13 +26,13 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 
 ## 未対応の機能 {#what-is-not-supported}
 
-以下の構文や節は未実装であり、コンパイル時に拒否します（下記 `covergroup` の宣言のみの例外を除きます）。
+以下の構文や節は未実装であり、コンパイル時に拒否します。
 
-- **検証・設計構造ブロック:** `bind`、`checker`、`config`、`covergroup`（クラス内でどこからも構築されない `covergroup` の宣言のみ受理。構築またはメソッド呼び出しは拒否）、clocking ブロックと clocking drive、ユーザー定義プリミティブ（UDP）、`specify` ブロック。
+- **検証・設計構造ブロック:** `bind`、`checker`、`config`、clocking ブロックと clocking drive、ユーザー定義プリミティブ（UDP）、`specify` ブロック。covergroup は一部に対応します。[カバーグループ](#covergroups)を参照してください。
 - **ポート形式:** `ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）。
 - **union と配列・コンテナの混在型:** `tagged` union、unpacked union、packed union の代入パターン、`chandle` の固定長 unpacked 配列（`chandle a[4]`、typedef 経由を含む）、動的コンテナの固定長 unpacked 配列（`int a[2][$]`、typedef 経由を含む）、固定長 unpacked 配列を要素とする動的コンテナ（`int a[][2]`）。
 - **制御フロー:** `disable fork` 以外の `disable` 文。宣言初期化子、`final`、`always_comb`、`always_ff` 内の `fork`（これらの文脈にはスケジューラ用のプロセス基盤がありません）。
-- **時刻・システムタスク:** `wait_order`、および未実装の IEEE 1800-2023 / Annex D システムタスク・関数。Celox は標準が定義する全タスク・関数名を認識しており、未対応のものは未使用パラメータや関数本体に書かれた場合も含め名前付きで報告します（例: `$get_coverage`）。
+- **時刻・システムタスク:** `wait_order`、および未実装の IEEE 1800-2023 / Annex D システムタスク・関数。Celox は標準が定義する全タスク・関数名を認識しており、未対応のものは未使用パラメータや関数本体に書かれた場合も含め名前付きで報告します（例: `$q_initialize`）。
 
 ## 部分対応の機能 {#partial-support}
 
@@ -201,6 +201,23 @@ program の region と `$exit` に関する差異は[標準準拠コードに影
 
 `expect (property_spec) action_block`（16.17）は、実行中のプロセスが次のクロックイベントから1回だけ評価を行い、各ステップをサンプル値で判定した後、Reactive 領域で成功・失敗の文（既定は `$error`）を実行して続行します。複数経路を持つ sequence はいずれか1つの経路が一致した最初のティックで成功し、いずれの経路も一致し得なくなった最初のティックで失敗します（前件が外れた試行はそのティックで空虚な成功となります）。
 
+### カバーグループ {#covergroups}
+
+covergroup（19 節）は型です。モジュール、program、パッケージ、コンパイル単位、generate ブロックで宣言でき、クラスに埋め込めます（19.4）。`new` は covergroup の引数でインスタンスを構築します。`sample()` は、`with function sample` 宣言の引数でインスタンスをサンプルします。`get_inst_coverage()`、`get_coverage()`、`T::get_coverage()`、`$get_coverage()` はカバレッジを返します。結果は `Simulation::coverage()` で読みます（[カバレッジ](#coverage)を参照）。
+
+**未対応**の列の構文は、covergroup の宣言位置ではなく、その `new` やメソッドを書いた位置でエラーになります。何も構築しない covergroup は宣言内容によらず受理し、その型の変数も受理します。いずれも、19 節の未対応分を追跡する [#4294](https://github.com/celox-sim/celox/issues/4294) を示します。
+
+| 観点 | 対応 | 未対応 |
+| --- | --- | --- |
+| **宣言（19.3、19.4）** | モジュール、program、パッケージ、コンパイル単位、generate ブロックの covergroup。クラスに埋め込んだ covergroup。covergroup 型の変数 | `covergroup extends`（19.4.1）。interface 内で宣言した covergroup（interface 自体がエラーになります）。checker 内やループ generate ブロック内で宣言した covergroup。モジュールが型パラメータとして受け取った covergroup 型の構築とサンプル（そのモジュールで変数は宣言できます） |
+| **カバーポイント、クロス、オプション（19.5–19.7）** | 項目を持たない covergroup | `coverpoint`、`cross`、`option` や `type_option` への代入を宣言する covergroup は構築できません。現時点で構築できる covergroup は項目を持ちません |
+| **サンプリング（19.3、19.8.1）** | `sample()` | clocking イベント（`covergroup cg @(posedge clk);`）やブロックイベント（`@@(begin f)`）付きで宣言した covergroup。sequence のマッチ項目内の `sample()` |
+| **引数（19.3、19.8.1）** | covergroup の引数と、`with function sample` 宣言の引数 | covergroup やその sample メソッドの `ref` 引数。unpacked 型の引数。型または既定値が `let` 宣言を参照する引数 |
+| **メソッド（19.8）** | `sample()`、`get_inst_coverage()`、`get_coverage()`、`T::get_coverage()`、`$get_coverage()`。埋め込み covergroup のメソッドを、その変数（クラス内の `cg`、`obj.cg`）に対して呼ぶこと | `start()`、`stop()`、`set_inst_name()`。`ref int` 引数付きの `get_coverage` と `get_inst_coverage`。カバーポイントとクロスのメソッド。`option` と `type_option` のメンバの読み書き。条件式など、ハンドルを返す他の式に対する埋め込み covergroup のメソッド呼び出し |
+| **構築（19.3、19.4）** | covergroup の引数を取る `new`。クラスの `new` メソッド内での、埋め込み covergroup への `cg = new;` または `this.cg = new;` による代入 | covergroup ハンドルを渡す浅いコピーの `new`（8.12）。`new` メソッド内での、クラスの他のハンドルを通した埋め込み covergroup への代入（`other.cg = new;`）。このメソッドの外での代入は、19.4 が定めるとおりエラーです |
+| **型名（20.6.1）** | — | covergroup 型、その変数、それを含む配列や構造体の `$typename`（20.6.1 にはその名前の規則がありません） |
+| **結果（19.9）** | `Simulation::coverage()` と `Simulator::coverage()`（[カバレッジ](#coverage)を参照） | カバレッジデータベース。[カバレッジデータベースはありません](#deviations-standard-code)を参照してください |
+
 ### I/O・書式出力・システムタスク {#formatted-output-to-strings}
 
 実行時 I/O（`$fopen`、ファイルへの `$display`/`$write`、`$system`、plusargs、`$sformatf` 系など）は時間付き `Simulation` プロセスを必要とし、組み合わせプロセスや継続代入からの呼び出しは拒否されます。`$system` は WebAssembly ホストでは未対応です。`$readmemh` / `$readmemb` については[メモリファイル](#memory-files)を参照してください。
@@ -273,8 +290,13 @@ program の region と `$exit` に関する差異は[標準準拠コードに影
 - **実行時書式の `%p` は文字列以外の値を簡略化します。** `%p` 変換がコンパイル時リテラルではなく
   実行時に評価される書式文字列から来る場合、Celox は `string` を引用符付きで、それ以外の値を
   `%0d` として出力します。
-- **カバレッジは報告しません。** 即時 `cover` は pass 文を実行しますが、
-  カバレッジカウンタやレポートは公開しません。
+- **カバレッジデータベースはありません。** `$set_coverage_db_name` と
+  `$load_coverage_db` は引数を評価してコンパイル警告
+  （[`[diagnostics]`](./celox-toml.md#diagnostics) の `no_coverage_database`）を
+  出します。何も保存せず、読み込みません（19.9、
+  [#4294](https://github.com/celox-sim/celox/issues/4294)）。covergroup のカバレッジは
+  `Simulation::coverage()` で読みます。即時 `cover` は pass 文を実行します。
+  アサーションカバレッジと 40 節のコードカバレッジは収集しません。
 - **program 外の `$exit` は警告します。** program スレッド以外からの `$exit` は
   24.7 どおり無視しますが、Celox はコンパイル警告（[`[diagnostics]`](./celox-toml.md#diagnostics) の
   `exit_outside_program`）も出します（未使用関数の宣言内呼び出しも含みます）。
@@ -417,6 +439,41 @@ Clause 4.7 がどちらの順序も許すケースで、Celox は決定的です
   それ以外は残項目のある任意の規則を等確率で進めます（0.5 は偏り無し、0.0 と 1.0 はそれぞれ最短・最長を常に優先）。
 - 配列の `shuffle` は呼び出しプロセスの乱数ストリームから引きます。
 
+### カバレッジ {#coverage}
+
+`Simulation::coverage()` と `Simulator::coverage()` は、インスタンスを持つ
+covergroup 型ごとに、インスタンス、サンプル数、`$get_coverage` が返すカバレッジを
+報告します。レポートを読んでも状態は変わらず、時刻も進みません。
+
+- **covergroup 型はエラボレートしたスコープに属します。** パラメータ値が同じ
+  モジュールインスタンスは、typedef と同様に、モジュールが宣言する covergroup 型を
+  共有します。6.22 はインスタンスごとの型とします。パラメータ値が異なる
+  エラボレーションはそれぞれの型を宣言し、レポートは同じ名前で並べます。
+  パッケージの covergroup はデザインに 1 つの型、コンパイル単位の covergroup は
+  ソースファイルごとの型です。
+- **`null` への `sample()` は何もサンプルしません。** コンストラクタが作らなかった
+  埋め込み covergroup（19.4）でも、それ以外の covergroup 変数でも同じです。
+  ハンドル経由の `get_coverage()` は型のカバレッジを返し、ハンドルを読みません。
+  `null` への `get_inst_coverage()` は実行時エラーです。
+- **項目のない covergroup にカバレッジはありません。** カバーポイントもクロスも
+  宣言しない covergroup の `get_inst_coverage()` と `get_coverage()` は 0 で、
+  `$get_coverage()` には寄与しません。寄与する covergroup がデザインに無いとき、
+  `$get_coverage()` は 100 です（19.11）。
+- **カバレッジは累積し、インスタンスは解放しません。** どこからも参照されなく
+  なったインスタンスのサンプルは、型のカバレッジとレポートに残ります。レポートは
+  そのインスタンスを生存していないものとして示します。トランザクションごとに
+  covergroup を構築するテストベンチでは、レポートのインスタンスが毎回 1 つ増えます。
+- **covergroup の構築は乱数を引きません。** 手続きやクラスのコンストラクタに
+  covergroup を足しても、その乱数スティミュラスは変わりません（18.14.1）。
+  モジュール内で初期化子付きで宣言した covergroup 変数は、初期化子付きの
+  クラス変数と同じく独立したプロセスで、プロセスにシードを与える順序の 1 つを
+  占めます。
+- **カバレッジはチェックポイントに含まれ、状態ファイルには含まれません。**
+  `Simulation::restore` はチェックポイントのカバレッジを復元します。covergroup を
+  構築した後の `save_state` と `load_state` は `StateError::Coverage` で失敗します。
+- レポートのインスタンス名は `<型>#<n>` で、型ごとに構築順に 0 から番号を
+  振ります。
+
 ### ホスト依存の結果
 
 - `$ferror` のコードと文言はホスト依存です。Celox は失敗した `$fopen` の
@@ -444,6 +501,28 @@ Clause 4.7 がどちらの順序も許すケースで、Celox は決定的です
   `Simulator::tick` は自イベントの立ち上がりだけを駆動します。`Simulation` は
   全エッジを実行します。`Simulator` の1呼び出しは `$sampled` と遅延アサーションに
   ついて1タイムスロットであり、`$time` は 0 を返します。
+- **covergroup。** モジュールや program 内で初期化子付きで宣言した covergroup 変数
+  （`cg c = new;`）は時刻 0 のプロセスが構築するため、`Simulation` が必要です。
+  そのデザインを `Simulator` で構築すると、他のプロセスと同じく失敗します。
+  `Simulator` ではクロック同期の手続きで構築してください
+  （`always @(posedge clk) begin if (c == null) c = new; c.sample(); end`）。
+  モジュールの covergroup 変数は、クラスハンドルと同じくデザイン状態内のハンドルです。
+  このとき `Simulation` のコンパイル済みスケジューラは、変数を何も構築しなくても、
+  タイムスロットの終わりごとにホストを呼び出します。この呼び出しを持たない環境では、
+  そこでホストへ戻ります（x86-64 は呼び出しを持ちます）。`Simulation` では、
+  クロック同期ロジックからのサンプルが加えるのは、サンプルの呼び出しだけです。
+  `Simulator` では、
+  クロック同期の手続きが covergroup を構築またはサンプルするクロックは、クロック
+  ドメインを 1 回実行するだけの `tick` も使えなくなります。クロック同期ロジックからの
+  他のホスト呼び出しと同じく、この呼び出しはクロックを読む可能性があるものとして
+  扱うため、`tick` のたびにクロックをアクティブレベルへ動かして戻します。tick は
+  サンプルの呼び出しに加えて、この分のコストも払います。`always_comb` や
+  `always @*` からの
+  `sample()` は手続きの評価ごとにサンプルし、デザインは変化が届く部分だけでなく
+  組み合わせロジック全体を settle のたびに評価します。以前のリリースは
+  `cg c = new;` を無視していたため、そのデザインは `Simulator` で構築でき、
+  状態にハンドルを持ちませんでした。covergroup はヒープを持たないブラウザ
+  （WASI）ビルドでは使えません。
 - **ホストクロック。** `Simulation::add_clock` と `Simulation::schedule` は
   イベント信号（エッジ駆動 `always` のクロックや非同期リセット、またはプロセスが待つ
   トップモジュールの1ビット入力）を動かします。プロセスが待つのは、イベント制御が名指す入力

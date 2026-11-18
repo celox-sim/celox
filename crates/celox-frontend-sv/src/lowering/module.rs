@@ -609,7 +609,7 @@ fn lower_module_with_overrides(
     )?;
     // The level-sensitive lowering below changes processes only: one table
     // of the subroutines serves every lowering of the module.
-    let tables = procedural::ModuleTables::new(module);
+    let tables = procedural::ModuleTables::new(module, shared.no_covergroups);
     // A combinational definition can replace a level-sensitive process
     // when the authored events cover the inputs that determine its result.
     let level_sensitive = match level_lists {

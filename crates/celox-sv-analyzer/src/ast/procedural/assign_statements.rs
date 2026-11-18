@@ -84,12 +84,16 @@ impl BodyBuilder<'_, '_, '_> {
         // conversion below substitutes its result (12.6.3).
         self.prepare_pattern_values(left)?;
         self.prepare_pattern_values(right)?;
-        expression_binding::objects::reject_covergroup(
+        // A member of the options of a covergroup (IEEE 1800-2023 19.7) is
+        // no variable the scope declares: its assignment is that of the
+        // covergroup, which is rejected as what it is.
+        covergroups::value(
             &self.tree,
             self.session,
             left,
             self.syntax().declarations(),
             &self.dims,
+            true,
         )?;
         if op != "="
             && unpacked_structs::value_struct(
@@ -720,6 +724,30 @@ impl BodyBuilder<'_, '_, '_> {
         if nonblocking {
             return Err(unsupported("nonblocking assignment to a class property"));
         }
+        // An embedded covergroup is assigned in the `new` method of its
+        // class alone (IEEE 1800-2023 19.4). There the subroutine that
+        // constructs it takes the object being constructed, so only `this`
+        // names the variable: through another handle of the class, which
+        // the standard does not exclude, it is not supported.
+        if let Some(receiver) = receiver
+            && !matches!(
+                &native.expression(expression_binding::ungroup(receiver, native)).kind,
+                celox_sv_syntax::ExprKind::Name(name) if name.spelling == classes::THIS
+            )
+            && covergroups::embedded_property(&property, &self.session.types)
+        {
+            if self.dims.constructor
+                && self.dims.class_scope.as_deref() == Some(property.owner.as_str())
+            {
+                return Err(unsupported(
+                    "covergroup embedded in a class assigned through another handle than `this` (IEEE 1800-2023 19.4)",
+                ));
+            }
+            return Err(AnalyzerError::CovergroupAssignment {
+                owner: property.owner.clone(),
+                name: property.name.clone(),
+            });
+        }
         let handle = expression_binding::object_receiver(
             &self.tree,
             self.session,
@@ -908,7 +936,7 @@ impl BodyBuilder<'_, '_, '_> {
         op: &str,
         mut value: Expr,
     ) -> Result<Stmt, AnalyzerError> {
-        expression_binding::check_writable(property, &self.dims)?;
+        expression_binding::check_writable(property, &self.dims, &self.session.types)?;
         if op != "=" {
             let operator = match op.strip_suffix('=') {
                 Some("+") => BinaryOp::Add,

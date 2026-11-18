@@ -41,10 +41,10 @@ pub use crate::procedural::{
 };
 pub use crate::system_functions::{
     AccessCheck, AggregatePattern, ArrayQuery, Callee, ChangeKey, ContainerConcat, ContainerKind,
-    ContainerLayout, ContainerOp, HandleProperty, Locator, LocatorKey, LocatorMethod,
-    LocatorSource, MemoryFormat, ObjectField, ObjectOp, Radix, Record, Severity, Stream, StreamArg,
-    StreamItem, StreamOp, StreamPack, StreamRange, StreamSize, StringOp, SystemFunction,
-    SystemTask, VcdTask,
+    ContainerLayout, ContainerOp, CoverageOp, CoverageQuery, HandleProperty, Locator, LocatorKey,
+    LocatorMethod, LocatorSource, MemoryFormat, ObjectField, ObjectOp, Radix, Record, Severity,
+    Stream, StreamArg, StreamItem, StreamOp, StreamPack, StreamRange, StreamSize, StringOp,
+    SystemFunction, SystemTask, VcdTask,
 };
 
 /// A procedural statement of the analyzed IR.
@@ -150,6 +150,17 @@ pub struct InterfaceHandle {
 }
 
 impl Module {
+    /// Whether the module can construct a covergroup (IEEE 1800-2023 19.3):
+    /// one of its subroutines, its own or one of a package or class it
+    /// reaches, is the constructor of a covergroup type. A design none of
+    /// whose modules can has no covergroup instance.
+    pub fn constructs_covergroup(&self) -> bool {
+        self.subroutines
+            .iter()
+            .chain(&self.declaration_subroutines)
+            .any(|subroutine| crate::ast::covergroup_constructor(&subroutine.name))
+    }
+
     /// Represent selected edge procedures as scheduled processes. A host
     /// request must finish synchronously before the following statement runs.
     pub fn schedule_edge_processes(self, select: impl FnMut(&FfProcess) -> bool) -> Self {

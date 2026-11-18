@@ -1783,9 +1783,7 @@ fn rejects_coverage_functions_in_constant_expressions() {
 }
 
 /// The scope and database name arguments of a coverage function are not
-/// evaluated, so an argument that calls is not dropped, and the overall
-/// coverage of a source with covergroups, which are not elaborated, is not
-/// known (IEEE 1800-2023 19.11).
+/// evaluated, so an argument that calls is not dropped.
 #[test]
 fn rejects_coverage_calls_whose_result_is_not_known() {
     for (body, want) in [
@@ -1799,16 +1797,25 @@ fn rejects_coverage_calls_whose_result_is_not_known() {
              int r; initial r = $coverage_merge(`SV_COV_TOGGLE, next_name());",
             "argument `next_name()` of `$coverage_merge`",
         ),
-        (
-            "covergroup cg; endgroup
-             real total; initial total = $get_coverage();",
-            "`$get_coverage` in a source that declares a covergroup",
-        ),
     ] {
         let source = format!("module Top(output logic y); {body} assign y = 1'b0; endmodule");
         let error = build_error(&source);
         assert!(error.contains(want), "{body}: {error}");
     }
+}
+
+/// A system task that IEEE 1800-2023 defines and Celox does not support is
+/// reported by its name where it is called, as the reference page says with
+/// this example.
+#[test]
+fn known_unsupported_system_tasks_are_reported_by_name() {
+    let source = "module Top(output logic y);
+        int q_id, status;
+        initial $q_initialize(q_id, 1, 8, status);
+        assign y = 1'b0;
+    endmodule";
+    let error = build_error(source);
+    assert!(error.contains("$q_initialize"), "{error}");
 }
 
 /// A constant function ignores its system task calls (IEEE 1800-2023

@@ -70,6 +70,8 @@ pub(super) fn precision(
             ..
         } => match &**op {
             sv::ir::ObjectOp::Load(field) => field_precision(field),
+            // A coverage of a covergroup (19.8, 19.9).
+            sv::ir::ObjectOp::Coverage(op) if op.is_real() => Some(FP::F64),
             _ => None,
         },
         E::Unary {

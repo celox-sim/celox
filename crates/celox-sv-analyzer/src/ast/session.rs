@@ -107,6 +107,13 @@ pub(crate) struct Session {
     /// array parameter may name one (see
     /// [`array_parameters::constant_elements`]).
     pub(super) enum_constant_types: Option<ConstantTypes>,
+    /// The scope-level covergroup types the scope being analyzed declares,
+    /// by their reserved names (see [`covergroups`]).
+    pub(super) covergroups: HashMap<String, Arc<covergroups::Covergroup>>,
+    /// Those of `covergroups` whose `new` or methods the scope has bound, in
+    /// the order it bound them: a module makes the subroutines of these
+    /// alone.
+    pub(super) covergroup_requests: Vec<String>,
 }
 
 impl Session {

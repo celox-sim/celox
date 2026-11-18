@@ -27,13 +27,13 @@ Measured conformance is published on the [verification page](/verification/).
 
 ## Unsupported features {#what-is-not-supported}
 
-These constructs and clauses are not implemented and are always rejected at compile time (except the one declaration-only `covergroup` case noted below):
+These constructs and clauses are not implemented and are always rejected at compile time:
 
-- **Verification and design-level blocks:** `bind`, `checker`, `config`, `covergroup` (a class may declare a `covergroup` that nothing constructs; constructing one or calling its methods is rejected), clocking blocks and clocking drives, user-defined primitives (UDP), and `specify` blocks.
+- **Verification and design-level blocks:** `bind`, `checker`, `config`, clocking blocks and clocking drives, user-defined primitives (UDP), and `specify` blocks. Covergroups are supported in part; see [Coverage groups](#covergroups).
 - **Port forms:** `ref` ports ([#427](https://github.com/celox-sim/celox/issues/427)).
 - **Unions and mixed array/container types:** `tagged` unions, unpacked unions, packed union assignment patterns, fixed-size unpacked arrays of `chandle` (`chandle a[4]`, including via `typedef`), fixed-size unpacked arrays of dynamic containers (`int a[2][$]`, including via `typedef`), and dynamic containers of fixed-size unpacked arrays (`int a[][2]`).
 - **Control flow:** `disable` statements other than `disable fork`; `fork` inside declaration initializers, `final`, `always_comb`, and `always_ff` (no process scheduler in those contexts).
-- **Timing and system tasks:** `wait_order`, and any unimplemented IEEE 1800-2023 or Annex D system task/function. Celox knows every standard name and reports unsupported ones by name wherever written, including in unused parameters and function bodies (e.g., `$get_coverage`).
+- **Timing and system tasks:** `wait_order`, and any unimplemented IEEE 1800-2023 or Annex D system task/function. Celox knows every standard name and reports unsupported ones by name wherever written, including in unused parameters and function bodies (e.g., `$q_initialize`).
 
 ## Partially supported features {#partial-support}
 
@@ -203,6 +203,23 @@ See [Random numbers](#random-numbers) for the solver policy, `soft`, `dist`, `so
 
 For `expect (property_spec) action_block` (16.17), the executing process makes one attempt starting from the next clocking event, decides each step on sampled values, runs the pass or fail statement (by default `$error`) in the Reactive region, and continues. Multi-path sequences pass at the first tick any path matches and fail at the first tick no path can still match; a missed antecedent succeeds vacuously at that tick.
 
+### Coverage groups {#covergroups}
+
+A covergroup (clause 19) is a type: declared in a module, a program, a package, the compilation unit or a generate block, or embedded in a class (19.4). `new` constructs an instance, with the arguments of the covergroup; `sample()` samples it, with the arguments of a `with function sample` declaration; `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()` and `$get_coverage()` give coverage. The results are read through `Simulation::coverage()` (see [Coverage](#coverage)).
+
+A construct of the **Not supported** column is rejected where a `new` or a method of the covergroup is written, not where the covergroup is declared: a covergroup that nothing constructs is accepted whatever it declares, and so is a variable of its type. All of them point to [#4294](https://github.com/celox-sim/celox/issues/4294), which tracks what is left of clause 19.
+
+| Aspect | Supported | Not supported |
+| --- | --- | --- |
+| **Declarations (19.3, 19.4)** | A covergroup of a module, a program, a package, the compilation unit or a generate block; a covergroup embedded in a class; variables of a covergroup type | `covergroup extends` (19.4.1); a covergroup declared in an interface, which rejects the interface; one declared in a checker or in a loop generate block; constructing or sampling a covergroup type that a module takes as a type parameter (it declares variables there) |
+| **Coverpoints, crosses, and options (19.5–19.7)** | Covergroups without items | A covergroup that declares a `coverpoint`, a `cross`, or an `option` or `type_option` assignment cannot be constructed, so the covergroups that can be have no item yet |
+| **Sampling (19.3, 19.8.1)** | `sample()` | A covergroup declared with a clocking event (`covergroup cg @(posedge clk);`) or a block event (`@@(begin f)`); `sample()` in a sequence match item |
+| **Arguments (19.3, 19.8.1)** | The arguments of a covergroup and of its `with function sample` declaration | `ref` arguments of a covergroup or of its sample method; arguments of unpacked type; an argument whose type or default names a `let` declaration |
+| **Methods (19.8)** | `sample()`, `get_inst_coverage()`, `get_coverage()`, `T::get_coverage()`, and `$get_coverage()`; a method of an embedded covergroup called on its variable (`cg` in the class, `obj.cg`) | `start()`, `stop()` and `set_inst_name()`; `get_coverage` and `get_inst_coverage` with `ref int` arguments; the methods of coverpoints and crosses; reading or writing `option` and `type_option` members; a method of an embedded covergroup called on another expression that gives the handle, such as a conditional expression |
+| **Construction (19.3, 19.4)** | `new` with the arguments of the covergroup; in the `new` method of its class, an embedded covergroup assigned as `cg = new;` or `this.cg = new;` | `new` with a covergroup handle as a shallow copy (8.12); an embedded covergroup assigned through another handle of the class (`other.cg = new;`) in the `new` method (outside that method the assignment is the error 19.4 makes it) |
+| **Type names (20.6.1)** | — | `$typename` of a covergroup type, of a variable of one, or of an array or structure that holds one (20.6.1 has no rule for the name) |
+| **Results (19.9)** | `Simulation::coverage()` and `Simulator::coverage()` (see [Coverage](#coverage)) | The coverage database; see [No coverage database](#deviations-standard-code) |
+
 ### I/O, formatting, and system tasks {#formatted-output-to-strings}
 
 Runtime I/O (`$fopen`, file `$display`/`$write`, `$system`, plusargs, `$sformatf` family, etc.) requires a timed `Simulation` process — calls from combinational processes and continuous assignments are rejected. `$system` is unsupported on WebAssembly hosts. For `$readmemh` and `$readmemb`, see [Memory files](#memory-files).
@@ -278,8 +295,14 @@ These accepted IEEE 1800-2023 constructs deliberately behave differently from th
   conversion comes from a format string evaluated at run time rather than a
   compile-time literal, Celox prints `string` values in quotes and any other
   value as `%0d`.
-- **Coverage is not reported.** Immediate `cover` executes its pass
-  statement, but coverage counters and reports are not exposed.
+- **No coverage database.** `$set_coverage_db_name` and `$load_coverage_db`
+  evaluate their argument and report a compilation warning
+  (`no_coverage_database` in
+  [`[diagnostics]`](./celox-toml.md#diagnostics)); nothing is saved or
+  loaded (19.9; [#4294](https://github.com/celox-sim/celox/issues/4294)).
+  Read the coverage of covergroups with `Simulation::coverage()`. Immediate
+  `cover` executes its pass statement; assertion coverage and the code
+  coverage of clause 40 are not collected.
 - **`$exit` outside a program warns.** A `$exit` call from anywhere other
   than a program thread is ignored, as 24.7 specifies, and Celox also
   reports a compilation warning (`exit_outside_program` in
@@ -470,6 +493,46 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
   prefers no length; 0.0 and 1.0 always prefer the shortest and longest).
 - Array `shuffle` draws from the calling process's random stream.
 
+### Coverage {#coverage}
+
+`Simulation::coverage()` and `Simulator::coverage()` report every covergroup
+type that has an instance, with its instances, their numbers of samples and
+the coverage `$get_coverage` gives. Reading the report changes nothing and
+advances no time.
+
+- **A covergroup type belongs to its elaborated scope.** Instances of a
+  module with the same parameter values share the covergroup types the
+  module declares, as they share its typedefs; 6.22 makes them types of each
+  instance. Elaborations with other parameter values declare types of their
+  own, which the report lists under one name. A covergroup of a package is
+  one type of the design, and one of a compilation unit a type of its
+  source file.
+- **`sample()` on `null` samples nothing**, for an embedded covergroup that
+  the constructor did not create (19.4) and for any other covergroup
+  variable. `get_coverage()` through a handle gives the coverage of the type
+  and does not read the handle; `get_inst_coverage()` on `null` is a runtime
+  error.
+- **A covergroup without items has no coverage.** `get_inst_coverage()` and
+  `get_coverage()` of a covergroup that declares no coverpoint or cross are
+  0, and it takes no part in `$get_coverage()`, which is 100 when no
+  covergroup of the design does (19.11).
+- **Coverage is cumulative and instances are never freed.** The samples of
+  an instance stay in the coverage of its type and in the report when
+  nothing refers to it any more; the report marks it as no longer live. A
+  testbench that constructs a covergroup for each transaction grows the
+  report by an instance each time.
+- **Constructing a covergroup draws no random number**, so adding one to a
+  procedure or to a class constructor leaves its random stimulus unchanged
+  (18.14.1). A covergroup variable declared with an initializer in a
+  module is a process of its own, as a class variable with one is, and
+  takes a place in the order in which processes are seeded.
+- **Coverage is part of a checkpoint and not of a state file.**
+  `Simulation::restore` restores the coverage of the checkpoint;
+  `save_state` and `load_state` fail with `StateError::Coverage` once a
+  covergroup was constructed.
+- Instances are named `<type>#<n>` in the report, numbered from 0 in the
+  order of their construction within the type.
+
 ### Host-dependent results
 
 - `$ferror` codes and wording are host dependent; Celox also exposes a
@@ -499,6 +562,28 @@ which designs need the timed `Simulation` API and what the host can observe.
   edge-sensitive `always`. `Simulator::tick` drives the rising edge of its
   event only; a `Simulation` runs every edge. A `Simulator` call is one
   time slot for `$sampled` and deferred assertions, and `$time` returns 0.
+- **Covergroups.** A covergroup variable declared with an initializer in a
+  module or program (`cg c = new;`) is constructed by a process at time
+  zero, which needs `Simulation`: building a `Simulator` for such a design
+  fails as for any process. Under `Simulator`, construct the covergroup in
+  a clocked procedure (`always @(posedge clk) begin if (c == null) c = new;
+  c.sample(); end`). A covergroup variable of a module is a handle in the
+  state of the design, as a class handle is: the compiled scheduler of a
+  `Simulation` then calls into the host at the end of each time slot, or
+  returns to it there where it has no such call (it has one on x86-64),
+  also when nothing constructs the variable. Under `Simulation`, sampling
+  from clocked logic adds only the calls that sample. Under `Simulator`, a
+  clock whose clocked procedures construct or sample a covergroup also
+  loses the `tick` that is one run of its clock domain: as any call into
+  the host from clocked logic, the call is taken for one that may read the
+  clock, so each `tick` moves the clock to its active level and back, which
+  each tick pays beside the calls that sample. `sample()` from
+  `always_comb` or `always @*` samples at each evaluation of the procedure
+  and makes the design evaluate its whole combinational logic at each
+  settle instead of the part a change reaches. Earlier releases ignored
+  `cg c = new;`, so such a design built as a `Simulator` and had no handle
+  in its state. Covergroups are not available in the browser (WASI) build,
+  which has no heap.
 - **Host clocks.** `Simulation::add_clock` and `Simulation::schedule` move
   an event signal: a clock or asynchronous reset of an edge-sensitive
   `always`, or a one-bit input of a top-level module that a process waits
