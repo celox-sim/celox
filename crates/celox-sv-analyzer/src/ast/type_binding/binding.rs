@@ -582,7 +582,7 @@ fn bind_in_mode(
                         return Ok(None);
                     };
                     if let Some(scope) = scope {
-                        ty.spelling.declared_in(scope);
+                        ty.reshape_keeping_declarations(|shape| shape.spelling.declared_in(scope));
                     }
                     bind_nested(&mut ty, tree, session, context);
                     values.push(ty);

@@ -329,7 +329,7 @@ pub(in crate::ast) fn native_type(
         ConstExpr::Literal(width.checked_sub(1)?.to_string()),
         ConstExpr::Literal("0".into()),
     ));
-    r#type.unpacked_struct = Some(Arc::new(aggregate));
+    r#type.keep_structure(Some(Arc::new(aggregate)));
     Some(r#type)
 }
 
@@ -385,7 +385,7 @@ pub(in crate::ast) fn array_storage(ty: Type) -> Converted<Type> {
                 let count = aggregate.members().len();
                 let children = values.split_off(values.len() - count);
                 let mut offset = aggregate.width();
-                ty.members = aggregate
+                let members = aggregate
                     .members()
                     .iter()
                     .zip(children)
@@ -399,6 +399,8 @@ pub(in crate::ast) fn array_storage(ty: Type) -> Converted<Type> {
                         )
                     })
                     .collect();
+                // The storage is of the structure type still.
+                ty.reshape_keeping_declarations(|shape| shape.members = members);
                 values.push(ty);
             }
         }
@@ -991,6 +993,32 @@ mod shape_struct_tests {
                 width: 1,
             }],
         })
+    }
+
+    #[test]
+    fn shapes_of_a_structure_are_not_those_of_its_bits() {
+        // A shape that keeps an unpacked structure type (IEEE 1800-2023 7.2)
+        // is not of a bit vector of its width (6.22.2): the closed-shape
+        // cache, which keys on the shape, does not give it the type of a bit
+        // vector typed before it.
+        let mut ty = Type::new(TypeKind::Bit);
+        ty.packed_ranges.push(PackedRange::new(
+            ConstExpr::Literal("0".into()),
+            ConstExpr::Literal("0".into()),
+        ));
+        let bits = VariableDimensions::new(VariableShape {
+            declared: type_names::Declared::default(),
+            ..procedural::dimensions_from_type(&ty).clone_shape()
+        });
+        let mut structure = VariableDimensions::new(bits.clone_shape());
+        structure.keep_structure(Some(one_bit(None)));
+        let mut table = semantic_types::TyTable::default();
+        let functions = const_functions::ConstantFunctions::default();
+        let env = ConstEnv::default();
+        let bits = bits.type_id(&mut table, &functions, &env).unwrap();
+        let structure = structure.type_id(&mut table, &functions, &env).unwrap();
+        assert_ne!(bits, structure);
+        assert!(table.is_unpacked_struct(structure));
     }
 
     #[test]

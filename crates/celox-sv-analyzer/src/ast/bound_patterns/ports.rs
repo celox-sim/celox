@@ -372,6 +372,11 @@ impl VariableDimensions {
             ty.spelling = declared.spelling.clone();
         }
         ty.signed_element_depth = self.signed_element_depth;
+        // The type keeps the structure the shape keeps, after the changes of
+        // its shape above, which forget it.
+        if let Some(aggregate) = self.structure_declaration() {
+            ty.keep_structure(Some(aggregate.clone()));
+        }
         ty.pattern_target(&const_functions::Environment {
             constants: &*dims.const_env,
             functions,

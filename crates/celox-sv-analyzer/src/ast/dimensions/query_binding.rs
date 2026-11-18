@@ -1202,7 +1202,7 @@ pub(in crate::ast) fn shape(
                     .last_mut()
                     .ok_or_else(|| unsupported("query shape"))?;
                 if !shape.unpacked.is_empty() {
-                    shape.unpacked.remove(0);
+                    shape.unpacked_mut().remove(0);
                 } else if !shape.packed.is_empty() {
                     shape.packed.remove(0);
                     if shape.packed.is_empty() {
@@ -1238,7 +1238,7 @@ pub(in crate::ast) fn shape(
                     .last_mut()
                     .ok_or_else(|| unsupported("query shape"))?;
                 if !shape.unpacked.is_empty() {
-                    shape.unpacked[0] = UnpackedDimension {
+                    shape.unpacked_mut()[0] = UnpackedDimension {
                         left: ConstExpr::Literal((width - 1).to_string()),
                         right: ConstExpr::Literal("0".into()),
                         width: ConstExpr::Literal(width.to_string()),

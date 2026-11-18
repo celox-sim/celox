@@ -519,6 +519,11 @@ pub struct Type {
     /// it, with the fields that tell it (see
     /// [`variable_dimensions::kept`]).
     enumeration: variable_dimensions::kept::KeptEnumeration,
+    /// The unpacked structure type (7.2) the type is, or whose elements a
+    /// fixed-size unpacked array of the type has, which changes of its
+    /// unpacked dimensions keep and any other change forgets. Only
+    /// [`Type::keep_structure`] sets it, with the field that tells it.
+    structure: variable_dimensions::kept::KeptStructure,
 }
 
 /// What a [`Type`] is made of.
@@ -578,6 +583,7 @@ impl std::ops::DerefMut for Type {
         self.binding.forget();
         self.element.forget();
         self.enumeration.forget();
+        self.structure.forget();
         Arc::make_mut(&mut self.shape)
     }
 }
@@ -636,6 +642,12 @@ impl Type {
             Some((_, Some(true))) => {}
             _ => self.enumeration.forget(),
         }
+        // The structure registered for the semantic type, or for that of
+        // its elements (7.4.2).
+        match table.unpacked_struct(id) {
+            Some(aggregate) => self.keep_structure(Some(aggregate.clone())),
+            None => self.structure.forget(),
+        }
     }
 }
 
@@ -646,6 +658,7 @@ impl From<TypeShape> for Type {
             binding: semantic_types::Binding::default(),
             element: semantic_types::Binding::default(),
             enumeration: variable_dimensions::kept::KeptEnumeration::default(),
+            structure: variable_dimensions::kept::KeptStructure::default(),
         }
     }
 }
