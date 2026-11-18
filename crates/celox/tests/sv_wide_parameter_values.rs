@@ -121,3 +121,44 @@ fn function_results_are_extended_by_their_sign() {
         );
     }
 }
+
+/// A parameter wider than 128 bits that copies another package's, such as
+/// OpenTitan's `alert_handler_pkg::LpgMap = alert_handler_reg_pkg::LpgMap`,
+/// has that package's literal as its value (IEEE 1800-2023 26.3): a run-time
+/// select of it in an `always_comb` reads its elements. Verilator 5.054 prints
+/// the same line.
+#[test]
+fn copies_of_wide_package_parameters_have_their_literal() {
+    let source = r#"`timescale 1ns/1ns
+package reg_pkg;
+  parameter int N = 12;
+  parameter logic [N-1:0][14:0] Map = {
+    15'd7, 15'd3, 15'd9, 15'd1, 15'd12, 15'd5,
+    15'd0, 15'd14, 15'd2, 15'd11, 15'd6, 15'd8
+  };
+endpackage
+package top_pkg;
+  localparam logic [reg_pkg::N-1:0][14:0] Map = reg_pkg::Map;
+endpackage
+module Top;
+  import top_pkg::*;
+  localparam logic [reg_pkg::N-1:0][14:0] Local = reg_pkg::Map;
+  logic [15:0] used, local_used;
+  always_comb begin
+    used = '0;
+    local_used = '0;
+    for (int j = 0; j < reg_pkg::N; j++) begin
+      used[Map[j]] |= 1'b1;
+      local_used[Local[j] + 15'd1] |= 1'b1;
+    end
+  end
+  initial #1 $display("%h %h %0d", used, local_used, $bits(Map));
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            display(source, four_state),
+            ["5bef b7de 180"],
+            "four-state {four_state}"
+        );
+    }
+}
