@@ -184,3 +184,183 @@ fn replication_counts_of_unresolved_parameters_are_rejected() {
         );
     }
 }
+
+/// A multi-word result whose width is no multiple of 64 keeps the bits above
+/// its width clear: the carry out of a sum, the borrow of a difference or a
+/// negation, the high bits of a product or a left shift, the sign fill of an
+/// arithmetic right shift and an inversion must not reach the reductions,
+/// comparisons and selects that read the result (BlackParrot's
+/// `bp_be_pipe_int` computes `sum_zero = ~|sum` of a 65-bit sum). Values
+/// agree with Verilator 5.054, including results narrowed from wider
+/// operands.
+const WIDE_PADDING_SOURCE: &str = r#"
+module Top(input logic [@W@-1:0] a, b, input logic [6:0] n,
+  output logic [5:0] add_o, sub_o, mul_o, neg_o, shl_o, shln_o, sar_o, sarn_o, inv_o, bp_o,
+  output logic [5:0] shrw_o, addw_o, output logic bp_c);
+  localparam int W = @W@;
+  localparam logic [W-1:0] HALF = {1'b1, {(W-1){1'b0}}};
+  logic [W-1:0] add, sub, mul, neg, shl, shln, sar, sarn, inv, bp, shrw, addw;
+  assign add = a + b;
+  assign sub = a - b;
+  assign mul = a * b;
+  assign neg = -a;
+  assign shl = a << 3;
+  assign shln = a << n;
+  assign sar = $signed(a) >>> 3;
+  assign sarn = $signed(a) >>> n;
+  assign inv = ~a;
+  assign {bp_c, bp} = {a[W-1], a} + {b[W-1], b} + 1'b1;
+  assign shrw = {b, a} >> 3;
+  assign addw = {b, a} + {a, b};
+  `define OBS(r) {~|r, |r, r == '0, ^r, r >= HALF, r[W-1]}
+  assign add_o = `OBS(add);
+  assign sub_o = `OBS(sub);
+  assign mul_o = `OBS(mul);
+  assign neg_o = `OBS(neg);
+  assign shl_o = `OBS(shl);
+  assign shln_o = `OBS(shln);
+  assign sar_o = `OBS(sar);
+  assign sarn_o = `OBS(sarn);
+  assign inv_o = `OBS(inv);
+  assign bp_o = `OBS(bp);
+  assign shrw_o = `OBS(shrw);
+  assign addw_o = `OBS(addw);
+endmodule
+"#;
+
+/// The six observations of `OBS` in `WIDE_PADDING_SOURCE`, most significant first.
+fn wide_padding_observations(r: &BigUint, width: usize) -> u8 {
+    let zero = r.bits() == 0;
+    let bits = [
+        zero,
+        !zero,
+        zero,
+        r.count_ones() % 2 == 1,
+        // `r >= HALF` and `r[W-1]`.
+        r.bit(width as u64 - 1),
+        r.bit(width as u64 - 1),
+    ];
+    bits.into_iter()
+        .fold(0, |acc, bit| (acc << 1) | u8::from(bit))
+}
+
+fn check_wide_padding<B: celox::SimBackend>(mut sim: Simulator<B>, width: usize, context: &str) {
+    let one = BigUint::from(1u8);
+    let modulus = &one << width;
+    let all = &modulus - 1u8;
+    let half = &one << (width - 1);
+    let pattern = BigUint::from_bytes_le(&[0x5a; 16]) & &all;
+    let values = [
+        BigUint::from(0u8),
+        one.clone(),
+        all.clone(),
+        half.clone(),
+        &one << 64usize,
+        &half | &one,
+        pattern,
+    ];
+    let shifts = [0u8, 3, 63, 64, width as u8 - 1, width as u8, 127];
+    let sign_fill = |shift: usize| {
+        if shift >= width {
+            all.clone()
+        } else {
+            &all ^ (&all >> shift)
+        }
+    };
+    let sar = |a: &BigUint, shift: usize| {
+        if a.bit(width as u64 - 1) {
+            (a >> shift) | sign_fill(shift)
+        } else {
+            a >> shift
+        }
+    };
+    let sign_extend = |a: &BigUint| {
+        if a.bit(width as u64 - 1) {
+            a | &modulus
+        } else {
+            a.clone()
+        }
+    };
+    let [ia, ib, inn] = ["a", "b", "n"].map(|name| sim.signal(name));
+    let outputs = [
+        "add_o", "sub_o", "mul_o", "neg_o", "shl_o", "shln_o", "sar_o", "sarn_o", "inv_o", "bp_o",
+        "shrw_o", "addw_o", "bp_c",
+    ]
+    .map(|name| (name, sim.signal(name)));
+    for (i, a) in values.iter().enumerate() {
+        for (j, b) in values.iter().enumerate() {
+            let n = shifts[(i * values.len() + j) % shifts.len()];
+            let shift = usize::from(n);
+            let bp_total = (sign_extend(a) + sign_extend(b) + 1u8) % (&modulus << 1usize);
+            let results = [
+                (a + b) % &modulus,
+                (a + &modulus - b) % &modulus,
+                (a * b) % &modulus,
+                (&modulus - a) % &modulus,
+                (a << 3usize) % &modulus,
+                (a << shift) % &modulus,
+                sar(a, 3),
+                sar(a, shift),
+                a ^ &all,
+                &bp_total % &modulus,
+                (((b << width) | a) >> 3usize) % &modulus,
+                (a + b) % &modulus,
+            ];
+            let mut expected: Vec<BigUint> = results
+                .iter()
+                .map(|r| BigUint::from(wide_padding_observations(r, width)))
+                .collect();
+            expected.push(&bp_total >> width);
+            sim.modify(|io| {
+                io.set_wide(ia, a.clone());
+                io.set_wide(ib, b.clone());
+                io.set(inn, n);
+            })
+            .unwrap();
+            for ((name, signal), expected) in outputs.iter().zip(&expected) {
+                assert_eq!(
+                    sim.get_four_state(*signal),
+                    (expected.clone(), BigUint::from(0u8)),
+                    "{name}: {context} width={width} a={a:#x} b={b:#x} n={n}"
+                );
+            }
+        }
+    }
+}
+
+macro_rules! wide_padding_backend {
+    ($name:ident, $build:ident) => {
+        #[test]
+        fn $name() {
+            for width in [65usize, 100] {
+                let source = WIDE_PADDING_SOURCE.replace("@W@", &width.to_string());
+                for level in [
+                    celox::OptLevel::O0,
+                    celox::OptLevel::O1,
+                    celox::OptLevel::O2,
+                ] {
+                    for four_state in [false, true] {
+                        let sim =
+                            Simulator::from_sv_sources(vec![(&source, Path::new("pad.sv"))], "Top")
+                                .opt_level(level)
+                                .four_state(four_state)
+                                .$build()
+                                .unwrap();
+                        let context = format!("{level:?} four_state={four_state}");
+                        check_wide_padding(sim, width, &context);
+                    }
+                }
+            }
+        }
+    };
+}
+
+mod wide_results_clear_bits_above_their_width {
+    use super::*;
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    wide_padding_backend!(native, build_native);
+    wide_padding_backend!(cranelift, build_cranelift);
+    wide_padding_backend!(wasm, build_wasm);
+    wide_padding_backend!(interpreter, build_interpreter);
+}
