@@ -12,7 +12,6 @@ impl Type {
             members: Vec::new(),
             signed_element_depth: None,
             container: None,
-            unpacked_struct: None,
             spelling: type_names::Spelling::default(),
         })
     }
@@ -26,7 +25,6 @@ impl Type {
             members: Vec::new(),
             signed_element_depth: None,
             container: None,
-            unpacked_struct: None,
             spelling: type_names::Spelling::default(),
         })
     }
@@ -85,16 +83,7 @@ impl Type {
     /// whose elements a fixed-size unpacked array of it has (IEEE 1800-2023
     /// 7.2, 7.4.2), as the type keeps it.
     pub(in crate::ast) fn unpacked_struct(&self) -> Option<&Arc<unpacked_structs::UnpackedStruct>> {
-        let kept = self.structure.declaration();
-        debug_assert_eq!(
-            kept.map(|aggregate| aggregate.identity()),
-            self.shape
-                .unpacked_struct
-                .as_ref()
-                .map(|aggregate| aggregate.identity()),
-            "the structure a type keeps is not that of its field: {self:?}"
-        );
-        kept
+        self.structure.declaration()
     }
 
     pub(crate) fn structure_identity(&self) -> Option<&str> {

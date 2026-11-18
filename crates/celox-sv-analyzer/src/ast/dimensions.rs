@@ -170,7 +170,6 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                     ),
                     members: port.r#type().members.clone(),
                     signed_element_depth: port.r#type().signed_element_depth,
-                    unpacked_struct: port.r#type().unpacked_struct.clone(),
                 },
                 // The shape has the type the port was declared with.
                 port.r#type(),
@@ -220,7 +219,6 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                     ),
                     members: signal.r#type().members.clone(),
                     signed_element_depth: signal.r#type().signed_element_depth,
-                    unpacked_struct: signal.r#type().unpacked_struct.clone(),
                 },
                 // The shape has the type the signal was declared with.
                 signal.r#type(),
@@ -488,7 +486,6 @@ fn extend_variable_dimensions_from_markers(
                 .collect(),
             members: Vec::new(),
             signed_element_depth: None,
-            unpacked_struct: None,
             spelling: type_names::Spelling::default(),
         });
         let mut shape = procedural::dimensions_from_type(&ty);
@@ -706,7 +703,6 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                     is_2state: parameter.declared_is_2state,
                     members: parameter.members.clone(),
                     signed_element_depth: parameter.signed_element_depth,
-                    unpacked_struct: None,
                 })
                 .with_enumeration(enumeration(parameter)),
             )

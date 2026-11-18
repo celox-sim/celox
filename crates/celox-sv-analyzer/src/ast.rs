@@ -539,23 +539,24 @@ pub struct TypeShape {
     /// named type, which is signed although the whole array is not (IEEE
     /// 1800-2023 7.4.1).
     signed_element_depth: Option<usize>,
-    /// The members of an unpacked structure type (IEEE 1800-2023 7.2).
-    unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
     /// The typedef that names an enumeration, struct or union type, and how
     /// `$typename` spells the type where its structure does not tell.
     spelling: type_names::Spelling,
 }
 
 /// Two types are equal if their shapes, the identities of their elements
-/// and their enumerated types are: a virtual interface type has the shape
-/// of the number that holds its value, and its element type tells its
-/// interface (IEEE 1800-2023 25.9); an enumerated type, or an array of one,
-/// has the shape of its base type, and its declaration tells it (6.19).
+/// and their enumerated and unpacked structure types are: a virtual
+/// interface type has the shape of the number that holds its value, and its
+/// element type tells its interface (IEEE 1800-2023 25.9); an enumerated
+/// type, or an array of one, has the shape of its base type, and its
+/// declaration tells it (6.19); an unpacked structure type has the shape of
+/// its bits, and its declaration tells it (7.2, 6.22.1).
 impl PartialEq for Type {
     fn eq(&self, other: &Self) -> bool {
         self.shape == other.shape
             && self.element.identity() == other.element.identity()
             && self.enumeration.declaration() == other.enumeration.declaration()
+            && self.structure.identity() == other.structure.identity()
     }
 }
 
@@ -566,6 +567,7 @@ impl std::hash::Hash for Type {
         self.shape.hash(state);
         self.element.identity().hash(state);
         self.enumeration.declaration().hash(state);
+        self.structure.identity().hash(state);
     }
 }
 
