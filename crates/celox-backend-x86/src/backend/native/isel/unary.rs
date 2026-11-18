@@ -50,7 +50,13 @@ pub(super) fn lower_unary(
             unreachable!("float and plane operations are lowered before integer operations")
         }
         UnaryOp::Ident | UnaryOp::ToTwoState => {
-            ctx.emit_mov(block, dst_vreg, src_vreg);
+            // A narrower destination takes the low bits of the source, and
+            // a narrow register keeps no bits above its width.
+            if d_width < src_width {
+                ctx.emit_and_imm(block, dst_vreg, src_vreg, mask_for_width(d_width));
+            } else {
+                ctx.emit_mov(block, dst_vreg, src_vreg);
+            }
         }
         UnaryOp::Minus => {
             if d_width < 64 {
