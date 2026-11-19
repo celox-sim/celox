@@ -26,7 +26,9 @@ fn lower_expr(
 /// parameters and enumeration members, and has no unknown bits: a constant,
 /// or the equality, logical connective or negation of such values, the
 /// forms a condition on a parameter is written in (`Pass`,
-/// `Impl == ImplDom`, `!Pass && Mode != ModeOff`).
+/// `Impl == ImplDom`, `!Pass && Mode != ModeOff`). A logical connective
+/// with one operand that decides it has its value whatever the other is:
+/// `x || 1` is 1 and `x && 0` is 0 (IEEE 1800-2023 11.4.7).
 fn known_value(arena: &SLTNodeArena<SourceVarId>, node: celox_slt::NodeId) -> Option<BigUint> {
     let zero = BigUint::from(0u32);
     let truth = |value: bool| BigUint::from(u32::from(value));
@@ -37,14 +39,22 @@ fn known_value(arena: &SLTNodeArena<SourceVarId>, node: celox_slt::NodeId) -> Op
         SLTNode::Unary(UnaryOp::LogicNot, operand) => {
             Some(truth(known_value(arena, *operand)? == zero))
         }
+        SLTNode::Binary(left, op @ (BinaryOp::LogicAnd | BinaryOp::LogicOr), right) => {
+            let deciding = *op == BinaryOp::LogicOr;
+            let left = known_value(arena, *left).map(|value| value != zero);
+            let right = known_value(arena, *right).map(|value| value != zero);
+            match (left, right) {
+                (Some(value), _) | (_, Some(value)) if value == deciding => Some(truth(deciding)),
+                (Some(_), Some(_)) => Some(truth(!deciding)),
+                _ => None,
+            }
+        }
         SLTNode::Binary(left, op, right) => {
             let left = known_value(arena, *left)?;
             let right = known_value(arena, *right)?;
             match op {
                 BinaryOp::Eq | BinaryOp::EqCase => Some(truth(left == right)),
                 BinaryOp::Ne | BinaryOp::NeCase => Some(truth(left != right)),
-                BinaryOp::LogicAnd => Some(truth(left != zero && right != zero)),
-                BinaryOp::LogicOr => Some(truth(left != zero || right != zero)),
                 _ => None,
             }
         }
@@ -635,16 +645,23 @@ pub(super) fn lower_bits_with_context(
                         )?,
                     ),
                 };
-            // A left operand of a known value that decides `&&` or `||` is the
-            // result, without the right operand, which is not evaluated (IEEE
-            // 1800-2023 11.4.7): a parameter that turns a term off, as in
-            // `Pass && wvalid_i`, leaves the result reading nothing.
-            if let Some(truth) = known_truth(arena, left)
-                && matches!(
-                    (op, truth),
-                    (sv::ir::BinaryOp::LogicAnd, false) | (sv::ir::BinaryOp::LogicOr, true)
-                )
-            {
+            // An operand of a known value that decides `&&` or `||` is the
+            // result: a left one leaves the right operand unevaluated (IEEE
+            // 1800-2023 11.4.7), and a right one decides it whatever the left
+            // operand is, an unknown included (`x || 1` is 1, `x && 0` is 0).
+            // Lowered expressions have no side effects, so the result reads
+            // neither: a parameter that turns a term off, as in
+            // `Pass && wvalid_i` or `full_q || Pass == 1'b0`, leaves it
+            // reading nothing.
+            let deciding = |node| {
+                known_truth(arena, node).filter(|&truth| {
+                    matches!(
+                        (op, truth),
+                        (sv::ir::BinaryOp::LogicAnd, false) | (sv::ir::BinaryOp::LogicOr, true)
+                    )
+                })
+            };
+            if let Some(truth) = deciding(left).or_else(|| deciding(right)) {
                 let node = arena
                     .alloc(SLTNode::Constant(
                         BigUint::from(u32::from(truth)),
@@ -653,7 +670,7 @@ pub(super) fn lower_bits_with_context(
                         false,
                     ))
                     .ok()?;
-                return Some((node, sources));
+                return Some((node, HashSet::default()));
             }
             sources.extend(right_sources);
             if context_determined {
