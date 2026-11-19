@@ -389,7 +389,8 @@ pub struct LogicGateInstance {
     pub name: Option<Name>,
     pub dimensions: Vec<Dimension>,
     /// Output first, followed by one or more inputs; for `buf` and `not`,
-    /// one or more outputs followed by the input.
+    /// one or more outputs followed by the input; for `bufif0`, `bufif1`,
+    /// `notif0` and `notif1`, the output, the data input and the control.
     pub terminals: Vec<ExprId>,
     pub tokens: TokenRange,
 }
