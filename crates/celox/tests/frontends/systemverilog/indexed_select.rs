@@ -1486,3 +1486,148 @@ sv_backends! {
         check_pointer_selects(&mut sim);
     }
 }
+
+/// Memories of 39-bit elements, declared descending and ascending away from
+/// zero, read and written at a run-time index: nonblocking and blocking
+/// writes in `always_ff`, a blocking write in `always_comb`, continuous
+/// reads. The element position is the index's distance from the left bound
+/// times the element width; an index outside the bounds or an unknown one
+/// reads the default and writes nothing (IEEE 1800-2023 7.4.6, 11.5.1).
+const ELEMENT_INDEX_MEMORY: &str = r#"
+    module Top(input logic clk, input logic w, input logic [5:0] wa,
+               input logic [38:0] wd, input logic [5:0] ra, output logic [38:0] qd,
+               output logic [38:0] qa, output logic [38:0] qb, output logic [38:0] qc);
+        logic [38:0] down [47:8];
+        logic [38:0] up [8:47];
+        logic [38:0] comb [3:12];
+        always_ff @(posedge clk)
+            if (w) begin
+                down[wa] <= wd;
+                up[wa] = ~wd;
+            end
+        always_comb begin
+            for (int i = 3; i <= 12; i++) comb[i] = 39'd0;
+            comb[wa] = wd;
+        end
+        assign qd = down[ra];
+        assign qa = up[ra];
+        assign qb = comb[ra];
+        assign qc = up[ra + 6'd1];
+    endmodule
+"#;
+
+fn check_element_index_memory<B: celox::SimBackend>(
+    sim: &mut celox::Simulator<B>,
+    four_state: bool,
+) {
+    let all = (1u64 << 39) - 1;
+    // Each element's value and known bits; an unwritten four-state element
+    // is X.
+    let fresh = (0u64, if four_state { 0 } else { all });
+    let mut down = [fresh; 64];
+    let mut up = [fresh; 64];
+    let in_range = |index: u64| (8..=47).contains(&index);
+    let clk = sim.event("clk");
+    let names = ["w", "wa", "wd", "ra"].map(|name| sim.signal(name));
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let read = |memory: &[(u64, u64); 64], index: u64, unknown: bool| match () {
+        _ if unknown && four_state => (0, all),
+        _ if in_range(index) => {
+            let (value, known) = memory[index as usize];
+            (value & known, all ^ known)
+        }
+        _ if four_state => (0, all),
+        _ => (0, 0),
+    };
+    for step in 0..300 {
+        let w = next() % 4 != 0;
+        let wa = next() % 64;
+        let wd = next() & all;
+        let ra = if step % 3 == 0 { wa } else { next() % 64 };
+        let unknown_wa = four_state && step % 17 == 5;
+        let unknown_ra = four_state && step % 13 == 7;
+        sim.modify(|io| {
+            io.set(names[0], u8::from(w));
+            if unknown_wa {
+                io.set_four_state(names[1], BigUint::from(0u8), BigUint::from(0x3fu8));
+            } else {
+                io.set(names[1], wa);
+            }
+            io.set(names[2], wd);
+            if unknown_ra {
+                io.set_four_state(names[3], BigUint::from(0u8), BigUint::from(0x3fu8));
+            } else {
+                io.set(names[3], ra);
+            }
+        })
+        .unwrap();
+        // The always_comb memory holds only this slot's write.
+        let comb = match () {
+            _ if unknown_wa => None,
+            _ if (3..=12).contains(&wa) => Some(wa),
+            _ => None,
+        };
+        let comb_read = if unknown_ra && four_state {
+            (0, all)
+        } else if (3..=12).contains(&ra) {
+            if unknown_wa {
+                // Writing at an unknown index changes nothing.
+                (0, 0)
+            } else if comb == Some(ra) {
+                (wd, 0)
+            } else {
+                (0, 0)
+            }
+        } else if four_state {
+            (0, all)
+        } else {
+            (0, 0)
+        };
+        let next_ra = (ra + 1) % 64;
+        for (name, expected) in [
+            ("qd", read(&down, ra, unknown_ra)),
+            ("qa", read(&up, ra, unknown_ra)),
+            ("qb", comb_read),
+            ("qc", read(&up, next_ra, unknown_ra)),
+        ] {
+            let (value, unknown) = sim.get_four_state(sim.signal(name));
+            let known = BigUint::from(all) ^ &unknown;
+            assert_eq!(
+                (value & known, unknown),
+                (BigUint::from(expected.0), BigUint::from(expected.1)),
+                "{name} at ra={ra} wa={wa} before step {step}"
+            );
+        }
+        sim.tick(clk).unwrap();
+        if w && !unknown_wa && in_range(wa) {
+            down[wa as usize] = (wd, all);
+            up[wa as usize] = (!wd & all, all);
+        }
+    }
+}
+
+sv_backends! {
+    fn element_index_memory_two_state(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(
+            vec![(ELEMENT_INDEX_MEMORY, Path::new("element_index.sv"))],
+            "Top",
+        ).four_state(false);
+        check_element_index_memory(&mut sim, false);
+    }
+
+    fn element_index_memory_four_state(sim) {
+        @setup {}
+        @build Simulator::from_sv_sources(
+            vec![(ELEMENT_INDEX_MEMORY, Path::new("element_index.sv"))],
+            "Top",
+        ).four_state(true);
+        check_element_index_memory(&mut sim, true);
+    }
+}
