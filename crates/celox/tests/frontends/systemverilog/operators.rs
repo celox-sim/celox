@@ -476,9 +476,11 @@ mod reductions_of_transposed_rows_read_their_row {
     transposed_row_reductions_backend!(interpreter, build_interpreter);
 }
 
-/// A left operand of `&&` or `||` whose known value decides the result, and
-/// a known condition of `?:`, leave the other operand unevaluated (IEEE
-/// 1800-2023 11.4.7, 11.4.11), so the result does not depend on it. A
+/// An operand of `&&` or `||` whose known value decides the result, and a
+/// known condition of `?:`, leave the result independent of the other
+/// operand (IEEE 1800-2023 11.4.7, 11.4.11): a left one leaves the right
+/// operand unevaluated, and a right one decides the result whatever the left
+/// one is, as `prim_fifo_sync` writes `full_q || Pass == 1'b0`. A
 /// pass-through FIFO turned off by a parameter, as OpenTitan's
 /// `prim_fifo_sync` with `.Pass(0)` is, has no combinational path from its
 /// input to its output, and a design that feeds the output back to the input
@@ -495,6 +497,11 @@ fn known_operands_of_logical_and_conditional_operators_leave_the_others_unread()
             "conditional",
             "full_q || (Pass ? wvalid_i : 1'b0)",
             "Pass ? (full_q ? storage : wdata_i) : storage",
+        ),
+        (
+            "right operands",
+            "full_q || (wvalid_i && Pass)",
+            "(full_q || Pass == 1'b0) ? storage : wdata_i",
         ),
     ] {
         let source = format!(
