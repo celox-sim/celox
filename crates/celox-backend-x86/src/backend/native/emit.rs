@@ -1814,12 +1814,15 @@ fn shorten_absolute_moves(asm: &mut EmitAssembler) -> Result<(), iced_x86::IcedE
             asm.add_instruction(instruction)?;
             continue;
         };
+        // A displacement size of 8 keeps 64-bit addressing; 4 would select
+        // 32-bit addressing and an address-size prefix for the same
+        // sign-extended disp32 encoding.
         let memory = MemoryOperand::new(
             Register::None,
             Register::None,
             1,
             i64::from(displacement),
-            4,
+            8,
             false,
             instruction.segment_prefix(),
         );
