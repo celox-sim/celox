@@ -144,7 +144,7 @@ fn static_input_slice_preserves_a_cached_snapshot() {
     )));
     assert!(instructions.iter().any(|instruction| matches!(
         instruction,
-        SIRInstruction::Binary(_, source, BinaryOp::Shr, _) if *source == snapshot
+        SIRInstruction::Slice(_, source, 133, 1) if *source == snapshot
     )));
 }
 
@@ -470,7 +470,7 @@ fn static_input_slice_uses_an_exact_override_range() {
     );
     assert!(instructions.iter().any(|instruction| matches!(
         instruction,
-        SIRInstruction::Binary(_, source, BinaryOp::Shr, _) if *source == materialized
+        SIRInstruction::Slice(_, source, 4, 4) if *source == materialized
     )));
 }
 
