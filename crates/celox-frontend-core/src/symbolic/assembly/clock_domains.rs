@@ -246,6 +246,8 @@ pub(super) fn unify_clock_domains(
             }
         }
     };
+    // The copies cut from their source, with the source and their edge.
+    let mut cut: Vec<(AbsoluteAddr, AbsoluteAddr, bool)> = Vec::new();
     let drive_graph: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>> = drive_graph
         .iter()
         .map(|(src, sinks)| {
@@ -254,7 +256,10 @@ pub(super) fn unify_clock_domains(
                 .iter()
                 .copied()
                 .filter(|sink| match (src_polarity, effective_polarity(*sink)) {
-                    (Some(a), Some(b)) => a == b,
+                    (Some(a), Some(b)) if a != b => {
+                        cut.push((*src, *sink, b));
+                        false
+                    }
                     _ => true,
                 })
                 .collect();
@@ -304,7 +309,62 @@ pub(super) fn unify_clock_domains(
         }
         clock_domains.insert(addr, current);
     }
+    share_opposite_edge_copies(&mut clock_domains, cut);
     clock_domains
+}
+
+/// Join the copies of one clock that are sensed at the opposite edge of
+/// their source into one domain: they are all the same signal and edge,
+/// `(clk, negedge)` beside `clk`'s rising domain, however many modules copy
+/// the clock through their ports or `assign c = clk`. Waking their
+/// processes together is the order of one Active-region event of that edge
+/// (IEEE 1800-2023 4.7). Each `(source domain, edge)` keeps the lowest of
+/// its copies as its root; a copy of such a copy joins after its source
+/// has joined.
+fn share_opposite_edge_copies(
+    clock_domains: &mut HashMap<AbsoluteAddr, AbsoluteAddr>,
+    mut cut: Vec<(AbsoluteAddr, AbsoluteAddr, bool)>,
+) {
+    let key = |addr: &AbsoluteAddr| (addr.instance_id, addr.var_id);
+    cut.sort_unstable_by_key(|(src, sink, _)| (key(src), key(sink)));
+    // A cut copy that copies on to nothing is its own root.
+    for &(src, sink, _) in &cut {
+        clock_domains.entry(src).or_insert(src);
+        clock_domains.entry(sink).or_insert(sink);
+    }
+    loop {
+        let canonical = |domains: &HashMap<AbsoluteAddr, AbsoluteAddr>, addr: AbsoluteAddr| {
+            domains.get(&addr).copied().unwrap_or(addr)
+        };
+        let mut roots: HashMap<(AbsoluteAddr, bool), AbsoluteAddr> = HashMap::default();
+        for &(src, sink, polarity) in &cut {
+            let sink = canonical(clock_domains, sink);
+            roots
+                .entry((canonical(clock_domains, src), polarity))
+                .and_modify(|root| {
+                    if key(&sink) < key(root) {
+                        *root = sink;
+                    }
+                })
+                .or_insert(sink);
+        }
+        let mut moved: HashMap<AbsoluteAddr, AbsoluteAddr> = HashMap::default();
+        for &(src, sink, polarity) in &cut {
+            let sink = canonical(clock_domains, sink);
+            let root = roots[&(canonical(clock_domains, src), polarity)];
+            if sink != root {
+                moved.insert(sink, root);
+            }
+        }
+        if moved.is_empty() {
+            return;
+        }
+        for domain in clock_domains.values_mut() {
+            if let Some(&root) = moved.get(domain) {
+                *domain = root;
+            }
+        }
+    }
 }
 
 /// The most wiring hops followed from a one-bit variable to its source.

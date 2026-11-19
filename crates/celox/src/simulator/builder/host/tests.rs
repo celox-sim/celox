@@ -3044,3 +3044,31 @@ fn native_scheduler_calls_its_larger_bodies() {
         scheduler(&inlined)
     );
 }
+
+/// The port copies of a clock that units sense at the opposite edge of the
+/// top's share one domain, not one each.
+#[test]
+fn opposite_edge_clock_copies_share_one_domain() {
+    let mut source = String::from(
+        "`timescale 1ns/1ns\nmodule Unit(input logic clk, output logic [7:0] q); always_ff @(posedge clk) q <= q + 1; endmodule\nmodule Top; logic clk = 0; always #1 clk = ~clk; logic [7:0] falls = 0; always @(negedge clk) falls <= falls + 1;\n",
+    );
+    for index in 0..24 {
+        source += &format!("logic [7:0] q{index}; Unit u{index}(.clk(clk), .q(q{index}));\n");
+    }
+    source += "initial begin #20 $display(\"%0d %0d\", q0, falls); $finish; end\nendmodule\n";
+    let program = crate::Simulation::from_sv_sources(
+        vec![(source.as_str(), std::path::Path::new("copies.sv"))],
+        "Top",
+    )
+    .emit_triggers()
+    .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, false)
+    .unwrap()
+    .0;
+    let domains = program
+        .sir
+        .eval_apply_ffs
+        .values()
+        .filter(|units| !units.is_empty())
+        .count();
+    assert!(domains <= 3, "{domains} FF domains for 24 copies");
+}

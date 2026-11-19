@@ -152,10 +152,11 @@ fn replicated_bits_of_a_cell_clock_share_its_domain() {
     .build_with_trace();
     result.res.unwrap_or_else(|error| panic!("{error:?}"));
     let program = result.trace.post_optimized_sir.unwrap();
-    // The root clock's event shared by every rising-edge copy; a copy
-    // sensed at the falling edge stays a clock of its own, as a whole
-    // variable copy does. Without the wiring, every kid clock is an event.
-    assert_eq!(program.sir.eval_apply_ffs.len(), 1 + 8);
+    // The root clock's event shared by every rising-edge copy, and one
+    // event shared by the copies sensed at the falling edge: they stay
+    // apart from the rising domain but are one signal and edge. Without the
+    // wiring, every kid clock is an event.
+    assert_eq!(program.sir.eval_apply_ffs.len(), 1 + 1);
 
     let mut sim = Simulation::from_sv_sources(
         vec![(REPLICATED_CLOCKS, std::path::Path::new("replicated.sv"))],
