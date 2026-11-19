@@ -120,11 +120,22 @@ fn lower_module_with_overrides(
                 && demoted.contains(&process.creation_order())
         })
     {
-        module = std::borrow::Cow::Owned(module.into_owned().run_comb_processes_as_processes(
-            |_, process| demoted.contains(&process.creation_order()),
-        ));
+        module = std::borrow::Cow::Owned(
+            module
+                .into_owned()
+                .run_comb_processes_as_processes(!four_state, |_, process| {
+                    demoted.contains(&process.creation_order())
+                }),
+        );
     }
-    let sharing = share_always_variables(&module, &constants, &parameter_types, shared, warnings);
+    let sharing = share_always_variables(
+        &module,
+        &constants,
+        &parameter_types,
+        four_state,
+        shared,
+        warnings,
+    );
     let shared_process_variables = match sharing {
         Some((shared_module, names)) => {
             module = std::borrow::Cow::Owned(shared_module);
@@ -138,7 +149,7 @@ fn lower_module_with_overrides(
         module = std::borrow::Cow::Owned(
             module
                 .into_owned()
-                .run_comb_processes_as_processes(|index, _| level.contains(&index)),
+                .run_comb_processes_as_processes(!four_state, |index, _| level.contains(&index)),
         );
     }
     // The rewrite visits the edge processes in order, once each.
