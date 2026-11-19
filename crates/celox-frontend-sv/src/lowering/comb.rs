@@ -17,6 +17,7 @@ mod initial_process;
 mod inline_calls;
 mod loops;
 mod merge;
+mod next_state;
 mod path;
 mod rewrite;
 mod stmt;
@@ -34,6 +35,7 @@ use num_traits::{ToPrimitive, Zero};
 
 pub(super) use comb_process::*;
 pub(super) use loops::RUNTIME_LOOP_CONDITION;
+pub(super) use next_state::{NextState, NextStateRoot, RamWritePort};
 use rewrite::*;
 
 type Sources = HashSet<VarAtomBase<SourceVarId>>;
@@ -87,6 +89,12 @@ pub(super) struct Comb<'p, 'a> {
     /// node that stands for the words it loads, and the values written to
     /// those words before (see [`Self::readmem`]).
     memory_loads: Vec<(SourceVarId, InitialStateData, Option<NodeId>)>,
+    /// In the next-state form of an `always_ff` ([`Self::lower_next_state`]),
+    /// where its nonblocking assignments go.
+    next_state: Option<next_state::Form>,
+    /// Whether the assignment being lowered is a nonblocking one of the
+    /// next-state form.
+    nonblocking_now: bool,
 }
 
 fn range_error(error: impl std::fmt::Display) -> sv::AnalyzerError {
@@ -115,6 +123,8 @@ impl<'p, 'a> Comb<'p, 'a> {
             held: false,
             initial_seed: Store::default(),
             memory_loads: Vec::new(),
+            next_state: None,
+            nonblocking_now: false,
         }
     }
 

@@ -46,6 +46,7 @@ mod drivers;
 mod expr;
 mod external_hierarchy;
 mod ff;
+mod ff_next_state;
 mod ff_processes;
 mod floating;
 mod glue;
@@ -447,6 +448,9 @@ struct HierarchicalNames<'a> {
     /// Whether to lower each subroutine that can be out of line (see
     /// `AnalysisOptions::force_out_of_line_calls`).
     force_out_of_line: bool,
+    /// Where to append the next-state report of the module's `always_ff`
+    /// processes, if anywhere (see `AnalysisOptions::ff_next_state_report`).
+    next_state_report: Option<&'a std::path::Path>,
     /// The keys of the class properties that level waits of the design
     /// read, whose stores the module counts (see `ff::property_changes`).
     /// A wait that reads any other property is rejected.
@@ -496,6 +500,7 @@ impl<'a> HierarchicalNames<'a> {
             analyzed: None,
             recursion_report: None,
             force_out_of_line: false,
+            next_state_report: None,
             properties: &NO_PROPERTIES,
             time_format: false,
             instances,

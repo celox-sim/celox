@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use celox_design::{ModuleId, VarAtomBase};
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+pub mod canon;
 pub mod const_inline;
 mod lower;
 pub mod net_inline;

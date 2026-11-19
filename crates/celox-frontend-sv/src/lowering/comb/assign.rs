@@ -219,6 +219,9 @@ impl Comb<'_, '_> {
         lhs: &sv::ir::LValue,
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
+        // The subroutines the assignment calls write their own variables
+        // with blocking assignments; only the target's store is nonblocking.
+        let nonblocking = std::mem::take(&mut self.nonblocking_now);
         let prepared_rhs = if self.m.calls(rhs) {
             Cow::Owned(self.hoist(store, frames, rhs)?)
         } else {
@@ -288,6 +291,7 @@ impl Comb<'_, '_> {
             true,
         )
         .ok_or_else(|| unsupported("real assignment conversion"))?;
+        self.nonblocking_now = nonblocking;
         self.store_value(store, frames, target, (node, sources), signed, rhs)
     }
 
@@ -300,6 +304,22 @@ impl Comb<'_, '_> {
         signed: bool,
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
+        // A nonblocking write of a memory element at a run-time index is a
+        // write port; any other goes to the next-state variable.
+        let nonblocking = std::mem::take(&mut self.nonblocking_now);
+        let port = nonblocking
+            && matches!(
+                &target,
+                Target::Dynamic {
+                    offset: Offset::Element { .. },
+                    ..
+                }
+            );
+        let target = if nonblocking && !port {
+            self.next_target(target)?
+        } else {
+            target
+        };
         let (id, width) = match &target {
             Target::Static { id, width, .. } | Target::Dynamic { id, width, .. } => (*id, *width),
         };
@@ -308,6 +328,9 @@ impl Comb<'_, '_> {
         let target_two_state = !self.m.var(id).is_4state;
         if target_two_state || (!self.m.four_state && expr_is_unknown_literal(rhs)) {
             node = self.alloc(SLTNode::Unary(UnaryOp::ToTwoState, node))?;
+        }
+        if port {
+            return self.write_port(store, frames, target, node);
         }
         match target {
             Target::Static {
@@ -531,6 +554,7 @@ impl Comb<'_, '_> {
         parts: &[sv::ir::LValue],
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
+        let nonblocking = std::mem::take(&mut self.nonblocking_now);
         // The positions of all parts are evaluated before any part is written.
         let mut targets = Vec::with_capacity(parts.len());
         let mut widths = Vec::with_capacity(parts.len());
@@ -552,6 +576,7 @@ impl Comb<'_, '_> {
         for (target, width) in targets.into_iter().zip(widths) {
             lsb -= width;
             let slice = self.slice(node, BitAccess::new(lsb, lsb + width - 1))?;
+            self.nonblocking_now = nonblocking;
             self.store_value(store, frames, target, (slice, sources.clone()), false, rhs)?;
         }
         Ok(())

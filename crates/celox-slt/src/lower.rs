@@ -723,62 +723,69 @@ impl SLTToSIRLowerer {
         node: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> bool {
-        let mut pending = vec![node];
-        let mut seen = crate::HashSet::default();
-        while let Some(node) = pending.pop() {
-            if !seen.insert(node) {
-                continue;
-            }
-            match arena.get(node) {
-                SLTNode::Input { signed, .. } | SLTNode::Constant(_, _, _, signed) => {
-                    if !signed {
-                        return false;
-                    }
-                }
-                SLTNode::Binary(lhs, op, rhs) => match op {
-                    BinaryOp::DivS | BinaryOp::RemS => {}
-                    BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => pending.push(*lhs),
-                    BinaryOp::Add
-                    | BinaryOp::Sub
-                    | BinaryOp::Mul
-                    | BinaryOp::And
-                    | BinaryOp::Or
-                    | BinaryOp::Xor => {
-                        pending.push(*rhs);
-                        pending.push(*lhs);
-                    }
-                    _ => return false,
-                },
-                SLTNode::Unary(
-                    UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
-                    inner,
-                ) => pending.push(*inner),
-                SLTNode::Unary(
-                    UnaryOp::Float {
-                        op: celox_design::FloatUnaryOp::ToSigned { .. },
-                        ..
-                    },
-                    _,
-                ) => {}
-                SLTNode::Capture { expr, .. } => pending.push(*expr),
-                SLTNode::Mux {
-                    then_expr,
-                    else_expr,
-                    ..
-                } => {
-                    pending.push(*else_expr);
-                    pending.push(*then_expr);
-                }
-                SLTNode::ForFold {
-                    loop_signed: true,
-                    result: crate::SLTForFoldResult::State(_),
-                    ..
-                } => {}
-                _ => return false,
-            }
-        }
-        true
+        bound_signed(node, arena)
     }
+}
+
+/// Whether the lowering treats `node` as a signed value where an operation
+/// extends its operands by their signedness: every leaf it passes through
+/// is signed.
+pub(crate) fn bound_signed<A: Hash + Eq + Clone>(node: NodeId, arena: &SLTNodeArena<A>) -> bool {
+    let mut pending = vec![node];
+    let mut seen = crate::HashSet::default();
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        match arena.get(node) {
+            SLTNode::Input { signed, .. } | SLTNode::Constant(_, _, _, signed) => {
+                if !signed {
+                    return false;
+                }
+            }
+            SLTNode::Binary(lhs, op, rhs) => match op {
+                BinaryOp::DivS | BinaryOp::RemS => {}
+                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => pending.push(*lhs),
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Xor => {
+                    pending.push(*rhs);
+                    pending.push(*lhs);
+                }
+                _ => return false,
+            },
+            SLTNode::Unary(
+                UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
+                inner,
+            ) => pending.push(*inner),
+            SLTNode::Unary(
+                UnaryOp::Float {
+                    op: celox_design::FloatUnaryOp::ToSigned { .. },
+                    ..
+                },
+                _,
+            ) => {}
+            SLTNode::Capture { expr, .. } => pending.push(*expr),
+            SLTNode::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                pending.push(*else_expr);
+                pending.push(*then_expr);
+            }
+            SLTNode::ForFold {
+                loop_signed: true,
+                result: crate::SLTForFoldResult::State(_),
+                ..
+            } => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 impl Drop for SLTToSIRLowerer {
