@@ -29,7 +29,8 @@ fn source() -> String {
     for index in 36..72 {
         source += &format!("    r{index} <= w{index} + w{};\n", index - 36);
     }
-    source += "  end\n  logic [31:0] digest;\n  always_comb begin\n    digest = 0;\n";
+    source += "  end\n  always_comb if (w5 == 32'hffff_ffff) $display(\"all ones\");\n";
+    source += "  logic [31:0] digest;\n  always_comb begin\n    digest = 0;\n";
     for index in 0..72 {
         source += &format!("    digest = digest ^ w{index};\n");
     }
