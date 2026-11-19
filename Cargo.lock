@@ -446,6 +446,7 @@ dependencies = [
  "codspeed-criterion-compat",
  "criterion",
  "fxhash",
+ "imbl",
  "insta",
  "itertools 0.15.0",
  "libc",
