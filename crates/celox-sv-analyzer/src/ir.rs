@@ -212,13 +212,18 @@ impl Module {
 
     /// Run selected `always @*` processes, by index among
     /// [`Self::comb_processes`], as ordinary processes that wait on their
-    /// implicit event expression (IEEE 1800-2023 9.4.2.2) before each run of
-    /// their statement.
+    /// Convert the selected `always @*` processes from combinational
+    /// processes into repeating processes that wait on their implicit event
+    /// expression (IEEE 1800-2023 9.4.2.2) before each run of their statement.
+    /// When `run_at_time_zero` is set (two-state mode, matching
+    /// `lower_comb_process`), each process runs once at time zero after active
+    /// startup work (`#0`) before its first wait.
     pub fn run_comb_processes_as_processes(
         self,
+        run_at_time_zero: bool,
         mut select: impl FnMut(usize, &CombProcess) -> bool,
     ) -> Self {
-        self.run_comb_processes_with_deferred_rearm(|index, process| {
+        self.run_comb_processes_with_deferred_rearm(run_at_time_zero, |index, process| {
             select(index, process).then_some(false)
         })
     }
@@ -228,6 +233,7 @@ impl Module {
     /// other Active work run between its body and its next implicit wait (4.7).
     pub fn run_comb_processes_with_deferred_rearm(
         mut self,
+        run_at_time_zero: bool,
         mut select: impl FnMut(usize, &CombProcess) -> Option<bool>,
     ) -> Self {
         let mut retained = Vec::new();
@@ -249,26 +255,44 @@ impl Module {
                 .chain(&process.sensitivity_body)
                 .cloned()
                 .collect();
-            let mut body = vec![Stmt::WaitImplicit {
+            let wait = Stmt::WaitImplicit {
                 reads,
                 always_comb: false,
-            }];
-            body.extend(process.body);
-            if defer_rearm {
-                body.push(Stmt::DeferActive);
+            };
+            let mut body = Vec::new();
+            let mut loop_body = Vec::new();
+            if run_at_time_zero {
+                body.push(Stmt::Delay {
+                    amount: Expr::Literal("0".to_string()),
+                    ticks_per_unit: 1,
+                    ticks_per_precision: 1,
+                    precision_steps_per_tick: 1,
+                });
+                loop_body.extend(process.body);
+                if defer_rearm {
+                    loop_body.push(Stmt::DeferActive);
+                }
+                loop_body.push(wait);
+            } else {
+                loop_body.push(wait);
+                loop_body.extend(process.body);
+                if defer_rearm {
+                    loop_body.push(Stmt::DeferActive);
+                }
             }
+            body.push(Stmt::Loop {
+                kind: LoopKind::Forever,
+                init: Vec::new(),
+                condition: None,
+                step: Vec::new(),
+                body: loop_body,
+            });
             self.initial_processes.push(InitialProcess {
                 creation_order: process.creation_order,
                 site: process.process_site,
                 scheduled_edge: false,
                 condition: process.condition,
-                body: vec![Stmt::Loop {
-                    kind: LoopKind::Forever,
-                    init: Vec::new(),
-                    condition: None,
-                    step: Vec::new(),
-                    body,
-                }],
+                body,
                 kind: celox_design::ProcessKind::Regular,
                 synthetic: false,
                 repeats: true,

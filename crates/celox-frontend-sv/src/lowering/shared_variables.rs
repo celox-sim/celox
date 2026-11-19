@@ -88,6 +88,7 @@ pub(super) fn share_always_variables(
     module: &sv::ir::Module,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    four_state: bool,
     shared: SharedAlways<'_>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Option<(sv::ir::Module, HashSet<String>)> {
@@ -186,7 +187,7 @@ pub(super) fn share_always_variables(
         renamed
     });
     Some((
-        module.run_comb_processes_with_deferred_rearm(|index, _| {
+        module.run_comb_processes_with_deferred_rearm(!four_state, |index, _| {
             processes
                 .contains(&index)
                 .then_some(deferred_rearm.contains(&index))

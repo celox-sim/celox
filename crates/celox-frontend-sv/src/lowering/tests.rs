@@ -97,6 +97,7 @@ fn shared_always_temporaries_exclude_queued_writes() {
             &module,
             &module_constants_with_overrides(&module, &[]),
             &module_parameter_types(&module),
+            false,
             SharedAlways {
                 temporaries: true,
                 foreign_references: &HashSet::default(),
