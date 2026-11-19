@@ -201,6 +201,13 @@ struct LoweringCostCache {
     owned_slice_lower_costs: Vec<Option<u128>>,
     contains_shared_nontrivial: Vec<Option<bool>>,
     is_speculatable_pure: Vec<Option<bool>>,
+    /// Whether the cone of a node has no operation a guarded concat must not
+    /// skip (see `guarded_concat_root_is_supported`).
+    guarded_concat_supported: Vec<Option<bool>>,
+    /// The index in `zero_facts` of a node's zero-controller facts, or
+    /// `u32::MAX`. The facts depend on `fanout`, so they live as long as it.
+    zero_facts_slot: Vec<u32>,
+    zero_facts: Vec<ZeroControllerFacts>,
     traversal_seen: Vec<bool>,
     traversal_work: Vec<NodeId>,
     dirty: Vec<bool>,
@@ -220,6 +227,8 @@ impl LoweringCostCache {
         self.owned_slice_lower_costs.resize(node_count, None);
         self.contains_shared_nontrivial.resize(node_count, None);
         self.is_speculatable_pure.resize(node_count, None);
+        self.guarded_concat_supported.resize(node_count, None);
+        self.zero_facts_slot.resize(node_count, u32::MAX);
         self.traversal_seen.resize(node_count, false);
         self.dirty.resize(node_count, false);
     }
@@ -245,9 +254,12 @@ impl LoweringCostCache {
             self.owned_slice_lower_costs[node.0] = None;
             self.contains_shared_nontrivial[node.0] = None;
             self.is_speculatable_pure[node.0] = None;
+            self.guarded_concat_supported[node.0] = None;
+            self.zero_facts_slot[node.0] = u32::MAX;
             self.traversal_seen[node.0] = false;
             self.dirty[node.0] = false;
         }
+        self.zero_facts.clear();
         // Clear old entries before shrinking; new entries start empty.
         self.resize(node_count);
     }
