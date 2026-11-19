@@ -3127,6 +3127,9 @@ pub struct DpiImport {
     name: String,
     c_name: String,
     pure: bool,
+    /// Declared `context` (IEEE 1800-2023 35.5.3): the C code may call
+    /// exported subroutines and reach the SystemVerilog state of the scope.
+    context: bool,
     return_type: Option<DpiType>,
     arguments: Vec<DpiArgument>,
     builtin: Option<DpiBuiltin>,
@@ -3152,10 +3155,22 @@ impl DpiImport {
             name,
             c_name,
             pure,
+            context: false,
             return_type,
             arguments,
             builtin: None,
         }
+    }
+
+    /// This import declared `context` if `context`.
+    pub(crate) fn with_context(mut self, context: bool) -> Self {
+        self.context = context;
+        self
+    }
+
+    /// Whether the import is declared `context`.
+    pub fn is_context(&self) -> bool {
+        self.context
     }
 
     /// This import bound to a function Celox provides.
