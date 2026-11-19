@@ -111,6 +111,18 @@ constructs without a dedicated issue point to the frontend roadmap,
 - Packages: package nets
   ([#1146](https://github.com/celox-sim/celox/issues/1146)); a package
   variable cannot be a clock or reset.
+- Wildcard imports (26.3): a module, interface, program or package scope,
+  a generate block and a procedural block each bind a name once for their
+  whole body (an `export p::x;` binds it in the package), not per
+  reference. References that one such binding covers are rejected when
+  they denote different declarations at their positions: on both sides of
+  the wildcard import that makes the name visible, after two wildcard
+  imports that both declare it, or through an enclosing block's import
+  before an inner block's own. A module may import again a package its
+  compilation unit imports, and references that all denote one declaration
+  bind as the standard says. An initializer of a block local that reads a
+  package variable through a wildcard import of the block is rejected
+  ([#4350](https://github.com/celox-sim/celox/issues/4350)).
 - Compilation units: only one source file may declare `$unit` variables.
 - `let` declarations (11.12) only among the items of a module, interface or
   program, where each call is expanded; one in a package, a generate block
