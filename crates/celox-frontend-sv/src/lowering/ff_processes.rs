@@ -171,6 +171,7 @@ pub(super) fn lower_ff_processes(
     module: &sv::ir::Module,
     pm: &mut procedural::ProcModule<'_>,
     ff_parts: bool,
+    next_state_report: Option<&std::path::Path>,
     ff_event_roles: &[FfEventRole],
     shared_memories: &HashSet<String>,
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
@@ -279,6 +280,8 @@ pub(super) fn lower_ff_processes(
         edge_only_memories(module, pm.constants, pm.parameter_types, foreign_writes);
     let window_writes = kernel_window_writes(module, foreign_writes);
     let random_seeds = process_random_seeds(module);
+    let mut next_state = next_state_report
+        .map(|path| ff_next_state::NextStateReport::new(&specialization(module, pm), path));
     for ((index, process), events) in module.ff_processes().iter().enumerate().zip(process_events) {
         pm.call_unit();
         let mut events = events
@@ -312,6 +315,17 @@ pub(super) fn lower_ff_processes(
             .with_window_writes(&window_writes)
             .with_inferred_clock(clock)
             .lower_process(process.body())?;
+        if let Some(report) = &mut next_state {
+            report.attempt(
+                pm,
+                process.body(),
+                ff_next_state::ImperativeUnits {
+                    eval: &eval_only,
+                    apply: &apply,
+                    staged: &staged,
+                },
+            );
+        }
         all_delayed_sites.extend(delayed_sites);
         repeated_writes.extend(repeated_ff_writes(&eval_only, &staged));
         // A process without writes still runs for what it hands to the host:
@@ -350,6 +364,9 @@ pub(super) fn lower_ff_processes(
     }
     // One process is the whole trigger group.
     parallel_ff_parts.retain(|_, parts| parts.len() > 1);
+    if let Some(report) = next_state {
+        report.print();
+    }
 
     let split_commit_ff_blocks = active_ff_blocks
         .into_iter()
@@ -1128,5 +1145,28 @@ fn inferred_clock(
             })
         }
         _ => None,
+    }
+}
+
+/// The name of `module` with the values of its parameters, which tell its
+/// specializations apart: `name#(A=1,B=2)`.
+fn specialization(module: &sv::ir::Module, pm: &procedural::ProcModule<'_>) -> String {
+    let mut parameters: Vec<String> = module
+        .imported_parameters()
+        .iter()
+        .chain(module.parameters())
+        .map(|parameter| {
+            let name = parameter.name();
+            match pm.constants.get(name) {
+                Some(value) => format!("{name}={value}"),
+                None => format!("{name}=?"),
+            }
+        })
+        .collect();
+    parameters.sort();
+    if parameters.is_empty() {
+        module.name().to_string()
+    } else {
+        format!("{}#({})", module.name(), parameters.join(","))
     }
 }

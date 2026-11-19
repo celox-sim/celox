@@ -925,6 +925,7 @@ fn schedule_sources_collecting(
                     analyzed: analyses.get(&module_id),
                     recursion_report: analysis_options.recursion_report.as_deref(),
                     force_out_of_line: analysis_options.force_out_of_line_calls,
+                    next_state_report: analysis_options.ff_next_state_report.as_deref(),
                     properties: &properties,
                     time_format,
                     instances: Instances::Known(&expansion),

@@ -97,6 +97,10 @@ pub struct AnalysisOptions {
     /// inlining unless it is set, and no subroutine that cannot be lowered
     /// so is rejected for it.
     pub force_out_of_line_calls: bool,
+    /// A file to which the frontend appends the next-state form of each
+    /// module's `always_ff` processes, a diagnostic: the form is lowered
+    /// and checked beside the units that run, which it leaves unchanged.
+    pub ff_next_state_report: Option<std::sync::Arc<std::path::Path>>,
 }
 
 /// Errors reported by the SystemVerilog analyzer.
