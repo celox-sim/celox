@@ -76,6 +76,7 @@ impl Ff<'_, '_> {
             args: values,
             results: Vec::new(),
             strings,
+            scope: None,
         });
         self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Vcd, local_site))
             .map_err(|error| unsupported(error.to_string()))?;
@@ -275,6 +276,7 @@ impl Ff<'_, '_> {
             }],
             results,
             strings: Vec::new(),
+            scope: None,
         });
         self.request_host(HostRequestKind::Plusargs, site)?;
         if let Some((lvalues, result, guards)) = target {

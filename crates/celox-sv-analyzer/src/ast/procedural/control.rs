@@ -34,6 +34,8 @@ struct RandcaseState {
 enum Job {
     Enter(StatementId),
     EndScope,
+    /// Leave a named block or fork: `%m` names the scope around it again.
+    EndScopeName(Option<std::sync::Arc<expression_binding::ScopeName>>),
     /// Wrap the statements built since `start` as the named block `id`
     /// when a `disable` in them named it; they stay flattened otherwise.
     BlockEnd {
@@ -320,13 +322,18 @@ impl BodyBuilder<'_, '_, '_> {
                     StatementKind::Declaration(declaration) => {
                         output.extend(self.block_item_declaration(declaration)?)
                     }
-                    StatementKind::Parallel { items, join, .. } => {
+                    StatementKind::Parallel {
+                        items, join, label, ..
+                    } => {
                         if join != "join_none"
                             || matches!(self.body, system_functions::Body::Always)
                         {
                             self.allow_timing("fork-join block")?;
                         }
                         self.push_scope();
+                        if let Some(label) = label {
+                            jobs.push(self.enter_scope_name(label));
+                        }
                         let join = match join.as_str() {
                             "join" => celox_design::ForkJoin::All,
                             "join_any" => celox_design::ForkJoin::Any,
@@ -368,6 +375,9 @@ impl BodyBuilder<'_, '_, '_> {
                     }
                     StatementKind::Block { label, items, .. } => {
                         self.push_scope();
+                        if let Some(label) = label {
+                            jobs.push(self.enter_scope_name(label));
+                        }
                         // A named block is a candidate to stay a block in
                         // the IR when a `disable` in its body can leave
                         // it: no fork in the body, whose children a
@@ -942,6 +952,7 @@ impl BodyBuilder<'_, '_, '_> {
                     _ => output.extend(self.native_statement_leaf(&native.statement(id).kind)?),
                 },
                 Job::EndScope => self.pop_scope(),
+                Job::EndScopeName(previous) => self.dims.scope_name = previous,
                 Job::BlockEnd { id, start } => {
                     let Some((_, registered, targeted)) = self.named_blocks.pop() else {
                         return Err(disagreement());
@@ -2525,6 +2536,19 @@ enum Argument {
     /// To a formal or task argument that writes or refers to it.
     Storage,
     Other,
+}
+
+impl BodyBuilder<'_, '_, '_> {
+    /// Enter the named block or fork `label`, which `%m` in it names
+    /// (IEEE 1800-2023 21.2.1.5), and the job that leaves it.
+    fn enter_scope_name(&mut self, label: &celox_sv_syntax::Name) -> Job {
+        let previous = self.dims.scope_name.clone();
+        self.dims.scope_name = Some(std::sync::Arc::new(expression_binding::ScopeName::nested(
+            previous.as_deref(),
+            &generate::scope_component(&instances::normalize_identifier(&label.spelling)),
+        )));
+        Job::EndScopeName(previous)
+    }
 }
 
 #[cfg(test)]
