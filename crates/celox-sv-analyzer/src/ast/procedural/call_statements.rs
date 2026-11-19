@@ -718,7 +718,8 @@ impl BodyBuilder<'_, '_, '_> {
                 ids.push(id);
                 values.push(value);
             }
-            text = expression_binding::scoped_template(&text, self.dims.scope_name.as_deref());
+            text =
+                expression_binding::scoped_template(&text, self.dims.scope_name.as_deref(), false);
             if expression_binding::has_pattern(&text) {
                 text = expression_binding::rewrite_format(
                     &text,
@@ -732,9 +733,7 @@ impl BodyBuilder<'_, '_, '_> {
             }
             let format = expression_binding::bytes_literal(&text);
             let value = expression_binding::string_call(
-                StringOp::Format {
-                    ticks_per_unit: timescales::time_divisor(root, &self.tree)?,
-                },
+                StringOp::format(timescales::time_divisor(root, &self.tree)?, None),
                 std::iter::once(format).chain(values).collect(),
             );
             return self.format_assignment(output, value);

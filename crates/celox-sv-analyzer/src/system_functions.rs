@@ -862,6 +862,40 @@ impl fmt::Display for SystemTask {
 /// The analyzer rewrites string operators, methods and conversions into
 /// calls of these, so the frontend dispatches on them instead of on the
 /// integral operators that a string handle would otherwise reach.
+/// How [`StringOp::Format`] formats.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FormatOptions {
+    /// The simulation time units of one time unit of the calling scope,
+    /// which a `%t` converts values in.
+    pub ticks_per_unit: u64,
+    /// The scope that `%m` names when the format is read at run time.
+    pub scope: Option<FormatScope>,
+}
+
+impl StringOp {
+    /// `$sformatf` with `options`.
+    pub fn format(ticks_per_unit: u64, scope: Option<FormatScope>) -> Self {
+        Self::Format {
+            options: Box::new(FormatOptions {
+                ticks_per_unit,
+                scope,
+            }),
+        }
+    }
+}
+
+/// The scope `%m` names in a format read at run time (IEEE 1800-2023
+/// 21.2.1.5).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FormatScope {
+    /// A scope of a package or the compilation unit, the same wherever the
+    /// format is.
+    Absolute(String),
+    /// A scope under the instance that runs the format: a named block,
+    /// generate block or subroutine of it.
+    Relative(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StringOp {
     /// A string holding the bytes of an integral operand, most significant
@@ -899,8 +933,9 @@ pub enum StringOp {
     /// `$sformatf(format, args...)` (21.3.3): the arguments formatted as
     /// `$display` formats them. A `%t` converts a value in the time unit of
     /// the calling scope, of which `ticks_per_unit` simulation time units
-    /// make one.
-    Format { ticks_per_unit: u64 },
+    /// make one. A format read at run time names `scope` in its `%m`
+    /// (21.2.1.5); a literal format has its `%m` named already.
+    Format { options: Box<FormatOptions> },
     /// The text `%p` prints for a class handle, or with a layout for a
     /// container (21.2.1.6).
     Pattern(Option<Box<ContainerLayout>>),

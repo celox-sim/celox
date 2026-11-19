@@ -25,8 +25,8 @@ impl Ff<'_, '_> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         // A format captures each operand at its own type, in order.
-        if let StringOp::Format { ticks_per_unit } = op {
-            return self.format_string(ticks_per_unit, &args);
+        if let StringOp::Format { options } = &op {
+            return self.format_string(options.ticks_per_unit, options.scope.as_ref(), &args);
         }
         if args.iter().any(|arg| self.m.calls(arg)) {
             for (index, arg) in args.iter_mut().enumerate() {

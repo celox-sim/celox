@@ -163,6 +163,131 @@ sv_backends! {
             celox::RuntimeEvent::Display { message: b"[$unit::U::where]".to_vec() },
         ]);
     }
+    // `%m` names the named block or fork, nested ones too, and the generate
+    // blocks (an unnamed one by its implicit name, numbered among all the
+    // generate constructs of its scope, 27.6) that hold the
+    // process or subroutine (IEEE 1800-2023 21.2.1.5). The lines are
+    // sorted: processes in one time slot run in no defined order.
+    fn scope_name_of_named_blocks_and_generate_scopes(sim) {
+        @setup {
+            let source = r#"
+                `timescale 1ns/1ns
+                module c #(parameter int w = 2) ();
+                    if (w == 1) begin : fi
+                        initial #1 $display("%m one");
+                    end else begin : fi2
+                        initial #1 $display("%m many");
+                        for (genvar k = 0; k < 2; k++) begin : g
+                            initial #1 $display("%m k=%0d", k);
+                        end
+                    end
+                    if (1) begin : gb
+                        task automatic t(); $display("%m gen-task"); endtask
+                        initial #2 t();
+                    end
+                    if (1) begin
+                        initial #2 $display("%m unnamed");
+                    end
+                endmodule
+                module Top;
+                    c #(.w(2)) u ();
+                    task t2(); begin : tb $display("%m task-block"); end endtask
+                    initial begin : ib
+                        #3;
+                        begin : inner $display("%m nested"); end
+                        fork : fk
+                            $display("%m fork");
+                        join
+                        t2();
+                        $display("%m after");
+                    end
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("block_scope.sv"))], "Top");
+        sim.run_until(4).unwrap();
+        let mut lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        lines.sort();
+        assert_eq!(lines, [
+            "Top.ib after",
+            "Top.ib.fk fork",
+            "Top.ib.inner nested",
+            "Top.t2.tb task-block",
+            "Top.u.fi2 many",
+            "Top.u.fi2.g[0] k=0",
+            "Top.u.fi2.g[1] k=1",
+            "Top.u.gb.t gen-task",
+            "Top.u.genblk3 unnamed",
+        ]);
+    }
+    // An escaped block name keeps the white space that ends it in `%m`
+    // (IEEE 1800-2023 5.6.1), so a `.` in it does not read as a separator.
+    fn scope_name_of_escaped_named_blocks(sim) {
+        @setup {
+            let source = "`timescale 1ns/1ns\nmodule Top;\n    string s;\n    initial begin : \\a.b \n        begin : inner\n            $display(\"%m\");\n            s = $sformatf(\"%m\"); $display(\"%s\", s);\n            $sformat(s, \"%m\"); $display(\"%s\", s);\n            $swrite(s, \"%m\"); $display(\"%s\", s);\n        end\n    end\nendmodule\n";
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("escaped_block.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let name = b"Top.\\a.b .inner".to_vec();
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: name.clone() },
+            celox::RuntimeEvent::Display { message: name.clone() },
+            celox::RuntimeEvent::Display { message: name.clone() },
+            celox::RuntimeEvent::Display { message: name },
+        ]);
+    }
+    // A format read at run time names the scope of the call in its `%m`,
+    // as a literal one does: a named block, a module subroutine under the
+    // instance, a package subroutine by its package (21.2.1.5, 21.3.3).
+    fn scope_name_of_run_time_formats(sim) {
+        @setup {
+            let source = r#"
+                `timescale 1ns/1ns
+                package pkg;
+                    function automatic string where(string format);
+                        return $sformatf(format);
+                    endfunction
+                endpackage
+                module Top;
+                    string fmt = "%m", s;
+                    task t();
+                        s = $sformatf(fmt);
+                        $display("task %s", s);
+                    endtask
+                    initial begin : b
+                        #1;
+                        s = $sformatf(fmt);
+                        $display("block %s", s);
+                        $sformat(s, fmt);
+                        $display("sformat %s", s);
+                        // Text of a format is never a directive to the host.
+                        s = $sformatf("$scope:A:evil %m");
+                        $display("text %s", s);
+                        t();
+                        $display("package %s", pkg::where(fmt));
+                    end
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("run_time_scope.sv"))], "Top");
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"block Top.b".to_vec() },
+            celox::RuntimeEvent::Display { message: b"sformat Top.b".to_vec() },
+            celox::RuntimeEvent::Display { message: b"text $scope:A:evil Top.b".to_vec() },
+            celox::RuntimeEvent::Display { message: b"task Top.t".to_vec() },
+            celox::RuntimeEvent::Display { message: b"package pkg::where".to_vec() },
+        ]);
+    }
 }
 
 /// A property's owner is captured before the operands of a container method

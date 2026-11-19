@@ -13,6 +13,7 @@ impl Ff<'_, '_> {
     pub(super) fn format_string(
         &mut self,
         ticks_per_unit: u64,
+        scope: Option<&sv::system_functions::FormatScope>,
         args: &[sv::ir::Expr],
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         let (format, values) = args
@@ -100,6 +101,15 @@ impl Ff<'_, '_> {
                         .then(|| celox_design::TIME_FORMAT_ARGUMENT.to_string()),
                 )
                 .collect(),
+            // The scope a run-time format's `%m` names.
+            scope: scope.map(|scope| match scope {
+                sv::system_functions::FormatScope::Absolute(name) => {
+                    celox_design::FormatScope::Absolute(name.clone())
+                }
+                sv::system_functions::FormatScope::Relative(path) => {
+                    celox_design::FormatScope::Relative(path.clone())
+                }
+            }),
         });
         self.request_host(HostRequestKind::Format, site)?;
         Ok(sv::ir::Expr::Ident(name))
