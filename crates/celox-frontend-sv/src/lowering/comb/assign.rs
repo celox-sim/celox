@@ -347,8 +347,7 @@ impl Comb<'_, '_> {
             } => {
                 // At each value of the selector, its constant select keeps
                 // what the variable holds or takes the value.
-                let (selected, selected_sources) =
-                    self.eval(store, frames, &sv::ir::Expr::Ident(selector), None)?;
+                let (selected, selected_sources) = self.eval(store, frames, &selector, None)?;
                 let selected = coerce_node_width(self.arena, selected, Some(selector_width), false)
                     .map_err(slt_error)?;
                 sources.extend(selected_sources);
@@ -633,7 +632,7 @@ pub(super) enum Offset {
     /// A select whose position one small run-time variable decides, at each
     /// value of it (see `Comb::enumerated_target`).
     Enumerated {
-        selector: String,
+        selector: sv::ir::Expr,
         selector_width: usize,
         cases: Vec<EnumeratedWrite>,
     },
