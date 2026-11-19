@@ -1947,6 +1947,91 @@ fn native_services_keep_file_and_plusargs_testbenches_compiled() {
     }
 }
 
+/// A testbench process that reads integral variables from a binary file with
+/// `$fread`, as RTLMeter's Vortex testbench reads its DCR writes, and then
+/// waits on every clock: the native service reads them as the reference
+/// loop does (a 12-bit variable takes two bytes, a partial read at the end of
+/// the file changes only the bits it read), so no slot falls back to it.
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+))]
+#[test]
+fn native_services_keep_fread_testbenches_compiled() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("words.bin");
+    std::fs::write(
+        &path,
+        [0x12, 0x34, 0x56, 0x78, 0xab, 0xcd, 0x9e, 0xf0, 0x01],
+    )
+    .unwrap();
+    let source = format!(
+        r#"`timescale 1ns/1ns
+        module Top;
+            bit clk = 0;
+            int fd, count = 0, first, second, third;
+            logic [11:0] narrow;
+            int codes;
+            always #1 clk = ~clk;
+            initial begin
+                fd = $fopen("{}", "r");
+                @(posedge clk);
+                codes = $fread(first, fd);
+                codes = codes * 10 + $fread(narrow, fd);
+                second = 32'h11111111;
+                codes = codes * 10 + $fread(second, fd);
+                third = 7;
+                codes = codes * 10 + $fread(third, fd);
+                $fclose(fd);
+                forever @(posedge clk) count = count + 1;
+            end
+        endmodule"#,
+        path.display()
+    );
+    for four_state in [false, true] {
+        let mut values = Vec::new();
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut simulation = crate::Simulation::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("fread.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(mode)
+            .build_native()
+            .unwrap();
+            simulation.run_until(20).unwrap();
+            if mode == crate::SchedulerMode::Compiled {
+                let stats = simulation.scheduler_stats();
+                assert!(
+                    stats.compiled_slots > 0 && stats.reference_steps < stats.compiled_slots,
+                    "{stats:?}"
+                );
+                assert!(
+                    stats
+                        .kernels
+                        .iter()
+                        .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                    "{stats:?}"
+                );
+            }
+            values.push(
+                ["count", "first", "narrow", "second", "third", "codes"]
+                    .map(|name| simulation.get(simulation.signal(name))),
+            );
+        }
+        assert_eq!(values[0], values[1], "four_state={four_state}");
+        let expected = [9u32, 0x1234_5678, 0xbcd, 0x9ef0_0111, 7, 4230];
+        assert_eq!(
+            values[0],
+            expected.map(num_bigint::BigUint::from),
+            "four_state={four_state}"
+        );
+    }
+}
+
 /// A testbench process that formats strings with `$sformatf`, of a constant
 /// and of a run-time format, with `%m` and a string argument, as OpenTitan's
 /// `sw_test_status_if` reports its transitions: the native service formats
