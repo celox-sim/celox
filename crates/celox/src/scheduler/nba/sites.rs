@@ -111,10 +111,11 @@ impl Sites {
                     )
                 })
                 .collect(),
-            observations: sites
-                .iter()
-                .map(|site| observations::Observations::new(program, site.target))
-                .collect(),
+            observations: observations::Observations::for_targets(
+                program,
+                &shared,
+                &sites.iter().map(|site| site.target).collect::<Vec<_>>(),
+            ),
             sites,
             processes,
         }

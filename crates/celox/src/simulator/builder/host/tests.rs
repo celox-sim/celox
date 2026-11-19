@@ -3126,3 +3126,47 @@ fn the_scheduler_calls_the_settle_unless_it_instruments_it() {
         assert_eq!(is_settle, bound, "{record}");
     }
 }
+
+/// The NBA observations built for all targets at once are those built for
+/// each target alone: the watches of edge and change waits, the gated
+/// (`iff`) waits and the occurrence probes of part event controls, also of
+/// targets that share their storage with an alias.
+#[cfg(all(test, target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn nba_observations_of_all_targets_match_those_of_each() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    bit en = 0;
+    logic [7:0] q = 0;
+    logic [7:0] p = 0;
+    logic [7:0] alias_q;
+    logic [15:0] wide = 0;
+    int edges = 0, changes = 0, gated = 0, parts = 0;
+    assign alias_q = q;
+    always #1 clk = !clk;
+    initial forever begin @(posedge clk); q <= q + 1; p <= p ^ q; wide <= {wide[14:0], q[0]}; end
+    initial forever begin @(negedge clk); en <= !en; end
+    initial forever begin @(posedge q[0]); edges++; end
+    initial forever begin @(alias_q); changes++; end
+    initial forever begin @(posedge p[1] iff en); gated++; end
+    initial forever begin @(wide[3:0]); parts++; end
+    initial begin #40 $display("%0d %0d %0d %0d", edges, changes, gated, parts); $finish; end
+endmodule"#;
+    for four_state in [false, true] {
+        let builder = crate::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("nba-observations.sv"))],
+            "Top",
+        )
+        .four_state(four_state);
+        let program = builder
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+            .unwrap()
+            .0;
+        let (targets, observed) = crate::scheduler::observations_match_for_test(&program);
+        assert!(
+            targets >= 3 && observed >= 3,
+            "targets={targets} observed={observed}"
+        );
+    }
+}
