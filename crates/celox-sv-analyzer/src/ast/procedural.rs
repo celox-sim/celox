@@ -838,7 +838,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         .insert(name.clone(), value.clone());
                 }
                 if let Some(binding) = layered.constant_types.get(name) {
-                    Arc::make_mut(&mut self.dims.constant_types)
+                    self.dims
+                        .constant_types
                         .insert(name.clone(), binding.clone());
                 }
                 self.names
@@ -894,11 +895,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         for entry in scope.entries.into_iter().rev() {
             match entry.shadowed_constant_type {
                 Some(binding) => {
-                    Arc::make_mut(&mut self.dims.constant_types)
+                    self.dims
+                        .constant_types
                         .insert(entry.source.clone(), binding);
                 }
                 None if self.dims.constant_types.contains_key(&entry.source) => {
-                    Arc::make_mut(&mut self.dims.constant_types).remove(&entry.source);
+                    self.dims.constant_types.remove(&entry.source);
                 }
                 None => {}
             }
@@ -1158,7 +1160,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             },
             shadowed_dimensions: self.dims.remove(source),
             shadowed_constant_type: if self.dims.constant_types.contains_key(source) {
-                Arc::make_mut(&mut self.dims.constant_types).remove(source)
+                self.dims.constant_types.remove(source)
             } else {
                 None
             },
@@ -1181,7 +1183,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         self.dims.class_scope = Some(class.name.clone());
         let constants =
             classes::specializations::constant_types(&self.tree, self.session, &class.name);
-        Arc::make_mut(&mut self.dims.constant_types).extend(constants);
+        self.dims.constant_types.extend(constants);
         // The name of a property of unpacked structure type, whose members
         // are properties named by their member paths, is hidden too.
         let aggregates = class

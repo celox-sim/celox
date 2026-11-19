@@ -224,7 +224,8 @@ fn preliminary_queries_preserve_final_scalar_parameter_bindings() {
     .unwrap();
     let env = crate::ast::parameters::const_env_from_parameters(&tree, &mut session, &parameters);
     let mut input = PackedDimensions::new(HashMap::default(), &env, &TypeAliases::default());
-    Arc::make_mut(&mut input.constant_types)
+    input
+        .constant_types
         .insert("P".into(), parameters[0].semantic_type.clone().unwrap());
     let dims = dimensions::query_operand_dimensions_id(id, &tree, &mut session, &input).unwrap();
     let ty = type_of(&tree, &mut session, id, tree.declarations(), &dims).unwrap();
@@ -350,10 +351,15 @@ fn nested_generate_imports_replace_enclosing_parameter_types() {
                 &symbols.const_env,
                 &symbols.type_aliases,
             );
-            input.constant_types = Arc::new(symbols.constant_types.clone());
+            input.constant_types = symbols
+                .constant_types
+                .iter()
+                .map(|(name, r#type)| (name.clone(), r#type.clone()))
+                .collect();
             for parameter in &symbols.parameters {
                 if let Some(ty) = &parameter.semantic_type {
-                    Arc::make_mut(&mut input.constant_types)
+                    input
+                        .constant_types
                         .insert(parameter.name().into(), ty.clone());
                 }
             }

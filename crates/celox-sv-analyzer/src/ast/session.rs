@@ -106,7 +106,7 @@ pub(crate) struct Session {
     /// members are constants, their types: an item of the pattern of an
     /// array parameter may name one (see
     /// [`array_parameters::constant_elements`]).
-    pub(super) enum_constant_types: Option<Arc<HashMap<String, semantic_types::ConstantType>>>,
+    pub(super) enum_constant_types: Option<ConstantTypes>,
 }
 
 impl Session {

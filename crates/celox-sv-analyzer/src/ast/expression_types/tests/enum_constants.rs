@@ -226,7 +226,7 @@ fn changed_constant_bindings_invalidate_expression_memos_and_values_do_not_choos
     let same = type_of(&tree, &mut session, id, tree.declarations(), &dims).unwrap();
     assert!(session.types.matches(first, same));
     let changed = dims.constant_types["C"].clone();
-    Arc::make_mut(&mut dims.constant_types).insert("A".into(), changed);
+    dims.constant_types.insert("A".into(), changed);
     let second = type_of(&tree, &mut session, id, tree.declarations(), &dims).unwrap();
     enum_type(&session.types, second, 8, false, false);
     assert!(!session.types.matches(first, second));

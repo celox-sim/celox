@@ -90,7 +90,8 @@ impl BodyBuilder<'_, '_, '_> {
                 .expression_signedness
                 .insert(member.clone(), r#type.signed);
             if let Some(binding) = &binding {
-                Arc::make_mut(&mut self.dims.constant_types)
+                self.dims
+                    .constant_types
                     .insert(member.clone(), binding.clone());
             }
             self.names
@@ -485,7 +486,7 @@ impl BodyBuilder<'_, '_, '_> {
                 self.dims.insert(name.to_string(), dimensions);
             }
             if let Some(ty) = &parameter.semantic_type {
-                Arc::make_mut(&mut self.dims.constant_types).insert(name.into(), ty.clone());
+                self.dims.constant_types.insert(name.into(), ty.clone());
             }
             if let Some(ty) = types.get(name) {
                 self.dims

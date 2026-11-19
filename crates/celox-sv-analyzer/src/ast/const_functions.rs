@@ -388,7 +388,7 @@ pub(super) fn module_constant_functions(
     session: &mut Session,
     const_env: &ConstEnv,
     type_aliases: &TypeAliases,
-    constant_types: &Arc<HashMap<String, semantic_types::ConstantType>>,
+    constant_types: &ConstantTypes,
     parameter_literals: &HashMap<String, Expr>,
 ) -> ConstantFunctions {
     module_constant_functions_with_variables(
@@ -410,7 +410,7 @@ pub(super) fn module_constant_functions_with_variables(
     session: &mut Session,
     const_env: &ConstEnv,
     type_aliases: &TypeAliases,
-    constant_types: &Arc<HashMap<String, semantic_types::ConstantType>>,
+    constant_types: &ConstantTypes,
     parameter_literals: &HashMap<String, Expr>,
     variables: &HashMap<String, VariableDimensions>,
 ) -> ConstantFunctions {
@@ -440,7 +440,7 @@ pub(super) fn symbolic_module_constant_functions(
     session: &mut Session,
     const_env: &ConstEnv,
     type_aliases: &TypeAliases,
-    constant_types: &Arc<HashMap<String, semantic_types::ConstantType>>,
+    constant_types: &ConstantTypes,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
     class_methods: procedural::ClassMethods,
@@ -500,7 +500,7 @@ fn collect_module_constant_functions(
     session: &mut Session,
     const_env: &ConstEnv,
     type_aliases: &TypeAliases,
-    constant_types: &Arc<HashMap<String, semantic_types::ConstantType>>,
+    constant_types: &ConstantTypes,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
     class_methods: procedural::ClassMethods,
