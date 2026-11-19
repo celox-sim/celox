@@ -65,7 +65,7 @@ fn interface_signatures_collecting(
                 false,
                 true,
                 false,
-                None,
+                NextStateOptions::default(),
                 warnings,
                 &[],
                 LevelLists::Processes,
