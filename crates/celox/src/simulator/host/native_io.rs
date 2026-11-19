@@ -34,6 +34,10 @@ pub(crate) const COMB_AFTER: u64 = u64::MAX - 10;
 pub(crate) const ARENA_RESERVE_NBA: u64 = u64::MAX - 11;
 pub(crate) const NBA_TIME_OVERFLOW: u64 = u64::MAX - 13;
 pub(crate) const ARENA_RESERVE_DELAYED_NBA: u64 = u64::MAX - 12;
+/// The end of a slot of a run spanning several (`scheduler::native_slot_end`):
+/// its deferred assertion reports mature; the result is 2 when the heap
+/// wants the host before the next slot.
+pub(crate) const SLOT_END: u64 = u64::MAX - 17;
 
 pub(crate) fn signature() -> celox_design::ExternSignature {
     let integer = celox_design::ExternType::Integer {
@@ -1036,6 +1040,43 @@ impl Scope<'_> {
         Ok(())
     }
 
+    /// Mature the slot's deferred assertion reports, the Observed region's
+    /// then the Postponed region's, as the host does at the end of a slot
+    /// (`Simulator::mature_deferred_assertions`), and ask for the host when
+    /// the heap holds a fault or wants a collection, both of which the host
+    /// takes between slots.
+    fn end_slot(&mut self) -> Result<u64, RuntimeErrorCode> {
+        {
+            let mut pending = self.pending.lock().unwrap();
+            self.drain_events(&mut pending)?;
+            let capacity = self.metadata.layout.runtime_event_capacity;
+            for region in [
+                celox_design::AssertionDeferral::Observed,
+                celox_design::AssertionDeferral::Final,
+            ] {
+                match pending.mature(region, capacity) {
+                    None => {}
+                    Some(RawRuntimeEvent::Missed { count }) => {
+                        return Err(RuntimeErrorCode::Runtime {
+                            message: format!(
+                                "missed {count} runtime events, which may have held a deferred $fatal"
+                            ),
+                            signals: Vec::new(),
+                        });
+                    }
+                    // `native_slot_end` admits no fatal deferred action.
+                    Some(_) => return Err(Self::fault("a fatal deferred action in a native slot")),
+                }
+            }
+        }
+        let heap = self.heap()?;
+        Ok(if heap.has_fault() || heap.should_collect() {
+            2
+        } else {
+            0
+        })
+    }
+
     fn after_comb(&self) {
         let mut pending = self.pending.lock().unwrap();
         // Do not collect the new records before cancelling the prior activation.
@@ -1336,6 +1377,8 @@ pub(crate) extern "C" fn call(
             // One counter spans every activation/pass of process_phase.
             // A new phase after NBA publication starts a fresh counter.
             scope.arena.header.returns = 0;
+        } else if encoded == SLOT_END {
+            return scope.end_slot();
         } else if encoded == COMB_BEFORE {
             scope.before_comb()?;
         } else if encoded == COMB_AFTER {

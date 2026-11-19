@@ -227,6 +227,47 @@ pub(crate) fn enable_native_services(program: &mut LaidOutProgram) {
     }
 }
 
+/// Whether the compiled scheduler ends each of its slots with a call of its
+/// native services (`native_io::SLOT_END`): one that matures the deferred
+/// assertion reports of the slot (IEEE 1800-2023 16.4.1: the observed ones
+/// in its Observed region, then the final ones in its Postponed region) and
+/// asks to return to the host when the heap holds a fault or wants a
+/// collection. With it a run spans many slots of a design with deferred
+/// assertions or heap handles, which the host otherwise ends at every slot.
+/// The reports it matures are those of combinational processes and none of
+/// them is fatal; other designs keep the host's slot ends.
+pub(crate) fn native_slot_end(program: &crate::ir::RuntimeProgram) -> bool {
+    let schema = &program.runtime_schema;
+    if !cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+        || !schema
+            .extern_functions
+            .iter()
+            .any(|function| function.name == crate::simulator::native_io::SYMBOL)
+    {
+        return false;
+    }
+    let observed: HashSet<u32> = schema
+        .comb_observers
+        .iter()
+        .map(|observer| observer.site_id)
+        .collect();
+    let mut deferred = schema
+        .runtime_event_sites
+        .iter()
+        .enumerate()
+        .filter(|(_, site)| site.deferred.is_some())
+        .peekable();
+    let has_deferred = deferred.peek().is_some();
+    let maturable =
+        deferred.all(|(index, site)| observed.contains(&(index as u32)) && !site.kind.is_fatal());
+    let handles = program
+        .design
+        .state_objects
+        .values()
+        .any(|metadata| metadata.value_kind != celox_design::ValueKind::Bits);
+    maturable && (has_deferred || handles)
+}
+
 /// Declare the native services of `program`, unless it already does.
 pub(crate) fn require_native_services(program: &mut LaidOutProgram) {
     let schema = &mut program.runtime.runtime_schema;

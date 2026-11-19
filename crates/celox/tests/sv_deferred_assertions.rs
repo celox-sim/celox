@@ -788,3 +788,55 @@ fn comb_assertion_formals_keep_their_statement_values() {
          end",
     );
 }
+
+/// Run `source` natively and on the interpreter: the reports and displays
+/// must be the same, and the compiled scheduler must run many slots per
+/// run, maturing the deferred reports at the end of each slot itself.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+fn check_multi_slot_runs(source: &str) {
+    let build =
+        || celox::Simulation::from_sv_sources(vec![(source, Path::new("multi_slot.sv"))], "Top");
+    let mut reference = build().build_interpreter().unwrap();
+    reference.run_until(1000).unwrap();
+    let expected = summary(reference.drain_runtime_events());
+    assert!(expected.len() > 4, "{expected:?}");
+    let mut native = build().build_native().unwrap();
+    native.run_until(1000).unwrap();
+    assert_eq!(summary(native.drain_runtime_events()), expected);
+    let stats = native.scheduler_stats();
+    assert!(
+        stats.compiled_slots > 4 * stats.compiled_runs.max(1),
+        "{stats:?}"
+    );
+}
+
+/// Observed and final deferred assertions of combinational logic report in
+/// many slots of one compiled run, in the order of the reference.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn deferred_reports_mature_in_multi_slot_runs() {
+    check_multi_slot_runs(
+        "`timescale 1ns/1ns\nmodule Top;\n  bit clk;\n  logic [7:0] count = 0;\n  \
+         always #5 clk = ~clk;\n  \
+         always_ff @(posedge clk) count <= count + 8'd1;\n  \
+         d: assert #0 (count[2:0] != 3'd5) else $error(\"observed %0d\", count);\n  \
+         always_comb f: assert final (count[1:0] != 2'd2) else $warning(\"final %0d\", count);\n  \
+         initial begin #400; $finish; end\nendmodule",
+    );
+}
+
+/// A design whose state holds heap handles runs many slots per compiled
+/// run; the heap is collected between runs.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn heap_handles_allow_multi_slot_runs() {
+    check_multi_slot_runs(
+        "`timescale 1ns/1ns\nmodule Top;\n  bit clk;\n  logic [7:0] count = 0;\n  \
+         string names[4];\n  \
+         initial begin names[0] = \"zero\"; names[1] = \"one\"; end\n  \
+         always #5 clk = ~clk;\n  \
+         always_ff @(posedge clk) count <= count + 8'd1;\n  \
+         always @(negedge clk) if (count[1:0] == 2'd3) $display(\"%s %0d\", names[count[2]], count);\n  \
+         initial begin #400; $finish; end\nendmodule",
+    );
+}
