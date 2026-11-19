@@ -102,8 +102,20 @@ fn single_bit_select_window(
     if (0..width).contains(&invalid) {
         return None;
     }
-    let mut checked_index = constants.clone();
-    checked_index.insert(lower.0.clone(), lower.1);
+    // The index at its checked value, with the other names of the
+    // expression bound as the module binds them.
+    let checked_index = bound_environment([&**then_expr], |name| {
+        if name == lower.0 {
+            Some(lower.1)
+        } else {
+            constants.get(name).copied()
+        }
+    })
+    .unwrap_or_else(|| {
+        let mut checked_index = constants.clone();
+        checked_index.insert(lower.0.clone(), lower.1);
+        checked_index
+    });
     let position = sv::typecheck::eval_const_expr_with_types(then_expr, &checked_index, types)?
         .checked_add(offset)?;
     if !(0..width).contains(&position) {
@@ -621,20 +633,67 @@ pub(super) fn runtime_select_width(
     // them at zero, also the elements and bits selected from variables,
     // such as `idx[x][y]` of an unpacked array in `v[idx[x][y]*4 +: 4]`,
     // whose whole value may be wider than the evaluator's 128 bits.
-    let mut sample = constants.clone();
-    for name in name_to_id.keys() {
-        sample.entry(name.clone()).or_insert(0);
-    }
+    let msb = zero_variable_selects(msb, name_to_id, constants);
+    let lsb = zero_variable_selects(lsb, name_to_id, constants);
+    // The names the bounds read, each a constant or a variable at zero.
+    let sample = bound_environment([&msb, &lsb], |name| {
+        constants
+            .get(name)
+            .copied()
+            .or_else(|| name_to_id.contains_key(name).then_some(0))
+    })
+    .unwrap_or_else(|| {
+        let mut sample = constants.clone();
+        for name in name_to_id.keys() {
+            sample.entry(name.clone()).or_insert(0);
+        }
+        sample
+    });
     let sampled = |bound: &sv::ir::ConstExpr| {
-        sv::typecheck::eval_const_expr_with_types(
-            &zero_variable_selects(bound, name_to_id, constants),
-            &sample,
-            parameter_types,
-        )
+        sv::typecheck::eval_const_expr_with_types(bound, &sample, parameter_types)
     };
-    usize::try_from(sampled(msb)?.abs_diff(sampled(lsb)?))
+    usize::try_from(sampled(&msb)?.abs_diff(sampled(&lsb)?))
         .ok()?
         .checked_add(1)
+}
+
+/// The values of the names that `exprs` read, as `value` gives them, for
+/// evaluating them without a copy of every constant and variable of the
+/// module; names `value` does not give are left out, as they would be
+/// absent from the module's tables. `None` when an expression calls a
+/// function, whose body may read other names.
+fn bound_environment<'a>(
+    exprs: impl IntoIterator<Item = &'a sv::ir::ConstExpr>,
+    value: impl Fn(&str) -> Option<i128>,
+) -> Option<HashMap<String, i128>> {
+    use sv::ir::ConstExpr;
+    let mut environment = HashMap::default();
+    let mut pending: Vec<&ConstExpr> = exprs.into_iter().collect();
+    while let Some(expr) = pending.pop() {
+        match expr {
+            ConstExpr::Literal(_) => {}
+            ConstExpr::Ident(name) => {
+                if !environment.contains_key(name)
+                    && let Some(value) = value(name)
+                {
+                    environment.insert(name.clone(), value);
+                }
+            }
+            ConstExpr::Select { expr, bit } => pending.extend([&**expr, &**bit]),
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                pending.extend([&**expr, &**msb, &**lsb]);
+            }
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => pending.push(expr),
+            ConstExpr::Binary { left, right, .. } => pending.extend([&**left, &**right]),
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => pending.extend([&**condition, &**then_expr, &**else_expr]),
+            ConstExpr::Function { .. } => return None,
+        }
+    }
+    Some(environment)
 }
 
 /// `bound` with each select from a variable, a run-time operand, replaced by
