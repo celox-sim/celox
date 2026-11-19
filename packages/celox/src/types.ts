@@ -413,7 +413,10 @@ export interface SimulatorOptions {
 	 * partitions of the combinational logic whose inputs changed; off unless
 	 * enabled with "+sir:partitioned_settle"), net_inlining (SystemVerilog
 	 * designs built with a dead store policy: combinational nets the policy
-	 * does not keep observable become part of the logic that reads them)
+	 * does not keep observable become part of the logic that reads them),
+	 * scheduler_callees (a native image's compiled scheduler calls its larger
+	 * bodies as functions of their own, which compile in parallel; on at
+	 * every level, "-sir:scheduler_callees" inlines them)
 	 *
 	 * @example ["-sir:reschedule", "+sir:gvn"]
 	 */

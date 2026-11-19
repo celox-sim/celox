@@ -716,6 +716,13 @@ pub struct LaidOutProgram {
     /// The cone sources of the settle ([`crate::settle::cone_source_homes`]),
     /// once the kernels are instrumented with them.
     pub(crate) cone_homes: Option<HashSet<usize>>,
+    /// The bodies the compiled scheduler of a native image calls instead of
+    /// inlining them, each compiled as a function of its own; the scheduler
+    /// calls callee `i` as the native kernel
+    /// [`crate::scheduler::CALLEE_PLACEHOLDER`]` + i`, which the backend
+    /// binds to its slot.
+    #[cfg(feature = "host-runtime")]
+    pub(crate) scheduler_callees: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
 }
 
 impl LaidOutProgram {
@@ -855,10 +862,20 @@ impl LaidOutProgram {
         for function in &mut self.sir.functions {
             cut(&mut function.unit, &codes);
         }
+        // The compiled scheduler's callees are bodies it no longer inlines.
+        #[cfg(feature = "host-runtime")]
+        for callee in &mut self.scheduler_callees {
+            cut(callee, &codes);
+        }
+        #[cfg(feature = "host-runtime")]
+        let callees = self.scheduler_callees.iter();
+        #[cfg(not(feature = "host-runtime"))]
+        let callees = std::iter::empty();
         debug_assert!(
             self.sir
                 .units()
                 .chain(self.sir.functions.iter().map(|function| &function.unit))
+                .chain(callees)
                 .flat_map(|unit| unit.blocks.values())
                 .flat_map(|block| &block.instructions)
                 .all(|instruction| !matches!(
@@ -1101,6 +1118,8 @@ impl OptimizedSir {
             #[cfg(feature = "host-runtime")]
             deferred_derived_edges: HashMap::default(),
             cone_homes: None,
+            #[cfg(feature = "host-runtime")]
+            scheduler_callees: Vec::new(),
         };
         if !defer_instrumentation {
             laid_out.prune_stale_marks();
