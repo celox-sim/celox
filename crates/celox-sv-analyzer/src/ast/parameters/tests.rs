@@ -1727,3 +1727,77 @@ fn member_constants_follow_their_parameter() {
     );
     assert_eq!(member_literal("other", "a", &env), None);
 }
+
+/// The packed dimensions a parameter environment gives a scope are those of
+/// `parameter_packed_dimensions_with_imported`: of the imported parameters,
+/// shadowed by every parameter of the scope declared so far, also one
+/// without packed dimensions, and of those parameters. The imported ones are
+/// built once per table of imported symbols, also when a scope's
+/// declarations go through another table.
+#[test]
+fn environment_packed_dimensions_are_those_of_the_imported_and_declared_parameters() {
+    let packed = |name: &str, msb: i128| {
+        let mut parameter = Parameter::new(
+            name.into(),
+            Some(ConstExpr::Literal("0".into())),
+            None,
+            None,
+            false,
+            false,
+            true,
+        );
+        if msb >= 0 {
+            parameter.packed_ranges = vec![PackedRange::new(
+                ConstExpr::Literal(msb.to_string()),
+                ConstExpr::Literal("0".into()),
+            )];
+        }
+        parameter
+    };
+    let imported = |parameters: Vec<Parameter>| {
+        Arc::new(scope::ScopeSymbols {
+            parameters,
+            ..Default::default()
+        })
+    };
+    let first = imported(vec![packed("IMPORTED", 7), packed("SHADOWED", 3)]);
+    let second = imported(vec![packed("OTHER", 5)]);
+    let source = crate::source_tree::parse_source("", Path::new("environment.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&source);
+    let first_tree = tree.importing(first.clone());
+    let second_tree = tree.importing(second.clone());
+    let session = &mut Session::default();
+    let base = ConstEnv::default();
+    let mut environment = ParameterEnvironment::new(&first_tree, session, &[], &base, &[]);
+    // A scalar `SHADOWED` hides the imported packed one.
+    let declared = [packed("SHADOWED", -1), packed("OWN", 15)];
+    let shown = |dimensions: ScopedMap<VariableDimensions>| {
+        let mut entries: Vec<_> = dimensions
+            .iter()
+            .map(|(name, shape)| format!("{name}: {shape:?}"))
+            .collect();
+        entries.sort();
+        entries
+    };
+    for (tree, symbols) in [
+        (&first_tree, &first),
+        (&second_tree, &second),
+        (&first_tree, &first),
+    ] {
+        for prefix in 0..=declared.len() {
+            let expected: ScopedMap<VariableDimensions> =
+                module_elaboration::parameter_packed_dimensions_with_imported(
+                    &declared[..prefix],
+                    symbols,
+                )
+                .into();
+            for _ in 0..2 {
+                assert_eq!(
+                    shown(environment.packed_dimensions(tree, &declared[..prefix])),
+                    shown(expected.shared()),
+                    "prefix {prefix}"
+                );
+            }
+        }
+    }
+}
