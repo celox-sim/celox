@@ -512,9 +512,41 @@ fn match_slt_found_update<A: Hash + Eq + Clone>(
     }
 }
 
+/// `shared(value, uses)` names the earlier "found" values that other
+/// expressions read as well, beyond the `uses` the step after them makes.
+/// The reduction stops at the first of them and ORs it in whole: each
+/// value of a chain whose intermediate values are read elsewhere is then the
+/// previous one OR its own conditions, rather than a reduction of all the
+/// conditions before it, which would cost the square of the chain's length.
+/// How often the nodes of one "found" step, its select and the update it
+/// selects down to the previous value, read `previous`.
+fn uses_in_step<A: Hash + Eq + Clone>(
+    step: NodeId,
+    previous: NodeId,
+    arena: &SLTNodeArena<A>,
+) -> usize {
+    let mut seen = crate::HashSet::default();
+    let mut work = vec![(step, 0)];
+    let mut uses = 0;
+    while let Some((node, depth)) = work.pop() {
+        if node == previous || !seen.insert(node) {
+            continue;
+        }
+        for child in SLTToSIRLowerer::node_children(node, arena) {
+            if child == previous {
+                uses += 1;
+            } else if depth < 2 {
+                work.push((child, depth + 1));
+            }
+        }
+    }
+    uses
+}
+
 fn match_slt_found_reduction<A: Hash + Eq + Clone>(
     root: NodeId,
     arena: &SLTNodeArena<A>,
+    shared: &dyn Fn(NodeId, usize) -> bool,
 ) -> Option<SLTCountPlan<A>> {
     if slt_width(root, arena) != 1 {
         return None;
@@ -554,8 +586,13 @@ fn match_slt_found_reduction<A: Hash + Eq + Clone>(
             SLTCountPredicate::And(cond, lane)
         };
         predicates.push(predicate);
+        let step = cursor;
         cursor = *previous;
         if slt_const_u64(cursor, arena) == Some(0) && slt_width(cursor, arena) == 1 {
+            break;
+        }
+        if shared(cursor, uses_in_step(step, cursor, arena)) {
+            predicates.push(SLTCountPredicate::Node(cursor));
             break;
         }
     }
@@ -886,7 +923,7 @@ fn match_slt_count_idiom<A: Hash + Eq + Clone>(
     root: NodeId,
     arena: &SLTNodeArena<A>,
 ) -> Option<SLTCountPlan<A>> {
-    match_slt_found_reduction(root, arena)
+    match_slt_found_reduction(root, arena, &|_, _| false)
         .or_else(|| match_slt_priority_count(root, arena))
         .or_else(|| match_slt_popcount(root, arena, None))
 }
@@ -895,8 +932,12 @@ fn match_slt_count_idiom_with_materialized<A: Hash + Eq + Clone>(
     root: NodeId,
     arena: &SLTNodeArena<A>,
     materialized: &crate::HashMap<NodeId, RegisterId>,
+    fanout: &[usize],
 ) -> Option<SLTCountPlan<A>> {
-    match_slt_found_reduction(root, arena)
+    let shared = |node: NodeId, uses: usize| {
+        materialized.contains_key(&node) || fanout.get(node.0).is_some_and(|count| *count > uses)
+    };
+    match_slt_found_reduction(root, arena, &shared)
         .or_else(|| match_slt_priority_count(root, arena))
         .or_else(|| match_slt_popcount(root, arena, Some(materialized)))
 }
@@ -1053,7 +1094,7 @@ impl SLTToSIRLowerer {
             return None;
         }
         let plan = if allow_cache {
-            match_slt_count_idiom_with_materialized(node, arena, cache)?
+            match_slt_count_idiom_with_materialized(node, arena, cache, &self.cost_cache.fanout)?
         } else {
             match_slt_count_idiom(node, arena)?
         };
