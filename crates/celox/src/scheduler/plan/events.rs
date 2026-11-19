@@ -226,15 +226,22 @@ impl<'a> PlanBuilder<'a> {
             .enumerate()
             .filter(|(_, event)| model.active_commits.contains(&event.signal))
             .filter(|(_, event)| {
+                // A container operation of the heap reaches the design only
+                // through the handle the unit stores, as the testbench memory
+                // `bit [7:0] mem [bit [31:0]]` a negedge process writes does.
                 unknown_gate
                     || event.eval_only.as_ref().is_none_or(|units| {
-                        units.iter().flat_map(instructions).any(|inst| {
-                            makes_opaque_calls(inst, &schema.extern_functions)
-                                || written_storage(inst).any(|target| {
-                                    target.region == STABLE_REGION
-                                        && active_observers
-                                            .contains(&storage(target.absolute_addr()))
-                                })
+                        units.iter().any(|unit| {
+                            let constants = unit_constants(unit);
+                            instructions(unit).any(|inst| {
+                                (makes_opaque_calls(inst, &schema.extern_functions)
+                                    && !container_value_call(inst, &constants))
+                                    || written_storage(inst).any(|target| {
+                                        target.region == STABLE_REGION
+                                            && active_observers
+                                                .contains(&storage(target.absolute_addr()))
+                                    })
+                            })
                         })
                     })
             })
