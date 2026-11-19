@@ -139,7 +139,7 @@ pub(super) fn stage_nonblocking(
             lsb: lsb.clone(),
             array_slice_width: array_slice_width.clone(),
             array_slice_reversed: *array_slice_reversed,
-            window: *window,
+            window: window.clone(),
         },
     };
     let mark = |lvalue: &sv::ir::LValue, stage: &NbaStage| sv::ir::Stmt::Assign {
@@ -319,13 +319,25 @@ pub(super) fn emit_nba_merges(
         if let Some(element_width) =
             unpacked_element_width(variable).filter(|_| !variable.array_dims.is_empty())
         {
+            // A forced element keeps its forced value (IEEE 1800-2023 10.6.2).
+            let forced = pm
+                .force_controls(stage.id)
+                .filter(|_| pm.procedurally_forced.contains(&stage.id))
+                .map(|controls| (controls, pm.force_holds.get(&stage.id).copied()));
             match &stage.sites {
                 Some(sites) => {
                     for site in sites {
-                        emit_array_site_merge(builder, stage, site, variable, element_width);
+                        emit_array_site_merge(
+                            builder,
+                            stage,
+                            site,
+                            variable,
+                            element_width,
+                            forced,
+                        );
                     }
                 }
-                None => emit_array_nba_merge(builder, stage, variable, element_width),
+                None => emit_array_nba_merge(builder, stage, variable, element_width, forced),
             }
             continue;
         }
@@ -379,12 +391,14 @@ pub(super) fn emit_nba_merges(
             builder.alloc_bit(width, false)
         };
         builder.emit(SIRInstruction::Binary(merged, kept, BinaryOp::Or, taken));
-        // A forced variable keeps its forced value (IEEE 1800-2023 10.6.2).
+        // A forced variable keeps its forced value (IEEE 1800-2023 10.6.2);
+        // a nonblocking assignment is no write of a procedure that holds it.
         let merged = match pm.force_controls(stage.id) {
             Some(controls) if pm.procedurally_forced.contains(&stage.id) => {
                 crate::lowering::ff_processes::force_select(
                     builder,
                     controls,
+                    None,
                     SIROffset::Static(0),
                     merged,
                 )
@@ -477,6 +491,7 @@ pub(super) fn emit_array_site_merge(
     site: &NbaArraySite,
     variable: &SvVariable,
     element_width: usize,
+    forced: ForcedElements,
 ) {
     let count = variable.width / element_width;
     let hit = builder.alloc_bit(1, false);
@@ -551,7 +566,7 @@ pub(super) fn emit_array_site_merge(
         bit_offset: 0,
         dynamic_bit_offset: None,
     };
-    emit_element_merge(builder, stage, variable, element_width, &offset);
+    emit_element_merge(builder, stage, variable, element_width, &offset, forced);
     let clear = builder.alloc_bit(element_width, false);
     builder.emit(SIRInstruction::Imm(clear, SIRValue::new(0u8)));
     builder.emit(SIRInstruction::Store(
@@ -589,14 +604,20 @@ pub(super) fn emit_array_site_merge(
     builder.switch_to_block(next);
 }
 
+/// The force controls of a forced unpacked array, and its hold, which the
+/// merge of each element applies.
+type ForcedElements = Option<((SourceVarId, SourceVarId), Option<SourceVarId>)>;
+
 /// Merge the staged nonblocking value of one element of an unpacked array
-/// into its stable state, in the bits its mask marks.
+/// into its stable state, in the bits its mask marks; a forced element
+/// keeps its forced bits.
 pub(super) fn emit_element_merge(
     builder: &mut SIRBuilder<Addr>,
     stage: &NbaStage,
     variable: &SvVariable,
     element_width: usize,
     offset: &SIROffset,
+    forced: ForcedElements,
 ) {
     let alloc = |builder: &mut SIRBuilder<Addr>| {
         if variable.is_4state {
@@ -634,6 +655,16 @@ pub(super) fn emit_element_merge(
     builder.emit(SIRInstruction::Binary(taken, value, BinaryOp::And, mask));
     let merged = alloc(builder);
     builder.emit(SIRInstruction::Binary(merged, kept, BinaryOp::Or, taken));
+    let merged = match forced {
+        Some((controls, hold)) => crate::lowering::ff_processes::force_select(
+            builder,
+            controls,
+            hold,
+            offset.clone(),
+            merged,
+        ),
+        None => merged,
+    };
     builder.emit(SIRInstruction::Store(
         stable(stage.id),
         offset.clone(),
@@ -651,6 +682,7 @@ pub(super) fn emit_array_nba_merge(
     stage: &NbaStage,
     variable: &SvVariable,
     element_width: usize,
+    forced: ForcedElements,
 ) {
     let count = variable.width / element_width;
     let first = builder.alloc_bit(64, false);
@@ -680,7 +712,7 @@ pub(super) fn emit_array_nba_merge(
         bit_offset: 0,
         dynamic_bit_offset: None,
     };
-    emit_element_merge(builder, stage, variable, element_width, &offset);
+    emit_element_merge(builder, stage, variable, element_width, &offset, forced);
     let one = builder.alloc_bit(64, false);
     builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
     let next = builder.alloc_bit(64, false);

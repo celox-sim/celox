@@ -86,6 +86,20 @@ pub(in crate::ast) fn port_formals<'a>(
         if ty.kind == TypeKind::Implicit {
             ty.kind = TypeKind::Logic;
         }
+        if !declared_port_range_matches(
+            port.declared_type,
+            Some(port.data_type),
+            &ty,
+            tree,
+            session,
+            &context.const_env,
+            &context.type_aliases,
+        )? {
+            return Err(AnalyzerError::Parse(format!(
+                "the ranges of a non-ANSI port declaration and its variable declaration of \
+                 {what} formal `{name}` differ"
+            )));
+        }
         previous_type = Some(ty.clone());
         // A container formal that is not a reference holds a copy of the
         // container (IEEE 1800-2023 13.5.1), as an assignment makes one.
@@ -154,5 +168,31 @@ mod tests {
         assert!(result.binding.get(&session.types).is_some());
         let handle = classes::handle_type(&tree, session, "C").unwrap();
         assert!(handle.binding.get(&session.types).is_some());
+    }
+
+    #[test]
+    fn non_ansi_formal_ranges_compare_by_their_bounds() {
+        // IEEE 1800-2023 23.2.2.1, which 13.3 follows: the ranges of a port
+        // declaration and its variable declaration are identical when their
+        // bounds are, however they are written.
+        let session = &mut Session::default();
+        let tree = crate::source_tree::parse_source(
+            "module M;
+             task same; input [W-1:0] a; reg [7:0] a; endtask
+             task other; input [W-1:0] a; reg [3:0] a; endtask
+             endmodule",
+            Path::new("non-ansi-formals.sv"),
+        )
+        .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let declaring = ConstEnv::from_iter([("W".into(), 8)]);
+        let context =
+            PackedDimensions::new(HashMap::default(), &declaring, &TypeAliases::default());
+        let same = &tree.declarations().subroutines[0];
+        let formals = subroutine_formals(same, &tree, session, &context).unwrap();
+        assert_eq!(formals[0].2.packed_ranges.len(), 1);
+        let other = &tree.declarations().subroutines[1];
+        let error = subroutine_formals(other, &tree, session, &context).unwrap_err();
+        assert!(error.to_string().contains("formal `a` differ"), "{error}");
     }
 }

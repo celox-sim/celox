@@ -97,7 +97,7 @@ impl Comb<'_, '_> {
                         lsb,
                         array_slice_width: array_slice_width.clone(),
                         array_slice_reversed: *array_slice_reversed,
-                        window: *window,
+                        window: window.clone(),
                     },
                     self.m.variables,
                     self.m.name_to_id,

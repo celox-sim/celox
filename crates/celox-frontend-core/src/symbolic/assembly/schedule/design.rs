@@ -57,8 +57,6 @@ pub(super) fn expand_design(
                 .len()
         })
         .sum::<usize>();
-    let scheduler_slots =
-        declare_scheduler_slots(&mut modules, root_id, process_count, expected_events);
     // Each package with variables is one instance outside the hierarchy,
     // named by a path segment no instance name can take.
     let mut package_instances = HashMap::default();
@@ -103,6 +101,21 @@ pub(super) fn expand_design(
         flatten_timing,
         "unify_clock_domains",
         unify_clock_domains(bindings, &expanded, &instance_modules, &modules)
+    );
+    // An input of a top-level module that only waiting processes sense is
+    // an event as well, of none of the domains counted above.
+    let waited_inputs = declare_waited_inputs(
+        bindings,
+        &instance_modules,
+        &mut modules,
+        &clock_domains,
+        &top_instances(&expanded, hidden_root, &package_instances),
+    );
+    let scheduler_slots = declare_scheduler_slots(
+        &mut modules,
+        root_id,
+        process_count,
+        expected_events + waited_inputs,
     );
     // Whether every automatically started process has reached its first
     // suspension: one combinational path computes it from their statuses,
@@ -259,6 +272,25 @@ pub(super) fn relocate_design(
 }
 
 /// The width of every variable and whether it is four-state.
+/// Release the units of every module once each instance holds its relocated
+/// copy of them (see [`relocate_design`]) and the package-driver check has
+/// read them: nothing after relocation runs a module's own units, and a
+/// large design would otherwise keep both copies until its schedule is built.
+pub(super) fn release_module_units(modules: &mut HashMap<ModuleId, SimModule>) {
+    for module in modules.values_mut() {
+        module.eval_only_ff_blocks = Default::default();
+        module.apply_ff_blocks = Default::default();
+        module.eval_apply_ff_blocks = Default::default();
+        module.split_commit_ff_blocks = Default::default();
+        module.parallel_ff_parts = Default::default();
+        module.functions = Default::default();
+        for process in &mut module.processes {
+            process.kernel.blocks = Default::default();
+            process.kernel.register_map = Default::default();
+        }
+    }
+}
+
 pub(super) fn variable_shapes(design: &Design) -> HashMap<AbsoluteAddr, (usize, bool)> {
     let Design {
         instance_modules,

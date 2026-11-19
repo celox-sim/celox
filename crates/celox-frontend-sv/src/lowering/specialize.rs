@@ -108,13 +108,14 @@ pub(super) fn analyze_specialization(
     module: &AnalyzedSvModule,
     design: &mut sv::Design,
     key: &LoweredSvModuleKey,
-    hierarchical: &[sv::ast::HierarchicalSignal],
+    hierarchical: sv::ast::HierarchicalObjects<'_>,
+    forced: &[String],
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<sv::Ir, sv::AnalyzerError> {
     #[cfg(test)]
     tests::record_analysis(key);
     let (overrides, type_overrides, pattern_overrides) = specialization_overrides(key)?;
-    let analyzed = module.source.analyze_module_with_hierarchy(
+    let analyzed = module.source.analyze_module_with_hierarchy_and_forces(
         &module.name,
         &overrides,
         &type_overrides,
@@ -123,6 +124,7 @@ pub(super) fn analyze_specialization(
         &module.packages,
         design,
         hierarchical,
+        forced,
     );
     if let Err(error) = &analyzed {
         warnings.extend(crate::warning::analyzer_warnings(error.warnings()));
@@ -178,7 +180,11 @@ pub(super) fn specialize_module(
                         module,
                         design,
                         key,
-                        hierarchical.signals,
+                        sv::ast::HierarchicalObjects {
+                            signals: hierarchical.signals,
+                            subroutines: &[],
+                        },
+                        hierarchical.forced,
                         warnings,
                     )?;
                     match hierarchical.instances {
@@ -291,12 +297,31 @@ pub(super) fn specialize_module(
 }
 
 /// The hierarchical name at which the analysis of a module failed, which
-/// needs the specialized hierarchy below it.
-pub(super) fn hierarchical_reference_path(error: &sv::AnalyzerError) -> Option<&str> {
+/// needs the specialized hierarchy below it: its components, and the
+/// interface instance of the module whose body has it, if one does.
+pub(super) fn unresolved_name(
+    error: &sv::AnalyzerError,
+) -> Option<(&[String], Option<&sv::InterfaceBodyScope>)> {
     match error {
-        sv::AnalyzerError::HierarchicalReference { path } => Some(path),
-        sv::AnalyzerError::WithWarnings { error, .. } => hierarchical_reference_path(error),
+        sv::AnalyzerError::HierarchicalReference {
+            components,
+            interface,
+            ..
+        } => Some((components, interface.as_deref())),
+        sv::AnalyzerError::WithWarnings { error, .. } => unresolved_name(error),
         _ => None,
+    }
+}
+
+/// Whether `error` stops an analysis that the elaborated hierarchy lets go
+/// on: a hierarchical name, or a call of a task or function through a
+/// virtual interface whose hierarchical names each instance resolves (see
+/// [`sv::AnalyzerError::VirtualInterfaceOutward`]).
+pub(super) fn waits_for_hierarchy(error: &sv::AnalyzerError) -> bool {
+    match error {
+        sv::AnalyzerError::VirtualInterfaceOutward { .. } => true,
+        sv::AnalyzerError::WithWarnings { error, .. } => waits_for_hierarchy(error),
+        error => unresolved_name(error).is_some(),
     }
 }
 

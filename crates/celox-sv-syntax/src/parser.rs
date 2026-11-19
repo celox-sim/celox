@@ -8,6 +8,8 @@ mod body;
 mod classes;
 mod constraints;
 mod coverage;
+#[cfg(test)]
+mod coverage_tests;
 mod declarations;
 mod dpi;
 mod expressions;
@@ -22,6 +24,7 @@ mod nets;
 mod non_ansi;
 mod numbers;
 mod packages;
+mod primitives;
 mod procedures;
 mod properties;
 #[cfg(test)]
@@ -71,9 +74,12 @@ pub struct Declarations {
     pub package_bindings: Vec<PackageBinding>,
     pub modport_declarations: Vec<ModportDeclaration>,
     pub assertion_declarations: Vec<AssertionDeclaration>,
-    /// The headers of every covergroup declaration, whose bodies stay
-    /// unconverted.
+    /// Every covergroup declaration (IEEE 1800-2023 19.3), by
+    /// [`CovergroupId`].
     pub covergroups: Vec<CovergroupDeclaration>,
+    /// The select expressions of the cross bins of every covergroup
+    /// (19.6.1), by [`SelectId`].
+    pub coverage_selects: Vec<SelectExpr>,
     /// Every user-defined nettype declaration, which stays unconverted.
     pub nettypes: Vec<NettypeDeclaration>,
     /// Every `let` declaration, whose item stays unconverted.
@@ -97,6 +103,8 @@ pub struct Declarations {
     /// The productions of the `randsequence` statements whose structure
     /// parsed (see [`Randsequence`]).
     pub randsequences: Vec<Randsequence>,
+    /// The user-defined primitives the source declares.
+    pub primitives: Vec<Primitive>,
 }
 
 impl Declarations {
@@ -112,7 +120,8 @@ impl Declarations {
         Self::from_tokens(pp.sources, source.tokens)
     }
 
-    pub fn from_tokens(sources: SourceMap, tokens: Vec<Token>) -> Result<Self> {
+    pub fn from_tokens(sources: SourceMap, mut tokens: Vec<Token>) -> Result<Self> {
+        keywords::escape_unreserved_keywords(&mut tokens);
         let indices = tokens
             .iter()
             .enumerate()
@@ -128,7 +137,7 @@ impl Declarations {
             sequence_operands: 0,
             sequence_depth: 0,
             timing_operand_start: None,
-            keyword_versions: Vec::new(),
+            coverage_operand: CoverageOperand::None,
             source_items: Vec::new(),
             expressions: Vec::new(),
             types: Vec::new(),
@@ -138,6 +147,7 @@ impl Declarations {
             modport_declarations: Vec::new(),
             assertion_declarations: Vec::new(),
             covergroups: Vec::new(),
+            coverage_selects: Vec::new(),
             nettypes: Vec::new(),
             sequences: Vec::new(),
             type_aliases: Vec::new(),
@@ -160,7 +170,10 @@ impl Declarations {
             class_scopes: Vec::new(),
             lets: Vec::new(),
             default_nettype: Some("wire".to_string()),
+            primitive_names: Vec::new(),
+            primitives: Vec::new(),
         };
+        parser.primitive_names = parser.primitive_names();
         let units = parser.units()?;
         let source_items = parser.source_items;
         let expressions = parser.expressions;
@@ -171,6 +184,7 @@ impl Declarations {
         let modport_declarations = parser.modport_declarations;
         let assertion_declarations = parser.assertion_declarations;
         let covergroups = parser.covergroups;
+        let coverage_selects = parser.coverage_selects;
         let nettypes = parser.nettypes;
         let lets = parser.lets;
         let sequences = parser.sequences;
@@ -190,6 +204,7 @@ impl Declarations {
         let subroutines = parser.subroutines;
         let classes = parser.classes;
         let randsequences = parser.randsequences;
+        let primitives = parser.primitives;
         Ok(Self {
             source_items,
             expressions,
@@ -200,6 +215,7 @@ impl Declarations {
             modport_declarations,
             assertion_declarations,
             covergroups,
+            coverage_selects,
             nettypes,
             lets,
             sequences,
@@ -219,6 +235,7 @@ impl Declarations {
             subroutines,
             classes,
             randsequences,
+            primitives,
             sources,
             tokens,
             units,
@@ -292,6 +309,16 @@ impl Declarations {
 
     pub fn assertion_declaration(&self, id: AssertionDeclarationId) -> &AssertionDeclaration {
         &self.assertion_declarations[id.0]
+    }
+
+    /// Resolve a covergroup declaration handle.
+    pub fn covergroup(&self, id: CovergroupId) -> &CovergroupDeclaration {
+        &self.covergroups[id.0]
+    }
+
+    /// Resolve a select-expression handle of a cross bin.
+    pub fn coverage_select(&self, id: SelectId) -> &SelectExpr {
+        &self.coverage_selects[id.0]
     }
 
     pub fn sequence(&self, id: SequenceId) -> &Sequence {
@@ -390,6 +417,20 @@ impl Declarations {
 
 type Result<T> = std::result::Result<T, ParseError>;
 
+/// The covergroup operand an expression is parsed as (IEEE 1800-2023
+/// A.2.11), which decides where the expression ends.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CoverageOperand {
+    /// An ordinary expression.
+    None,
+    /// A value of a `trans_range_list` (19.5.2): `[*`, `[->` and `[=` after
+    /// it begin the repetition, not a select.
+    Transition,
+    /// A leaf of a `select_expression` (19.6.1.2): `with (` after it filters
+    /// the selection, unless it follows an array method.
+    Select,
+}
+
 struct Parser<'a> {
     sources: &'a SourceMap,
     tokens: &'a [Token],
@@ -405,7 +446,9 @@ struct Parser<'a> {
     /// parsed starts. A parenthesis after it begins the controlled
     /// expression or statement, not call arguments.
     timing_operand_start: Option<usize>,
-    keyword_versions: Vec<keywords::KeywordVersion>,
+    /// Where an operand of the covergroup grammar being parsed ends
+    /// (A.2.11).
+    coverage_operand: CoverageOperand,
     source_items: Vec<SourceItem>,
     expressions: Vec<Expr>,
     types: Vec<DataType>,
@@ -415,6 +458,7 @@ struct Parser<'a> {
     modport_declarations: Vec<ModportDeclaration>,
     assertion_declarations: Vec<AssertionDeclaration>,
     covergroups: Vec<CovergroupDeclaration>,
+    coverage_selects: Vec<SelectExpr>,
     nettypes: Vec<NettypeDeclaration>,
     sequences: Vec<Sequence>,
     type_aliases: Vec<TypeAlias>,
@@ -443,6 +487,9 @@ struct Parser<'a> {
     /// `default_nettype none`.
     default_nettype: Option<String>,
     lets: Vec<LetDeclaration>,
+    /// The names of the user-defined primitives the source declares.
+    primitive_names: Vec<String>,
+    primitives: Vec<Primitive>,
 }
 
 impl Parser<'_> {
@@ -486,6 +533,28 @@ impl Parser<'_> {
             first
         };
         TokenRange { start: first, end }
+    }
+    /// Parse the optional `: name` after the keyword that ends a block or
+    /// declaration named `begin`, which shall be that name (IEEE 1800-2023
+    /// 9.3.4): a name after the end of an unnamed block differs from it.
+    fn end_label(&mut self, begin: Option<&Name>) -> Result<Option<Name>> {
+        if !self.eat(":") {
+            return Ok(None);
+        }
+        let label = self.name()?;
+        if begin.is_none_or(|begin| begin.value() != label.value()) {
+            self.at -= 1;
+            let error = self.error(match begin {
+                Some(begin) => format!(
+                    "end label `{}` differs from the name `{}` of its block",
+                    label.value(),
+                    begin.value()
+                ),
+                None => format!("end label `{}` of an unnamed block", label.value()),
+            });
+            return Err(error);
+        }
+        Ok(Some(label))
     }
     fn error(&self, message: impl Into<String>) -> ParseError {
         let token = self

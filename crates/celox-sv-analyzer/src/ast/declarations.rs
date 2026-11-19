@@ -24,6 +24,19 @@ pub(super) fn ports_from_scope(
             .map(type_binding::port_direction)
             .unwrap_or(inherited_direction);
         let explicit = matches!(native.kind, celox_sv_syntax::PortKind::Explicit { .. });
+        // An interconnect port has no data type (23.2.2.3): only the
+        // signing and packed dimensions of an implicit data type may
+        // be authored.
+        if native.net_type.as_deref() == Some("interconnect")
+            && native.data_type.is_some_and(|id| {
+                !matches!(
+                    syntax_tree.declarations().data_type(id).kind,
+                    celox_sv_syntax::DataTypeKind::Implicit
+                )
+            })
+        {
+            return Err(unsupported("interconnect port with a data type"));
+        }
         // An output with an explicit data type defaults to a variable;
         // input/inout and implicitly typed outputs default to nets unless
         // `var` is present (IEEE 1800-2023 23.2.2.3).
@@ -35,20 +48,32 @@ pub(super) fn ports_from_scope(
                     celox_sv_syntax::DataTypeKind::Implicit
                 )
             });
-        let base = match type_binding::port_type(
-            native,
-            syntax_tree,
-            session,
-            const_env,
-            type_aliases,
-            &declarations,
-        )? {
-            Some(ty) => ty,
-            None if native.data_type.is_none() => inherited_type.clone(),
-            None => return Err(unsupported("unsupported port data type")),
+        // The self-determined type of the expression of an explicitly named
+        // port is the port's type (IEEE 1800-2023 23.2.2.2), which takes the
+        // module's declarations: see `ScopeElaboration::ports_and_signals`.
+        // A port without an expression connects nothing.
+        let expression = match &native.kind {
+            celox_sv_syntax::PortKind::Explicit { expression, .. } => Some(*expression),
+            _ => None,
+        };
+        let base = match expression {
+            Some(_) => Type::new(TypeKind::Logic),
+            None => match type_binding::port_type(
+                native,
+                syntax_tree,
+                session,
+                const_env,
+                type_aliases,
+                &declarations,
+            )? {
+                Some(ty) => ty,
+                None if native.data_type.is_none() => inherited_type.clone(),
+                None => return Err(unsupported("unsupported port data type")),
+            },
         };
         if !type_binding::declared_port_range_matches(
-            native,
+            native.declared_type,
+            native.data_type,
             &base,
             syntax_tree,
             session,
@@ -124,8 +149,21 @@ pub(super) fn ports_from_scope(
                 return Err(unsupported("unpacked structure port default"));
             }
         }
+        let variable = native.variable
+            || typed_output
+            || (direction == PortDirection::Output
+                && native.net_type.is_none()
+                && native.direction.is_none()
+                && native.data_type.is_none()
+                && inherited_variable);
+        // The initializer of a variable output port initializes the
+        // variable (IEEE 1800-2023 23.2.2.2), as a variable declaration
+        // assignment does: see `procedural::port_initializers`. It is no
+        // default of the port.
+        let initialized_output = direction == PortDirection::Output && variable;
         let default = native
             .default
+            .filter(|_| !initialized_output)
             .map(|value| {
                 if direction != PortDirection::Input {
                     return Err(unsupported("default value on a non-input port"));
@@ -163,13 +201,6 @@ pub(super) fn ports_from_scope(
                 .ok_or_else(|| unsupported("nonconstant input port default"))
             })
             .transpose()?;
-        let variable = native.variable
-            || typed_output
-            || (direction == PortDirection::Output
-                && native.net_type.is_none()
-                && native.direction.is_none()
-                && native.data_type.is_none()
-                && inherited_variable);
         inherited_variable = variable;
         inherited_unresolved = if let Some(net_type) = &native.net_type {
             net_type == "uwire"
@@ -193,7 +224,8 @@ pub(super) fn ports_from_scope(
         )
         .with_unresolved_net(inherited_unresolved)
         .with_net_resolution(inherited_resolution)
-        .with_default(default);
+        .with_default(default)
+        .with_expression(expression.flatten());
         port.randomizable = variable && direction != PortDirection::Input;
         ports.push(port);
     }
@@ -203,7 +235,9 @@ pub(super) fn ports_from_scope(
 fn native_port_name(port: &celox_sv_syntax::Port) -> Converted<String> {
     match &port.kind {
         celox_sv_syntax::PortKind::Named(name)
-        | celox_sv_syntax::PortKind::Explicit { name, .. } => Ok(name.spelling.clone()),
+        | celox_sv_syntax::PortKind::Explicit { name, .. } => {
+            Ok(instances::normalize_identifier(&name.spelling))
+        }
         _ => Err(AnalyzerError::Parse(
             "native ANSI port has a non-ANSI name".into(),
         )),
@@ -217,7 +251,12 @@ pub(super) fn module_interface_from_scope(
 ) -> Result<ModuleInterface, AnalyzerError> {
     let ports = port_owners::scope(None, syntax_tree)?
         .into_iter()
-        .filter(|port| matches!(port.kind, celox_sv_syntax::PortKind::Named(_)))
+        .filter(|port| {
+            matches!(
+                port.kind,
+                celox_sv_syntax::PortKind::Named(_) | celox_sv_syntax::PortKind::Explicit { .. }
+            )
+        })
         .map(native_port_name)
         .collect::<Converted<Vec<_>>>()?;
     let mut parameters = Vec::new();
@@ -445,6 +484,13 @@ pub(super) fn signals_from_body_item(
     use celox_sv_syntax::{BodyItemKind, DataDeclaration};
     let native = tree.declarations();
     let owner = native.body_item(id);
+    // The state and previous inputs of the instances of a sequential UDP.
+    if let BodyItemKind::LogicGate(gate) = &owner.kind
+        && let Some(primitive) = primitives::sequential(native, &gate.kind)
+    {
+        primitives::signals(gate, primitive, selected_name, signals);
+        return Ok(());
+    }
     let payload = match owner.kind {
         BodyItemKind::Data(id) => match native.data_declaration(id) {
             DataDeclaration::Variables(value) | DataDeclaration::Constructed(value) => {
@@ -586,7 +632,7 @@ pub(super) fn signals_from_body_item(
     Ok(())
 }
 
-fn substitute_signal_local_constants(signals: &mut [Signal], const_env: &ConstEnv) {
+pub(super) fn substitute_signal_local_constants(signals: &mut [Signal], const_env: &ConstEnv) {
     for signal in signals {
         // The constants are those of the scope the type was bound in, so
         // their values leave its semantic type as it is.

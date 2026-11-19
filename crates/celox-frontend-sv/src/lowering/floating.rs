@@ -12,6 +12,15 @@ pub(super) fn precision(
     use sv::ir::{Expr as E, SystemFunction as F};
     match expr {
         E::Ident(name) => variables.get(names.get(name)?).and_then(|v| v.float),
+        // An element of an unpacked array of `real` or `shortreal` values
+        // is one; a real has no bits to select (6.12, 7.4).
+        E::Select { expr, .. } => match &**expr {
+            E::Ident(name) => variables
+                .get(names.get(name)?)
+                .filter(|v| !v.array_dims.is_empty())
+                .and_then(|v| v.float),
+            _ => None,
+        },
         E::Literal(text)
             if text.contains(['.', 'e', 'E']) && text.replace('_', "").parse::<f64>().is_ok() =>
         {
@@ -232,6 +241,10 @@ pub(super) fn lower(
                     .into_iter()
                     .collect(),
             ))
+        }
+        // The payload of an element of an array of reals.
+        E::Select { .. } => {
+            lower_bits_with_context(expr, variables, names, constants, types, arena, None, None)
         }
         E::Literal(text) => {
             let bits = text.replace('_', "").parse::<f64>().ok()?.to_bits();

@@ -152,8 +152,7 @@ Override individual compilation diagnostics by their displayed code:
 [diagnostics]
 mixed_timescale = "warn"
 inferred_latch = "warn"
-exit_outside_program = "allow"
-memory_file_word_count = "error"
+exit_outside_program = "error"
 ```
 
 `allow` suppresses the diagnostic, `warn` retains it without failing compilation,
@@ -162,16 +161,24 @@ Existing Veryl and SystemVerilog warnings can be suppressed or promoted this way
 Use the exact code printed in the diagnostic; entries for codes not encountered
 by a compilation have no effect.
 
+Every diagnostic that has a defined fallback is a warning by default, so
+existing designs and test suites compile with the fallback semantics below
+and the diagnostic stays visible. Set `strict = true` at the manifest root
+(or in a target), pass `--strict` to the CLI, or use the Rust
+`.strict(true)` / JavaScript `strict: true` option to promote all of them
+back to errors. An explicit per-code level always wins over strict mode.
+
 Recoverable errors support relaxation only when the compiler defines a fallback.
-`mixed_timescale` is one supported error: IEEE 1800-2023 §3.14.2.3 requires
-consistent explicit time units and precisions. Its default is `error`. With `warn`
+`mixed_timescale` is one such diagnostic: IEEE 1800-2023 §3.14.2.3 requires
+consistent explicit time units and precisions. Its default is `warn` (`error`
+in strict mode). With `warn`
 or `allow`, undeclared settings use Celox's defaults (1ns unit, 1ps precision),
 explicit settings remain effective, and the global precision includes default
 scopes. The error names the design elements without a unit or precision, and
 `warn` reports one warning for each, naming it. Syntax errors, unsupported constructs and invalid precision declarations
 remain errors.
 
-`interface_array_query` defaults to `error`. Set it to `warn` or `allow` to enable
+`interface_array_query` defaults to `warn` (`error` in strict mode). Set it to `allow` to enable it silently, or keep `warn` to enable
 `$size` on fixed-size interface arrays and index-selected subarrays as a compatibility
 extension. IEEE 1800-2023 §20.7 specifies queries on data arrays; interface
 instances are not data objects. The optional dimension must be a known integer constant. This
@@ -184,13 +191,13 @@ interface_array_query = "warn"
 
 The CLI uses the same policy: `celox run top.sv --top Top --diagnostic interface_array_query=warn`.
 
-`duplicate_module` defaults to `error`: a design declares each module once. With
+`duplicate_module` defaults to `warn` (`error` in strict mode): a design declares each module once. With
 `warn` or `allow`, the first declaration of a module in source order is the
 module and the later declarations of the same name are left out, as tools that
 only warn about them do. Interfaces, programs and packages declared twice
 remain errors.
 
-`interface_array_parameter` also defaults to `error`. Set it to `warn` or `allow`
+`interface_array_parameter` also defaults to `warn` (`error` in strict mode). Set it to `warn` or `allow`
 for the compatibility shorthand `bus.WIDTH` when `bus` is an interface array.
 It reads the value parameter from the first element in declaration order,
 including arrays with nonzero bounds. Signals and type parameters still require
@@ -198,38 +205,23 @@ an explicit element selection. The same setting works in `[diagnostics]` and
 with `--diagnostic interface_array_parameter=warn`.
 
 
-`multiple_always_ff_drivers` defaults to `error` for shared memories written by
+`multiple_always_ff_drivers` defaults to `warn` (`error` in strict mode) for shared memories written by
 an `always_ff` and another edge process (IEEE 1800-2023 §9.2.2.4). With `warn`
 or `allow`, Celox stages their nonblocking writes in sparse next-state storage
 and commits dirty chunks. Ordinary `always` procedures can share a memory
 without this diagnostic. Simultaneous
 writes to the same bits from different processes have no portable ordering.
 
-`inferred_latch` rejects retained assignments in SystemVerilog and Veryl
-`always_comb` by default. Set it to `warn` to simulate the latch with a
-source-located warning, or `allow` to simulate it silently. Ordinary `always @*`
+`inferred_latch` warns about retained assignments in SystemVerilog and Veryl
+`always_comb` by default (IEEE 1800-2023 §9.2.2.2 asks tools to warn when
+latched behavior can be inferred) and simulates the latch with a
+source-located warning; in strict mode it rejects the design instead.
+Set it to `allow` to simulate it silently. Ordinary `always @*`
 and explicit `always_latch` do not require this relaxation. Nonblocking latch
 assignments and unsupported combinational feedback remain errors.
 The Rust `.allow_inferred_latches(true)` and JavaScript `allowInferredLatches: true`
 options provide `allow` only when this diagnostic has no explicit setting;
 an explicit `error`, `warn` or `allow` takes precedence.
-
-`shared_always_temporary` defaults to `error`, which keeps IEEE 1800-2023
-semantics for a variable that several `always @*` blocks write, such as a loop
-index they share: each block waits on the variables it reads, the shared one
-included (§9.4.2.2), and writes notify other blocks that are waiting. For an
-isolated index written before reads, Celox may run other Active work after the
-body and before the next implicit wait (§4.7, §4.9.3). Shared storage and event
-notifications remain; sharing alone does not require nonconvergence. Blocks that keep waking
-each other end the run with `time T does not settle`, which names the blocks.
-With `warn` or `allow`, Celox instead makes such a variable a temporary of each
-block, when only `always @*` blocks write it, each writes it before it reads it
-on every path, and nothing else reads it: no other process, continuous
-assignment, subroutine, port, instance connection or hierarchical name. Its
-writes then wake no other block, as in Icarus Verilog, and the variable itself
-keeps its initial value. This deviates from the standard, so it is not the
-default; `warn` reports each variable and its blocks. Declaring the variable
-inside each block keeps the standard semantics without it.
 
 Project simulator constructors load this table alongside `Veryl.toml`. Native
 compilation also supports standalone SystemVerilog projects:
@@ -260,6 +252,45 @@ The order is common diagnostics → selected target → CLI overrides. Repeat
 `--diagnostic CODE=LEVEL` to override multiple codes; the last assignment to a
 code wins. `celox run` and `celox vpi build` print retained compilation warnings.
 Diagnostic severity does not change optimizer settings or runtime error handling.
+
+### `[compatibility]`
+
+Opt-ins that change simulation behavior for compatibility with other
+tools, grouped separately from diagnostic severities:
+
+```toml
+[compatibility]
+legacy_empty_reductions = true
+shared_always_temporary = true
+
+[targets.legacy.compatibility]
+legacy_empty_reductions = false
+```
+
+`legacy_empty_reductions` returns zero for every empty SystemVerilog
+array reduction instead of each operator's identity (product one,
+bitwise AND all ones, and so on; IEEE 1800-2023 §7.12.3). The CLI flag
+is `--legacy-empty-reductions`; the Rust spelling is
+`SimulatorBuilder::legacy_empty_reductions(true)`.
+
+`shared_always_temporary` treats a variable written by several
+`always @*` blocks as a temporary of each block. By default Celox keeps
+IEEE 1800-2023 semantics for such a variable, such as a shared loop
+index: each block waits on the variables it reads, the shared one
+included (§9.4.2.2), and writes notify other blocks that are waiting.
+With the opt-in, Celox instead makes the variable a temporary of each
+block when only `always @*` blocks write it, each writes it before it
+reads it on every path, and nothing else reads it. Its writes then wake
+no other block, as in Icarus Verilog, and the variable itself keeps its
+initial value. This deviates from the standard, so it is off by
+default; when it applies, Celox reports each variable and its blocks
+as a warning. It is not a diagnostic code: a level for it under
+`[diagnostics]` has no effect. The CLI flag is
+`--shared-always-temporary`, and the Rust spelling is
+`SimulatorBuilder::shared_always_temporary(true)`.
+
+The order is common compatibility → selected target → CLI flags.
+Project simulator constructors read the same table from `celox.toml`.
 
 ## CLI optimization and signal access
 

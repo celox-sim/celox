@@ -4,6 +4,7 @@ fn default_opts() -> ParsedOptions {
     ParsedOptions {
         common: ParsedOptionsCommon {
             diagnostic_policy: Default::default(),
+            legacy_empty_reductions: false,
             four_state: false,
             plusargs: Vec::new(),
             allow_inferred_latches: false,
@@ -151,6 +152,7 @@ fn native_handle_dumps_consume_activity_until_memory_is_exposed() {
             four_state: None,
             plusargs: None,
             allow_inferred_latches: None,
+            strict: None,
             opt_level: None,
             pass_overrides: None,
             optimize: None,
@@ -215,6 +217,7 @@ fn fst_option_records_a_parseable_waveform_and_conflicts_with_vcd() {
             four_state: None,
             plusargs: None,
             allow_inferred_latches: None,
+            strict: None,
             opt_level: None,
             pass_overrides: None,
             optimize: None,
@@ -624,6 +627,30 @@ fn inferred_latch_policy_differs() {
 }
 
 #[test]
+fn strict_policy_differs() {
+    let src = make_sources(&[("module Top {}", "a.veryl")]);
+    let default = default_opts();
+    let mut strict = default_opts();
+    strict.common.diagnostic_policy.strict = true;
+    assert_ne!(
+        build_cache_key(&src, "Top", &default, None),
+        build_cache_key(&src, "Top", &strict, None),
+    );
+}
+
+#[test]
+fn legacy_empty_reductions_differs() {
+    let src = make_sources(&[("module Top {}", "a.veryl")]);
+    let default = default_opts();
+    let mut legacy = default_opts();
+    legacy.common.legacy_empty_reductions = true;
+    assert_ne!(
+        build_cache_key(&src, "Top", &default, None),
+        build_cache_key(&src, "Top", &legacy, None),
+    );
+}
+
+#[test]
 fn inferred_latch_cache_key_uses_effective_explicit_policy() {
     let src = make_sources(&[("module Top {}", "a.veryl")]);
     for level in [
@@ -923,8 +950,8 @@ fn initial_memory_image_reads_readmem_x_and_z_as_zero_in_two_state() {
             .design
             .initial_state
             .iter()
-            .find(|initial| matches!(initial.data, celox_design::InitialStateData::Writes(_)))
-            .expect("$readmemh initializes mem");
+            .find(|initial| matches!(initial.data, celox_design::InitialStateData::MemoryFile(_)))
+            .expect("$readmemh loads mem as the image is built");
         let offset = layout.offsets[&initial.address];
         let element_byte = |element: usize| {
             let (byte, intra) = layout.map_static_bit_offset(&initial.address, element * 8);
@@ -943,4 +970,104 @@ fn initial_memory_image_reads_readmem_x_and_z_as_zero_in_two_state() {
             assert_eq!(memory[element_byte(2) + plane_size], mask2);
         }
     }
+}
+
+#[test]
+fn hdl_sources_partition_by_extension() {
+    let sources = make_sources(&[
+        ("module A; endmodule", "src/a.sv"),
+        ("module B () {}", "src/b.veryl"),
+        ("module C; endmodule", "src/c.SVH"),
+        ("module D () {}", "src/d"),
+    ]);
+    let (veryl, sv) = partition_hdl_sources(&sources);
+    let paths = |pairs: &[(String, std::path::PathBuf)]| {
+        pairs
+            .iter()
+            .map(|(_, p)| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(paths(&veryl), ["src/b.veryl", "src/d"]);
+    assert_eq!(paths(&sv), ["src/a.sv", "src/c.SVH"]);
+}
+
+#[test]
+fn gen_ts_from_sv_source_reports_module_ports() {
+    let json = gen_ts_from_source(
+        vec![NapiSourceFile {
+            content: "module Adder(input logic [15:0] a, input logic [15:0] b, output logic [16:0] sum); always_comb sum = a + b; endmodule".to_string(),
+            path: "src/Adder.sv".to_string(),
+        }],
+        None,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let module = &value["modules"][0];
+    assert_eq!(module["moduleName"], "Adder");
+    assert_eq!(module["sourceFile"], "src/Adder.sv");
+    assert_eq!(module["ports"]["a"]["direction"], "input");
+    assert_eq!(module["ports"]["a"]["width"], 16);
+    assert_eq!(module["ports"]["sum"]["direction"], "output");
+    assert_eq!(module["ports"]["sum"]["width"], 17);
+}
+
+#[test]
+fn simulator_handle_compiles_systemverilog_sources() {
+    let handle = NativeSimulatorHandle::new(
+        vec![NapiSourceFile {
+            content: "module Adder(input logic [15:0] a, input logic [15:0] b, output logic [16:0] sum); always_comb sum = a + b; endmodule".to_string(),
+            path: "src/Adder.sv".to_string(),
+        }],
+        "Adder".into(),
+        None,
+    )
+    .unwrap();
+    let layout: serde_json::Value = serde_json::from_str(&handle.layout_json).unwrap();
+    assert_eq!(layout["a"]["width"], 16);
+    assert_eq!(layout["sum"]["width"], 17);
+    assert_eq!(layout["sum"]["direction"], "output");
+}
+
+#[test]
+fn gen_ts_from_sv_sources_shares_packages_across_files() {
+    let json = gen_ts_from_source(
+        vec![
+            NapiSourceFile {
+                content:
+                    "package p; parameter int W = 12; typedef logic [W-1:0] word_t; endpackage"
+                        .to_string(),
+                path: "src/p.sv".to_string(),
+            },
+            NapiSourceFile {
+                content:
+                    "module Top(input p::word_t a, output p::word_t y); assign y = a; endmodule"
+                        .to_string(),
+                path: "src/Top.sv".to_string(),
+            },
+        ],
+        None,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let module = &value["modules"][0];
+    assert_eq!(module["moduleName"], "Top");
+    assert_eq!(module["ports"]["a"]["width"], 12);
+    assert_eq!(module["ports"]["y"]["width"], 12);
+}
+
+#[test]
+fn simulation_handle_compiles_systemverilog_sources() {
+    let handle = NativeSimulationHandle::new(
+        vec![NapiSourceFile {
+            content: "module Counter(input logic clk, input logic rst_n, input logic en, output logic [7:0] count); always_ff @(posedge clk or negedge rst_n) begin if (!rst_n) count <= 8'd0; else if (en) count <= count + 8'd1; end endmodule".to_string(),
+            path: "src/Counter.sv".to_string(),
+        }],
+        "Counter".into(),
+        None,
+    )
+    .unwrap();
+    let layout: serde_json::Value = serde_json::from_str(&handle.layout_json).unwrap();
+    assert_eq!(layout["count"]["width"], 8);
+    let events: serde_json::Value = serde_json::from_str(&handle.events_json).unwrap();
+    assert!(events.get("clk").is_some(), "events: {events}");
 }

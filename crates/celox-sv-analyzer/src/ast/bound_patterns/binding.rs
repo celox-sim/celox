@@ -63,7 +63,7 @@ pub(in crate::ast) fn prepare_native(
                         && shape.packed.len() <= 1
                         && (shape.members.iter().any(|member| {
                             member.name() == instances::normalize_identifier(&name.spelling)
-                        }) || shape.unpacked_struct.as_ref().is_some_and(|aggregate| {
+                        }) || shape.structure_declaration().is_some_and(|aggregate| {
                             aggregate
                                 .member(&instances::normalize_identifier(&name.spelling))
                                 .is_some()

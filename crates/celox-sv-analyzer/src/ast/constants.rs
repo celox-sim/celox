@@ -141,6 +141,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
         }
         return CombProcess {
             delay: process.delay,
+            delay_initial: process.delay_initial,
             net_delay: process.net_delay,
             drive_strength: process.drive_strength,
             creation_order: process.creation_order,
@@ -168,6 +169,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
             .collect(),
     );
     result.delay = process.delay;
+    result.delay_initial = process.delay_initial;
     result.net_delay = process.net_delay;
     result.drive_strength = process.drive_strength;
     result.creation_order = process.creation_order;
@@ -211,9 +213,20 @@ pub(super) fn substitute_lvalue_constants(
             signed,
             array_slice_width,
             array_slice_reversed,
-            window,
+            mut window,
             is_2state,
         } => LValue::Select {
+            window: {
+                // The position of a run-time element names the index.
+                if let Some(at) = window.as_mut().and_then(|window| window.at.as_mut()) {
+                    **at = substitute_const_expr_constants_with_literals(
+                        (**at).clone(),
+                        const_env,
+                        parameter_literals,
+                    );
+                }
+                window
+            },
             name,
             msb: substitute_const_expr_constants_with_literals(msb, const_env, parameter_literals),
             lsb: substitute_const_expr_constants_with_literals(lsb, const_env, parameter_literals),
@@ -222,7 +235,6 @@ pub(super) fn substitute_lvalue_constants(
                 substitute_const_expr_constants_with_literals(width, const_env, parameter_literals)
             }),
             array_slice_reversed,
-            window,
             is_2state,
         },
     }
@@ -270,18 +282,41 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             msb,
             lsb,
             signed,
-        } => Expr::Select {
-            expr: Box::new(substitute_expr_constants_with_parameter_literals(
+        } => {
+            let expr = substitute_expr_constants_with_parameter_literals(
                 tree,
                 session,
                 *expr,
                 const_env,
                 parameter_literals,
-            )),
-            msb: substitute_const_expr_constants_with_literals(msb, const_env, parameter_literals),
-            lsb: substitute_const_expr_constants_with_literals(lsb, const_env, parameter_literals),
-            signed,
-        },
+            );
+            let unknown_bits = matches!(&expr, Expr::Literal(text)
+                if typecheck::parse_integral_literal(text)
+                    .is_some_and(|literal| literal.mask != num_bigint::BigUint::default()));
+            let select = Expr::Select {
+                expr: Box::new(expr),
+                msb: substitute_const_expr_constants_with_literals(
+                    msb,
+                    const_env,
+                    parameter_literals,
+                ),
+                lsb: substitute_const_expr_constants_with_literals(
+                    lsb,
+                    const_env,
+                    parameter_literals,
+                ),
+                signed,
+            };
+            // A constant select of a value with X or Z bits, such as an
+            // element of a packed array parameter, is the literal of the
+            // selected bits: it keeps their X and Z, which a comparison
+            // such as `==?` or `inside` reads in two-state simulation too.
+            if unknown_bits {
+                fold_const_integral_expr_preserving_mask(tree, session, select, const_env)
+            } else {
+                select
+            }
+        }
         Expr::Concat(parts) => Expr::Concat(
             parts
                 .into_iter()

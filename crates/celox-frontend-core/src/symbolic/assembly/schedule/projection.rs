@@ -33,6 +33,7 @@ pub(super) fn project_design(
     four_state: bool,
 ) -> Result<ScheduledRtlOutput, ParserError> {
     let Design {
+        modules,
         module_names,
         hidden_root,
         time_precision,
@@ -245,6 +246,15 @@ pub(super) fn project_design(
             events,
             initial_state,
             hidden_root,
+            memory_file_bases: {
+                let mut bases: Vec<_> = modules
+                    .values()
+                    .flat_map(|module| module.memory_file_bases.iter().cloned())
+                    .collect();
+                bases.sort_by(|a, b| (a.key, &a.path).cmp(&(b.key, &b.path)));
+                bases.dedup();
+                bases
+            },
         },
         frontend_lookup: FrontendLookup {
             instance_ids: expanded,
@@ -555,6 +565,7 @@ fn event_watches(
         events: events.clone(),
         initial_state: Vec::new(),
         hidden_root: false,
+        memory_file_bases: Vec::new(),
     }
     .event_kinds();
     counted

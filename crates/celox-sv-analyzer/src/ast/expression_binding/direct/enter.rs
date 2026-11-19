@@ -25,6 +25,21 @@ pub(super) fn enter(
         values.push(value.clone());
         return Ok(());
     }
+    // A member of an element of an array parameter that is no variable
+    // here, as in a parameter initializer, is the constant it selects
+    // (IEEE 1800-2023 11.2.1).
+    if let Some(literal) =
+        constant_binding::array_parameter_member(id, native, tree, session, dimensions)
+    {
+        values.push(Expr::Literal(literal));
+        return Ok(());
+    }
+    // A parameter of another instance that a hierarchical name denotes is
+    // read as its value there (IEEE 1800-2023 23.6).
+    if let Some(literal) = hierarchical_constant(id, native, tree, session, dimensions) {
+        values.push(Expr::Literal(literal));
+        return Ok(());
+    }
     unpacked_structs::check_operands(id, native, tree, session, dimensions)?;
     check_received(id, root, &target, native, tree, session, dimensions)?;
     // A container formal passed by value receives a copy of a
@@ -622,7 +637,7 @@ fn enter_kind(
             left,
             operator,
             right,
-        } if operator == "inside" => enter_inside(left, right, native)?,
+        } if operator == "inside" => enter_inside(left, right, native, tree, session, dimensions)?,
         ExprKind::Unary { .. } => {
             return Err(unsupported("increment or decrement expression"));
         }
@@ -874,8 +889,18 @@ fn enter_stream_cast(
     Ok(())
 }
 
-/// Enter a set membership test, `left inside {right}`.
-fn enter_inside(left: &ExprId, right: &ExprId, native: &Declarations) -> Converted<Operands> {
+/// Enter a set membership test, `left inside {right}`. When the left operand
+/// or an item, a value or a bound of a range, is a string, each compares as
+/// a string, an integral one with its bytes, as `==` compares them (IEEE
+/// 1800-2023 11.4.13, 11.4.5).
+fn enter_inside(
+    left: &ExprId,
+    right: &ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<Operands> {
     let ExprKind::Set(items) = &native.expression(*right).kind else {
         return Err(unsupported("inside expression"));
     };
@@ -894,5 +919,46 @@ fn enter_inside(left: &ExprId, right: &ExprId, native: &Declarations) -> Convert
             _ => return Err(unsupported("inside range")),
         }
     }
-    Ok((Finish::Inside(ranges), children))
+    let strings = children
+        .iter()
+        .map(|(id, _)| strings::typed_string(tree, session, *id, native, dimensions))
+        .collect::<Vec<_>>();
+    if !strings.contains(&true) {
+        return Ok((Finish::Inside(ranges, None), children));
+    }
+    // The bounds of a range would compare as handles, not in the order of
+    // the strings.
+    if ranges.contains(&true) {
+        return Err(unsupported(
+            "a value range item of an inside set on strings",
+        ));
+    }
+    let integral = strings.into_iter().map(|string| !string).collect();
+    Ok((Finish::Inside(ranges, Some(integral)), children))
+}
+
+/// The typed literal of the value of the parameter of another instance that
+/// native expression `id` names by a hierarchical name, as the caller
+/// resolved it (IEEE 1800-2023 23.6).
+fn hierarchical_constant(
+    id: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    let constants = &scope::imported(tree).hierarchical_constants;
+    let id = ungroup(id, native);
+    if constants.is_empty()
+        || !matches!(
+            &native.expression(id).kind,
+            ExprKind::Member { separator, .. } if separator == "."
+        )
+    {
+        return None;
+    }
+    let (parts, None) = selected_values::path(id, native, tree, session, dimensions).ok()? else {
+        return None;
+    };
+    constants.get(&parts.join(".")).cloned()
 }

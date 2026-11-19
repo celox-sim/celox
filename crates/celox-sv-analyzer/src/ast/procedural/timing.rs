@@ -169,6 +169,23 @@ impl BodyBuilder<'_, '_, '_> {
         }) {
             return Ok(None);
         }
+        // A named event through a virtual interface is the event of the
+        // instance the handle denotes (15.5): a wait on it waits for a
+        // trigger of that event, as one on any event handle does. The event
+        // is the one the handle denotes when the wait begins: a later
+        // retargeting of the handle no more changes what the process waits
+        // for than assigning the event variable does (15.5.5.1).
+        if items.iter().all(|item| {
+            events::is_handle(
+                &self.tree,
+                self.session,
+                item.expression,
+                native,
+                &self.dims,
+            )
+        }) {
+            return Ok(None);
+        }
         self.allow_timing("event control")?;
         let mut handles: Vec<Expr> = Vec::new();
         // The handles that no variable of the design holds, read once when
@@ -202,6 +219,13 @@ impl BodyBuilder<'_, '_, '_> {
                 &self.dims,
             ) {
                 Some((handle, ty, member)) => {
+                    // A named event is triggered, not changed (15.5.1): it
+                    // is waited for with other named events only.
+                    if virtual_interfaces::is_event_member(self.session, &ty, &member)? {
+                        return Err(unsupported(
+                            "event control mixing named events with other events",
+                        ));
+                    }
                     let handle = self.native_value(handle)?;
                     if self.reads_reference_formal(&handle) {
                         return Err(unsupported(

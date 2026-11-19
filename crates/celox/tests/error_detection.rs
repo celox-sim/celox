@@ -211,7 +211,17 @@ fn test_if_without_else_reports_inferred_latch() {
         }
     "#;
 
-    let error = Simulator::builder(code, "Top").build().unwrap_err();
+    let sim = Simulator::builder(code, "Top").build().unwrap();
+    assert_eq!(sim.warnings().len(), 1);
+    assert!(
+        sim.warnings()[0].to_string().contains("latch"),
+        "{:?}",
+        sim.warnings()
+    );
+    let error = Simulator::builder(code, "Top")
+        .strict(true)
+        .build()
+        .unwrap_err();
     assert!(
         matches!(error.kind(), SimulatorErrorKind::DiagnosticPolicy(_)),
         "{error}"

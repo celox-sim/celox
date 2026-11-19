@@ -827,6 +827,178 @@ endmodule"#;
     }
 }
 
+/// The display lines a simulation of `source` prints by time 10.
+fn display_lines(source: &str, four_state: bool) -> Vec<String> {
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("members.sv"))], "top")
+            .four_state(four_state)
+            .build()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    sim.drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => {
+                Some(String::from_utf8_lossy(&message).into_owned())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A process that writes members of the elements of packed array members
+/// in a `for` loop, at the loop's variable, as OpenTitan's usbdev writes
+/// `hw2reg.out_stall[i].d`, drives the bits those members take in the
+/// loop's iterations, and other processes or continuous assignments may
+/// drive the other members (IEEE 1800-2023 6.5, 12.7.1). Verilator 5.054
+/// prints the same lines.
+#[test]
+fn loops_drive_members_of_packed_array_member_elements() {
+    let source = r#"`timescale 1ns/1ns
+package regs;
+  typedef struct packed { logic d; logic de; } bit_t;
+  typedef struct packed { bit_t [3:0] in_stall; bit_t [3:0] out_stall; logic [3:0] status; } hw2reg_t;
+endpackage
+module top;
+  import regs::*;
+  logic clk = 0;
+  hw2reg_t comb, ff;
+  logic [3:0] hit = 4'b0101;
+  assign comb.status = 4'h9;
+  always_comb begin
+    for (int i = 0; i < 4; i++) begin
+      comb.out_stall[i].d = 1'b1;
+      comb.out_stall[i].de = hit[i];
+      comb.in_stall[i].d = 1'b0;
+      comb.in_stall[i].de = ~hit[i];
+    end
+  end
+  always_ff @(posedge clk) ff.status <= 4'h6;
+  always_ff @(posedge clk) begin
+    for (int i = 0; i < 4; i++) begin
+      ff.out_stall[i].d <= hit[i];
+      ff.out_stall[i].de <= 1'b1;
+      ff.in_stall[i].d <= ~hit[i];
+      ff.in_stall[i].de <= 1'b0;
+    end
+  end
+  initial begin
+    #1 clk = 1;
+    #1 $display("%b %b", comb, ff);
+    hit = 4'b0011;
+    clk = 0;
+    #1 clk = 1;
+    #1 $display("%b %b", comb, ff);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            display_lines(source, four_state),
+            [
+                "01000100101110111001 10001000011101110110",
+                "01010000101011111001 10100000010111110110"
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// A run-time select of a member of a packed structure, `s.m[idx]`, or of
+/// a member of an element of a packed array member, `hw2reg.out_stall[k].d`,
+/// writes bits of that member only, which are its process's driver (IEEE
+/// 1800-2023 6.5): continuous assignments and other processes may drive the
+/// other members. An edge process commits the member only. Verilator 5.054
+/// prints the same lines.
+#[test]
+fn run_time_member_selects_drive_their_member() {
+    let source = r#"`timescale 1ns/1ns
+package regs;
+  typedef struct packed { logic d; logic de; } bit_t;
+  typedef struct packed { bit_t [3:0] in_stall; bit_t [3:0] out_stall; logic [3:0] status; } hw2reg_t;
+  typedef struct packed { logic [3:0] m; logic [3:0] n; } s_t;
+endpackage
+module top;
+  import regs::*;
+  logic clk = 0;
+  s_t s, f, g;
+  hw2reg_t hw2reg;
+  logic [1:0] idx = 2'd2, k = 2'd1;
+  logic b = 1'b1;
+  always_comb begin
+    s.m = '0;
+    s.m[idx] = b;
+  end
+  assign s.n = 4'h9;
+  assign hw2reg.status = 4'h9;
+  assign hw2reg.in_stall = '0;
+  always_comb begin
+    hw2reg.out_stall = '0;
+    hw2reg.out_stall[k].d = 1'b1;
+  end
+  always_ff @(posedge clk) begin
+    f.m <= '0;
+    f.m[idx] <= b;
+  end
+  always_ff @(posedge clk) f.n <= 4'h6;
+  always_ff @(posedge clk) g.n <= 4'h5;
+  always_ff @(posedge clk) begin
+    g.m <= '0;
+    g.m[idx] <= b;
+  end
+  initial begin
+    #1 clk = 1;
+    #1 $display("%h %b %h %h", s, hw2reg, f, g);
+    idx = 2'd0;
+    k = 2'd3;
+    clk = 0;
+    #1 clk = 1;
+    #1 $display("%h %b %h %h", s, hw2reg, f, g);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        assert_eq!(
+            display_lines(source, four_state),
+            [
+                "49 00000000000010001001 46 45",
+                "19 00000000100000001001 16 15"
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// Another driver of bits of the member a run-time select writes is a
+/// second driver of those bits (IEEE 1800-2023 6.5).
+#[test]
+fn run_time_member_selects_overlapping_other_drivers_are_rejected() {
+    for (process, other) in [
+        ("always_comb s.m[idx] = b;", "assign s.m[3] = 1'b0;"),
+        ("always_comb s.r[idx].d = b;", "assign s.r[0].d = 1'b0;"),
+    ] {
+        let source = format!(
+            "module top(input logic [1:0] idx, input logic b);
+               typedef struct packed {{ logic d; logic de; }} bit_t;
+               typedef struct packed {{ logic [3:0] m; bit_t [3:0] r; logic [3:0] n; }} s_t;
+               s_t s;
+               {process}
+               {other}
+             endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("overlap.sv"))],
+            "top",
+        )
+        .build()
+        .map(|_| ())
+        .expect_err("overlapping drivers are rejected")
+        .to_string();
+        assert!(
+            error.contains("multiple variable drivers for `s`"),
+            "{process}: {error}"
+        );
+    }
+}
+
 // A run-time bit-select or indexed part-select of a member of a packed
 // structure selects within the member (IEEE 1800-2023 7.2.1, 11.5.1): the
 // bits it selects outside the member's range read X and are not written, and
@@ -1124,6 +1296,272 @@ endmodule"#;
                 "i=6 down=01 asc=11",
                 "i=7 down=10 asc=10",
                 "s=101000101100",
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
+
+// A run-time index of a member of several packed dimensions selects one of
+// its elements (IEEE 1800-2023 7.4.5, 11.5.1), as Ariane's configuration
+// structure does with `Cfg.NonIdempotentAddrBase[k]`: an index outside the
+// member's range reads X and writes nothing, and never reaches a
+// neighboring member.
+#[test]
+fn run_time_element_selects_of_structure_members_stay_in_the_member() {
+    let source = r#"
+        module Top(
+            input logic clk, clear, input logic [1:0] idx, input logic [14:0] value,
+            input logic [3:0] nibble, output logic [3:0] element, output logic [1:0] low,
+            output logic [14:0] written
+        );
+            typedef struct packed { logic valid; logic [2:0][3:0] base; logic [1:0] low; } cfg_t;
+            cfg_t cfg, target;
+            assign cfg = value;
+            assign element = cfg.base[idx];
+            assign low = cfg.base[idx][1:0];
+            always_ff @(posedge clk)
+                if (clear) target <= '0;
+                else target.base[idx] <= nibble;
+            assign written = target;
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            Simulator::from_sv_sources(vec![(source, Path::new("member_elements.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        let clk = sim.event("clk");
+        let (clear, idx, value, nibble) = (
+            sim.signal("clear"),
+            sim.signal("idx"),
+            sim.signal("value"),
+            sim.signal("nibble"),
+        );
+        // valid = 1, base = {4'ha, 4'h5, 4'hc}, low = 2'b11: the members
+        // next to `base` hold ones that an index past it must not read.
+        sim.modify(|io| io.set(value, 0x6973u16)).unwrap();
+        let mut read = |name: &str, i: u8| {
+            sim.modify(|io| io.set(idx, i)).unwrap();
+            let (value, unknown) = sim.get_four_state(sim.signal(name));
+            let (value, unknown) = (u8::try_from(value).unwrap(), u8::try_from(unknown).unwrap());
+            (value & !unknown, unknown)
+        };
+        let x = |bits: u8| if four_state { bits } else { 0 };
+        assert_eq!(read("element", 0), (0xc, 0));
+        assert_eq!(read("element", 1), (0x5, 0));
+        assert_eq!(read("element", 2), (0xa, 0));
+        assert_eq!(read("low", 2), (0b10, 0));
+        // Index 3 is past the member, next to `valid`.
+        assert_eq!(read("element", 3), (0, x(0xf)));
+        assert_eq!(read("low", 3), (0, x(0b11)));
+
+        let written = sim.signal("written");
+        sim.modify(|io| io.set(clear, 1u8)).unwrap();
+        sim.tick(clk).unwrap();
+        let mut write = |i: u8, value: u8| {
+            sim.modify(|io| {
+                io.set(clear, 0u8);
+                io.set(idx, i);
+                io.set(nibble, value);
+            })
+            .unwrap();
+            sim.tick(clk).unwrap();
+            sim.get_four_state(written)
+        };
+        let known = |value: u16| (BigUint::from(value), BigUint::from(0u8));
+        // Index 3 writes nothing, not `valid`.
+        assert_eq!(write(3, 0xf), known(0));
+        assert_eq!(write(0, 0xf), known(0x3c));
+        assert_eq!(write(2, 0x6), known(0x183c));
+    }
+}
+
+/// An element of a packed parameter of more than one dimension wider than
+/// 128 bits is the element, not a bit of the parameter (IEEE 1800-2023
+/// 7.4.1), also as the default of a parameter of a module header.
+/// Verilator 5.054 prints the same lines.
+#[test]
+fn elements_of_wide_packed_parameters_are_elements() {
+    let source = r#"`timescale 1ns/1ns
+package cfg_pkg;
+  typedef struct packed { int a; int b; } cfg_s;
+  parameter cfg_s [3:0] all_cfgs_gp = {64'h0000_001f_0000_0020, 64'h0000_0015_0000_0016, 64'h0000_000b_0000_000c};
+endpackage
+module leaf import cfg_pkg::*; #(parameter int sel_p = 0, localparam cfg_s cfg_lp = all_cfgs_gp[sel_p]) ();
+  initial #1 $display("leaf sel=%0d lp=%h", sel_p, cfg_lp);
+endmodule
+module top;
+  localparam logic [1:0][64:0] t130_lp = {65'h0000_0015_0000_0016, 65'h0000_000b_0000_000c};
+  localparam logic [2:0][63:0] t192_lp = {64'h0000_0015_0000_0016, 64'h0000_000b_0000_000c};
+  localparam logic [64:0] e130_lp = t130_lp[1];
+  localparam logic [63:0] e192_lp = t192_lp[1];
+  localparam logic [63:0] o192_lp = t192_lp[2];
+  localparam logic b192_lp = t192_lp[1][4];
+  parameter int sel_p = 1;
+  localparam logic [63:0] s192_lp = t192_lp[sel_p];
+  logic [e192_lp[7:0]-1:0] sized;
+  for (genvar i = 0; i < 3; i++) begin : g
+    leaf #(.sel_p(i)) l ();
+  end
+  initial #1 $display("e130=%h e192=%h o192=%h b192=%b s192=%h bits=%0d", e130_lp, e192_lp, o192_lp, b192_lp, s192_lp, $bits(sized));
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("wide_elements.sv"))],
+            "top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let mut lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                "e130=00000001500000016 e192=0000001500000016 o192=0000000000000000 b192=1 s192=0000001500000016 bits=22",
+                "leaf sel=0 lp=0000000b0000000c",
+                "leaf sel=1 lp=0000001500000016",
+                "leaf sel=2 lp=0000001f00000020",
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
+
+// A run-time bit-select of a member of an element of an array of packed
+// structures, packed or unpacked, as OpenPiton's write buffer reads
+// `tx_stat_q[rtrn_id].be[k]`: a bit outside the member reads X and writes
+// nothing, also in an element outside the array (IEEE 1800-2023 7.4.5,
+// 11.5.1).
+#[test]
+fn run_time_bits_of_members_of_array_elements_stay_in_the_member() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+            typedef struct packed { logic vld; logic [7:0] be; logic [2:0] ptr; } tx_t;
+            tx_t [3:0] packed_q;
+            tx_t unpacked_q [4];
+            logic [2:0] id;
+            int k;
+            initial begin
+                packed_q = '0;
+                foreach (unpacked_q[e]) unpacked_q[e] = '0;
+                packed_q[2] = {1'b1, 8'b1010_0110, 3'b111};
+                unpacked_q[2] = {1'b1, 8'b1010_0110, 3'b111};
+                id = 2;
+                for (k = 0; k < 10; k++)
+                    $display("%0d %b %b", k, packed_q[id].be[k], unpacked_q[id].be[k]);
+                id = 5;
+                k = 1;
+                $display("%b %b", packed_q[id].be[k], unpacked_q[id].be[k]);
+                id = 1;
+                k = 3;
+                packed_q[id].be[k] = 1'b1;
+                unpacked_q[id].be[k] = 1'b1;
+                k = 8;
+                packed_q[id].be[k] = 1'b1;
+                unpacked_q[id].be[k] = 1'b1;
+                id = 5;
+                k = 0;
+                packed_q[id].be[k] = 1'b1;
+                unpacked_q[id].be[k] = 1'b1;
+                $display("%h %h %h %h", packed_q, unpacked_q[1], unpacked_q[2], unpacked_q[3]);
+            end
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let x = if four_state { "x" } else { "0" };
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("element_members.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build_cranelift()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let displayed: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8(message).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut expected = (0..8)
+            .map(|k| {
+                let bit = (0b1010_0110 >> k) & 1;
+                format!("{k} {bit} {bit}")
+            })
+            .collect::<Vec<_>>();
+        // Bits 8 and 9 are past `be`, next to `vld`.
+        expected.push(format!("8 {x} {x}"));
+        expected.push(format!("9 {x} {x}"));
+        // Element 5 is past the array.
+        expected.push(format!("{x} {x}"));
+        // Only be[3] of element 1 is written.
+        expected.push("000d37040000 040 d37 000".to_string());
+        assert_eq!(displayed, expected, "four_state={four_state}");
+    }
+}
+
+/// A packed parameter may be wider than 65536 bits, such as BlackParrot's
+/// 344064-bit configuration table, given by a concatenation of fewer bits
+/// (IEEE 1800-2023 6.9.1, 10.7); its elements and part-selects are
+/// constants.
+#[test]
+fn packed_parameters_wider_than_65536_bits_are_constants() {
+    let source = r#"`timescale 1ns/1ns
+package cfg_pkg;
+  localparam max_cfgs = 5376;
+  typedef struct packed { int a; int b; } cfg_s;
+  parameter cfg_s [max_cfgs-1:0] all_cfgs_gp =
+    {64'h0000_001f_0000_0020, 64'h0000_0015_0000_0016, 64'h0000_000b_0000_000c};
+endpackage
+module top;
+  import cfg_pkg::*;
+  localparam logic [63:0] part_lp = all_cfgs_gp[1:1];
+  localparam logic [63:0] idx_lp  = all_cfgs_gp[2 +: 1];
+  localparam logic [63:0] qual_lp = cfg_pkg::all_cfgs_gp[1];
+  localparam logic [63:0] top_lp  = cfg_pkg::all_cfgs_gp[max_cfgs-1];
+  initial #1 $display("bits=%0d e0=%h e3=%h part=%h idx=%h qual=%h top=%h", $bits(all_cfgs_gp),
+                      all_cfgs_gp[0], all_cfgs_gp[3], part_lp, idx_lp, qual_lp, top_lp);
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("wide_table.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "bits=344064 e0=0000000b0000000c e3=0000000000000000 part=0000001500000016 \
+              idx=0000001f00000020 qual=0000001500000016 top=0000000000000000"
             ],
             "four_state={four_state}"
         );

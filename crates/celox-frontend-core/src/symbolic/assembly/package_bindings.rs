@@ -312,6 +312,10 @@ pub(super) fn check_package_variable_drivers(
                     .filter(|run| run.bit_width > 0)
                     .map(|run| BitAccess::new(run.bit_offset, run.bit_offset + run.bit_width - 1))
                     .collect(),
+                celox_design::InitialStateData::MemoryFile(load) => load
+                    .written_bits()
+                    .map(|(lsb, msb)| vec![BitAccess::new(lsb, msb)])
+                    .unwrap_or_default(),
             };
             for access in accesses {
                 initial_writes.push(((instance, usize::MAX), address, access));

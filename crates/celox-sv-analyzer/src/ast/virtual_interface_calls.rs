@@ -42,78 +42,494 @@ pub(crate) struct Subroutines {
     pub(super) static_initializer: Option<InitialProcess>,
 }
 
-/// The subroutines of the interfaces in `declarations`, built with the
-/// analyzed `packages` (see the module documentation).
+/// The subroutines of the specializations of parameterized interfaces, by
+/// the key of each specialization (see [`VirtualInterface::key`]).
+pub(crate) type Specializations = Arc<HashMap<String, Arc<Subroutines>>>;
+
+impl Subroutines {
+    fn extend(&mut self, found: Self) {
+        self.subroutines.extend(found.subroutines);
+        self.shapes.extend(found.shapes);
+        self.locals.extend(found.locals);
+        self.function_return_types
+            .extend(found.function_return_types);
+        self.statics.extend(found.statics);
+        if let Some(process) = found.static_initializer {
+            match &mut self.static_initializer {
+                Some(initializer) => initializer.body.extend(process.body),
+                None => self.static_initializer = Some(process),
+            }
+        }
+    }
+}
+
+/// Declare the subroutines `calls` in `symbols`, the symbols of a scope
+/// that may call them, which copies those it calls.
+pub(super) fn import(symbols: &mut scope::ScopeSymbols, calls: &Subroutines) {
+    for subroutine in &calls.subroutines {
+        if symbols
+            .subroutines
+            .iter()
+            .any(|known| known.name == subroutine.name)
+        {
+            continue;
+        }
+        symbols.subroutine_params.insert(
+            subroutine.name.clone(),
+            subroutine
+                .params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect(),
+        );
+        if let Some(shapes) = calls.shapes.get(&subroutine.name) {
+            symbols
+                .subroutine_shapes
+                .insert(subroutine.name.clone(), shapes.clone());
+        }
+        symbols.subroutines.push(subroutine.clone());
+    }
+    for (name, metadata) in &calls.function_return_types {
+        symbols
+            .function_return_types
+            .entry(name.clone())
+            .or_insert_with(|| metadata.clone());
+    }
+    for signal in &calls.statics {
+        if !symbols
+            .state_signals
+            .iter()
+            .any(|known| known.name == signal.name)
+        {
+            symbols.state_signals.push(signal.clone());
+        }
+    }
+    if let Some(initializer) = &calls.static_initializer {
+        symbols.initial_processes.push(initializer.clone());
+    }
+    for local in &calls.locals {
+        if !symbols.locals.iter().any(|known| known.name == local.name) {
+            symbols.locals.push(local.clone());
+        }
+    }
+}
+
+/// Declare the subroutines of the specializations that earlier analyses
+/// built (see [`specializations`]) in `symbols`, if the scope reaches the
+/// instances of virtual interfaces and does not declare them yet.
+pub(super) fn import_specializations(session: &Session, symbols: &mut Arc<scope::ScopeSymbols>) {
+    if session.virtual_interface_calls.is_empty()
+        || !symbols
+            .state_signals
+            .iter()
+            .any(|signal| virtual_interfaces::is_placeholder_signal(&signal.name))
+    {
+        return;
+    }
+    let mut keys: Vec<_> = session.virtual_interface_calls.keys().collect();
+    keys.sort();
+    for key in keys {
+        let calls = &session.virtual_interface_calls[key];
+        let declared = |symbols: &scope::ScopeSymbols| {
+            calls.subroutines.first().is_none_or(|first| {
+                symbols
+                    .subroutines
+                    .iter()
+                    .any(|known| known.name == first.name)
+            })
+        };
+        if !declared(symbols) {
+            import(Arc::make_mut(symbols), calls);
+        }
+    }
+}
+
+/// Whether `module` calls a task or function of an interface through a
+/// virtual interface whose hierarchical names each instance resolves, before
+/// the subroutine is built (see
+/// [`virtual_interfaces::VirtualInterfaceDeclaration::outward`]): a call
+/// bound by an analysis that did not know it waits, such as one of a class
+/// method that its package bound. The module is analyzed again once the
+/// hierarchy is elaborated ([`AnalyzerError::VirtualInterfaceOutward`]).
+pub(super) fn check_outward(session: &Session, module: &Module) -> Converted<()> {
+    let Some(declarations) = session.virtual_interfaces.as_deref() else {
+        return Ok(());
+    };
+    let pending = declarations
+        .interfaces
+        .iter()
+        .filter(|(_, declaration)| !declaration.outward.is_empty())
+        .map(|(key, _)| (key, virtual_interfaces::subroutine_name(key, "")))
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let defined = module
+        .subroutines
+        .iter()
+        .map(|subroutine| subroutine.name.as_str())
+        .collect::<HashSet<_>>();
+    let bodies = module
+        .subroutines
+        .iter()
+        .map(|subroutine| &subroutine.body)
+        .chain(module.initial_processes.iter().map(|process| &process.body))
+        .chain(module.ff_processes.iter().map(|process| &process.body))
+        .chain(module.comb_processes.iter().map(|process| &process.body));
+    let mut called = HashSet::default();
+    for body in bodies {
+        for stmt in body {
+            let mut exprs = Vec::new();
+            let mut tasks = Vec::new();
+            stmt.visit(&mut |expr| exprs.push(expr), &mut |_| {}, &mut |name| {
+                tasks.push(name.to_owned())
+            });
+            for expr in exprs {
+                called_in(expr, &mut called);
+            }
+            called.extend(tasks);
+        }
+    }
+    for (key, prefix) in pending {
+        if called
+            .iter()
+            .any(|name| name.starts_with(&prefix) && !defined.contains(name.as_str()))
+        {
+            return Err(AnalyzerError::VirtualInterfaceOutward {
+                interface: key.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Add the subroutines that `expr` calls to `called`.
+fn called_in(expr: &Expr, called: &mut HashSet<String>) {
+    if let Expr::Call {
+        callee: Callee::Subroutine(name),
+        ..
+    } = expr
+    {
+        called.insert(name.clone());
+    }
+    for child in virtual_interfaces::children(expr) {
+        called_in(child, called);
+    }
+}
+
+/// The subroutines of the interfaces in `declarations` that have no
+/// parameters, built with the analyzed `packages` (see the module
+/// documentation). Those of a parameterized interface belong to each of its
+/// specializations (see [`specializations`]). The declarations record the
+/// names that the subroutines of each interface use and it does not
+/// declare, whose subroutines are not built then.
 pub(super) fn build(
     packages: &packages::Packages,
-    declarations: &virtual_interfaces::VirtualInterfaces,
+    declarations: &mut virtual_interfaces::VirtualInterfaces,
 ) -> Converted<Subroutines> {
     let mut built = Subroutines::default();
+    let mut pending = Vec::new();
     let mut interfaces: Vec<_> = declarations
         .interfaces
         .iter()
-        .filter(|(_, declaration)| !declaration.subroutines.is_empty())
+        .filter(|(_, declaration)| {
+            !declaration.subroutines.is_empty()
+                && declaration.template.is_none()
+                && declaration.arguments.is_empty()
+        })
         .collect();
     interfaces.sort_by(|left, right| left.0.cmp(right.0));
-    for (interface, declaration) in interfaces {
-        let Some((tree, path)) = packages.interface_sources.get(interface) else {
-            continue;
-        };
-        for handle in tree.root_scopes()? {
-            let scoped = tree.scoped(handle)?;
-            if instances::normalize_identifier(&scoped.root_name()?) != *interface {
-                continue;
-            }
-            // An interface whose subroutines cannot be analyzed has none to
-            // call through a virtual interface; a design that calls none
-            // keeps working, and a call names the missing subroutine.
-            let mut found = Subroutines::default();
-            if interface_subroutines(packages, &scoped, path, interface, declaration, &mut found)
-                .is_ok()
-            {
-                built.subroutines.extend(found.subroutines);
-                built.shapes.extend(found.shapes);
-                built.locals.extend(found.locals);
-                built
-                    .function_return_types
-                    .extend(found.function_return_types);
-                built.statics.extend(found.statics);
-                if let Some(process) = found.static_initializer {
-                    match &mut built.static_initializer {
-                        Some(initializer) => initializer.body.extend(process.body),
-                        None => built.static_initializer = Some(process),
-                    }
-                }
-            }
+    for (key, declaration) in interfaces {
+        let (subroutines, outward) = specialization(
+            packages,
+            &mut packages.design(),
+            key,
+            declaration,
+            &HashMap::default(),
+            &[],
+        )?;
+        built.extend(subroutines);
+        if !outward.is_empty() {
+            pending.push((key.clone(), outward));
+        }
+    }
+    for (key, outward) in pending {
+        if let Some(declaration) = declarations.interfaces.get_mut(&key) {
+            declaration.outward = outward;
         }
     }
     Ok(built)
 }
 
-/// Add the subroutines of interface `interface`, whose declaration `scoped`
-/// is, to `built`.
+/// Build the subroutines of each specialization of a parameterized
+/// interface that the analyses of `design` named and that has tasks or
+/// functions, if they are not built yet. Whether any were: an analysis that
+/// named one is repeated, to call them (see
+/// [`crate::ast::source`]).
+pub(super) fn specializations(
+    packages: &packages::Packages,
+    design: &mut packages::Design,
+) -> Converted<bool> {
+    let Some(declarations) = design.virtual_interfaces.clone() else {
+        return Ok(false);
+    };
+    let mut missing: Vec<_> = declarations
+        .interfaces
+        .iter()
+        .filter(|(key, declaration)| {
+            !declaration.arguments.is_empty()
+                && !declaration.subroutines.is_empty()
+                && !design.virtual_interface_calls.contains_key(*key)
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(false);
+    }
+    missing.sort_by(|left, right| left.0.cmp(right.0));
+    let mut repeat = false;
+    for (key, declaration) in missing {
+        let overrides = declarations
+            .interfaces
+            .get(&declaration.interface)
+            .and_then(|base| base.template.as_ref())
+            .map(|template| template.overrides(&declaration.arguments))
+            .unwrap_or_default();
+        let overrides = overrides
+            .into_iter()
+            .map(|(name, value)| (name, parameters::const_expr_from_i128(value)))
+            .collect();
+        // Built in the types of the design, which the analyses that call
+        // them share.
+        let (built, outward) = specialization(packages, design, key, declaration, &overrides, &[])?;
+        repeat |= !built.subroutines.is_empty();
+        Arc::make_mut(&mut design.virtual_interface_calls).insert(key.clone(), Arc::new(built));
+        if !outward.is_empty()
+            && let Some(declarations) = design.virtual_interfaces.as_mut()
+            && let Some(declaration) = Arc::make_mut(declarations).interfaces.get_mut(key)
+        {
+            declaration.outward = outward;
+        }
+    }
+    Ok(repeat)
+}
+
+/// Build the subroutines of the interface, or specialization, `key`, whose
+/// hierarchical names that it does not declare (see
+/// [`virtual_interfaces::VirtualInterfaceDeclaration::outward`]) denote
+/// objects of `objects`, by their components, with their types and whether
+/// each is a net: in every instance, the object its parent finds (IEEE
+/// 1800-2023 23.8). Each becomes a member of the declaration, which a call
+/// through a virtual interface reads and writes in the instance it denotes.
+pub(super) fn resolve_outward(
+    packages: &packages::Packages,
+    design: &mut packages::Design,
+    key: &str,
+    objects: &[(Vec<String>, Type, bool)],
+) -> Converted<()> {
+    let Some(declarations) = design.virtual_interfaces.as_mut() else {
+        return Ok(());
+    };
+    let declarations = Arc::make_mut(declarations);
+    let overrides = declarations
+        .interfaces
+        .get(key)
+        .and_then(|declaration| {
+            let base = declarations.interfaces.get(&declaration.interface)?;
+            Some(base.template.as_ref()?.overrides(&declaration.arguments))
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, value)| (name, parameters::const_expr_from_i128(value)))
+        .collect();
+    let Some(declaration) = declarations.interfaces.get_mut(key) else {
+        return Ok(());
+    };
+    // An interface without instances has no objects for the names, which a
+    // call through a virtual interface, of null, never reaches: they keep
+    // provisional types.
+    let provisional_objects;
+    let objects = if objects.is_empty() {
+        provisional_objects = declaration
+            .outward
+            .iter()
+            .map(|components| {
+                let object = provisional(components);
+                (components.clone(), object.r#type, object.is_net)
+            })
+            .collect::<Vec<_>>();
+        &provisional_objects[..]
+    } else {
+        objects
+    };
+    for (components, r#type, is_net) in objects {
+        let name = virtual_interfaces::outward_member(components);
+        if !declaration.members.iter().any(|member| member.name == name) {
+            declaration
+                .members
+                .push(virtual_interfaces::VirtualInterfaceMember {
+                    name,
+                    r#type: virtual_interfaces::MemberType::Value(r#type.clone()),
+                    is_net: *is_net,
+                });
+        }
+    }
+    declaration.outward.clear();
+    let declaration = declaration.clone();
+    let seeds = objects
+        .iter()
+        .map(|(components, r#type, is_net)| HierarchicalSignal {
+            paths: vec![components.join(".")],
+            name: virtual_interfaces::outward_member(components),
+            r#type: r#type.clone(),
+            is_net: *is_net,
+            local: false,
+            interface_instance: None,
+            aliased: None,
+            constant: None,
+        })
+        .collect::<Vec<_>>();
+    let (built, outward) = specialization(packages, design, key, &declaration, &overrides, &seeds)?;
+    if let Some(components) = outward.first() {
+        return Err(unsupported(format!(
+            "hierarchical name `{}` in a task or function of interface `{}` called through a virtual interface",
+            components.join("."),
+            declaration.interface
+        )));
+    }
+    Arc::make_mut(&mut design.virtual_interface_calls).insert(key.to_owned(), Arc::new(built));
+    Ok(())
+}
+
+/// The subroutines of the specialization `key` of the interface `declaration`
+/// declares, whose parameters `overrides` give, and the hierarchical names
+/// they use that the interface does not declare, by their components,
+/// beyond those `resolved` gives the objects of. While there are any, no
+/// subroutine is built: each instance finds them from its parent (IEEE
+/// 1800-2023 23.8), which the elaborated hierarchy tells (see
+/// [`crate::AnalyzerError::VirtualInterfaceOutward`]).
+fn specialization(
+    packages: &packages::Packages,
+    design: &mut packages::Design,
+    key: &str,
+    declaration: &virtual_interfaces::VirtualInterfaceDeclaration,
+    overrides: &HashMap<String, ConstExpr>,
+    resolved: &[HierarchicalSignal],
+) -> Converted<(Subroutines, Vec<Vec<String>>)> {
+    let mut built = Subroutines::default();
+    let mut outward = Vec::new();
+    let interface = &declaration.interface;
+    let Some((tree, path)) = packages.interface_sources.get(interface) else {
+        return Ok((built, outward));
+    };
+    for handle in tree.root_scopes()? {
+        let scoped = tree.scoped(handle)?;
+        if instances::normalize_identifier(&scoped.root_name()?) != *interface {
+            continue;
+        }
+        // The names the interface does not declare are found one analysis
+        // at a time, each standing for an object of a provisional type for
+        // the next, which the subroutines built later do not keep.
+        let mut seeds = resolved.to_vec();
+        loop {
+            // An interface whose subroutines cannot be analyzed has none
+            // to call through a virtual interface; a design that calls none
+            // keeps working, and a call names the missing subroutine.
+            let mut found = Subroutines::default();
+            let mut session = Session::with_packages(packages, design);
+            let subroutines = interface_subroutines(
+                packages,
+                &mut session,
+                &scoped,
+                path,
+                key,
+                declaration,
+                overrides,
+                &seeds,
+                &mut found,
+            );
+            session.restore(design);
+            match subroutines {
+                Ok(()) => {
+                    if outward.is_empty() {
+                        built.extend(found);
+                    }
+                    break;
+                }
+                Err(error) => match outward_name(&error) {
+                    Some(components)
+                        if !outward.contains(components) && outward.len() < MAX_OUTWARD =>
+                    {
+                        seeds.push(provisional(components));
+                        outward.push(components.clone());
+                    }
+                    _ => break,
+                },
+            }
+        }
+    }
+    Ok((built, outward))
+}
+
+/// How many names an interface's subroutines may use that it does not
+/// declare, a bound on the analyses that find them.
+const MAX_OUTWARD: usize = 256;
+
+/// The components of the hierarchical name that `error` reports the body
+/// does not resolve.
+fn outward_name(error: &AnalyzerError) -> Option<&Vec<String>> {
+    match error {
+        AnalyzerError::HierarchicalReference {
+            components,
+            interface: None,
+            ..
+        } => Some(components),
+        AnalyzerError::WithWarnings { error, .. } => outward_name(error),
+        _ => None,
+    }
+}
+
+/// A provisional object for name `components` of the body, which lets the
+/// analysis go on to the next name.
+fn provisional(components: &[String]) -> HierarchicalSignal {
+    HierarchicalSignal {
+        paths: vec![components.join(".")],
+        name: virtual_interfaces::outward_member(components),
+        r#type: Type::new(TypeKind::Logic),
+        is_net: false,
+        local: false,
+        interface_instance: None,
+        aliased: None,
+        constant: None,
+    }
+}
+
+/// Add the subroutines of the specialization `interface` (its key) of the
+/// interface whose declaration `scoped` is, with the parameter values
+/// `overrides` give, to `built`.
+#[allow(clippy::too_many_arguments)]
 fn interface_subroutines(
     packages: &packages::Packages,
+    session: &mut Session,
     scoped: &SyntaxTree,
     path: &std::path::Path,
     interface: &str,
     declaration: &virtual_interfaces::VirtualInterfaceDeclaration,
+    overrides: &HashMap<String, ConstExpr>,
+    outward: &[HierarchicalSignal],
     built: &mut Subroutines,
 ) -> Converted<()> {
-    let overrides = HashMap::default();
     let context = AnalysisContext::unspecialized(scoped);
-    let mut design = packages.design();
-    let session = &mut Session::with_packages(packages, &mut design);
     session.shares_static_formals = true;
     let module = interface_ast::analyze(
-        &context.child(scoped, &overrides),
+        &context.child(scoped, overrides),
         session,
         path,
         packages,
-        &overrides,
+        overrides,
         &[],
         &ModuleInterfaces::default(),
         false,
+        outward,
     )?;
     let symbols = module
         .symbols
@@ -164,13 +580,22 @@ fn interface_subroutines(
             Some(VirtualInterfaceSignal::StaticPlaceholder { .. })
         )
     };
-    built.statics.extend(
-        bound
-            .signals
-            .iter()
-            .filter(|signal| is_static(&signal.name))
-            .cloned(),
-    );
+    // Their types may be sized by the interface's parameters, which the
+    // scopes that hold them do not declare: they take the values of the
+    // specialization.
+    let constants: ConstEnv = symbols
+        .const_env
+        .iter()
+        .filter_map(|(name, value)| Some((names.get(name)?.clone(), *value)))
+        .collect();
+    let mut statics: Vec<Signal> = bound
+        .signals
+        .iter()
+        .filter(|signal| is_static(&signal.name))
+        .cloned()
+        .collect();
+    declarations::substitute_signal_local_constants(&mut statics, &constants);
+    built.statics.extend(statics);
     for process in bound
         .initial_processes
         .iter()
@@ -202,10 +627,11 @@ fn interface_subroutines(
         .collect();
     let ty = virtual_interfaces::value_type(
         &mut session.types,
-        VirtualInterface {
-            interface: interface.to_string(),
-            modport: None,
-        },
+        VirtualInterface::new(
+            declaration.interface.clone(),
+            None,
+            declaration.arguments.clone(),
+        ),
     );
     let handle_shape = procedural::dimensions_from_type(&ty);
     let ty = type_nodes::ir_type(session, &context.functions, ty, &ConstEnv::default());

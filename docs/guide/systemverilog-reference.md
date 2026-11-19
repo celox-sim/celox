@@ -51,8 +51,11 @@ constructs without a dedicated issue point to the frontend roadmap,
   ports — a header of port names with body declarations — are supported),
   `ref` ports ([#427](https://github.com/celox-sim/celox/issues/427)),
   wildcard `.*` connections to a module defined outside the SystemVerilog
-  sources ([#442](https://github.com/celox-sim/celox/issues/442)), and ANSI
-  port default values.
+  sources ([#442](https://github.com/celox-sim/celox/issues/442)), ANSI
+  port default values, and the implicit nets that the port connections of an
+  instance inside a generate block declare (6.10): an input connection of
+  such an instance that reads one is rejected, and one that only outputs
+  drive is a net of the module rather than of the block.
 - Nets with several drivers, other than the continuous assignments of one
   module to a `wire`, `tri`, `wand`, `triand`, `wor` or `trior` net, which
   are resolved (6.6.1 to 6.6.3). Still rejected are drivers below an
@@ -66,23 +69,45 @@ constructs without a dedicated issue point to the frontend roadmap,
   Internal nets without a driver are rejected
   ([#460](https://github.com/celox-sim/celox/issues/460)), except undriven
   bits of a net with an independent delay, which read as `z`.
-- Gate and switch primitives other than scalar `and`, `nand`, `or`, `nor`,
-  `xor`, `xnor` without delays or strengths (Clause 28); gate delays,
-  strengths, and instance arrays are also unsupported
-  ([#457](https://github.com/celox-sim/celox/issues/457)).
+- Gate and switch primitives other than `and`, `nand`, `or`, `nor`, `xor`,
+  `xnor`, `buf`, `not` without delays or strengths, single or in
+  one-dimensional instance arrays (Clause 28); gate delays and strengths are
+  also unsupported ([#457](https://github.com/celox-sim/celox/issues/457)).
 - Instance arrays with a negative bound.
-- Hierarchical references <a id="hierarchical-references"></a> that drive a net or a
-  variable through a continuous assignment, appear in port connections, or
-  name tasks, functions, named blocks, parameters, structure members of
-  another scope other than members of a packed structure variable (a member
-  of an element of a packed array of structures is rejected), or `real`,
-  `string` (except through the host API name, see below), or class-typed
-  signals; names that start inside a generate block relative to it are also
-  rejected. A static variable of a subroutine is named as `f.v` (23.6) only
-  from a scope that `f` is visible in by its simple name: a method of the
-  class or a base, or a subroutine of the design element; not through an
-  instance, package or named block, and not when the variable is of
-  unpacked structure type.
+- Hierarchical references <a id="hierarchical-references"></a> that drive a net
+  through a continuous assignment, or a variable that its own module also
+  drives continuously or from `always_comb`, appear in port connections, or
+  name named blocks, structure members of another scope other
+  than members of a packed structure variable or of an element of an array
+  of packed structures, or `real`, `string` (except
+  through the host API name, see below), or class-typed signals; names that
+  start inside a generate block relative to it are also rejected. A task or
+  function of another instance called by a hierarchical name (23.8) must be
+  declared in the scope of a module, of one specialization for every
+  instance of the calling module, and its formals, result and the variables
+  it names must not be `real`, `shortreal`, class or event typed; two
+  modules cannot call each other's subroutines.
+  A parameter or local parameter of another instance named by a
+  hierarchical name (23.6), such as `u.N`, is read as its value in that
+  instance; it must be integral, of no packed dimensions other than one
+  `[N-1:0]`, and a value wider than 128 bits must have no unknown or
+  high-impedance bits.
+  It is not a
+  constant expression (A.8.4 `constant_primary` names parameters only by
+  package, class or generate scope), so a declaration's range, a parameter
+  value or a generate condition cannot use one.
+  A static variable of a subroutine is named as `f.v` (23.6) only from a
+  scope that `f` is visible in by its simple name: a method of the class or
+  a base, or a subroutine of the design element; not through an instance,
+  package or named block, and not when the variable is of unpacked structure
+  type.
+  A name that the body of an interface instance does not declare is
+  searched for from the scope that instantiates the instance (23.8), also in
+  a task or function called through a virtual interface, from the instance
+  the handle denotes; such a name must denote objects of one type in every
+  instance of the interface. It is rejected where the body is reached
+  through an interface port, and in an interface instance that another
+  interface's body declares.
 - Packages: package nets
   ([#1146](https://github.com/celox-sim/celox/issues/1146)); a package
   variable cannot be a clock or reset.
@@ -101,11 +126,6 @@ constructs without a dedicated issue point to the frontend roadmap,
   and clocking modports. A connection cannot name a modport if the receiving
   port declares none. Writes through a port without a modport, and member
   connections from such a port to a non-ANSI module, are unsupported.
-- **Function calls:** calls through an unselected interface array or a
-  run-time element selection; calls from an interface instance array's logic
-  to a function that accesses members; calls through a port to an imported
-  function that writes members inside generate constructs, functions, and
-  tasks.
 - **Static storage of subroutines:** a static function or task called
   through interface ports of several modules keeps its static variables, and
   the static formals of a task that suspends, once per calling module
@@ -128,9 +148,14 @@ constructs without a dedicated issue point to the frontend roadmap,
   through a virtual interface held by an automatic variable or an argument,
   or by a class property of an object one holds (a property of `this` or of
   an object a static variable holds is watched); virtual interfaces of
-  parameterized interfaces;
+  interfaces with type parameters, or with parameter values that are not
+  integral constants;
   clocking blocks and nested interface instances reached through a virtual
-  interface; writes to nets through a virtual interface; `$bits` of a call
+  interface; an event control that mixes a named event reached through a
+  virtual interface with other kinds of events (`@(v.e or v.d)`; `@(v.e)`
+  and `@(v.e or other_event)` wait for a trigger of the event the handle
+  denotes when the wait begins); writes to nets through a virtual
+  interface; `$bits` of a call
   of an interface function through a virtual interface in a package or
   class, whose analysis precedes the interface's subroutines (in a module
   it is the function's width;
@@ -158,6 +183,9 @@ blocks in programs. Two region deviations are listed under
   leaves its declared range
   ([#88](https://github.com/celox-sim/celox/issues/88)). Run-time selects
   follow the standard.
+- Run-time part-selects and element selects of a member of an element of a
+  packed array of structures that is itself a member of a packed structure,
+  such as `s.regs[i].q[j +: 4]`.
 - Reduction operators in parameter expressions
   ([#456](https://github.com/celox-sim/celox/issues/456)).
 - Type operator (6.23): a type reference compared with a value, range items
@@ -170,10 +198,18 @@ blocks in programs. Two region deviations are listed under
   of signed typedefs, classes with non-integral value parameters, and
   operands other than names and data types, such as `$typename(a + b)`.
   A virtual interface type, which 20.6.1 has no rule for, is written as
-  it is declared: `virtual bus_if` or `virtual bus_if.mp`.
+  it is declared: `virtual bus_if` or `virtual bus_if.mp`, and one of a
+  parameterized interface with the values of its parameters in
+  declaration order, `virtual bus_if#(8, 4)`.
 - Parameters of unpacked array type hold their value from the start of the
-  simulation and cannot be used where an elaboration-time constant is
-  required. A member of a packed-structure parameter is such a constant
+  simulation. An element of a one-dimensional array parameter is an
+  elaboration-time constant when the elements are packed integral values
+  of at most 127 bits without X or Z bits and the array has at most 4096
+  of them, and so is a select of such an element's packed dimensions
+  unless the element type is a packed array of a signed named type; the
+  whole array, and an element of any other array parameter, cannot be used
+  where such a constant is required. A member of a packed-structure
+  parameter is such a constant
   unless it is wider than 127 bits or has X or Z bits: then it cannot size
   a declaration, select a generate construct or override a parameter.
 
@@ -206,17 +242,44 @@ blocks in programs. Two region deviations are listed under
 
 - The `disable` statement, except `disable fork`.
 - Procedural `force` / `release` (IEEE 1800-2023 10.6.2) outside `initial`
-  and `always` procedures: in a subroutine, a `final` procedure, or an
-  `always_comb`, `always_latch` or `always_ff` procedure. An `always`
-  procedure with one runs as a process. The target is a whole packed
-  integral variable or net of the module: a bit-select, part-select,
-  member, concatenation or name of another instance, a `real`, `string`,
-  handle or unpacked target (singular ones the standard allows), and a
-  variable that an `always_comb`, `always_latch` or `always @*` procedure
-  assigns, or that a nonblocking assignment with an intra-assignment delay
-  writes, are rejected. So are an expression with side effects or with a
-  call of a subroutine or a system function, and one that reads a variable
-  of a procedural block. A target that the host also forces
+  and `always` procedures and tasks: in a function, a `final` procedure, or
+  an `always_comb`, `always_latch` or `always_ff` procedure. An `always`
+  procedure with one runs as a process, and a force in a task executes in
+  the process that calls it. The target is a packed integral
+  variable or net of the module or, through a hierarchical name, of another
+  instance, or a constant bit-select, part-select or member of one: as an
+  extension, a constant select or a member of a variable is a target too,
+  which the standard allows only of a vector net. As a further extension,
+  an element of a fixed-size unpacked array of a packed integral type at
+  constant indices, or a constant select or member of one, is a target: the
+  array then has force controls of its own shape, which the warning
+  `forced_array` reports with their size, and a write of an element at a
+  run-time index keeps the forced bits of that element. A force of an input port
+  of an instance forces that port, not the net connected to it. Every
+  instance of a module whose variable or net a hierarchical name forces
+  carries the force controls, which the warning `forced_specialization`
+  reports when several instances share them. A write of a forced target
+  through a hierarchical name from a module that does not force it is not
+  overridden. A member of an interface instance can be forced through a
+  hierarchical name, also of an element of an interface instance array
+  (`u.bus[2].ready`), except one that a procedure of another instance
+  writes through an interface port, which is rejected. A concatenation, a select
+  with nonconstant bounds, a slice of an unpacked array, a `real`, `string`,
+  handle or unpacked structure target (singular ones the standard allows),
+  an unpacked array that several edge-triggered processes write, and a
+  variable that a nonblocking assignment with
+  an intra-assignment delay writes are rejected, as are a target that the
+  `always_comb`, `always_latch` or `always @*` procedure assigning it also
+  reads, a target that an `always_comb` running as a process (calling a
+  task, for example) assigns whole, and overlapping parts
+  of one target when a force of one of them has an expression that reads a
+  variable. So are an expression with side effects or with a call of a
+  subroutine or a system function other than `$urandom` and
+  `$urandom_range` with constant arguments, which draw a value when the
+  force executes and again when a variable of the expression changes, and
+  one that reads a variable of a procedural block or of an automatic task.
+  A static variable of a task, such as its argument, is read when the force
+  executes. A target that the host also forces
   (`Simulator::force`) is rejected, as is an input port of the top module,
   which the host writes.
 - Procedural continuous assignments (`assign` / `deassign`, IEEE 1800-2023
@@ -239,12 +302,12 @@ blocks in programs. Two region deviations are listed under
   `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431));
   use blocking assignments there.
 - `iff` qualifiers in `always_ff` event lists
-  ([#452](https://github.com/celox-sim/celox/issues/452)), `always_ff` edge
-  operands other than a plain signal
-  ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit edge
+  ([#452](https://github.com/celox-sim/celox/issues/452)), multi-bit edge
   signals in `always_ff`, and several `always_ff` edges without an
   asynchronous reset. The same shapes in a plain `always` run as timed
-  processes instead; see the [execution model](#celox-execution-model).
+  processes instead, as does an `always_ff` whose event is not `posedge` or
+  `negedge` of a variable (a member or a bit of one, an expression, `edge`);
+  see the [execution model](#celox-execution-model).
 - Intra-assignment timing: nonblocking intra-assignment event controls and
   nonconstant delays. Delayed nonblocking assignments
   (`lhs <= #constant rhs`, 10.4.2) accept only integral constant delays and
@@ -291,8 +354,9 @@ blocks in programs. Two region deviations are listed under
   own thread or calling `await()` from a function.
 - Loops: a procedural loop unrolls at most 10,000 iterations; a
   combinational loop with a run-time trip count must be a counted `for`
-  loop; loop-generate constructs past 10,000 iterations are rejected
-  ([#448](https://github.com/celox-sim/celox/issues/448)); genvar updates
+  loop; the loop-generate constructs of one module are rejected past
+  1,000,000 iterations in all, which stops a loop whose condition never
+  becomes false; genvar updates
   with bitwise compound operators are rejected
   ([#455](https://github.com/celox-sim/celox/issues/455)); recursive
   constant-function expansion in generate constructs is rejected.
@@ -399,12 +463,18 @@ blocks in programs. Two region deviations are listed under
   included, the latter naming the member. A guard of state values, as of `if` or `->`, is
   evaluated before solving, so a constraint it leaves out reads no member of
   a null handle (18.5.13).
-- Inline `with` constraints: aggregate caller-scope inputs other than an
-  element at a position a caller-scope name or a literal gives (as
-  `buffer[i]`, read as the call starts), typed parameter inputs, a `local::` name of a property of the caller's
-  class, and a member of a caller-scope variable (18.7) other than the one
-  that holds the object being randomized, as `h` of
-  `h.randomize() with { h.x > 0; }`, which names that object, also in
+- Inline `with` constraints: aggregate caller-scope inputs, typed parameter
+  inputs, a `local::` name of a property of the caller's class, and a value
+  the caller computes from a random variable (18.7). An integral value the
+  caller computes from its variables and from properties of the object that
+  are neither `rand` nor `randc` is an input the call reads as it starts,
+  after `pre_randomize()`: an element at a position a caller-scope name or a
+  literal gives (as `buffer[i]`), a member of a caller-scope variable (as
+  `req.rw`), an element at a position such a value gives (as
+  `memory[rsp.addr]`), and a method call on an object (as
+  `m.get_size()`). `memory[h.addr]` with a `rand addr` stays unsupported.
+  The variable that holds the object being randomized, as `h` of
+  `h.randomize() with { h.x > 0; }`, names that object, also in
   `foreach (h.a[i])`, `h.a[i]` and guards. That variable is read once as
   the call starts: a `pre_randomize()` that assigns it does not change the
   object its names refer to.
@@ -443,7 +513,8 @@ blocks in programs. Two region deviations are listed under
   string values in VPI, VCD output,
   and the TypeScript API; nonblocking character writes to fixed string
   arrays; method calls on whole string arrays or subarrays; array-valued
-  string arguments or return values.
+  string arguments or return values; value range items (`["a":"z"]`) of an
+  `inside` set or a `case inside` statement on strings.
 - Reference arguments <a id="reference-arguments"></a> (13.5.2): `ref static`;
   elements of dynamic arrays, queues, and associative arrays as actuals;
   elements of class properties; writes to part of a formal bound to a class
@@ -490,9 +561,11 @@ concurrent assertions is unsupported:
   match items in their operands: an attempt passes at the first tick one of
   its ways to
   match matches, and fails at the first tick none can match any more. At
-  most 1024 ways to match, and only in a sequence that is the whole
-  property: not in an implication, an `expect` statement, or one with local
-  variables or match items.
+  most 1024 ways to match, in a sequence that is the whole property or the
+  consequent of an implication whose antecedent has one way to match (an
+  attempt whose antecedent misses succeeds vacuously at that tick): not in
+  the antecedent of an implication, an `expect` statement, or one with
+  local variables or match items.
 - `disable iff` of a sequence over cycles: an attempt is disabled, and
   neither passes nor fails, when the condition is true at any time from
   its start to its end, also between the ticks of the clock, over the
@@ -586,30 +659,21 @@ or nonblocking action statements.
 These are accepted by Celox but do not follow the standard exactly.
 Code that must stay portable should avoid relying on them.
 
-- **Inferred latches are an error by default.** An incomplete assignment in
-  `always_comb` (including a static local that only some paths write) is
-  rejected unless `inferred_latch = "warn"` or `"allow"` is set in the
-  [`[diagnostics]` table](./celox-toml.md#diagnostics), or the equivalent
-  Rust / JavaScript option is used. Explicit `always_latch` and ordinary
-  `always @*` do not need the option.
 - **A missing `static` keyword is forgiven in one case.** IEEE 1800-2023
   6.21 requires an explicit `static` when a static variable's declaration
   specifies an initialization value. Celox also accepts the declaration
   without the keyword with a constant initializer in any procedure, and
   with a run-time initializer in a procedure that runs once, such as
   `initial`. In an `always` procedure a run-time initializer without the
-  keyword is rejected; declare the local `static` or `automatic`.
-- **`$readmemh` / `$readmemb` of a constant file name read at compile
-  time.** The file is read when the design is compiled, not when the call
-  executes; a missing or malformed file is a compile-time `MemoryFile`
-  error. In `always_ff` the file's words are written on every activation.
-  An `@` address directive outside the requested range is an error; without
-  directives, a word-count mismatch is a compilation warning (excess words
-  are ignored, missing words leave memory unchanged). A file name that is
-  not a constant string, such as a `string` variable that
-  `$value$plusargs` reads, is read when the call executes in a process:
-  the same errors end the simulation and the mismatch is a run-time
-  warning. Such a call takes a whole unpacked array as its memory.
+  keyword is rejected; declare the local `static` or `automatic`. Both
+  accepted forms report an `implicit_static_initializer` warning, which the
+  diagnostics policy can silence (`allow`) or escalate (`error`).
+- **Packed values and fills of fixed-size unpacked arrays.** IEEE
+  1800-2023 7.6 assigns a fixed-size unpacked array only an unpacked array
+  of a compatible type. Celox also assigns it a packed value exactly as
+  wide as the whole array, bit for bit, and fills every element with an
+  unbased unsized literal such as `'0`. A value of any other width, a real or a string
+  variable is rejected.
 - **Program continuous assignments do not run in the Reactive region.**
   Continuous assignments in a program are evaluated with the design's
   combinational logic, and design logic that a program writes settles while
@@ -622,21 +686,15 @@ Code that must stay portable should avoid relying on them.
   calls in unused function declarations.
 - **Coverage is not reported.** Immediate `cover` executes its pass
   statement, but coverage counters and reports are not exposed.
-- **Opt-in legacy empty reductions.** By default, empty array reductions
-  return their identities (7.12.3). Rust's
-  `SimulatorBuilder::legacy_empty_reductions(true)` (or the frontend's
-  `AnalysisOptions::legacy_empty_reductions`) instead returns zero for all
-  empty reductions, for compatibility with tools that do so.
-- **Opt-in default time scales for elements without one.** IEEE 1800-2023
+- **Default time scales for elements without one.** IEEE 1800-2023
   3.14.2.3 makes a design an error when some design elements have a time
   unit and precision (declared, inherited or from `` `timescale ``) and
-  others do not, and Celox rejects it by default, naming the elements
-  without one. With `mixed_timescale = "warn"` or `"allow"` in the
-  [`[diagnostics]` table](./celox-toml.md#diagnostics), which the
-  JavaScript package also reads (or `--diagnostic mixed_timescale=warn` on
-  the command line, or `SimulatorBuilder::diagnostic_policy` in Rust), each such element takes the default time unit and precision
-  instead, and `warn` reports one `mixed_timescale` warning naming each, as
-  other simulators do.
+  others do not. Celox instead warns, naming the elements without one,
+  and each such element takes the default time unit and precision, as
+  other simulators do. Strict mode (`strict = true` / `--strict`) or
+  `mixed_timescale = "error"` in the
+  [`[diagnostics]` table](./celox-toml.md#diagnostics) rejects the
+  design; `mixed_timescale = "allow"` silences the warning.
 - **Storage of interface subroutines called through a virtual interface.**
   A task or function of an interface called through a virtual interface
   (`vif.drive(req)`, 25.9) runs for the instance the handle denotes. Its
@@ -657,6 +715,15 @@ Code that must stay portable should avoid relying on them.
 Where IEEE 1800-2023 leaves a choice to the implementation, or declares an
 order unspecified or nondeterministic, Celox chooses as follows.
 Portable code must not depend on these choices.
+
+### Constant widths {#constant-widths}
+
+IEEE 1800-2023 lets an implementation limit the width of a vector to no
+less than 65536 bits (6.9.1, 7.4.1). A constant value, such as a parameter,
+the concatenation that gives it or a part-select of it, may have up to
+1048576 bits. A replication, a constant built bit by bit, and a value inside
+a constant function call may have up to 65536 bits. A wider constant is
+rejected before it is built.
 
 ### Event scheduling {#timing-semantics}
 
@@ -797,6 +864,23 @@ which designs need the timed `Simulation` API and what the host can observe.
   edge-sensitive `always`. `Simulator::tick` drives the rising edge of its
   event only; a `Simulation` runs every edge. A `Simulator` call is one
   time slot for `$sampled` and deferred assertions, and `$time` returns 0.
+- **Host clocks.** `Simulation::add_clock` and `Simulation::schedule` move
+  an event signal: a clock or asynchronous reset of an edge-sensitive
+  `always`, or a one-bit input of a top-level module that a process waits
+  for. A process waits for the input its event control names
+  (`@(posedge clk)`, `@(clk)`) or its `wait` condition reads: in the top
+  module itself, by a hierarchical name, or through port connections and
+  continuous assignments that copy the whole signal unchanged. For any other
+  signal `schedule` returns `NotAnEvent` and `add_clock` does nothing: an
+  input read only as data, an `iff` condition, a multi-bit input, and the
+  operands of an event expression such as `@(posedge (clk & en))` are driven
+  with `modify` between the runs. With several top-level modules,
+  `named_events()` names the events of each top from it (`hdl_top.clk`), and
+  `add_clock_by_id` and `schedule_by_id` move them. An event signal cannot
+  be forced from the host: `force_signals` rejects a waited input as it
+  rejects a clock. A clock on a waited input that another event is computed
+  from (a gated clock, an inverted reset) is not compiled into the
+  scheduler's time slots, so each of its edges is a step of the host.
 - **Termination.** `final` procedures run once on `$finish`, `$fatal`, or an
   explicit `Simulation::finish()`; an idle `step()` or the end of
   `run_until()` does not terminate the reusable Rust simulation. No
@@ -855,6 +939,28 @@ which designs need the timed `Simulation` API and what the host can observe.
   or container layouts must be regenerated.
 - **Loop progress.** A run-time loop in `always_ff` that stops making
   progress reports a runtime error naming its loop variable.
+- **Memory files.** <a id="memory-files"></a> `$readmemh` and `$readmemb`
+  read their file when they execute (21.4), never when the design is
+  compiled, so compiled code, a JIT cache, and native images see the file
+  as it is then. A load in an `initial` block that neither waits nor reads
+  design state before it runs when each `Simulator` or `Simulation`
+  instance is created, in both APIs; any other load runs at its statement,
+  in `always_ff` at every activation and in `always_comb` whenever the
+  block runs. A relative name is looked up in the working directory of the
+  simulating process. The word-count warning and the errors of a load are
+  `RuntimeEvent::Report`s; an error terminates the load, keeping the words
+  loaded before it, and the simulation continues. An `initial` block that
+  reads loaded words afterwards runs as a process. For the inferred-latch
+  check of `always_comb`, a load assigns all the words it may load.
+  An associative array is loaded when its indices are integral values of
+  at most 64 bits and its elements packed values of at most 64 bits (21.4.1),
+  always at its statement: each word creates or replaces the element of
+  its address, which is the index's bit pattern (`@fffffffe` is the `int`
+  index -2, as in Verilator). Without addresses in the call, a file address
+  may name any index; an address or word that is no member of an
+  enumerated index or element type is an error. An index that selects the
+  array, as in `banks[i++]`, must have no effect. Dynamic arrays and queues
+  are not loaded.
 
 ## Mixing Veryl and SystemVerilog {#mixed-language}
 
@@ -898,10 +1004,16 @@ Each import is linked by its C name at build time: `dpi_function`
 registrations are searched first, then `dpi_library` libraries in order; an
 unresolved name fails the build with a `Dpi` error. Both methods are
 `unsafe`, because Celox cannot check that a C function matches its import.
+`allow_unlinked_dpi_for_elaboration()` builds a design despite unresolved
+imports, for an elaboration that never runs it (the sv-tests runner's
+elaboration mode, which links no C code as other tools' does not): a call of
+such an import is a run-time error that names the import and says it was
+elaborated without its C body. It is off unless requested; simulation and
+every other build keep the error.
 
 Supported subset; everything else is rejected:
 
-- `function` imports (not tasks, not `context`) declared in a module, in a
+- `function` imports (not tasks), also `context` ones (35.5.3), declared in a module, in a
   package or at compilation-unit scope, called from procedural code:
   `initial` and `always` processes (`always @*` included), `always_ff`, and
   the subroutines they call. Calls in continuous assignments and
@@ -920,8 +1032,17 @@ Supported subset; everything else is rejected:
   output is copied when it returns.
 - In two-state simulation, the unknown bits a function writes to a `logic`
   argument read as zero.
+- An `always @*` block that calls an import runs when what it reads changes
+  (9.4.2.2), as any other, and no more often: a C function whose result
+  changes without a change of its SystemVerilog arguments is not called
+  again until one changes.
+- A `context` import is called as any other. Its C code cannot use the scope
+  API (`svGetScope`, `svSetScope`, `svGetNameFromScope`, `svGetScopeFromName`,
+  user data) or call exported subroutines: Celox does not provide those C
+  symbols, so a library that uses them fails to load with an unresolved-symbol
+  error naming it.
 - `export "DPI-C"` declarations are accepted and checked (35.7) but no C
-  code can call them, because only `context` imports may do so (35.5.3).
+  code can call them (see `context` imports above).
 - UVM's C library functions are provided by Celox and shadow any user
   implementation of the same name. The
   `uvm_re_*` functions use the Rust `regex` crate, whose syntax differs

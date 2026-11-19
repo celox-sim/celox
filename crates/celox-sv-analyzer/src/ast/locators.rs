@@ -188,6 +188,8 @@ impl Array {
             signed: true,
             two_state: true,
             handle: None,
+            enum_values: None,
+            key_enum_values: None,
         };
         match self {
             Self::Container(container) if method.returns_index() => match container.layout.kind {
@@ -212,15 +214,17 @@ impl Array {
                     } else {
                         None
                     },
+                    enum_values: None,
+                    key_enum_values: None,
                 },
                 _ => int,
             },
             Self::Container(container) => ContainerLayout {
                 kind: queue,
-                ..container.layout
+                ..container.layout.clone()
             },
             Self::Fixed { .. } if method.returns_index() => int,
-            Self::Fixed { layout, .. } => *layout,
+            Self::Fixed { layout, .. } => layout.clone(),
         }
     }
 }
@@ -374,7 +378,7 @@ fn array(
                 element: container.element.clone(),
                 layout: ContainerLayout {
                     kind: ContainerKind::Queue { capacity: 0 },
-                    ..container.layout
+                    ..container.layout.clone()
                 },
                 storage: Some(container),
             }));
@@ -428,11 +432,11 @@ fn array(
             .map(|dimension| PackedRange::new(dimension.left.clone(), dimension.right.clone()))
             .collect();
         ty.members = shape.members.clone();
-        ty.is_enum = shape.enum_domain.is_some();
-        ty.enum_domain = shape.enum_domain.clone();
-        ty.packed_enum = shape.packed_enum;
         ty.signed_element_depth = shape.signed_element_depth;
         ty = ty.with_chandle(shape.chandle);
+        // The element keeps the enumerated type of the array's elements,
+        // even where the shape records no members of it.
+        ty.keep_enumeration(shape.retained_enumeration());
         ty
     };
     let width = casts::expr_type_from_type(&tree.functions, &element, &dims.const_env)
@@ -451,6 +455,8 @@ fn array(
         width: width as u32,
         signed: shape.signed,
         two_state: shape.is_2state || handle.is_some(),
+        enum_values: None,
+        key_enum_values: None,
         handle,
     };
     Ok(Some(Array::Fixed {
@@ -656,7 +662,7 @@ pub(super) fn bind(
     }
     let (source, array) = match &call.array {
         Array::Container(container) => (
-            LocatorSource::Container(container.layout),
+            LocatorSource::Container(container.layout.clone()),
             expression_binding::value(call.base, native, tree, session, dims)?,
         ),
         Array::Fixed {
@@ -675,7 +681,11 @@ pub(super) fn bind(
                 containers::element_read(
                     storage,
                     &session.types,
-                    containers::call(ContainerOp::Get, storage.layout, vec![receiver, position]),
+                    containers::call(
+                        ContainerOp::Get,
+                        storage.layout.clone(),
+                        vec![receiver, position],
+                    ),
                 ),
             )
         }

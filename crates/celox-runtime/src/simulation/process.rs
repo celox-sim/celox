@@ -256,10 +256,14 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 Some(ProcessStatus::Exit) => {
                     self.exit_program(executor.backend_mut(), process)?;
+                    // `$exit` kills the program's processes (IEEE 1800-2023
+                    // 24.7): as for kill() and a disable (9.7, 16.4.4), the
+                    // reports still pending in their queues are flushed. One
+                    // that already finished keeps the reports it left.
                     let program = self.model.processes[process].program;
                     for (index, candidate) in self.model.processes.iter().enumerate() {
                         if candidate.program == program {
-                            executor.finish_deferred_assertion_process(index);
+                            executor.cancel_deferred_assertion_process(index);
                         }
                     }
                     self.program_kernel_ended(executor.backend())?;
@@ -499,6 +503,7 @@ impl<B: SimBackend> SimulationState<B> {
             .program
             .ok_or(SimulatorErrorCode::InternalError)?;
         let mut ended = Vec::new();
+        let mut exited = Vec::new();
         for index in 0..self.model.processes.len() {
             let refs = &self.model.processes[index];
             if refs.program != Some(program) {
@@ -513,7 +518,6 @@ impl<B: SimBackend> SimulationState<B> {
                 activation.control.suspended = None;
                 activation.control.awaiting = None;
                 activation.control.observes.clear();
-                activation.control.observed_events.clear();
                 activation.control.level_wait = false;
                 activation.pending.clear();
                 activation.join = None;
@@ -524,7 +528,11 @@ impl<B: SimBackend> SimulationState<B> {
             state.deferred_ready.remove(&index);
             state.reactive.remove(&index);
             state.re_inactive.remove(&index);
+            exited.push(index);
         }
+        // Its processes are queued and waiting nowhere any more, also not
+        // for the Observed region (16.4) or a mailbox (15.4).
+        self.release_for_reuse(&exited, true);
         let model = &self.model;
         self.process_wakeups
             .retain(|std::cmp::Reverse((_, index))| {

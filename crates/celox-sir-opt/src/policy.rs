@@ -10,8 +10,9 @@ use crate::HashSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum OptLevel {
     /// No semantic SIR optimizations. The compatibility
-    /// [`SirPass::TailCallSplit`] selector is consumed only by Cranelift.
-    /// Cranelift: `fast_compile()`. DSE: Off.
+    /// [`SirPass::TailCallSplit`] selector is consumed only by Cranelift;
+    /// [`SirPass::SchedulerCallees`], which only shortens native builds,
+    /// stays on. Cranelift: `fast_compile()`. DSE: Off.
     O0,
     /// Production-default SIR optimizations enabled, including conservative
     /// two-state control-flow recovery for profitable Mux regions.
@@ -29,7 +30,7 @@ impl OptLevel {
     /// Returns whether a given SIR pass is enabled by default at this level.
     pub fn default_enabled(self, pass: SirPass) -> bool {
         match self {
-            OptLevel::O0 => matches!(pass, SirPass::TailCallSplit),
+            OptLevel::O0 => matches!(pass, SirPass::TailCallSplit | SirPass::SchedulerCallees),
             OptLevel::O1 => !matches!(pass, SirPass::PartitionedSettle),
             // The frontend keeps small and lane-parallel schedules whole.
             OptLevel::O2 => true,
@@ -137,6 +138,12 @@ define_sir_passes! {
     /// the settle is scheduled. Not a SIR transform: the frontend consumes
     /// it, and only for a design whose dead-store policy lets signals go.
     NetInlining => "net_inlining",
+    /// Compile the larger bodies a native image's compiled scheduler runs
+    /// (the settle, FF domains, kernels) as functions of their own that it
+    /// calls, instead of inlining them all into one function, whose
+    /// compilation time and memory grow faster than its size. Not a SIR
+    /// transform: the builder consumes it. Enabled at every level.
+    SchedulerCallees => "scheduler_callees",
 }
 /// Diagnostics and additional verification for the SIR optimizer.
 ///
@@ -245,7 +252,8 @@ impl OptimizeOptions {
         Self::new(OptLevel::O1)
     }
 
-    /// All passes disabled except TailCallSplit (equivalent to `OptLevel::O0`).
+    /// All passes disabled except the TailCallSplit and SchedulerCallees
+    /// selectors (equivalent to `OptLevel::O0`).
     pub fn none() -> Self {
         Self::new(OptLevel::O0)
     }
@@ -373,8 +381,8 @@ impl OptimizeOptions {
     }
 
     /// Returns true if any SIR transform is enabled: any pass other than
-    /// the TailCallSplit, DerivedEdgeUnits, PartitionedSettle and
-    /// NetInlining selectors.
+    /// the TailCallSplit, DerivedEdgeUnits, PartitionedSettle, NetInlining
+    /// and SchedulerCallees selectors.
     pub fn any_enabled(&self) -> bool {
         SirPass::ALL.iter().any(|&p| {
             !matches!(
@@ -383,6 +391,7 @@ impl OptimizeOptions {
                     | SirPass::DerivedEdgeUnits
                     | SirPass::PartitionedSettle
                     | SirPass::NetInlining
+                    | SirPass::SchedulerCallees
             ) && self.is_enabled(p)
         })
     }
@@ -434,10 +443,13 @@ mod tests {
     }
 
     #[test]
-    fn o0_only_enables_the_backend_compatibility_selector() {
+    fn o0_only_enables_the_backend_compatibility_selectors() {
         let options = OptimizeOptions::new(OptLevel::O0);
         for &pass in SirPass::ALL {
-            assert_eq!(options.is_enabled(pass), pass == SirPass::TailCallSplit);
+            assert_eq!(
+                options.is_enabled(pass),
+                matches!(pass, SirPass::TailCallSplit | SirPass::SchedulerCallees)
+            );
         }
         assert!(!options.any_enabled());
     }

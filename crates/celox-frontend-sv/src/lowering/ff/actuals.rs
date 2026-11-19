@@ -200,7 +200,7 @@ impl Ff<'_, '_> {
                 (
                     ObjectOp::Container {
                         op: ContainerOp::Set,
-                        layout: *layout,
+                        layout: layout.clone(),
                     },
                     vec![container, Expr::Ident(name)],
                     layout.width as usize,

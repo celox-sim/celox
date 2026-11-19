@@ -74,6 +74,10 @@ pub(super) struct Item {
     imports: SharedMap<String>,
     shadowed: Arc<HashSet<String>>,
     scope: String,
+    /// The generate blocks of `scope`, outermost first, each as a
+    /// hierarchical name spells it (`g[1]`): an escaped name may contain
+    /// `.` (IEEE 1800-2023 5.6.1), so `scope` cannot be split into them.
+    blocks: Arc<[String]>,
 }
 
 /// The names the imports of the enclosing generate blocks bind to another
@@ -229,6 +233,11 @@ impl Item {
         &self.scope
     }
 
+    /// The generate blocks that hold the item, outermost first.
+    pub fn blocks(&self) -> &[String] {
+        &self.blocks
+    }
+
     /// `tree` analyzing the item, which sees the interface bindings of the
     /// generate scopes that enclose it.
     pub fn scoped<'a>(&self, tree: &AnalysisContext<'a>) -> AnalysisContext<'a> {
@@ -312,13 +321,19 @@ impl Item {
         let mut local = dimensions.clone();
         local.const_env = self.env.clone();
         if !self.shadowed.is_empty() || !self.names.is_empty() || !self.constant_types.is_empty() {
-            let mut bindings = self.function_aliases((*dimensions.constant_types).clone());
+            let mut bindings = self.function_aliases(
+                dimensions
+                    .constant_types
+                    .iter()
+                    .map(|(name, r#type)| (name.clone(), r#type.clone()))
+                    .collect::<HashMap<_, _>>(),
+            );
             bindings.extend(
                 self.constant_types
                     .iter()
                     .map(|(n, t)| (n.clone(), t.clone())),
             );
-            local.constant_types = Arc::new(bindings);
+            local.constant_types = bindings.into_iter().collect();
         }
         local.parameter_values =
             if self.shadowed.is_empty() && self.names.is_empty() && self.literals.is_empty() {
@@ -537,6 +552,7 @@ impl Item {
                 msb,
                 lsb,
                 array_slice_width,
+                window,
                 ..
             } => {
                 *name = self.name(name);
@@ -544,6 +560,10 @@ impl Item {
                 self.constant(lsb);
                 if let Some(width) = array_slice_width {
                     self.constant(width);
+                }
+                // The position of a run-time element names the index.
+                if let Some(at) = window.as_mut().and_then(|window| window.at.as_mut()) {
+                    self.constant(at);
                 }
             }
         }
@@ -554,6 +574,8 @@ impl Item {
 struct Scope {
     imported: Arc<scope::ScopeSymbols>,
     path: String,
+    /// The blocks of `path`, outermost first.
+    blocks: Vec<String>,
     in_loop: bool,
     env: SharedEnv,
     literals: SharedMap<Expr>,
@@ -779,7 +801,7 @@ impl<'a> Elaborator<'a, '_> {
     ) -> Result<Option<ConstExpr>, AnalyzerError> {
         // A select of a parameter names indices of its declared range,
         // which may be ascending (IEEE 1800-2023 7.4.1, 11.5.1).
-        let parameters = PackedDimensions::new(
+        let mut parameters = PackedDimensions::new(
             scope
                 .parameter_dimensions
                 .iter()
@@ -788,6 +810,10 @@ impl<'a> Elaborator<'a, '_> {
             &scope.env,
             &*self.aliases,
         );
+        // A parameter wider than the numeric environment holds is known by
+        // its literal, which a select of it reads, such as of an element of
+        // a member of a packed structure (IEEE 1800-2023 11.2.1).
+        parameters.parameter_values = scope.literals.clone();
         let Some(expr) = constant_binding::bind(root, &self.tree, self.session, &parameters)?
         else {
             return Ok(None);
@@ -947,6 +973,7 @@ impl<'a> Elaborator<'a, '_> {
             imports: scope.imports.clone(),
             shadowed: scope.shadowed.clone(),
             scope: scope.path.clone(),
+            blocks: scope.blocks.clone().into(),
         });
     }
 
@@ -1033,6 +1060,7 @@ impl<'a> Elaborator<'a, '_> {
                 ]
                 .into_iter()
                 .chain(parameters::member_keys(&name, &scope.env))
+                .chain(parameters::element_keys(&name, &scope.env))
                 {
                     scope.env.remove(&key);
                 }
@@ -1086,6 +1114,7 @@ impl<'a> Elaborator<'a, '_> {
                 ]
                 .into_iter()
                 .chain(parameters::member_keys(&name, &scope.env))
+                .chain(parameters::element_keys(&name, &scope.env))
                 {
                     scope.env.remove(&key);
                 }
@@ -1204,16 +1233,28 @@ impl<'a> Elaborator<'a, '_> {
                             &HashMap::default(),
                             &mut environment,
                         )?;
-                        let parameter = scope
+                        let Some(parameter) = scope
                             .parameters
                             .get(inherited_count)
                             .filter(|parameter| parameter.name() == name)
                             .cloned()
-                            .ok_or_else(|| {
-                                AnalyzerError::Unsupported(format!(
-                                    "generate-local parameter `{name}`"
-                                ))
-                            })?;
+                        else {
+                            self.local_array_parameter(scope, &name, id)?;
+                            order.complete(next);
+                            let Some(ready) = order.peek_ready().filter(|ready| {
+                                *ready >= signal_count
+                                    && pending[*ready - signal_count]
+                                        .as_ref()
+                                        .is_some_and(|(_, _, _, single)| *single)
+                            }) else {
+                                break;
+                            };
+                            next = order
+                                .pop_ready()
+                                .expect("the ready frontier was just inspected");
+                            debug_assert_eq!(next, ready);
+                            continue;
+                        };
                         constants::bind_generate_parameter_with_types(
                             &self.tree,
                             self.session,
@@ -1255,13 +1296,15 @@ impl<'a> Elaborator<'a, '_> {
                     &self.aliases,
                     &HashMap::default(),
                 )?;
-                let parameter = scope
+                let Some(parameter) = scope
                     .parameters
                     .drain(inherited_count..)
                     .find(|parameter| parameter.name() == name)
-                    .ok_or_else(|| {
-                        AnalyzerError::Unsupported(format!("generate-local parameter `{name}`"))
-                    })?;
+                else {
+                    self.local_array_parameter(scope, &name, id)?;
+                    order.complete(index);
+                    continue;
+                };
                 scope.parameters.push(parameter.clone());
                 bind_generate_parameter(
                     &self.tree,
@@ -1290,6 +1333,34 @@ impl<'a> Elaborator<'a, '_> {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// Name the unpacked array parameter `name` that declaration `id` of the
+    /// block declares, which is a constant variable of the block rather than
+    /// a parameter value (see [`array_parameters`]): its name in the block is
+    /// that of the variable, qualified by the block.
+    fn local_array_parameter(
+        &mut self,
+        scope: &mut Scope,
+        name: &str,
+        id: celox_sv_syntax::BodyItemId,
+    ) -> Result<(), AnalyzerError> {
+        let is_array = parameters::ownership::body(id, &self.tree)?
+            .iter()
+            .any(|parameter| {
+                instances::normalize_identifier(&parameter.name.spelling) == name
+                    && array_parameters::is_array_parameter(parameter, self.tree.declarations())
+            });
+        if !is_array {
+            return Err(AnalyzerError::Unsupported(format!(
+                "generate-local parameter `{name}`"
+            )));
+        }
+        scope.names.insert(
+            name.to_string(),
+            format!("{}.{}", scope.path, scope_component(name)),
+        );
         Ok(())
     }
 
@@ -1573,7 +1644,10 @@ impl<'a> Elaborator<'a, '_> {
                     enum_marker(&signal.name),
                     parameter_width_marker(&signal.name),
                     parameter_signed_marker(&signal.name),
-                ] {
+                ]
+                .into_iter()
+                .chain(parameters::element_keys(&signal.name, &scope.env))
+                {
                     scope.env.remove(&key);
                 }
                 scope.literals.remove(&signal.name);
@@ -1595,13 +1669,18 @@ impl<'a> Elaborator<'a, '_> {
 /// block hides: a query of the name reads the nearer declaration (IEEE
 /// 1800-2023 23.9).
 fn forget_variable(env: &mut SharedEnv, name: &str) {
+    // The elements of an outer array parameter of the name, too: a select
+    // of the name selects the bits of the nearer declaration.
     for key in [
         variable_bits_marker(name),
         variable_size_marker(name),
         variable_signed_marker(name),
         variable_unpacked_dimensions_marker(name),
         variable_dimensions_marker(name),
-    ] {
+    ]
+    .into_iter()
+    .chain(parameters::element_keys(name, env))
+    {
         env.remove(&key);
     }
 }
@@ -1715,6 +1794,7 @@ fn module_constant_functions(
             imports: SharedMap::default(),
             shadowed: Arc::default(),
             scope: String::new(),
+            blocks: Arc::default(),
         });
     }
     let mut functions = functions::native_functions(

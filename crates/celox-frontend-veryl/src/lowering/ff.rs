@@ -205,6 +205,7 @@ impl<'a> FfParser<'a> {
             runtime: RuntimeSites {
                 runtime_errors: HashMap::default(),
                 runtime_event_sites: Vec::new(),
+                memory_file_bases: Vec::new(),
                 next_runtime_error_code: 2000,
                 runtime_error_code_map: None,
                 runtime_event_site_base: 0,
@@ -244,6 +245,12 @@ impl<'a> FfParser<'a> {
 
     pub fn runtime_event_sites(&self) -> &Vec<RuntimeEventSite> {
         &self.runtime.runtime_event_sites
+    }
+
+    /// The directories the memory file loads of the blocks look relative
+    /// names up in.
+    pub fn memory_file_bases(&self) -> &[celox_design::MemoryFileBase] {
+        &self.runtime.memory_file_bases
     }
 
     // expression / function-call lowering is split into submodules:

@@ -90,6 +90,20 @@ fn level_sensitive(
         && !has_timing_control(body, native, true)
 }
 
+/// Whether the statement an `always_ff` procedure controls with its event
+/// control has a blocking timing control of its own, which the procedure
+/// may not have (IEEE 1800-2023 9.2.2.4).
+pub(super) fn always_ff_body_suspends(
+    procedure: &celox_sv_syntax::Procedure,
+    native: &celox_sv_syntax::Declarations,
+) -> bool {
+    matches!(
+        native.statement(procedure.body).kind,
+        celox_sv_syntax::StatementKind::Timing { body, .. }
+            if has_timing_control(body, native, false)
+    )
+}
+
 /// Timing controls, including delayed assignments, require process kernels.
 /// With `procedural_assigns`, so does a procedural continuous assignment or
 /// a force, which starts or ends a driver that outlives the statement (IEEE
@@ -441,6 +455,79 @@ fn contains(outer: celox_sv_syntax::TokenRange, inner: celox_sv_syntax::TokenRan
     outer.start <= inner.start && inner.end <= outer.end
 }
 
+/// Whether native expression `id` is a replication whose multiplier is the
+/// constant zero.
+fn zero_replication(
+    id: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> bool {
+    let celox_sv_syntax::ExprKind::Replication { count, .. } = native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    else {
+        return false;
+    };
+    constant_binding::bind(count, tree, session, dimensions)
+        .ok()
+        .flatten()
+        .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env))
+        == Some(0)
+}
+
+/// Whether native expression `id` is a real operand: a real literal, or a
+/// parameter of the design element declared `real`, `shortreal` or
+/// `realtime` (IEEE 1800-2023 5.7.2, 6.12).
+pub(super) fn real_operand(
+    id: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+) -> bool {
+    use celox_sv_syntax::{DataTypeKind, ExprKind, ParameterKind};
+    match &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    {
+        // A real literal has a decimal point or an exponent, unlike a based
+        // or a time literal.
+        ExprKind::Literal(text) => {
+            text.starts_with(|c: char| c.is_ascii_digit())
+                && text
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, '_' | '.' | 'e' | 'E' | '+' | '-'))
+                && text.contains(['.', 'e', 'E'])
+        }
+        ExprKind::Name(name) => {
+            let name = instances::normalize_identifier(&name.spelling);
+            tree.root_unit().is_ok_and(|unit| {
+                unit.parameters
+                    .iter()
+                    .flatten()
+                    .chain(&unit.body_parameters)
+                    .any(|parameter| {
+                        instances::normalize_identifier(&parameter.name.spelling) == name
+                            && matches!(
+                                &parameter.kind,
+                                ParameterKind::Value { data_type, dimensions, .. }
+                                    if dimensions.is_empty()
+                                        && matches!(
+                                            &native.data_type(*data_type).kind,
+                                            DataTypeKind::Builtin(builtin)
+                                                if matches!(
+                                                    builtin.as_str(),
+                                                    "real" | "shortreal" | "realtime"
+                                                )
+                                        )
+                            )
+                    })
+            })
+        }
+        _ => false,
+    }
+}
+
 /// Whole-file facts the scope validation selects from, built once per file
 /// so each scope costs what its own token ranges contain.
 #[derive(Debug)]
@@ -452,7 +539,8 @@ pub(crate) struct Facts {
     /// Unit and port positions of every header port, in arena order.
     ports: Vec<(usize, usize)>,
     port_starts: Starts,
-    /// Type and dimension positions of every packed dimension.
+    /// Type and dimension positions of every packed dimension a scope
+    /// binds: none of what follows the name of a covergroup.
     packed_dimensions: Vec<(usize, usize)>,
     packed_dimension_starts: Starts,
     /// Dimensions of type arguments naming an alias, with that name.
@@ -472,7 +560,8 @@ pub(crate) struct Facts {
     pub(super) callee_spans: HashSet<(usize, usize)>,
     /// Expressions that are expression statements.
     pub(super) expression_statements: HashSet<ExprId>,
-    /// Expressions that are constant values, and the roots they are under.
+    /// Expressions that are constant values of a scope, and the roots they
+    /// are under: none of what follows the name of a covergroup.
     constant_roots: Vec<ExprId>,
     constant_nodes: HashSet<ExprId>,
     /// Callee and first argument of every call with one.
@@ -481,7 +570,10 @@ pub(crate) struct Facts {
 }
 
 impl Facts {
-    pub(crate) fn new(native: &celox_sv_syntax::Declarations) -> Self {
+    pub(crate) fn new(
+        native: &celox_sv_syntax::Declarations,
+        covergroups: &crate::source_tree::CovergroupInteriors,
+    ) -> Self {
         use celox_sv_syntax::{BodyItemKind, ExprKind, ParameterKind, StatementKind};
         let controls = Ranges::new(native.body_items.iter().filter_map(|item| {
             matches!(
@@ -509,6 +601,8 @@ impl Facts {
                 .map(|port| port.tokens)
                 .enumerate(),
         );
+        // The dimension of a covergroup formal or of a coverpoint's type may
+        // name a formal, which only the covergroup binds (19.3).
         let packed_dimensions = native
             .types
             .iter()
@@ -516,13 +610,14 @@ impl Facts {
             .flat_map(|(ty, data)| {
                 (0..data.packed_dimensions.len()).map(move |dimension| (ty, dimension))
             })
+            .filter(|(ty, dimension)| {
+                !covergroups.contain(native.types[*ty].packed_dimensions[*dimension].tokens)
+            })
             .collect::<Vec<_>>();
         let packed_dimension_starts = Starts::new(
-            native
-                .types
+            packed_dimensions
                 .iter()
-                .flat_map(|data| &data.packed_dimensions)
-                .map(|dimension| dimension.tokens)
+                .map(|(ty, dimension)| native.types[*ty].packed_dimensions[*dimension].tokens)
                 .enumerate(),
         );
         let override_dimensions = native
@@ -701,6 +796,9 @@ impl Facts {
                 _ => {}
             }
         }
+        // What follows the name of a covergroup is no constant value of
+        // the scope that declares it.
+        constant_roots.retain(|id| !covergroups.contain(native.expression(*id).tokens));
         let mut constant = constant_roots.clone();
         let mut constant_nodes = HashSet::default();
         while let Some(id) = constant.pop() {
@@ -826,6 +924,9 @@ fn validate_scope(
         .iter()
         .chain(&native.nested_units)
         .collect::<Vec<_>>();
+    // The generic interconnect nets and ports of the scope (6.6.8), whose
+    // uses outside port and terminal connections are rejected below.
+    let mut interconnect_names: Vec<String> = Vec::new();
     for index in facts.port_starts.within(&ranges) {
         let (unit, port) = facts.ports[index];
         let port = &units[unit].ports[port];
@@ -840,6 +941,11 @@ fn validate_scope(
         }
         if let Some(net_type) = &port.net_type {
             validate_net_type(net_type)?;
+            if net_type == "interconnect"
+                && let celox_sv_syntax::PortKind::Named(name) = &port.kind
+            {
+                interconnect_names.push(instances::normalize_identifier(&name.spelling));
+            }
         }
     }
     for index in spans.net_declarations.within(&ranges) {
@@ -848,6 +954,13 @@ fn validate_scope(
             continue;
         }
         validate_net_type(&net.net_type)?;
+        if net.net_type == "interconnect" {
+            interconnect_names.extend(
+                net.variables
+                    .iter()
+                    .map(|variable| instances::normalize_identifier(&variable.name.spelling)),
+            );
+        }
         if net
             .variables
             .iter()
@@ -892,6 +1005,63 @@ fn validate_scope(
             };
             if let Some(diagnostic) = diagnostic {
                 return Err(unsupported(diagnostic));
+            }
+        }
+    }
+    // An interconnect net or port may only express port and terminal
+    // connections: it shall not be used in a procedural context, in a
+    // continuous or procedural continuous assignment, or in any expression
+    // other than a net_lvalue of interconnect nets (6.6.8). Instance items
+    // carry the allowed connections; every other authored item that names
+    // one is a forbidden use. Generate wrappers are skipped: their inner
+    // items are visited on their own. So is a covergroup, whose formals
+    // and labels the scope does not bind.
+    if !interconnect_names.is_empty() {
+        let forbidden_use = |tokens: &celox_sv_syntax::TokenRange| {
+            native.tokens[tokens.start..tokens.end]
+                .iter()
+                .filter_map(|token| token.identifier())
+                .map(instances::normalize_identifier)
+                .find(|name| interconnect_names.contains(name))
+        };
+        for index in spans.body_items.within(&ranges) {
+            let item = &native.body_items[index];
+            if !selected(item.tokens) {
+                continue;
+            }
+            // A net declaration is allowed, but its initializer is a
+            // continuous assignment, where an interconnect may not be
+            // used (6.6.8).
+            if let BodyItemKind::Net(id) = item.kind {
+                let declaration = native.net_declaration(id);
+                for variable in &declaration.variables {
+                    if let Some(value) = variable.value
+                        && let Some(name) = forbidden_use(&native.expression(value).tokens)
+                    {
+                        return Err(unsupported(format!(
+                            "interconnect net `{name}` used outside a port or terminal connection"
+                        )));
+                    }
+                }
+                continue;
+            }
+            if matches!(
+                item.kind,
+                BodyItemKind::Instance(_)
+                    | BodyItemKind::Region(_)
+                    | BodyItemKind::Block { .. }
+                    | BodyItemKind::Conditional { .. }
+                    | BodyItemKind::Case { .. }
+                    | BodyItemKind::Loop { .. }
+                    | BodyItemKind::Covergroup(_)
+                    | BodyItemKind::Unconverted { .. }
+            ) {
+                continue;
+            }
+            if let Some(name) = forbidden_use(&item.tokens) {
+                return Err(unsupported(format!(
+                    "interconnect net `{name}` used outside a port or terminal connection"
+                )));
             }
         }
     }
@@ -953,6 +1123,7 @@ fn validate_scope(
             }
         }
     }
+    let mut variables = None;
     for id in spans.expressions.within(&ranges) {
         let expression = native.expression(id);
         if !selected(expression.tokens) {
@@ -963,7 +1134,38 @@ fn validate_scope(
                 matches!(control.kind, celox_sv_syntax::TimingControlKind::Delay { value, .. } if contains(native.expression(value).tokens, expression.tokens))) => {
                 return Err(unsupported("mintypmax expression"));
             }
-            ExprKind::Select { dimension, .. } => {
+            ExprKind::Select {
+                expression: selected,
+                dimension,
+            } => {
+                // The bounds of a part-select of a vector shall be constant
+                // (11.5.1); only an indexed part-select has a variable
+                // position. A slice of a queue may have variable bounds
+                // (7.10.1).
+                if let DimensionKind::Range { left, right } = dimension.kind
+                    && !facts.parameter_defaults.contains(dimension.tokens)
+                    && let ExprKind::Name(selected) =
+                        &native.expression(expression_binding::ungroup(*selected, native)).kind
+                    && variables
+                        .get_or_insert_with(|| element_variables(syntax_tree))
+                        .get(&instances::normalize_identifier(&selected.spelling))
+                        == Some(&false)
+                {
+                    for bound in [left, right] {
+                        if let Some(name) = variable_read(
+                            bound,
+                            native,
+                            spans,
+                            indexed_dimensions,
+                            variables.get_or_insert_with(|| element_variables(syntax_tree)),
+                        ) {
+                            return Err(AnalyzerError::NonConstantExpression {
+                                construct: "a bound of a part-select".into(),
+                                name,
+                            });
+                        }
+                    }
+                }
                 if let DimensionKind::Indexed { width, .. } = dimension.kind {
                     if facts.parameter_defaults.contains(dimension.tokens) { continue; }
                     // IEEE 1800-2023 11.5.1 permits a variable base. Its
@@ -971,6 +1173,29 @@ fn validate_scope(
                     // only the width requires constant validation here.
                     check_indexed_width(width, syntax_tree, session, indexed_dimensions)?;
                 }
+            }
+            // A replication of zero copies has no size; it appears only in a
+            // concatenation with an operand of positive size (11.4.12.1).
+            ExprKind::Concatenation(operands) | ExprKind::Replication { expressions: operands, .. }
+                if !operands.is_empty()
+                    && operands.iter().all(|operand| {
+                        zero_replication(*operand, native, syntax_tree, session, indexed_dimensions)
+                    }) =>
+            {
+                return Err(AnalyzerError::InvalidReplication(
+                    "a replication of zero copies is the only operand of a concatenation".into(),
+                ));
+            }
+            ExprKind::Binary { left, operator, right }
+                if matches!(operator.as_str(), "==?" | "!=?")
+                    && [*left, *right]
+                        .into_iter()
+                        .any(|operand| real_operand(operand, native, syntax_tree)) =>
+            {
+                return Err(AnalyzerError::IllegalOperand {
+                    operator: operator.clone(),
+                    operand: "real",
+                });
             }
             _ => {}
         }
@@ -1233,6 +1458,111 @@ fn reject_constant_calls(
     Ok(())
 }
 
+/// A variable or net of the scope that native expression `id` reads by its
+/// simple name, which makes it no constant expression (IEEE 1800-2023
+/// 11.2.1). A name a parameter, a genvar or a constant of the scope also
+/// has is not one, nor is a name in a call, such as of `$bits`, which may
+/// query a variable, in a member select, or the key of an assignment
+/// pattern item, which names a member.
+pub(super) fn variable_read(
+    id: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
+    spans: &crate::source_tree::Spans,
+    dimensions: &PackedDimensions,
+    variables: &HashMap<String, bool>,
+) -> Option<String> {
+    use celox_sv_syntax::ExprKind;
+    let tokens = native.expression(id).tokens;
+    let expressions = spans.expressions.within(&[tokens]);
+    let mut opaque = Vec::new();
+    for id in &expressions {
+        let expression = native.expression(*id);
+        match &expression.kind {
+            ExprKind::Call { .. } | ExprKind::Member { .. } => opaque.push(expression.tokens),
+            // The key of an assignment pattern item names a member or a type.
+            ExprKind::Pattern { items, .. } => opaque.extend(
+                items
+                    .iter()
+                    .filter_map(|item| item.key)
+                    .map(|key| native.expression(key).tokens),
+            ),
+            _ => {}
+        }
+    }
+    expressions.into_iter().find_map(|id| {
+        let expression = native.expression(id);
+        let ExprKind::Name(name) = &expression.kind else {
+            return None;
+        };
+        if opaque
+            .iter()
+            .any(|outer| contains(*outer, expression.tokens))
+        {
+            return None;
+        }
+        let name = instances::normalize_identifier(&name.spelling);
+        (variables.contains_key(&name)
+            && !dimensions.const_env.contains_key(&name)
+            && !dimensions.parameter_values.contains_key(&name))
+        .then_some(name)
+    })
+}
+
+/// The ports and the variables and nets that the design element of `tree`
+/// declares in its own scope, by their normalized names, with whether they
+/// may be unpacked arrays: they have unpacked dimensions, or a type name,
+/// which may name an unpacked array type.
+pub(super) fn element_variables(tree: &AnalysisContext<'_>) -> HashMap<String, bool> {
+    use celox_sv_syntax::{BodyItemKind, DataDeclaration, DataTypeKind, PortKind};
+    let mut names = HashMap::default();
+    let Ok(unit) = tree.root_unit() else {
+        return names;
+    };
+    let native = tree.declarations();
+    let named = |id: celox_sv_syntax::TypeId| {
+        !matches!(
+            native.data_type(id).kind,
+            DataTypeKind::Builtin(_) | DataTypeKind::Implicit
+        )
+    };
+    for port in &unit.ports {
+        if let PortKind::Named(name) | PortKind::Explicit { name, .. } = &port.kind {
+            names.insert(
+                instances::normalize_identifier(&name.spelling),
+                !port.dimensions.is_empty() || port.data_type.is_none_or(named),
+            );
+        }
+    }
+    let mut pending = unit.items.clone();
+    while let Some(id) = pending.pop() {
+        let (data_type, declarators) = match &native.body_item(id).kind {
+            BodyItemKind::Region(items) => {
+                pending.extend(items);
+                continue;
+            }
+            BodyItemKind::Net(id) => {
+                let declaration = native.net_declaration(*id);
+                (declaration.data_type, &declaration.variables)
+            }
+            BodyItemKind::Data(id) => match native.data_declaration(*id) {
+                DataDeclaration::Variables(declaration)
+                | DataDeclaration::Constructed(declaration) => {
+                    (declaration.data_type, &declaration.variables)
+                }
+                DataDeclaration::Unconverted(_) => continue,
+            },
+            _ => continue,
+        };
+        names.extend(declarators.iter().map(|declarator| {
+            (
+                instances::normalize_identifier(&declarator.name.spelling),
+                !declarator.dimensions.is_empty() || named(data_type),
+            )
+        }));
+    }
+    names
+}
+
 /// Reject an indexed part-select width that is not a positive constant.
 fn check_indexed_width(
     native: celox_sv_syntax::ExprId,
@@ -1240,6 +1570,23 @@ fn check_indexed_width(
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<()> {
+    // The width may be an element of an array parameter, `Cap[L128]`, a
+    // constant the constant binder folds (IEEE 1800-2023 11.2.1).
+    if let Ok(Some(width)) = constant_binding::bind_in(
+        native,
+        syntax_tree.declarations(),
+        syntax_tree,
+        session,
+        dimensions,
+    ) && let Some(width) =
+        eval_ast_const_expr(&syntax_tree.functions, &width, &dimensions.const_env)
+    {
+        return if width > 0 {
+            Ok(())
+        } else {
+            Err(unsupported(format!("indexed part-select width {width}")))
+        };
+    }
     let mut context = dimensions.clone();
     context.constant_indexed_base = true;
     let value = constant_binding::indexed_expression(

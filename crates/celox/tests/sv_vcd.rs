@@ -665,6 +665,29 @@ fn imported_escaped_package_delimiters_remain_literal() {
 }
 
 #[test]
+fn dumping_an_instance_without_variables_at_its_levels_is_no_error() {
+    // IEEE 1800-2023 21.7.1.2: one level of `mid` holds no variable, only the
+    // instance `leaf`, so the call selects nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty-selection.vcd");
+    let source = format!(
+        r#"module Leaf; logic r; endmodule
+        module Mid; Leaf leaf(); endmodule
+        module Top; Mid mid();
+        initial begin $dumpfile("{}"); $dumpvars(1, Top.mid); $display("ran"); end
+        endmodule"#,
+        path.display()
+    );
+    let mut simulation = Simulation::from_sv_sources(vec![(&source, Path::new("vcd.sv"))], "Top")
+        .build_interpreter()
+        .unwrap();
+    simulation.run_until(1).unwrap();
+    simulation.flush_vcd().unwrap();
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    assert_eq!(text.matches("$var ").count(), 0, "{text}");
+}
+
+#[test]
 fn scoped_parameter_dump_does_not_select_imported_state() {
     let source = r#"package p; logic state=1; endpackage
         module Top; import p::*;

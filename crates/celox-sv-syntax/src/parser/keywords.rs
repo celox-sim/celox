@@ -327,32 +327,72 @@ impl KeywordVersion {
     }
 }
 
+/// Rewrite each word that 1800-2023 reserves but the `begin_keywords`
+/// version in effect does not into the escaped identifier of that word
+/// (22.14): such a word is an ordinary identifier there, and an escaped
+/// identifier is the same name as its simple spelling (5.6.1). The parser
+/// then compares keywords against token text without consulting the
+/// version. The directives' specifiers are validated when the parser meets
+/// them.
+pub(super) fn escape_unreserved_keywords(tokens: &mut [Token]) {
+    let mut versions = Vec::new();
+    let mut words = tokens
+        .iter_mut()
+        .filter(|token| !token.is_trivia())
+        .peekable();
+    while let Some(token) = words.next() {
+        if token.kind == TokenKind::Symbol && token.text == "`" {
+            let Some(directive) = words.next() else { break };
+            match directive.text.as_str() {
+                "begin_keywords" => {
+                    if let Some(version) = words
+                        .peek()
+                        .and_then(|specifier| KeywordVersion::from_specifier(&specifier.text))
+                    {
+                        versions.push(version);
+                    }
+                }
+                "end_keywords" => {
+                    versions.pop();
+                }
+                _ => {}
+            }
+            continue;
+        }
+        let Some(&version) = versions.last() else {
+            continue;
+        };
+        if token.kind == TokenKind::Identifier
+            && KeywordVersion::default().reserves(&token.text)
+            && !version.reserves(&token.text)
+        {
+            token.text.insert(0, '\\');
+            token.kind = TokenKind::EscapedIdentifier;
+            token.contributors = vec![token.origin];
+        }
+    }
+}
+
 impl Parser<'_> {
+    /// Whether `token` is a keyword. Words the `begin_keywords` version in
+    /// effect does not reserve were escaped before parsing.
     pub(super) fn reserved_identifier(&self, token: &Token) -> bool {
         token.kind == TokenKind::Identifier && self.reserved_word(&token.text)
     }
 
     pub(super) fn reserved_word(&self, word: &str) -> bool {
-        self.keyword_versions
-            .last()
-            .copied()
-            .unwrap_or_default()
-            .reserves(word)
+        KeywordVersion::default().reserves(word)
     }
 
     pub(super) fn keyword_directive(&mut self, name: &str) -> Result<bool> {
         match name {
             "begin_keywords" => {
-                let version = KeywordVersion::from_specifier(self.peek())
+                KeywordVersion::from_specifier(self.peek())
                     .ok_or_else(|| self.error("invalid keyword version specifier"))?;
-                self.keyword_versions.push(version);
                 self.at += 1;
                 Ok(true)
             }
-            "end_keywords" => {
-                self.keyword_versions.pop();
-                Ok(true)
-            }
+            "end_keywords" => Ok(true),
             _ => Ok(false),
         }
     }

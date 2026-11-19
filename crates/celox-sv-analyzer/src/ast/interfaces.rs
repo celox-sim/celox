@@ -40,6 +40,8 @@ pub(super) struct Prototype {
     /// The types of the members of an enumeration type, by name, which the
     /// ports of the prototype's `module` do not keep.
     pub(super) enumerations: Vec<(String, super::Type)>,
+    /// What analyzing the signature of a specialization takes.
+    pub(super) source: super::interface_ast::SignatureSource,
 }
 
 pub fn interface_prototypes(
@@ -235,7 +237,7 @@ fn prototypes(
                     .collect::<HashSet<_>>();
                 let behavior_captures =
                     interface.captured_members(&interface.function_closure(&behavior_functions));
-                let (module, enumerations) = {
+                let (module, enumerations, source) = {
                     let file = &files[interface.file];
                     let scoped = file.syntax_tree.scoped(interface.scope)?;
                     let members = interface
@@ -251,7 +253,8 @@ fn prototypes(
                         probe_name.clone(),
                         &members,
                         &interface.names,
-                    )?
+                    )
+                    .map_err(|error| virtual_interface_reference(error, &interface.name))?
                 };
                 let prototype = InterfacePrototype {
                     name: interface.name.clone(),
@@ -315,6 +318,7 @@ fn prototypes(
                 Ok(Prototype {
                     prototype,
                     enumerations,
+                    source,
                 })
             })();
             prototype
@@ -444,6 +448,24 @@ pub(crate) fn body_component_references(tree: &SyntaxTree) -> HashSet<String> {
         .iter()
         .map(|instance| normalize_identifier(&instance.name.spelling))
         .collect()
+}
+
+/// The subroutines of an interface that a virtual interface names are
+/// analyzed apart from its instances, for every instance a handle may
+/// select; a hierarchical name they do not declare denotes an object
+/// relative to the instance (IEEE 1800-2023 23.8), which that analysis
+/// cannot resolve, so it is rejected rather than looked up there.
+fn virtual_interface_reference(error: AnalyzerError, interface: &str) -> AnalyzerError {
+    match error {
+        AnalyzerError::HierarchicalReference { path, .. } => unsupported(format!(
+            "hierarchical name `{path}` in a task or function of interface `{interface}`, which a virtual interface names"
+        )),
+        AnalyzerError::WithWarnings { error, warnings } => AnalyzerError::WithWarnings {
+            error: Box::new(virtual_interface_reference(*error, interface)),
+            warnings,
+        },
+        error => error,
+    }
 }
 
 fn unsupported(construct: impl Into<String>) -> AnalyzerError {
@@ -1026,6 +1048,13 @@ struct Expansion {
     /// modport port also carries the members that imported functions and
     /// declarations use.
     accessible: Option<HashSet<String>>,
+    /// The members whose output direction comes from calling an interface
+    /// function, directly or through a child, rather than from a direct
+    /// write. A call counts wherever it appears, as a call in an
+    /// `always_comb` under a run-time condition already does, so a call
+    /// inside a generate construct, a function or a task drives the member
+    /// (IEEE 1800-2023 25.7).
+    call_driven: HashSet<String>,
 }
 
 impl Expansion {
@@ -1170,7 +1199,9 @@ impl<'a> Design<'a> {
                     if unit.kind == native::UnitKind::Module
                         && unit.port_style == native::PortStyle::Ansi
                     {
-                        let module = ModuleDecl::collect(handle, index, file, &interfaces)?;
+                        let module = ModuleDecl::collect(handle, index, file, &|name| {
+                            interfaces.contains_key(name)
+                        })?;
                         if interfaces.contains_key(&module.name) {
                             return Err(AnalyzerError::DuplicateModule { name: module.name });
                         }
@@ -1346,8 +1377,9 @@ impl<'a> Design<'a> {
         }
         // The directions do not depend on generate conditions, loop bounds
         // or which subroutines are called, which are not evaluated here, so
-        // a write that depends on them needs a modport, and an imported
-        // function that writes must be called unconditionally.
+        // a direct write that depends on them needs a modport. A write
+        // through a called interface function counts wherever the call is,
+        // as it already does under a run-time condition.
         let through = match &port.modport {
             Some(modport) => format!(" through its port `{port_name}` of modport `{modport}`"),
             None => format!(", whose port `{port_name}` has no modport"),
@@ -1382,15 +1414,9 @@ impl<'a> Design<'a> {
             // lists, but only when the module or a child calls it.
             let imported = interface.captured_members(&interface.function_closure(&imports));
             let mut called = interface.declaration_functions();
-            for (handle, item, context) in &uses.references {
+            for (handle, item, _) in &uses.references {
                 if handle != port_name || !imports.contains(item) {
                     continue;
-                }
-                let closure = interface.function_closure(&HashSet::from_iter([item.clone()]));
-                for (member, direction) in interface.captured_members(&closure) {
-                    if direction == Direction::Output && *context != Context::Module {
-                        return Err(conditional_write(&member, *context));
-                    }
                 }
                 called.insert(item.clone());
             }
@@ -1405,11 +1431,13 @@ impl<'a> Design<'a> {
                 .map(|(_, member, _)| member.clone())
                 .collect();
             let functions = interface.function_closure(&called);
+            let mut call_driven = HashSet::default();
             for (member, direction) in interface.captured_members(&functions) {
                 let listed = listed.entry(member.clone()).or_insert(direction);
                 if direction == Direction::Output {
                     *listed = Direction::Output;
-                    driven.insert(member);
+                    driven.insert(member.clone());
+                    call_driven.insert(member);
                 }
             }
             for child in uses
@@ -1427,6 +1455,9 @@ impl<'a> Design<'a> {
                 for (member, direction) in child_expansion.members {
                     if direction == Direction::Output {
                         driven.insert(member.clone());
+                        if child_expansion.call_driven.contains(&member) {
+                            call_driven.insert(member.clone());
+                        }
                     }
                     let Some(access) = imported.get(&member) else {
                         continue;
@@ -1435,7 +1466,9 @@ impl<'a> Design<'a> {
                         && *access == Direction::Output
                         && listed.get(&member) != Some(&Direction::Output)
                     {
-                        if child.context != Context::Module {
+                        if child.context != Context::Module
+                            && !child_expansion.call_driven.contains(&member)
+                        {
                             return Err(conditional_write(&member, child.context));
                         }
                         listed.insert(member, Direction::Output);
@@ -1462,6 +1495,7 @@ impl<'a> Design<'a> {
                 functions,
                 callable: Some(imports),
                 accessible: Some(accessible),
+                call_driven,
             });
         }
         // Without a modport every member is reachable. A member the module or
@@ -1476,17 +1510,16 @@ impl<'a> Design<'a> {
             }
         }
         let mut called = interface.declaration_functions();
-        for (handle, item, context) in &uses.references {
+        let mut call_driven = HashSet::default();
+        for (handle, item, _) in &uses.references {
             if handle != port_name || interface.function(item).is_none() {
                 continue;
             }
             let closure = interface.function_closure(&HashSet::from_iter([item.clone()]));
             for (member, direction) in interface.captured_members(&closure) {
                 if direction == Direction::Output {
-                    if *context != Context::Module {
-                        return Err(conditional_write(&member, *context));
-                    }
-                    written.insert(member);
+                    written.insert(member.clone());
+                    call_driven.insert(member);
                 }
             }
             called.insert(item.clone());
@@ -1511,10 +1544,15 @@ impl<'a> Design<'a> {
             )?;
             for (member, direction) in child_expansion.members {
                 if direction == Direction::Output {
-                    if child.context != Context::Module {
+                    if child.context != Context::Module
+                        && !child_expansion.call_driven.contains(&member)
+                    {
                         return Err(conditional_write(&member, child.context));
                     }
-                    written.insert(member);
+                    written.insert(member.clone());
+                    if child_expansion.call_driven.contains(&member) {
+                        call_driven.insert(member);
+                    }
                 }
             }
         }
@@ -1533,6 +1571,7 @@ impl<'a> Design<'a> {
             functions,
             callable: None,
             accessible: None,
+            call_driven,
         })
     }
 
@@ -1820,46 +1859,208 @@ fn declared_names(unit: &native::Unit, file: &File<'_>) -> Converted<Vec<String>
             continue;
         }
         let statement = native.statement(id);
-        match &statement.kind {
-            native::StatementKind::Declaration(declaration) => match declaration {
-                native::LocalDeclaration::Variables(decl)
-                | native::LocalDeclaration::Constructed(decl) => names.extend(
-                    decl.variables
-                        .iter()
-                        .map(|variable| native_name(&variable.name)),
-                ),
-                native::LocalDeclaration::Parameters(id) => names.extend(
-                    native
-                        .parameter_declaration(*id)
-                        .parameters
-                        .iter()
-                        .map(|parameter| native_name(&parameter.name)),
-                ),
-                native::LocalDeclaration::TypeAlias(id) => {
-                    names.push(native_name(&native.type_alias(*id).name))
-                }
-                _ => {}
-            },
-            native::StatementKind::Loop {
-                kind: native::LoopSyntax::For(header),
-                ..
-            } => {
-                if let Some(native::ForInitialization::Declarations(decls)) = &header.initialization
-                {
-                    for decl in decls {
-                        names.extend(
-                            decl.variables
-                                .iter()
-                                .map(|variable| native_name(&variable.name)),
-                        );
-                    }
-                }
-            }
-            _ => {}
-        }
+        names.extend(statement_declarations(&statement.kind, native).map(native_name));
         statements.extend(statement.kind.children());
     }
     Ok(names)
+}
+
+/// The names a statement declares in the scope that holds it, each where
+/// its declarator names it: a local declaration's, or the variables a `for`
+/// loop header declares, which are the loop's.
+fn statement_declarations<'a>(
+    statement: &'a native::StatementKind,
+    native: &'a native::Declarations,
+) -> Box<dyn Iterator<Item = &'a native::Name> + 'a> {
+    match statement {
+        native::StatementKind::Declaration(declaration) => match declaration {
+            native::LocalDeclaration::Variables(decl)
+            | native::LocalDeclaration::Constructed(decl) => {
+                Box::new(decl.variables.iter().map(|variable| &variable.name))
+            }
+            native::LocalDeclaration::Parameters(id) => Box::new(
+                native
+                    .parameter_declaration(*id)
+                    .parameters
+                    .iter()
+                    .map(|parameter| &parameter.name),
+            ),
+            native::LocalDeclaration::TypeAlias(id) => {
+                Box::new(std::iter::once(&native.type_alias(*id).name))
+            }
+            _ => Box::new(std::iter::empty()),
+        },
+        native::StatementKind::Loop {
+            kind: native::LoopSyntax::For(header),
+            ..
+        } => match &header.initialization {
+            Some(native::ForInitialization::Declarations(decls)) => Box::new(
+                decls
+                    .iter()
+                    .flat_map(|decl| &decl.variables)
+                    .map(|variable| &variable.name),
+            ),
+            _ => Box::new(std::iter::empty()),
+        },
+        _ => Box::new(std::iter::empty()),
+    }
+}
+
+/// The procedural scopes of a design element: its subroutines, and the
+/// blocks and loops of their bodies and of its processes, with the names
+/// declared in each.
+struct ProceduralScopes {
+    /// The declarations of each name.
+    declarations: HashMap<String, Vec<ScopedDeclaration>>,
+}
+
+/// A declaration of a name in a procedural scope.
+struct ScopedDeclaration {
+    /// The span of the scope.
+    scope: Span,
+    /// Where the declaration starts: the name hides the interface item from
+    /// there to the end of the scope.
+    from: usize,
+    /// Whether [`declared_names`] lists it; it does not list foreach loop
+    /// variables.
+    listed: bool,
+}
+
+impl ProceduralScopes {
+    fn collect(unit: &native::Unit, file: &File<'_>) -> Converted<Self> {
+        let native = file.syntax_tree.declarations();
+        let mut scopes = Self {
+            declarations: HashMap::default(),
+        };
+        for id in body_items(unit, native)? {
+            match &native.body_item(id).kind {
+                native::BodyItemKind::Subroutine(id) => {
+                    let subroutine = native.subroutine(*id);
+                    let scope = file.span(subroutine.tokens)?;
+                    for name in subroutine
+                        .ports
+                        .iter()
+                        .flatten()
+                        .chain(
+                            subroutine
+                                .port_declarations
+                                .iter()
+                                .flat_map(|group| &group.ports),
+                        )
+                        .filter_map(|port| port.name.as_ref())
+                    {
+                        // A formal hides from its own declaration on: the
+                        // defaults of the formals before it do not see it.
+                        let from = file.name_span(name).0;
+                        scopes.declare(native_name(name), scope, from, true);
+                    }
+                    // The authored statements hold every statement of the
+                    // body; its lexical roots are those no other one holds.
+                    let nested = subroutine
+                        .authored_statements
+                        .iter()
+                        .flat_map(|id| native.statement(*id).kind.children())
+                        .collect::<HashSet<_>>();
+                    for statement in &subroutine.authored_statements {
+                        if !nested.contains(statement) {
+                            scopes.statements(*statement, Some(scope), file)?;
+                        }
+                    }
+                }
+                native::BodyItemKind::Procedure(id) => {
+                    scopes.statements(native.procedure(*id).body, None, file)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(scopes)
+    }
+
+    fn declare(&mut self, name: String, scope: Span, from: usize, listed: bool) {
+        self.declarations
+            .entry(name)
+            .or_default()
+            .push(ScopedDeclaration {
+                scope,
+                from,
+                listed,
+            });
+    }
+
+    /// Record the declarations of statement `root`, which the procedural
+    /// scope `scope` holds, if any, and of the statements in it, each in
+    /// the innermost scope around it. A worklist, since bodies nest
+    /// arbitrarily deep.
+    fn statements(
+        &mut self,
+        root: native::StatementId,
+        scope: Option<Span>,
+        file: &File<'_>,
+    ) -> Converted<()> {
+        let native = file.syntax_tree.declarations();
+        let mut pending = vec![(root, scope)];
+        while let Some((id, scope)) = pending.pop() {
+            let statement = native.statement(id);
+            let span = file.span(statement.tokens)?;
+            let mut scope = scope;
+            match &statement.kind {
+                native::StatementKind::Block { .. } | native::StatementKind::Parallel { .. } => {
+                    scope = Some(span);
+                }
+                native::StatementKind::Loop {
+                    kind: native::LoopSyntax::For(_),
+                    ..
+                } => {
+                    // A loop's variables are its own.
+                    scope = Some(span);
+                    for name in statement_declarations(&statement.kind, native) {
+                        self.declare(native_name(name), span, file.name_span(name).0, true);
+                    }
+                }
+                native::StatementKind::Loop {
+                    kind: native::LoopSyntax::Foreach(header),
+                    ..
+                } => {
+                    scope = Some(span);
+                    for name in header.variables.iter().flatten() {
+                        self.declare(native_name(name), span, file.name_span(name).0, false);
+                    }
+                }
+                kind => {
+                    if let Some(scope) = scope {
+                        // Each declarator hides from its own name on: the
+                        // initializers before it do not see it.
+                        for name in statement_declarations(kind, native) {
+                            self.declare(native_name(name), scope, file.name_span(name).0, true);
+                        }
+                    }
+                }
+            }
+            pending.extend(statement.kind.children().map(|child| (child, scope)));
+        }
+        Ok(())
+    }
+
+    /// How many declarations of `name` procedural scopes make, as
+    /// [`declared_names`] lists them.
+    fn declarations(&self, name: &str) -> usize {
+        self.declarations.get(name).map_or(0, |declarations| {
+            declarations
+                .iter()
+                .filter(|declaration| declaration.listed)
+                .count()
+        })
+    }
+
+    /// Whether a declaration of `name` hides the interface item at source
+    /// offset `at`: inside its scope, after it.
+    fn hides(&self, name: &str, at: usize) -> bool {
+        self.declarations.get(name).is_some_and(|declarations| {
+            declarations.iter().any(|declaration| {
+                declaration.from <= at && declaration.scope.0 <= at && at < declaration.scope.1
+            })
+        })
+    }
 }
 
 fn clone_module_name(module: &str, bindings: &[(String, String)]) -> String {
@@ -2654,8 +2855,15 @@ impl InterfaceDecl {
         for name in declared_names(unit, file)? {
             *declared.entry(name).or_default() += 1;
         }
+        // A formal or a declaration in a subroutine, block or loop shadows an
+        // interface item there (IEEE 1800-2023 23.9); a name it hides is
+        // not a reference to the item.
+        let procedural = ProceduralScopes::collect(unit, file)?;
         for (name, count) in &declared {
-            if *count > 1 && interface.names.contains(name) {
+            if *count > 1
+                && interface.names.contains(name)
+                && count.saturating_sub(procedural.declarations(name)) > 1
+            {
                 return Err(unsupported(format!(
                     "declaration of `{name}` in a nested scope of interface `{interface_name}`, which shadows an interface item"
                 )));
@@ -2703,6 +2911,7 @@ impl InterfaceDecl {
                 }
                 if interface.names.contains(&name_text)
                     && !qualified.contains(&expression.tokens.start)
+                    && !procedural.hides(&name_text, file.name_span(name).0)
                 {
                     interface.references.push((file.name_span(name), name_text));
                 }
@@ -2727,7 +2936,9 @@ impl InterfaceDecl {
                 && let [segment] = path.as_slice()
             {
                 let name = native_name(&segment.name);
-                if interface.names.contains(&name) {
+                if interface.names.contains(&name)
+                    && !procedural.hides(&name, file.name_span(&segment.name).0)
+                {
                     interface
                         .references
                         .push((file.name_span(&segment.name), name));
@@ -3044,6 +3255,12 @@ impl InterfaceDecl {
                     )));
                 }
             },
+            native::BodyItemKind::Covergroup(_) => {
+                return Err(unsupported(format!(
+                    "task, class, or verification declaration in interface `{}`",
+                    self.name
+                )));
+            }
             _ => {
                 return Err(unsupported(format!(
                     "nested declaration in interface `{}`",
@@ -3151,7 +3368,7 @@ impl ModuleDecl {
         handle: ScopeHandle,
         file_index: usize,
         file: &File<'_>,
-        interfaces: &HashMap<String, InterfaceDecl>,
+        is_interface: &dyn Fn(&str) -> bool,
     ) -> Converted<Self> {
         let tree = file.syntax_tree.scoped(handle)?;
         let unit = tree.root_unit()?;
@@ -3182,8 +3399,7 @@ impl ModuleDecl {
                             modport.as_ref().map(native_name),
                         )),
                         native::DataTypeKind::Named(path)
-                            if path.len() == 1
-                                && interfaces.contains_key(&native_name(&path[0].name)) =>
+                            if path.len() == 1 && is_interface(&native_name(&path[0].name)) =>
                         {
                             Some((Some(native_name(&path[0].name)), None))
                         }
@@ -3303,6 +3519,82 @@ pub fn plan_interfaces_with_member_paths(
     plan_interfaces_of_first_modules(sources, bindings, false)
 }
 
+/// The interfaces of the interface instances that the modules of `file`
+/// connect to generic interface ports of their children, `generic` holding
+/// the children with such ports. The connections are those elaboration
+/// sees ([`connections`]), and an actual names the instance of the innermost
+/// generate scope around it that declares one by that name, as the plan
+/// resolves handles.
+fn generic_actual_interfaces(
+    file: &File<'_>,
+    interface_names: &HashSet<String>,
+    generic: &HashMap<String, ModuleDecl>,
+) -> Converted<HashSet<String>> {
+    let native = file.syntax_tree.declarations();
+    let mut interfaces = HashSet::default();
+    for (_, unit) in roots(&file.syntax_tree)? {
+        if unit.kind != native::UnitKind::Module {
+            continue;
+        }
+        let module = file.span(unit.tokens)?;
+        let blocks = block_spans(unit, file)?;
+        let mut handles = Handles::default();
+        let mut actuals = Vec::new();
+        for id in body_items(unit, native)? {
+            let native::BodyItemKind::Instance(instance) = native.body_item(id).kind else {
+                continue;
+            };
+            let instantiation = native.instantiation(instance);
+            let child = native_name(&instantiation.name);
+            if interface_names.contains(&child) {
+                let span = file.span(instantiation.tokens)?;
+                let scope = blocks
+                    .iter()
+                    .filter(|block| block.0 <= span.0 && span.1 <= block.1)
+                    .min_by_key(|block| block.1 - block.0)
+                    .copied()
+                    .unwrap_or(module);
+                for instance in &instantiation.instances {
+                    handles.insert(
+                        native_name(&instance.name),
+                        scope,
+                        Handle {
+                            interface: child.clone(),
+                            port: None,
+                            arrayed: !instance.dimensions.is_empty(),
+                        },
+                    );
+                }
+                continue;
+            }
+            let Some(child) = generic.get(&child) else {
+                continue;
+            };
+            for instance in &instantiation.instances {
+                for (formal, connection) in connections(instance, child, file, true)? {
+                    let generic_port = child
+                        .port(&formal)
+                        .and_then(|port| port.interface.as_ref())
+                        .is_some_and(|port| port.interface.is_none());
+                    if !generic_port {
+                        continue;
+                    }
+                    if let Some((actual, span)) = connection.interface_actual(&formal, file)? {
+                        actuals.push((actual.handle, span));
+                    }
+                }
+            }
+        }
+        interfaces.extend(
+            actuals
+                .iter()
+                .filter_map(|(name, span)| handles.at(name, *span))
+                .map(|handle| handle.interface.clone()),
+        );
+    }
+    Ok(interfaces)
+}
+
 /// [`plan_interfaces_with_member_paths`], with only the first declaration
 /// of a module declared twice when `first_modules`
 /// ([`crate::AnalysisOptions::first_duplicate_module`]).
@@ -3328,9 +3620,11 @@ pub fn plan_interfaces_of_first_modules(
     let mut interface_names = HashSet::default();
     let mut contract_names = HashSet::default();
     let mut module_names = HashSet::default();
-    for file in &files {
+    // The modules with generic interface ports.
+    let mut generic_modules = Vec::new();
+    for (index, file) in files.iter().enumerate() {
         let native = file.syntax_tree.declarations();
-        for (_, unit) in roots(&file.syntax_tree)? {
+        for (handle, unit) in roots(&file.syntax_tree)? {
             let name = native_name(&unit.name);
             match unit.kind {
                 native::UnitKind::Interface => {
@@ -3345,7 +3639,7 @@ pub fn plan_interfaces_of_first_modules(
                     if interface_names.contains(&name) {
                         return Err(AnalyzerError::DuplicateModule { name });
                     }
-                    module_names.insert(name);
+                    module_names.insert(name.clone());
                     for port in &unit.ports {
                         if port.direction.is_some() || port.net_type.is_some() || port.variable {
                             continue;
@@ -3356,6 +3650,9 @@ pub fn plan_interfaces_of_first_modules(
                                     name: Some(name), ..
                                 } => {
                                     contract_names.insert(native_name(name));
+                                }
+                                native::DataTypeKind::Interface { name: None, .. } => {
+                                    generic_modules.push((index, handle));
                                 }
                                 native::DataTypeKind::Named(path) if path.len() == 1 => {
                                     contract_names.insert(native_name(&path[0].name));
@@ -3371,6 +3668,20 @@ pub fn plan_interfaces_of_first_modules(
     }
     for (_, _, supplied) in bindings {
         contract_names.extend(supplied.iter().map(|(_, interface)| interface.clone()));
+    }
+    // A generic interface port takes the interface of the instance connected
+    // to it (IEEE 1800-2023 25.3.3), which no port type names.
+    if !generic_modules.is_empty() {
+        let mut generic = HashMap::default();
+        for (index, handle) in generic_modules {
+            let module = ModuleDecl::collect(handle, index, &files[index], &|name| {
+                interface_names.contains(name)
+            })?;
+            generic.insert(module.name.clone(), module);
+        }
+        for file in &files {
+            contract_names.extend(generic_actual_interfaces(file, &interface_names, &generic)?);
+        }
     }
     let design = if !module_names.is_empty() {
         // Ordinary module contracts still need planning when local interfaces
@@ -3604,10 +3915,12 @@ pub fn plan_interfaces_of_first_modules(
                 && handle.arrayed
                 && reference.selects.is_none()
             {
-                return Err(unsupported(format!(
-                    "call of a function of the unselected interface array `{}`",
-                    reference.handle
-                )));
+                return Err(AnalyzerError::InvalidInterfaceSelection {
+                    detail: format!(
+                        "call of a function of the unselected interface array `{}`",
+                        reference.handle
+                    ),
+                });
             }
         }
         let mut children = HashMap::default();

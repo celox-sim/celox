@@ -151,10 +151,10 @@ impl Generator<'_> {
         values
     }
 
-    pub(super) fn observers_before(&mut self, failed: celox_sir::BlockId) {
-        let Some(observers) = self.observers else {
-            return;
-        };
+    /// Enable the capture sites of the observers whose reads changed since
+    /// the last settle, and return whether any did.
+    pub(super) fn observers_before(&mut self, failed: celox_sir::BlockId) -> Option<RegisterId> {
+        let observers = self.observers?;
         self.clear_observer_flags(observers);
         let pointer = self.arena_header_load(offset_of!(ArenaHeader, observers));
         let initial = self.arena_header_load(offset_of!(ArenaHeader, observer_initial));
@@ -172,6 +172,11 @@ impl Generator<'_> {
                 }
             }
         }
+        let any = active
+            .iter()
+            .copied()
+            .reduce(|any, group| self.binary(1, any, BinaryOp::Or, group))
+            .unwrap_or(initial);
         let zero = self.constant(0, 1);
         for (&site, &group) in observers.sites.iter().zip(&observers.groups) {
             self.b.emit(SIRInstruction::CombCaptureEnableIfChanged {
@@ -194,6 +199,7 @@ impl Generator<'_> {
                 failed,
             );
         }
+        Some(any)
     }
 
     pub(super) fn observers_after(&mut self, failed: celox_sir::BlockId) {
@@ -399,7 +405,7 @@ endmodule"#
                 let mut program = program.into_laid_out(four_state);
                 if mode == SchedulerMode::Compiled {
                     super::super::enable_native_services(&mut program);
-                    super::super::attach(&mut program, true);
+                    super::super::attach(&mut program, true, false);
                     assert!(
                         program
                             .runtime

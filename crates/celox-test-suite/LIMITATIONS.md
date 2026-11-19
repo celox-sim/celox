@@ -698,7 +698,8 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_runtime_packed_subselect` | compile | icarus | 3 | Icarus 13.0 rejects a further select after a runtime index into a multidimensional packed array, or after runtime indices into an unpacked array of them (t[k][j], t[k][2:1], u[j][k][i]: "Array index expressions must be constant here"). Verilator passes the two-state case; the four-state one is outside what it checks. |
 | `sv_verilator_multidimensional_interface_connections` | compile | verilator | 1 | Verilator 5.052 validates a 2x2 scalar interface array against a two-bit connection instead of four bits. See the focused interface-array evidence above. |
 | `sv_icarus_interface_array_connections` | compile | icarus | 3 | Icarus 13.0 rejects distributed unpacked actuals and multidimensional instances, and aborts on interface array ports. See the focused interface-array evidence above. |
-| `sv_icarus_interfaces` | compile | icarus | 16 | Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports ("sorry: modport task/function ports are not yet supported") and multidimensional interface instance arrays ("sorry: Multi-dimensional arrays of instances are not yet supported"). Verilator passes these cases. The implicit named interface cases have [focused pre-exclusion evidence](verification/sv/limitations/implicit-interface-ports-icarus.json). The mixed module-contract/local-interface case retains its [port-declaration diagnostics](verification/repros/sv_mixed_interface_connections_icarus.json). |
+| `sv_icarus_interfaces` | compile | icarus | 17 | Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports ("sorry: modport task/function ports are not yet supported") and multidimensional interface instance arrays ("sorry: Multi-dimensional arrays of instances are not yet supported"). Verilator passes these cases. The implicit named interface cases have [focused pre-exclusion evidence](verification/sv/limitations/implicit-interface-ports-icarus.json). The mixed module-contract/local-interface case retains its [port-declaration diagnostics](verification/repros/sv_mixed_interface_connections_icarus.json). |
+| `sv_icarus_interface_array_member_function` | execute | icarus | 1 | Icarus 13.0 does not re-evaluate a continuous assignment in an element of an interface instance array that calls a function reading a member when the member changes after time zero; the scalar interface form is re-evaluated. Verilator passes the case. |
 | `sv_icarus_packed_inner_index_range` | execute | icarus | 1 | Icarus 13.0 flattens an out-of-range inner index of a multidimensional packed array into the neighbouring element: a read gives a known value instead of X, and a write lands in that element; IEEE 1800-2023 7.4.6 and 11.5.1 make the select out of range. Verilator cannot check four-state values, and it truncates out-of-range packed indices. |
 | `sv_icarus_string_methods` | compile | icarus | 4 | Icarus 13.0 does not implement the string methods getc, putc, compare, icompare, toupper, tolower, substr, atoi/atohex/atooct/atobin and itoa/hextoa/octtoa/bintoa ("Method getc is not a string method"), and requires a constant replication count for a string ("A reference to a net or variable is not allowed in a constant expression"). IEEE 1800-2023 6.16 defines the methods and 11.4.12.2 permits a non-constant count for a string replication. Verilator passes the cases. |
 | `sv_icarus_string_array_row_patterns` | compile | icarus | 1 | Icarus 13.0 rejects the array-valued default and replicated row items in this multidimensional string-array assignment pattern with syntax errors. IEEE 1800-2023 10.9.1 permits array-valued subarray items, defaults and whole-dimension replication. Verilator passes the case. |
@@ -1012,6 +1013,18 @@ cases ([diagnostics](verification/repros/sv_randc_icarus.json)). Verilator
 `srandom` declarations for the inheritance/control case and draws undeclared
 values for an enum typedef alias ([evidence](verification/repros/sv_randc_verilator.json)).
 The original cycle, mode and domain assertions remain unchanged.
+
+Generic interconnect nets (IEEE 1800-2023 6.6.8) have no external
+corroboration: Verilator 5.054 reports `%Error-UNSUPPORTED: interconnect`
+for every declaration and Icarus 13.0 rejects the syntax, so all
+`interconnect::*` cases are excluded for both tools
+(`sv_interconnect_external_simulator_support`). xezim 0.11.4 accepts the
+syntax and passes the scalar chains, but does not resolve each element
+of an interconnect array to its own net type (6.6.8) and does not merge
+the dominating net type of connected ports (23.3.3.7.1), so the array
+and `wand` cases are excluded for xezim only
+(`sv_xezim_interconnect_arrays_and_resolution`). Celox implements the
+merged-net semantics and runs every assertion.
 
 ## SystemVerilog packed unions
 

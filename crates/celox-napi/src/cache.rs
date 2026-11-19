@@ -46,6 +46,7 @@ pub(super) struct CachedBuild {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct CacheKey {
     pub(super) diagnostic_policy: celox::DiagnosticPolicy,
+    pub(super) legacy_empty_reductions: bool,
     /// (path, content) sorted by path for determinism.
     pub(super) sources: Vec<(String, String)>,
     pub(super) top: String,
@@ -133,6 +134,7 @@ pub(super) fn build_cache_key(
             .diagnostic_policy
             .clone()
             .with_inferred_latches(opts.allow_inferred_latches),
+        legacy_empty_reductions: opts.legacy_empty_reductions,
         sources: sorted_sources,
         top: top.to_string(),
         four_state: opts.four_state,

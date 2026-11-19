@@ -53,6 +53,8 @@ pub(super) struct ProcModule<'a> {
     pub constants: &'a HashMap<String, i128>,
     pub parameter_types: &'a HashMap<String, (usize, bool)>,
     pub subroutines: Arc<HashMap<String, sv::ir::Subroutine>>,
+    /// The names the subroutines write (see [`super::WrittenNames`]).
+    pub(super) written_names: Arc<super::WrittenNames>,
     pub constant_functions: sv::RuntimeConstantFunctions<'a>,
     /// DPI-C imports of the module, by SystemVerilog name.
     pub dpi_imports: HashMap<String, sv::ir::DpiImport>,
@@ -63,6 +65,9 @@ pub(super) struct ProcModule<'a> {
     /// `$exit` (24.7).
     pub program: bool,
     pub forceable: HashMap<SourceVarId, (SourceVarId, SourceVarId)>,
+    /// The hold of each procedurally forced target that procedures of the
+    /// settle assign (see `sv::ir::ForceRole::Hold`).
+    pub force_holds: HashMap<SourceVarId, SourceVarId>,
     /// The targets of `forceable` a procedural force controls (see
     /// [`super::ForceSlot`]): their reads are not redirected.
     pub procedurally_forced: HashSet<SourceVarId>,
@@ -143,21 +148,50 @@ pub(super) struct FunctionSites {
 /// evaluate.
 pub(super) struct ModuleTables {
     subroutines: Arc<HashMap<String, sv::ir::Subroutine>>,
+    written_names: Arc<super::WrittenNames>,
     constant_functions: sv::RuntimeConstantTable,
 }
 
 impl ModuleTables {
     pub fn new(module: &sv::ir::Module) -> Self {
+        let subroutines: HashMap<String, sv::ir::Subroutine> = module
+            .subroutines()
+            .iter()
+            .map(|subroutine| (subroutine.name.clone(), subroutine.clone()))
+            .collect();
+        // The names the subroutines write, found as a lowering finds the
+        // callees: by these tables.
+        let calls = TableCalls {
+            subroutines: &subroutines,
+            dpi_imports: module
+                .dpi_imports()
+                .iter()
+                .map(|import| (import.name(), import))
+                .collect(),
+        };
+        let written_names = super::WrittenNames::of(&calls, subroutines.values());
         Self {
-            subroutines: Arc::new(
-                module
-                    .subroutines()
-                    .iter()
-                    .map(|subroutine| (subroutine.name.clone(), subroutine.clone()))
-                    .collect(),
-            ),
+            written_names: Arc::new(written_names),
+            subroutines: Arc::new(subroutines),
             constant_functions: sv::RuntimeConstantFunctions::table(module),
         }
+    }
+}
+
+/// The subroutines and DPI-C imports of [`ModuleTables`], as a
+/// [`ProcModule`] finds them by name.
+struct TableCalls<'a> {
+    subroutines: &'a HashMap<String, sv::ir::Subroutine>,
+    dpi_imports: HashMap<&'a str, &'a sv::ir::DpiImport>,
+}
+
+impl super::CallDefinitions for TableCalls<'_> {
+    fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine> {
+        self.subroutines.get(name)
+    }
+
+    fn dpi_import(&self, name: &str) -> Option<&sv::ir::DpiImport> {
+        self.dpi_imports.get(name).copied()
     }
 }
 
@@ -220,15 +254,25 @@ impl<'a> ProcModule<'a> {
             .iter()
             .filter_map(|(&enabled, var)| {
                 let slot = var.force_control?;
-                if !slot.enable {
+                if slot.role != super::ForceSlotRole::Enable {
                     return None;
                 }
                 let value = variables.iter().find_map(|(&id, var)| {
                     var.force_control
-                        .is_some_and(|other| other.target == slot.target && !other.enable)
+                        .is_some_and(|other| {
+                            other.target == slot.target && other.role == super::ForceSlotRole::Value
+                        })
                         .then_some(id)
                 })?;
                 Some((slot.target, (enabled, value)))
+            })
+            .collect();
+        let force_holds = variables
+            .iter()
+            .filter_map(|(&id, var)| {
+                var.force_control
+                    .filter(|slot| slot.role == super::ForceSlotRole::Hold)
+                    .map(|slot| (slot.target, id))
             })
             .collect();
         let procedurally_forced = variables
@@ -238,6 +282,7 @@ impl<'a> ProcModule<'a> {
             .collect();
         Self {
             forceable,
+            force_holds,
             procedurally_forced,
             variables,
             name_to_id,
@@ -246,6 +291,7 @@ impl<'a> ProcModule<'a> {
             constants,
             parameter_types,
             subroutines: Arc::clone(&tables.subroutines),
+            written_names: Arc::clone(&tables.written_names),
             constant_functions: sv::RuntimeConstantFunctions::with_table(
                 &tables.constant_functions,
                 constants,
@@ -383,6 +429,23 @@ impl<'a> ProcModule<'a> {
                     })
                     .collect(),
             },
+            // Celox's own reporting functions stay opaque, and so does an
+            // argument the C code reaches through a pointer, which may be
+            // the design's storage (35.5.6).
+            isolated: !import.is_context()
+                && import.builtin().is_none()
+                && import.arguments().iter().all(|argument| {
+                    argument.direction() == sv::ir::DpiDirection::Input
+                        && match argument.r#type() {
+                            sv::ir::DpiType::Bit
+                            | sv::ir::DpiType::Logic
+                            | sv::ir::DpiType::Integer { .. }
+                            | sv::ir::DpiType::Chandle => true,
+                            sv::ir::DpiType::String
+                            | sv::ir::DpiType::BitVector { .. }
+                            | sv::ir::DpiType::LogicVector { .. } => false,
+                        }
+                }),
         };
         let index = self
             .externs

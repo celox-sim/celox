@@ -695,23 +695,18 @@ fn member_of(
     if let Some(ty) = session.types.member(base, member) {
         return Some(ty);
     }
-    let TyData::VirtualInterface {
-        interface: Decl::Interface(interface),
-        ..
-    } = session.types.data(base).clone()
-    else {
-        return None;
-    };
-    let interface = session.types.decl(interface).name.clone();
+    // The specialization of a parameterized interface types its members
+    // with its own parameter values (25.9).
+    let interface = virtual_interfaces::of_type(&session.types, base)?.key();
     let ty = session
         .virtual_interfaces
         .as_ref()?
         .interfaces
-        .get(interface.as_ref())?
+        .get(&interface)?
         .members
         .iter()
         .find(|candidate| candidate.name == member)?
-        .r#type
-        .clone();
+        .clone()
+        .type_in(&mut session.types);
     semantic_types::of_type(&mut session.types, &tree.functions, &ty, &dims.const_env)
 }

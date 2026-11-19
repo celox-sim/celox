@@ -510,7 +510,7 @@ impl BodyBuilder<'_, '_, '_> {
         // Evaluate the whole value, which may read the members it replaces,
         // and the object it is stored in once, before any member is written.
         let mut flat = aggregate.r#type.clone();
-        flat.unpacked_struct = None;
+        flat.forget_structure();
         let temp = self.declare("$aggregate", flat);
         body.push(Stmt::Local {
             name: temp.clone(),

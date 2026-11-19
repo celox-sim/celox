@@ -230,11 +230,8 @@ fn select<'a>(
             container: None,
             chandle: false,
             randomizable: true,
-            enum_domain: None,
-            packed_enum: false,
             real: false,
             string: false,
-            class: None,
             packed: rest.to_vec(),
             unpacked: Vec::new(),
             signed: shape.signed_element_depth == Some(1),
@@ -244,7 +241,6 @@ fn select<'a>(
                 .signed_element_depth
                 .and_then(|depth| depth.checked_sub(1))
                 .filter(|depth| *depth > 0),
-            unpacked_struct: None,
         })));
         let (kind, bindings, fill) =
             extract_type_fill(tree, session, functions, kind, bindings, &sub, dims)?;
@@ -374,18 +370,14 @@ fn select<'a>(
         container: None,
         chandle: false,
         randomizable: true,
-        enum_domain: None,
-        packed_enum: false,
         real: false,
         string: false,
-        class: None,
         packed: Vec::new(),
         unpacked: Vec::new(),
         signed: false,
         is_2state: shape.is_2state,
         members: Vec::new(),
         signed_element_depth: None,
-        unpacked_struct: None,
     })));
     let items = indexed_items(
         kind,

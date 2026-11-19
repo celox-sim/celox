@@ -814,11 +814,11 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 // Runtime events append to the single-producer event ring.
                 None => pinned = true,
             }
+            // Runtime events, comb captures and external functions, also
+            // those a called function reaches, stay on the lane that runs in
+            // program order: an external function need not be thread-safe.
             if !logic_path.comb_capture_enable_sites.is_empty()
-                || matches!(&logic_path.target, LogicPathTarget::Process { unit, .. }
-                    if unit.blocks.values().any(|block| block.instructions.iter().any(|inst|
-                        matches!(inst, SIRInstruction::RuntimeEvent { .. } | SIRInstruction::ExternCall { .. } | SIRInstruction::CombCaptureEnableIfChanged { .. } | SIRInstruction::CombCaptureEvent { .. })
-                        || matches!(inst, SIRInstruction::Store(_, _, _, _, _, sites) if !sites.is_empty()))))
+                || super::partitions::process_interacts_with_host(logic_path)
             {
                 pinned = true;
             }

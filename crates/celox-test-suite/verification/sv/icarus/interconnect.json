@@ -1,0 +1,418 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::generic_interconnect_connects_implicit_ports",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_elements_may_carry_real_and_logic",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_elements_merge_resolutions_separately",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_elements_of_equal_width",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_elements_resolve_independently",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_passes_whole_through_a_module",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_port_chains_through_a_module",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_uwire_element_does_not_block_resolved_drivers",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_array_with_one_connected_element",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_authored_signing_is_preserved",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_concatenation_operands_keep_their_widths",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_instances_merge_their_ports_separately",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_merges_to_wand_from_connected_ports",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_merges_to_wand_from_connected_ports_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_port_chains_through_a_module",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_takes_signedness_from_connected_ports",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_takes_width_and_value_from_connected_ports",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "src/sv/cases/interconnect.vtest",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_interconnect_external_simulator_support",
+        "observed_version": "Verilator 5.054 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "IEEE 1800-2023 6.6.8 defines the generic interconnect net, whose type its connections determine (23.3.3.7.1). Verilator 5.054 rejects every interconnect declaration with %Error-UNSUPPORTED: interconnect, and Icarus 13.0 rejects it with a syntax error. Celox implements the merged-net semantics, so these cases have no external corroboration.",
+        "upstream": []
+      },
+      "name": "interconnect::interconnect_wire_drivers_conflict_to_x_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

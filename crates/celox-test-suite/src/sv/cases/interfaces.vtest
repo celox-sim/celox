@@ -201,6 +201,114 @@
     (assert_eq narrow (trunc 8 (+ value 1)))
     (assert_eq wide (trunc 16 (+ value 1)))))
 
+; An interface with ports bound to a generic interface port: no port type
+; names it, the connection does (IEEE 1800-2023 25.3.3).
+(case binds_generic_interface_ports_to_interfaces_with_ports
+  (source "interface_generic_ported.sv" #"
+        interface Bus(input logic [7:0] base);
+            logic [7:0] sum;
+            assign sum = base + 8'd3;
+        endinterface
+        module Read(interface b, output logic [7:0] y);
+            assign y = b.sum;
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] y);
+            Bus bus(x);
+            Read r(.b(bus), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq y (trunc 8 (+ value 3)))))
+
+; The same next to a typed port of another interface, which plans the
+; module's interfaces: the generic port's interface is planned too.
+(case binds_generic_interface_ports_beside_typed_ports
+  (source "interface_generic_ported_typed.sv" #"
+        interface Bus(input logic [7:0] base);
+            logic [7:0] sum;
+            assign sum = base + 8'd3;
+        endinterface
+        interface Side;
+            logic [7:0] value;
+        endinterface
+        module Read(interface b, Side s, output logic [7:0] y);
+            assign y = b.sum ^ s.value;
+        endmodule
+        module Top(input logic [7:0] x, input logic [7:0] k, output logic [7:0] y);
+            Bus bus(x);
+            Side side();
+            assign side.value = k;
+            Read r(.b(bus), .s(side), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (for (value key) (list (0 0) (1 0xf0) (0x7f 0x55) (0xfe 0xff))
+    (modify (set x value) (set k key))
+    (assert_eq y (^ (trunc 8 (+ value 3)) key))))
+
+; Same-named instances of different interfaces in two generate blocks: each
+; generic port takes the interface of the instance its own block declares.
+(case binds_generic_interface_ports_per_generate_scope
+  (source "interface_generic_ported_scopes.sv" #"
+        interface Plus1(input logic [7:0] base);
+            logic [7:0] v;
+            assign v = base + 8'd1;
+        endinterface
+        interface Plus2(input logic [7:0] base);
+            logic [7:0] v;
+            assign v = base + 8'd2;
+        endinterface
+        module Read(interface b, output logic [7:0] y);
+            assign y = b.v;
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] one, output logic [7:0] two);
+            if (1) begin : first
+                Plus1 bus(x);
+                Read r(.b(bus), .y(one));
+            end
+            if (1) begin : second
+                Plus2 bus(x);
+                Read r(.b(bus), .y(two));
+            end
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq one (trunc 8 (+ value 1)))
+    (assert_eq two (trunc 8 (+ value 2)))))
+
+; Implicit named connections bind generic interface ports as named ones do
+; (IEEE 1800-2023 23.3.2.3, 23.3.2.4): `.b` to the instance `b`, and `.*`
+; the ports a generic port is named beside.
+(case binds_generic_interface_ports_by_implicit_connections
+  (source "interface_generic_ported_implicit.sv" #"
+        interface Plus1(input logic [7:0] base);
+            logic [7:0] v;
+            assign v = base + 8'd1;
+        endinterface
+        interface Plus2(input logic [7:0] base);
+            logic [7:0] v;
+            assign v = base + 8'd2;
+        endinterface
+        module Read(interface b, output logic [7:0] y);
+            assign y = b.v;
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] one, output logic [7:0] y);
+            Plus1 b(x);
+            Plus2 bus(x);
+            Read named(.b, .y(one));
+            Read wild(.b(bus), .*);
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq one (trunc 8 (+ value 1)))
+    (assert_eq y (trunc 8 (+ value 2)))))
+
 (case clocks_interface_processes_from_member_clocks
   (source "interface_clocking.sv" #"
         interface Counter;
@@ -300,6 +408,88 @@
     (modify (set v value))
     (assert_eq sum (trunc 16 (+ (trunc 8 value) (trunc 12 value))))
     (assert_eq scaled (trunc 8 (* (trunc 8 value) 3)))))
+
+(case calls_member_functions_from_interface_array_logic
+  (source "interface_array_logic_functions.sv" #"
+        interface Cell;
+            logic [7:0] value;
+            logic [7:0] result;
+            function automatic logic [7:0] get();
+                return value + 8'd1;
+            endfunction
+            assign result = get();
+        endinterface
+        module Top(input logic [7:0] x, output logic [7:0] r0, output logic [7:0] r1);
+            Cell cells[2]();
+            assign cells[0].value = x;
+            assign cells[1].value = x + 8'd10;
+            assign r0 = cells[0].result;
+            assign r1 = cells[1].result;
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 0x40 0xf5)
+    (modify (set x value))
+    (assert_eq r0 (trunc 8 (+ value 1)))
+    (assert_eq r1 (trunc 8 (+ value 11)))))
+
+(case calls_writing_imported_functions_from_generate_functions_and_tasks
+  (source "interface_imported_writes.sv" #"
+        interface Reg;
+            logic [7:0] state;
+            function automatic void load(input logic [7:0] v);
+                state = v;
+            endfunction
+            modport loader(import load);
+        endinterface
+        module InGenerate(Reg.loader p, input logic [7:0] v);
+            generate
+                if (1) begin : g
+                    always_comb p.load(v);
+                end
+            endgenerate
+        endmodule
+        module Relay(Reg.loader p, input logic [7:0] v);
+            generate
+                if (1) begin : g
+                    InGenerate u(.p(p), .v(v));
+                end
+            endgenerate
+        endmodule
+        module InFunction(Reg.loader p, input logic [7:0] v);
+            function automatic void wrap(input logic [7:0] x);
+                p.load(x);
+            endfunction
+            always_comb wrap(v);
+        endmodule
+        module InTask(Reg.loader p, input logic clk, input logic [7:0] v);
+            task automatic t(input logic [7:0] x);
+                p.load(x);
+            endtask
+            always_ff @(posedge clk) t(v);
+        endmodule
+        module Top(input logic clk, input logic [7:0] v,
+                   output logic [7:0] gen_out, output logic [7:0] relay_out,
+                   output logic [7:0] fn_out, output logic [7:0] task_out);
+            Reg gen_reg(), relay_reg(), fn_reg(), task_reg();
+            InGenerate gen_u(.p(gen_reg), .v(v));
+            Relay relay_u(.p(relay_reg), .v(v + 8'd1));
+            InFunction fn_u(.p(fn_reg), .v(v + 8'd2));
+            InTask task_u(.p(task_reg), .clk(clk), .v(v + 8'd3));
+            assign gen_out = gen_reg.state;
+            assign relay_out = relay_reg.state;
+            assign fn_out = fn_reg.state;
+            assign task_out = task_reg.state;
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 0x40 0xfc)
+    (modify (set v value))
+    (assert_eq gen_out value)
+    (assert_eq relay_out (trunc 8 (+ value 1)))
+    (assert_eq fn_out (trunc 8 (+ value 2)))
+    (tick clk 1)
+    (assert_eq task_out (trunc 8 (+ value 3)))))
 
 (case rewrites_nested_references_and_keeps_declaration_functions
   (source "interface_nested_references.sv" #"
@@ -1007,3 +1197,193 @@
     (assert_eq result (^ value 0x5a))
     (tick clk 1)
     (assert_eq sampled value)))
+
+; A formal of an interface function and a declaration in a block of an
+; interface process shadow interface items there (IEEE 1800-2023 23.9). The
+; shadowed names are not the items: neither write drives the item `pkt`,
+; which the module drives through the port.
+(case shadows_interface_items_in_nested_scopes
+  (source "interface_shadowing.sv" #"
+        interface Box;
+            logic [7:0] base;
+            logic [7:0] pkt;
+            logic [7:0] sum;
+            function automatic logic [7:0] bump(logic [7:0] pkt);
+                pkt = pkt + 8'd1;
+                return pkt;
+            endfunction
+            always_comb begin
+                logic [7:0] pkt;
+                pkt = base + 8'd2;
+                sum = pkt;
+            end
+        endinterface
+        module Use(Box b, input logic [7:0] x, output logic [7:0] y, output logic [7:0] z,
+                   output logic [7:0] w);
+            assign b.base = x;
+            assign b.pkt = x ^ 8'hff;
+            assign y = b.bump(x);
+            assign z = b.sum;
+            assign w = b.pkt;
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] y, output logic [7:0] z,
+                   output logic [7:0] w);
+            Box box();
+            Use u(.b(box), .x(x), .y(y), .z(z), .w(w));
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq y (trunc 8 (+ value 1)))
+    (assert_eq z (trunc 8 (+ value 2)))
+    (assert_eq w (^ value 0xff))))
+
+; The same through a virtual interface: a task formal named as an interface
+; variable is the formal inside the task.
+(case shadows_interface_items_in_tasks_called_through_virtual_interfaces
+  (source "interface_shadowing_virtual.sv" #"
+        interface Bfm(input logic clk);
+            int pkt;
+            int last;
+            task send(int pkt);
+                @(posedge clk);
+                last = pkt;
+            endtask
+        endinterface
+        module Top(output int item, output int sent);
+            logic clk = 0;
+            Bfm bfm(clk);
+            virtual Bfm v;
+            always #1 clk = ~clk;
+            assign item = bfm.pkt;
+            assign sent = bfm.last;
+            initial begin
+                v = bfm;
+                bfm.pkt = 7;
+                v.send(5);
+            end
+        endmodule
+    "#)
+  (top Top) (run_until 4)
+  (assert_eq item 7) (assert_eq sent 5))
+
+; A block declaration hides an interface function only inside the block:
+; the call after it is of the interface's `helper`, which the modport's
+; import brings along.
+(case shadows_interface_functions_only_inside_their_blocks
+  (source "interface_shadowing_functions.sv" #"
+        interface Box;
+            logic [7:0] pkt;
+            function automatic logic [7:0] helper();
+                return pkt + 8'd1;
+            endfunction
+            function automatic logic [7:0] get();
+                begin
+                    logic [7:0] helper;
+                    helper = 8'd0;
+                end
+                return helper();
+            endfunction
+            modport use_get(input pkt, import get);
+        endinterface
+        module Use(Box.use_get b, output logic [7:0] y);
+            assign y = b.get();
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] y);
+            Box box();
+            assign box.pkt = x;
+            Use u(.b(box), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq y (trunc 8 (+ value 1)))))
+
+; A block declaration hides the interface item only inside the block: the
+; write after it is to the interface's `pkt`, which the function captures
+; as an output of the port.
+(case shadows_interface_items_only_inside_their_blocks
+  (source "interface_shadowing_blocks.sv" #"
+        interface Box;
+            logic [7:0] pkt;
+            function automatic void put(logic [7:0] v);
+                begin
+                    logic [7:0] pkt;
+                    pkt = 8'd0;
+                end
+                pkt = v;
+            endfunction
+        endinterface
+        module Use(Box b, input logic [7:0] x);
+            always_comb b.put(x);
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] y);
+            Box box();
+            Use u(.b(box), .x(x));
+            assign y = box.pkt;
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq y value)))
+
+; A formal hides an interface item from its own declaration on: the
+; default of an earlier formal calls the interface's `helper`.
+(case shadows_interface_items_from_the_formal_on
+  (source "interface_shadowing_formals.sv" #"
+        interface Box;
+            logic [7:0] pkt;
+            function automatic logic [7:0] helper();
+                return pkt + 8'd1;
+            endfunction
+            function automatic logic [7:0] get(input logic [7:0] x = helper(),
+                                               input logic [7:0] helper = 8'd0);
+                return x + helper;
+            endfunction
+            modport use_get(input pkt, import get);
+        endinterface
+        module Use(Box.use_get b, output logic [7:0] y);
+            assign y = b.get();
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] y);
+            Box box();
+            assign box.pkt = x;
+            Use u(.b(box), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq y (trunc 8 (+ value 1)))))
+
+; Each declarator of a declaration hides from its own name on: the
+; initializer of `tmp` calls the interface's `helper`.
+(case shadows_interface_items_from_each_declarator_on
+  (source "interface_shadowing_declarators.sv" #"
+        interface Box;
+            logic [7:0] pkt;
+            function automatic logic [7:0] helper();
+                return pkt + 8'd1;
+            endfunction
+            function automatic logic [7:0] get();
+                logic [7:0] tmp = helper(), helper = 8'd0;
+                return tmp + helper;
+            endfunction
+            modport use_get(input pkt, import get);
+        endinterface
+        module Use(Box.use_get b, output logic [7:0] y);
+            assign y = b.get();
+        endmodule
+        module Top(input logic [7:0] x, output logic [7:0] y);
+            Box box();
+            assign box.pkt = x;
+            Use u(.b(box), .y(y));
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 1 0x7f 0xfe)
+    (modify (set x value))
+    (assert_eq y (trunc 8 (+ value 1)))))

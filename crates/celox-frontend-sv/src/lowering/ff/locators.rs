@@ -74,14 +74,18 @@ impl Ff<'_, '_> {
         let result = handle(self, "locator");
         stmts.push(local(
             &result,
-            Some(container(ContainerOp::Literal, locator.result, Vec::new())),
+            Some(container(
+                ContainerOp::Literal,
+                locator.result.clone(),
+                Vec::new(),
+            )),
         ));
         // What a match contributes to the result.
         let found = if method.returns_index() { index } else { item };
         let push = |value: &str| {
             Stmt::Eval(container(
                 ContainerOp::PushBack,
-                locator.result,
+                locator.result.clone(),
                 vec![ident(&result), ident(value)],
             ))
         };
@@ -159,13 +163,19 @@ impl Ff<'_, '_> {
                         signed,
                         two_state: false,
                         handle: None,
+                        enum_values: None,
+                        key_enum_values: None,
                     };
                     let seen = handle(self, "locator_seen");
                     let (_, position) = self.m.temp("locator_seen_index", 32, true, false);
                     let (_, repeated) = self.m.temp("locator_repeated", 1, false, false);
                     stmts.push(local(
                         &seen,
-                        Some(container(ContainerOp::Literal, seen_layout, Vec::new())),
+                        Some(container(
+                            ContainerOp::Literal,
+                            seen_layout.clone(),
+                            Vec::new(),
+                        )),
                     ));
                     body.push(local(&repeated, Some(literal("1'b0"))));
                     body.push(Stmt::Loop {
@@ -174,7 +184,7 @@ impl Ff<'_, '_> {
                         condition: Some(binary(
                             ident(&position),
                             BinaryOp::Lt,
-                            container(ContainerOp::Size, seen_layout, vec![ident(&seen)]),
+                            container(ContainerOp::Size, seen_layout.clone(), vec![ident(&seen)]),
                         )),
                         step: vec![assign(
                             &position,
@@ -184,7 +194,7 @@ impl Ff<'_, '_> {
                             condition: binary(
                                 container(
                                     ContainerOp::Get,
-                                    seen_layout,
+                                    seen_layout.clone(),
                                     vec![ident(&seen), ident(&position)],
                                 ),
                                 BinaryOp::EqCase,
@@ -227,18 +237,24 @@ impl Ff<'_, '_> {
                         signed: false,
                         two_state: true,
                         handle: None,
+                        enum_values: None,
+                        key_enum_values: None,
                     };
                     let seen = handle(self, "locator_seen");
                     stmts.push(local(
                         &seen,
-                        Some(container(ContainerOp::Literal, seen_layout, Vec::new())),
+                        Some(container(
+                            ContainerOp::Literal,
+                            seen_layout.clone(),
+                            Vec::new(),
+                        )),
                     ));
                     body.push(Stmt::If {
                         condition: Expr::Unary {
                             op: UnaryOp::LogicNot,
                             expr: Box::new(container(
                                 ContainerOp::Exists,
-                                seen_layout,
+                                seen_layout.clone(),
                                 vec![ident(&seen), ident(&value)],
                             )),
                         },
@@ -298,11 +314,15 @@ impl Ff<'_, '_> {
                     name
                 };
                 stmts.push(local(&source, Some(array.clone())));
-                let element =
-                    container(ContainerOp::Get, layout, vec![ident(&source), ident(index)]);
+                let element = container(
+                    ContainerOp::Get,
+                    layout.clone(),
+                    vec![ident(&source), ident(index)],
+                );
                 if matches!(layout.kind, ContainerKind::Associative { .. }) {
                     let (_, status) = self.m.temp("locator_status", 32, true, false);
-                    let traverse = |op| container(op, layout, vec![ident(&source), ident(index)]);
+                    let traverse =
+                        |op| container(op, layout.clone(), vec![ident(&source), ident(index)]);
                     let (start, next) = if backward {
                         (ContainerOp::Last, ContainerOp::Prev)
                     } else {
@@ -315,7 +335,7 @@ impl Ff<'_, '_> {
                         vec![assign(&status, traverse(next))],
                     )
                 } else {
-                    let size = container(ContainerOp::Size, layout, vec![ident(&source)]);
+                    let size = container(ContainerOp::Size, layout.clone(), vec![ident(&source)]);
                     if backward {
                         (
                             element,
@@ -480,13 +500,13 @@ impl Ff<'_, '_> {
         }
         let queue = ContainerLayout {
             kind: ContainerKind::Queue { capacity: 0 },
-            ..concat.result
+            ..concat.result.clone()
         };
         let mut result: Option<Expr> = None;
         let mut elements = Vec::new();
         let append = |result: Option<Expr>, item: Expr| match result {
             None => item,
-            Some(result) => container(ContainerOp::Concat, queue, vec![result, item]),
+            Some(result) => container(ContainerOp::Concat, queue.clone(), vec![result, item]),
         };
         for (part, arg) in concat.parts.iter().zip(args) {
             let value = arg.clone().expect("checked above");
@@ -495,20 +515,24 @@ impl Ff<'_, '_> {
                 continue;
             }
             if !elements.is_empty() {
-                let run = container(ContainerOp::Literal, queue, std::mem::take(&mut elements));
+                let run = container(
+                    ContainerOp::Literal,
+                    queue.clone(),
+                    std::mem::take(&mut elements),
+                );
                 result = Some(append(result, run));
             }
             result = Some(append(result, value));
         }
         if !elements.is_empty() {
-            let run = container(ContainerOp::Literal, queue, elements);
+            let run = container(ContainerOp::Literal, queue.clone(), elements);
             result = Some(append(result, run));
         }
         let result = result.unwrap_or_else(|| container(ContainerOp::Literal, queue, Vec::new()));
         // The conversion makes a new container, also of a lone array item.
         self.hoist(&container(
             ContainerOp::Convert,
-            concat.result,
+            concat.result.clone(),
             vec![result],
         ))
     }

@@ -511,6 +511,18 @@ impl RuntimeDesign {
         Ok(())
     }
 
+    /// The directories the memory file loads of the code look relative
+    /// names up in.
+    #[cfg(feature = "host-runtime")]
+    pub(crate) fn memory_file_bases(&self) -> &[celox_design::MemoryFileBase] {
+        &self.semantic.memory_file_bases
+    }
+
+    #[cfg(feature = "host-runtime")]
+    pub(crate) fn memory_file_bases_mut(&mut self) -> &mut [celox_design::MemoryFileBase] {
+        &mut self.semantic.memory_file_bases
+    }
+
     #[cfg(feature = "host-runtime")]
     pub(crate) fn take_initial_state(
         &mut self,
@@ -704,6 +716,13 @@ pub struct LaidOutProgram {
     /// The cone sources of the settle ([`crate::settle::cone_source_homes`]),
     /// once the kernels are instrumented with them.
     pub(crate) cone_homes: Option<HashSet<usize>>,
+    /// The bodies the compiled scheduler of a native image calls instead of
+    /// inlining them, each compiled as a function of its own; the scheduler
+    /// calls callee `i` as the native kernel
+    /// [`crate::scheduler::CALLEE_PLACEHOLDER`]` + i`, which the backend
+    /// binds to its slot.
+    #[cfg(feature = "host-runtime")]
+    pub(crate) scheduler_callees: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
 }
 
 impl LaidOutProgram {
@@ -753,6 +772,118 @@ impl LaidOutProgram {
             }
         }
         Ok(())
+    }
+
+    /// Replace each call of an extern function of `unlinked`, indices of the
+    /// runtime schema's extern functions that the design is built without
+    /// (see [`crate::SimulatorBuilder::allow_unlinked_dpi_for_elaboration`]),
+    /// by a run-time error naming its import: the block ends at the call.
+    /// This is the one place that knows about unlinked imports, for every
+    /// backend and every unit, the functions calls enter included, so no
+    /// generated code reaches their slots of the extern table. Only a host
+    /// build links imports (a target without the host runtime compiles to
+    /// SIR and links none), so only it has unlinked ones.
+    #[cfg(feature = "host-runtime")]
+    pub(crate) fn replace_unlinked_extern_calls(&mut self, unlinked: &[usize]) {
+        if unlinked.is_empty() {
+            return;
+        }
+        let schema = &mut self.runtime.runtime_schema;
+        let first = schema
+            .runtime_errors
+            .keys()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .max(1999)
+            + 1;
+        let mut codes = HashMap::default();
+        for (code, &index) in (first..).zip(unlinked) {
+            let name = &schema.extern_functions[index].name;
+            schema.runtime_errors.insert(
+                code,
+                celox_design::RuntimeErrorInfo {
+                    message: format!(
+                        "DPI-C import `{name}` was elaborated without its C body (allow_unlinked_dpi_for_elaboration) and cannot be called"
+                    ),
+                    signals: Vec::new(),
+                },
+            );
+            codes.insert(index as u32, code);
+        }
+        fn cut(
+            unit: &mut celox_sir::ExecutionUnit<RegionedAbsoluteAddr>,
+            codes: &HashMap<u32, i64>,
+        ) {
+            let mut changed = false;
+            for block in unit.blocks.values_mut() {
+                let found = block.instructions.iter().position(|instruction| {
+                    matches!(instruction, SIRInstruction::ExternCall { func, .. } if codes.contains_key(func))
+                });
+                if let Some(position) = found {
+                    let SIRInstruction::ExternCall { func, .. } = &block.instructions[position]
+                    else {
+                        unreachable!("found an extern call")
+                    };
+                    block.terminator = celox_sir::SIRTerminator::Error(codes[func]);
+                    block.instructions.truncate(position);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return;
+            }
+            // The blocks only the code after a call reached are left out.
+            let mut reached = HashSet::default();
+            let mut pending = vec![unit.entry_block_id];
+            while let Some(id) = pending.pop() {
+                if !reached.insert(id) {
+                    continue;
+                }
+                match &unit.blocks[&id].terminator {
+                    SIRTerminator::Jump(target, _) => pending.push(*target),
+                    SIRTerminator::Branch {
+                        true_block,
+                        false_block,
+                        ..
+                    } => pending.extend([true_block.0, false_block.0]),
+                    SIRTerminator::Switch { cases, default, .. } => {
+                        pending.extend(cases.iter().map(|case| case.target));
+                        pending.push(*default);
+                    }
+                    SIRTerminator::Return | SIRTerminator::Error(_) => {}
+                }
+            }
+            unit.blocks.retain(|id, _| reached.contains(id));
+        }
+        for unit in self.sir.units_mut() {
+            cut(unit, &codes);
+        }
+        for function in &mut self.sir.functions {
+            cut(&mut function.unit, &codes);
+        }
+        // The compiled scheduler's callees are bodies it no longer inlines.
+        #[cfg(feature = "host-runtime")]
+        for callee in &mut self.scheduler_callees {
+            cut(callee, &codes);
+        }
+        #[cfg(feature = "host-runtime")]
+        let callees = self.scheduler_callees.iter();
+        #[cfg(not(feature = "host-runtime"))]
+        let callees = std::iter::empty();
+        debug_assert!(
+            self.sir
+                .units()
+                .chain(self.sir.functions.iter().map(|function| &function.unit))
+                .chain(callees)
+                .flat_map(|unit| unit.blocks.values())
+                .flat_map(|block| &block.instructions)
+                .all(|instruction| !matches!(
+                    instruction,
+                    SIRInstruction::ExternCall { func, .. } if codes.contains_key(func)
+                )),
+            "a call of an unlinked import is left"
+        );
     }
 
     /// The units, with the layout and runtime metadata they are checked
@@ -987,6 +1118,8 @@ impl OptimizedSir {
             #[cfg(feature = "host-runtime")]
             deferred_derived_edges: HashMap::default(),
             cone_homes: None,
+            #[cfg(feature = "host-runtime")]
+            scheduler_callees: Vec::new(),
         };
         if !defer_instrumentation {
             laid_out.prune_stale_marks();

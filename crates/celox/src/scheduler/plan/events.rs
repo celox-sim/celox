@@ -132,7 +132,10 @@ impl<'a> PlanBuilder<'a> {
         // scheduler's slots change, and only those (checked below).
         let rtl_written: BTreeSet<usize> = rtl_units().flat_map(written).collect();
         let rtl_stores: HashSet<AbsoluteAddr> = rtl_units().flat_map(stores).collect();
-        let opaque_comb = sir.eval_comb.iter().any(opaque);
+        let opaque_comb = sir
+            .eval_comb
+            .iter()
+            .any(|unit| opaque(unit, &schema.extern_functions));
         let kernel_stores: Vec<HashSet<AbsoluteAddr>> = sir
             .processes
             .iter()
@@ -226,7 +229,7 @@ impl<'a> PlanBuilder<'a> {
                 unknown_gate
                     || event.eval_only.as_ref().is_none_or(|units| {
                         units.iter().flat_map(instructions).any(|inst| {
-                            makes_host_calls(inst)
+                            makes_opaque_calls(inst, &schema.extern_functions)
                                 || written_storage(inst).any(|target| {
                                     target.region == STABLE_REGION
                                         && active_observers
@@ -250,6 +253,8 @@ impl<'a> PlanBuilder<'a> {
 
     /// The events a host periodic clock may drive in the slots: the clocks,
     /// and the resets of a compiled testbench, that no design code writes.
+    /// An input only waiting processes sense is none of them when other
+    /// events derive from it.
     pub(super) fn host_clocks(&mut self) -> Result<(), String> {
         let program = self.program;
         let slots = self.slots;
@@ -275,30 +280,49 @@ impl<'a> PlanBuilder<'a> {
         // its domains' code even when no clock runs, and the host drives
         // asynchronous resets by writes.
         let undriven = undriven_storage(schema, rtl_stores, kernel_stores, nba_targets);
+        // A slot makes the events that derive from its event combinationally,
+        // which a run otherwise holds stable, cost every slot their waves.
+        let source_of_events = |signal: &AbsoluteAddr| {
+            topology
+                .combinational_derived
+                .get(signal)
+                .is_some_and(|derived| !derived.is_empty())
+        };
         // The resets a compiled testbench writes: its unit applies those
         // writes as edges of their slots, with its clocks'. A reset other
-        // events derive from combinationally keeps its writes in the host:
-        // a slot would make those derived events, which a run otherwise
-        // holds stable, cost every slot their waves.
+        // events derive from combinationally keeps its writes in the host.
         let testbench_resets: HashSet<AbsoluteAddr> = program
             .runtime
             .testbench
             .iter()
             .flat_map(|tb| tb.statements())
             .flat_map(testbench_resets)
-            .filter(|&reset| {
-                topology
-                    .combinational_derived
-                    .get(&reset)
-                    .is_none_or(|derived| derived.is_empty())
-            })
+            .filter(|reset| !source_of_events(reset))
             .map(storage)
             .collect();
+        // An event only waiting processes sense is whatever the design
+        // waits for, as often a reset or an enable as a clock, and it has
+        // no domain a slot would run. With events deriving from it, it too
+        // stays in the host: a clock on it runs from the queue, and the
+        // events deriving from it stay as stable as they were before a
+        // process waited for it.
+        let waited: HashSet<AbsoluteAddr> = host_inputs::signals(schema)
+            .into_iter()
+            .map(|term| topology.canonical(term))
+            .collect();
+        let waited_source = |event: &Event| {
+            event.eval_apply.is_empty()
+                && event.eval_only.as_ref().is_none_or(Vec::is_empty)
+                && event.apply.as_ref().is_none_or(Vec::is_empty)
+                && waited.contains(&event.signal)
+                && source_of_events(&event.signal)
+        };
         let clocks: Vec<usize> = events
             .iter()
             .enumerate()
             .filter(|(_, event)| {
-                (event.clock || testbench_resets.contains(&storage(event.signal)))
+                ((event.clock && !waited_source(event))
+                    || testbench_resets.contains(&storage(event.signal)))
                     && event.width == 1
                     && undriven(storage(event.signal))
             })

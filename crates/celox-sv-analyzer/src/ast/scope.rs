@@ -58,12 +58,30 @@ pub(super) struct ScopeSymbols {
     pub aliases: HashMap<String, String>,
     /// Hierarchical interface member paths bound to semantic signal names.
     pub interface_members: HashMap<String, String>,
+    /// The hierarchical names of parameters of other instances, and the
+    /// typed literals of their values (IEEE 1800-2023 23.6).
+    pub hierarchical_constants: HashMap<String, String>,
+    /// The hierarchical names of the bodies of the scope's interface
+    /// instances that their bodies do not declare, by instance handle, as
+    /// the scope resolved them (IEEE 1800-2023 23.8; see
+    /// [`crate::InterfaceBodyScope`]).
+    pub outward_names: HashMap<String, Vec<HierarchicalSignal>>,
     /// The paths of `interface_members` that are hierarchical names of the
     /// scope's own declarations.
     pub local_aliases: HashSet<String>,
+    /// The variables and nets of the scope that `force` statements of
+    /// other modules force through hierarchical names (IEEE 1800-2023
+    /// 10.6.2), which have their force controls here.
+    pub external_forces: Vec<String>,
     pub interface_types: HashMap<String, String>,
     /// The modport of each interface port handle declared with one.
     pub interface_modports: HashMap<String, String>,
+    /// The parameter values of each interface instance or port handle of a
+    /// parameterized interface that virtual interface types name (25.9).
+    pub interface_arguments: HashMap<String, Arc<[i128]>>,
+    /// The generate blocks that hold each interface instance of a generate
+    /// scope, outermost first (see [`crate::InterfaceBodyScope::blocks`]).
+    pub interface_blocks: HashMap<String, Arc<[String]>>,
     pub interface_arrays: HashMap<String, interface_binding::ArrayBinding>,
     pub interface_scopes: HashMap<String, interface_binding::ScopeBinding>,
     pub interface_declarations: HashSet<celox_sv_syntax::BodyItemId>,
@@ -86,6 +104,13 @@ pub(super) struct ScopeSymbols {
     /// (IEEE 1800-2023 26.3): a scope that uses them may be analyzed from
     /// another source, without their declarations.
     pub classes: Vec<Arc<classes::Class>>,
+    /// The classes whose objects code the scope lowers for another scope
+    /// may handle, beyond those it uses: those an interface instance bound
+    /// into it sees, through its own imports, whose processes and
+    /// subroutines the scope lowers. Their objects reach the dispatchers and
+    /// casts lowered here (see [`classes::visible_classes`]), but the
+    /// scope's own source does not see their names.
+    pub object_classes: Vec<Arc<classes::Class>>,
     /// Class-declared types, frozen in each specialization's declaration
     /// environment before another source imports them (8.23, 8.25).
     pub class_member_types: HashMap<String, HashMap<String, Type>>,
@@ -94,6 +119,9 @@ pub(super) struct ScopeSymbols {
     /// it takes when a specialization of a package class it takes names an
     /// item of the unit (see `Module::from_selected_scope`).
     pub unit: Option<Arc<DeferredUnit>>,
+    /// The functions and tasks of other instances that the scope's
+    /// hierarchical names call (IEEE 1800-2023 23.8), by their signatures.
+    pub hierarchical_subroutines: Vec<HierarchicalSubroutine>,
 }
 
 /// The compilation unit a scope takes only if a specialization it takes
@@ -171,9 +199,11 @@ pub(super) fn imported(tree: &AnalysisContext<'_>) -> Arc<ScopeSymbols> {
 /// The name a constant-environment marker key describes, with the marker
 /// text before it.
 pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
-    const FIXED: [&str; 14] = [
+    const FIXED: [&str; 16] = [
+        "__parameter::element_members::",
         "__parameter::local::",
         "__parameter::members::",
+        "__parameter::elements::",
         "__parameter::unbounded::",
         "__parameter::width::",
         "__parameter::signed_element::",
@@ -204,6 +234,17 @@ pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
         let _ = (index, bound);
         return Some((&key[..prefix_len], name));
     }
+    // `__parameter::element_member::{offset,type}::{path}::{name}`
+    if let Some(rest) = key.strip_prefix("__parameter::element_member::") {
+        let mut parts = rest.splitn(3, "::");
+        let (_, _, name) = (parts.next()?, parts.next()?, parts.next()?);
+        return Some((&key[..key.len() - name.len()], name));
+    }
+    // `__parameter::element::{fact}::{name}`
+    if let Some(rest) = key.strip_prefix("__parameter::element::") {
+        let (_, name) = rest.split_once("::")?;
+        return Some((&key[..key.len() - name.len()], name));
+    }
     // `__parameter::member::{value,type}::{path}::{name}`
     if let Some(rest) = key.strip_prefix("__parameter::member::") {
         let mut parts = rest.splitn(3, "::");
@@ -215,6 +256,14 @@ pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
 }
 
 impl ScopeSymbols {
+    /// The subroutine of another instance that hierarchical name `path`
+    /// calls (IEEE 1800-2023 23.8).
+    pub(super) fn hierarchical_subroutine(&self, path: &str) -> Option<&HierarchicalSubroutine> {
+        self.hierarchical_subroutines
+            .iter()
+            .find(|subroutine| subroutine.paths.iter().any(|candidate| candidate == path))
+    }
+
     /// Add the symbols of `other` that this scope does not already have.
     pub fn extend(&mut self, other: &ScopeSymbols) {
         self.package_scopes
@@ -225,6 +274,9 @@ impl ScopeSymbols {
             |request| &request.key,
         );
         extend_unnamed(&mut self.classes, &other.classes, |class| &*class.name);
+        extend_unnamed(&mut self.object_classes, &other.object_classes, |class| {
+            &*class.name
+        });
         extend_missing(&mut self.class_member_types, &other.class_member_types);
         for (name, value) in &other.const_env {
             self.const_env.entry(name.clone()).or_insert(*value);
@@ -238,7 +290,13 @@ impl ScopeSymbols {
             &*parameter.name
         });
         extend_missing(&mut self.interface_members, &other.interface_members);
+        extend_missing(
+            &mut self.hierarchical_constants,
+            &other.hierarchical_constants,
+        );
         extend_missing(&mut self.interface_types, &other.interface_types);
+        extend_missing(&mut self.interface_arguments, &other.interface_arguments);
+        extend_missing(&mut self.interface_blocks, &other.interface_blocks);
         extend_missing(&mut self.interface_arrays, &other.interface_arrays);
         extend_missing(&mut self.interface_scopes, &other.interface_scopes);
         self.interface_declarations
@@ -466,12 +524,16 @@ impl ScopeSymbols {
             design_subroutines: self.design_subroutines.clone(),
             // Classes have their qualified names already.
             classes: self.classes.clone(),
+            object_classes: self.object_classes.clone(),
             class_member_types: self.class_member_types.clone(),
             inline_randomizations: self.inline_randomizations.clone(),
+            hierarchical_subroutines: self.hierarchical_subroutines.clone(),
             declarations_only: self.declarations_only,
             interface_instances: self.interface_instances.clone(),
             interface_types: self.interface_types.clone(),
             interface_modports: self.interface_modports.clone(),
+            interface_arguments: self.interface_arguments.clone(),
+            interface_blocks: self.interface_blocks.clone(),
             interface_arrays: self.interface_arrays.clone(),
             interface_scopes: self.interface_scopes.clone(),
             interface_declarations: self.interface_declarations.clone(),
@@ -481,6 +543,11 @@ impl ScopeSymbols {
                 .map(|(path, name)| (path.clone(), rename.name(name)))
                 .collect(),
             local_aliases: self.local_aliases.clone(),
+            hierarchical_constants: self.hierarchical_constants.clone(),
+            // The names belong to the scope that instantiates the
+            // interfaces, which renaming does not move.
+            outward_names: self.outward_names.clone(),
+            external_forces: self.external_forces.clone(),
             type_parameter_bindings: self.type_parameter_bindings.clone(),
             pattern_parameter_bindings: self.pattern_parameter_bindings.clone(),
             const_env,
@@ -982,7 +1049,11 @@ impl Renamer<'_> {
                 signed,
                 array_slice_width: array_slice_width.map(|width| self.const_expr(width)),
                 array_slice_reversed,
-                window,
+                // The position of a run-time element names the index.
+                window: window.map(|window| crate::ast::SelectWindow {
+                    at: window.at.map(|at| Box::new(self.const_expr(*at))),
+                    ..window
+                }),
                 is_2state,
             },
         }

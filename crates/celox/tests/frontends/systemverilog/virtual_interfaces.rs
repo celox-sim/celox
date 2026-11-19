@@ -179,8 +179,10 @@ fn output_arrays_of_virtual_interfaces_need_compatible_actuals() {
 }
 
 /// A member access compares the handle with each instance, so a handle
-/// expression whose evaluation may have effects is rejected; and the
-/// instance a port of an interface without members denotes is unknown.
+/// expression whose evaluation may have effects is rejected; the instance a
+/// port of an interface without members denotes is unknown; and an instance
+/// of a generate block is not yet a value by its simple name inside the
+/// block (#4266), which is not reported as a port.
 #[test]
 fn unsupported_handle_forms_are_diagnosed() {
     for (source, want) in [
@@ -204,6 +206,17 @@ fn unsupported_handle_forms_are_diagnosed() {
              endmodule
              module Top; empty_if e(); Child c(e); endmodule",
             "which declares no members",
+        ),
+        (
+            "interface Drv; logic [7:0] last; endinterface
+             package cfg; virtual Drv vs[2]; endpackage
+             module Top;
+                 for (genvar i = 0; i < 2; i++) begin : g
+                     Drv d();
+                     initial cfg::vs[i] = d;
+                 end
+             endmodule",
+            "an instance of interface `Drv` named",
         ),
     ] {
         let Err(error) =
@@ -361,6 +374,37 @@ fn copies_of_arrays_of_another_interface_are_rejected() {
     };
     let error = error.to_string();
     assert!(error.contains("virtual other_if"), "{error}");
+}
+
+/// The parameter values of an interface are part of a virtual interface
+/// type of it (IEEE 1800-2023 25.9): an instance of another specialization
+/// is not assignment compatible with it, which is an error, not an
+/// unsupported construct.
+#[test]
+fn instances_of_other_specializations_are_not_assignment_compatible() {
+    let source = "interface bus #(parameter int W = 8) (); logic [W-1:0] data; endinterface
+        module Top;
+            bus #(16) w();
+            virtual bus #(8) v;
+            initial v = w;
+        endmodule";
+    let Err(error) = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "Top")
+        .build_interpreter()
+    else {
+        panic!("an instance of another specialization must be rejected");
+    };
+    // The report wraps its lines.
+    let error = error
+        .to_string()
+        .split_whitespace()
+        .filter(|word| *word != "│")
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        error.contains("a `virtual bus#(16)` is not assignment compatible with `virtual bus#(8)`"),
+        "{error}"
+    );
+    assert!(!error.contains("Unsupported"), "{error}");
 }
 
 /// The modport of a virtual interface is part of its type (IEEE 1800-2023
@@ -593,6 +637,38 @@ fn waits_follow_design_storage_handles() {
     sim.run_until(10).unwrap();
     assert_eq!(sim.get(by_index), num_bigint::BigUint::from(3u8));
     assert_eq!(sim.get(by_variable), num_bigint::BigUint::from(3u8));
+}
+
+/// A named event through a virtual interface is waited for as any named
+/// event is (IEEE 1800-2023 15.5.2), so an event control that mixes it with
+/// a value member, which is not supported for named events either, is
+/// rejected with that error.
+#[test]
+fn waits_mixing_named_events_through_virtual_interfaces_with_values_are_unsupported() {
+    let source = "interface bfm(input logic clk); event go; logic d; endinterface
+        package p;
+            class h;
+                virtual bfm v;
+                task w(); @(v.go or v.d); endtask
+            endclass
+        endpackage
+        module top;
+            logic clk = 0;
+            bfm b(clk);
+            p::h x;
+            initial begin x = new; x.v = b; x.w(); end
+        endmodule";
+    let Err(error) = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build_interpreter()
+    else {
+        panic!("a wait mixing a named event with a value is unsupported");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("event control mixing named events with other events"),
+        "{error}"
+    );
 }
 
 /// A wait through a virtual interface that a ref formal names would follow
@@ -1104,4 +1180,71 @@ fn enum_members_assigned_through_generic_interface_ports() {
             "four-state {four_state}"
         );
     }
+}
+
+/// The widths of the members of `top`'s virtual interfaces `v` (the
+/// defaults) and `w` (`#(override)`), once simulated.
+fn specialized_widths(interface: &str, override_value: &str) -> (u32, u32) {
+    let source = format!(
+        "`timescale 1ns/1ns
+        {interface}
+        module top(output int defaults, output int overridden);
+            bus u();
+            bus #({override_value}) o();
+            virtual bus v;
+            virtual bus #({override_value}) w;
+            initial begin
+                v = u;
+                w = o;
+                #1 defaults = $bits(v.data);
+                overridden = $bits(w.data);
+            end
+        endmodule"
+    );
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("vif.sv"))], "top")
+            .build()
+            .unwrap();
+    let (defaults, overridden) = (sim.signal("defaults"), sim.signal("overridden"));
+    sim.run_until(2).unwrap();
+    let value = |value: num_bigint::BigUint| u32::try_from(value).unwrap();
+    (value(sim.get(defaults)), value(sim.get(overridden)))
+}
+
+/// A parameter of a specialization keeps its declared type, also a 127-bit
+/// one, whose value is converted to it as any instance's is (IEEE 1800-2023
+/// 6.20.2, 25.9).
+#[test]
+fn specializations_convert_values_to_wide_parameter_types() {
+    let interface = "interface bus #(parameter logic [126:0] W = 1) ();
+            logic [W[3:0]:0] data;
+        endinterface";
+    assert_eq!(specialized_widths(interface, "127'd5"), (2, 6));
+}
+
+/// A local parameter computed from a typed parameter takes the operand's
+/// type: `~W` of a 4-bit `W` is a 4-bit value (IEEE 1800-2023 6.20.2,
+/// 11.6.1), so the specializations' members have the widths it gives.
+#[test]
+fn specializations_evaluate_dependent_parameters_with_their_types() {
+    let interface = "interface bus #(parameter logic [3:0] W = 4'hf) ();
+            localparam P = ~W;
+            logic [P + 3:0] data;
+        endinterface";
+    assert_eq!(specialized_widths(interface, "4'h0"), (4, 19));
+}
+
+/// A parameter default may call a constant function (IEEE 1800-2023
+/// 13.4.3), also for a specialization that keeps it.
+#[test]
+fn specializations_call_constant_functions_in_defaults() {
+    let interface = "package cfg;
+            function automatic int width();
+                return 6;
+            endfunction
+        endpackage
+        interface bus #(parameter int W = cfg::width(), parameter int V = W + 1) ();
+            logic [V-1:0] data;
+        endinterface";
+    assert_eq!(specialized_widths(interface, "2"), (7, 3));
 }

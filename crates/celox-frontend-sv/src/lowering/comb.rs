@@ -75,6 +75,18 @@ pub(super) struct Comb<'p, 'a> {
     pub continuous: bool,
     /// Whether the process is an `initial` block, which defines initial state.
     pub initial: bool,
+    /// Whether a variable the process does not write on every path may keep
+    /// its value there, as a latch.
+    pub hold_latches: bool,
+    /// Whether the process keeps a variable's value on a path, which it
+    /// then defines as a latch.
+    pub held: bool,
+    /// The initial store of the `initial` block being folded.
+    initial_seed: Store,
+    /// The memory files the `initial` block loads, in order, each with the
+    /// node that stands for the words it loads, and the values written to
+    /// those words before (see [`Self::readmem`]).
+    memory_loads: Vec<(SourceVarId, InitialStateData, Option<NodeId>)>,
 }
 
 fn range_error(error: impl std::fmt::Display) -> sv::AnalyzerError {
@@ -99,6 +111,10 @@ impl<'p, 'a> Comb<'p, 'a> {
             folds: loops::Folds::default(),
             continuous: false,
             initial: false,
+            hold_latches: false,
+            held: false,
+            initial_seed: Store::default(),
+            memory_loads: Vec::new(),
         }
     }
 

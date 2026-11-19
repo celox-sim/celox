@@ -140,26 +140,21 @@ cocotb から fs 単位のクロックを駆動できます。明示された `t
 [diagnostics]
 mixed_timescale = "warn"
 inferred_latch = "warn"
-exit_outside_program = "allow"
-memory_file_word_count = "error"
+exit_outside_program = "error"
 ```
 
 `allow` は診断を抑制し、`warn` は警告を残してコンパイルを続行し、`error` はコンパイルを失敗させます。指定しない診断は既定のレベルを維持します。既存の Veryl・SystemVerilog の警告にも適用できます。診断に表示されたコードをそのまま指定してください。そのコンパイルで発生しないコードの設定は影響しません。
 
-エラーの緩和は、コンパイラが継続時の動作を定義している診断に対応します。`mixed_timescale` はその一つです。IEEE 1800-2023 §3.14.2.3 が求める時間単位・精度の明示指定の一貫性を検査し、既定では `error` になります。`warn` または `allow` を選ぶと、未指定部分には Celox の既定値（単位 1ns、精度 1ps）を適用します。明示した値は維持し、全体の精度には既定値を使うスコープも含めます。エラーは単位や精度を持たない設計要素の名前を示し、`warn` はそれぞれについてその名前を示す警告を出します。構文エラー、未対応の構文、不正な精度指定は引き続きエラーになります。
+継続時の動作が定義されている診断は、既定ではすべて `warn` です。既存デザインやテストスイートが代替意味論でコンパイルでき、診断も残ります。マニフェストのルート（またはターゲット）に `strict = true` を書くか、CLI の `--strict`、Rust の `.strict(true)`、JavaScript の `strict: true` を指定すると、それらをすべて `error` に戻せます。コード別の明示指定は strict mode より優先されます。エラーの緩和は、コンパイラが継続時の動作を定義している診断に対応します。`mixed_timescale` はその一つです。IEEE 1800-2023 §3.14.2.3 が求める時間単位・精度の明示指定の一貫性を検査し、既定では `warn`（strict mode では `error`）になります。`warn` または `allow` を選ぶと、未指定部分には Celox の既定値（単位 1ns、精度 1ps）を適用します。明示した値は維持し、全体の精度には既定値を使うスコープも含めます。エラーは単位や精度を持たない設計要素の名前を示し、`warn` はそれぞれについてその名前を示す警告を出します。構文エラー、未対応の構文、不正な精度指定は引き続きエラーになります。
 
-`inferred_latch` は SystemVerilog と Veryl の `always_comb` で値を保持する代入を既定では拒否します。
-`warn` ならソース位置付きの警告を出してラッチをシミュレーションし、`allow` なら警告を出さずに許可します。
+`inferred_latch` は SystemVerilog と Veryl の `always_comb` で値を保持する代入を既定では警告します（IEEE 1800-2023 §9.2.2.2 は、ラッチ動作が推論できる場合にツールが警告することを求めています）。
+既定の `warn` ではソース位置付きの警告を出してラッチをシミュレーションし、strict mode では拒否します。`allow` なら警告を出さずに許可します。
 通常の `always @*` と明示的な `always_latch` にはこの緩和は不要です。
 ラッチのノンブロッキング代入と未対応の組み合わせフィードバックは引き続きエラーになります。
 Rust の `.allow_inferred_latches(true)` と JavaScript の `allowInferredLatches: true` は、
 この診断の明示設定がない場合だけ `allow` を補います。明示した `error`・`warn`・`allow` が優先されます。
 
-`shared_always_temporary` の既定値は `error` で、共有するループ変数のように複数の `always @*` ブロックが書き込む変数に IEEE 1800-2023 の意味論を適用します。各ブロックは自身が読む変数（共有変数を含む）の変化を待つため（§9.4.2.2）、書き込みは待機中の他のブロックに通知されます。ほかから読まれず読む前に書かれる添字については、本体終了後、次の暗黙のイベント待ちに入る前に他の Active 領域の処理を実行できます（§4.7、§4.9.3）。共有変数の格納とイベント通知は保持し、共有だけを理由に非収束とはしません。互いに起動し続けるブロックは `time T does not settle` で実行を終了し、そのメッセージに該当ブロックが示されます。
-`warn` または `allow` を選ぶと、Celox はそのような変数を各ブロックの一時変数として扱います。対象は、`always @*` ブロックだけが書き込み、各ブロックがすべての経路で読む前に書き込み、ほかに読むもの（他のプロセス、継続的代入、サブルーチン、ポート、インスタンス接続、階層名）がない変数です。その書き込みは Icarus Verilog と同様に他のブロックを起動せず、変数自体は初期値のままになります。
-これは規格からの逸脱なので既定では無効です。`warn` は対象の変数とブロックを報告します。変数を各ブロックの中で宣言すれば、この緩和なしで規格どおりの意味論を保てます。
-
-`interface_array_query` の既定値は `error` です。`warn` または `allow` で、固定長の interface 配列と添字で選択した部分配列に対する `$size` を互換拡張として許可します。IEEE 1800-2023 §20.7 の対象はデータ配列であり、interface インスタンスはデータオブジェクトではありません。省略可能な次元引数は既知の整数定数に限ります。この拡張によって interface ハンドルに packed 幅が付いたり、他の配列クエリが使えるようになったりすることはありません。
+`interface_array_query` の既定値は `warn`（strict mode では `error`）です。`warn` または `allow` で、固定長の interface 配列と添字で選択した部分配列に対する `$size` を互換拡張として許可します。IEEE 1800-2023 §20.7 の対象はデータ配列であり、interface インスタンスはデータオブジェクトではありません。省略可能な次元引数は既知の整数定数に限ります。この拡張によって interface ハンドルに packed 幅が付いたり、他の配列クエリが使えるようになったりすることはありません。
 
 ```toml
 [diagnostics]
@@ -168,9 +163,9 @@ interface_array_query = "warn"
 
 CLI でも同じ設定を使います: `celox run top.sv --top Top --diagnostic interface_array_query=warn`。
 
-`duplicate_module` の既定値は `error` です。デザインは各モジュールを 1 回だけ宣言します。`warn` または `allow` を選ぶと、ソース順で最初の宣言をそのモジュールとして使い、同名の後続の宣言は取り除きます（警告だけを出すツールと同じ扱いです）。interface・program・package の重複宣言は引き続きエラーになります。
+`duplicate_module` の既定値は `warn`（strict mode では `error`）です。デザインは各モジュールを 1 回だけ宣言します。`warn` または `allow` を選ぶと、ソース順で最初の宣言をそのモジュールとして使い、同名の後続の宣言は取り除きます（警告だけを出すツールと同じ扱いです）。interface・program・package の重複宣言は引き続きエラーになります。
 
-`multiple_always_ff_drivers` は、`always_ff` と別のエッジプロセスが同じメモリへ書く場合に既定で `error` になります（IEEE 1800-2023 §9.2.2.4）。`warn` または `allow` では、非ブロッキング代入の変更範囲を次状態領域に保持してコミットします。通常の `always` 同士による共有にはこの診断は出ません。異なるプロセスが同時に同じビットへ書く順序は、移植可能な動作として保証されません。
+`multiple_always_ff_drivers` は、`always_ff` と別のエッジプロセスが同じメモリへ書く場合に既定で `warn`（strict mode では `error`）になります（IEEE 1800-2023 §9.2.2.4）。`warn` または `allow` では、非ブロッキング代入の変更範囲を次状態領域に保持してコミットします。通常の `always` 同士による共有にはこの診断は出ません。異なるプロセスが同時に同じビットへ書く順序は、移植可能な動作として保証されません。
 
 プロジェクトのシミュレータ生成時は `Veryl.toml` と同じ場所の設定を読み込みます。CLI は単独の SystemVerilog プロジェクトにも対応します。
 
@@ -193,6 +188,25 @@ mixed_timescale = "warn"
 ```
 
 共通設定→選択したターゲット→CLI の順に優先されます。`--diagnostic CODE=LEVEL` は繰り返し指定でき、同じコードを複数回指定した場合は最後の指定が有効です。`celox run` と `celox vpi build` は抑制していない警告を表示します。診断レベルを変更しても、最適化設定や実行時エラーの扱いは変わりません。
+
+### `[compatibility]`
+
+診断レベルとは分けて、他ツール互換のためにシミュレーション挙動を変えるオプトインをまとめます。
+
+```toml
+[compatibility]
+legacy_empty_reductions = true
+shared_always_temporary = true
+
+[targets.legacy.compatibility]
+legacy_empty_reductions = false
+```
+
+`legacy_empty_reductions` は、空の SystemVerilog 配列縮約について各演算子の恒等元（積なら1、ビットANDなら全1など、IEEE 1800-2023 §7.12.3）ではなくゼロを返します。CLI フラグは `--legacy-empty-reductions`、Rust では `SimulatorBuilder::legacy_empty_reductions(true)` です。
+
+`shared_always_temporary` は、複数の `always @*` ブロックが書く変数を各ブロックの一時変数として扱います。既定では、共有するループ変数のように、そうした変数に IEEE 1800-2023 の意味論を適用します。各ブロックは自身が読む変数（共有変数を含む）の変化を待ち（§9.4.2.2）、書き込みは待機中の他のブロックに通知されます。有効にすると、`always @*` ブロックだけが書き込み、各ブロックがすべての経路で読む前に書き込み、ほかに読むものがない変数を各ブロックの一時変数にします。その書き込みは Icarus Verilog と同様に他のブロックを起動せず、変数自体は初期値のままになります。これは規格からの逸脱なので既定では無効で、適用時は対象の変数とブロックを警告として報告します。診断コードではないため、`[diagnostics]` でのレベル指定は効果がありません。CLI フラグは `--shared-always-temporary`、Rust では `SimulatorBuilder::shared_always_temporary(true)` です。
+
+優先順位は共通設定→選択したターゲット→CLI フラグです。プロジェクトのシミュレータ生成時も同じテーブルを `celox.toml` から読み込みます。
 
 ## CLIの最適化と信号アクセス
 

@@ -18,6 +18,7 @@ impl Parser<'_> {
                 | "uwire"
                 | "supply0"
                 | "supply1"
+                | "interconnect"
         )
     }
     pub(super) fn net_declaration(&mut self) -> Result<NetDeclarationId> {

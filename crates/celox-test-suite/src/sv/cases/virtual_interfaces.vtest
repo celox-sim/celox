@@ -1102,3 +1102,434 @@ endmodule
 "#)
   (top Top) (run_until 0)
   (assert_eq size 2) (assert_eq first 3) (assert_eq through 2))
+
+
+; A task called through a virtual interface reads and writes the members of
+; the instance the handle denotes, also in the bounds of a select, as
+; `sel[idx]` and `flags[idx]` do (IEEE 1800-2023 25.9): each instance waits
+; for its own bit.
+(case subroutine_select_bounds_read_instance_members
+  (source "vif.sv" #"
+interface bfm(input logic clk, input logic [3:0] sel);
+    int idx = 0;
+    logic [3:0] flags = 0;
+    function void set_idx(int i); idx = i; endfunction
+    task wait_sel();
+        while (sel[idx] != 1'b1) @(posedge clk);
+        flags[idx] = 1'b1;
+    endtask
+endinterface
+package p;
+    class agent;
+        virtual bfm v;
+        int seen;
+        task run(); v.wait_sel(); seen = $time; endtask
+    endclass
+endpackage
+module Top;
+    logic clk = 0;
+    logic [3:0] sel = 0;
+    always #1 clk = ~clk;
+    bfm b0(clk, sel);
+    bfm b1(clk, sel);
+    p::agent a0, a1;
+    initial begin
+        a0 = new; a1 = new; a0.v = b0; a1.v = b1;
+        a0.v.set_idx(2); a1.v.set_idx(1);
+        fork a0.run(); a1.run(); join_none
+        #4 sel[1] = 1;
+        #6 sel[2] = 1;
+        #4 $display("seen %0d %0d flags %b %b", a0.seen, a1.seen, b0.flags, b1.flags);
+    end
+endmodule
+"#)
+  (top Top) (run_until 20)
+  (expect_output "seen 11 5 flags 0100 0010\n"))
+
+(case specializations_of_parameterized_interfaces
+  ; The parameter values of an interface are part of a virtual interface
+  ; type of it (IEEE 1800-2023 25.9): a handle of `virtual bus #(8)` denotes
+  ; only instances whose `W` is 8, with members of their widths, and an
+  ; instance with the default values is one of them.
+  (source "virtual_interfaces.sv" #"
+interface bus #(parameter int W = 8) ();
+    logic [W-1:0] data;
+    function automatic int width();
+        return $bits(data);
+    endfunction
+endinterface
+package drivers;
+    class Drv #(int W = 8);
+        virtual bus #(W) v;
+        function new(virtual bus #(W) v);
+            this.v = v;
+        endfunction
+        function void put(logic [W-1:0] x);
+            v.data = x;
+        endfunction
+    endclass
+endpackage
+module Top(output logic [7:0] a, output logic [15:0] b, output logic [7:0] c,
+           output int wa, output int wb, output int fa, output int fb);
+    bus #(8) n();
+    bus #(.W(16)) w();
+    bus d();
+    assign a = n.data;
+    assign b = w.data;
+    assign c = d.data;
+    drivers::Drv #(8) x;
+    drivers::Drv #(16) y;
+    drivers::Drv #(8) z;
+    virtual bus #(8) h;
+    initial begin
+        x = new(n);
+        y = new(w);
+        z = new(d);
+        x.put(8'hA5);
+        y.put(16'h1234);
+        z.put(8'h3C);
+        h = d;
+        h.data += 1;
+        wa = $bits(x.v.data);
+        wb = $bits(y.v.data);
+        fa = h.width();
+        fb = y.v.width();
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq a 0xA5) (assert_eq b 0x1234) (assert_eq c 0x3D)
+  (assert_eq wa 8) (assert_eq wb 16) (assert_eq fa 8) (assert_eq fb 16))
+
+(case rejects_instances_of_other_specializations
+  ; An instance is assignable only to a virtual interface of the same
+  ; interface with the same parameter values (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus #(parameter int W = 8) ();
+    logic [W-1:0] data;
+endinterface
+module Top;
+    bus #(16) w();
+    virtual bus #(8) v;
+    initial v = w;
+endmodule
+"#)
+  (top Top)
+  (expect reject))
+
+(case package_types_of_parameterized_interfaces
+  ; A virtual interface type that a package declares with package constants
+  ; is the type of the instance with those values, which a class keyed by
+  ; the type stores and returns, and through which a task of that
+  ; specialization runs (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bfm #(ADDR_WIDTH = 8, DATA_WIDTH = 8) (input logic clk);
+    logic [ADDR_WIDTH-1:0] address;
+    task drive(logic [ADDR_WIDTH-1:0] a);
+        @(posedge clk);
+        address <= a;
+    endtask
+endinterface
+package c;
+    parameter int aw = 12;
+    parameter int dw = 4;
+endpackage
+package p;
+    typedef virtual bfm #(c::aw, c::dw) bfm_t;
+    class db #(type T = int);
+        static T value;
+        static function void set(T v);
+            value = v;
+        endfunction
+        static function T get();
+            return value;
+        endfunction
+    endclass
+endpackage
+module Top(output logic [11:0] address, output int width);
+    logic clk = 0;
+    always #5 clk = ~clk;
+    bfm #(.ADDR_WIDTH(c::aw), .DATA_WIDTH(c::dw)) u(clk);
+    assign address = u.address;
+    initial begin
+        p::bfm_t h;
+        p::db #(virtual bfm #(.ADDR_WIDTH(12), .DATA_WIDTH(4)))::set(u);
+        h = p::db #(p::bfm_t)::get();
+        width = $bits(h.address);
+        h.drive(12'h9AB);
+    end
+endmodule
+"#)
+  (top Top) (run_until 20)
+  (assert_eq address 0x9AB) (assert_eq width 12))
+
+(case specializations_of_interfaces_with_class_formals
+  ; The task of a specialization reads the members of an object of a class
+  ; its interface imports, which a call through a virtual interface of the
+  ; specialization passes (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+package items;
+    class item;
+        logic [11:0] address;
+    endclass
+endpackage
+interface bfm #(ADDR_WIDTH = 8) ();
+    import items::*;
+    logic [ADDR_WIDTH-1:0] address;
+    task execute(item i);
+        address = i.address;
+    endtask
+endinterface
+module Top(output logic [11:0] address);
+    bfm #(12) u();
+    virtual bfm #(12) h;
+    assign address = u.address;
+    initial begin
+        items::item i = new;
+        i.address = 12'h9ab;
+        h = u;
+        h.execute(i);
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq address 0x9AB))
+
+(case package_types_of_interfaces_with_class_formals
+  ; A package type names the specialization before the modules are
+  ; analyzed; its task takes an object of a class the interface imports
+  ; (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+package items;
+    class item;
+        logic [11:0] address;
+    endclass
+endpackage
+interface bfm #(ADDR_WIDTH = 8) ();
+    import items::*;
+    logic [ADDR_WIDTH-1:0] address;
+    task execute(item i);
+        address = i.address;
+    endtask
+endinterface
+package types;
+    typedef virtual bfm #(12) bfm_t;
+endpackage
+module Top(output logic [11:0] address);
+    bfm #(12) u();
+    types::bfm_t h;
+    assign address = u.address;
+    initial begin
+        items::item i = new;
+        i.address = 12'h9ab;
+        h = u;
+        h.execute(i);
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq address 0x9AB))
+
+(case calls_find_hierarchical_names_from_each_instance
+  ; A task called through a virtual interface waits on and writes the
+  ; objects its hierarchical names denote from the parent of the instance
+  ; the handle denotes (IEEE 1800-2023 23.8, 25.9): each `Mid` its own
+  ; `CONTROL`.
+  (source "virtual_interface_upward.sv" #"
+interface Ctl; logic clk; logic [7:0] data; endinterface
+interface Drv;
+    logic [7:0] last;
+    task put(input logic [7:0] v);
+        @(posedge CONTROL.clk);
+        CONTROL.data = v;
+        last = v;
+    endtask
+endinterface
+package cfg;
+    virtual Drv vs[2];
+endpackage
+module Mid #(parameter int I = 0) (output logic [7:0] data, last);
+    Ctl CONTROL();
+    Drv d();
+    assign data = CONTROL.data;
+    assign last = d.last;
+    initial begin
+        cfg::vs[I] = d;
+        CONTROL.clk = 0;
+        repeat (6) begin #1 CONTROL.clk = 1; #1 CONTROL.clk = 0; end
+    end
+endmodule
+module Top(output wire [7:0] d0, d1, l0, l1);
+    Mid #(0) m0(d0, l0);
+    Mid #(1) m1(d1, l1);
+    initial begin
+        #0;
+        fork
+            cfg::vs[0].put(8'h5a);
+            cfg::vs[1].put(8'ha5);
+        join
+    end
+endmodule
+"#)
+  (top Top) (run_until 12)
+  (assert_eq d0 0x5a) (assert_eq d1 0xa5) (assert_eq l0 0x5a) (assert_eq l1 0xa5))
+
+(case calls_find_names_of_ancestors_and_generate_blocks
+  ; A name of an ancestor's object resolves upward from the instance's
+  ; parent, and one of a generate block's object from the block that holds
+  ; the instance first (IEEE 1800-2023 23.8), also in a function.
+  (source "virtual_interface_upward_scopes.sv" #"
+interface Ctl; logic [7:0] data; endinterface
+interface Drv;
+    logic [7:0] last;
+    function automatic logic [7:0] peek();
+        return Top.k + CONTROL.data;
+    endfunction
+    task put(logic [7:0] v);
+        CONTROL.data = v;
+        last = v;
+    endtask
+endinterface
+module Top(output logic [7:0] p0, p1, b0, b1, outer);
+    logic [7:0] k = 8'h03;
+    Ctl CONTROL();
+    for (genvar i = 0; i < 2; i++) begin : g
+        Ctl CONTROL();
+        Drv d();
+    end
+    virtual Drv v0, v1;
+    assign b0 = g[0].CONTROL.data;
+    assign b1 = g[1].CONTROL.data;
+    assign outer = CONTROL.data;
+    initial begin
+        CONTROL.data = 8'h77;
+        v0 = g[0].d;
+        v1 = g[1].d;
+        v0.put(8'h10);
+        v1.put(8'h20);
+        p0 = v0.peek();
+        p1 = v1.peek();
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq b0 0x10) (assert_eq b1 0x20) (assert_eq outer 0x77)
+  (assert_eq p0 0x13) (assert_eq p1 0x23))
+
+(case calls_of_interfaces_without_instances
+  ; An interface with hierarchical names in its tasks that no instance
+  ; resolves is called through a null virtual interface only (25.9).
+  (source "virtual_interface_upward_none.sv" #"
+interface Drv;
+    task put(logic [7:0] v);
+        CONTROL.data = v;
+    endtask
+endinterface
+module Top(output bit done);
+    virtual Drv v;
+    initial begin
+        if (v != null) v.put(8'h11);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq done 1))
+
+; A named event of an interface is a member that a virtual interface reaches
+; (IEEE 1800-2023 25.9): a task of the interface called through one, and
+; class code through one, trigger the event of the instance it denotes, with
+; `->` and `->>` (15.5.1), and `triggered` reads that instance's (15.5.3).
+; The other instance's process does not wake.
+(case named_event_triggers_reach_the_instance
+  (source "vif.sv" #"
+interface bfm(input logic clk);
+    event go;
+    int n;
+    task kick(); ->go; endtask
+    task kick_nb(); ->>go; endtask
+    initial forever begin @go; n++; end
+endinterface
+package p;
+    class h;
+        virtual bfm v;
+        task from_task(); v.kick(); endtask
+        task from_task_nb(); v.kick_nb(); endtask
+        task direct(); ->v.go; endtask
+        task direct_nb(); ->>v.go; endtask
+        function bit fired(); return v.go.triggered; endfunction
+    endclass
+endpackage
+module Top;
+    logic clk;
+    bfm b1(clk);
+    bfm b2(clk);
+    p::h x, y;
+    initial begin
+        x = new; x.v = b1;
+        y = new; y.v = b2;
+        #1 x.from_task();
+        $display("t %0d %0d", x.fired(), y.fired());
+        #1 $display("a %0d %0d", b1.n, b2.n);
+        #1 y.direct();
+        $display("t %0d %0d", x.fired(), y.fired());
+        #1 $display("b %0d %0d", b1.n, b2.n);
+        #1 x.direct_nb();
+        #1 $display("c %0d %0d", b1.n, b2.n);
+        #1 y.from_task_nb();
+        #1 $display("d %0d %0d", b1.n, b2.n);
+    end
+endmodule
+"#)
+  (top Top) (run_until 10)
+  (expect_output "t 1 0\na 1 0\nt 0 1\nb 1 1\nc 2 1\nd 2 2\n"))
+
+; An event control on a named event through a virtual interface waits for a
+; trigger of the event of the instance the handle denotes when the wait
+; begins (IEEE 1800-2023 15.5.2, 15.5.5.1), from a module and from class
+; code, alone or with other events; `wait(v.go.triggered)` too (15.5.3). A
+; trigger of the other instance's event wakes none of them, and a handle
+; retargeted during the wait keeps the event it began with. Each waiter
+; records when it woke.
+(case waits_on_named_events_through_virtual_interfaces
+  (source "vif_waits.sv" #"
+interface bfm;
+    event go;
+    event stop;
+endinterface
+package p;
+    class h;
+        virtual bfm v;
+        task on_go(output int at); @(v.go); at = $time; endtask
+        task on_level(output int at); wait(v.go.triggered); at = $time; endtask
+    endclass
+endpackage
+module Top(output int class_x, output int class_y, output int level_x, output int level_y,
+           output int module_1, output int module_2, output int moved_at);
+    bfm b1();
+    bfm b2();
+    virtual bfm v1, v2, moved;
+    event other;
+    p::h x, y;
+    initial begin
+        v1 = b1; v2 = b2; moved = b1;
+        x = new; x.v = b1;
+        y = new; y.v = b2;
+        fork
+            x.on_go(class_x); y.on_go(class_y);
+            x.on_level(level_x); y.on_level(level_y);
+        join_none
+    end
+    initial begin #1 @(v1.go); module_1 = $time; end
+    initial begin #1 @(v2.go or v2.stop or other); module_2 = $time; end
+    initial begin #1 @(moved.go); moved_at = $time; end
+    initial begin
+        #2 moved = b2;
+        #1 ->b2.go;
+        #2 ->>v1.go;
+    end
+endmodule
+"#)
+  (top Top) (run_until 10)
+  (assert_eq class_x 5) (assert_eq class_y 3) (assert_eq level_x 5) (assert_eq level_y 3)
+  (assert_eq module_1 5) (assert_eq module_2 3) (assert_eq moved_at 5))

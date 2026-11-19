@@ -34,7 +34,10 @@ Procedures retain authored statement membership and lexical scopes independently
 of execution-root selection. Statements cover blocks, conditionals, cases, loops,
 foreach headers, assignments, calls, jumps, timing/wait controls and immediate
 assertion actions. Concurrent assertions and other unsupported constructs retain
-explicit grammar boundaries without adding execution behavior.
+explicit grammar boundaries without adding execution behavior. Covergroup
+declarations are typed nodes (options, coverpoints with their bins and
+transitions, crosses with their select expressions) that a body item, and for an
+embedded covergroup its class, names by `CovergroupId`.
 
 Generate traversal uses native scope IDs and explicit worklists. Existing case
 comparison, genvar conversion, implicit localparams, scope numbering, imports and

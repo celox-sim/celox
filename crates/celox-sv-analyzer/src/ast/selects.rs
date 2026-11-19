@@ -266,6 +266,11 @@ pub(super) fn lvalue_from_range(
     let (array_slice_width, array_slice_reversed) =
         unpacked_select_range_metadata(tree, &name, &indices, &msb, &lsb, packed_dimensions)
             .map_or((None, false), |(width, reversed)| (Some(width), reversed));
+    let window = if array_slice_width.is_none() {
+        element_window(tree, &name, &indices, &msb, &lsb, packed_dimensions)
+    } else {
+        None
+    };
     (msb, lsb) = flatten_select_range(
         tree,
         &name,
@@ -290,9 +295,68 @@ pub(super) fn lvalue_from_range(
         signed: false,
         array_slice_width,
         array_slice_reversed,
-        window: None,
+        window,
         is_2state: false,
     })
+}
+
+/// The window of a run-time select `[msb:lsb]` within the element of array
+/// variable `name` that `indices` select: the element's bits, which the
+/// select stays within (IEEE 1800-2023 7.4.5, 11.5.1). At a run-time
+/// position for a run-time element; none for a constant element of an
+/// unpacked array, which the lowering keeps the select within itself, and
+/// none for a constant select.
+fn element_window(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    indices: &[ConstExpr],
+    msb: &ConstExpr,
+    lsb: &ConstExpr,
+    packed_dimensions: &PackedDimensions,
+) -> Option<crate::ast::SelectWindow> {
+    let functions = &tree.functions;
+    let constant =
+        |expr: &ConstExpr| eval_ast_const_expr(functions, expr, &packed_dimensions.const_env);
+    if indices.is_empty() || (constant(msb).is_some() && constant(lsb).is_some()) {
+        return None;
+    }
+    let dimensions = packed_dimensions.get(name)?;
+    let unpacked = dimensions.unpacked.len();
+    if indices.len() < unpacked {
+        return None;
+    }
+    let packed_indices = indices.len() - unpacked;
+    let dimension = dimensions.packed.get(packed_indices)?;
+    let constant_element = indices.iter().all(|index| constant(index).is_some());
+    if unpacked > 0 && constant_element {
+        return None;
+    }
+    // The bits of the element: those of the dimension the select is in and
+    // of the ones below it.
+    let width = dimensions.packed[packed_indices..]
+        .iter()
+        .try_fold(1usize, |width, dimension| {
+            width.checked_mul(usize::try_from(constant(&dimension.width)?).ok()?)
+        })?;
+    let (_, bottom) = flatten_select_range(
+        tree,
+        name,
+        indices,
+        dimension.left.clone(),
+        dimension.right.clone(),
+        packed_dimensions,
+    )?;
+    let msb = u32::try_from(width.checked_sub(1)?).ok()?;
+    Some(
+        match constant(&bottom).and_then(|bottom| u32::try_from(bottom).ok()) {
+            Some(bottom) => crate::ast::SelectWindow::bits(bottom, bottom.checked_add(msb)?),
+            None => crate::ast::SelectWindow {
+                lsb: 0,
+                msb,
+                at: Some(Box::new(bottom)),
+            },
+        },
+    )
 }
 
 /// Whether selecting `count` packed dimensions of `name` yields an element of
@@ -1106,6 +1170,30 @@ pub(super) fn indexed_expression_value(
     expr_to_const(session, folded)
 }
 
+/// The constant operand of an assignment-like context, such as a cast, with
+/// only its self-determined operands folded: the context sizes the others
+/// (IEEE 1800-2023 6.24.1, 11.6.1).
+pub(super) fn indexed_context_operand(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    expression: Expr,
+    dimensions: &PackedDimensions,
+) -> Option<ConstExpr> {
+    let expression = substitute_indexed_parameter_values(tree, session, expression, dimensions);
+    let const_env = &dimensions.const_env;
+    constant_folding::constant_with_folded_selections_with_lookup(
+        tree,
+        session,
+        &expression,
+        const_env,
+        &|name| parameter_type_from_const_env(const_env, name).map(|ty| (ty.width, ty.signed)),
+    )
+    .or_else(|| {
+        let folded = fold_const_integral_expr_preserving_mask(tree, session, expression, const_env);
+        expr_to_const(session, folded)
+    })
+}
+
 fn substitute_indexed_parameter_values(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -1157,20 +1245,44 @@ pub(super) fn selected_parameter_initializer(
 ) -> Converted<ConstExpr> {
     let mut dimensions = dimensions.clone();
     dimensions.constant_indexed_base = true;
-    let expression = constant_binding::indexed_expression(
+    constant_binding::indexed_expression(
         native,
         syntax_tree.declarations(),
         syntax_tree,
         session,
         &dimensions,
-    )?;
-    fold_parameter_selection(
-        syntax_tree,
-        session,
-        expression,
-        &dimensions,
-        assignment_width,
     )
+    .and_then(|expression| {
+        fold_parameter_selection(
+            syntax_tree,
+            session,
+            expression,
+            &dimensions,
+            assignment_width,
+        )
+    })
+    .or_else(|error| {
+        // The value binder reads an element of an array parameter, `Cap[k]`,
+        // as a select of the array, which the constant binder folds to the
+        // element (11.2.1).
+        let Ok(Some(constant)) = constant_binding::bind_in(
+            native,
+            syntax_tree.declarations(),
+            syntax_tree,
+            session,
+            &dimensions,
+        ) else {
+            return Err(error);
+        };
+        fold_parameter_selection(
+            syntax_tree,
+            session,
+            const_expr_to_expr(constant),
+            &dimensions,
+            assignment_width,
+        )
+        .map_err(|_| error)
+    })
 }
 
 fn fold_parameter_selection(
@@ -1225,7 +1337,7 @@ fn unknown_indexed_range_literal(
     let width = eval_ast_const_expr(functions, stride, &dimensions.const_env)
         .and_then(|stride| width.checked_mul(stride))
         .and_then(|width| usize::try_from(width).ok())
-        .filter(|width| *width > 0 && *width <= constant_folding::MAX_CONSTANT_CONCAT_BITS)
+        .filter(|width| *width > 0 && *width <= constant_folding::MAX_CONSTANT_VALUE_BITS)
         .ok_or_else(|| unsupported("constant indexed part-select materialization width"))?;
     // IEEE 1800-2023 11.5.1: an X/Z part-select base reads as X,
     // including for two-state sources. Part-select results are unsigned.

@@ -244,7 +244,29 @@ const _: () = assert!(
         && crate::streams::TRUNCATE < UVM_RE_COMP
         && UVM_TOOL_VERSION <= 0xff
         && UVM_DUMP_RE_CACHE <= 0xff
+        && OBJECT_ARGUMENT_VALUE < MEMORY_FILE_RANGE
+        && MEMORY_FILE_MESSAGE <= 0xff
 );
+
+/// `range(start, finish, flags)`: the addresses the next
+/// [`MEMORY_FILE_LOAD`] loads from and toward, as signed integers; `flags`
+/// has bit 0 when either has an unknown bit and bit 1 when either is beyond
+/// a signed 64-bit integer (IEEE 1800-2023 21.4).
+pub const MEMORY_FILE_RANGE: u64 = 160;
+/// `load(descriptor, file)`: read memory file string `file` as string
+/// `descriptor` describes, through the reader of the heap (see
+/// [`crate::memory_files`]), and return the number of words it gives.
+pub const MEMORY_FILE_LOAD: u64 = 161;
+/// `position(k)`: the position of word `k` of the last load in the storage
+/// order of the array.
+pub const MEMORY_FILE_POSITION: u64 = 162;
+/// `word(k, chunk)`: 64-bit chunk `chunk` of word `k` of the last load, of
+/// its value plane, or of its unknown plane when the parameter is 1.
+pub const MEMORY_FILE_WORD: u64 = 163;
+/// `message()`: the warning of the last load, or its error when the
+/// parameter is 1, as a string; the empty string when it has none. Taking
+/// the error ends the load, whose words are dropped.
+pub const MEMORY_FILE_MESSAGE: u64 = 164;
 
 impl Heap {
     /// Perform the operation selected by `code` on `a`, `b` and `c`.
@@ -275,6 +297,9 @@ impl Heap {
             | UVM_REPORT_FIELD
             | UVM_DUMP_RE_CACHE) => self.uvm_call(op, a, b, c),
             op @ DPI_AREA..=DPI_FROM_C_STRING => self.dpi_call(op, a, b),
+            op @ MEMORY_FILE_RANGE..=MEMORY_FILE_MESSAGE => {
+                self.memory_file_call(op, parameter, a, b, c)
+            }
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {
                 let lower = |handle| {

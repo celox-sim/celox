@@ -1,6 +1,14 @@
 import { chai, JestAsymmetricMatchers, JestChaiExpect } from "@vitest/expect";
 import * as monaco from "monaco-editor";
 import { CeloxCompilerClient } from "./celox-compiler-client.js";
+import {
+	extractModuleNames,
+	extractSvPortsFromSource,
+	hdlDeclarationPaths,
+	hdlLanguageForPath,
+	isHdlPath,
+	isSvPath,
+} from "./hdl-source.js";
 import { buildMonacoTestbenchCompilerOptions } from "./monaco-testbench-options.js";
 import { celoxDtsLibs } from "./playground-dts.js";
 import { FourState, X, Z } from "./playground-runtime-helpers.js";
@@ -9,11 +17,13 @@ import {
 	createPlaygroundSimulator,
 	type PlaygroundDumpSink,
 } from "./playground-simulator.js";
+import { SV_EXAMPLES } from "./sv-examples.js";
 import { transpileTestbench } from "./testbench-transpile.js";
 import {
 	buildVirtualModuleDts,
 	extractPortsFromSource,
 	type VirtualPortInfo,
+	virtualPortsFromJson,
 } from "./virtual-module-dts.js";
 import {
 	generateVcdText,
@@ -485,6 +495,232 @@ monaco.languages.setMonarchTokensProvider("veryl", {
 	},
 });
 
+// SystemVerilog (IEEE 1800-2023)
+monaco.languages.register({ id: "systemverilog" });
+monaco.languages.setMonarchTokensProvider("systemverilog", {
+	keywords: [
+		"module",
+		"endmodule",
+		"macromodule",
+		"interface",
+		"endinterface",
+		"package",
+		"endpackage",
+		"program",
+		"endprogram",
+		"function",
+		"endfunction",
+		"task",
+		"endtask",
+		"import",
+		"export",
+		"input",
+		"output",
+		"inout",
+		"ref",
+		"logic",
+		"reg",
+		"bit",
+		"wire",
+		"tri",
+		"var",
+		"genvar",
+		"parameter",
+		"localparam",
+		"typedef",
+		"enum",
+		"struct",
+		"union",
+		"packed",
+		"signed",
+		"unsigned",
+		"assign",
+		"always_ff",
+		"always_comb",
+		"always_latch",
+		"always",
+		"initial",
+		"final",
+		"if",
+		"else",
+		"for",
+		"foreach",
+		"while",
+		"repeat",
+		"forever",
+		"case",
+		"casez",
+		"casex",
+		"endcase",
+		"default",
+		"return",
+		"break",
+		"continue",
+		"begin",
+		"end",
+		"generate",
+		"endgenerate",
+		"posedge",
+		"negedge",
+		"edge",
+		"or",
+		"and",
+		"not",
+		"unique",
+		"priority",
+		"void",
+		"new",
+		"this",
+		"super",
+		"class",
+		"endclass",
+		"extends",
+		"virtual",
+		"const",
+		"static",
+		"automatic",
+		"assert",
+		"property",
+		"endproperty",
+		"sequence",
+		"endsequence",
+	],
+	typeKeywords: [
+		"byte",
+		"shortint",
+		"int",
+		"longint",
+		"integer",
+		"time",
+		"real",
+		"shortreal",
+		"realtime",
+		"string",
+		"event",
+		"chandle",
+	],
+	operators: [
+		"=",
+		"==",
+		"!=",
+		"===",
+		"!==",
+		"<",
+		">",
+		"<=",
+		">=",
+		"+",
+		"-",
+		"*",
+		"/",
+		"%",
+		"&",
+		"|",
+		"^",
+		"~",
+		"<<",
+		">>",
+		"<<<",
+		">>>",
+		"&&",
+		"||",
+		"!",
+		"->",
+		"++",
+		"--",
+		"+=",
+		"-=",
+		"*=",
+		"/=",
+		"%=",
+		"&=",
+		"|=",
+		"^=",
+		"<<=",
+		">>=",
+	],
+	symbols: /[=><!~?:&|+\-*/^%]+/,
+	tokenizer: {
+		root: [
+			[
+				/[a-zA-Z_]\w*/,
+				{
+					cases: {
+						"@keywords": "keyword",
+						"@typeKeywords": "type",
+						"@default": "identifier",
+					},
+				},
+			],
+			[/\$[a-zA-Z_]\w*/, "annotation"],
+			[/`[a-zA-Z_]\w*/, "annotation"],
+			[/[{}()[\]]/, "@brackets"],
+			[/@symbols/, { cases: { "@operators": "operator", "@default": "" } }],
+			[/\d[\d_]*(?:'[sS]?[bodhBODH][0-9a-fA-FxzXZ_?]+)?/, "number"],
+			[/' [sS]?[bodhBODH][0-9a-fA-FxzXZ_?]+/, "number"],
+			[/"([^"\\]|\\.)*$/, "string.invalid"],
+			[/"/, { token: "string.quote", bracket: "@open", next: "@string" }],
+			[/\/\/.*$/, "comment"],
+			[/\/\*/, "comment", "@comment"],
+		],
+		string: [
+			[/[^\\"]+/, "string"],
+			[/"/, { token: "string.quote", bracket: "@close", next: "@pop" }],
+		],
+		comment: [
+			[/[^/*]+/, "comment"],
+			[/\*\//, "comment", "@pop"],
+			[/[/*]/, "comment"],
+		],
+	},
+});
+
+monaco.languages.registerCompletionItemProvider("systemverilog", {
+	provideCompletionItems(model, position) {
+		const word = model.getWordUntilPosition(position);
+		const range = {
+			startLineNumber: position.lineNumber,
+			endLineNumber: position.lineNumber,
+			startColumn: word.startColumn,
+			endColumn: word.endColumn,
+		};
+		const snippets = [
+			{
+				label: "module",
+				insertText: "module ${1:Name} (\n    ${2}\n);\n    ${0}\nendmodule",
+				detail: "Module declaration (ANSI header)",
+			},
+			{
+				label: "always_ff",
+				insertText:
+					"always_ff @(posedge ${1:clk} or negedge ${2:rst_n}) begin\n    if (!${2:rst_n}) begin\n        ${3}\n    end else begin\n        ${0}\n    end\nend",
+				detail: "Sequential block",
+			},
+			{
+				label: "always_comb",
+				insertText: "always_comb begin\n    ${0}\nend",
+				detail: "Combinational block",
+			},
+			{
+				label: "assign",
+				insertText: "assign ${1:out} = ${0};",
+				detail: "Continuous assignment",
+			},
+		];
+		return {
+			suggestions: snippets.map((s) => ({
+				label: s.label,
+				kind: monaco.languages.CompletionItemKind.Snippet,
+				insertText: s.insertText,
+				insertTextRules:
+					monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+				detail: s.detail,
+				range,
+			})),
+		};
+	},
+});
+
 monaco.languages.registerCompletionItemProvider("veryl", {
 	provideCompletionItems(model, position) {
 		const word = model.getWordUntilPosition(position);
@@ -599,7 +835,7 @@ document.getElementById("app")!.innerHTML = `
 </style>
 <header>
   <h1>Celox Playground</h1>
-  <select id="examples"><option value="">-- Example --</option><option value="adder">Adder</option><option value="counter">Counter (Simulator)</option><option value="counter_sim">Counter (Simulation)</option><option value="counter_vcd">Counter (Waveform)</option><option value="four_state">4-State</option></select>
+  <select id="examples"><option value="">-- Example --</option><option value="adder">Adder</option><option value="counter">Counter (Simulator)</option><option value="counter_sim">Counter (Simulation)</option><option value="counter_vcd">Counter (Waveform)</option><option value="four_state">4-State</option><option value="sv_adder">SV: Adder</option><option value="sv_counter">SV: Counter (Simulation)</option><option value="sv_counter_vcd">SV: Counter (Waveform)</option><option value="sv_alu">SV: ALU</option></select>
   <select id="run-target"></select>
   <input id="run-args" type="text" placeholder="vitest args (e.g. --grep &quot;add&quot;)" style="width: 180px; font-size: 0.8rem;" />
   <button id="run" disabled>Run</button>
@@ -795,7 +1031,7 @@ const files = new Map<string, PlaygroundFile>();
 let activeFilePath: string | null = null;
 
 function langForPath(path: string): string {
-	if (path.endsWith(".veryl")) return "veryl";
+	if (isHdlPath(path)) return hdlLanguageForPath(path);
 	if (path.endsWith(".ts") || path.endsWith(".tsx")) return "typescript";
 	if (path.endsWith(".js")) return "javascript";
 	if (path.endsWith(".toml")) return "toml";
@@ -814,9 +1050,9 @@ function createFile(path: string, content: string): PlaygroundFile {
 	const file: PlaygroundFile = { path, model, viewState: null };
 	files.set(path, file);
 
-	// Listen for changes on .veryl files
-	if (lang === "veryl") {
-		model.onDidChangeContent(() => onVerylChange());
+	// Listen for changes on HDL files
+	if (lang === "veryl" || lang === "systemverilog") {
+		model.onDidChangeContent(() => onHdlChange());
 	}
 
 	return file;
@@ -1014,7 +1250,7 @@ function promptNewFile() {
 	const input = document.createElement("input");
 	input.className = "tab-rename";
 	input.value = "src/";
-	input.placeholder = "path/to/file.veryl";
+	input.placeholder = "path/to/file.veryl or file.sv";
 
 	// Insert before the "+" button
 	const addBtn = tabBarEl.querySelector(".tab-add")!;
@@ -1102,18 +1338,68 @@ for (const lib of celoxDtsLibs(celoxDtsSources)) {
 
 let currentExtraLib: monaco.IDisposable | null = null;
 
-function getVerylSource(): string {
-	for (const f of files.values()) {
-		if (f.path.endsWith(".veryl")) return f.model.getValue();
-	}
-	return "";
+interface HdlFile {
+	path: string;
+	content: string;
+	model: monaco.editor.ITextModel;
 }
 
-function getVerylModel(): monaco.editor.ITextModel | null {
+function getHdlFiles(): HdlFile[] {
+	const result: HdlFile[] = [];
 	for (const f of files.values()) {
-		if (f.path.endsWith(".veryl")) return f.model;
+		if (isHdlPath(f.path)) {
+			result.push({
+				path: f.path,
+				content: f.model.getValue(),
+				model: f.model,
+			});
+		}
+	}
+	return result;
+}
+
+function getHdlSources(): { content: string; path: string }[] {
+	return getHdlFiles().map(({ content, path }) => ({ content, path }));
+}
+
+/** The first HDL file, which holds the top module in playground examples. */
+function getPrimaryHdlFile(): HdlFile | null {
+	return getHdlFiles()[0] ?? null;
+}
+
+function getVerylSource(): string {
+	return getPrimaryHdlFile()?.content ?? "";
+}
+
+/** Top module name across all HDL sources, or null when none is declared. */
+function getTopModuleName(): string | null {
+	for (const f of getHdlFiles()) {
+		const names = extractModuleNames(f.content);
+		if (names.length > 0) return names[0];
 	}
 	return null;
+}
+
+/** The model of the HDL file a diagnostic path names, if it is open. */
+function modelForDiagnosticFile(file: string): monaco.editor.ITextModel | null {
+	const normalized = file.replace(/\\/g, "/");
+	for (const f of getHdlFiles()) {
+		if (
+			f.path === normalized ||
+			normalized.endsWith(`/${f.path}`) ||
+			f.path.endsWith(`/${normalized}`)
+		) {
+			return f.model;
+		}
+	}
+	return null;
+}
+
+/** Ports of the primary HDL file from the regex fallback. */
+function fallbackPorts(file: HdlFile): Record<string, VirtualPortInfo> {
+	return isSvPath(file.path)
+		? extractSvPortsFromSource(file.content)
+		: extractPortsFromSource(file.content);
 }
 
 function snapshotTestSources(
@@ -1134,42 +1420,52 @@ function snapshotTestSources(
 	return [];
 }
 
-function updateDutTypes(ports: Record<string, VirtualPortInfo>) {
+function updateDutTypes(
+	ports: Record<string, VirtualPortInfo>,
+	moduleName = getTopModuleName() ?? "Top",
+	sourceFile?: string,
+) {
 	if (currentExtraLib) currentExtraLib.dispose();
 
-	// Extract module name from Veryl source
-	const topMatch = getVerylSource().match(/module\s+(\w+)/);
-	const moduleName = topMatch?.[1] || "Top";
-
-	// Only generate .veryl module declarations — @celox-sim/celox types are
-	// registered once at startup from the real .d.ts files.
+	// Only generate HDL module declarations — @celox-sim/celox types are
+	// registered once at startup from the real .d.ts files. Testbenches may
+	// import the module from a `.veryl` or a `.sv` file, so declare both.
 	const virtualModuleDts = buildVirtualModuleDts(moduleName, ports);
-	const dts = `
-declare module "./${moduleName}.veryl" {
+	const extensions = ["veryl", "sv", "svh"];
+	const declarations = extensions
+		.map(
+			(ext) => `
+declare module "./${moduleName}.${ext}" {
 ${virtualModuleDts}
 }
 
-declare module "../src/${moduleName}.veryl" {
+declare module "../src/${moduleName}.${ext}" {
 ${virtualModuleDts}
 }
-`;
+`,
+		)
+		.join("\n");
 	currentExtraLib = monacoTypeScript.typescriptDefaults.addExtraLib(
-		dts,
+		declarations,
 		"file:///celox-sim.d.ts",
 	);
 
-	// Also register the .veryl module as a virtual file so TS can resolve the import
-	const verylModuleDts = virtualModuleDts;
-	// Register under multiple paths to ensure resolution works
-	// test/foo.test.ts imports "../src/Adder.veryl" → resolves to file:///src/Adder.veryl
-	monacoTypeScript.typescriptDefaults.addExtraLib(
-		verylModuleDts,
-		`file:///src/${moduleName}.veryl`,
+	// Also register the HDL module as virtual files so TS can resolve the
+	// import at the source's actual path (e.g. `rtl/Adder.sv`, not only
+	// `src/Adder.sv`). With allowArbitraryExtensions, `../rtl/Adder.sv`
+	// resolves through the declaration file `file:///rtl/Adder.d.sv.ts`
+	// (likewise `.d.veryl.ts`).
+	const declarationPaths = hdlDeclarationPaths(
+		moduleName,
+		getHdlFiles(),
+		sourceFile ?? getPrimaryHdlFile()?.path,
 	);
-	monacoTypeScript.typescriptDefaults.addExtraLib(
-		verylModuleDts,
-		`file:///src/${moduleName}.d.veryl.ts`,
-	);
+	for (const path of declarationPaths) {
+		monacoTypeScript.typescriptDefaults.addExtraLib(
+			virtualModuleDts,
+			`file:///${path}`,
+		);
+	}
 }
 
 // Parse error messages from genTsFromSource/NativeSimulatorHandle into Monaco markers
@@ -1236,33 +1532,40 @@ function parseVerylErrors(errorMsg: string): monaco.editor.IMarkerData[] {
 	return markers;
 }
 
-// Update types + diagnostics when Veryl source changes
+// Update types + diagnostics when an HDL source changes
 let updateTimer: ReturnType<typeof setTimeout>;
 let updateRevision = 0;
-function onVerylChange() {
+function onHdlChange() {
 	clearTimeout(updateTimer);
 	const revision = ++updateRevision;
 	updateTimer = setTimeout(async () => {
-		const source = getVerylSource();
-		const model = getVerylModel();
+		const primary = getPrimaryHdlFile();
+		const model = primary?.model ?? null;
+		const sources = getHdlSources();
 
 		// Try WASM-based analysis (accurate types + diagnostics)
-		if (celoxCompilerReady) {
+		if (celoxCompilerReady && sources.length > 0) {
 			try {
 				const result = JSON.parse(
-					await celoxCompiler.genTsFromSourceLatest([
-						{ content: source, path: "main.veryl" },
-					]),
+					await celoxCompiler.genTsFromSourceLatest(sources),
 				);
 				if (revision !== updateRevision) return;
-				if (result.modules?.[0]?.ports) {
-					updateDutTypes(result.modules[0].ports);
+				const topName = getTopModuleName();
+				const module =
+					result.modules?.find((m: any) => m.moduleName === topName) ??
+					result.modules?.[0];
+				if (module?.ports) {
+					updateDutTypes(
+						virtualPortsFromJson(module.ports),
+						module.moduleName,
+						module.sourceFile,
+					);
 				}
-				// Show structured diagnostics (if any) as Monaco markers
-				if (model) {
-					const diags: monaco.editor.IMarkerData[] = (
-						result.diagnostics || []
-					).map((d: any) => ({
+				// Show structured diagnostics as Monaco markers, routed to the
+				// model of the file each diagnostic names (`d.file`); diagnostics
+				// without a file, and legacy string warnings, go to the primary file.
+				{
+					const toMarker = (d: any): monaco.editor.IMarkerData => ({
 						severity:
 							d.severity === "error"
 								? monaco.MarkerSeverity.Error
@@ -1275,8 +1578,7 @@ function onVerylChange() {
 						startColumn: d.column,
 						endLineNumber: d.endLine ?? d.line,
 						endColumn: d.endColumn ?? d.column + 1,
-					}));
-					// Fallback to string-based parsing for warnings field
+					});
 					const legacyWarnings: monaco.editor.IMarkerData[] = (
 						result.warnings || []
 					)
@@ -1285,10 +1587,33 @@ function onVerylChange() {
 							...m,
 							severity: monaco.MarkerSeverity.Warning,
 						}));
-					monaco.editor.setModelMarkers(model, "veryl", [
-						...diags,
-						...legacyWarnings,
-					]);
+					const byModel = new Map<
+						monaco.editor.ITextModel,
+						monaco.editor.IMarkerData[]
+					>();
+					for (const d of result.diagnostics || []) {
+						const target =
+							(typeof d.file === "string" && modelForDiagnosticFile(d.file)) ||
+							model;
+						if (!target) continue;
+						const markers = byModel.get(target) ?? [];
+						markers.push(toMarker(d));
+						byModel.set(target, markers);
+					}
+					if (model && legacyWarnings.length > 0) {
+						byModel.set(model, [
+							...(byModel.get(model) ?? []),
+							...legacyWarnings,
+						]);
+					}
+					// Clear markers of files that no longer have diagnostics.
+					for (const f of getHdlFiles()) {
+						monaco.editor.setModelMarkers(
+							f.model,
+							"veryl",
+							byModel.get(f.model) ?? [],
+						);
+					}
 				}
 				return;
 			} catch (e: any) {
@@ -1304,12 +1629,17 @@ function onVerylChange() {
 
 		// Fallback: regex-based port extraction (no WASM needed)
 		if (revision !== updateRevision) return;
-		const ports = extractPortsFromSource(source);
-		if (Object.keys(ports).length > 0) {
-			updateDutTypes(ports);
+		if (primary) {
+			const ports = fallbackPorts(primary);
+			if (Object.keys(ports).length > 0) {
+				updateDutTypes(ports);
+			}
 		}
 	}, 500);
 }
+
+// Historical name used by the initial-load call sites.
+const onVerylChange = onHdlChange;
 
 // ── WASM loading ────────────────────────────────────────
 
@@ -1368,25 +1698,19 @@ async function run() {
 	}
 
 	try {
-		const verylSource = getVerylSource();
-		const topMatch = verylSource.match(/module\s+(\w+)/);
-		if (!topMatch) throw new Error("No module found in Veryl source");
-		const topName = topMatch[1];
+		const sources = getHdlSources();
+		if (sources.length === 0) throw new Error("No HDL source file found");
+		const topName = getTopModuleName();
+		if (!topName) throw new Error("No module found in HDL source");
 
 		const t0 = performance.now();
 		const genTsResult = await (async () => {
 			try {
-				return JSON.parse(
-					await celoxCompiler.genTsFromSource([
-						{ content: verylSource, path: "main.veryl" },
-					]),
-				);
+				return JSON.parse(await celoxCompiler.genTsFromSource(sources));
 			} catch {
 				return null;
 			}
 		})();
-
-		const sources = [{ content: verylSource, path: "main.veryl" }];
 		const [twoStateCompiled, fourStateCompiled] = await Promise.all([
 			celoxCompiler.compile(sources, topName, { fourState: false }),
 			celoxCompiler.compile(sources, topName, { fourState: true }),
@@ -1407,10 +1731,16 @@ async function run() {
 		const compiledFor = (options?: PlaygroundSimulatorOptions) =>
 			options?.fourState === true ? fourStateCompiled : twoStateCompiled;
 
-		// Build module definitions from genTsFromSource result for .veryl imports
-		const moduleNames = (genTsResult?.modules || [])
+		// Build module definitions from genTsFromSource result for HDL imports;
+		// fall back to the declared module names when analysis is unavailable.
+		const moduleNames: string[] = (genTsResult?.modules || [])
 			.map((m: any) => m.moduleName)
 			.filter(Boolean);
+		if (moduleNames.length === 0) {
+			for (const f of getHdlFiles()) {
+				moduleNames.push(...extractModuleNames(f.content));
+			}
+		}
 
 		const Simulator = {
 			create(_module: any, options?: PlaygroundSimulatorOptions) {
@@ -1602,13 +1932,25 @@ async function run() {
 // ── Events ──────────────────────────────────────────────
 
 function loadExample(name: string) {
+	const svExample = SV_EXAMPLES[name];
+	if (svExample) {
+		removeAllFiles();
+		createFile("Veryl.toml", DEFAULT_VERYL_TOML);
+		createFile("celox.toml", DEFAULT_CELOX_TOML);
+		createFile(svExample.sourcePath, svExample.source);
+		createFile(`test/${name}.test.ts`, svExample.testbench);
+		activateFile(`test/${name}.test.ts`);
+		onHdlChange();
+		return;
+	}
+
 	const ex = EXAMPLES[name];
 	if (!ex) return;
 
 	// Derive module name from the Veryl source
-	const topMatch = ex.veryl.match(/module\s+(\w+)/);
 	const moduleName =
-		topMatch?.[1] ?? name.charAt(0).toUpperCase() + name.slice(1);
+		extractModuleNames(ex.veryl)[0] ??
+		name.charAt(0).toUpperCase() + name.slice(1);
 	// Use example key for test file name (e.g. "counter_sim" → "counter_sim.test.ts")
 	const testFileName = name;
 
@@ -1618,7 +1960,7 @@ function loadExample(name: string) {
 	createFile(`src/${moduleName}.veryl`, ex.veryl);
 	createFile(`test/${testFileName}.test.ts`, ex.testbench);
 	activateFile(`test/${testFileName}.test.ts`);
-	onVerylChange();
+	onHdlChange();
 }
 
 function installPlaygroundTestApi() {

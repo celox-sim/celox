@@ -92,7 +92,7 @@ pub(in crate::ast) fn same_tables(a: &PackedDimensions, b: &PackedDimensions) ->
         && Arc::ptr_eq(&a.subroutine_param_shapes, &b.subroutine_param_shapes)
         && Arc::ptr_eq(&a.subroutine_directions, &b.subroutine_directions)
         && Arc::ptr_eq(&a.subroutine_param_names, &b.subroutine_param_names)
-        && Arc::ptr_eq(&a.constant_types, &b.constant_types)
+        && a.constant_types.ptr_eq(&b.constant_types)
         && a.class_scope == b.class_scope
         && a.constructor == b.constructor
         && a.method_name == b.method_name
@@ -238,7 +238,7 @@ fn shape(
     local: bool,
 ) {
     if context.constant_types.contains_key(&name) {
-        Arc::make_mut(&mut context.constant_types).remove(&name);
+        context.constant_types.remove(&name);
     }
     let value = procedural::bound_dimensions_from_type(
         ty,
@@ -338,7 +338,7 @@ fn parameter(
     let n = name(&parameter.name);
     let retained = context.constant_types.get(&n).cloned();
     if retained.is_some() {
-        Arc::make_mut(&mut context.constant_types).remove(&n);
+        context.constant_types.remove(&n);
     }
     match &parameter.kind {
         ParameterKind::Type { default: Some(id) } => {
@@ -396,7 +396,7 @@ fn parameter(
                     )
                 });
             if let Some(binding) = binding {
-                Arc::make_mut(&mut context.constant_types).insert(n, binding);
+                context.constant_types.insert(n, binding);
             }
         }
         _ => {}
@@ -461,18 +461,16 @@ fn declaration(
                 // are bound; that of a generate block is named by the path
                 // of its elaborated scope.
                 if top {
-                    ty.name_declaration(
-                        types::declaring_scope(
-                            classes::enclosing_unit(tree.declarations(), alias.tokens),
-                            tree.declarations(),
-                            alias.tokens,
-                            session,
-                        ),
-                        || types::declaration_name(tree, alias, None),
+                    let scope = types::declaring_scope(
+                        classes::enclosing_unit(tree.declarations(), alias.tokens),
+                        tree.declarations(),
+                        alias.tokens,
+                        session,
                     );
+                    ty.name_declaration(scope, || types::declaration_name(tree, alias, None));
                 }
                 if context.constant_types.contains_key(&name(&alias.name)) {
-                    Arc::make_mut(&mut context.constant_types).remove(&name(&alias.name));
+                    context.constant_types.remove(&name(&alias.name));
                 }
                 publish_enum_constants(id, &ty, tree, session, context)?;
                 context.type_aliases.insert(name(&alias.name), ty);
@@ -1218,7 +1216,7 @@ fn local_declaration(
                 )?
             {
                 if context.constant_types.contains_key(&name(&alias.name)) {
-                    Arc::make_mut(&mut context.constant_types).remove(&name(&alias.name));
+                    context.constant_types.remove(&name(&alias.name));
                 }
                 publish_enum_constants(id, &ty, tree, session, context)?;
                 context.type_aliases.insert(name(&alias.name), ty);
@@ -1397,10 +1395,11 @@ pub(in crate::ast) fn nearest_block_variable(
             BodyItemKind::Loop { variable, .. } => named(variable),
             // An import may declare any name (26.3).
             BodyItemKind::PackageBinding(_) => true,
-            BodyItemKind::Modport(_) | BodyItemKind::Unconverted { .. } => native.tokens
-                [item.tokens.range()]
-            .iter()
-            .any(|token| instances::normalize_identifier(&token.text) == wanted),
+            BodyItemKind::Modport(_)
+            | BodyItemKind::Covergroup(_)
+            | BodyItemKind::Unconverted { .. } => native.tokens[item.tokens.range()]
+                .iter()
+                .any(|token| instances::normalize_identifier(&token.text) == wanted),
             _ => imports::item_names(id, tree).contains(wanted),
         };
         if !declares {
@@ -1540,7 +1539,9 @@ fn hides(
                 }
                 BodyItemKind::Loop { variable, .. } => named(variable),
                 BodyItemKind::PackageBinding(_) => import(item.tokens),
-                BodyItemKind::Modport(_) | BodyItemKind::Unconverted { .. } => spelled(item.tokens),
+                BodyItemKind::Modport(_)
+                | BodyItemKind::Covergroup(_)
+                | BodyItemKind::Unconverted { .. } => spelled(item.tokens),
                 BodyItemKind::Assign(_)
                 | BodyItemKind::Defparam(_)
                 | BodyItemKind::LogicGate(_)
@@ -1711,7 +1712,7 @@ fn same_overlay_input(a: &PackedDimensions, b: &PackedDimensions) -> bool {
         && a.type_aliases.identity() == b.type_aliases.identity()
         && a.function_return_types.identity() == b.function_return_types.identity()
         && a.parameter_values.identity() == b.parameter_values.identity()
-        && Arc::ptr_eq(&a.constant_types, &b.constant_types)
+        && a.constant_types.ptr_eq(&b.constant_types)
         && a.class_base == b.class_base
         && a.class_scope == b.class_scope
         && a.constructor == b.constructor
@@ -1744,7 +1745,7 @@ fn overlay(context: &mut PackedDimensions, input: &PackedDimensions) {
         }
         for (name, binding) in input.constant_types.iter() {
             if base.0.constant_types.get(name) != Some(binding) {
-                Arc::make_mut(&mut context.constant_types).insert(name.clone(), binding.clone());
+                context.constant_types.insert(name.clone(), binding.clone());
             }
         }
         context.class_scope = input.class_scope.clone();
@@ -1754,7 +1755,7 @@ fn overlay(context: &mut PackedDimensions, input: &PackedDimensions) {
     if !input.constant_types.is_empty() {
         for (name, binding) in input.constant_types.iter() {
             if !context.constant_types.contains_key(name) {
-                Arc::make_mut(&mut context.constant_types).insert(name.clone(), binding.clone());
+                context.constant_types.insert(name.clone(), binding.clone());
             }
         }
     }
@@ -1782,7 +1783,8 @@ fn settle_scope(
     super::SCOPE_SETTLES.with(|count| count.set(count.get() + 1));
     let mut context = input.clone();
     for (name, binding) in &scope::imported(tree).constant_types {
-        Arc::make_mut(&mut context.constant_types)
+        context
+            .constant_types
             .entry(name.clone())
             .or_insert_with(|| binding.clone());
     }
@@ -1794,7 +1796,8 @@ fn settle_scope(
     }
     for parameter in &scope::imported(tree).parameters {
         if let Some(ty) = &parameter.semantic_type {
-            Arc::make_mut(&mut context.constant_types)
+            context
+                .constant_types
                 .entry(parameter.name().into())
                 .or_insert_with(|| ty.clone());
         }
@@ -2069,7 +2072,9 @@ fn publish_enum_constants(
             // The member hides a variable of an outer scope (IEEE 1800-2023
             // 23.9).
             context.remove(&name(&member.name));
-            Arc::make_mut(&mut context.constant_types).insert(name(&member.name), binding.clone());
+            context
+                .constant_types
+                .insert(name(&member.name), binding.clone());
         }
     }
     Ok(())

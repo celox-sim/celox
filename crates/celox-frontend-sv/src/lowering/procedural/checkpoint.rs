@@ -47,6 +47,7 @@ impl ProcModule<'_> {
             constants: _,
             parameter_types: _,
             subroutines: _,
+            written_names: _,
             constant_functions: _,
             dpi_imports: _,
             externs:
@@ -58,6 +59,7 @@ impl ProcModule<'_> {
             program: _,
             forceable: _,
             procedurally_forced: _,
+            force_holds: _,
             created,
             temp_counter,
             capture_counter,

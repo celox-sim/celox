@@ -57,25 +57,25 @@ impl PlanBuilder<'_> {
             .filter(|(_, (slots, unit))| returns_status(unit, slots.status, ProcessStatus::Yield))
             .map(|(index, _)| index)
             .collect();
-        let service_processes: HashSet<usize> = model
-            .processes
-            .iter()
-            .enumerate()
-            .filter(|(index, process)| {
-                service_function.is_some()
-                    && (!process.host_requests.is_empty()
-                        || yielding.contains(index)
-                        || nba_processes.contains(index))
-                    && process.host_requests.iter().all(|site| {
-                        crate::simulator::native_io::supported(site)
-                            && site
-                                .args
-                                .iter()
-                                .all(|arg| !program.layout().unpacked_arrays.contains_key(&arg.id))
-                    })
-            })
-            .map(|(index, _)| index)
-            .collect();
+        let service_processes: HashSet<usize> =
+            model
+                .processes
+                .iter()
+                .enumerate()
+                .filter(|(index, process)| {
+                    service_function.is_some()
+                        && (!process.host_requests.is_empty()
+                            || yielding.contains(index)
+                            || nba_processes.contains(index))
+                        && process.host_requests.iter().all(|site| {
+                            crate::simulator::native_io::supported(site)
+                                && site.args.iter().chain(&site.results).all(|arg| {
+                                    !program.layout().unpacked_arrays.contains_key(&arg.id)
+                                })
+                        })
+                })
+                .map(|(index, _)| index)
+                .collect();
         self.found.service_function = service_function;
         self.found.ordered_available = ordered_available;
         self.found.nba_processes = nba_processes;
@@ -188,7 +188,7 @@ impl PlanBuilder<'_> {
                         (index < fallback.len() && fallback[index].is_none()).then_some(unit)
                     }),
             )
-            .any(opaque);
+            .any(|unit| opaque(unit, &schema.extern_functions));
         self.found.kernels = kernels;
         self.found.fallback = fallback;
         self.found.delay_writers = delay_writers;

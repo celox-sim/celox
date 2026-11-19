@@ -703,7 +703,8 @@ fn interface_array_query_policy_flows_through_manifest_and_cli_overrides() {
     .unwrap();
     let manifest = project.path().join("celox.toml");
     for (configured, overridden, success, warning) in [
-        (None, None, false, false),
+        // The default is warn; strict or an explicit error rejects.
+        (None, None, true, true),
         (Some("warn"), None, true, true),
         (Some("allow"), None, true, false),
         (Some("warn"), Some("error"), false, false),

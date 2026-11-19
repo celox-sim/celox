@@ -17,6 +17,9 @@ pub struct NativeSimulatorHandle {
     pub(super) warnings_json: String,
     pub(super) stable_size: u32,
     pub(super) total_size: u32,
+    /// The heap the generated modules call, whose memory-file reader loads
+    /// the memory files of `$readmemh` statements (IEEE 1800-2023 21.4).
+    pub(super) heap: celox_heap::Heap,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -53,6 +56,7 @@ impl NativeSimulatorHandle {
         let stable_size = layout.total_size as u32;
         let total_size = layout.merged_total_size as u32;
 
+        let heap = Self::heap(&laid_out);
         Ok(Self {
             program: laid_out,
             four_state: opts.four_state,
@@ -62,6 +66,7 @@ impl NativeSimulatorHandle {
             warnings_json,
             stable_size,
             total_size,
+            heap,
         })
     }
 }
@@ -88,39 +93,87 @@ impl NativeSimulatorHandle {
             .collect();
         append_extra_source(&mut src_pairs, &opts.extra_source);
 
-        let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+        let (veryl_pairs, sv_pairs) = partition_hdl_sources(&src_pairs);
+        let source_refs: Vec<(&str, &std::path::Path)> = veryl_pairs
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
+        let sv_refs: Vec<(&str, &std::path::Path)> = sv_pairs
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
 
         let trace_opts = celox::TraceOptions::default();
-        let (program, warnings) = celox::compile_to_sir_with_diagnostic_policy(
-            &source_refs,
-            &top,
-            &opts
-                .false_loops
-                .iter()
-                .map(|(f, t)| (f.clone(), t.clone()))
-                .collect::<Vec<_>>(),
-            &opts
-                .true_loops
-                .iter()
-                .map(|(f, t, m)| (f.clone(), t.clone(), *m))
-                .collect::<Vec<_>>(),
-            opts.four_state,
-            &trace_opts,
-            None,
-            None,
-            opts.clock_type,
-            opts.reset_type,
-            &opts.parameters,
-            &opts.optimize_options,
-            &opts
-                .diagnostic_policy
-                .clone()
-                .with_inferred_latches(opts.allow_inferred_latches),
-            &Default::default(),
-        )
+        let false_loops = opts
+            .false_loops
+            .iter()
+            .map(|(f, t)| (f.clone(), t.clone()))
+            .collect::<Vec<_>>();
+        let true_loops = opts
+            .true_loops
+            .iter()
+            .map(|(f, t, m)| (f.clone(), t.clone(), *m))
+            .collect::<Vec<_>>();
+        // Dispatch on the source languages: pure Veryl keeps the existing
+        // diagnostic-policy pipeline, pure SystemVerilog uses the SV
+        // frontend, and a mix uses the mixed-language pipeline.
+        let (program, warnings) = match (source_refs.is_empty(), sv_refs.is_empty()) {
+            (false, true) | (true, true) => celox::compile_to_sir_with_diagnostic_policy(
+                &source_refs,
+                &top,
+                &false_loops,
+                &true_loops,
+                opts.four_state,
+                &trace_opts,
+                None,
+                None,
+                opts.clock_type,
+                opts.reset_type,
+                &opts.parameters,
+                &opts.optimize_options,
+                &opts
+                    .diagnostic_policy
+                    .clone()
+                    .with_inferred_latches(opts.allow_inferred_latches),
+            ),
+            (true, false) => celox::compile_sv_to_sir_with_diagnostic_policy(
+                &sv_refs,
+                &top,
+                &false_loops,
+                &true_loops,
+                opts.four_state,
+                &trace_opts,
+                None,
+                None,
+                opts.clock_type,
+                opts.reset_type,
+                &opts.parameters,
+                &opts.optimize_options,
+                &opts
+                    .diagnostic_policy
+                    .clone()
+                    .with_inferred_latches(opts.allow_inferred_latches),
+            ),
+            (false, false) => celox::compile_mixed_to_sir_with_diagnostic_policy(
+                &source_refs,
+                &sv_refs,
+                &top,
+                &false_loops,
+                &true_loops,
+                opts.four_state,
+                &trace_opts,
+                None,
+                None,
+                opts.clock_type,
+                opts.reset_type,
+                &opts.parameters,
+                &opts.optimize_options,
+                &opts
+                    .diagnostic_policy
+                    .clone()
+                    .with_inferred_latches(opts.allow_inferred_latches),
+            ),
+        }
         .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
         let laid_out = program
@@ -134,6 +187,7 @@ impl NativeSimulatorHandle {
 
         let stable_size = layout.total_size as u32;
         let total_size = layout.merged_total_size as u32;
+        let heap = Self::heap(&laid_out);
         Ok(Self {
             program: laid_out,
             four_state: opts.four_state,
@@ -143,6 +197,7 @@ impl NativeSimulatorHandle {
             warnings_json,
             stable_size,
             total_size,
+            heap,
         })
     }
 
@@ -166,7 +221,8 @@ impl NativeSimulatorHandle {
     ) -> Result<Self> {
         let mut opts = parse_options_common(&options)?;
         let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
-        opts.diagnostic_policy = celox_cfg.diagnostics.clone();
+        opts.diagnostic_policy = celox_cfg.diagnostic_policy(opts.diagnostic_policy.strict);
+        opts.legacy_empty_reductions = celox_cfg.legacy_empty_reductions();
         append_extra_source(&mut sources, &opts.extra_source);
 
         let source_refs: Vec<(&str, &std::path::Path)> = sources
@@ -200,7 +256,6 @@ impl NativeSimulatorHandle {
                 .diagnostic_policy
                 .clone()
                 .with_inferred_latches(opts.allow_inferred_latches),
-            &Default::default(),
         )
         .map_err(|error| Error::from_reason(error.to_string()))?;
         let laid_out = program
@@ -214,6 +269,7 @@ impl NativeSimulatorHandle {
 
         let stable_size = layout.total_size as u32;
         let total_size = layout.merged_total_size as u32;
+        let heap = Self::heap(&laid_out);
         Ok(Self {
             program: laid_out,
             four_state: opts.four_state,
@@ -223,6 +279,7 @@ impl NativeSimulatorHandle {
             warnings_json,
             stable_size,
             total_size,
+            heap,
         })
     }
 
@@ -294,6 +351,30 @@ impl NativeSimulatorHandle {
     #[napi(getter)]
     pub fn total_size(&self) -> u32 {
         self.total_size
+    }
+
+    /// Perform heap operation `code` for generated WASM modules (see
+    /// `celox_heap::ops`), such as the load of a memory file.
+    #[napi]
+    pub fn heap_call(&mut self, code: BigInt, a: BigInt, b: BigInt, c: BigInt) -> BigInt {
+        fn bits(value: BigInt) -> u64 {
+            let word = value.words.first().copied().unwrap_or(0);
+            if value.sign_bit {
+                word.wrapping_neg()
+            } else {
+                word
+            }
+        }
+        napi_bigint(self.heap.call(bits(code), bits(a), bits(b), bits(c)))
+    }
+
+    /// The heap of the generated modules of `program`.
+    pub(super) fn heap(program: &celox::LaidOutProgram) -> celox_heap::Heap {
+        let mut heap = celox_heap::Heap::new();
+        heap.set_memory_file_reader(
+            celox::HostMemoryFileReader::new(&program.design.memory_file_bases).into_heap_reader(),
+        );
+        heap
     }
 
     /// Evaluate an internal floating-point operation for generated WASM modules.

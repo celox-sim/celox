@@ -948,10 +948,8 @@ pub(super) fn declares_covergroup(
     declaration: &celox_sv_syntax::ClassDeclaration,
     member: &str,
 ) -> bool {
-    let within = declaration.tokens.range();
-    native.covergroups.iter().any(|covergroup| {
-        within.contains(&covergroup.tokens.start)
-            && instances::normalize_identifier(&covergroup.name.spelling) == member
+    declaration.covergroups.iter().any(|covergroup| {
+        instances::normalize_identifier(&native.covergroup(*covergroup).name.spelling) == member
     })
 }
 
@@ -1331,13 +1329,15 @@ fn imported(tree: &AnalysisContext<'_>, name: &str) -> Option<Rc<Class>> {
         .map(|class| Rc::new((**class).clone()))
 }
 
-/// The classes whose objects the current scope may see: those it declares
-/// and those of the scopes it uses.
+/// The classes whose objects the current scope may see: those it declares,
+/// those of the scopes it uses, and those of the interface instances it
+/// binds (see `scope::ScopeSymbols::object_classes`).
 pub(super) fn visible_classes(tree: &AnalysisContext<'_>, session: &mut Session) -> Vec<String> {
     let mut names = scope_declarations(tree)
         .flat_map(|declaration| specializations_of(tree, session, declaration))
         .collect::<Vec<_>>();
-    for class in &scope::imported(tree).classes {
+    let imported = scope::imported(tree);
+    for class in imported.classes.iter().chain(&imported.object_classes) {
         if !names.contains(&class.name) {
             names.push(class.name.clone());
         }
@@ -1354,9 +1354,8 @@ pub(super) fn handle(table: &mut semantic_types::TyTable, name: &str) -> Type {
     ty
 }
 
-/// [`handle`] without its semantic type, for the built-in types of
-/// [`super::type_binding::builtin_type`], which their readers bind.
-pub(super) fn handle_shape(name: &str) -> Type {
+/// The shape of the handle type of class `name`, which [`handle`] binds.
+fn handle_shape(name: &str) -> Type {
     let mut ty = Type::new(
         // A semaphore is a heap object, which collection reclaims.
         if name == super::processes::CLASS {
@@ -1371,7 +1370,6 @@ pub(super) fn handle_shape(name: &str) -> Type {
         ConstExpr::Literal((HANDLE_WIDTH - 1).to_string()),
         ConstExpr::Literal("0".into()),
     ));
-    ty.class = Some(Arc::from(name));
     ty
 }
 

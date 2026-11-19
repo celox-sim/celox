@@ -338,6 +338,27 @@ pub(super) fn makes_extern_calls(inst: &SIRInstruction<RegionedAbsoluteAddr>) ->
 /// explicit stores: an extern call other than a native memory operation (the
 /// settle instrumentation's wide commits, whose writes the typed commits
 /// after them name), or a call of a function that makes one.
+/// Whether `inst` is a host call that may read or write state of the design
+/// beyond its arguments and its result, as [`makes_host_calls`] says of
+/// every host call: a call of an isolated function of `functions`, such as
+/// a noncontext DPI-C import, reaches only those (see
+/// [`celox_design::ExternFunction::isolated`]).
+pub(super) fn makes_opaque_calls(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    functions: &[celox_design::ExternFunction],
+) -> bool {
+    match inst {
+        SIRInstruction::ExternCall { func, .. }
+            if functions
+                .get(*func as usize)
+                .is_some_and(|function| function.isolated) =>
+        {
+            false
+        }
+        _ => makes_host_calls(inst),
+    }
+}
+
 pub(super) fn makes_host_calls(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
     match inst {
         SIRInstruction::ExternCall { func, .. } => {

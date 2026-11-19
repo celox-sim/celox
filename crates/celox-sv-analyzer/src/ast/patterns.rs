@@ -78,12 +78,11 @@ fn pattern_value(
     if let Some((dimension, rest)) = shape.unpacked.split_first() {
         let (_, _, count) =
             dimension_bounds(&tree.functions, &dimension.left, &dimension.right, dims)?;
-        let element = VariableDimensions::new(VariableShape {
+        let element = shape.derived(VariableShape {
             declared: type_names::Declared::default(),
             container: None,
             real: false,
             string: false,
-            class: None,
             unpacked: rest.to_vec(),
             ..shape.clone_shape()
         });
@@ -172,7 +171,7 @@ pub(super) fn assignment_value(
         let array = if let Some((dim, rest)) = shape.unpacked.split_first() {
             Some((
                 &dim.width,
-                VariableDimensions::new(VariableShape {
+                shape.derived(VariableShape {
                     declared: type_names::Declared::default(),
                     container: None,
                     unpacked: rest.to_vec(),
@@ -184,7 +183,7 @@ pub(super) fn assignment_value(
         {
             Some((
                 &dim.width,
-                VariableDimensions::new(VariableShape {
+                shape.derived(VariableShape {
                     declared: type_names::Declared::default(),
                     container: None,
                     packed: rest.to_vec(),

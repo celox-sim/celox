@@ -45,6 +45,7 @@ mod scheduler_slots;
 mod settle;
 mod startup;
 mod timing;
+mod waited_inputs;
 use boundaries::*;
 use clock_analysis::*;
 use clock_domains::*;
@@ -62,6 +63,7 @@ use scheduler_slots::*;
 use settle::*;
 use startup::*;
 use timing::*;
+use waited_inputs::*;
 
 pub(crate) use package_bindings::PackageBindings;
 pub use schedule::schedule_symbolic_rtl_reporting_loops;

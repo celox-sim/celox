@@ -82,7 +82,7 @@ pub struct AnalysisOptions {
     /// before it reads it, and that nothing else reads, as a temporary of
     /// each block, instead of a variable whose writes wake the other blocks
     /// (IEEE 1800-2023 9.4.2.2). Off by default; see the
-    /// `shared_always_temporary` diagnostic.
+    /// `shared_always_temporary` compatibility opt-in.
     pub shared_always_temporaries: bool,
     /// Default unit/precision exponents; precision also bounds global resolution.
     pub default_timescale: Option<(i32, i32)>,
@@ -132,7 +132,27 @@ pub enum AnalyzerError {
     /// of the scope: a hierarchical name (IEEE 1800-2023 23.6) that the
     /// caller did not resolve to a signal of another instance.
     #[error("unresolved hierarchical reference `{path}`")]
-    HierarchicalReference { path: String },
+    HierarchicalReference {
+        path: String,
+        /// The components of the name, each an identifier as declarations
+        /// spell it (an escaped one normalized), with a constant index of an
+        /// instance array element: `path` split without splitting an
+        /// escaped identifier.
+        components: Vec<String>,
+        /// The interface instance whose body has the name, which the
+        /// instance's parent then resolves (23.8).
+        interface: Option<Box<InterfaceBodyScope>>,
+    },
+    /// A call through a virtual interface of a task or function of
+    /// interface `interface` whose body names objects it does not declare
+    /// (IEEE 1800-2023 23.8): each instance finds them from its parent, so
+    /// the subroutine is built once the hierarchy is elaborated and the
+    /// caller supplies them (see [`Design::resolve_virtual_interface_outward`]).
+    /// The scope that makes the call is analyzed again then.
+    #[error(
+        "call of a task or function of interface `{interface}` through a virtual interface before the hierarchy is elaborated"
+    )]
+    VirtualInterfaceOutward { interface: String },
     /// A delay, event control or wait statement in a function, an
     /// `always_comb` or an `always_ff` body (IEEE 1800-2023 9.2.2.2,
     /// 9.2.2.4, 13.4).
@@ -192,6 +212,11 @@ pub enum AnalyzerError {
     /// Packages that import or refer to each other.
     #[error("package `{name}` depends on itself")]
     PackageCycle { name: String },
+    /// A parameter whose value depends on itself, directly or through other
+    /// parameters, which no constant value satisfies (IEEE 1800-2023
+    /// 6.20.2).
+    #[error("parameter `{name}` depends on its own value")]
+    CircularParameter { name: String },
     #[error("unknown top-level parameter override `{name}`")]
     UnknownParameterOverride { name: String },
     #[error("localparam override `{name}`")]
@@ -199,6 +224,18 @@ pub enum AnalyzerError {
     /// A name that nothing in the design declares (IEEE 1800-2023 6.18).
     #[error("`{name}` is not declared: {context}")]
     UndeclaredIdentifier { name: String, context: String },
+    /// A variable or net read where a constant expression is required,
+    /// such as a bound of a part-select (IEEE 1800-2023 11.5.1) or the
+    /// value of a parameter (6.20.2).
+    #[error("{construct} reads `{name}`, which is not a constant")]
+    NonConstantExpression { construct: String, name: String },
+    /// A member of an interface instance array named without an element
+    /// selection, or with a selection that is not a constant expression:
+    /// a hierarchical name selects an instance with a constant expression,
+    /// and the selection is required when the array name is not the last
+    /// component of the name (IEEE 1800-2023 23.6).
+    #[error("{detail}")]
+    InvalidInterfaceSelection { detail: String },
     /// A `$name` call that is not a system task or function Celox knows.
     #[error("unknown system task or function `{name}`")]
     UnknownSystemTf { name: String },
@@ -330,10 +367,54 @@ pub enum AnalyzerError {
     /// between types of different sizes.
     #[error("cast: {0} (IEEE 1800-2023 6.24)")]
     InvalidCast(String),
+    /// A replication that IEEE 1800-2023 11.4.12.1 forbids, such as one of
+    /// zero copies alone in a concatenation.
+    #[error("replication: {0} (IEEE 1800-2023 11.4.12.1)")]
+    InvalidReplication(String),
+    /// An operand of a type that the operator does not take, such as a real
+    /// operand of a wildcard equality or a concatenation, which take
+    /// integral ones (IEEE 1800-2023 11.3, Table 11-1).
+    #[error("operator `{operator}` takes no {operand} operand (IEEE 1800-2023 11.3)")]
+    IllegalOperand {
+        operator: String,
+        operand: &'static str,
+    },
+    /// A net declared with a data type that is not integral or an unpacked
+    /// aggregate of such, such as a `string` or a class (IEEE 1800-2023
+    /// 6.7.1).
+    #[error(
+        "net `{name}` of {data_type}: a net shall have an integral type (IEEE 1800-2023 6.7.1)"
+    )]
+    IllegalNetDataType {
+        name: String,
+        data_type: &'static str,
+    },
     /// A `defparam` assignment that IEEE 1800-2023 23.10.1 or 6.20.3
     /// forbids, such as one out of the generate block it is in.
     #[error("defparam: {0}")]
     InvalidDefparam(String),
+    /// An enumeration declaration that IEEE 1800-2023 6.19 forbids, such
+    /// as one whose base type is not an integer type or that gives two
+    /// members the same value.
+    #[error("enumeration: {0} (IEEE 1800-2023 6.19)")]
+    InvalidEnumeration(String),
+}
+
+/// The interface instance in whose body a hierarchical name was written:
+/// the scope that IEEE 1800-2023 23.8 starts its upward search from, in
+/// the parent that instantiates it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceBodyScope {
+    /// The instance as the parent names it, with the generate scopes that
+    /// hold it and the index of an element of an instance array, such as
+    /// `g[1].u` or `bfm[2]`.
+    pub handle: String,
+    /// The generate blocks that hold the instance, outermost first, each as
+    /// a hierarchical name spells it (`g[1]`). An escaped block name may
+    /// contain `.` (IEEE 1800-2023 5.6.1), so these are not `handle` split.
+    pub blocks: Vec<String>,
+    /// The interface the instance is of.
+    pub interface: String,
 }
 
 impl miette::Diagnostic for AnalyzerError {}
@@ -364,7 +445,6 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("undriven net declaration", 460),
     ("non-integer module parameter override", 461),
     ("nonconstant module parameter override", 461),
-    ("always_ff event expression", 464),
     ("package net", 1146),
 ];
 

@@ -54,6 +54,7 @@ impl Ff<'_, '_> {
                 reads,
                 &mut HashSet::default(),
                 &mut writes,
+                &mut HashSet::default(),
                 true,
             );
             let writes = writes

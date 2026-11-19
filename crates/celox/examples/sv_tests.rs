@@ -256,10 +256,16 @@ fn run(options: &Options) -> Result<(), String> {
         }
         Mode::Elaboration => {
             let start = std::time::Instant::now();
+            // Elaboration links no C code, as the other runners' does not:
+            // an import whose C function the test does not provide is not an
+            // elaboration error. It runs nothing, static initializers
+            // included, which may call such an import.
             celox::Simulation::from_sv_sources(sources, &tops[0])
                 .tops(tops.clone())
                 .four_state(options.four_state)
                 .diagnostics_from_env()
+                .allow_unlinked_dpi_for_elaboration()
+                .defer_initialization(true)
                 .build()
                 .map_err(|error| error.to_string())?;
             tracing::debug!("[elaboration] total: {:?}", start.elapsed());
@@ -733,6 +739,25 @@ mod tests {
                 .unwrap_err()
                 .contains("include directory is unavailable")
         );
+    }
+
+    /// Elaboration builds a design whose import no C function provides, and
+    /// runs nothing: a static initializer that calls the import is not run.
+    /// A simulation of it fails at that call.
+    #[test]
+    fn elaboration_runs_no_initializer_of_an_unlinked_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture(
+            dir.path(),
+            "unlinked.sv",
+            r#"module Top;
+                import "DPI-C" function int unlinked_sum(input int a, input int b);
+                int total = unlinked_sum(1, 2);
+            endmodule"#,
+        );
+        run(&fixture_options(vec![path.clone()], Mode::Elaboration)).unwrap();
+        let error = run(&fixture_options(vec![path], Mode::Simulation)).unwrap_err();
+        assert!(error.contains("unlinked_sum"), "{error}");
     }
 
     #[test]

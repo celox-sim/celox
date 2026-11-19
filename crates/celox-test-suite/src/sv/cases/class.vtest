@@ -6178,6 +6178,66 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq checks 3))
 
+; A value the caller computes from its variables and from properties of the
+; object that are neither rand nor randc is an input the call reads as it
+; starts (IEEE 1800-2023 18.7): a member of a caller variable `req.rw`, an
+; element `memory[rsp.addr]` at a non-random property of the object, one at a
+; member of a caller variable `memory[req.addr]`, a method call through a
+; property `rm.m1.get_size()` and a member path through a caller handle.
+(case inline_constraint_caller_expressions
+  (source "class.sv" #"
+class mem;
+    int n = 12;
+    function int get_size(); return n; endfunction
+endclass
+class model;
+    mem m1 = new;
+endclass
+class item;
+    rand bit rw;
+    bit [7:0] addr;
+    rand bit [7:0] rdata;
+endclass
+class seq;
+    rand bit [7:0] addr;
+    model rm = new;
+    function int bounded();
+        int ok = 1;
+        repeat (8) begin
+            ok &= this.randomize() with { addr <= rm.m1.get_size(); };
+            ok &= addr <= 12;
+        end
+        return ok;
+    endfunction
+endclass
+class holder;
+    item it = new;
+endclass
+module Top(output int checks);
+    initial begin
+        item req = new;
+        item rsp = new;
+        seq s = new;
+        holder h = new;
+        bit [7:0] memory [bit [7:0]];
+        req.addr = 9;
+        req.rw = 0;
+        rsp.addr = 5;
+        memory[9] = 42;
+        memory[5] = 17;
+        h.it.addr = 33;
+        checks = 0;
+        checks += (rsp.randomize() with { rsp.rw == req.rw; } && rsp.rw == 0) * 1;
+        checks += (rsp.randomize() with { if (!rsp.rw) rsp.rdata == memory[rsp.addr]; }
+            && (rsp.rw || rsp.rdata == 17)) * 2;
+        checks += (rsp.randomize() with { rdata == memory[req.addr]; } && rsp.rdata == 42) * 4;
+        checks += s.bounded() * 8;
+        checks += (rsp.randomize() with { rdata == h.it.addr + 1; } && rsp.rdata == 34) * 16;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq checks 31))
+
 ; A select of a member a handle path names, `h.m[0]`, `this.h.m[3:0]`,
 ; `super.h.m[1:0]` or the receiver's `item.h.m[6]`, and of a member of a loop
 ; element, takes its bits in every constraint position: a constraint, a
@@ -6890,3 +6950,153 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
   (expect_output "0\n"))
+
+; `function A::new()` and `function B::new()` define the classes'
+; constructors (IEEE 1800-2023 8.24): neither package declares a `new` that
+; the wildcard imports of `c` could both provide (26.3).
+(case out_of_block_methods_declare_no_package_items
+  (source "class.sv" #"
+package a;
+    class A; extern function new(); endclass
+    function A::new(); endfunction
+endpackage
+package b;
+    class B; extern function new(); endclass
+    function B::new(); endfunction
+endpackage
+package c;
+    import a::*;
+    import b::*;
+    class C;
+        int k;
+        function new(); k = 4; endfunction
+    endclass
+    function int f();
+        C x = new;
+        return x.k;
+    endfunction
+endpackage
+module Top(output int y, output bit done);
+    initial begin
+        y = c::f();
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq y 4) (assert_eq done 1))
+
+; A value the caller computes reads the object the call captured, as
+; `rsp.addr` of `memory[rsp.addr]` does, after `pre_randomize()` (IEEE
+; 1800-2023 18.6.2): a hook that assigns the caller's `rsp` another object
+; does not change the object the value reads, nor does one that moves the
+; caller's `i` of `items[i]`, and one that assigns the object's own `addr`
+; does.
+(case inline_constraint_caller_expressions_after_pre_randomize
+  (source "class.sv" #"
+module Top(output int first, output int second, output int third, output int fourth,
+           output bit done);
+    typedef class item;
+    item rsp;
+    item items[2];
+    int i;
+    class item;
+        bit [7:0] addr;
+        rand bit [7:0] rdata;
+        item other;
+        bit move;
+        bit bump;
+        // Reassigns the caller's variable, or the object's own position.
+        function void pre_randomize();
+            if (other != null) rsp = other;
+            if (move) addr = 6;
+            if (bump) i++;
+        endfunction
+    endclass
+    class sub extends item;
+    endclass
+    initial begin
+        item a = new;
+        item b = new;
+        sub s = new;
+        bit [7:0] memory [bit [7:0]];
+        memory[5] = 17;
+        memory[6] = 99;
+        a.addr = 5;
+        b.addr = 6;
+        a.other = b;
+        rsp = a;
+        // The constraint reads the object the call captured, `a`.
+        void'(rsp.randomize() with { rdata == memory[rsp.addr]; });
+        first = a.rdata;
+        // The pre-hook moves the object's own position before the call
+        // reads it.
+        a.other = null;
+        a.move = 1;
+        rsp = a;
+        void'(rsp.randomize() with { rdata == memory[rsp.addr]; });
+        second = a.rdata;
+        // A handle of the base class dispatches to the derived class's
+        // method, which captures the object as well.
+        s.addr = 5;
+        s.other = b;
+        rsp = s;
+        void'(rsp.randomize() with { rdata == memory[rsp.addr]; });
+        third = s.rdata;
+        // A receiver of any form names the object the call captured: the
+        // pre-hook moves the caller's `i`, not the object.
+        items[0] = new;
+        items[1] = new;
+        items[0].addr = 5;
+        items[1].addr = 6;
+        items[0].bump = 1;
+        i = 0;
+        void'(items[i].randomize() with { rdata == memory[items[i].addr]; });
+        fourth = items[0].rdata;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq first 17) (assert_eq second 99) (assert_eq third 17)
+  (assert_eq fourth 17) (assert_eq done 1))
+
+; A value the caller computes under a guard is read only when the guard
+; holds, after it (IEEE 1800-2023 18.5.12): the guard removes the constraint,
+; and with it the value, which may fail or have effects (18.5.11). A guard
+; through a `null` handle reads nothing through it; one that is false calls
+; nothing.
+(case inline_constraint_caller_inputs_follow_guards
+  (source "class.sv" #"
+module Top(output int nulls, output int counts, output int values, output bit done);
+    class source;
+        int count;
+        function int f(); return 5; endfunction
+        function int next(); count++; return 7; endfunction
+    endclass
+    class item;
+        rand int x;
+    endclass
+    initial begin
+        item it = new;
+        source h = null;
+        source c = new;
+        bit enabled = 0;
+        // `h` is null: the guard removes the constraint and `h.f()`.
+        nulls = it.randomize() with { if (h != null) x == h.f(); };
+        nulls += it.randomize() with { (h != null) -> x == h.f(); };
+        // A false guard calls nothing; a true one calls once.
+        void'(it.randomize() with { if (enabled) x == c.next(); });
+        void'(it.randomize() with { if (!enabled) x > 0; else x == c.next(); });
+        counts = c.count;
+        enabled = 1;
+        h = c;
+        void'(it.randomize() with { if (enabled && h != null) x == c.next(); });
+        values = it.x;
+        void'(it.randomize() with { if (h != null) x == h.f(); });
+        values = values * 10 + it.x;
+        counts = counts * 10 + c.count;
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq nulls 2) (assert_eq counts 1) (assert_eq values 75)
+  (assert_eq done 1))

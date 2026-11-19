@@ -120,7 +120,8 @@ impl Source {
                 values: parameter_overrides,
                 types: &[],
                 patterns: &[],
-                hierarchical: &[],
+                hierarchical: HierarchicalObjects::default(),
+                forced: &[],
             },
             extra_interfaces,
             &packages,
@@ -141,23 +142,44 @@ impl Source {
         packages: &packages::Packages,
         design: &mut packages::Design,
     ) -> Result<Self, AnalyzerError> {
-        let mut session = Session::with_packages(packages, design);
-        // A type argument of the module is a type of the analysis, whether
-        // or not a source names it: interning it interns the types it is
-        // made of, a chandle element of a container included.
-        session.scope = Some(module_scope(module_name, &bindings, &mut session.types));
-        let source = Self::from_indexed_syntax_module_in(
-            syntax_tree,
-            path,
-            index,
-            module_name,
-            bindings,
-            extra_interfaces,
-            packages,
-            &mut session,
-        );
-        session.restore(design);
-        source
+        // The specializations that the packages and earlier analyses named
+        // have their subroutines before the analysis starts.
+        virtual_interface_calls::specializations(packages, design)?;
+        loop {
+            let mut session = Session::with_packages(packages, design);
+            // A type argument of the module is a type of the analysis, whether
+            // or not a source names it: interning it interns the types it is
+            // made of, a chandle element of a container included.
+            session.scope = Some(module_scope(module_name, &bindings, &mut session.types));
+            let source = Self::from_indexed_syntax_module_in(
+                syntax_tree,
+                path,
+                index,
+                module_name,
+                bindings,
+                extra_interfaces,
+                packages,
+                &mut session,
+            );
+            session.restore(design);
+            // The analysis moved the design's types into its source, which
+            // publishes its IR with them (see [`Publication`]): the
+            // subroutines below, and an analysis repeated in place of this
+            // one, are bound in them too.
+            let mut source = source;
+            if let Ok(source) = &mut source {
+                design.types = std::mem::take(&mut source.types);
+            }
+            // An analysis that named a specialization of a parameterized
+            // interface with tasks or functions is repeated with the
+            // subroutines that call them through virtual interfaces (25.9).
+            if !virtual_interface_calls::specializations(packages, design)? {
+                if let Ok(source) = &mut source {
+                    source.types = std::mem::take(&mut design.types);
+                }
+                return source;
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -210,7 +232,46 @@ impl Source {
                         type_parameters::bind_patterns(syntax_tree, bindings.patterns)?;
                     // A hierarchical name reads and writes the local signal
                     // bound to the other instance's object.
-                    for signal in bindings.hierarchical {
+                    imported.external_forces = bindings.forced.to_vec();
+                    for signal in bindings.hierarchical.signals {
+                        // A parameter of another instance is read as its
+                        // value (23.6).
+                        if let Some(literal) = &signal.constant {
+                            for path in &signal.paths {
+                                imported
+                                    .hierarchical_constants
+                                    .insert(path.clone(), literal.clone());
+                            }
+                            continue;
+                        }
+                        // A name of the body of an interface instance binds
+                        // there; the module holds the signal of an object
+                        // of another instance it denotes.
+                        if let Some(handle) = &signal.interface_instance {
+                            imported
+                                .outward_names
+                                .entry(handle.clone())
+                                .or_default()
+                                .push(signal.clone());
+                            if !signal.local {
+                                imported.state_signals.push(Signal {
+                                    is_const: false,
+                                    name: signal.name.clone(),
+                                    r#type: signal.r#type.clone(),
+                                    is_net: signal.is_net,
+                                    unresolved_net: false,
+                                    net_resolution: NetResolution::Wire,
+                                    net_drive: NetDrive::None,
+                                    package_variable: None,
+                                    hierarchical: Some(format!(
+                                        "{handle}.{}",
+                                        signal.paths.first().map_or("", String::as_str)
+                                    )),
+                                    force_control: None,
+                                });
+                            }
+                            continue;
+                        }
                         for path in &signal.paths {
                             imported
                                 .interface_members
@@ -232,6 +293,51 @@ impl Source {
                             hierarchical: signal.paths.first().cloned(),
                             force_control: None,
                         });
+                    }
+                    // A hierarchical name calls the subroutine of the other
+                    // instance as the module's subroutine of its name, which
+                    // the caller supplies; the calls bind by its signature.
+                    for subroutine in bindings.hierarchical.subroutines {
+                        let formals = subroutine
+                            .formals
+                            .iter()
+                            .map(|formal| FunctionArgumentMetadata {
+                                name: formal.name.clone(),
+                                direction: formal.direction,
+                                has_default: formal.has_default,
+                            })
+                            .collect();
+                        if !subroutine.is_task {
+                            imported.function_return_types.insert(
+                                subroutine.name.clone(),
+                                FunctionReturnMetadata::from_type(
+                                    syntax_tree,
+                                    session,
+                                    subroutine.result.as_ref(),
+                                    formals,
+                                    &PackedDimensions::default(),
+                                ),
+                            );
+                        }
+                        imported.subroutine_params.insert(
+                            subroutine.name.clone(),
+                            subroutine
+                                .formals
+                                .iter()
+                                .map(|formal| formal.name.clone())
+                                .collect(),
+                        );
+                        imported.subroutine_shapes.insert(
+                            subroutine.name.clone(),
+                            Arc::new(
+                                subroutine
+                                    .formals
+                                    .iter()
+                                    .map(|formal| procedural::dimensions_from_type(&formal.r#type))
+                                    .collect(),
+                            ),
+                        );
+                        imported.hierarchical_subroutines.push(subroutine.clone());
                     }
                     if let Some(mut module) = interface_binding::analyze_module(
                         syntax_tree,
@@ -394,7 +500,8 @@ mod scope_tests {
                 values: &values,
                 types,
                 patterns: &[],
-                hierarchical: &[],
+                hierarchical: HierarchicalObjects::default(),
+                forced: &[],
             },
             table,
         )
@@ -407,12 +514,17 @@ mod scope_tests {
             ConstExpr::Literal("1".into()),
             ConstExpr::Literal("0".into()),
         ));
-        ty.is_enum = true;
-        ty.spelling.name(
-            name.into(),
-            type_names::TypedefName::Scope(name.into()),
-            None,
-        );
+        let typename = type_names::TypedefName::Scope(name.into());
+        ty.keep_enumeration(semantic_types::EnumBinding::new(
+            semantic_types::EnumDeclaration {
+                name: Some(name.into()),
+                named: true,
+                scope: None,
+                typename: Some(typename),
+                domain: None,
+                dims: 1,
+            },
+        ));
         ty
     }
 
@@ -435,7 +547,8 @@ mod scope_tests {
         let table = &mut semantic_types::TyTable::default();
         let first = enumeration("P::a_t");
         let second = enumeration("P::b_t");
-        assert_eq!(first, second, "the fields do not tell them apart");
+        assert_eq!(*first, *second, "their shapes do not tell them apart");
+        assert_ne!(first, second, "their declarations tell them apart");
         assert_ne!(
             scope_with(table, &[], &[("T".into(), first.clone())]),
             scope_with(table, &[], &[("T".into(), second)])

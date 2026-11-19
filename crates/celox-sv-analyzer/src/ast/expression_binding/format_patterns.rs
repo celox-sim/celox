@@ -152,8 +152,8 @@ pub(in crate::ast) fn pattern(
     // A call of a function of an enumerated type whose members are not
     // known.
     if matches!(expression, ExprKind::Call { expression, .. }
-        if direct::call_name(tree, *expression, native)
-            .is_some_and(|name| returns_enum(&name, dimensions)))
+        if direct::function_name(tree, session, *expression, native, dimensions)
+            .is_some_and(|name| returns_enum(&name, dimensions, &session.types)))
     {
         return Err(unsupported("%p of an enum value"));
     }
@@ -194,12 +194,12 @@ pub(in crate::ast) fn pattern(
                 "%p of an associative array with class handle keys",
             ));
         }
-        return Ok(Pattern::Handle(Some(container.layout)));
+        return Ok(Pattern::Handle(Some(container.layout.clone())));
     }
     if objects::native_class(tree, session, id, native, dimensions).is_some()
         || handle_value(value, &session.types, dimensions)
         || matches!(expression, ExprKind::Call { expression, .. }
-            if direct::call_name(tree, *expression, native)
+            if direct::function_name(tree, session, *expression, native, dimensions)
                 .is_some_and(|name| returns_handle(&name, dimensions)))
     {
         return Ok(Pattern::Handle(None));
@@ -261,15 +261,17 @@ pub(in crate::ast) fn pattern(
     // A cast to, or a call of a function that returns, a structure or an
     // unpacked array.
     let aggregate = |ty: &Type| {
-        !ty.members.is_empty() || ty.unpacked_struct.is_some() || !ty.unpacked_ranges.is_empty()
+        !ty.members.is_empty() || ty.unpacked_struct().is_some() || !ty.unpacked_ranges.is_empty()
     };
     let aggregate_value = match expression {
         ExprKind::Cast { target, .. } => {
             enums::cast_type(tree, session, *target, native, dimensions)?
                 .is_some_and(|ty| aggregate(&ty))
         }
-        ExprKind::Call { expression, .. } => direct::call_name(tree, *expression, native)
-            .is_some_and(|name| returns_aggregate(&name, dimensions, aggregate)),
+        ExprKind::Call { expression, .. } => {
+            direct::function_name(tree, session, *expression, native, dimensions)
+                .is_some_and(|name| returns_aggregate(&name, dimensions, aggregate))
+        }
         _ => false,
     };
     // A value of unpacked structure type: a variable, member or property.
@@ -431,7 +433,7 @@ fn packed_members(
         // A call of a function binds as bits: the declared return type has
         // the members.
         ExprKind::Call { expression, .. } => {
-            if let Some(ty) = direct::call_name(tree, *expression, native)
+            if let Some(ty) = direct::function_name(tree, session, *expression, native, dimensions)
                 .and_then(|name| {
                     dimensions
                         .functions
@@ -616,7 +618,7 @@ fn container_text(
     let source = match container.layout.kind {
         ContainerKind::Dynamic
         | ContainerKind::Queue { .. }
-        | ContainerKind::Associative { .. } => LocatorSource::Container(container.layout),
+        | ContainerKind::Associative { .. } => LocatorSource::Container(container.layout.clone()),
     };
     Ok(classes::object_call(
         ObjectOp::Pattern(AggregatePattern { source }),
@@ -669,7 +671,7 @@ impl Text {
             }
             let leaf = leaves.next().expect("a value for each leaf");
             let ty = &member.r#type;
-            if let Some(domain) = &ty.enum_domain
+            if let Some(domain) = ty.enum_domain()
                 && ty.unpacked_ranges.is_empty()
                 && ty.container.is_none()
             {
@@ -681,7 +683,7 @@ impl Text {
                 self.args.push(enums::pattern_text(domain, leaf));
                 continue;
             }
-            if ty.is_enum || ty.packed_enum {
+            if ty.enumeration().is_some() {
                 return Err(unsupported("%p of a structure with an enum member"));
             }
             if !ty.members.is_empty() {
@@ -765,10 +767,10 @@ impl Text {
             };
             if !ty.members.is_empty() && ty.packed_ranges.len() == 1 {
                 self.packed(tree, &ty.members, &select, dimensions)?;
-            } else if let Some(domain) = ty.enum_domain.as_ref().filter(|_| !ty.packed_enum) {
+            } else if let Some(domain) = ty.enum_domain() {
                 self.template.extend_from_slice(b"%s");
                 self.args.push(enums::pattern_text(domain, select));
-            } else if ty.is_enum || ty.packed_enum {
+            } else if ty.enumeration().is_some() {
                 return Err(unsupported("%p of a packed structure with an enum member"));
             } else {
                 self.template.extend_from_slice(b"%0d");
@@ -851,16 +853,24 @@ fn rereadable(value: &Expr) -> bool {
     !effects
 }
 
-/// Whether function `name` returns an enumerated value.
-fn returns_enum(name: &str, dimensions: &PackedDimensions) -> bool {
+/// Whether function `name` returns a value of an enumerated type whose
+/// members are resolved, as its semantic type in `table` tells.
+fn returns_enum(
+    name: &str,
+    dimensions: &PackedDimensions,
+    table: &semantic_types::TyTable,
+) -> bool {
+    let enumerated = |id: Option<semantic_types::TyId>| {
+        id.is_some_and(|id| table.enumeration(id) == Some(false) && table.enum_domain(id).is_some())
+    };
     dimensions
         .functions
         .get(name)
-        .is_some_and(|function| function.return_enum_domain.is_some())
+        .is_some_and(|function| enumerated(function.return_semantic_type))
         || dimensions
             .function_return_types
             .get(name)
-            .is_some_and(|metadata| metadata.enum_domain.is_some())
+            .is_some_and(|metadata| enumerated(metadata.semantic_type))
 }
 
 /// The shape of the variable that native selection `id` selects from, and
@@ -942,7 +952,10 @@ pub(in crate::ast) fn pattern_argument(
             ),
         ),
         Pattern::Enum(domain) => (b"%s", enums::pattern_text(&domain, value)),
-        Pattern::Handle(layout) => (b"%s", strings::call(StringOp::Pattern(layout), vec![value])),
+        Pattern::Handle(layout) => (
+            b"%s",
+            strings::call(StringOp::Pattern(layout.map(Box::new)), vec![value]),
+        ),
     }
 }
 

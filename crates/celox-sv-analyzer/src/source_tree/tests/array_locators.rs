@@ -75,7 +75,7 @@ fn locator_iterators_are_hidden_locals_read_by_the_predicate() {
     };
     assert_eq!(locator.method, LocatorMethod::Find);
     assert!(matches!(
-        locator.source,
+        &locator.source,
         LocatorSource::Container(layout) if layout.kind == ContainerKind::Queue { capacity: 0 }
     ));
     let (iterator, index) = (ident(&args[2]), ident(&args[3]));

@@ -264,10 +264,11 @@ pub enum TestbenchStatement<Event, Signal, Expression, Argument, Target = Signal
     },
     Break,
     Finish,
-    /// Apply preloaded memory data at this point in the testbench program.
+    /// Load a memory file into `signal` at this point in the testbench
+    /// program, reading the file then (IEEE 1800-2023 21.4).
     WriteMemory {
         signal: Signal,
-        writes: Vec<celox_design::InitialStateWriteRun>,
+        load: celox_design::MemoryFileLoad,
     },
 }
 
@@ -554,6 +555,21 @@ impl<A> TestbenchProgram<A> {
                         statements(else_block, map)?;
                     }
                     TestbenchStatement::For { body, .. } => statements(body, map)?,
+                    // The directory the file is looked up in and the call.
+                    TestbenchStatement::WriteMemory { load, .. } => {
+                        if let Some(base) = &mut load.base {
+                            *base = map(std::path::Path::new(base))?
+                                .to_string_lossy()
+                                .into_owned();
+                        }
+                        if let Some(location) = &mut load.location
+                            && !location.file.is_empty()
+                        {
+                            location.file = map(std::path::Path::new(&location.file))?
+                                .to_string_lossy()
+                                .into_owned();
+                        }
+                    }
                     _ => {}
                 }
             }

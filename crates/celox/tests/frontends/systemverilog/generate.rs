@@ -328,6 +328,7 @@ fn keeps_four_state_generate_function_guards_nonexhaustive() {
         vec![(source, Path::new("generate_four_state_function_guard.sv"))],
         "Top",
     )
+    .strict(true)
     .four_state(true)
     .build_cranelift();
     let error = match result {
@@ -605,6 +606,104 @@ endmodule"#;
             [
                 "5592405 5".to_string(),
                 format!("16777216 1 5592405 0055555500000001 21845 {by_zero}")
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// A typed parameter is assigned its value (IEEE 1800-2023 6.20.2), and a
+/// size cast evaluates its operand as such an assignment (6.24.1): the
+/// declared width is the context of the context-determined operands, which
+/// are extended before they are evaluated (11.6.1, 11.8.2), while the value
+/// keeps its own signedness (11.8.1). An untyped parameter keeps the
+/// self-determined width. BlackParrot's dcache ORs shifted feature bits into
+/// its enum-sized `amo_support_p`. Verilator 5.054 and Icarus 13 print the
+/// same lines.
+#[test]
+fn typed_parameters_evaluate_their_values_at_the_width_of_their_type() {
+    let source = r#"`timescale 1ns/1ns
+typedef logic [15:0] word_t;
+typedef enum logic [3:0] { s_none, s_lr, s_sc, s_swap, s_add } op_e;
+typedef logic [(1<<$bits(op_e))-1:0] ops_t;
+module m #(parameter logic [15:0] f = 16'h00b0,
+           parameter logic [15:0] p = f[5] << 3,
+           parameter word_t q = 1'b1 << 4,
+           parameter ops_t ops = (f[4] << s_lr) | (f[5] << s_sc) | (f[7] << s_add)) ();
+  initial #1 $display("%m p=%h q=%h ops=%h", p, q, ops);
+endmodule
+module top;
+  localparam logic [15:0] f = 16'h00b0;
+  localparam logic [15:0] lp = f[5] << 3;
+  localparam logic [15:0] lq = 1'b1 << 3;
+  localparam int unsigned li = f[5] << 3;
+  localparam logic [15:0] lc = 16'(f[5] << 3);
+  localparam logic [15:0] a = 1'b1 + 1'b1;
+  localparam logic [15:0] n = ~1'b0;
+  localparam logic [15:0] t = 4'hf << 4;
+  localparam logic [15:0] mu = 4'hf * 4'h2;
+  localparam logic [15:0] c = 1'b1 ? (1'b1 << 3) : 1'b0;
+  localparam logic signed [7:0] ss = 4'sb1000 + 4'sb0000;
+  localparam logic signed [7:0] su = 4'sb1000 + 4'b0000;
+  localparam int ii = 4'sb1000 >>> 1;
+  localparam logic [7:0] ln = -4'sd1;
+  localparam logic [15:0] cc = 16'(4'hf + 4'h1);
+  localparam logic [3:0] tr = 8'hff + 8'h01;
+  localparam u = 1'b1 << 3;
+  localparam [15:0] r = 1'b1 << 3;
+  localparam uc = 16'(4'hf + 4'h1);
+  localparam int ic = int'(1'b1 << 3);
+  localparam logic [199:0] w = 1'b1 << 150;
+  localparam logic [7:0] xs = {1'b1, 1'bx} << 2;
+  localparam logic [7:0] xa = 4'b10x1 + 4'b0000;
+  m d ();
+  m #(.f(16'h0010)) o ();
+  initial begin
+    $display("%h %h %0d %h %h %h %h %h %h", lp, lq, li, lc, a, n, t, mu, c);
+    $display("%h %h %0d %h %h %h", ss, su, ii, ln, cc, tr);
+    $display("%0d %0d %h %h %0d", u, $bits(u), r, uc, ic);
+    $display("%h", w);
+    $display("%b %b", xs, xa);
+    #2 $finish;
+  end
+endmodule"#;
+    // Two-state simulation reads the X bits as zeros.
+    for (four_state, unknown) in [(false, "00001000 00000000"), (true, "00001x00 xxxxxxxx")] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("typed.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        let (constants, instances) = lines.split_at(5);
+        let mut instances = instances.to_vec();
+        instances.sort();
+        assert_eq!(
+            constants,
+            [
+                "0008 0008 8 0008 0002 ffff 00f0 001e 0008",
+                "f8 08 -4 ff 0010 0",
+                "0 1 0008 0010 8",
+                "00000000000040000000000000000000000000000000000000",
+                unknown,
+            ],
+            "four_state={four_state}"
+        );
+        assert_eq!(
+            instances,
+            [
+                "top.d p=0008 q=0010 ops=0016",
+                "top.o p=0000 q=0010 ops=0002"
             ],
             "four_state={four_state}"
         );
@@ -1008,5 +1107,206 @@ fn set_membership_tests_of_calls_and_arrays_beside_fills_are_not_folded() {
                 "{name} four-state {four_state}: {error:?}"
             );
         }
+    }
+}
+
+/// A generate condition may select an element of a member of a packed
+/// structure parameter wider than 128 bits, such as OpenTitan pinmux's
+/// `TargetCfg.dio_scan_role[k] == ScanClock`: the parameter is known by its
+/// literal, which the select reads (IEEE 1800-2023 11.2.1, 27.5). Verilator
+/// 5.054 prints the same line.
+#[test]
+fn generate_conditions_select_members_of_wide_structure_parameters() {
+    let source = r#"`timescale 1ns/1ns
+package cfg_pkg;
+  typedef struct packed { logic [127:0] pad; logic [3:0][1:0] role; } cfg_t;
+endpackage
+module Child #(parameter cfg_pkg::cfg_t Cfg = '0) (output logic [3:0] o);
+  for (genvar k = 0; k < 4; k++) begin : g
+    if (Cfg.role[k] == 2'h3) begin : s
+      assign o[k] = 1'b1;
+    end else begin : n
+      assign o[k] = 1'b0;
+    end
+  end
+endmodule
+module Top;
+  localparam cfg_pkg::cfg_t A = '{pad: 128'h1234_0000_0000_0000_0000_0000_0000_5678,
+                                  role: {2'h3, 2'h0, 2'h3, 2'h1}};
+  localparam cfg_pkg::cfg_t B = '{pad: '1, role: {2'h0, 2'h3, 2'h2, 2'h3}};
+  logic [3:0] a, b;
+  Child #(.Cfg(A)) u_a(.o(a));
+  Child #(.Cfg(B)) u_b(.o(b));
+  initial #1 $display("%b %b", a, b);
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("wide_generate_condition.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["1010 0101"], "four_state={four_state}");
+    }
+}
+
+/// The ports of the instances of a generate loop take elements of a package
+/// parameter wider than 128 bits, such as OpenTitan otp_ctrl_scrmbl's
+/// `RndCnstKey[k]`: at the loop index, at a constant index, of a copy of the
+/// parameter, through a localparam of the block, and elements wider than 128
+/// bits themselves (IEEE 1800-2023 23.3.2, 26.3, 27.4). Verilator 5.054 prints
+/// the same lines.
+#[test]
+fn instance_ports_take_elements_of_wide_package_parameters() {
+    let source = r#"`timescale 1ns/1ns
+package key_pkg;
+  typedef logic [2:0][127:0] key_array_t;
+  parameter key_array_t Keys = {
+    128'h85A9E830BC059BA9286D6E2856A05CC3,
+    128'hEFFA6D736C5EFF49AE7B70F9C46E5A62,
+    128'h3BA121C5E097DDEB7768B4C666E9C3DA
+  };
+  parameter logic [1:0][191:0] WideKeys = {
+    192'h0123456789ABCDEF_FEDCBA9876543210_0F1E2D3C4B5A6978,
+    192'h8796A5B4C3D2E1F0_1122334455667788_99AABBCCDDEEFF00
+  };
+endpackage
+module Buf #(parameter int Width = 1) (input logic [Width-1:0] i, output logic [Width-1:0] o);
+  assign o = i;
+endmodule
+module Top;
+  import key_pkg::*;
+  localparam key_array_t Copy = Keys;
+  key_array_t at_genvar, at_copy, at_local;
+  logic [127:0] at_constant;
+  logic [1:0][191:0] wide;
+  for (genvar k = 0; k < 3; k++) begin : g
+    localparam logic [127:0] Element = Keys[k];
+    Buf #(.Width(128)) u_genvar(.i(Keys[k]), .o(at_genvar[k]));
+    Buf #(.Width(128)) u_copy(.i(Copy[k]), .o(at_copy[k]));
+    Buf #(.Width(128)) u_local(.i(Element), .o(at_local[k]));
+  end
+  Buf #(.Width(128)) u_constant(.i(key_pkg::Keys[1]), .o(at_constant));
+  for (genvar k = 0; k < 2; k++) begin : w
+    Buf #(.Width(192)) u_wide(.i(WideKeys[k]), .o(wide[k]));
+  end
+  initial begin
+    #1;
+    $display("%h %h %h", at_genvar[0], at_genvar[1], at_genvar[2]);
+    $display("%h %h %h", at_copy[0], at_copy[1], at_copy[2]);
+    $display("%h %h %h", at_local[0], at_local[1], at_local[2]);
+    $display("%h", at_constant);
+    $display("%h %h", wide[0], wide[1]);
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("wide_package_parameter_ports.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        let keys = "3ba121c5e097ddeb7768b4c666e9c3da effa6d736c5eff49ae7b70f9c46e5a62 \
+                    85a9e830bc059ba9286d6e2856a05cc3";
+        assert_eq!(
+            lines,
+            [
+                keys,
+                keys,
+                keys,
+                "effa6d736c5eff49ae7b70f9c46e5a62",
+                "8796a5b4c3d2e1f0112233445566778899aabbccddeeff00 \
+                 0123456789abcdeffedcba98765432100f1e2d3c4b5a6978",
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
+
+/// A generate block may declare an unpacked array parameter, a constant
+/// variable of the block (IEEE 1800-2023 27.2, 6.20.2), such as ibex_alu's
+/// `SHUFFLE_MASK_L [4]` in `gen_alu_rvb_otearlgrey_full`. The generate
+/// conditions of the scope still read the elements of its own array
+/// parameters, and a block's packed structure parameter given by a pattern
+/// stays a value, also in a loop. Verilator 5.054 prints the same line.
+#[test]
+fn generate_blocks_declare_array_parameters() {
+    let source = r#"`timescale 1ns/1ns
+module Top #(parameter bit Full = 1);
+  typedef struct packed { logic [1:0] sel; logic [3:0] addr; } page_t;
+  localparam int Offsets [4] = '{0, 5, 2, 6};
+  localparam page_t Iso = '{sel: 2'd1, addr: 4'd2};
+  logic [31:0] mask;
+  logic [3:0] rot, hit;
+  if (Full) begin : g_full
+    localparam logic [31:0] Masks [2] = '{32'h1111_2222, 32'h3333_4444};
+    assign mask = Masks[1] ^ Masks[0];
+  end else begin : g_none
+    assign mask = '0;
+  end
+  for (genvar x = 0; x < 2; x++) begin : g_x
+    for (genvar y = 0; y < 2; y++) begin : g_y
+      localparam int Offset = Offsets[2*x+y] % 4;
+      if (Offset == 0) begin : g_zero
+        assign rot[2*x+y] = 1'b1;
+      end else begin : g_other
+        assign rot[2*x+y] = 1'b0;
+      end
+    end
+  end
+  for (genvar i = 0; i < 4; i++) begin : g_page
+    localparam page_t Cur = '{sel: 2'd1, addr: 4'(i)};
+    if (Cur == Iso) begin : g_iso
+      assign hit[i] = 1'b1;
+    end else begin : g_no
+      assign hit[i] = 1'b0;
+    end
+  end
+  initial #1 $display("%h %b %b", mask, rot, hit);
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("generate_arrays.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<String> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["22226666 0001 0100"], "four_state={four_state}");
     }
 }

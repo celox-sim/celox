@@ -51,24 +51,26 @@ impl<B: SimBackend> Simulator<B> {
     /// `%m` of its host requests prints.
     pub(super) fn process_scope(&self, process: usize) -> Option<String> {
         let process = &self.program.runtime_schema.processes[process];
-        self.program
-            .design
-            .instance(process.status.instance_id)
-            .map(|instance| {
-                let top = self
-                    .program
-                    .design
-                    .root_instance()
-                    .map(|root| root.module_name.as_str())
-                    // The root of several tops is not part of a name.
-                    .filter(|_| !self.program.design.hidden_root)
-                    .unwrap_or("");
-                std::iter::once(top)
-                    .chain(instance.display_path.iter().map(String::as_str))
-                    .filter(|part| !part.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(".")
-            })
+        self.instance_scope(process.status.instance_id)
+    }
+
+    /// The hierarchical name of instance `instance`, as `%m` prints it.
+    pub(super) fn instance_scope(&self, instance: celox_design::InstanceId) -> Option<String> {
+        self.program.design.instance(instance).map(|instance| {
+            let top = self
+                .program
+                .design
+                .root_instance()
+                .map(|root| root.module_name.as_str())
+                // The root of several tops is not part of a name.
+                .filter(|_| !self.program.design.hidden_root)
+                .unwrap_or("");
+            std::iter::once(top)
+                .chain(instance.display_path.iter().map(String::as_str))
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(".")
+        })
     }
 
     /// Read bytes through the descriptor manager so EOF and pushback retain
@@ -84,7 +86,7 @@ impl<B: SimBackend> Simulator<B> {
         let descriptor = descriptor.to_u32_digits().first().copied().unwrap_or(0);
         let mut line = Vec::new();
         let success = loop {
-            match self.file_io.read_byte(descriptor) {
+            match self.files_mut().read_byte(descriptor) {
                 Ok(Some(byte)) => {
                     line.push(byte);
                     if byte == b'\n' {
@@ -131,7 +133,7 @@ impl<B: SimBackend> Simulator<B> {
                 }));
             }
             let descriptor = descriptor.to_u32_digits().first().copied().unwrap_or(0);
-            let (code, message) = self.file_io.error(descriptor);
+            let (code, message) = self.files_mut().error(descriptor);
             let bytes: Vec<_> = message.bytes().filter(|byte| *byte != 0).collect();
             let result = if site.results[1].value_kind == celox_design::ValueKind::StrRef {
                 BigUint::from(self.backend.heap_mut().intern(&bytes))
@@ -197,12 +199,12 @@ impl<B: SimBackend> Simulator<B> {
                 } else {
                     None
                 };
-                let descriptor = self.file_io.open(path, mode.as_deref());
+                let descriptor = self.files_mut().open(path, mode.as_deref());
                 self.backend.set(site.results[0].id, descriptor);
             }
             1 => {
                 let descriptor = number(0)?;
-                self.file_io
+                self.files_mut()
                     .close(descriptor)
                     .map_err(|err| error(format!("$fclose: {err}")))?;
                 self.cancel_file_strobes(descriptor);
@@ -232,7 +234,8 @@ impl<B: SimBackend> Simulator<B> {
                 };
                 let (args, message) =
                     formatted_file_write(site, &values, &format, timestamp, self.backend.heap());
-                let (stdout, write_result) = self.file_io.write_with_stdout(number(0)?, &message);
+                let (stdout, write_result) =
+                    self.files_mut().write_with_stdout(number(0)?, &message);
                 if stdout {
                     let mut format = format;
                     format.kind = if site.operation == 3 {
@@ -250,7 +253,7 @@ impl<B: SimBackend> Simulator<B> {
                 } else {
                     Some(number(0)?)
                 };
-                self.file_io
+                self.files_mut()
                     .flush(descriptor)
                     .map_err(|err| error(format!("$fflush: {err}")))?;
             }
@@ -258,7 +261,7 @@ impl<B: SimBackend> Simulator<B> {
                 let descriptor = number(usize::from(site.operation == 11))?;
                 let code: i32 = match site.operation {
                     7 => self
-                        .file_io
+                        .files_mut()
                         .tell(descriptor)
                         .ok()
                         .and_then(|position| i32::try_from(position).ok())
@@ -267,7 +270,7 @@ impl<B: SimBackend> Simulator<B> {
                         let offset = number(1)? as i32;
                         let operation = number(2)? as i32;
                         if self
-                            .file_io
+                            .files_mut()
                             .seek(descriptor, i64::from(offset), operation)
                             .is_ok()
                         {
@@ -277,14 +280,14 @@ impl<B: SimBackend> Simulator<B> {
                         }
                     }
                     9 => {
-                        if self.file_io.rewind(descriptor).is_ok() {
+                        if self.files_mut().rewind(descriptor).is_ok() {
                             0
                         } else {
                             -1
                         }
                     }
                     10 => self
-                        .file_io
+                        .files_mut()
                         .read_byte(descriptor)
                         .ok()
                         .flatten()
@@ -293,7 +296,7 @@ impl<B: SimBackend> Simulator<B> {
                         let character = number(0)?;
                         if character != u32::MAX
                             && self
-                                .file_io
+                                .files_mut()
                                 .unread_byte(descriptor, character as u8)
                                 .is_ok()
                         {
@@ -302,7 +305,7 @@ impl<B: SimBackend> Simulator<B> {
                             -1
                         }
                     }
-                    12 => i32::from(self.file_io.eof(descriptor).unwrap_or(false)),
+                    12 => i32::from(self.files_mut().eof(descriptor).unwrap_or(false)),
                     _ => unreachable!(),
                 };
                 self.backend.set(site.results[0].id, code);
@@ -364,7 +367,7 @@ impl<B: SimBackend> Simulator<B> {
                         )
                     })
                     .collect();
-                self.file_io
+                self.files_mut()
                     .write_memory_with_backend(
                         path,
                         site.operation == 5,
@@ -378,130 +381,6 @@ impl<B: SimBackend> Simulator<B> {
                         }),
                     )
                     .map_err(|err| error(format!("$writemem: {err}")))?;
-            }
-            21 | 22 => {
-                let task = if site.operation == 22 {
-                    "$readmemb"
-                } else {
-                    "$readmemh"
-                };
-                let path = string(0)?;
-                let metadata = |index: usize| -> Result<i128, Halt> {
-                    site.strings[index]
-                        .parse()
-                        .map_err(|_| error("invalid memory metadata".into()))
-                };
-                let (left, right) = (metadata(0)?, metadata(1)?);
-                let width = usize::try_from(metadata(2)?)
-                    .map_err(|_| error("invalid memory metadata".into()))?;
-                let address = |index: usize| -> Result<i128, Halt> {
-                    let (value, mask) = &values[index];
-                    if *mask != BigUint::default() {
-                        return Err(error(format!("{task} address contains X or Z")));
-                    }
-                    let mut value = num_bigint::BigInt::from(value.clone());
-                    let arg = &site.args[index];
-                    if arg.signed && arg.width > 0 && value.bit(arg.width as u64 - 1) {
-                        value -= num_bigint::BigInt::from(1u8) << arg.width;
-                    }
-                    value
-                        .try_into()
-                        .map_err(|_| error(format!("{task} address exceeds supported range")))
-                };
-                let (low, high) = (left.min(right), left.max(right));
-                let start = if site.args.len() > 1 {
-                    address(1)?
-                } else {
-                    low
-                };
-                let finish = if site.args.len() > 2 {
-                    address(2)?
-                } else {
-                    high
-                };
-                if start < low || start > high || finish < low || finish > high {
-                    return Err(error(format!(
-                        "{task}: address range [{start}:{finish}] is outside the destination range [{low}:{high}]"
-                    )));
-                }
-                let content = std::fs::read_to_string(&path)
-                    .map_err(|err| error(format!("{task}: failed to read {path}: {err}")))?;
-                let parsed = celox_frontend_core::memory_file::parse_memory_range(
-                    &content,
-                    if site.operation == 22 { 2 } else { 16 },
-                    width,
-                    start,
-                    finish,
-                )
-                .map_err(|err| error(format!("{task}: {}", err.message)))?;
-                // The words the file gives replace those of the copy of the
-                // memory, which keeps the others.
-                let target = site.results[0].id;
-                let (data, unknown) = self.backend.get_four_state(target);
-                let bytes = target.width.div_ceil(8);
-                let mut data = data.to_bytes_le();
-                let mut unknown = unknown.to_bytes_le();
-                data.resize(bytes, 0);
-                unknown.resize(bytes, 0);
-                let bit = |bytes: &[u8], index: usize| {
-                    bytes
-                        .get(index / 8)
-                        .is_some_and(|byte| byte >> (index % 8) & 1 != 0)
-                };
-                let set = |bytes: &mut [u8], index: usize, value: bool| {
-                    let flag = 1u8 << (index % 8);
-                    if value {
-                        bytes[index / 8] |= flag;
-                    } else {
-                        bytes[index / 8] &= !flag;
-                    }
-                };
-                for run in &parsed.writes.runs {
-                    for word in 0..run.bit_width / width {
-                        // Run offsets count from the lowest address read.
-                        let index = start.min(finish) + (run.bit_offset / width + word) as i128;
-                        let base = index.abs_diff(left) as usize * width;
-                        for offset in 0..width {
-                            let source = word * width + offset;
-                            set(&mut data, base + offset, bit(&run.value_bytes, source));
-                            set(&mut unknown, base + offset, bit(&run.mask_bytes, source));
-                        }
-                    }
-                }
-                let data = BigUint::from_bytes_le(&data);
-                let unknown = BigUint::from_bytes_le(&unknown);
-                if self.backend.layout().four_state && target.is_4state {
-                    self.backend.set_four_state(target, data, unknown);
-                } else {
-                    let whole = (BigUint::from(1u8) << target.width) - BigUint::from(1u8);
-                    self.backend.set_wide(target, data & (whole ^ unknown));
-                }
-                // IEEE 1800-2023 21.4: a file without addresses that holds
-                // another number of words than the range is read with a
-                // warning.
-                if let Some(detail) = parsed.warning {
-                    let message = format!("{task} reading {path}: {detail}").replace('%', "%%");
-                    let scope = self.process_scope(site.process.index());
-                    self.queue_host_runtime_event(
-                        RuntimeEventSite {
-                            kind: RuntimeEventKind::Report(Severity::Warning),
-                            template: Some(message),
-                            sizing: DisplaySizing::Ieee,
-                            scope,
-                            location: None,
-                            assertion: None,
-                            deferred: None,
-                            timestamp_arg: false,
-                            time_format_arg: false,
-                            arg_widths: Vec::new(),
-                            arg_signed: Vec::new(),
-                            arg_is_string: Vec::new(),
-                            arg_float_precision: Vec::new(),
-                            arg_is_handle: Vec::new(),
-                        },
-                        Vec::new(),
-                    );
-                }
             }
             _ => return Err(error("unknown file I/O request".into())),
         }

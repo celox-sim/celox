@@ -5,18 +5,13 @@ use super::*;
 impl Type {
     pub(super) fn implicit() -> Self {
         Self::from(TypeShape {
-            is_enum: false,
-            enum_domain: None,
-            packed_enum: false,
             kind: TypeKind::Implicit,
             is_signed: false,
             packed_ranges: Vec::new(),
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
             signed_element_depth: None,
-            class: None,
             container: None,
-            unpacked_struct: None,
             spelling: type_names::Spelling::default(),
         })
     }
@@ -24,17 +19,12 @@ impl Type {
     pub(super) fn new(kind: TypeKind) -> Self {
         Self::from(TypeShape {
             kind,
-            is_enum: false,
-            enum_domain: None,
-            packed_enum: false,
             is_signed: false,
             packed_ranges: Vec::new(),
             unpacked_ranges: Vec::new(),
             members: Vec::new(),
             signed_element_depth: None,
-            class: None,
             container: None,
-            unpacked_struct: None,
             spelling: type_names::Spelling::default(),
         })
     }
@@ -43,17 +33,25 @@ impl Type {
     /// unless an earlier typedef already named it (`typedef A B` names the
     /// type of `A`). `typename` is how `$typename` writes the name.
     /// `scope` is the elaborated scope that declares the typedef (see
-    /// [`types::unit_scope`]).
+    /// [`types::unit_scope`]). An enumerated type the type keeps is named
+    /// too.
     pub(super) fn name_declaration(
         &mut self,
         scope: Option<Arc<str>>,
         name: impl FnOnce() -> (String, type_names::TypedefName),
     ) {
-        if (self.is_enum || !self.members.is_empty() || self.unpacked_struct.is_some())
+        if (self.enumeration().is_some()
+            || !self.members.is_empty()
+            || self.unpacked_struct().is_some())
             && self.spelling.declaration().is_none()
         {
             let (name, typename) = name();
-            self.spelling.name(name.into(), typename, scope);
+            let mut enumeration = self.enumeration.binding();
+            enumeration.name(&name, scope.as_ref(), &typename);
+            self.reshape_keeping_declarations(|shape| {
+                shape.spelling.name(name.into(), typename, scope);
+            });
+            self.keep_enumeration(enumeration);
         }
     }
 
@@ -81,24 +79,25 @@ impl Type {
             })
     }
 
-    /// The members of an unpacked structure type.
+    /// The declaration of the unpacked structure type the type is, or
+    /// whose elements a fixed-size unpacked array of it has (IEEE 1800-2023
+    /// 7.2, 7.4.2), as the type keeps it.
     pub(in crate::ast) fn unpacked_struct(&self) -> Option<&Arc<unpacked_structs::UnpackedStruct>> {
-        self.unpacked_struct.as_ref()
+        self.structure.declaration()
     }
 
     pub(crate) fn structure_identity(&self) -> Option<&str> {
-        self.unpacked_struct.as_ref().map(|ty| ty.identity())
+        self.unpacked_struct().map(|ty| ty.identity())
     }
 
     /// Non-storage aggregate paths, including the root, retained for member typing.
     pub(crate) fn structure_aggregates(&self, base: &str) -> Vec<(String, Self)> {
-        self.unpacked_struct
-            .as_ref()
+        self.unpacked_struct()
             .map_or_else(Vec::new, |_| unpacked_structs::aggregates(base, self))
     }
 
     pub(crate) fn structure_leaves(&self) -> Vec<(String, Self)> {
-        self.unpacked_struct.as_ref().map_or_else(Vec::new, |ty| {
+        self.unpacked_struct().map_or_else(Vec::new, |ty| {
             ty.leaves()
                 .into_iter()
                 .map(|leaf| (leaf.path.join("."), leaf.r#type))
@@ -106,29 +105,18 @@ impl Type {
         })
     }
 
-    /// The class of an object handle type, or of the elements of an array
-    /// of them. Conversions of the type read it, and the readers that have
-    /// no type table; the others ask `class_in`.
-    pub fn class(&self) -> Option<&str> {
-        self.class.as_deref()
-    }
-
     /// The class of an object handle type, or of the elements of a
     /// fixed-size array of them, as its semantic type in `table` tells.
     pub(in crate::ast) fn class_in(&self, table: &semantic_types::TyTable) -> Option<Arc<str>> {
-        let Some(id) = self.binding.get(table) else {
-            debug_assert!(
-                self.class.is_none(),
-                "a class handle type is told by its semantic type"
-            );
-            return None;
-        };
-        let class = table.handle_class(id);
-        debug_assert_eq!(
-            class.map(|class| &**class),
-            self.class(),
-            "the semantic type of a handle type"
+        debug_assert!(
+            !self.binding.class_outside(table) && !self.element.class_outside(table),
+            "a class handle type is read in a table that does not hold it: {self:?}"
         );
+        let class = self
+            .binding
+            .get(table)
+            .or_else(|| self.element.get(table))
+            .and_then(|id| table.handle_class(id));
         class.cloned()
     }
 
@@ -138,7 +126,7 @@ impl Type {
         unpacked_structs::is_struct(
             self.binding.get(table),
             table,
-            self.unpacked_struct.is_some(),
+            self.unpacked_struct().is_some(),
         )
     }
 
@@ -148,28 +136,21 @@ impl Type {
         &'a self,
         table: &'a semantic_types::TyTable,
     ) -> Option<&'a Arc<unpacked_structs::UnpackedStruct>> {
-        unpacked_structs::declaration_of(
-            self.binding.get(table),
-            table,
-            self.unpacked_struct.as_ref(),
-        )
+        unpacked_structs::declaration_of(self.binding.get(table), table, self.unpacked_struct())
     }
 
     /// What the type is of an enumeration, as its semantic type in `table`
-    /// tells (see [`enums::Enumeration::of`]).
+    /// tells (see [`enums::Enumeration::of`]), or the enumerated type it
+    /// keeps while it has none.
     pub(in crate::ast) fn enumeration_in(
         &self,
         table: &semantic_types::TyTable,
     ) -> enums::Enumeration {
-        enums::Enumeration::of(self.binding.get(table), table, self.enumeration_fields())
-    }
-
-    /// The enumeration the conversion input fields of the type tell.
-    pub(in crate::ast) fn enumeration_fields(&self) -> enums::Enumeration {
-        enums::Enumeration {
-            enumeration: self.is_enum || self.packed_enum,
-            packed: self.packed_enum,
-            domain: self.enum_domain.clone(),
+        match (self.binding.get(table), self.enumeration.declaration()) {
+            (None, Some(declaration)) => {
+                enums::Enumeration::kept(declaration, self.packed_ranges.len())
+            }
+            (id, _) => enums::Enumeration::of(id, table),
         }
     }
 
@@ -259,7 +240,7 @@ impl Type {
                     Some(key) => Some(key.with_resolved_container_bounds(eval)?),
                     None => None,
                 },
-                layout: container.layout,
+                layout: container.layout.clone(),
                 element: container.element.with_resolved_container_bounds(eval)?,
                 record: container.record.clone(),
                 fixed: container.fixed,
@@ -284,6 +265,21 @@ impl Type {
     /// selects them (IEEE 1800-2023 23.6).
     pub fn with_members_of(mut self, other: &Type) -> Self {
         self.members = other.members.clone();
+        self
+    }
+
+    /// Whether the type is an enumeration or a packed array of them.
+    pub(crate) fn has_enumeration(&self) -> bool {
+        self.enumeration().is_some()
+    }
+
+    /// The type with the enumeration of `other`, its named values and its
+    /// typedef name: a name of a variable or a subroutine of another scope,
+    /// whose type is resolved there, has them (IEEE 1800-2023 6.19, 23.6).
+    pub fn with_enumeration_of(mut self, other: &Type) -> Self {
+        self.spelling = other.spelling.clone();
+        // The type keeps the enumerated type `other` keeps.
+        self.keep_enumeration(other.enumeration.binding());
         self
     }
 
@@ -376,7 +372,7 @@ pub(crate) fn ir_type(
     env: &ConstEnv,
 ) -> crate::ir::Type {
     let bounds = semantic_types::packed_bounds(&mut session.types, functions, &ty, env);
-    ir_type_with_bounds(functions, ty, env, bounds)
+    ir_type_with_bounds(&session.types, functions, ty, env, bounds)
 }
 
 /// [`ir_type`] for a type `env` may not name the way its declaring scope
@@ -389,10 +385,11 @@ pub(crate) fn declared_ir_type(
     env: &ConstEnv,
 ) -> crate::ir::Type {
     let bounds = semantic_types::declared_packed_bounds(&mut session.types, functions, &ty, env);
-    ir_type_with_bounds(functions, ty, env, bounds)
+    ir_type_with_bounds(&session.types, functions, ty, env, bounds)
 }
 
 fn ir_type_with_bounds(
+    table: &semantic_types::TyTable,
     functions: &const_functions::ConstantFunctions,
     ty: Type,
     env: &ConstEnv,
@@ -404,6 +401,7 @@ fn ir_type_with_bounds(
             constants: env,
             functions,
         },
+        &|ty| ty.class_in(table).map(|class| class.to_string()),
     )
     .with_packed_bounds(bounds)
 }

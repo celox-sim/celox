@@ -278,6 +278,617 @@ module top;
   end
 endmodule"#;
 
+/// A released target of an `always_comb`, `always_latch` or `always @*`
+/// procedure keeps the forced value until the procedure executes again
+/// (9.2.2.2), also when its input changes in the time step of the release,
+/// and when it changes twice.
+const HOLD: &str = r#"`timescale 1ns/1ns
+module top;
+  logic a = 0, b = 0, en = 0, c = 0;
+  logic v, l, s;
+  always_comb v = a & b;
+  always_latch if (en) l = a;
+  always @* s = a | b;
+  initial begin
+    #1 $display("A %b", v);
+    force v = 1'b1; force l = 1'b1; force s = 1'b0;
+    #1 $display("B %b %b %b", v, l, s);
+    release v; release l; release s;
+    #1 $display("C %b %b %b", v, l, s);
+    c = 1;
+    #1 $display("D %b %b %b", v, l, s);
+    b = 1;
+    #1 $display("E %b %b %b", v, l, s);
+    en = 1;
+    #1 $display("F %b %b %b", v, l, s);
+    force v = 1'b0;
+    #1 release v; a = 1;
+    #1 $display("G %b %b %b", v, l, s);
+    force v = 1'b0;
+    #1 release v;
+    #1 $display("H %b %b %b", v, l, s);
+    release v;
+    b = 0; b = 1;
+    #1 $display("I %b %b %b", v, l, s);
+    $finish;
+  end
+endmodule"#;
+
+/// A force and a release at time zero, before the time-zero execution of
+/// an `always_comb` and an `always_latch` (9.2.2.2.2), which ends their
+/// holds. The lines are those of Icarus Verilog 13.0.
+const TIME_ZERO_HOLD: &str = r#"`timescale 1ns/1ns
+module top;
+  logic a = 0, v, l, en = 1;
+  always_comb v = a;
+  always_latch if (en) l = a;
+  initial begin
+    force v = 1'b1; force l = 1'b1;
+    release v; release l;
+    #1 $display("A %b %b", v, l);
+    $finish;
+  end
+endmodule"#;
+
+/// A force of a target an `always_comb` assigns whole to an expression of
+/// a variable the procedure does not read: the target follows the
+/// expression while the force lasts. The lines are those of Verilator 5.054
+/// (Icarus Verilog 13.0 evaluates the expression only once).
+const VARYING_COMB: &str = r#"`timescale 1ns/1ns
+module top;
+  logic a = 0, b = 0, v;
+  always_comb v = a;
+  initial begin
+    #1 force v = b;
+    #1 $display("A %b", v);
+    b = 1;
+    #1 $display("B %b", v);
+    b = 0;
+    #1 $display("C %b", v);
+    $finish;
+  end
+endmodule"#;
+
+/// A force and a release of a target an `always @*` assigns, at time zero:
+/// the procedure waits for a change (9.2.2.2) and holds the target, as
+/// Icarus Verilog 13.0 does, in four-state mode; in two-state mode it runs at
+/// time zero (see the reference), which ends the hold.
+const STAR_TIME_ZERO: &str = r#"`timescale 1ns/1ns
+module top;
+  logic a = 0, v;
+  always @* v = a;
+  initial begin
+    force v = 1'b1;
+    release v;
+    #1 $display("A %b", v);
+    a = 1;
+    #1 $display("B %b", v);
+    $finish;
+  end
+endmodule"#;
+
+/// An assignment of another procedure to a released target that an
+/// `always @*` holds takes effect at once and ends the hold (10.6.2). The
+/// lines are those of Icarus Verilog 13.0.
+const OTHER_WRITER: &str = r#"`timescale 1ns/1ns
+module top;
+  logic a = 0, q;
+  always @* q = a;
+  initial begin
+    #1 force q = 1'b1;
+    #1 release q;
+    q = 1'b0;
+    #1 $display("A %b", q);
+    a = 1;
+    #1 $display("B %b", q);
+    $finish;
+  end
+endmodule"#;
+
+/// A force and a release of a target an `always_latch` assigns do not run
+/// the procedure again: its other effects happen only when it executes.
+/// The lines are those of Icarus Verilog 13.0.
+const COUNTED_RUNS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic en = 1, d = 0, q;
+  int n = 0;
+  always_latch if (en) begin q = d; n = n + 1; end
+  initial begin
+    #1 $display("A %b %0d", q, n);
+    force q = 1'b1;
+    #1 $display("B %b %0d", q, n);
+    release q;
+    #1 $display("C %b %0d", q, n);
+    d = 1;
+    #1 $display("D %b %0d", q, n);
+    $finish;
+  end
+endmodule"#;
+
+/// A target an `always_comb` assigns through the `output` actual of a
+/// function in an expression, which the procedure does not read.
+const OUTPUT_ACTUALS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic d = 0, q, dummy;
+  function automatic logic write_q(output logic o);
+    o = d;
+    return 1'b1;
+  endfunction
+  always_comb dummy = write_q(q);
+  initial begin
+    #1 force q = 1'b1;
+    #1 $display("A %b", q);
+    $finish;
+  end
+endmodule"#;
+
+/// A force of a variable whose only writer is an `always_comb` of a
+/// generate block with a false condition, which never runs: the force stores
+/// its value. The line is that of Icarus Verilog 13.0.
+const INACTIVE_WRITER: &str = r#"`timescale 1ns/1ns
+module top;
+  localparam bit P = 1'b0;
+  logic a = 0, v;
+  if (P) begin : g
+    always_comb v = a;
+  end
+  initial begin
+    #1 force v = 1'b1;
+    #1 $display("A %b", v);
+    $finish;
+  end
+endmodule"#;
+
+/// The hold of a target an `always_comb` with a loop over the members of a
+/// packed array assigns.
+const HOLD_LOOP: &str = r#"`timescale 1ns/1ns
+module top;
+  typedef struct packed { logic en; logic [1:0] e; } w_t;
+  w_t [1:0] w;
+  logic [3:0] q;
+  logic [3:0] tmp;
+  always_comb begin
+    tmp = '0;
+    for (int i = 0; i < 2; i++)
+      tmp |= w[i].en ? 4'(w[i].e) << i : '0;
+    q = tmp;
+  end
+  initial begin
+    w = '0;
+    #1 $display("A %0d", q);
+    force q = 4'd9;
+    #1 $display("B %0d", q);
+    release q;
+    #1 $display("C %0d", q);
+    w[1] = '{en: 1, e: 2};
+    #1 $display("D %0d", q);
+    $finish;
+  end
+endmodule"#;
+
+/// Targets an `always_comb` assigns through a called function and through
+/// the output of a called task are held after the release too: the one
+/// the function assigns until a change of what the function reads runs
+/// the procedure again (9.2.2.2.1), the other until the procedure runs
+/// again. The lines are those of Icarus Verilog 13.0.
+const HOLD_CALLS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic [3:0] a = 4'd1, v, w;
+  function void set(); v = a; endfunction
+  task automatic get(output logic [3:0] o); o = a + 4'd1; endtask
+  always_comb set();
+  always_comb get(w);
+  initial begin
+    #1 force v = 4'd9; force w = 4'd9;
+    #1 $display("A %0d %0d", v, w);
+    release v; release w;
+    #1 $display("B %0d %0d", v, w);
+    a = 4'd3;
+    #1 $display("C %0d %0d", v, w);
+    $finish;
+  end
+endmodule"#;
+
+/// A force of a clock an `always_comb` assigns on each branch of an `if`
+/// gives the edge it makes. The lines are those of Icarus Verilog 13.0.
+const COMB_BRANCH_CLOCKS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic clk = 0, sel = 1;
+  int m = 0;
+  logic gclk;
+  always_comb
+    if (sel) gclk = clk;
+    else gclk = 1'b0;
+  always @(posedge gclk) m++;
+  initial begin
+    #1 clk = 1; #1 clk = 0;
+    #1 $display("A %0d %b", m, gclk);
+    force gclk = 1'b1;
+    #1 $display("B %0d %b", m, gclk);
+    release gclk;
+    #1 $display("C %0d %b", m, gclk);
+    clk = 1;
+    #1 $display("D %0d %b", m, gclk);
+    $finish;
+  end
+endmodule"#;
+
+/// [`CLOCKS`] with the derived clock an `always_comb` assigns, which holds
+/// the forced value after the release until the clock changes.
+const COMB_CLOCKS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic clk = 0;
+  int n = 0, m = 0;
+  logic gclk;
+  always_comb gclk = clk;
+  always @(posedge clk) n++;
+  always @(posedge gclk) m++;
+  initial begin
+    #1 clk = 1; #1 clk = 0;
+    #1 $display("A %0d %0d", n, m);
+    force clk = 1'b1;
+    #1 $display("B %0d %0d", n, m);
+    clk = 0; #1 clk = 1;
+    #1 $display("C %0d %0d", n, m);
+    release clk;
+    #1 $display("D %0d %0d %b", n, m, clk);
+    clk = 0; #1 clk = 1;
+    #1 $display("E %0d %0d", n, m);
+    force gclk = 1'b0;
+    clk = 0; #1 clk = 1;
+    #1 $display("F %0d %0d", n, m);
+    release gclk;
+    #1 $display("G %0d %0d %b", n, m, gclk);
+    $finish;
+  end
+endmodule"#;
+
+/// Forces of members and constant selects: of a structure an
+/// `always_comb` assigns, held after the release, with genvar indices, of a
+/// vector with a declared range, of a part of a net, of a varying member,
+/// and a forced high impedance bit. The lines are those of Icarus Verilog,
+/// with the varying member of Verilator.
+const SELECTS: &str = r#"`timescale 1ns/1ns
+module top;
+  typedef struct packed { logic [3:0] hi; logic [3:0] lo; } p_t;
+  p_t s;
+  logic [7:4] v;
+  wire [3:0] w;
+  logic [3:0] a = 4'd5, b = 4'd1;
+  assign w = a;
+  always_comb begin
+    s.hi = a;
+    s.lo = ~a;
+  end
+  for (genvar i = 0; i < 2; i++) begin : g
+    initial #10 force s.lo[i] = 1'b1;
+  end
+  initial begin
+    v = 4'b0000;
+    #1 $display("A %h %b %b", s, v, w);
+    force s.hi = 4'hc; force v[5] = 1'b1; force w[2:1] = 2'b00; force w[3] = 1'bz;
+    #1 $display("B %h %b %b", s, v, w);
+    a = 4'd3; v = 4'b0000;
+    #1 $display("C %h %b %b", s, v, w);
+    release s.hi; release v[5]; release w[2:1]; release w[3];
+    #1 $display("D %h %b %b", s, v, w);
+    a = 4'd9;
+    #1 $display("E %h %b %b", s, v, w);
+    #6 $display("F %h %b %b", s, v, w);
+    force s.hi = b;
+    #1 $display("G %h", s);
+    b = 4'd7;
+    #1 $display("H %h", s);
+    release s.hi;
+    #1 $display("I %h", s);
+    a = 4'd2;
+    #1 $display("J %h", s);
+    $finish;
+  end
+endmodule"#;
+
+/// Forces of bits of a net that a continuous assignment drives in part:
+/// a bit no driver drives takes the forced value, and high impedance after
+/// the release. The lines are those of Icarus Verilog 13.0.
+const PARTIAL_NETS: &str = r#"`timescale 1ns/1ns
+module top;
+  wire [3:0] w;
+  logic [1:0] a = 2'b10;
+  assign w[3:2] = a;
+  initial begin
+    #1 $display("A %b", w);
+    force w[1] = 1'b1;
+    #1 $display("B %b", w);
+    force w[3] = 1'b0;
+    #1 $display("C %b", w);
+    release w[1]; release w[3];
+    #1 $display("D %b", w);
+    $finish;
+  end
+endmodule"#;
+
+/// Forces of the elements of a multidimensional packed array and of a
+/// bit of an ascending vector.
+const PACKED_ELEMENTS: &str = r#"`timescale 1ns/1ns
+module top;
+  logic [1:0][3:0] m;
+  logic [0:3] r;
+  initial begin
+    m = '0; r = '0;
+    force m[1] = 4'ha; force m[0][2] = 1'b1; force r[1] = 1'b1;
+    #1 $display("A %h %b", m, r);
+    m = 8'hff; r = 4'b0000;
+    #1 $display("B %h %b", m, r);
+    release m[1]; release m[0][2]; release r[1];
+    m = 8'h00; r = 4'b0000;
+    #1 $display("C %h %b", m, r);
+    $finish;
+  end
+endmodule"#;
+
+/// Forces in tasks: a task called in a forked process forces through a
+/// hierarchical name to its argument, which is read when the force
+/// executes, while the caller goes on; a task without delays forces to a
+/// varying expression, and another task releases it; a force in a forked
+/// branch. The lines are those of Verilator 5.054, as Icarus Verilog 13.0
+/// evaluates the forced expression only once (line W).
+const TASKS: &str = r#"`timescale 1ns/1ns
+module dut(input logic [7:0] addr_i, output logic [7:0] o);
+  assign o = addr_i;
+endmodule
+module top;
+  logic [7:0] a = 8'h11, b = 8'h20;
+  logic [7:0] x;
+  wire [7:0] o;
+  dut d(.addr_i(a), .o(o));
+  task drive(input logic [7:0] address);
+    force d.addr_i = address;
+    #2 release d.addr_i;
+  endtask
+  task follow;
+    force x = b + 8'h1;
+  endtask
+  task stop;
+    release x;
+  endtask
+  initial begin
+    fork drive(8'h5a); join_none
+    #1 $display("T %h", o);
+    #2 $display("U %h", o);
+    follow;
+    #1 $display("V %h", x);
+    b = 8'h30;
+    #1 $display("W %h", x);
+    stop;
+    b = 8'h40;
+    #1 $display("X %h", x);
+    fork
+      begin force a = 8'h33; #1 $display("Y %h", o); release a; end
+    join
+    #1 $display("Z %h", o);
+    a = 8'h44;
+    #1 $display("Q %h", o);
+    $finish;
+  end
+endmodule"#;
+
+/// Forces to random values with constant arguments, drawn when the force
+/// executes, and again when a variable of the expression changes. The
+/// lines are those of Verilator 5.054 (Icarus Verilog evaluates the
+/// expression only once, line S).
+const RANDOM_VALUES: &str = r#"`timescale 1ns/1ns
+module top;
+  logic [31:0] x, y, z;
+  logic [7:0] c = 8'h12;
+  initial begin
+    force x = $urandom();
+    force y = {16'h0, 16'($urandom_range(5, 9))};
+    force z = {24'h0, c} + $urandom_range(0, 0);
+    #1 $display("R %b %b %h", x != 0, y >= 5 && y <= 9, z);
+    c = 8'h34;
+    #1 $display("S %h", z);
+    $finish;
+  end
+endmodule"#;
+
+/// Forces of members of an interface instance, a variable and one a
+/// continuous assignment drives, which drives it again after the release.
+const INTERFACE_MEMBERS: &str = r#"`timescale 1ns/1ns
+interface bus_if;
+  logic ready;
+  logic [3:0] data;
+endinterface
+module top;
+  bus_if b();
+  logic clk = 0;
+  assign b.ready = clk;
+  initial begin
+    b.data = 4'd1;
+    #1 force b.ready = 1'b1; force b.data = 4'd7;
+    #1 $display("A %b %0d", b.ready, b.data);
+    release b.ready; release b.data;
+    #1 $display("B %b %0d", b.ready, b.data);
+    $finish;
+  end
+endmodule"#;
+
+/// Forces of elements of unpacked arrays at constant indices, of a select
+/// of one, through a hierarchical name and to a varying expression: a
+/// write of a memory at a run-time index keeps the forced bits of a forced
+/// element, writes its neighbours, and writes nothing at an index outside
+/// the array, nor at an index with unknown bits in four-state mode (IEEE
+/// 1800-2023 7.4.6); a read at a run-time index reads the forced value.
+/// Icarus Verilog 13.0 does not force elements of arrays; the lines are
+/// those of Verilator 5.054, which is two-state.
+const UNPACKED_ELEMENTS: &str = r#"`timescale 1ns/1ns
+module mem(input logic clk, input logic we, input logic [2:0] waddr, input logic [7:0] wdata,
+           input logic [1:0] raddr, output logic [7:0] rdata);
+  logic [1:0][3:0] ram [4];
+  always @(posedge clk) begin
+    if (we) ram[waddr] <= wdata;
+  end
+  assign rdata = ram[raddr];
+endmodule
+
+module top;
+  logic clk = 0;
+  logic we = 0;
+  logic [2:0] waddr = 0;
+  logic [1:0] raddr = 0;
+  logic [7:0] wdata = 0;
+  logic [7:0] rdata;
+  logic [3:0] src = 4'h5;
+  logic [7:0] loc [3];
+  int i;
+  mem u(.*);
+  task tick; clk = 1; #1 clk = 0; #1; endtask
+  initial begin
+    for (i = 0; i < 4; i++) u.ram[i] = 8'h10 * i;
+    for (i = 0; i < 3; i++) loc[i] = 8'h01 * i;
+    #1;
+    force u.ram[2][1] = src;
+    force u.ram[1] = 8'hab;
+    force loc[1][7:4] = 4'hc;
+    #1 $display("A %h %h %h %h", u.ram[0], u.ram[1], u.ram[2], u.ram[3]);
+    raddr = 2; #1 $display("B %h", rdata);
+    src = 4'h9; #1 $display("C %h", rdata);
+    we = 1; waddr = 2; wdata = 8'hee; tick;
+    $display("D %h %h %h %h", u.ram[0], u.ram[1], u.ram[2], u.ram[3]);
+    waddr = 3; wdata = 8'h77; tick;
+    waddr = 1; wdata = 8'h66; tick;
+    waddr = 5; wdata = 8'h55; tick;
+    $display("E %h %h %h %h", u.ram[0], u.ram[1], u.ram[2], u.ram[3]);
+    for (i = 0; i < 3; i++) loc[i] = 8'hf0 + i;
+    $display("F %h %h %h", loc[0], loc[1], loc[2]);
+    release u.ram[2][1];
+    release u.ram[1];
+    release loc[1][7:4];
+    #1 $display("G %h %h %h %h %h", u.ram[1], u.ram[2], loc[0], loc[1], loc[2]);
+    waddr = 2; wdata = 8'h33; tick;
+    i = 1; loc[i] = 8'h44;
+    raddr = 2; #1 $display("H %h %h %h", rdata, u.ram[1], loc[1]);
+    force u.ram[3] = 8'h5a;
+    waddr = 3'b0x1; wdata = 8'h11; tick;
+    waddr = 3'b01x; wdata = 8'h22; tick;
+    $display("I %h %h %h %h", u.ram[0], u.ram[1], u.ram[2], u.ram[3]);
+    $finish;
+  end
+endmodule"#;
+
+/// Forces of a member of a structure element of an unpacked array, and of
+/// a select of an element of an array an `always_comb` assigns at a
+/// run-time index, held after the release until the procedure executes
+/// again (IEEE 1800-2023 9.2.2.2). The lines are those of Verilator 5.054,
+/// which does not hold the released element (line G).
+const UNPACKED_MEMBERS: &str = r#"`timescale 1ns/1ns
+module top;
+  typedef struct packed { logic [3:0] a; logic [3:0] b; } s_t;
+  s_t arr [3];
+  logic [7:0] c [4];
+  logic [1:0] sel = 0;
+  logic [7:0] din = 0;
+  int i;
+  always_comb begin
+    for (int k = 0; k < 4; k++) c[k] = 8'h00;
+    c[sel] = din;
+  end
+  initial begin
+    for (i = 0; i < 3; i++) arr[i] = 8'h11 * i;
+    force arr[1].a = 4'h7;
+    #1 $display("A %h %h %h", arr[0], arr[1], arr[2]);
+    i = 1; arr[i] = 8'hff; arr[i].b = 4'h3;
+    #1 $display("B %h %h %h", arr[0], arr[1], arr[2]);
+    release arr[1].a;
+    i = 1; arr[i] = 8'h44;
+    #1 $display("C %h %h %h", arr[0], arr[1], arr[2]);
+    sel = 2; din = 8'h5c;
+    #1 $display("D %h %h %h %h", c[0], c[1], c[2], c[3]);
+    force c[2][3:0] = 4'h1;
+    #1 $display("E %h %h %h %h", c[0], c[1], c[2], c[3]);
+    din = 8'h6d;
+    #1 $display("F %h %h %h %h", c[0], c[1], c[2], c[3]);
+    release c[2][3:0];
+    #1 $display("G %h %h %h %h", c[0], c[1], c[2], c[3]);
+    din = 8'h7e;
+    #1 $display("H %h %h %h %h", c[0], c[1], c[2], c[3]);
+    $finish;
+  end
+endmodule"#;
+
+/// Forces through hierarchical names of a flip-flop of a child, of a part
+/// of a variable an `always_comb` of another child assigns, held after the
+/// release, and of a varying expression. The lines are those of Icarus
+/// Verilog, with the varying expression of Verilator.
+const HIERARCHICAL: &str = r#"`timescale 1ns/1ns
+module flop(input logic clk, input logic d, output logic q);
+  always @(posedge clk) q <= d;
+endmodule
+module comb(input logic [3:0] a, output logic [3:0] y);
+  logic [3:0] v;
+  always_comb v = a;
+  assign y = v;
+endmodule
+module top;
+  logic clk = 0, d = 1;
+  logic [3:0] a = 4'd5;
+  wire q;
+  wire [3:0] y;
+  flop u_flop(.clk(clk), .d(d), .q(q));
+  comb u_comb(.a(a), .y(y));
+  initial begin
+    #1 clk = 1; #1 clk = 0;
+    #1 $display("A %b %h", q, y);
+    force u_flop.q = 1'b0; force u_comb.v[1:0] = 2'b10;
+    #1 $display("B %b %h %b %h", q, y, u_flop.q, u_comb.v);
+    clk = 1; #1 clk = 0;
+    #1 $display("C %b %h", q, y);
+    release u_flop.q; release u_comb.v[1:0];
+    #1 $display("D %b %h", q, y);
+    a = 4'd8;
+    #1 $display("E %b %h", q, y);
+    clk = 1; #1 clk = 0;
+    #1 $display("F %b %h", q, y);
+    force u_flop.q = a[0];
+    #1 $display("G %b", q);
+    a = 4'd3;
+    #1 $display("H %b", q);
+    release u_flop.q;
+    $finish;
+  end
+endmodule"#;
+
+/// Forces through hierarchical names of an input port of one instance and
+/// of a bit of a net of another instance of the same module: the other
+/// instance keeps its values. Verilator 5.054 prints the same lines; Icarus
+/// Verilog collapses the input port onto the net of the parent, which it
+/// then forces too (10.6.2 leaves collapsed ports to the implementation).
+const HIERARCHICAL_INSTANCES: &str = r#"`timescale 1ns/1ns
+module leaf(input logic clk, input logic [3:0] din, output logic [3:0] q);
+  wire [3:0] w;
+  assign w = ~din;
+  always @(posedge clk) q <= w;
+endmodule
+module top;
+  logic clk = 0;
+  logic [3:0] din = 4'd3;
+  logic [3:0] q0, q1;
+  leaf u0(.clk(clk), .din(din), .q(q0));
+  leaf u1(.clk(clk), .din(din), .q(q1));
+  initial begin
+    #1 clk = 1; #1 clk = 0;
+    #1 $display("A %h %h", q0, q1);
+    force u0.din = 4'd5; force u1.w[2] = 1'b0;
+    #1 $display("B %h %h %h %h", u0.din, u0.w, u1.w, din);
+    clk = 1; #1 clk = 0;
+    #1 $display("C %h %h", q0, q1);
+    release u0.din; release u1.w[2];
+    #1 $display("D %h %h %h", u0.din, u0.w, u1.w);
+    clk = 1; #1 clk = 0;
+    #1 $display("E %h %h", q0, q1);
+    $finish;
+  end
+endmodule"#;
+
 sv_backends! {
     fn delayed_drivers_drive_again_after_the_release(sim) {
         @setup {}
@@ -302,6 +913,270 @@ sv_backends! {
         @build simulation(TIME_ZERO, true);
         sim.run_until(100).unwrap();
         assert_eq!(display_lines(&mut sim), ["A 1 1 3 0", "B 1 1 6 0"]);
+    }
+    fn procedures_hold_released_targets(sim) {
+        @setup {}
+        @build simulation(HOLD, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1 1 0", "C 1 1 0", "D 1 1 0", "E 0 1 1", "F 0 0 1", "G 1 1 1", "H 0 1 1", "I 1 1 1"]);
+    }
+    fn procedures_hold_released_targets_four_state(sim) {
+        @setup {}
+        @build simulation(HOLD, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1 1 0", "C 1 1 0", "D 1 1 0", "E 0 1 1", "F 0 0 1", "G 1 1 1", "H 0 1 1", "I 1 1 1"]);
+    }
+    fn time_zero_executions_end_holds(sim) {
+        @setup {}
+        @build simulation(TIME_ZERO_HOLD, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0 0"]);
+    }
+    fn time_zero_executions_end_holds_four_state(sim) {
+        @setup {}
+        @build simulation(TIME_ZERO_HOLD, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0 0"]);
+    }
+    fn comb_targets_follow_varying_forces(sim) {
+        @setup {}
+        @build simulation(VARYING_COMB, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1", "C 0"]);
+    }
+    fn comb_targets_follow_varying_forces_four_state(sim) {
+        @setup {}
+        @build simulation(VARYING_COMB, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1", "C 0"]);
+    }
+    fn always_star_time_zero_holds(sim) {
+        @setup {}
+        @build simulation(STAR_TIME_ZERO, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1"]);
+    }
+    fn always_star_time_zero_holds_four_state(sim) {
+        @setup {}
+        @build simulation(STAR_TIME_ZERO, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1", "B 1"]);
+    }
+    fn other_writers_end_holds(sim) {
+        @setup {}
+        @build simulation(OTHER_WRITER, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1"]);
+    }
+    fn other_writers_end_holds_four_state(sim) {
+        @setup {}
+        @build simulation(OTHER_WRITER, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 1"]);
+    }
+    fn forces_do_not_run_procedures(sim) {
+        @setup {}
+        @build simulation(COUNTED_RUNS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0 1", "B 1 1", "C 1 1", "D 1 2"]);
+    }
+    fn forces_do_not_run_procedures_four_state(sim) {
+        @setup {}
+        @build simulation(COUNTED_RUNS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0 1", "B 1 1", "C 1 1", "D 1 2"]);
+    }
+    fn targets_of_output_actuals_are_forced(sim) {
+        @setup {}
+        @build simulation(OUTPUT_ACTUALS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1"]);
+    }
+    fn targets_of_output_actuals_are_forced_four_state(sim) {
+        @setup {}
+        @build simulation(OUTPUT_ACTUALS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1"]);
+    }
+    fn forces_of_targets_of_inactive_procedures(sim) {
+        @setup {}
+        @build simulation(INACTIVE_WRITER, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1"]);
+    }
+    fn forces_of_targets_of_inactive_procedures_four_state(sim) {
+        @setup {}
+        @build simulation(INACTIVE_WRITER, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1"]);
+    }
+    fn procedures_with_loops_hold_released_targets(sim) {
+        @setup {}
+        @build simulation(HOLD_LOOP, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 9", "C 9", "D 4"]);
+    }
+    fn procedures_with_loops_hold_released_targets_four_state(sim) {
+        @setup {}
+        @build simulation(HOLD_LOOP, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 0", "B 9", "C 9", "D 4"]);
+    }
+    fn procedures_hold_targets_their_calls_assign(sim) {
+        @setup {}
+        @build simulation(HOLD_CALLS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 9 9", "B 9 9", "C 3 9"]);
+    }
+    fn procedures_hold_targets_their_calls_assign_four_state(sim) {
+        @setup {}
+        @build simulation(HOLD_CALLS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 9 9", "B 9 9", "C 3 9"]);
+    }
+    fn forced_clocks_of_comb_branches_give_edges(sim) {
+        @setup {}
+        @build simulation(COMB_BRANCH_CLOCKS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 0", "B 2 1", "C 2 1", "D 2 1"]);
+    }
+    fn forced_clocks_of_comb_branches_give_edges_four_state(sim) {
+        @setup {}
+        @build simulation(COMB_BRANCH_CLOCKS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 0", "B 2 1", "C 2 1", "D 2 1"]);
+    }
+    fn forced_procedure_clocks_give_edges(sim) {
+        @setup {}
+        @build simulation(COMB_CLOCKS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 1", "B 2 2", "C 2 2", "D 2 2 1", "E 3 3", "F 4 3", "G 4 3 0"]);
+    }
+    fn forced_procedure_clocks_give_edges_four_state(sim) {
+        @setup {}
+        @build simulation(COMB_CLOCKS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 1", "B 2 2", "C 2 2", "D 2 2 1", "E 3 3", "F 4 3", "G 4 3 0"]);
+    }
+    fn forces_of_members_and_selects(sim) {
+        @setup {}
+        @build simulation(SELECTS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 5a 0000 0101", "B ca 0010 0001", "C cc 0010 0001", "D cc 0010 0011", "E 96 0010 1001", "F 97 0010 1001", "G 17", "H 77", "I 77", "J 2f"]);
+    }
+    fn forces_of_members_and_selects_four_state(sim) {
+        @setup {}
+        @build simulation(SELECTS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 5a 0000 0101", "B ca 0010 z001", "C cc 0010 z001", "D cc 0010 0011", "E 96 0010 1001", "F 97 0010 1001", "G 17", "H 77", "I 77", "J 2f"]);
+    }
+    fn forces_of_bits_of_partly_driven_nets(sim) {
+        @setup {}
+        @build simulation(PARTIAL_NETS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1000", "B 1010", "C 0010", "D 1000"]);
+    }
+    fn forces_of_bits_of_partly_driven_nets_four_state(sim) {
+        @setup {}
+        @build simulation(PARTIAL_NETS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 10zz", "B 101z", "C 001z", "D 10zz"]);
+    }
+    fn forces_of_packed_elements(sim) {
+        @setup {}
+        @build simulation(PACKED_ELEMENTS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A a4 0100", "B af 0100", "C 00 0000"]);
+    }
+    fn forces_of_packed_elements_four_state(sim) {
+        @setup {}
+        @build simulation(PACKED_ELEMENTS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A a4 0100", "B af 0100", "C 00 0000"]);
+    }
+    fn forces_in_tasks(sim) {
+        @setup {}
+        @build simulation(TASKS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["T 5a", "U 11", "V 21", "W 31", "X 31", "Y 33", "Z 33", "Q 44"]);
+    }
+    fn forces_in_tasks_four_state(sim) {
+        @setup {}
+        @build simulation(TASKS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["T 5a", "U 11", "V 21", "W 31", "X 31", "Y 33", "Z 33", "Q 44"]);
+    }
+    fn forces_to_random_values(sim) {
+        @setup {}
+        @build simulation(RANDOM_VALUES, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["R 1 1 00000012", "S 00000034"]);
+    }
+    fn forces_to_random_values_four_state(sim) {
+        @setup {}
+        @build simulation(RANDOM_VALUES, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["R 1 1 00000012", "S 00000034"]);
+    }
+    fn forces_of_interface_members(sim) {
+        @setup {}
+        @build simulation(INTERFACE_MEMBERS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 7", "B 0 7"]);
+    }
+    fn forces_of_interface_members_four_state(sim) {
+        @setup {}
+        @build simulation(INTERFACE_MEMBERS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 7", "B 0 7"]);
+    }
+    fn forces_of_unpacked_array_elements(sim) {
+        @setup {}
+        @build simulation(UNPACKED_ELEMENTS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 00 ab 50 30", "B 50", "C 90", "D 00 ab 9e 30", "E 00 ab 9e 77", "F f0 c1 f2", "G ab 9e f0 c1 f2", "H 33 ab 44", "I 00 11 22 5a"]);
+    }
+    fn forces_of_unpacked_array_elements_four_state(sim) {
+        @setup {}
+        @build simulation(UNPACKED_ELEMENTS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 00 ab 50 30", "B 50", "C 90", "D 00 ab 9e 30", "E 00 ab 9e 77", "F f0 c1 f2", "G ab 9e f0 c1 f2", "H 33 ab 44", "I 00 ab 33 5a"]);
+    }
+    fn forces_of_unpacked_array_members_and_held_elements(sim) {
+        @setup {}
+        @build simulation(UNPACKED_MEMBERS, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 00 71 22", "B 00 73 22", "C 00 44 22", "D 00 00 5c 00", "E 00 00 51 00", "F 00 00 61 00", "G 00 00 61 00", "H 00 00 7e 00"]);
+    }
+    fn forces_of_unpacked_array_members_and_held_elements_four_state(sim) {
+        @setup {}
+        @build simulation(UNPACKED_MEMBERS, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 00 71 22", "B 00 73 22", "C 00 44 22", "D 00 00 5c 00", "E 00 00 51 00", "F 00 00 61 00", "G 00 00 61 00", "H 00 00 7e 00"]);
+    }
+    fn forces_through_hierarchical_names(sim) {
+        @setup {}
+        @build simulation(HIERARCHICAL, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 5", "B 0 6 0 6", "C 0 6", "D 0 6", "E 0 8", "F 1 8", "G 0", "H 1"]);
+    }
+    fn forces_through_hierarchical_names_four_state(sim) {
+        @setup {}
+        @build simulation(HIERARCHICAL, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A 1 5", "B 0 6 0 6", "C 0 6", "D 0 6", "E 0 8", "F 1 8", "G 0", "H 1"]);
+    }
+    fn forces_of_one_instance_through_hierarchical_names(sim) {
+        @setup {}
+        @build simulation(HIERARCHICAL_INSTANCES, false);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A c c", "B 5 a 8 3", "C a 8", "D 3 c c", "E c c"]);
+    }
+    fn forces_of_one_instance_through_hierarchical_names_four_state(sim) {
+        @setup {}
+        @build simulation(HIERARCHICAL_INSTANCES, true);
+        sim.run_until(100).unwrap();
+        assert_eq!(display_lines(&mut sim), ["A c c", "B 5 a 8 3", "C a 8", "D 3 c c", "E c c"]);
     }
     fn lrm_example_forces_and_releases(sim) {
         @setup {}
@@ -401,8 +1276,9 @@ sv_backends! {
     }
 }
 
-/// [`CLOCKS`] on the interpreter and on the tiered backend, whose derived
-/// clocks follow the forced net as the native image's do (see #3755).
+/// [`CLOCKS`] and [`COMB_CLOCKS`] on the interpreter and on the tiered
+/// backend, whose derived clocks follow the forced net or variable as the
+/// native image's do (see #3755).
 #[test]
 fn forced_clocks_give_edges_on_interpreter_and_tiered() {
     let expected = [
@@ -430,34 +1306,64 @@ fn forced_clocks_give_edges_on_interpreter_and_tiered() {
 fn rejected_forces_name_their_reason() {
     for (body, expected) in [
         (
-            "logic [3:0] v; initial force v[0] = 1'b1;",
-            "force or release of a bit-select or part-select",
+            "logic [3:0] v; int i; initial force v[i] = 1'b1;",
+            "whose bounds are not constant",
+        ),
+        (
+            "logic [3:0] v, a; initial begin force v[1] = a; force v = 4'd0; end",
+            "overlapping parts of `v`",
+        ),
+        // The whole of a vector with a declared range overlaps its bits.
+        (
+            "logic [7:4] v, a; initial begin force v = a; force v[5] = 1'b1; end",
+            "overlapping parts of `v`",
         ),
         (
             "logic a, b; initial force {a, b} = 2'b01;",
             "force or release of a concatenation",
         ),
         (
-            "typedef struct packed { logic a; logic b; } s_t; s_t s; initial force s.a = 1'b1;",
-            "of a member or an element",
+            "logic [3:0] m [4]; initial force m[1:0] = '{4'd1, 4'd2};",
+            "slice of an unpacked array",
         ),
         (
-            "logic v, a; always_comb v = a; initial force v = 1'b1;",
-            "which an `always_comb` procedure assigns",
+            "string m [2]; initial force m[0] = \"a\";",
+            "not of a packed integral type or a fixed-size unpacked array of one",
         ),
         (
-            "logic v, a; always @* v = a; initial release v;",
-            "which an `always @*` procedure assigns",
+            "logic d, q, r; always_comb begin q = d; r = q; end initial force q = 1'b1;",
+            "which the `always_comb` procedure that assigns it also reads",
         ),
         (
-            "logic v, a; function void set(); v = a; endfunction always_comb set(); \
+            "logic d, q, r; function automatic logic f(input logic x = q); return x; endfunction \
+             always_comb begin q = d; r = f(); end initial force q = 1'b1;",
+            "which the `always_comb` procedure that assigns it also reads",
+        ),
+        (
+            "logic d, q, r; function automatic logic read_q(); return q; endfunction \
+             function automatic logic f(input logic x = read_q()); return x; endfunction \
+             always_comb begin q = d; r = f(); end initial force q = 1'b1;",
+            "which the `always_comb` procedure that assigns it also reads",
+        ),
+        (
+            "logic a, v; task automatic t(); endtask always_comb begin v = a; t(); end \
              initial force v = 1'b1;",
-            "which an `always_comb` procedure assigns",
+            "which an `always_comb` that runs as a process assigns whole",
         ),
         (
-            "logic v, a; task automatic t(output logic o); o = a; endtask always @* t(v); \
-             initial force v = 1'b1;",
-            "which an `always @*` procedure assigns",
+            "logic d; logic [1:0] v; task automatic set(output logic o); o = d; endtask \
+             always @* set(v[v[0]]); initial force v = 2'b01;",
+            "which the `always @*` procedure that assigns it also reads",
+        ),
+        (
+            "logic d, q, r; function void update(); q = d; r = q; endfunction \
+             always_comb update(); initial force q = 1'b1;",
+            "which the `always_comb` procedure that assigns it also reads",
+        ),
+        (
+            "logic d, v; task automatic t(inout logic o); o = o ^ d; endtask \
+             always @* t(v); initial force v = 1'b1;",
+            "which the `always @*` procedure that assigns it also reads",
         ),
         (
             "logic q, d, c; always @(posedge c) q <= #1 d; initial force q = 1'b1;",
@@ -469,12 +1375,20 @@ fn rejected_forces_name_their_reason() {
             "intra-assignment delay",
         ),
         (
-            "logic v; task t; force v = 1'b1; endtask initial t;",
-            "force or release in a subroutine",
+            "logic v; function void f; force v = 1'b1; endfunction initial f;",
+            "force or release in a function",
         ),
         (
             "logic v, c; always_ff @(posedge c) force v = 1'b1;",
-            "force or release in a subroutine",
+            "force or release in a function",
+        ),
+        (
+            "logic v; task automatic t(logic x); force v = x; endtask initial t(1'b1);",
+            "reads a variable of a procedural block or of an automatic task",
+        ),
+        (
+            "logic [7:0] v, a; initial force v = a + $urandom_range(a, 2);",
+            "force of an expression that calls",
         ),
         (
             "real r; initial force r = 1.0;",
@@ -487,7 +1401,7 @@ fn rejected_forces_name_their_reason() {
         ),
         (
             "logic v; initial begin logic l; force v = l; end",
-            "reads a variable of a procedural block",
+            "reads a variable of a procedural block or of an automatic task",
         ),
         (
             "logic v; initial force v = 1'b1, v = 1'b0;",
@@ -529,14 +1443,258 @@ fn force_of_an_input_of_the_top_module_is_rejected() {
     );
 }
 
-/// A name of another instance is not a target yet.
+/// A force through a hierarchical name in a design whose instances form a
+/// cycle reports the cycle rather than count the instances of the forced
+/// specialization for ever.
 #[test]
-fn force_of_another_instance_is_rejected() {
-    let source = "module child; logic v; endmodule \
-                  module top; child c(); initial force c.v = 1'b1; endmodule";
+fn forces_in_recursive_designs_report_the_recursion() {
+    let source = "module child; logic v; child c(); endmodule \
+                  module top; child u(); initial force u.v = 1'b1; endmodule";
     let error = match simulation(source, false).build() {
         Ok(_) => panic!("accepted"),
         Err(error) => error.to_string(),
     };
-    assert!(error.contains("another instance"), "{error}");
+    assert!(error.contains("recursive"), "{error}");
+}
+
+/// Every instance of a forced specialization carries the force controls,
+/// which a warning reports when several instances share it.
+#[test]
+fn forced_specializations_with_several_instances_are_reported() {
+    let sim = simulation(HIERARCHICAL_INSTANCES, false).build().unwrap();
+    let warnings = sim
+        .warnings()
+        .iter()
+        .map(|warning| warning.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("gives all 2 instances of the specialization")),
+        "{warnings:?}"
+    );
+}
+
+/// The force controls of a forced unpacked array have its shape, which a
+/// warning reports with their size.
+#[test]
+fn forced_arrays_report_the_size_of_their_controls() {
+    let sim = simulation(UNPACKED_ELEMENTS, false).build().unwrap();
+    let warnings = sim
+        .warnings()
+        .iter()
+        .map(|warning| warning.to_string())
+        .collect::<Vec<_>>();
+    for expected in [
+        "the force of elements of `ram` in `mem` gives it force controls of 64 bits",
+        "the force of elements of `loc` in `top` gives it force controls of 48 bits",
+    ] {
+        assert!(
+            warnings.iter().any(|warning| warning.contains(expected)),
+            "{expected}: {warnings:?}"
+        );
+    }
+}
+
+/// Forces through hierarchical names of members of interface instances: of
+/// an element of an interface instance array and of a single instance, of a
+/// member that an `assign` of the holding module drives, of one that an
+/// `assign` of another instance drives through an interface port, to a
+/// varying expression, and of one that an `always_comb` of the holding
+/// module assigns from another element, which keeps its forced value after
+/// the release until the procedure runs again (Caliptra's
+/// `responder_inst[N].hreadyout`). The lines are those of Icarus Verilog
+/// 13.0, and of Verilator 5.054 where Icarus has no modports.
+#[test]
+fn forces_of_members_of_interface_instances() {
+    for (source, expected) in [
+        (
+            r#"`timescale 1ns/1ns
+interface ahb_if;
+  logic hreadyout;
+  logic hwrite;
+endinterface
+module dut;
+  ahb_if resp[0:3]();
+  ahb_if single();
+  for (genvar i = 0; i < 4; i++) begin : g
+    assign resp[i].hreadyout = 1'b1;
+  end
+  assign single.hreadyout = 1'b1;
+endmodule
+module top;
+  dut d();
+  initial begin
+    #1 $display("a %b %b %b", d.resp[2].hreadyout, d.resp[3].hreadyout, d.single.hreadyout);
+    force d.resp[2].hreadyout = 1'b0;
+    force d.single.hreadyout = 1'b0;
+    #1 $display("b %b %b %b", d.resp[2].hreadyout, d.resp[3].hreadyout, d.single.hreadyout);
+    release d.resp[2].hreadyout;
+    release d.single.hreadyout;
+    #1 $display("c %b %b %b", d.resp[2].hreadyout, d.resp[3].hreadyout, d.single.hreadyout);
+    $finish;
+  end
+endmodule
+"#,
+            &["a 1 1 1", "b 0 1 0", "c 1 1 1"][..],
+        ),
+        (
+            r#"`timescale 1ns/1ns
+interface ahb_if;
+  logic hreadyout;
+  logic [3:0] hrdata;
+  modport resp(output hreadyout, output hrdata);
+endinterface
+module responder(ahb_if.resp port, input logic [3:0] v);
+  assign port.hreadyout = 1'b1;
+  always_comb port.hrdata = v;
+endmodule
+module dut(input logic [3:0] v);
+  ahb_if resp[0:3]();
+  for (genvar i = 0; i < 4; i++) begin : g
+    responder r(.port(resp[i]), .v(v + 4'(i)));
+  end
+  logic seen;
+  assign seen = resp[2].hreadyout;
+endmodule
+module top;
+  logic [3:0] v = 4'd1;
+  logic alt = 1'b0;
+  dut d(.v);
+  initial begin
+    #1 $display("a %b %b %0d %b", d.resp[2].hreadyout, d.resp[1].hreadyout, d.resp[2].hrdata, d.seen);
+    force d.resp[2].hreadyout = alt;
+    #1 $display("b %b %b %0d %b", d.resp[2].hreadyout, d.resp[1].hreadyout, d.resp[2].hrdata, d.seen);
+    alt = 1'b1; v = 4'd5;
+    #1 $display("c %b %0d %0d %b", d.resp[2].hreadyout, d.resp[1].hrdata, d.resp[2].hrdata, d.seen);
+    release d.resp[2].hreadyout;
+    #1 $display("d %b %0d %b", d.resp[2].hreadyout, d.resp[2].hrdata, d.seen);
+    $finish;
+  end
+endmodule
+"#,
+            &["a 1 1 3 1", "b 0 1 3 0", "c 1 6 7 1", "d 1 7 1"][..],
+        ),
+        (
+            r#"`timescale 1ns/1ns
+interface ahb_if;
+  logic hreadyout;
+endinterface
+module top_dut(input logic src);
+  ahb_if resp[0:9]();
+  assign resp[8].hreadyout = src;
+  always_comb resp[9].hreadyout = resp[8].hreadyout;
+endmodule
+module top;
+  logic src = 1'b1, alt = 1'b0;
+  top_dut d(.src);
+  initial begin
+    #1 force d.resp[9].hreadyout = 1'b0;
+    #1 $display("a %b", d.resp[9].hreadyout);
+    force d.resp[9].hreadyout = alt;
+    alt = 1'b1;
+    #1 $display("b %b", d.resp[9].hreadyout);
+    release d.resp[9].hreadyout;
+    #1 $display("c %b", d.resp[9].hreadyout);
+    src = 1'b0;
+    #1 $display("d %b", d.resp[9].hreadyout);
+    $finish;
+  end
+endmodule
+"#,
+            &["a 0", "b 1", "c 1", "d 0"][..],
+        ),
+    ] {
+        for four_state in [false, true] {
+            let mut sim = simulation(source, four_state).build().unwrap();
+            sim.run_until(100).unwrap();
+            assert_eq!(display_lines(&mut sim), expected, "four_state={four_state}");
+        }
+    }
+}
+
+/// A member of an interface instance that a procedure of another instance
+/// writes through an interface port is rejected as a force target: the
+/// write reaches it as an output port connection does, so after a release
+/// it would not keep the forced value until the next write.
+#[test]
+fn forces_of_interface_members_written_through_interface_ports_are_rejected() {
+    // A procedure of an instance below the one the member is passed to, as
+    // through a relay, writes it as well.
+    for source in [
+        r#"`timescale 1ns/1ns
+interface bus_if;
+  logic [3:0] c, k, s, f;
+endinterface
+module writer(bus_if port, input logic clk, input logic [3:0] v);
+  assign port.c = v;
+  always_comb port.k = v;
+  always @* port.s = v;
+  always_ff @(posedge clk) port.f <= v;
+endmodule
+module dut(input logic clk, input logic [3:0] v);
+  bus_if b();
+  writer w(.port(b), .clk, .v);
+endmodule
+module top;
+  logic clk = 0; logic [3:0] v = 4'd1;
+  dut d(.clk, .v);
+  always #5 clk = ~clk;
+  initial begin
+    #7 force d.b.c = 4'd9; force d.b.k = 4'd9; force d.b.s = 4'd9; force d.b.f = 4'd9;
+    #1 v = 4'd5;
+    #10 $display("forced %0d %0d %0d %0d", d.b.c, d.b.k, d.b.s, d.b.f);
+    release d.b.c; release d.b.k; release d.b.s; release d.b.f;
+    #1 $display("released %0d %0d %0d %0d", d.b.c, d.b.k, d.b.s, d.b.f);
+    $finish;
+  end
+endmodule
+"#,
+        r#"`timescale 1ns/1ns
+interface bus_if;
+  logic [3:0] c, k, s, f;
+endinterface
+module writer(bus_if port, input logic clk, input logic [3:0] v);
+  assign port.c = v;
+  always_comb port.k = v;
+  always @* port.s = v;
+  always_ff @(posedge clk) port.f <= v;
+endmodule
+module relay(bus_if port, input logic clk, input logic [3:0] v);
+  writer inner(.port(port), .clk, .v);
+endmodule
+module dut(input logic clk, input logic [3:0] v);
+  bus_if b();
+  relay w(.port(b), .clk, .v);
+endmodule
+module top;
+  logic clk = 0; logic [3:0] v = 4'd1;
+  dut d(.clk, .v);
+  always #5 clk = ~clk;
+  initial begin
+    #7 force d.b.c = 4'd9; force d.b.k = 4'd9; force d.b.s = 4'd9; force d.b.f = 4'd9;
+    #1 v = 4'd5;
+    #10 $display("forced %0d %0d %0d %0d", d.b.c, d.b.k, d.b.s, d.b.f);
+    release d.b.c; release d.b.k; release d.b.s; release d.b.f;
+    #1 $display("released %0d %0d %0d %0d", d.b.c, d.b.k, d.b.s, d.b.f);
+    $finish;
+  end
+endmodule
+"#,
+    ] {
+        let error = simulation(source, false)
+            .build()
+            .expect_err("the force must be rejected")
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            error.contains(
+                "of `dut`, which a procedure of instance `w` or of one below it writes through an interface port"
+            ) && !error.contains("`b.c`"),
+            "{error}"
+        );
+    }
 }

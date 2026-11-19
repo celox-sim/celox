@@ -179,6 +179,15 @@ pub struct SimulationState<B: SimBackend> {
     kernel_count: usize,
     process_wakeups: BinaryHeap<ProcessWakeup>,
     process_state: ProcessState,
+    /// The number of activations whose parent each activation is, by
+    /// activation: one with children is not reused, as they name it.
+    activation_children: Vec<u32>,
+    /// Spawned activations that were reusable when they became so, smallest
+    /// first: each is checked again when a fork takes it (see
+    /// [`Self::take_reusable_activation`]).
+    reusable_activations: BinaryHeap<Reverse<usize>>,
+    /// Activations reused, for sampling the check of their counts.
+    reuses: u64,
     declaration_processes: Vec<usize>,
     declarations_pending: bool,
     /// The host changed state that the next step must settle at the
@@ -301,6 +310,9 @@ impl<B: SimBackend> SimulationState<B> {
             kernel_count: model.processes.len(),
             model,
             process_state,
+            activation_children: Vec::new(),
+            reusable_activations: BinaryHeap::new(),
+            reuses: 0,
             declaration_processes,
             declarations_pending,
             host_pending: false,
@@ -644,6 +656,59 @@ impl<B: SimBackend> SimulationState<B> {
     /// kernel is scheduled.
     pub fn scheduler_stats(&self) -> &SchedulerStats {
         &self.stats
+    }
+
+    /// The activations held and the bytes they hold: each one's own state
+    /// and saved call stack, each process description they refer to once,
+    /// as activations of one kernel share its description, and the pool of
+    /// local cells they share.
+    pub fn activation_footprint(&self) -> (u64, u64) {
+        let activations = &self.process_state.activations;
+        let own: usize = activations
+            .iter()
+            .map(|activation| {
+                std::mem::size_of::<Activation>()
+                    + activation.private.bytes()
+                    + activation.locals.capacity() * std::mem::size_of::<Option<usize>>()
+                    + activation.pending.capacity() * std::mem::size_of::<usize>()
+                    + activation.control.observes.capacity() * std::mem::size_of::<usize>()
+                    + (activation.control.events.capacity()
+                        + activation.control.observed_events.capacity())
+                        * std::mem::size_of::<u32>()
+                    + activation
+                        .join
+                        .as_ref()
+                        .map_or(0, |(_, children)| children.capacity())
+                        * std::mem::size_of::<usize>()
+            })
+            .sum();
+        let stacks: usize = self
+            .process_state
+            .call_stacks
+            .values()
+            .map(|saved| saved.stack.capacity())
+            .sum();
+        let mut seen = fxhash::FxHashSet::default();
+        let descriptions: usize = self
+            .model
+            .processes
+            .iter()
+            .filter(|refs| seen.insert(std::sync::Arc::as_ptr(refs)))
+            .map(|refs| refs.bytes())
+            .sum();
+        // The pool of local cells the activations share, once, with the
+        // digits of each value's planes.
+        let digits = |value: &num_bigint::BigUint| value.bits().div_ceil(64) as usize * 8;
+        let cells: usize = self.process_state.cells.capacity()
+            * std::mem::size_of::<crate::timing::Value>()
+            + self
+                .process_state
+                .cells
+                .iter()
+                .map(|(value, mask)| digits(value) + digits(mask))
+                .sum::<usize>();
+        let count = activations.len().max(self.model.processes.len());
+        (count as u64, (own + stacks + descriptions + cells) as u64)
     }
 
     /// The signals whose changes the host observes inside a time slot (see

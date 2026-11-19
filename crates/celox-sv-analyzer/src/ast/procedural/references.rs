@@ -182,10 +182,25 @@ pub(in crate::ast) fn validate<'a>(
             } else {
                 param.leaves.as_slice()
             };
+            // A dispatcher passes its formals to the overrides, whose
+            // formals have the same directions (IEEE 1800-2023 8.20), also
+            // those of classes of packages the scope does not import, which
+            // a specialization made a package it uses see.
+            let forwarded = subroutine
+                .name
+                .ends_with("$virtual")
+                .then_some(subroutine.params.as_slice());
             let mut error = None;
             for formal in formals {
                 for stmt in &subroutine.body {
-                    check_formal(stmt, formal, param.direction, directions, &mut error);
+                    check_formal(
+                        stmt,
+                        formal,
+                        param.direction,
+                        directions,
+                        forwarded,
+                        &mut error,
+                    );
                 }
             }
             if let Some(detail) = error {
@@ -241,6 +256,7 @@ fn check_formal(
     formal: &str,
     direction: ParamDirection,
     directions: &lifetimes::Directions,
+    forwarded: Option<&[SubroutineParam]>,
     error: &mut Option<&'static str>,
 ) {
     let constant = direction == ParamDirection::ConstRef;
@@ -248,10 +264,13 @@ fn check_formal(
         args.iter().enumerate().any(|(position, arg)| {
             arg.as_ref().is_some_and(|arg| writes_through(arg, formal))
                 && match callee {
-                    Callee::Subroutine(name) => directions
-                        .get(name)
-                        .and_then(|directions| directions.get(position))
-                        .is_none_or(|direction| direction.is_written()),
+                    Callee::Subroutine(name) => match directions.get(name) {
+                        Some(directions) => directions.get(position).copied(),
+                        None => forwarded
+                            .and_then(|params| params.get(position))
+                            .map(|param| param.direction),
+                    }
+                    .is_none_or(|direction| direction.is_written()),
                     Callee::System(function) => function.writes_argument(position),
                     Callee::Object(op) => op.writes_argument(position),
                     Callee::String(_)
@@ -464,6 +483,28 @@ mod tests {
              initial f(g, h);",
         );
         assert!(error.contains("`b`"), "{error}");
+    }
+
+    // `$root` of the two top modules uses `p`, whose dispatcher of `f` also
+    // calls the override of `q::B`, which the specialization `p::Reg#(B)`
+    // made `p` see: the override's `rw` is const ref too (8.20).
+    #[test]
+    fn dispatchers_pass_const_ref_formals_to_overrides_of_other_packages() {
+        analyze_source(
+            "package p; typedef struct { int kind; } op_t; \
+             virtual class A; pure virtual function int f(const ref op_t rw); endclass \
+             class Reg #(type T = int); \
+             static function A create(); T t = new; return t; endfunction endclass \
+             endpackage \
+             package q; class B extends p::A; typedef p::Reg#(B) type_id; \
+             virtual function int f(const ref p::op_t rw); return rw.kind + 1; endfunction \
+             endclass endpackage \
+             module Top; initial begin p::A a; p::op_t o; o.kind = 4; \
+             a = q::B::type_id::create(); $display(a.f(o)); end endmodule \
+             module Other; endmodule",
+            Path::new("const_ref_dispatch.sv"),
+        )
+        .unwrap();
     }
 
     #[test]

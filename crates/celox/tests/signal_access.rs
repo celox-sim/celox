@@ -279,6 +279,33 @@ fn unsupported_force_targets_fail_explicitly() {
     }
 }
 
+/// An input of the top that a process waits for is an event, so that a
+/// host can clock it, and like a clock it is no force target. An input
+/// read as data stays one.
+#[test]
+fn waited_inputs_are_no_force_targets() {
+    let build = |body: &str| {
+        let source = format!("module Top(input logic go, output logic done); {body} endmodule");
+        celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("waited-force.sv"))],
+            "Top",
+        )
+        .signal_access(SignalAccessOptions {
+            force_signals: vec!["Top.go".into()],
+            ..Default::default()
+        })
+        .build_native()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    };
+    assert_eq!(build("assign done = go;"), Ok(()));
+    let error = build("initial begin @(posedge go); done = 1; end").unwrap_err();
+    assert!(
+        error.contains("force signal `Top.go` must be a packed non-clock variable"),
+        "{error}"
+    );
+}
+
 #[test]
 fn explicit_force_runs_with_parallel_optimized_kernels() {
     let source = "module Top(input logic [7:0] a, b, output logic [7:0] x, y, z); always_comb begin x=a+1; y=x+1; end assign z=b+2; endmodule";

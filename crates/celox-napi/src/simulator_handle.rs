@@ -226,9 +226,20 @@ impl NativeSimulatorHandle {
         waveform: Option<(&str, celox::WaveformFormat)>,
     ) -> Result<Self> {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        let backend = HandleBackend::Default(celox::NativeBackend::from_shared(Arc::clone(
-            &cached.shared_code,
-        )));
+        let backend = {
+            let mut backend = celox::NativeBackend::from_shared(Arc::clone(&cached.shared_code));
+            // Each instance reads the memory files of its initial state (IEEE
+            // 1800-2023 21.4). A handle has no runtime event for their
+            // messages, which are traced.
+            for report in backend.load_initial_memory_files() {
+                if report.severity == celox::Severity::Warning {
+                    tracing::warn!("{}", report.message);
+                } else {
+                    tracing::error!("{}", report.message);
+                }
+            }
+            HandleBackend::Default(backend)
+        };
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let backend = HandleBackend::Default(celox::JitBackend::from_shared(Arc::clone(
             &cached.shared_code,
@@ -266,6 +277,21 @@ impl NativeSimulatorHandle {
         })
     }
 
+    /// The simulator builder for sources partitioned by language.
+    pub(super) fn builder_for_sources<'a>(
+        veryl: Vec<(&'a str, &'a std::path::Path)>,
+        sv: Vec<(&'a str, &'a std::path::Path)>,
+        top: &'a str,
+    ) -> celox::SimulatorBuilder<'a, celox::Simulator> {
+        match (veryl.is_empty(), sv.is_empty()) {
+            (false, true) | (true, true) => celox::Simulator::from_sources(veryl, top),
+            (true, false) => celox::SimulatorBuilder::<celox::Simulator>::from_sv_sources(sv, top),
+            (false, false) => {
+                celox::SimulatorBuilder::<celox::Simulator>::from_mixed_sources(veryl, sv, top)
+            }
+        }
+    }
+
     /// Create a new simulator from Veryl source code.
     #[napi(constructor)]
     pub fn new(
@@ -289,11 +315,16 @@ impl NativeSimulatorHandle {
             }
         }
 
-        let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+        let (veryl_pairs, sv_pairs) = partition_hdl_sources(&src_pairs);
+        let source_refs: Vec<(&str, &std::path::Path)> = veryl_pairs
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts);
+        let sv_refs: Vec<(&str, &std::path::Path)> = sv_pairs
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
+        let builder = apply_options(Self::builder_for_sources(source_refs, sv_refs, &top), &opts);
         let sim = builder
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -322,11 +353,16 @@ impl NativeSimulatorHandle {
             .collect();
         append_extra_source(&mut src_pairs, &opts.extra_source);
 
-        let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+        let (veryl_pairs, sv_pairs) = partition_hdl_sources(&src_pairs);
+        let source_refs: Vec<(&str, &std::path::Path)> = veryl_pairs
             .iter()
             .map(|(s, p)| (s.as_str(), p.as_path()))
             .collect();
-        let builder = apply_options(celox::Simulator::from_sources(source_refs, &top), &opts);
+        let sv_refs: Vec<(&str, &std::path::Path)> = sv_pairs
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_path()))
+            .collect();
+        let builder = apply_options(Self::builder_for_sources(source_refs, sv_refs, &top), &opts);
         let sim = builder
             .build_tiered()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
@@ -349,7 +385,9 @@ impl NativeSimulatorHandle {
     ) -> Result<Self> {
         let mut opts = parse_options(&options)?;
         let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
-        opts.common.diagnostic_policy = celox_cfg.diagnostics.clone();
+        opts.common.diagnostic_policy =
+            celox_cfg.diagnostic_policy(opts.common.diagnostic_policy.strict);
+        opts.common.legacy_empty_reductions = celox_cfg.legacy_empty_reductions();
         append_extra_source(&mut sources, &opts.extra_source);
 
         let source_refs: Vec<(&str, &std::path::Path)> = sources
@@ -392,7 +430,9 @@ impl NativeSimulatorHandle {
     ) -> Result<Self> {
         let mut opts = parse_options(&options)?;
         let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
-        opts.common.diagnostic_policy = celox_cfg.diagnostics.clone();
+        opts.common.diagnostic_policy =
+            celox_cfg.diagnostic_policy(opts.common.diagnostic_policy.strict);
+        opts.common.legacy_empty_reductions = celox_cfg.legacy_empty_reductions();
         append_extra_source(&mut sources, &opts.extra_source);
 
         let cache_key = build_cache_key(&sources, &top, &opts, Some(&metadata));

@@ -402,7 +402,11 @@ pub(super) fn item_names(id: celox_sv_syntax::BodyItemId, tree: &SyntaxTree) -> 
                 types.push(id);
             }
         }
-        BodyItemKind::Subroutine(id) => add(&native.subroutine(*id).name),
+        // An out-of-block method definition, `function C::f`, belongs to its
+        // class (IEEE 1800-2023 8.24): the scope declares no `f`.
+        BodyItemKind::Subroutine(id) if native.subroutine(*id).scope.is_empty() => {
+            add(&native.subroutine(*id).name)
+        }
         // An export names a subroutine the scope already declares.
         BodyItemKind::Dpi(id) if native.dpi_declaration(*id).import => {
             add(&native.dpi_declaration(*id).name)
@@ -421,26 +425,18 @@ pub(super) fn item_names(id: celox_sv_syntax::BodyItemId, tree: &SyntaxTree) -> 
                 }
             }
         }
-        // The type a covergroup or a user-defined nettype declares (IEEE
-        // 1800-2023 19.3, 6.6.7), which Celox keeps unconverted.
-        BodyItemKind::Unconverted { category, .. }
-            if matches!(category.as_str(), "covergroup" | "nettype") =>
-        {
+        // The type a covergroup declares (IEEE 1800-2023 19.3).
+        BodyItemKind::Covergroup(id) => add(&native.covergroup(*id).name),
+        // The type a user-defined nettype declares (6.6.7), which Celox
+        // keeps unconverted.
+        BodyItemKind::Unconverted { category, .. } if category == "nettype" => {
             let tokens = native.body_item(id).tokens.range();
-            for name in native
-                .covergroups
+            for nettype in native
+                .nettypes
                 .iter()
-                .map(|covergroup| (&covergroup.name, covergroup.tokens))
-                .chain(
-                    native
-                        .nettypes
-                        .iter()
-                        .map(|nettype| (&nettype.name, nettype.tokens)),
-                )
-                .filter(|(_, declared)| tokens.contains(&declared.start))
-                .map(|(name, _)| name)
+                .filter(|nettype| tokens.contains(&nettype.tokens.start))
             {
-                add(name);
+                add(&nettype.name);
             }
         }
         _ => {}
@@ -1204,56 +1200,7 @@ pub(super) fn resolve_imports(
         }
         // The subroutines that call interface tasks and functions through
         // virtual interfaces, which a scope copies when it calls them.
-        for subroutine in &packages.virtual_interface_calls.subroutines {
-            if symbols
-                .subroutines
-                .iter()
-                .any(|known| known.name == subroutine.name)
-            {
-                continue;
-            }
-            symbols.subroutine_params.insert(
-                subroutine.name.clone(),
-                subroutine
-                    .params
-                    .iter()
-                    .map(|param| param.name.clone())
-                    .collect(),
-            );
-            if let Some(shapes) = packages
-                .virtual_interface_calls
-                .shapes
-                .get(&subroutine.name)
-            {
-                symbols
-                    .subroutine_shapes
-                    .insert(subroutine.name.clone(), shapes.clone());
-            }
-            symbols.subroutines.push(subroutine.clone());
-        }
-        for (name, metadata) in &packages.virtual_interface_calls.function_return_types {
-            symbols
-                .function_return_types
-                .entry(name.clone())
-                .or_insert_with(|| metadata.clone());
-        }
-        for signal in &packages.virtual_interface_calls.statics {
-            if !symbols
-                .state_signals
-                .iter()
-                .any(|known| known.name == signal.name)
-            {
-                symbols.state_signals.push(signal.clone());
-            }
-        }
-        if let Some(initializer) = &packages.virtual_interface_calls.static_initializer {
-            symbols.initial_processes.push(initializer.clone());
-        }
-        for local in &packages.virtual_interface_calls.locals {
-            if !symbols.locals.iter().any(|known| known.name == local.name) {
-                symbols.locals.push(local.clone());
-            }
-        }
+        virtual_interface_calls::import(symbols, &packages.virtual_interface_calls);
     }
     Ok(resolved)
 }

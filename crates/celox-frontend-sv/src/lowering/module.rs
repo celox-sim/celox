@@ -462,6 +462,11 @@ fn lower_module_with_overrides(
         let Some(control) = signal.force_control() else {
             continue;
         };
+        // The hold of a target of another instance holds the writes of its
+        // own module; a write of the forcing module ends it there.
+        if signal.hierarchical().is_some() && control.role == sv::ir::ForceRole::Hold {
+            continue;
+        }
         let (Some(&id), Some(&target)) = (
             name_to_id.get(signal.name()),
             name_to_id.get(&control.target),
@@ -476,10 +481,42 @@ fn lower_module_with_overrides(
         let variable = variables.get_mut(&id).expect("a signal has a variable");
         variable.force_control = Some(ForceSlot {
             target,
-            enable: control.role == sv::ir::ForceRole::Enable,
+            role: match control.role {
+                sv::ir::ForceRole::Enable => ForceSlotRole::Enable,
+                sv::ir::ForceRole::Value => ForceSlotRole::Value,
+                sv::ir::ForceRole::Hold => ForceSlotRole::Hold,
+            },
             procedural: true,
             stored: control.stored,
         });
+    }
+    // The controls of a forced unpacked array have its shape: report their
+    // size, so that the force of an element of a large memory shows.
+    let mut forced_arrays: Vec<(String, usize)> = Vec::new();
+    for variable in variables.values() {
+        let Some(slot) = variable.force_control.filter(|slot| slot.procedural) else {
+            continue;
+        };
+        let target = &variables[&slot.target];
+        if target.array_dims.is_empty() {
+            continue;
+        }
+        let array = target.path.join(".");
+        match forced_arrays.iter_mut().find(|(name, _)| *name == array) {
+            Some((_, bits)) => *bits += variable.width,
+            None => forced_arrays.push((array, variable.width)),
+        }
+    }
+    forced_arrays.sort();
+    for (array, bits) in forced_arrays {
+        warnings.push((
+            crate::FrontendWarningKind::ForcedArray {
+                module: name.clone(),
+                array,
+                bits,
+            },
+            None,
+        ));
     }
 
     let forceable = variables
@@ -522,7 +559,11 @@ fn lower_module_with_overrides(
             let mut control = target.clone();
             control.force_control = Some(ForceSlot {
                 target: id,
-                enable: prefix == FORCE_ENABLE,
+                role: if prefix == FORCE_ENABLE {
+                    ForceSlotRole::Enable
+                } else {
+                    ForceSlotRole::Value
+                },
                 procedural: false,
                 stored: false,
             });
@@ -703,6 +744,7 @@ fn lower_module_with_overrides(
             comb_observers: Vec::<CombObserver<SourceVarId>>::new(),
             runtime_errors,
             runtime_event_sites,
+            memory_file_bases: Vec::new(),
             extern_functions,
             initial_memory_values,
             declaration_initial_memory_values,
@@ -737,6 +779,21 @@ fn lower_module_with_overrides(
         event_assignments,
         repeated_ff_writes,
         inout_driven_inside: HashSet::default(),
+        interconnect_names: module
+            .ports()
+            .iter()
+            .filter(|port| port.is_interconnect())
+            .map(|port| port.name().to_string())
+            .chain(
+                module
+                    .signals()
+                    .iter()
+                    .filter(|signal| signal.is_interconnect())
+                    .map(|signal| signal.name().to_string()),
+            )
+            .collect(),
+        interconnect_resolutions: HashMap::default(),
+        interconnect_element_resolutions: HashMap::default(),
         calls: None,
     })
 }

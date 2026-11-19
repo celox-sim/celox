@@ -98,9 +98,54 @@ pub struct Design {
     /// Source-call identities shared with modules importing these package bodies.
     pub(super) call_sites: usize,
     pub(super) types: semantic_types::TyTable,
+    /// The declarations of the interfaces virtual interface types name,
+    /// with the specializations of parameterized ones the analyses have
+    /// named so far (25.9).
+    pub(super) virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
+    /// The subroutines that call the tasks and functions of those
+    /// specializations through virtual interfaces.
+    pub(super) virtual_interface_calls: virtual_interface_calls::Specializations,
 }
 
 impl Design {
+    /// The declarations of the interfaces virtual interface types name, and
+    /// of the specializations the analyses of the design named, whose
+    /// instances the frontend numbers.
+    pub fn virtual_interfaces(&self) -> Option<&Arc<virtual_interfaces::VirtualInterfaces>> {
+        self.virtual_interfaces.as_ref()
+    }
+
+    /// The interfaces and specializations, by key, whose tasks and functions
+    /// called through virtual interfaces use hierarchical names they do not
+    /// declare, with the components of those names, which each instance
+    /// finds from its parent (IEEE 1800-2023 23.8) once the hierarchy is
+    /// elaborated (see [`Self::resolve_virtual_interface_outward`]).
+    pub fn virtual_interface_outward(&self) -> Vec<(String, Vec<Vec<String>>)> {
+        let mut outward = self
+            .virtual_interfaces
+            .iter()
+            .flat_map(|declarations| &declarations.interfaces)
+            .filter(|(_, declaration)| !declaration.outward.is_empty())
+            .map(|(key, declaration)| (key.clone(), declaration.outward.clone()))
+            .collect::<Vec<_>>();
+        outward.sort();
+        outward
+    }
+
+    /// Build the tasks and functions of interface or specialization `key`
+    /// called through virtual interfaces, whose hierarchical names denote,
+    /// in every instance, an object of `objects`: by the components of the
+    /// name, its type and whether it is a net. The analyses of the design
+    /// that call them are made after this.
+    pub fn resolve_virtual_interface_outward(
+        &mut self,
+        packages: &Packages,
+        key: &str,
+        objects: &[(Vec<String>, Type, bool)],
+    ) -> Result<(), AnalyzerError> {
+        virtual_interface_calls::resolve_outward(packages, self, key, objects)
+    }
+
     /// Take back the types that an analysis of the design moved into its
     /// [`Source`](super::Source) and published the IR with.
     pub(crate) fn restore_publication(&mut self, publication: super::Publication) {
@@ -311,8 +356,14 @@ impl Packages {
     /// with the packages imports them.
     pub(crate) fn build_virtual_interface_calls(&mut self) -> Result<(), AnalyzerError> {
         if let Some(declarations) = self.virtual_interfaces.clone() {
+            let mut declarations = (*declarations).clone();
             self.virtual_interface_calls =
-                Arc::new(virtual_interface_calls::build(self, &declarations)?);
+                Arc::new(virtual_interface_calls::build(self, &mut declarations)?);
+            // The modules analyzed with the packages see which interfaces'
+            // subroutines wait for the hierarchy.
+            let declarations = Some(Arc::new(declarations));
+            self.design.virtual_interfaces = declarations.clone();
+            self.virtual_interfaces = declarations;
         }
         Ok(())
     }
@@ -381,8 +432,19 @@ impl Packages {
                     &[],
                     &ModuleInterfaces::default(),
                     false,
+                    &[],
                 ) {
-                    found.push((name, error));
+                    // The hierarchical names of the tasks and functions of
+                    // an interface that virtual interface types name are
+                    // resolved from each instance's parent (23.8), of which
+                    // there is none.
+                    let named = self
+                        .virtual_interfaces
+                        .as_ref()
+                        .is_some_and(|declarations| declarations.interfaces.contains_key(&name));
+                    if !(named && interface_ast::hierarchical_reference(&error)) {
+                        found.push((name, error));
+                    }
                 }
             }
         }
@@ -555,11 +617,12 @@ impl Packages {
         };
         let mut packages =
             Self::analyze_packages(trees, timescales, needed.map(|(needed, _)| needed), session)?;
-        if let Some(declarations) = &options.virtual_interfaces {
+        // With the specializations the packages name (25.9).
+        if let Some(declarations) = session.virtual_interfaces.clone() {
             packages.virtual_interface_signals =
-                virtual_interfaces::member_signals(declarations, &mut session.types).into();
+                virtual_interfaces::member_signals(&declarations, &mut session.types).into();
         }
-        packages.virtual_interfaces = options.virtual_interfaces;
+        packages.virtual_interfaces = session.virtual_interfaces.clone();
         if trees
             .iter()
             .any(|(tree, _)| assertion_control::called(tree.declarations()))
@@ -629,6 +692,8 @@ impl Packages {
             call_sites: session.next_call_site,
             foreign: std::mem::take(&mut session.foreign),
             types: std::mem::take(&mut session.types),
+            virtual_interfaces: session.virtual_interfaces.clone(),
+            virtual_interface_calls: session.virtual_interface_calls.clone(),
         };
         Ok(packages)
     }

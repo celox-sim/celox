@@ -78,8 +78,10 @@ pub mod packages;
 mod packed_structs;
 mod parameters;
 mod port_owners;
+mod primitives;
 mod timing;
 mod type_binding;
+pub(crate) use constant_folding::MAX_CONSTANT_VALUE_BITS;
 pub(crate) use parameters::unbounded_parameter_marker;
 mod array_reductions;
 mod containers;
@@ -93,7 +95,7 @@ mod selects;
 mod semantic_types;
 mod shared_map;
 mod statements;
-mod subroutine_owners;
+pub(crate) mod subroutine_owners;
 pub(crate) mod timescales;
 mod type_names;
 pub(crate) mod type_parameters;
@@ -130,7 +132,7 @@ use case::expr_is_two_state;
 use casts::{
     expr_type_from_type, resize_integral_literal_for_cast, resize_unbased_fill_literal_for_cast,
 };
-use comb_process::comb_processes_from_scope;
+use comb_process::{comb_processes_from_scope, port_connections};
 use comb_rewrite::{expr_static_width, whole_packed_lvalue};
 use constant_folding::{
     fold_const_integral_expr_preserving_mask, simplify_constant_mux_conditions,
@@ -150,7 +152,8 @@ use dimensions::{
     enum_marker, extend_const_env_with_variable_types, function_packed_dimension_widths,
     insert_parameter_type_markers, local_parameter_marker,
     packed_dimensions_from_ports_and_signals, parameter_dimension_marker,
-    parameter_dimensions_marker, parameter_marker, parameter_member_type_marker,
+    parameter_dimensions_marker, parameter_element_member_marker, parameter_element_members_marker,
+    parameter_marker, parameter_member_chunk_marker, parameter_member_type_marker,
     parameter_member_value_marker, parameter_members_marker, parameter_packed_dimensions,
     parameter_rank_marker, parameter_signed_element_marker, parameter_signed_marker,
     parameter_type_from_const_env, parameter_types_from_const_env, parameter_width_marker,
@@ -164,16 +167,18 @@ use functions::{functions_from_scope, procedural_truth_condition};
 use inlining::{expand_expr_calls, expr_signedness_with_return_types, substitute_expr_idents};
 pub(crate) use instances::normalize_identifier;
 use instances::{expr_ident_name, instances_from_scope};
+#[cfg(test)]
+use parameters::const_env_from_parameters;
 use parameters::{
-    apply_parameter_overrides, coerce_const_parameter_value, const_env_from_parameters,
-    const_expr_from_i128, const_expr_to_expr, enum_member_constants_from_scope,
-    extend_const_env_with_parameters, format_typed_parameter_literal, infer_const_expr_type,
-    infer_parameter_value_type, parameter_element_literal, parameter_value_env,
-    substitute_typed_parameter_literals,
+    apply_parameter_overrides, coerce_const_parameter_value, const_expr_from_i128,
+    const_expr_to_expr, enum_member_constants_from_scope, extend_const_env_with_parameters,
+    format_typed_parameter_literal, infer_const_expr_type, infer_parameter_value_type,
+    parameter_element_literal, parameter_value_env, substitute_typed_parameter_literals,
 };
 use scoped_map::{ScopedMap, Signedness};
 use selects::{add_expr, product_expr};
 pub(crate) use shared_map::{ConstEnv, TypeAliases};
+use shared_map::{ConstantTypeTable, ConstantTypes};
 use shared_map::{SharedAliases, SharedEnv, SharedMap, ToShared};
 use statements::{
     assignment_op_expr, coerce_procedural_assignment_rhs, expr_from_lvalue, lvalue_expr_type,
@@ -241,12 +246,51 @@ pub(crate) struct ModuleBodies {
 }
 
 /// Overrides supplied by one instantiation. Types have been resolved in its scope.
+#[derive(Clone, Copy)]
 pub(crate) struct ModuleParameterBindings<'a> {
     pub declarations_only: bool,
     pub values: &'a HashMap<String, ConstExpr>,
     pub types: &'a [(String, Type)],
     pub patterns: &'a [(String, BoundPattern)],
-    pub hierarchical: &'a [HierarchicalSignal],
+    pub hierarchical: HierarchicalObjects<'a>,
+    /// The variables and nets of the module that other modules force
+    /// through hierarchical names.
+    pub forced: &'a [String],
+}
+
+/// The objects of other instances that hierarchical names of the analyzed
+/// module denote, resolved by the caller against the elaborated hierarchy.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HierarchicalObjects<'a> {
+    pub signals: &'a [HierarchicalSignal],
+    pub subroutines: &'a [HierarchicalSubroutine],
+}
+
+/// A function or task of another instance that hierarchical names of the
+/// analyzed module call (IEEE 1800-2023 23.8), resolved by the caller
+/// against the elaborated hierarchy. The module calls it as its subroutine
+/// `name`, whose body the caller supplies once the module is analyzed: the
+/// analysis binds the calls by this signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchicalSubroutine {
+    /// The names that denote the subroutine, as
+    /// [`crate::ParsedSource::hierarchical_names`] spells them.
+    pub paths: Vec<String>,
+    pub name: String,
+    pub formals: Vec<HierarchicalFormal>,
+    /// The result of a function; `None` for a task or a `void` function.
+    pub result: Option<Type>,
+    pub is_task: bool,
+}
+
+/// A formal argument of a [`HierarchicalSubroutine`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchicalFormal {
+    pub name: String,
+    pub direction: crate::procedural::ParamDirection,
+    pub r#type: Type,
+    /// The formal has a default, which an omitted argument takes.
+    pub has_default: bool,
 }
 
 /// A signal of another instance that hierarchical names of the analyzed
@@ -262,6 +306,20 @@ pub struct HierarchicalSignal {
     pub is_net: bool,
     /// The names denote the module's own signal `name`, which they alias.
     pub local: bool,
+    /// The interface instance of the module whose body writes the names
+    /// (IEEE 1800-2023 23.8), as [`crate::InterfaceBodyScope::handle`]
+    /// names it: they are names of that body, not of the module. `name` is
+    /// then the body's placeholder for the object
+    /// ([`virtual_interfaces::VirtualInterfaceSignal::Upward`]), never a
+    /// name the body's own members could have.
+    pub interface_instance: Option<String>,
+    /// The module's own signal that the names of an interface body alias,
+    /// when `local`.
+    pub aliased: Option<String>,
+    /// The typed literal of the value of the parameter of another instance
+    /// that the names denote (IEEE 1800-2023 23.6), such as `32'sd12`:
+    /// they read that value, and no signal stands for them.
+    pub constant: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,7 +365,12 @@ pub(crate) fn generated_time_declarations(
     timescales::generated_source_declarations(sources, roots, crate::AnalysisOptions::default())
 }
 
-const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;
+/// The most iterations the loop generate constructs of one module expand to
+/// in all, a bound on elaboration that IEEE 1800-2023 27.4 does not set: a
+/// loop whose condition never becomes false is rejected rather than run
+/// forever. OpenTitan's one-hot multiplexer of 312 bits from 32 inputs
+/// expands to 10_296 iterations.
+const MAX_GENERATE_LOOP_EXPANSION: usize = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
@@ -324,8 +387,6 @@ pub struct Parameter {
     is_local: bool,
     /// See [`Type::signed_element_depth`].
     signed_element_depth: Option<usize>,
-    /// The enumerated type the parameter is declared with.
-    enum_domain: Option<Arc<enums::EnumDomain>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,6 +399,9 @@ pub struct Port {
     unresolved_net: bool,
     net_resolution: NetResolution,
     default: Option<ConstExpr>,
+    /// The expression of an explicitly named port (IEEE 1800-2023
+    /// 23.2.2.2), which a continuous connection joins to the port.
+    expression: Option<celox_sv_syntax::ExprId>,
 }
 
 /// The implicit driver of a pull or supply net (IEEE 1800-2023 6.6.5-6):
@@ -363,6 +427,9 @@ pub enum NetResolution {
     /// A net whose drivers Celox does not combine: `uwire`, the pull and
     /// supply nets, `trireg`.
     Single,
+    /// A generic interconnect net or port (6.6.8), whose type and driver
+    /// resolution the connections determine at elaboration (23.3.3.7.1).
+    Interconnect,
 }
 
 impl NetResolution {
@@ -371,6 +438,7 @@ impl NetResolution {
             "wire" | "tri" => Self::Wire,
             "wand" | "triand" => Self::And,
             "wor" | "trior" => Self::Or,
+            "interconnect" => Self::Interconnect,
             _ => Self::Single,
         }
     }
@@ -437,7 +505,7 @@ pub enum PortDirection {
 /// copies until one changes, and the semantic type it was bound to, which
 /// any change of the shape forgets. It is small, as types are held on
 /// deeply recursive binding frames.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Type {
     shape: Arc<TypeShape>,
     binding: semantic_types::Binding,
@@ -445,18 +513,24 @@ pub struct Type {
     /// (IEEE 1800-2023 7.4), which a change of those dimensions keeps
     /// (see [`Type::unpacked_ranges_mut`]) and any other change forgets.
     element: semantic_types::Binding,
+    /// The enumerated type (IEEE 1800-2023 6.19) the type is, or whose
+    /// elements a packed or unpacked array of the type has, which changes
+    /// of its dimensions keep (see [`Type::reshape_keeping_enumeration`])
+    /// and any other change forgets. Only [`Type::keep_enumeration`] sets
+    /// it, with the fields that tell it (see
+    /// [`variable_dimensions::kept`]).
+    enumeration: variable_dimensions::kept::KeptEnumeration,
+    /// The unpacked structure type (7.2) the type is, or whose elements a
+    /// fixed-size unpacked array of the type has, which changes of its
+    /// unpacked dimensions keep and any other change forgets. Only
+    /// [`Type::keep_structure`] sets it, with the field that tells it.
+    structure: variable_dimensions::kept::KeptStructure,
 }
 
 /// What a [`Type`] is made of.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeShape {
     container: Option<Arc<ContainerType>>,
-    is_enum: bool,
-    /// Resolved members of a scalar enum; None if its domain is unsupported.
-    enum_domain: Option<Arc<enums::EnumDomain>>,
-    /// A packed array whose elements are of an enumerated type, whose
-    /// methods are not supported on its elements.
-    packed_enum: bool,
     kind: TypeKind,
     is_signed: bool,
     packed_ranges: Vec<PackedRange>,
@@ -466,21 +540,24 @@ pub struct TypeShape {
     /// named type, which is signed although the whole array is not (IEEE
     /// 1800-2023 7.4.1).
     signed_element_depth: Option<usize>,
-    /// The class of an object handle type.
-    class: Option<Arc<str>>,
-    /// The members of an unpacked structure type (IEEE 1800-2023 7.2).
-    unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
     /// The typedef that names an enumeration, struct or union type, and how
     /// `$typename` spells the type where its structure does not tell.
     spelling: type_names::Spelling,
 }
 
-/// Two types are equal if their shapes and the identities of their elements
-/// are: a virtual interface type has the shape of the number that holds its
-/// value, and its element type tells its interface (IEEE 1800-2023 25.9).
+/// Two types are equal if their shapes, the identities of their elements
+/// and their enumerated and unpacked structure types are: a virtual
+/// interface type has the shape of the number that holds its value, and its
+/// element type tells its interface (IEEE 1800-2023 25.9); an enumerated
+/// type, or an array of one, has the shape of its base type, and its
+/// declaration tells it (6.19); an unpacked structure type has the shape of
+/// its bits, and its declaration tells it (7.2, 6.22.1).
 impl PartialEq for Type {
     fn eq(&self, other: &Self) -> bool {
-        self.shape == other.shape && self.element.identity() == other.element.identity()
+        self.shape == other.shape
+            && self.element.identity() == other.element.identity()
+            && self.enumeration.declaration() == other.enumeration.declaration()
+            && self.structure.identity() == other.structure.identity()
     }
 }
 
@@ -490,6 +567,8 @@ impl std::hash::Hash for Type {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.shape.hash(state);
         self.element.identity().hash(state);
+        self.enumeration.declaration().hash(state);
+        self.structure.identity().hash(state);
     }
 }
 
@@ -506,6 +585,8 @@ impl std::ops::DerefMut for Type {
     fn deref_mut(&mut self) -> &mut TypeShape {
         self.binding.forget();
         self.element.forget();
+        self.enumeration.forget();
+        self.structure.forget();
         Arc::make_mut(&mut self.shape)
     }
 }
@@ -526,17 +607,49 @@ impl Type {
         &mut Arc::make_mut(&mut self.shape).unpacked_ranges
     }
 
-    /// Bind the type to semantic type `id` of `table`, and its elements to
-    /// the type of an element of its unpacked dimensions.
+    /// What declares the enumerated type (IEEE 1800-2023 6.19) the type
+    /// is, or whose elements a packed or unpacked array of the type has.
+    pub(in crate::ast) fn enumeration(&self) -> Option<&semantic_types::EnumDeclaration> {
+        self.enumeration.declaration()
+    }
+
+    /// The members of the enumerated type the type is, or whose elements
+    /// an unpacked array of it has, if resolved: none for a packed array of
+    /// it.
+    pub(in crate::ast) fn enum_domain(&self) -> Option<&Arc<enums::EnumDomain>> {
+        self.enumeration()
+            .filter(|enumeration| self.packed_ranges.len() == enumeration.dims)
+            .and_then(|enumeration| enumeration.domain.as_ref())
+    }
+
+    /// Bind the type to semantic type `id` of `table`, its elements to the
+    /// type of an element of its unpacked dimensions, and its enumeration
+    /// to that element if it is an enumerated type. A packed array of an
+    /// enumerated type keeps the enumeration it has.
     pub(in crate::ast) fn bind(
         &mut self,
         table: &semantic_types::TyTable,
         id: semantic_types::TyId,
     ) {
         self.binding.set(table, id);
-        match table.unpacked_element(id, self.unpacked_ranges.len()) {
+        let element = table.unpacked_element(id, self.unpacked_ranges.len());
+        match element {
             Some(element) => self.element.set(table, element),
             None => self.element.forget(),
+        }
+        match element.map(|element| (element, table.enumeration(element))) {
+            Some((element, Some(false))) => {
+                let enumeration = semantic_types::EnumBinding::of(table, element);
+                self.keep_enumeration(enumeration.unwrap_or_default());
+            }
+            Some((_, Some(true))) => {}
+            _ => self.enumeration.forget(),
+        }
+        // The structure registered for the semantic type, or for that of
+        // its elements (7.4.2).
+        match table.unpacked_struct(id) {
+            Some(aggregate) => self.keep_structure(Some(aggregate.clone())),
+            None => self.structure.forget(),
         }
     }
 }
@@ -547,6 +660,8 @@ impl From<TypeShape> for Type {
             shape: Arc::new(shape),
             binding: semantic_types::Binding::default(),
             element: semantic_types::Binding::default(),
+            enumeration: variable_dimensions::kept::KeptEnumeration::default(),
+            structure: variable_dimensions::kept::KeptStructure::default(),
         }
     }
 }
@@ -658,6 +773,23 @@ pub struct Assignment {
     rhs: Expr,
 }
 
+/// The window of a select of an analyzed lvalue, see
+/// [`crate::ir::SelectWindow`], whose run-time position is a constant
+/// expression of the analysis.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SelectWindow {
+    pub lsb: u32,
+    pub msb: u32,
+    pub at: Option<Box<ConstExpr>>,
+}
+
+impl SelectWindow {
+    /// The constant window of bits `lsb..=msb` of the variable.
+    pub fn bits(lsb: u32, msb: u32) -> Self {
+        Self { lsb, msb, at: None }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LValue {
     Ident(String),
@@ -670,8 +802,8 @@ pub enum LValue {
         array_slice_reversed: bool,
         /// The bits of the variable a run-time select stays within: those of
         /// the structure member it is written on (see
-        /// [`crate::ir::SelectWindow`]).
-        window: Option<crate::ir::SelectWindow>,
+        /// [`SelectWindow`]).
+        window: Option<SelectWindow>,
         /// Whether this selection names a two-state packed struct member.
         is_2state: bool,
     },
@@ -733,6 +865,10 @@ pub enum ObjectPlace {
 pub struct CombProcess {
     /// Elaborated ticks, consumed by continuous_delays before IR publication.
     delay: Option<u64>,
+    /// The value a delayed assignment drives before its first delay ends:
+    /// the initial value of a sequential UDP's output (IEEE 1800-2023
+    /// 29.3.3); x if `None`.
+    delay_initial: Option<Expr>,
     /// A declaration's independent net delay, consumed before IR publication.
     net_delay: bool,
     /// Whether the continuous assignment or gate states a drive strength
@@ -833,10 +969,6 @@ struct Function {
     return_dimensions: Option<usize>,
     return_signed: bool,
     return_is_2state: bool,
-    /// The members of an enumerated return type, for its methods.
-    return_enum_domain: Option<Arc<enums::EnumDomain>>,
-    /// The class of a class handle result.
-    return_class: Option<String>,
     /// The container type of a dynamic array, associative array or queue
     /// result (IEEE 1800-2023 7.5, 7.8, 7.10).
     return_container: Option<Arc<ContainerType>>,
@@ -1033,8 +1165,6 @@ struct FunctionReturnMetadata {
     chandle: bool,
     /// Declared aggregate type, available before function bodies are inlined.
     pattern_type: Option<Type>,
-    /// The members of an enumerated return type, for its methods.
-    enum_domain: Option<Arc<enums::EnumDomain>>,
     /// The function returns a dynamic array, associative array or queue of
     /// this type (IEEE 1800-2023 7.5, 7.8, 7.10).
     container: Option<Arc<ContainerType>>,

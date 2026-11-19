@@ -310,9 +310,9 @@ pub(super) fn declare_parameters<'a>(
 
 /// Record the types that `items` of one scope declare, each visible after
 /// its declaration, not those of the scopes nested in it: typedefs, also
-/// forward ones, type parameters, and covergroups and user-defined
-/// nettypes, which Celox keeps unconverted (IEEE 1800-2023 6.18, 6.20.3,
-/// 19.3, 6.6.7).
+/// forward ones, type parameters, covergroups, and user-defined nettypes,
+/// which Celox keeps unconverted (IEEE 1800-2023 6.18, 6.20.3, 19.3,
+/// 6.6.7).
 fn declare_items(
     native: &celox_sv_syntax::Declarations,
     items: &[celox_sv_syntax::BodyItemId],
@@ -333,23 +333,23 @@ fn declare_items(
                 false,
                 declarations,
             ),
-            BodyItemKind::Unconverted { category, .. }
-                if matches!(category.as_str(), "covergroup" | "nettype") =>
-            {
+            // The type is visible after the name of the covergroup.
+            BodyItemKind::Covergroup(covergroup) => {
+                let covergroup = native.covergroup(*covergroup);
+                declare(
+                    declarations,
+                    name(&covergroup.name),
+                    Some(covergroup.header.end),
+                );
+            }
+            BodyItemKind::Unconverted { category, .. } if category == "nettype" => {
                 let tokens = item.tokens.range();
-                for (declared, range) in native
-                    .covergroups
+                for nettype in native
+                    .nettypes
                     .iter()
-                    .map(|covergroup| (&covergroup.name, covergroup.tokens))
-                    .chain(
-                        native
-                            .nettypes
-                            .iter()
-                            .map(|nettype| (&nettype.name, nettype.tokens)),
-                    )
-                    .filter(|(_, declared)| tokens.contains(&declared.start))
+                    .filter(|nettype| tokens.contains(&nettype.tokens.start))
                 {
-                    declare(declarations, name(declared), Some(range.end));
+                    declare(declarations, name(&nettype.name), Some(nettype.tokens.end));
                 }
             }
             _ => {}
@@ -520,15 +520,13 @@ pub(super) fn bind_alias(
     // The base type's bounds are those of `const_env`, and the declared
     // type is named before container dimensions hold it as their element.
     freeze_bounds(&mut base, &syntax_tree.functions, const_env);
-    base.name_declaration(
-        declaring_scope(
-            classes::enclosing_unit(syntax_tree.declarations(), alias.tokens),
-            syntax_tree.declarations(),
-            alias.tokens,
-            session,
-        ),
-        name,
+    let scope = declaring_scope(
+        classes::enclosing_unit(syntax_tree.declarations(), alias.tokens),
+        syntax_tree.declarations(),
+        alias.tokens,
+        session,
     );
+    base.name_declaration(scope, name);
     let context = PackedDimensions::new(HashMap::default(), dimension_env, aliases);
     let mut ty =
         containers::with_dimensions(base, &alias.dimensions, syntax_tree, session, &context)?;
@@ -761,20 +759,21 @@ pub(super) fn enclose_aliased_packed_type(
     }
     // Use-site dimensions enclose the aliased packed type. The packed
     // array they form is unsigned, whatever its elements (IEEE 1800-2023
-    // 7.4.1); a type name takes no signing of its own.
-    r#type.packed_enum |= r#type.is_enum;
-    r#type.enum_domain = None;
-    r#type.signed_element_depth = if r#type.is_signed {
-        Some(direct_ranges.len())
-    } else {
-        r#type
-            .signed_element_depth
-            .map(|depth| depth + direct_ranges.len())
-    };
-    r#type.is_signed = false;
-    let mut ranges = direct_ranges;
-    ranges.extend(std::mem::take(&mut r#type.packed_ranges));
-    r#type.packed_ranges = ranges;
+    // 7.4.1); a type name takes no signing of its own. Its elements keep
+    // their enumerated type.
+    r#type.reshape_keeping_enumeration(|shape| {
+        shape.signed_element_depth = if shape.is_signed {
+            Some(direct_ranges.len())
+        } else {
+            shape
+                .signed_element_depth
+                .map(|depth| depth + direct_ranges.len())
+        };
+        shape.is_signed = false;
+        let mut ranges = direct_ranges;
+        ranges.extend(std::mem::take(&mut shape.packed_ranges));
+        shape.packed_ranges = ranges;
+    });
     r#type
 }
 
@@ -796,6 +795,49 @@ pub(super) fn chandle_enum<T>() -> Result<T, AnalyzerError> {
     Err(AnalyzerError::IllegalChandleUse {
         detail: "an enumeration of chandle base type".into(),
     })
+}
+
+/// The error of an enumeration that IEEE 1800-2023 6.19 forbids, returned
+/// directly by the recursive type binder. Out of line like
+/// [`packed_chandles`].
+#[inline(never)]
+#[cold]
+pub(super) fn invalid_enumeration<T>(detail: String) -> Result<T, AnalyzerError> {
+    Err(AnalyzerError::InvalidEnumeration(detail))
+}
+
+/// Why `base`, the bound base type of an enumeration together with the
+/// packed dimension the declaration adds to it, is no enumeration base:
+/// an integer atom type, or an integer vector type with at most one packed
+/// dimension, also through a type name (IEEE 1800-2023 6.19, Syntax 6-5
+/// and its footnote 19). A chandle base has its own error.
+pub(super) fn illegal_enum_base(base: &Type) -> Option<&'static str> {
+    if base.is_container() || !base.unpacked_ranges.is_empty() || base.unpacked_struct().is_some() {
+        return Some("its base type is an unpacked type");
+    }
+    match base.kind {
+        TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Chandle => {}
+        TypeKind::Real | TypeKind::Shortreal => return Some("its base type is a real type"),
+        TypeKind::String => return Some("its base type is `string`"),
+        TypeKind::Object | TypeKind::Process | TypeKind::Event => {
+            return Some("its base type is a handle type");
+        }
+        // A typedef of an implicit type, such as `signed [3:0]`, is a
+        // vector of `logic`.
+        TypeKind::Implicit => {}
+    }
+    if base.enumeration().is_some() {
+        return Some("its base type is an enumeration");
+    }
+    if !base.members.is_empty() {
+        return Some("its base type is a packed structure or union");
+    }
+    // An integer atom type is held with the packed range of its width, so
+    // an atom with a packed dimension has two, as a vector with two has.
+    if base.packed_ranges.len() > 1 {
+        return Some("its base type has more than one packed dimension");
+    }
+    None
 }
 
 /// `r#type` with the fixed-size unpacked dimensions `ranges` (IEEE 1800-2023
@@ -923,7 +965,7 @@ mod tests {
         // A name declared only in a nested block, or only in another design
         // element, is not visible.
         // Nor is another design element's name, or a label inside a
-        // covergroup, which Celox keeps unconverted.
+        // covergroup, which names a coverpoint and no type.
         for source in [
             "module A; int Missing; endmodule\nmodule B; typedef Missing Alias; endmodule\n",
             "module B; initial begin int Missing; end typedef Missing Alias; endmodule\n",

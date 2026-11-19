@@ -270,6 +270,9 @@ pub(super) struct TyTable {
     class_ids: HashMap<Arc<str>, DeclId>,
     /// The interfaces by name.
     interface_ids: HashMap<Arc<str>, DeclId>,
+    /// The specializations of parameterized interfaces by name and the
+    /// values of their parameters (25.9).
+    interface_specializations: HashMap<(Arc<str>, Arc<[i128]>), DeclId>,
     /// How many times a reader resolved a type that was not bound where it
     /// was declared, which tests check producers against.
     #[cfg(test)]
@@ -326,7 +329,7 @@ impl Binding {
 
     /// What tells the type apart where its shape does not (see
     /// [`RetainedType::identity`]).
-    pub(super) fn identity(&self) -> Option<Arc<TyData>> {
+    pub(super) fn identity(&self) -> Option<Identity> {
         self.0.as_ref()?.identity()
     }
 
@@ -334,6 +337,14 @@ impl Binding {
     /// the shape of a variable declared with it.
     pub(super) fn retained(&self) -> Option<RetainedType> {
         self.0.clone()
+    }
+
+    /// Whether the type is bound to a class handle type that `table` does
+    /// not hold (see [`RetainedType::class_outside`]).
+    pub(super) fn class_outside(&self, table: &TyTable) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|retained| retained.class_outside(table))
     }
 }
 
@@ -343,16 +354,42 @@ impl Binding {
 pub(super) struct RetainedType {
     id: TyId,
     node: Weak<TyData>,
+    /// The class of a class handle type, by the name its declaration has
+    /// in the table the type was retained from.
+    class: Option<Arc<str>>,
 }
+
+/// What tells a type apart from another of the same shape, in any table.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Identity {
+    /// The interned data of a virtual interface type (IEEE 1800-2023
+    /// 25.9), which is the same in every table that shares the prefix the
+    /// design's interfaces were declared in.
+    Interface(Arc<TyData>),
+    /// The class of a class handle type (8.4) by its specialization name,
+    /// which tables that declared the class on their own also agree on.
+    Class(Arc<str>),
+}
+
 impl RetainedType {
+    /// Whether the type is a class handle type that `table` does not hold,
+    /// so that its class cannot be read there. Types are read in the table
+    /// they were bound in or one that extends it: the design's, which the
+    /// analyses of its packages and modules extend in turn.
+    pub(super) fn class_outside(&self, table: &TyTable) -> bool {
+        self.class.is_some() && self.in_table(table).is_none()
+    }
+
     /// What tells the type apart from another of the same shape, where its
-    /// shape does not: the interned data of a virtual interface type (IEEE
-    /// 1800-2023 25.9), which is the same in every table that shares the
-    /// prefix the design's interfaces were declared in.
-    pub(super) fn identity(&self) -> Option<Arc<TyData>> {
+    /// shape does not: a virtual interface or class handle type.
+    pub(super) fn identity(&self) -> Option<Identity> {
+        if let Some(class) = &self.class {
+            return Some(Identity::Class(class.clone()));
+        }
         self.node
             .upgrade()
             .filter(|data| matches!(**data, TyData::VirtualInterface { .. }))
+            .map(Identity::Interface)
     }
 
     pub(super) fn same_node(&self, other: &Self) -> bool {
@@ -365,6 +402,152 @@ impl RetainedType {
             .get(self.id.0 as usize)
             .filter(|(node, _)| std::ptr::eq(Arc::as_ptr(node), self.node.as_ptr()))
             .map(|_| self.id)
+    }
+}
+
+/// The enumerated type (IEEE 1800-2023 6.19) a [`crate::ast::Type`] is,
+/// or whose elements a packed or unpacked array of it has, kept across
+/// changes of its dimensions: the declaration that declares it, which
+/// tells it apart in any table, even before the constants its dimensions
+/// name are known.
+#[derive(Debug, Clone, Default)]
+pub(super) struct EnumBinding(Option<Arc<EnumDeclaration>>);
+
+/// What declares an enumerated type (6.19).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EnumDeclaration {
+    /// The typedef that names the type (6.18), or the source position of
+    /// its declaration if none does (6.22.1 c), if recorded.
+    pub name: Option<Arc<str>>,
+    /// Whether `name` is a typedef.
+    pub named: bool,
+    /// The elaborated scope that declares the type, if not a package or
+    /// compilation unit.
+    pub scope: Option<Arc<str>>,
+    /// How `$typename` writes the typedef (20.6.1).
+    pub typename: Option<super::type_names::TypedefName>,
+    /// The members, if resolved.
+    pub domain: Option<Arc<super::enums::EnumDomain>>,
+    /// How many packed dimensions the enumerated type has itself, inside
+    /// those of a packed array of it (7.4.1).
+    pub dims: usize,
+}
+
+/// A binding never tells two types apart: their shapes do.
+impl PartialEq for EnumBinding {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for EnumBinding {}
+
+impl std::hash::Hash for EnumBinding {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+}
+
+impl EnumBinding {
+    /// Keep the enumerated type `declaration` declares.
+    pub(super) fn new(declaration: EnumDeclaration) -> Self {
+        Self(Some(Arc::new(declaration)))
+    }
+
+    /// Forget the enumerated type, as the type changes.
+    pub(super) fn forget(&mut self) {
+        self.0 = None;
+    }
+
+    /// What declares the kept enumerated type.
+    pub(super) fn declaration(&self) -> Option<&EnumDeclaration> {
+        self.0.as_deref()
+    }
+
+    /// Enumerated type `id` of `table`, if it is one, or none for a packed
+    /// array of one, which keeps the enumerated type it has.
+    pub(super) fn of(table: &TyTable, id: TyId) -> Option<Self> {
+        if table.enumeration(id)? {
+            return None;
+        }
+        let TyData::Packed(Packed {
+            element: PackedElement::Enum { decl, array: false },
+            dims,
+            ..
+        }) = table.data(id)
+        else {
+            unreachable!("an enumerated type is packed");
+        };
+        let (data, domain) = match decl {
+            Decl::Named(decl) => (Some(table.decl(*decl)), table.decl(*decl).domain.clone()),
+            Decl::AnonymousEnum { decl, domain } => {
+                (decl.map(|decl| table.decl(decl)), domain.clone())
+            }
+            _ => unreachable!("an enumerated type is declared by an enumeration"),
+        };
+        Some(Self::new(EnumDeclaration {
+            name: data.map(|data| data.name.clone()),
+            named: matches!(decl, Decl::Named(_)),
+            scope: data.and_then(|data| data.scope.clone()),
+            typename: data.and_then(|data| data.typename.clone()),
+            domain,
+            dims: dims.len(),
+        }))
+    }
+
+    /// The kept enumerated type as typedef `name` of `scope` names it
+    /// (6.18), written `typename` by `$typename`. A named one stays as it
+    /// is, as an earlier typedef named it.
+    pub(super) fn name(
+        &mut self,
+        name: &str,
+        scope: Option<&Arc<str>>,
+        typename: &super::type_names::TypedefName,
+    ) {
+        if let Some(declaration) = &mut self.0
+            && !declaration.named
+        {
+            let declaration = Arc::make_mut(declaration);
+            declaration.name = Some(name.into());
+            declaration.named = true;
+            declaration.scope = scope.cloned();
+            declaration.typename = Some(typename.clone());
+        }
+    }
+}
+
+/// Hashes what [`PartialEq`] compares but the spelling of the typedef,
+/// which the name and scope tell.
+impl std::hash::Hash for EnumDeclaration {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (&self.name, self.named, &self.scope, &self.domain, self.dims).hash(state);
+    }
+}
+
+impl EnumDeclaration {
+    /// The element of a packed type of `dimensions` packed dimensions that
+    /// is this enumerated type, or a packed array of it if it has more
+    /// dimensions than the enumerated type (7.4.1), declared in `table`.
+    /// The members of an anonymous enumeration tell an array of it apart
+    /// from another of its bits by none.
+    pub(super) fn element(&self, table: &mut TyTable, dimensions: usize) -> PackedElement {
+        let array = dimensions > self.dims;
+        let declared = self
+            .name
+            .as_deref()
+            .map(|name| table.declare(name, self.scope.as_deref()));
+        let decl = match declared {
+            Some(decl) if self.named => {
+                table.record_spelling(decl, self.typename.as_ref(), None);
+                if let Some(domain) = &self.domain {
+                    table.record_enum_domain(decl, domain);
+                }
+                Decl::Named(decl)
+            }
+            decl => Decl::AnonymousEnum {
+                decl,
+                domain: self.domain.clone().filter(|_| !array),
+            },
+        };
+        PackedElement::Enum { decl, array }
     }
 }
 
@@ -432,9 +615,14 @@ impl TyTable {
     }
 
     pub(super) fn retain(&self, id: TyId) -> RetainedType {
+        let node = &self.types[id.0 as usize].0;
         RetainedType {
             id,
-            node: Arc::downgrade(&self.types[id.0 as usize].0),
+            node: Arc::downgrade(node),
+            class: match &**node {
+                TyData::Class(Decl::Class(decl)) => Some(self.decl(*decl).name.clone()),
+                _ => None,
+            },
         }
     }
 
@@ -500,6 +688,33 @@ impl TyTable {
             &mut self.interface_ids,
             name,
         ))
+    }
+
+    /// The declaration of the specialization of parameterized interface
+    /// `name` whose value parameters, in the order the interface declares
+    /// them, have `values`: a virtual interface type of it is another type
+    /// than one of another specialization (IEEE 1800-2023 25.9).
+    pub fn interface_specialization(&mut self, name: &str, values: &Arc<[i128]>) -> Decl {
+        let key = (Arc::<str>::from(name), values.clone());
+        if let Some(&id) = self.interface_specializations.get(&key) {
+            return Decl::Interface(id);
+        }
+        let id = DeclId(self.decls.len() as u32);
+        self.decls.push(DeclData {
+            name: key.0.clone(),
+            scope: None,
+            domain: None,
+            typename: None,
+            aggregate: None,
+            arguments: Some(
+                values
+                    .iter()
+                    .map(|value| ClassArgument::Value(Some(*value)))
+                    .collect(),
+            ),
+        });
+        self.interface_specializations.insert(key, id);
+        Decl::Interface(id)
     }
 
     fn named_decl(

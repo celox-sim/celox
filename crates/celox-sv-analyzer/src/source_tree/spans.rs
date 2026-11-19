@@ -145,6 +145,9 @@ pub(crate) struct Spans {
     /// The `f.v` names of subroutines' static variables the file may use
     /// (see `procedural::static_references`).
     pub static_references: Vec<crate::ast::StaticReference>,
+    /// What follows the name of each covergroup, for the analyses that walk
+    /// the arenas themselves.
+    pub covergroups: CovergroupInteriors,
     pub(super) text: SourceText,
 }
 
@@ -188,26 +191,63 @@ impl std::hash::Hash for SourceText {
     }
 }
 
+/// What follows the name of each covergroup of a file: its formals, its
+/// event, its coverpoint expressions, guards and option values and its
+/// bins. These name the formals, `item`, the cross items and
+/// `CrossQueueType` (IEEE 1800-2023 19.3, 19.5.1.1, 19.6.1), which the scope
+/// that declares the covergroup cannot bind, so its analyses of the
+/// expressions and types in its token ranges select none of them.
+#[derive(Debug)]
+pub(crate) struct CovergroupInteriors(Option<Ranges>);
+
+impl CovergroupInteriors {
+    fn new(native: &Declarations) -> Self {
+        // A file without covergroups pays nothing.
+        Self((!native.covergroups.is_empty()).then(|| {
+            Ranges::new(native.covergroups.iter().map(|covergroup| TokenRange {
+                start: covergroup.header.end,
+                end: covergroup.tokens.end,
+            }))
+        }))
+    }
+
+    /// Whether the node of `tokens` follows the name of a covergroup that
+    /// contains it.
+    pub(crate) fn contain(&self, tokens: TokenRange) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|interiors| interiors.covers(tokens.start))
+    }
+}
+
 impl Spans {
     pub(super) fn new(native: &Declarations) -> Self {
         let indexed =
             |tokens: &mut dyn Iterator<Item = TokenRange>| Starts::new(tokens.enumerate());
+        let covergroups = CovergroupInteriors::new(native);
         Self {
             expressions: Starts::new(
                 native
                     .expression_nodes()
-                    .map(|(id, node)| (id, node.tokens)),
+                    .map(|(id, node)| (id, node.tokens))
+                    .filter(|(_, tokens)| !covergroups.contain(*tokens)),
             ),
-            types: Starts::new(native.type_nodes().map(|(id, node)| (id, node.tokens))),
+            types: Starts::new(
+                native
+                    .type_nodes()
+                    .map(|(id, node)| (id, node.tokens))
+                    .filter(|(_, tokens)| !covergroups.contain(*tokens)),
+            ),
             body_items: indexed(&mut native.body_items.iter().map(|node| node.tokens)),
             net_declarations: indexed(&mut native.net_declarations.iter().map(|node| node.tokens)),
             subroutines: indexed(&mut native.subroutines.iter().map(|node| node.tokens)),
             // The facts are derived from the arenas when they are built, as
             // every analysis of the file reads them.
-            validation: crate::ast::validation::Facts::new(native),
+            validation: crate::ast::validation::Facts::new(native, &covergroups),
             imports: crate::ast::imports::Facts::new(native),
             classes: crate::ast::ClassIndex::new(native),
             static_references: crate::ast::static_reference_candidates(native),
+            covergroups,
             text: SourceText::new(native),
         }
     }

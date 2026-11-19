@@ -45,7 +45,7 @@ pub(in crate::ast) fn string_value(expr: &Expr, dimensions: &PackedDimensions) -
             matches!(**op, crate::system_functions::ObjectOp::Load(field)
             if field.handle == Some(crate::system_functions::HandleProperty::String))
                 || matches!(**op, ObjectOp::Pattern(_))
-                || matches!(**op, ObjectOp::Container { op: ContainerOp::Get | ContainerOp::PopFront | ContainerOp::PopBack, layout } if layout.handle == Some(crate::system_functions::HandleProperty::String))
+                || matches!(**op, ObjectOp::Container { op: ContainerOp::Get | ContainerOp::PopFront | ContainerOp::PopBack, ref layout } if layout.handle == Some(crate::system_functions::HandleProperty::String))
                 || matches!(
                     **op,
                     ObjectOp::Stream(
@@ -173,6 +173,18 @@ pub(in crate::ast) fn alias_name(
                 })
                 .flatten()
         })
+}
+
+/// Whether native expression `id` has type `string`, as its type tells.
+pub(in crate::ast) fn typed_string(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> bool {
+    expression_types::type_of(tree, session, id, native, dimensions)
+        .is_ok_and(|ty| matches!(session.types.data(ty), semantic_types::TyData::String))
 }
 
 /// Whether native expression `id` has type `string`, judged before it is
@@ -381,4 +393,29 @@ pub(in crate::ast) fn method(
     }
     let (op, _) = StringOp::method(&name.spelling)?;
     Some((op, *expression))
+}
+
+#[cfg(test)]
+mod tests {
+    // A range item of an inside set on strings compares in the order of
+    // the strings (IEEE 1800-2023 11.4.13), which its bounds as handles
+    // would not give.
+    #[test]
+    fn string_inside_ranges_are_rejected() {
+        for (operand, item) in [("s", "[\"a\":\"z\"]"), ("8'h6d", "[t:\"z\"]")] {
+            let result = crate::analyze_source(
+                &format!(
+                    "module Top; initial begin automatic string s = \"m\", t = \"a\"; \
+                     $display({operand} inside {{{item}}}); end endmodule"
+                ),
+                std::path::Path::new("string_inside.sv"),
+            );
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.to_string().contains("value range item")),
+                "{operand}: {result:?}"
+            );
+        }
+    }
 }
