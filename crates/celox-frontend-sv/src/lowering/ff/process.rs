@@ -125,6 +125,7 @@ impl Ff<'_, '_> {
                 float_precision: None,
             }],
             strings: Vec::new(),
+            scope: None,
         });
         self.request_host(HostRequestKind::Process, index)?;
         // A process that resumes from an event control or a wait for a
@@ -338,6 +339,7 @@ impl Ff<'_, '_> {
             args: values,
             results,
             strings: Vec::new(),
+            scope: None,
         });
         let blocking = matches!(
             op,

@@ -60,11 +60,23 @@ impl<B: SimBackend> Simulator<B> {
             scale_time_arguments(&String::from_utf8_lossy(&bytes), &mut args, ticks_per_unit);
             bytes
         };
+        // A run-time format's `%m` names the scope of the call: a named
+        // block, generate block or subroutine under the instance that runs
+        // it, or a scope of a package or the compilation unit.
+        let process_scope = self.process_scope(site.process.index());
+        let scope = match &site.scope {
+            Some(celox_design::FormatScope::Absolute(name)) => Some(name.clone()),
+            Some(celox_design::FormatScope::Relative(path)) => Some(match process_scope {
+                Some(instance) => format!("{instance}.{path}"),
+                None => path.clone(),
+            }),
+            None => process_scope,
+        };
         let format = RuntimeEventSite {
             kind: RuntimeEventKind::Write,
             template: None,
             sizing: DisplaySizing::Ieee,
-            scope: self.process_scope(site.process.index()),
+            scope,
             location: None,
             assertion: None,
             deferred: None,

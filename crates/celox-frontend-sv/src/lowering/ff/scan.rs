@@ -111,6 +111,7 @@ impl Ff<'_, '_> {
             args: inputs,
             results,
             strings: Vec::new(),
+            scope: None,
         });
         self.request_host(HostRequestKind::Scan, site)?;
         // A failed or ignored output must not overwrite a previously assigned
