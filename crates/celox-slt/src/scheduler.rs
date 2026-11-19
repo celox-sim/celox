@@ -361,6 +361,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     first_runtime_error_code: i64,
     mut ff: Option<&mut dyn ClockFfLowering<Addr, Error = E>>,
     partitioning: Option<SettlePartitioning<Addr>>,
+    unit_limits: UnitLimits,
 ) -> Result<ScheduleResult<Addr>, ClockSortError<Addr, E>> {
     let prepared = prepare_schedule(
         input,
@@ -417,7 +418,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         unpacked_element_widths,
         direct_ff_writes_by_action: &prepared.direct_ff_writes_by_action,
         four_state,
-        split_large_units: ff.is_none(),
+        unit_limits: ff.is_none().then_some(unit_limits),
     };
     let mut lowering = WorkLowering::new(&context, &mut lowerer);
     if let Some(ff_lowering) = ff.as_deref_mut() {
@@ -557,6 +558,33 @@ pub fn sort_with_unpacked_element_widths<Addr: Clone + Eq + Ord + Hash + Debug +
     first_runtime_error_code: i64,
     partitioning: Option<SettlePartitioning<Addr>>,
 ) -> Result<ScheduleResult<Addr>, SchedulerError<Addr>> {
+    sort_with_unit_limits(
+        input,
+        arena,
+        ignored_loops,
+        true_loops,
+        four_state,
+        var_widths,
+        unpacked_element_widths,
+        first_runtime_error_code,
+        partitioning,
+        UnitLimits::DEFAULT,
+    )
+}
+
+/// [`sort_with_unpacked_element_widths`], cutting its units at `unit_limits`.
+fn sort_with_unit_limits<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    input: Vec<LogicPath<Addr>>,
+    arena: &SLTNodeArena<Addr>,
+    ignored_loops: &HashSet<(Addr, Addr)>,
+    true_loops: &HashMap<(Addr, Addr), usize>,
+    four_state: bool,
+    var_widths: &HashMap<Addr, usize>,
+    unpacked_element_widths: &HashMap<Addr, usize>,
+    first_runtime_error_code: i64,
+    partitioning: Option<SettlePartitioning<Addr>>,
+    unit_limits: UnitLimits,
+) -> Result<ScheduleResult<Addr>, SchedulerError<Addr>> {
     match sort_impl::<Addr, std::convert::Infallible>(
         input,
         arena,
@@ -568,6 +596,7 @@ pub fn sort_with_unpacked_element_widths<Addr: Clone + Eq + Ord + Hash + Debug +
         first_runtime_error_code,
         None,
         partitioning,
+        unit_limits,
     ) {
         Ok(result) => Ok(result),
         Err(ClockSortError::Scheduler(error)) => Err(error),
@@ -599,8 +628,11 @@ pub fn sort_clock<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         first_runtime_error_code,
         Some(ff),
         None,
+        UnitLimits::DEFAULT,
     )
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod unit_limit_tests;
